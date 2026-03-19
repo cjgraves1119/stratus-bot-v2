@@ -1,6 +1,9 @@
 /**
  * Stratus AI - Webex Quote Bot
- * Phase 1: JSON catalog engine with Claude API failover
+ * JSON catalog engine with Claude API failover
+ *
+ * URL format (from SKILL.md):
+ *   https://stratusinfosystems.com/order/?item={SKU1},{SKU2}&qty={qty1},{qty2}
  *
  * Flow:
  *   Webex message → JSON parser → build Stratus URLs → respond
@@ -24,10 +27,11 @@ const PORT = process.env.PORT || 3000;
 // ─── Load Catalogs ───────────────────────────────────────────────────────────
 const prices = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'prices.json'))).prices;
 const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'valid_skus.json')));
+const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
 const EOL_REPLACEMENTS = catalog._EOL_REPLACEMENTS || {};
 const COMMON_MISTAKES = catalog._COMMON_MISTAKES || {};
 
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
 
 // ─── Bot Identity ─────────────────────────────────────────────────────────────
 let BOT_PERSON_ID = null;
@@ -60,35 +64,31 @@ async function sendMessage(roomId, markdown) {
   });
 }
 
-// ─── SKU Resolution ──────────────────────────────────────────────────────────
+// ─── SKU Suffix Rules (SKILL.md Step 2c) ─────────────────────────────────────
 
-/**
- * Apply -HW / -MR / -RTG suffix rules to a bare SKU.
- * Returns the suffixed hardware SKU.
- */
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
 
-  // CW Wi-Fi 7 (917x family)
+  // CW Wi-Fi 7 (917x family) → -RTG
   if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
 
-  // CW Wi-Fi 6E (916x family)
+  // CW Wi-Fi 6E (916x family) → -MR
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
 
-  // MS150, C9xxx, MA- — no suffix
+  // MS150, C9xxx, MA- accessories → no suffix
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('MA-')) return upper;
 
-  // MS130, MS390 — -HW
+  // MS130, MS390 → -HW
   if (upper.startsWith('MS130') || upper.startsWith('MS390')) {
     return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   }
 
-  // MX cellular variants — -HW-NA
-  if (/^MX\d+C(W)?(-HW-NA)?$/.test(upper)) {
+  // MX cellular variants (MXxxC or MXxxCW) → -HW-NA
+  if (/^MX\d+C(W)?$/i.test(upper)) {
     return upper.endsWith('-HW-NA') ? upper : `${upper}-HW-NA`;
   }
 
-  // All other hardware families: MR, MX, MV, MT, MG, Z
+  // All other hardware families: MR, MX, MV, MT, MG, Z → -HW
   if (/^(MR|MX|MV|MT|MG|Z)\d/.test(upper)) {
     return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   }
@@ -96,14 +96,15 @@ function applySuffix(sku) {
   return upper;
 }
 
-/**
- * Determine license SKU for a given hardware base SKU.
- * Returns array of { term, sku } for 1Y, 3Y, 5Y.
- */
+// ─── License SKU Rules (SKILL.md Step 2d) ─────────────────────────────────────
+// Term format matters:
+//   Older products (MX, MV, LIC-ENT): -1YR, -3YR, -5YR
+//   Newer products (MS130, MS150, C9xxx, MG, MT, Z4): -1Y, -3Y, -5Y
+
 function getLicenseSkus(baseSku) {
   const upper = baseSku.toUpperCase();
 
-  // AP families (MR + all CW models) → LIC-ENT
+  // AP families (MR + all CW models) → LIC-ENT (older format: -YR)
   if (/^MR\d/.test(upper) || /^CW9/.test(upper)) {
     return [
       { term: '1Y', sku: 'LIC-ENT-1YR' },
@@ -112,7 +113,7 @@ function getLicenseSkus(baseSku) {
     ];
   }
 
-  // MX security licenses
+  // MX security licenses (older format: -YR)
   const mxMatch = upper.match(/^MX(\d+(?:CW?|W)?)/);
   if (mxMatch) {
     const model = mxMatch[1];
@@ -123,18 +124,18 @@ function getLicenseSkus(baseSku) {
     ];
   }
 
-  // Z-series
+  // Z-series → SEC tier, newer format: -Y (SKILL.md line 313)
   const zMatch = upper.match(/^Z(\d+C?)/);
   if (zMatch) {
     const model = zMatch[1];
     return [
-      { term: '1Y', sku: `LIC-Z${model}-ENT-1Y` },
-      { term: '3Y', sku: `LIC-Z${model}-ENT-3Y` },
-      { term: '5Y', sku: `LIC-Z${model}-ENT-5Y` }
+      { term: '1Y', sku: `LIC-Z${model}-SEC-1Y` },
+      { term: '3Y', sku: `LIC-Z${model}-SEC-3Y` },
+      { term: '5Y', sku: `LIC-Z${model}-SEC-5Y` }
     ];
   }
 
-  // MG cellular gateways
+  // MG cellular gateways → ENT tier, newer format: -Y
   const mgMatch = upper.match(/^MG(\d+E?)/);
   if (mgMatch) {
     const model = mgMatch[1];
@@ -145,7 +146,7 @@ function getLicenseSkus(baseSku) {
     ];
   }
 
-  // MS130 compact (8 or 12 port) → CMPT license
+  // MS130 compact (8, 8P, 8P-I, 8X, 12X) → LIC-MS130-CMPT, newer format: -Y
   if (/^MS130-(8|12)/.test(upper)) {
     return [
       { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
@@ -154,7 +155,7 @@ function getLicenseSkus(baseSku) {
     ];
   }
 
-  // MS130 standard (24 or 48 port)
+  // MS130 standard (24 or 48 port), newer format: -Y
   const ms130Match = upper.match(/^MS130-(24|48)/);
   if (ms130Match) {
     const ports = ms130Match[1];
@@ -165,31 +166,67 @@ function getLicenseSkus(baseSku) {
     ];
   }
 
-  // No license mapping found — return null
+  // MS150 (24 or 48 port), newer format: -Y (SKILL.md line 307-308)
+  const ms150Match = upper.match(/^MS150-(24|48)/);
+  if (ms150Match) {
+    const ports = ms150Match[1];
+    return [
+      { term: '1Y', sku: `LIC-MS150-${ports}-1Y` },
+      { term: '3Y', sku: `LIC-MS150-${ports}-3Y` },
+      { term: '5Y', sku: `LIC-MS150-${ports}-5Y` }
+    ];
+  }
+
+  // MS390 → no license in URL
+  if (/^MS390/.test(upper)) return null;
+
+  // No license mapping found
   return null;
 }
 
-/**
- * Build a Stratus order URL for given items and term.
- * items: [{ sku, qty }]
- * term: 1 | 3 | 5
- */
-function buildStratusUrl(items, term) {
-  const skuParam = items.map(i => `${i.sku}:${i.qty}`).join(',');
-  return `https://www.stratusinfosystems.com/store/cisco-meraki/p?skus=${skuParam}&term=${term}`;
+// ─── URL Builder (SKILL.md Step 4) ───────────────────────────────────────────
+// Format: https://stratusinfosystems.com/order/?item={items}&qty={quantities}
+// Items and quantities are separate comma-separated lists
+
+function buildStratusUrl(items) {
+  const itemStr = items.map(i => i.sku).join(',');
+  const qtyStr = items.map(i => i.qty).join(',');
+  return `https://stratusinfosystems.com/order/?item=${itemStr}&qty=${qtyStr}`;
 }
 
-/**
- * Check if a SKU base is EOL. Returns replacement string or null.
- */
+// ─── EOL Check ───────────────────────────────────────────────────────────────
+
 function checkEol(baseSku) {
   const upper = baseSku.toUpperCase();
-  return EOL_REPLACEMENTS[upper] || null;
+
+  // Check direct replacement lookup
+  if (EOL_REPLACEMENTS[upper]) return EOL_REPLACEMENTS[upper];
+
+  // Check family-level EOL (e.g., MR42 → check EOL_PRODUCTS.MR for "42")
+  for (const [family, variants] of Object.entries(EOL_PRODUCTS)) {
+    if (upper.startsWith(family)) {
+      const variant = upper.replace(family, '');
+      if (variants.includes(variant)) {
+        return EOL_REPLACEMENTS[upper] || EOL_REPLACEMENTS[family] || null;
+      }
+    }
+  }
+  return null;
 }
 
-/**
- * Try to fix common mistakes. Returns corrected SKU or null.
- */
+function isEol(baseSku) {
+  const upper = baseSku.toUpperCase();
+  for (const [family, variants] of Object.entries(EOL_PRODUCTS)) {
+    if (upper.startsWith(family)) {
+      const variant = upper.replace(family, '');
+      if (variants.includes(variant)) return true;
+    }
+  }
+  return false;
+}
+
+// ─── Common Mistakes ─────────────────────────────────────────────────────────
+
 function fixCommonMistake(sku) {
   const upper = sku.toUpperCase();
   const mistake = COMMON_MISTAKES[upper];
@@ -199,10 +236,8 @@ function fixCommonMistake(sku) {
   return null;
 }
 
-/**
- * Validate a base SKU against the catalog.
- * Returns { valid: true } or { valid: false, reason, suggest? }
- */
+// ─── SKU Validation (SKILL.md Step 2a) ───────────────────────────────────────
+
 function validateSku(baseSku) {
   const upper = baseSku.toUpperCase();
 
@@ -210,38 +245,38 @@ function validateSku(baseSku) {
   const mistake = fixCommonMistake(upper);
   if (mistake) return { valid: false, reason: mistake.error, suggest: mistake.suggest };
 
-  // MR — check variant
-  if (/^MR/.test(upper)) {
+  // MR
+  if (/^MR\d/.test(upper)) {
     const variant = upper.replace('MR', '');
     if (catalog.MR && catalog.MR.includes(variant)) return { valid: true };
-    const eolCheck = catalog._EOL_PRODUCTS?.MR?.includes(variant);
-    if (eolCheck) return { valid: true, eol: true };
+    if (EOL_PRODUCTS.MR && EOL_PRODUCTS.MR.includes(variant)) return { valid: true, eol: true };
     return { valid: false, reason: `MR${variant} is not a recognized model`, suggest: catalog.MR?.map(v => `MR${v}`) };
   }
 
   // MX
-  if (/^MX/.test(upper)) {
+  if (/^MX\d/.test(upper)) {
     const variant = upper.replace('MX', '');
     if (catalog.MX && catalog.MX.includes(variant)) return { valid: true };
+    if (EOL_PRODUCTS.MX && EOL_PRODUCTS.MX.includes(variant)) return { valid: true, eol: true };
     return { valid: false, reason: `MX${variant} is not a recognized model`, suggest: catalog.MX?.map(v => `MX${v}`) };
   }
 
   // MV
-  if (/^MV/.test(upper)) {
+  if (/^MV\d/.test(upper)) {
     const variant = upper.replace('MV', '');
     if (catalog.MV && catalog.MV.includes(variant)) return { valid: true };
     return { valid: false, reason: `MV${variant} is not a recognized model` };
   }
 
   // MT
-  if (/^MT/.test(upper)) {
+  if (/^MT\d/.test(upper)) {
     const variant = upper.replace('MT', '');
     if (catalog.MT && catalog.MT.includes(variant)) return { valid: true };
     return { valid: false, reason: `MT${variant} is not a recognized model`, suggest: catalog.MT?.map(v => `MT${v}`) };
   }
 
   // MG
-  if (/^MG/.test(upper)) {
+  if (/^MG\d/.test(upper)) {
     const variant = upper.replace('MG', '');
     if (catalog.MG && catalog.MG.includes(variant)) return { valid: true };
     return { valid: false, reason: `MG${variant} is not a recognized model` };
@@ -251,26 +286,26 @@ function validateSku(baseSku) {
   if (/^Z\d/.test(upper)) {
     const variant = upper.replace('Z', '');
     if (catalog.Z && catalog.Z.includes(variant)) return { valid: true };
+    if (EOL_PRODUCTS.Z && EOL_PRODUCTS.Z.includes(variant)) return { valid: true, eol: true };
     return { valid: false, reason: `Z${variant} is not a recognized model`, suggest: ['Z4', 'Z4C'] };
   }
 
   // MS130
-  if (/^MS130/.test(upper)) {
+  if (/^MS130-/.test(upper)) {
     const variant = upper.replace('MS130-', '');
     if (catalog.MS130 && catalog.MS130.includes(variant)) return { valid: true };
     return { valid: false, reason: `MS130-${variant} is not a valid variant`, suggest: catalog.MS130?.map(v => `MS130-${v}`) };
   }
 
   // MS150
-  if (/^MS150/.test(upper)) {
+  if (/^MS150-/.test(upper)) {
     const variant = upper.replace('MS150-', '');
     if (catalog.MS150 && catalog.MS150.includes(variant)) return { valid: true };
-    if (!variant) return { valid: false, reason: 'MS150 requires a variant', suggest: catalog.MS150?.map(v => `MS150-${v}`) };
     return { valid: false, reason: `MS150-${variant} is not a valid variant`, suggest: catalog.MS150?.map(v => `MS150-${v}`) };
   }
 
   // MS390
-  if (/^MS390/.test(upper)) {
+  if (/^MS390-/.test(upper)) {
     const variant = upper.replace('MS390-', '');
     if (catalog.MS390 && catalog.MS390.includes(variant)) return { valid: true };
     return { valid: false, reason: `MS390-${variant} is not a valid variant`, suggest: catalog.MS390?.map(v => `MS390-${v}`) };
@@ -280,7 +315,7 @@ function validateSku(baseSku) {
   if (/^CW9/.test(upper)) {
     for (const family of Object.keys(catalog).filter(k => k.startsWith('CW9'))) {
       if (upper.startsWith(family)) {
-        const variant = upper.replace(family + '-', '').replace(family, '');
+        const variant = upper.slice(family.length);
         if (!variant) return { valid: false, reason: `${family} requires a variant`, suggest: catalog[family].map(v => `${family}${v}`) };
         if (catalog[family].includes(variant)) return { valid: true };
       }
@@ -288,7 +323,7 @@ function validateSku(baseSku) {
     return { valid: false, reason: `${upper} is not a recognized CW model` };
   }
 
-  // C9xxx and MA- accessories — pass through (no deep validation)
+  // C9xxx and MA- accessories — pass through
   if (/^C9/.test(upper) || /^MA-/.test(upper)) return { valid: true };
 
   return { valid: false, reason: `${upper} is not a recognized SKU` };
@@ -296,34 +331,27 @@ function validateSku(baseSku) {
 
 // ─── Message Parser ──────────────────────────────────────────────────────────
 
-/**
- * Parse a Webex message for SKU/quantity pairs.
- * Returns { items: [{ baseSku, qty }], requestedTerm: null | 1 | 3 | 5 } or null if nothing found.
- */
 function parseMessage(text) {
   const upper = text.toUpperCase();
 
-  // Detect explicitly requested term
+  // Detect explicitly requested term (only single-term if "just" or "only" used)
   let requestedTerm = null;
-  if (/\b1[\s-]?Y(EAR)?\b/.test(upper) && !/3[\s-]?Y|5[\s-]?Y/.test(upper)) requestedTerm = 1;
-  else if (/\b3[\s-]?Y(EAR)?\b/.test(upper) && !/1[\s-]?Y|5[\s-]?Y/.test(upper)) requestedTerm = 3;
-  else if (/\b5[\s-]?Y(EAR)?\b/.test(upper) && !/1[\s-]?Y|3[\s-]?Y/.test(upper)) requestedTerm = 5;
+  const hasJust = /\b(JUST|ONLY)\b/.test(upper);
+  if (hasJust) {
+    if (/\b1[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 1;
+    else if (/\b3[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 3;
+    else if (/\b5[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 5;
+  }
 
   // SKU patterns to match (order matters — more specific first)
   const skuPatterns = [
-    // C9200L / C9300 family
-    /C9[23]\d{2}L?-[\dA-Z]+-[\dA-Z]+-M/g,
-    // MA- accessories
-    /MA-[A-Z0-9-]+/g,
-    // CW family
-    /CW9\d{3}[A-Z0-9-]*/g,
-    // MS150 full variant
-    /MS150-[\dA-Z]+-[\dA-Z]+/g,
-    // MS130/MS390 with variant
-    /MS[13][39]0-[\dA-Z]+/g,
-    // MR/MX/MV/MT/MG/Z with model number
-    /(?:MR|MX|MV|MT|MG)\d+[A-Z]*/g,
-    /Z\d+[A-Z]*/g
+    /C9[23]\d{2}L?-[\dA-Z]+-[\dA-Z]+-M/gi,
+    /MA-[A-Z0-9-]+/gi,
+    /CW9\d{3}[A-Z0-9]*/gi,
+    /MS150-[\dA-Z]+-[\dA-Z]+/gi,
+    /MS[13][39]0-[\dA-Z]+/gi,
+    /(?:MR|MX|MV|MT|MG)\d+[A-Z]*/gi,
+    /Z\d+[A-Z]*/gi
   ];
 
   const foundItems = [];
@@ -337,9 +365,8 @@ function parseMessage(text) {
       matched.add(sku);
 
       // Look for quantity near this SKU
-      // Check for "N x SKU" or "N SKU" before, or "SKU x N" or "SKU N" after
       const pos = match.index;
-      const before = upper.slice(Math.max(0, pos - 15), pos);
+      const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + sku.length, pos + sku.length + 15);
 
       let qty = 1;
@@ -359,15 +386,11 @@ function parseMessage(text) {
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
 
-/**
- * Build quote response from parsed items.
- * Returns { message: string, needsLlm: boolean }
- */
 function buildQuoteResponse(parsed) {
   const terms = parsed.requestedTerm ? [parsed.requestedTerm] : [1, 3, 5];
   const eolNotes = [];
   const errors = [];
-  const resolvedItems = []; // [{ sku, qty }] — hw + licenses per term
+  const resolvedItems = [];
 
   for (const { baseSku, qty } of parsed.items) {
     // Validate
@@ -379,9 +402,10 @@ function buildQuoteResponse(parsed) {
     }
 
     // EOL check
+    const eol = isEol(baseSku);
     const replacement = checkEol(baseSku);
-    if (replacement) {
-      eolNotes.push(`⚠️ **${baseSku}** is End-of-Life. Consider upgrading to **${replacement}** instead.`);
+    if (eol && replacement) {
+      eolNotes.push(`⚠️ **${baseSku}** is End-of-Life. Recommended replacement: **${replacement}**`);
     }
 
     // Apply suffix for hardware SKU
@@ -390,12 +414,12 @@ function buildQuoteResponse(parsed) {
     // Get license SKUs
     const licenseSkus = getLicenseSkus(baseSku);
 
-    resolvedItems.push({ hwSku, qty, licenseSkus });
+    resolvedItems.push({ baseSku, hwSku, qty, licenseSkus, eol });
   }
 
-  // If any SKU failed validation entirely, trigger LLM fallback
+  // If ALL SKUs failed validation, trigger LLM fallback
   if (errors.length > 0 && resolvedItems.length === 0) {
-    return { message: null, needsLlm: true };
+    return { message: null, needsLlm: true, errors };
   }
 
   // Build response
@@ -410,68 +434,85 @@ function buildQuoteResponse(parsed) {
   }
 
   if (resolvedItems.length === 0) {
-    return { message: null, needsLlm: true };
+    return { message: null, needsLlm: true, errors };
   }
 
   // Build URLs per term
   for (const term of terms) {
     const urlItems = [];
-    for (const { hwSku, qty, licenseSkus } of resolvedItems) {
-      urlItems.push({ sku: hwSku, qty });
+    for (const { hwSku, qty, licenseSkus, eol } of resolvedItems) {
+      // For EOL items, skip hardware (license-only renewal)
+      if (!eol) {
+        urlItems.push({ sku: hwSku, qty });
+      }
       if (licenseSkus) {
         const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
         if (licSku) urlItems.push({ sku: licSku, qty });
       }
     }
-    const url = buildStratusUrl(urlItems, term);
-    lines.push(`**${term}-Year:** ${url}`);
+    if (urlItems.length > 0) {
+      const url = buildStratusUrl(urlItems);
+      const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+      lines.push(`**${termLabel}:** ${url}`);
+      lines.push('');
+    }
   }
 
-  return { message: lines.join('\n'), needsLlm: false };
+  return { message: lines.join('\n').trim(), needsLlm: false };
 }
 
 // ─── Claude API Fallback ─────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are Stratus AI, a Cisco/Meraki quoting assistant for Stratus Information Systems.
 
-Your only job is to generate Stratus order URLs for Cisco/Meraki products.
+Your job is to generate Stratus order URLs for Cisco/Meraki products.
 
 ## URL FORMAT
-https://www.stratusinfosystems.com/store/cisco-meraki/p?skus=SKU1:QTY1,SKU2:QTY2&term=TERM
+https://stratusinfosystems.com/order/?item={item1},{item2}&qty={qty1},{qty2}
 
-Where term = 1, 3, or 5 (years). Always include both hardware and license SKUs.
+Items is a comma-separated list of SKUs. Qty is a separate comma-separated list of quantities in the same order.
+
+Example for 10 MR44 with 3-year licenses:
+https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=10,10
+
+Example for 2 MR44 + 1 MS130-24P + 1 MX75 with 3-year:
+https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR,MS130-24P-HW,LIC-MS130-24-3Y,MX75-HW,LIC-MX75-SEC-3YR&qty=2,2,1,1,1,1
 
 ## SKU SUFFIX RULES
-- MR, MX, MV, MT, MG, MS130, MS390, Z → add -HW (e.g. MR44 → MR44-HW)
-- MX cellular (MXxxCW, MXxxC) → add -HW-NA (e.g. MX68CW → MX68CW-HW-NA)
-- CW Wi-Fi 6E (CW916x) → add -MR (e.g. CW9166I → CW9166I-MR)
-- CW Wi-Fi 7 (CW917x) → add -RTG (e.g. CW9172I → CW9172I-RTG)
+- MR, MV, MT, MG, MS130, MS390, Z → add -HW
+- MX non-cellular → add -HW
+- MX cellular (MXxxC, MXxxCW) → add -HW-NA
+- CW Wi-Fi 6E (CW916x) → add -MR
+- CW Wi-Fi 7 (CW917x) → add -RTG
 - MS150, C9xxx-M, MA- accessories → no suffix
 
-## LICENSE RULES
-- All APs (MR + CW models) → LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR
-- MX → LIC-MX{model}-SEC-{1YR/3YR/5YR} (e.g. MX68 → LIC-MX68-SEC-3YR)
-- Z-series → LIC-Z{model}-ENT-{1Y/3Y/5Y}
-- MG → LIC-MG{model}-ENT-{1Y/3Y/5Y}
-- MS130 compact (8 or 12 port) → LIC-MS130-CMPT-{1Y/3Y/5Y}
-- MS130 standard (24 or 48 port) → LIC-MS130-{24/48}-{1Y/3Y/5Y}
-- MS150, MS390 → no license SKU needed in URL (licensed separately)
+## LICENSE RULES (term format matters!)
+- All APs (MR + CW) → LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR
+- MX → LIC-MX{model}-SEC-1YR / -3YR / -5YR
+- Z-series → LIC-Z{model}-SEC-1Y / -3Y / -5Y
+- MG → LIC-MG{model}-ENT-1Y / -3Y / -5Y
+- MS130 compact (8/8P/8X/12X) → LIC-MS130-CMPT-1Y / -3Y / -5Y
+- MS130 standard (24/48) → LIC-MS130-{24/48}-1Y / -3Y / -5Y
+- MS150 24-port → LIC-MS150-24-1Y / -3Y / -5Y
+- MS150 48-port → LIC-MS150-48-1Y / -3Y / -5Y
+- MS390 → no license in URL
 
 ## OUTPUT RULES
-- Always show 1-Year, 3-Year, and 5-Year URLs unless user specifies one term
-- URL-only output by default — no pricing tables, no totals
-- If user asks "how much", "price", or "cost" — you may add pricing context
-- If a SKU is EOL, note the replacement but still build the URL if they want to renew licenses
-- If a SKU is ambiguous or doesn't exist, ask for clarification — don't guess
+- Always show 1-Year, 3-Year, and 5-Year URLs unless user says "just" or "only" with one term
+- URL-only output by default — no pricing tables
+- If user asks "how much", "price", or "cost" you may add pricing context
+- If a SKU is EOL, note the replacement and offer renewal vs refresh options
+- If a SKU is ambiguous, ask for clarification
 
 ## EOL REPLACEMENTS
 MR33→MR36, MR42→MR44, MR42E→MR46E, MR52/53/56→MR57, MR74→MR76, MR84→MR86
 MX64→MX67, MX64W→MX67W, MX65→MX68, MX65W→MX68W, MX80/84→MX85
 MS120/125/210/220/225→MS130, MS250/320→MS150, MS350/410/420/425→MS390
 
-Keep responses concise and formatted for Webex markdown.`;
+Keep responses concise, formatted for Webex markdown.`;
 
 async function askClaude(userMessage) {
+  if (!anthropic) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
@@ -484,14 +525,14 @@ async function askClaude(userMessage) {
 // ─── Webhook Handler ─────────────────────────────────────────────────────────
 
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // Ack immediately
+  res.sendStatus(200);
 
   try {
     const event = req.body;
     if (event.resource !== 'messages' || event.event !== 'created') return;
 
     const botId = await getBotPersonId();
-    if (event.data.personId === botId) return; // Ignore own messages
+    if (event.data.personId === botId) return;
 
     const msg = await getMessage(event.data.id);
     const text = (msg.text || '').trim();
@@ -503,15 +544,23 @@ app.post('/webhook', async (req, res) => {
     const parsed = parseMessage(text);
 
     if (parsed) {
-      const { message, needsLlm } = buildQuoteResponse(parsed);
+      const result = buildQuoteResponse(parsed);
 
-      if (!needsLlm && message) {
-        await sendMessage(roomId, message);
+      if (!result.needsLlm && result.message) {
+        await sendMessage(roomId, result.message);
+        return;
+      }
+
+      // If errors exist but we're falling back, include them for context
+      if (result.errors && result.errors.length > 0) {
+        const errorContext = result.errors.join('\n');
+        const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`);
+        await sendMessage(roomId, claudeReply);
         return;
       }
     }
 
-    // Fallback to Claude API
+    // Full fallback to Claude API
     const claudeReply = await askClaude(text);
     await sendMessage(roomId, claudeReply);
 
@@ -521,10 +570,15 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
-app.get('/', (req, res) => res.json({ status: 'Stratus AI running', version: '1.0.0' }));
+app.get('/', (req, res) => res.json({ status: 'Stratus AI running', version: '2.0.0' }));
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Stratus AI bot listening on port ${PORT}`);
-  getBotPersonId().then(id => console.log(`Bot ID: ${id}`)).catch(console.error);
+  if (WEBEX_BOT_TOKEN) {
+    getBotPersonId().then(id => console.log(`Bot ID: ${id}`)).catch(console.error);
+  }
 });
+
+// ─── Exports for testing ─────────────────────────────────────────────────────
+module.exports = { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol };
