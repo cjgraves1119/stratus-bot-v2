@@ -176,7 +176,7 @@ function getLicenseSkus(baseSku) {
  */
 function buildStratusUrl(items, term) {
   const skuParam = items.map(i => `${i.sku}:${i.qty}`).join(',');
-  return `https://www.stratusinfosystems.com/store/cisco-meraki/p?skus=${encodeURIComponent(skuParam)}&term=${term}`;
+  return `https://www.stratusinfosystems.com/store/cisco-meraki/p?skus=${skuParam}&term=${term}`;
 }
 
 /**
