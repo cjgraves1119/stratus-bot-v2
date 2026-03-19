@@ -813,6 +813,98 @@ test('Route: EOL product → JSON engine dual-option (needsLlm=false)', () => {
 });
 
 
+console.log('\n=== REVISION DETECTION & ROUTING ===');
+
+test('"remove the license" → detected as revision with no SKUs', () => {
+  const parsed = parseMessage('remove the license');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isRevision === true, 'Should detect as revision');
+  assert(parsed.items.length === 0, 'Should have no items');
+});
+
+test('"change quantity to 20" → detected as revision', () => {
+  const parsed = parseMessage('change quantity to 20');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isRevision === true, 'Should detect as revision');
+});
+
+test('"just the hardware" → detected as revision', () => {
+  const parsed = parseMessage('just the hardware');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isRevision === true, 'Should detect as revision');
+});
+
+test('"actually make it an MX85 instead" → detected as revision with MX85 SKU', () => {
+  const parsed = parseMessage('actually make it an MX85 instead');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isRevision === true, 'Should detect as revision');
+  // MX85 is a valid SKU and should still be parsed
+  assert(parsed.items.length === 1, 'Should find MX85');
+  assert(parsed.items[0].baseSku === 'MX85', 'Should be MX85');
+});
+
+test('"switch to enterprise" → detected as revision', () => {
+  const parsed = parseMessage('switch to enterprise');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isRevision === true, 'Should detect as revision');
+  assert(parsed.requestedTier === 'ENT', 'Should detect ENT tier');
+});
+
+test('"bump it to 20" → detected as revision', () => {
+  const parsed = parseMessage('bump it to 20');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isRevision === true, 'Should detect as revision');
+});
+
+test('"nevermind drop the MR44" → detected as revision', () => {
+  const parsed = parseMessage('nevermind drop the MR44');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isRevision === true, 'Should detect as revision');
+});
+
+test('Revision with no SKUs → buildQuoteResponse routes to LLM', () => {
+  const parsed = parseMessage('remove the license');
+  const result = buildQuoteResponse(parsed);
+  assert(result.needsLlm === true, 'Should route to LLM');
+  assert(result.revision === true, 'Should flag as revision');
+});
+
+test('"quote 10 MR44" is NOT a revision', () => {
+  const parsed = parseMessage('quote 10 MR44');
+  assert(parsed.isRevision === false, 'Normal quote should not be revision');
+});
+
+test('"what would you recommend for a 24 port switch" → advisory, not revision', () => {
+  const parsed = parseMessage('what would you recommend for a 24 port switch to power 10 MR36s');
+  assert(parsed !== null, 'Should not return null');
+  assert(parsed.isAdvisory === true, 'Should detect as advisory');
+});
+
+console.log('\n=== HARD-STOP MIXED ITEM VALIDATION ===');
+
+test('Mixed valid + invalid + EOL → hard-stop, no URLs', () => {
+  const parsed = parseMessage('MS150-24, MS130-8P, MX67 Enterprise, MG21');
+  assert(parsed !== null, 'Should parse');
+  const result = buildQuoteResponse(parsed);
+  // MS150-24 is invalid — should hard-stop
+  assert(result.needsLlm === false, 'Should not need LLM');
+  assert(result.message.includes('MS150-24'), 'Should mention invalid SKU');
+  assert(!result.message.includes('stratusinfosystems.com/order'), 'Should NOT contain any URLs');
+});
+
+test('All valid items → generates URLs normally', () => {
+  const parsed = parseMessage('MS130-8P, MX67');
+  const result = buildQuoteResponse(parsed);
+  assert(result.message.includes('stratusinfosystems.com'), 'Should have URLs');
+});
+
+test('Single invalid item → error, no URLs', () => {
+  const parsed = parseMessage('MS150-24');
+  const result = buildQuoteResponse(parsed);
+  assert(!result.message.includes('stratusinfosystems.com/order'), 'Should NOT have URLs');
+  assert(result.message.includes('MS150-24'), 'Should mention invalid SKU');
+});
+
 console.log('\n=== SYSTEM PROMPT VALIDATION ===');
 
 test('SYSTEM_PROMPT contains ENT/SEC/SDW tier rules', () => {
@@ -869,6 +961,23 @@ test('SYSTEM_PROMPT MX75 few-shot uses -Y format (not -YR)', () => {
 test('SYSTEM_PROMPT warns against inventing SKUs', () => {
   assert(SYSTEM_PROMPT.includes('NEVER assume a product exists'), 'Missing SKU invention warning');
   assert(SYSTEM_PROMPT.includes('NEVER invent SKUs'), 'Missing invent warning');
+});
+
+test('SYSTEM_PROMPT contains quote revision section', () => {
+  assert(SYSTEM_PROMPT.includes('QUOTE REVISION'), 'Missing quote revision section');
+  assert(SYSTEM_PROMPT.includes('remove the license'), 'Missing revision example');
+  assert(SYSTEM_PROMPT.includes('conversation history'), 'Missing conversation history reference');
+});
+
+test('SYSTEM_PROMPT contains revision few-shot examples', () => {
+  assert(SYSTEM_PROMPT.includes('switch to enterprise'), 'Missing revision few-shot for tier change');
+});
+
+test('askClaude uses correct model string', () => {
+  // Read the source to verify model string
+  const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+  assert(src.includes("model: 'claude-3-5-sonnet-latest'"), 'Should use claude-3-5-sonnet-latest model');
+  assert(!src.includes("model: 'claude-sonnet-4-6'"), 'Should NOT use old claude-sonnet-4-6 model');
 });
 
 

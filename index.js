@@ -574,8 +574,30 @@ function parseMessage(text) {
   // Strip position from output (not needed downstream)
   const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
 
-  if (items.length === 0) return null;
-  return { items, requestedTerm, modifiers, requestedTier, isAdvisory };
+  // ─── Revision Intent Detection ──────────────────────────────────────────────
+  // Detect follow-up modification requests that reference a prior quote
+  const revisionPatterns = [
+    /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(LICENSE|HARDWARE|HW|AP|SWITCH|MX|MR)/,
+    /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(FROM|THE|THAT|THOSE)/,
+    /\b(ADD|INCLUDE|THROW IN|TACK ON)\b.*\b(MORE|EXTRA|ADDITIONAL|ALSO)\b/,
+    /\b(CHANGE|UPDATE|MODIFY|ADJUST|SWITCH)\b.*(QUANTITY|QTY|COUNT|NUMBER|TERM|LICENSE|TIER)/,
+    /\b(MAKE (IT|THAT|THEM))\b.*(INSTEAD|RATHER)/,
+    /\b(ACTUALLY|NEVER\s?MIND|SCRATCH THAT|WAIT)\b/,
+    /\bINSTEAD OF\b/,
+    /\b(JUST|ONLY)\s+(THE\s+)?(LICENSE|HARDWARE|HW)\b/,
+    /\bSWITCH (TO|IT TO)\b/,
+    /\bBUMP (IT |THAT |THE )?(UP|DOWN|TO)\b/
+  ];
+  const isRevision = revisionPatterns.some(p => p.test(upper));
+
+  if (items.length === 0) {
+    // No SKUs found — could be a revision or advisory, but not a quote request
+    if (isRevision || isAdvisory) {
+      return { items: [], requestedTerm, modifiers, requestedTier, isAdvisory, isRevision };
+    }
+    return null;
+  }
+  return { items, requestedTerm, modifiers, requestedTier, isAdvisory, isRevision };
 }
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
@@ -584,6 +606,11 @@ function buildQuoteResponse(parsed) {
   // ─── Advisory intent → route to Claude (Error 3 fix) ─────────────────────
   if (parsed.isAdvisory) {
     return { message: null, needsLlm: true, advisory: true };
+  }
+
+  // ─── Revision intent with no new SKUs → route to Claude with history ─────
+  if (parsed.isRevision && parsed.items.length === 0) {
+    return { message: null, needsLlm: true, revision: true };
   }
 
   const terms = parsed.requestedTerm ? [parsed.requestedTerm] : [1, 3, 5];
@@ -864,6 +891,22 @@ MS120/125/210/220/225→MS130, MS250/320→MS150, MS350/410/420/425→MS390
 ## COMMON MISTAKES
 MR55 doesn't exist (suggest MR57). MS130-13X doesn't exist (suggest MS130-12X). MS350-24 is EOL (suggest MS390-24UX).
 
+## QUOTE REVISION (FOLLOW-UP REQUESTS)
+Users may reference a prior quote and ask to modify it. You'll see the conversation history and a system note indicating this is a revision. Common revision requests:
+- "remove the license" → regenerate the prior quote with hardware only (no license SKUs)
+- "remove the hardware" / "just the license" → regenerate with license only
+- "change to 3 year only" → regenerate with only the 3-year term
+- "change quantity to 20" / "bump it to 20" → regenerate with updated quantity
+- "add 5 more MR44" → add to the existing quote items
+- "switch to enterprise" / "change to security" → change the license tier
+- "actually make it an MX85 instead" → swap out the product
+
+When revising:
+1. Look at your prior response in conversation history to understand the original quote
+2. Apply the requested modification
+3. Generate fresh URLs with the changes applied
+4. Briefly note what changed (e.g., "Here's the updated quote with hardware only:")
+
 ## FEW-SHOT EXAMPLES
 
 User: "quote 10 MR44"
@@ -905,7 +948,23 @@ User: "What's the difference between the MX75 and MX85?"
 Response:
 The MX75 and MX85 are both next-gen Meraki security appliances. The MX85 offers higher throughput and is designed for larger deployments (up to ~600 users), while the MX75 covers mid-range deployments (up to ~200 users). Both support Enterprise, Advanced Security, and SD-WAN licensing.
 
-Want me to put together a quote for either one?`;
+Want me to put together a quote for either one?
+
+User (follow-up after quoting "10 MR44"): "remove the license"
+Response:
+Here's the updated quote with hardware only:
+
+https://stratusinfosystems.com/order/?item=MR44-HW&qty=10
+
+User (follow-up after quoting "2 MX75"): "switch to enterprise"
+Response:
+Updated with Enterprise licensing:
+
+1-Year: https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-ENT-1Y&qty=2,2
+
+3-Year: https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-ENT-3Y&qty=2,2
+
+5-Year: https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-ENT-5Y&qty=2,2`;
 
 async function askClaude(userMessage, personId) {
   if (!anthropic) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
@@ -915,7 +974,7 @@ async function askClaude(userMessage, personId) {
     const messages = [...history, { role: 'user', content: userMessage }];
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-3-5-sonnet-latest',
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
       messages
@@ -930,7 +989,7 @@ async function askClaude(userMessage, personId) {
 
     return reply;
   } catch (err) {
-    console.error('Claude API error:', err.message);
+    console.error('Claude API error:', err.message, err.status, JSON.stringify(err.error || {}));
     return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44" or "5 MS150-48LP-4G".`;
   }
 }
@@ -965,6 +1024,19 @@ app.post('/webhook', async (req, res) => {
         addToHistory(personId, 'user', text);
         addToHistory(personId, 'assistant', result.message);
         await sendMessage(roomId, result.message);
+        return;
+      }
+
+      // Revision intent — route to Claude with explicit instruction to use conversation history
+      if (result.revision) {
+        const history = getHistory(personId);
+        if (history.length > 0) {
+          const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId);
+          await sendMessage(roomId, claudeReply);
+          return;
+        }
+        // No history — can't revise what doesn't exist
+        await sendMessage(roomId, `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`);
         return;
       }
 
