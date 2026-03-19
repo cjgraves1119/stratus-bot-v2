@@ -1007,4 +1007,4 @@ app.listen(PORT, () => {
 });
 
 // ─── Exports for testing ─────────────────────────────────────────────────────
-module.exports = { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, detectFamily, VALID_SKUS, getHistory, addToHistory, conversationHistory };
+module.exports = { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, detectFamily, VALID_SKUS, getHistory, addToHistory, conversationHistory, SYSTEM_PROMPT, askClaude };

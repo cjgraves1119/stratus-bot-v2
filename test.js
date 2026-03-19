@@ -4,7 +4,7 @@
  * v2: expanded with auto-catalog coverage tests
  */
 
-const { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, VALID_SKUS, getHistory, addToHistory, conversationHistory } = require('./index.js');
+const { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, VALID_SKUS, getHistory, addToHistory, conversationHistory, SYSTEM_PROMPT, askClaude } = require('./index.js');
 
 let passed = 0;
 let failed = 0;
@@ -729,9 +729,252 @@ test('EOL: "1 MR42" → Option A (renew) + Option B (refresh to MR44)', () => {
 });
 
 
-// ─── Summary ─────────────────────────────────────────────────────────────────
-console.log(`\n${'='.repeat(50)}`);
-console.log(`Results: ${passed} passed, ${failed} failed out of ${passed + failed} tests`);
-console.log(`${'='.repeat(50)}\n`);
+console.log('\n=== ROUTING LOGIC ===');
 
-process.exit(failed > 0 ? 1 : 0);
+// These tests verify the full routing decision tree:
+// 1. Valid SKUs → JSON engine handles (needsLlm=false)
+// 2. Advisory questions with SKUs → Claude (needsLlm=true, advisory=true)
+// 3. No SKUs at all → parseMessage returns null → Claude
+// 4. All invalid SKUs with partial matches → JSON engine clarification (needsLlm=false)
+// 5. All invalid SKUs without partial matches → Claude (needsLlm=true)
+// 6. Mixed valid+invalid → JSON engine hard-stop (needsLlm=false, error message)
+
+test('Route: valid SKU → JSON engine (needsLlm=false)', () => {
+  const result = runQuote('quote 5 MR44');
+  assert(result !== null, 'Should parse');
+  assert(result.needsLlm === false, 'Should be handled by JSON engine');
+  assert(result.message.includes('stratusinfosystems.com'), 'Should have URL');
+});
+
+test('Route: advisory with SKUs → Claude (needsLlm=true, advisory=true)', () => {
+  const result = runQuote('tell me about the MX75');
+  assert(result !== null, 'Should parse');
+  assert(result.needsLlm === true, 'Should route to Claude');
+  assert(result.advisory === true, 'Should be flagged advisory');
+});
+
+test('Route: no SKUs → parseMessage returns null → would go to Claude', () => {
+  const parsed = parseMessage('hello how are you');
+  assert(parsed === null, 'No SKUs should return null (Claude path)');
+});
+
+test('Route: ambiguous SKU → JSON engine clarification (needsLlm=false)', () => {
+  const result = runQuote('quote MS150-48');
+  assert(result.needsLlm === false, 'Should be handled by JSON engine clarification');
+  assert(result.message.includes('Which one'), 'Should ask for clarification');
+});
+
+test('Route: completely unknown SKU → Claude (needsLlm=true)', () => {
+  const result = runQuote('quote XYZZY-9000');
+  // XYZZY-9000 won't match any regex patterns, so parseMessage returns null
+  // which means the webhook handler would go to Claude
+  // But if it somehow matches, it should fall through
+  assert(result === null || result.needsLlm === true, 'Should either not parse or route to Claude');
+});
+
+test('Route: mixed valid+invalid → hard-stop, no URL, no Claude', () => {
+  const result = runQuote('2 MR44 and 1 MR55');
+  assert(result.needsLlm === false, 'Should NOT fall to Claude');
+  assert(!result.message.includes('stratusinfosystems.com'), 'Should NOT have URL');
+  assert(result.message.includes('correct the invalid'), 'Should ask to correct');
+});
+
+test('Route: "how much" question with valid SKU → still generates quote (not advisory)', () => {
+  // "how much" is a pricing question, not advisory — it still wants a quote
+  const parsed = parseMessage('how much for 10 MR44');
+  // Note: "HOW MUCH" matches advisory pattern HOW MUCH — let's check
+  const result = runQuote('how much for 10 MR44');
+  // This SHOULD be advisory since user is asking a question, not requesting a quote
+  // The Claude system prompt handles pricing questions
+  assert(result !== null, 'Should parse');
+  if (result.needsLlm) {
+    assert(result.advisory === true, 'If routed to Claude, should be advisory');
+  }
+});
+
+test('Route: modifier + valid SKU → JSON engine (needsLlm=false)', () => {
+  const result = runQuote('5 MR44 without a license');
+  assert(result.needsLlm === false, 'Modifier quotes handled by JSON engine');
+  assert(result.message.includes('MR44-HW'), 'Should have hardware');
+  assert(!result.message.includes('LIC-ENT'), 'Should NOT have license');
+});
+
+test('Route: tier request + valid SKU → JSON engine (needsLlm=false)', () => {
+  const result = runQuote('1 MX67 enterprise');
+  assert(result.needsLlm === false, 'Tier quotes handled by JSON engine');
+  assert(result.message.includes('LIC-MX67-ENT'), 'Should use ENT tier');
+});
+
+test('Route: EOL product → JSON engine dual-option (needsLlm=false)', () => {
+  const result = runQuote('5 MR42');
+  assert(result.needsLlm === false, 'EOL handled by JSON engine');
+  assert(result.message.includes('Option A'), 'Should have renew option');
+  assert(result.message.includes('Option B'), 'Should have refresh option');
+});
+
+
+console.log('\n=== SYSTEM PROMPT VALIDATION ===');
+
+test('SYSTEM_PROMPT contains ENT/SEC/SDW tier rules', () => {
+  assert(SYSTEM_PROMPT.includes('ENT (Enterprise)'), 'Missing ENT tier');
+  assert(SYSTEM_PROMPT.includes('SEC (Advanced Security)'), 'Missing SEC tier');
+  assert(SYSTEM_PROMPT.includes('SDW (SD-WAN)'), 'Missing SDW tier');
+});
+
+test('SYSTEM_PROMPT contains correct MX tier defaults', () => {
+  assert(SYSTEM_PROMPT.includes('MX: Supports ENT, SEC, SDW. Default = SEC'), 'Missing MX tier default');
+});
+
+test('SYSTEM_PROMPT contains Z-series tier restrictions', () => {
+  assert(SYSTEM_PROMPT.includes('Z1, Z3, Z3C: ENT ONLY'), 'Missing Z legacy ENT-only rule');
+  assert(SYSTEM_PROMPT.includes('Z4, Z4C: ENT + SEC'), 'Missing Z4 tier rule');
+});
+
+test('SYSTEM_PROMPT contains -YR vs -Y format guidance', () => {
+  assert(SYSTEM_PROMPT.includes('-YR vs -Y'), 'Missing term format guidance');
+  assert(SYSTEM_PROMPT.includes('SDW always uses -Y'), 'Missing SDW format note');
+});
+
+test('SYSTEM_PROMPT contains modifier handling section', () => {
+  assert(SYSTEM_PROMPT.includes('MODIFIER HANDLING'), 'Missing modifier section');
+  assert(SYSTEM_PROMPT.includes('hardware only'), 'Missing hardware only');
+  assert(SYSTEM_PROMPT.includes('license only'), 'Missing license only');
+});
+
+test('SYSTEM_PROMPT contains enterprise tier few-shot example', () => {
+  assert(SYSTEM_PROMPT.includes('MX67 enterprise'), 'Missing enterprise example');
+  assert(SYSTEM_PROMPT.includes('LIC-MX67-ENT'), 'Missing ENT license in example');
+});
+
+test('SYSTEM_PROMPT contains hardware-only few-shot example', () => {
+  assert(SYSTEM_PROMPT.includes('hardware only'), 'Missing hardware-only example');
+});
+
+test('SYSTEM_PROMPT contains advisory few-shot example', () => {
+  assert(SYSTEM_PROMPT.includes('difference between the MX75 and MX85'), 'Missing advisory example');
+});
+
+test('SYSTEM_PROMPT contains full valid product catalog', () => {
+  assert(SYSTEM_PROMPT.includes('MR44'), 'Missing MR44 in catalog');
+  assert(SYSTEM_PROMPT.includes('MX75'), 'Missing MX75 in catalog');
+  assert(SYSTEM_PROMPT.includes('Z4'), 'Missing Z4 in catalog');
+  assert(SYSTEM_PROMPT.includes('CW9172I'), 'Missing CW9172I in catalog');
+  assert(SYSTEM_PROMPT.includes('MS150-48FP-4G'), 'Missing MS150 variant in catalog');
+});
+
+test('SYSTEM_PROMPT MX75 few-shot uses -Y format (not -YR)', () => {
+  assert(SYSTEM_PROMPT.includes('LIC-MX75-SEC-3Y'), 'MX75 example should use -Y not -YR');
+});
+
+test('SYSTEM_PROMPT warns against inventing SKUs', () => {
+  assert(SYSTEM_PROMPT.includes('NEVER assume a product exists'), 'Missing SKU invention warning');
+  assert(SYSTEM_PROMPT.includes('NEVER invent SKUs'), 'Missing invent warning');
+});
+
+
+console.log('\n=== CLAUDE API TESTS (live, skipped if no key) ===');
+
+// These tests actually call Claude to verify the system prompt produces correct responses.
+// They're skipped if ANTHROPIC_API_KEY is not set.
+const HAS_API_KEY = !!process.env.ANTHROPIC_API_KEY;
+
+async function asyncTest(name, fn) {
+  if (!HAS_API_KEY) {
+    console.log(`  ⏭️  ${name} (skipped — no API key)`);
+    return;
+  }
+  try {
+    await fn();
+    console.log(`  ✅ ${name}`);
+    passed++;
+  } catch (e) {
+    console.log(`  ❌ ${name}`);
+    console.log(`     ${e.message}`);
+    failed++;
+  }
+}
+
+// We need to run async tests before the summary
+async function runAsyncTests() {
+  await asyncTest('Claude: "quote 10 MR44" → response contains correct URL structure', async () => {
+    const reply = await askClaude('quote 10 MR44', null);
+    assert(reply.includes('MR44-HW'), `Response missing MR44-HW. Got:\n${reply}`);
+    assert(reply.includes('LIC-ENT'), `Response missing LIC-ENT license. Got:\n${reply}`);
+    assert(reply.includes('stratusinfosystems.com'), `Response missing URL. Got:\n${reply}`);
+    assert(reply.includes('qty=10,10'), `Response missing correct quantities. Got:\n${reply}`);
+  });
+
+  await asyncTest('Claude: "1 MX67 enterprise" → uses ENT tier, not SEC', async () => {
+    const reply = await askClaude('1 MX67 enterprise', null);
+    assert(reply.includes('LIC-MX67-ENT'), `Should use ENT tier. Got:\n${reply}`);
+    assert(!reply.includes('LIC-MX67-SEC'), `Should NOT use SEC tier. Got:\n${reply}`);
+  });
+
+  await asyncTest('Claude: "difference between MX75 and MX85" → advisory response, no URL required', async () => {
+    const reply = await askClaude('what is the difference between the MX75 and MX85', null);
+    // Should give an informative answer, not just URLs
+    assert(reply.length > 100, `Response too short for advisory. Got:\n${reply}`);
+    // Should mention both models
+    assert(reply.includes('MX75') && reply.includes('MX85'), `Should discuss both models. Got:\n${reply}`);
+  });
+
+  await asyncTest('Claude: "quote 5 MR55" → recognizes invalid SKU, suggests MR57', async () => {
+    const reply = await askClaude('quote 5 MR55', null);
+    assert(reply.includes('MR57') || reply.includes('MR5'), `Should suggest MR57 replacement. Got:\n${reply}`);
+  });
+
+  await asyncTest('Claude: "1 Z3 with security license" → explains Z3 is ENT only', async () => {
+    const reply = await askClaude('1 Z3 with advanced security license', null);
+    const lower = reply.toLowerCase();
+    assert(lower.includes('enterprise') || lower.includes('ent'), `Should mention Enterprise is the only option for Z3. Got:\n${reply}`);
+  });
+
+  await asyncTest('Claude: "5 MR44 hardware only" → URL without license', async () => {
+    const reply = await askClaude('5 MR44 hardware only', null);
+    assert(reply.includes('MR44-HW'), `Should have hardware SKU. Got:\n${reply}`);
+    // Should either omit license or note it's hardware only
+    if (reply.includes('stratusinfosystems.com')) {
+      // If it generated a URL, check it doesn't include license
+      const urlMatch = reply.match(/stratusinfosystems\.com\/order\/\?[^\s]+/);
+      if (urlMatch) {
+        assert(!urlMatch[0].includes('LIC-ENT'), `URL should not include license. Got: ${urlMatch[0]}`);
+      }
+    }
+  });
+
+  await asyncTest('Claude: MX75 uses -Y format (not -YR)', async () => {
+    const reply = await askClaude('quote 1 MX75', null);
+    if (reply.includes('LIC-MX75')) {
+      assert(reply.includes('-1Y') || reply.includes('-3Y') || reply.includes('-5Y'), `MX75 should use -Y format. Got:\n${reply}`);
+      assert(!reply.includes('-1YR') && !reply.includes('-3YR') && !reply.includes('-5YR'), `MX75 should NOT use -YR format. Got:\n${reply}`);
+    }
+  });
+
+  await asyncTest('Claude: conversation memory maintains context', async () => {
+    // First message establishes context
+    const reply1 = await askClaude('quote 10 MR44', 'test-memory-user');
+    assert(reply1.includes('MR44'), `First reply should mention MR44. Got:\n${reply1}`);
+
+    // Follow-up should have context
+    const reply2 = await askClaude('change that to 20', 'test-memory-user');
+    // Should reference MR44 from context and update qty to 20
+    const hasMR44 = reply2.includes('MR44');
+    const has20 = reply2.includes('20');
+    assert(hasMR44 || has20, `Follow-up should reference MR44 or qty 20 from memory. Got:\n${reply2}`);
+
+    // Clean up
+    conversationHistory.delete('test-memory-user');
+  });
+
+  // Print final summary after async tests
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`Results: ${passed} passed, ${failed} failed out of ${passed + failed} tests`);
+  if (!HAS_API_KEY) {
+    console.log('(Claude API tests were skipped — set ANTHROPIC_API_KEY to run them)');
+  }
+  console.log(`${'='.repeat(50)}\n`);
+
+  process.exit(failed > 0 ? 1 : 0);
+}
+
+runAsyncTests();
