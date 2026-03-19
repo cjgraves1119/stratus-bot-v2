@@ -163,10 +163,11 @@ function applySuffix(sku) {
 //   Older products (MX, MV, LIC-ENT): -1YR, -3YR, -5YR
 //   Newer products (MS130, MS150, C9xxx, MG, MT, Z4): -1Y, -3Y, -5Y
 
-function getLicenseSkus(baseSku) {
+function getLicenseSkus(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
   // AP families (MR + all CW models) → LIC-ENT (older format: -YR)
+  // APs only support ENT — ignore requestedTier
   if (/^MR\d/.test(upper) || /^CW9\d/.test(upper)) {
     return [
       { term: '1Y', sku: 'LIC-ENT-1YR' },
@@ -179,34 +180,68 @@ function getLicenseSkus(baseSku) {
   const mxNaMatch = upper.match(/^MX(\d+C[W]?)-NA$/);
   if (mxNaMatch) {
     const model = mxNaMatch[1];
+    // MX supports ENT, SEC, SDW — default SEC
+    const tier = requestedTier || 'SEC';
+    // Older MX models (67/68) use -YR, newer (75/85/95/105) use -Y
+    const numMatch = model.match(/^(\d+)/);
+    const modelNum = numMatch ? parseInt(numMatch[1]) : 0;
+    const isNewer = modelNum >= 75;
+    const suffix = isNewer ? 'Y' : 'YR';
+    // SDW uses -Y format regardless of model age
+    const termSuffix = tier === 'SDW' ? 'Y' : suffix;
     return [
-      { term: '1Y', sku: `LIC-MX${model}-SEC-1YR` },
-      { term: '3Y', sku: `LIC-MX${model}-SEC-3YR` },
-      { term: '5Y', sku: `LIC-MX${model}-SEC-5YR` }
+      { term: '1Y', sku: `LIC-MX${model}-${tier}-1${termSuffix}` },
+      { term: '3Y', sku: `LIC-MX${model}-${tier}-3${termSuffix}` },
+      { term: '5Y', sku: `LIC-MX${model}-${tier}-5${termSuffix}` }
     ];
   }
 
-  // MX security licenses (older format: -YR)
+  // MX security appliances — supports ENT, SEC, SDW (default SEC)
   const mxMatch = upper.match(/^MX(\d+(?:CW?|W)?)/);
   if (mxMatch) {
     const model = mxMatch[1];
+    const tier = requestedTier || 'SEC';
+    // Older MX models (67/68/100/250/450) use -YR, newer (75/85/95/105) use -Y
+    const numMatch = model.match(/^(\d+)/);
+    const modelNum = numMatch ? parseInt(numMatch[1]) : 0;
+    const isNewer = modelNum >= 75 && modelNum < 250;
+    const suffix = isNewer ? 'Y' : 'YR';
+    // SDW uses -Y format regardless of model age
+    const termSuffix = tier === 'SDW' ? 'Y' : suffix;
     return [
-      { term: '1Y', sku: `LIC-MX${model}-SEC-1YR` },
-      { term: '3Y', sku: `LIC-MX${model}-SEC-3YR` },
-      { term: '5Y', sku: `LIC-MX${model}-SEC-5YR` }
+      { term: '1Y', sku: `LIC-MX${model}-${tier}-1${termSuffix}` },
+      { term: '3Y', sku: `LIC-MX${model}-${tier}-3${termSuffix}` },
+      { term: '5Y', sku: `LIC-MX${model}-${tier}-5${termSuffix}` }
     ];
   }
 
-  // Z-series → SEC tier, newer format: -Y (SKILL.md line 313)
-  // Z4, Z4C → LIC-Z4-SEC / LIC-Z4C-SEC
-  // Z4X, Z4CX → LIC-Z4X-SEC / LIC-Z4CX-SEC
-  const zMatch = upper.match(/^Z(\d+C?X?)/);
+  // Z-series license tiers:
+  //   Z1, Z3, Z3C → ENT only (older -YR format). If user requests SEC/SDW, warn + default ENT.
+  //   Z4, Z4C → ENT + SEC (newer -Y format). Default ENT. If user requests SDW, warn + default ENT.
+  //   Z4X, Z4CX → use Z4/Z4C licenses respectively
+  const zMatch = upper.match(/^Z(\d+)(C)?(X)?$/);
   if (zMatch) {
-    const model = zMatch[1];
+    const zNum = zMatch[1];          // "1", "3", "4"
+    const hasC = !!zMatch[2];        // cellular variant
+    const hasX = !!zMatch[3];        // X variant (uses parent model license)
+
+    // Determine license model name: Z4X uses Z4, Z4CX uses Z4C
+    const licModel = `Z${zNum}${hasC ? 'C' : ''}`;
+
+    if (zNum === '1' || zNum === '3') {
+      // Legacy Z: ENT only, -YR format
+      return [
+        { term: '1Y', sku: `LIC-${licModel}-ENT-1YR` },
+        { term: '3Y', sku: `LIC-${licModel}-ENT-3YR` },
+        { term: '5Y', sku: `LIC-${licModel}-ENT-5YR` }
+      ];
+    }
+    // Z4/Z4C/Z4X/Z4CX: supports ENT + SEC, newer -Y format. Default ENT.
+    const zTier = (requestedTier === 'SEC') ? 'SEC' : 'ENT';
     return [
-      { term: '1Y', sku: `LIC-Z${model}-SEC-1Y` },
-      { term: '3Y', sku: `LIC-Z${model}-SEC-3Y` },
-      { term: '5Y', sku: `LIC-Z${model}-SEC-5Y` }
+      { term: '1Y', sku: `LIC-${licModel}-${zTier}-1Y` },
+      { term: '3Y', sku: `LIC-${licModel}-${zTier}-3Y` },
+      { term: '5Y', sku: `LIC-${licModel}-${zTier}-5Y` }
     ];
   }
 
@@ -434,6 +469,43 @@ function parseMessage(text) {
     else if (/\b5[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 5;
   }
 
+  // ─── Modifier Detection (Error 1 fix) ──────────────────────────────────────
+  const modifiers = { hardwareOnly: false, licenseOnly: false };
+  if (/\b(HARDWARE\s+ONLY|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper)) {
+    modifiers.hardwareOnly = true;
+  }
+  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY)\b/.test(upper)) {
+    modifiers.licenseOnly = true;
+  }
+
+  // ─── License Tier Detection (Phase 3) ───────────────────────────────────────
+  let requestedTier = null;
+  if (/\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/.test(upper) && !/\bENTERPRISE\b/.test(upper)) {
+    requestedTier = 'SEC';
+  } else if (/\bENT(ERPRISE)?\b/.test(upper) && !/\bSEC(URITY)?\b/.test(upper)) {
+    requestedTier = 'ENT';
+  } else if (/\b(SD[\s-]?WAN|SDW)\b/.test(upper)) {
+    requestedTier = 'SDW';
+  }
+
+  // ─── Intent Classification (Error 3 fix) ───────────────────────────────────
+  const advisoryPatterns = [
+    /\bWHAT('?S| IS) THE DIFFERENCE\b/,
+    /\bWHICH (ONE |SHOULD |DO |WOULD )/,
+    /\bDO I NEED\b/,
+    /\bIS .+ COMPATIBLE\b/,
+    /\bCAN I USE\b/,
+    /\bSHOULD I (GET|USE|GO|CHOOSE|PICK)\b/,
+    /\bWHAT (DO YOU|WOULD YOU) (RECOMMEND|SUGGEST)\b/,
+    /\bCOMPARE\b/,
+    /\bTELL ME ABOUT\b/,
+    /\bWHAT('?S| IS) THE BEST\b/,
+    /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/,
+    /\bSPECS?\b/,
+    /\bDIFFERENCE BETWEEN\b/
+  ];
+  const isAdvisory = advisoryPatterns.some(p => p.test(upper));
+
   // SKU patterns to match (order matters — more specific first)
   const skuPatterns = [
     /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,  // Catalyst C9200L/C9300/C9300X
@@ -442,26 +514,38 @@ function parseMessage(text) {
     /MS150-[\dA-Z]+-[\dA-Z]+/gi,                          // MS150 (3-part SKU)
     /MS450-\d+/gi,                                        // MS450
     /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,               // All MS families (130/150/210/225/250/350/390/425)
-    /(?:MR|MV|MT|MG)\d+[A-Z]*/gi,                        // MR, MV, MT, MG
+    /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,              // MR, MV, MT, MG — only 0-1 trailing alpha (prevents MR44S from plural "s")
     /MX\d+[A-Z]*(?:-NA)?/gi,                             // MX (including MX67C-NA, MX68CW-NA)
     /GX\d+/gi,                                            // GX
     /Z\d+[A-Z]*/gi                                        // Z-series
   ];
 
-  const foundItems = [];
+  const rawMatches = [];
   const matched = new Set();
 
   for (const pattern of skuPatterns) {
     let match;
     while ((match = pattern.exec(upper)) !== null) {
-      const sku = match[0];
+      let sku = match[0];
+      const pos = match.index;
+
+      // ─── Plural "s" strip (Error 4 fix) ──────────────────────────────
+      // If SKU ends with S and stripped version is valid but full version is not, strip it
+      if (sku.endsWith('S') && sku.length > 3) {
+        const stripped = sku.slice(0, -1);
+        const strippedValid = VALID_SKUS.has(stripped) || detectFamily(stripped) !== null;
+        const fullValid = VALID_SKUS.has(sku);
+        if (strippedValid && !fullValid) {
+          sku = stripped;
+        }
+      }
+
       if (matched.has(sku)) continue;
       matched.add(sku);
 
       // Look for quantity near this SKU
-      const pos = match.index;
       const before = upper.slice(Math.max(0, pos - 20), pos);
-      const after = upper.slice(pos + sku.length, pos + sku.length + 15);
+      const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
 
       let qty = 1;
       const beforeQty = before.match(/(\d+)\s*[X×]?\s*$/);
@@ -470,21 +554,45 @@ function parseMessage(text) {
       if (beforeQty) qty = parseInt(beforeQty[1]);
       else if (afterQty) qty = parseInt(afterQty[1]);
 
-      foundItems.push({ baseSku: sku, qty });
+      rawMatches.push({ baseSku: sku, qty, position: pos });
     }
   }
 
-  if (foundItems.length === 0) return null;
-  return { items: foundItems, requestedTerm };
+  // ─── Subsumption Dedup (Error 2 fix) ──────────────────────────────────────
+  // If one matched SKU is a substring of another (e.g., MS150-48FP inside MS150-48FP-4G),
+  // drop the shorter one.
+  const foundItems = rawMatches.filter((item, idx) => {
+    return !rawMatches.some((other, otherIdx) => {
+      if (idx === otherIdx) return false;
+      return other.baseSku.length > item.baseSku.length && other.baseSku.includes(item.baseSku);
+    });
+  });
+
+  // ─── Sort by input position (Error 4 fix) ────────────────────────────────
+  foundItems.sort((a, b) => a.position - b.position);
+
+  // Strip position from output (not needed downstream)
+  const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
+
+  if (items.length === 0) return null;
+  return { items, requestedTerm, modifiers, requestedTier, isAdvisory };
 }
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
 
 function buildQuoteResponse(parsed) {
+  // ─── Advisory intent → route to Claude (Error 3 fix) ─────────────────────
+  if (parsed.isAdvisory) {
+    return { message: null, needsLlm: true, advisory: true };
+  }
+
   const terms = parsed.requestedTerm ? [parsed.requestedTerm] : [1, 3, 5];
-  const eolNotes = [];
+  const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
+  const requestedTier = parsed.requestedTier || null;
+  const eolItems = [];
   const errors = [];
   const resolvedItems = [];
+  const tierWarnings = [];
 
   for (const { baseSku, qty } of parsed.items) {
     // Validate
@@ -499,34 +607,56 @@ function buildQuoteResponse(parsed) {
     const eol = isEol(baseSku);
     const replacement = checkEol(baseSku);
     if (eol && replacement) {
-      eolNotes.push(`⚠️ **${baseSku}** is End-of-Life. Recommended replacement: **${replacement}**`);
+      eolItems.push({ baseSku, qty, replacement, eol: true });
+      continue; // Handle EOL separately with dual-option flow
+    }
+
+    // Z-series tier warnings
+    const zTest = baseSku.toUpperCase().match(/^Z(\d+)/);
+    if (zTest) {
+      const zNum = zTest[1];
+      if ((zNum === '1' || zNum === '3') && requestedTier && requestedTier !== 'ENT') {
+        tierWarnings.push(`⚠️ **${baseSku}** only supports Enterprise licensing. Using ENT.`);
+      }
+      if (zNum === '4' && requestedTier === 'SDW') {
+        tierWarnings.push(`⚠️ **${baseSku}** does not support SD-WAN licensing. Using ENT.`);
+      }
     }
 
     // Apply suffix for hardware SKU
     const hwSku = applySuffix(baseSku);
 
-    // Get license SKUs
-    const licenseSkus = getLicenseSkus(baseSku);
+    // Get license SKUs with tier support
+    const licenseSkus = getLicenseSkus(baseSku, requestedTier);
 
-    resolvedItems.push({ baseSku, hwSku, qty, licenseSkus, eol });
+    resolvedItems.push({ baseSku, hwSku, qty, licenseSkus, eol: false });
   }
 
-  // If ALL SKUs failed validation, check if we can handle with clarification instead of LLM
-  if (errors.length > 0 && resolvedItems.length === 0) {
-    // Check if all errors have partial-match suggestions (ambiguous SKU, not unknown)
+  // ─── Hard-stop on validation errors (Phase 4) ───────────────────────────
+  // If ANY item failed validation, do NOT generate URLs — return errors only
+  if (errors.length > 0) {
+    // Check if all errors have partial-match suggestions (ambiguous SKU clarification)
     const allPartialMatches = parsed.items.every(({ baseSku }) => {
       const v = validateSku(baseSku);
-      return !v.valid && v.isPartialMatch && v.suggest && v.suggest.length > 0;
+      return v.valid || (!v.valid && v.isPartialMatch && v.suggest && v.suggest.length > 0);
     });
 
+    // If some items resolved but others failed, hard-stop with error + suggestions
+    if (resolvedItems.length > 0) {
+      const lines = [...errors];
+      lines.push('');
+      lines.push('Please correct the invalid SKU(s) above and try again. I can only generate a quote when all items are valid.');
+      return { message: lines.join('\n'), needsLlm: false };
+    }
+
+    // If ALL failed and all are partial matches, show clarification
     if (allPartialMatches) {
-      // Build clarification message directly instead of falling to Claude
       const lines = [];
       for (const { baseSku } of parsed.items) {
         const v = validateSku(baseSku);
+        if (v.valid) continue;
         const family = detectFamily(baseSku.toUpperCase());
         const familyLabel = family || baseSku.toUpperCase();
-        // Extract port hint from input (e.g., "48" from "MS150-48")
         const portMatch = baseSku.match(/\d+$/);
         const portHint = portMatch ? ` ${portMatch[0]}-port` : '';
         lines.push(`I found multiple ${familyLabel}${portHint} variants. Which one do you need?`);
@@ -543,36 +673,75 @@ function buildQuoteResponse(parsed) {
   // Build response
   let lines = [];
 
-  if (eolNotes.length > 0) {
-    lines.push(...eolNotes, '');
+  if (tierWarnings.length > 0) {
+    lines.push(...tierWarnings, '');
   }
 
-  if (errors.length > 0) {
-    lines.push(...errors, '');
+  // ─── EOL Dual-Option Flow (Phase 5) ───────────────────────────────────────
+  if (eolItems.length > 0) {
+    for (const { baseSku, qty, replacement } of eolItems) {
+      lines.push(`⚠️ **${baseSku}** is End-of-Life. Replacement: **${replacement}**`);
+      lines.push('');
+
+      // Option A: Renew existing (license-only for current model)
+      const renewLicenses = getLicenseSkus(baseSku, requestedTier);
+      if (renewLicenses) {
+        lines.push(`**Option A — Renew Existing ${baseSku} License:**`);
+        for (const term of terms) {
+          const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
+          if (licSku) {
+            const url = buildStratusUrl([{ sku: licSku, qty }]);
+            const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+            lines.push(`${termLabel}: ${url}`);
+          }
+        }
+        lines.push('');
+      }
+
+      // Option B: Refresh to replacement (hardware + license)
+      const replHwSku = applySuffix(replacement);
+      const replLicenses = getLicenseSkus(replacement, requestedTier);
+      lines.push(`**Option B — Refresh to ${replacement}:**`);
+      for (const term of terms) {
+        const urlItems = [];
+        if (!modifiers.licenseOnly) urlItems.push({ sku: replHwSku, qty });
+        if (replLicenses && !modifiers.hardwareOnly) {
+          const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
+          if (licSku) urlItems.push({ sku: licSku, qty });
+        }
+        if (urlItems.length > 0) {
+          const url = buildStratusUrl(urlItems);
+          const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+          lines.push(`${termLabel}: ${url}`);
+        }
+      }
+      lines.push('');
+    }
   }
 
-  if (resolvedItems.length === 0) {
+  if (resolvedItems.length === 0 && eolItems.length === 0) {
     return { message: null, needsLlm: true, errors };
   }
 
-  // Build URLs per term
-  for (const term of terms) {
-    const urlItems = [];
-    for (const { hwSku, qty, licenseSkus, eol } of resolvedItems) {
-      // For EOL items, skip hardware (license-only renewal)
-      if (!eol) {
-        urlItems.push({ sku: hwSku, qty });
+  // Build URLs per term for non-EOL items
+  if (resolvedItems.length > 0) {
+    for (const term of terms) {
+      const urlItems = [];
+      for (const { hwSku, qty, licenseSkus } of resolvedItems) {
+        if (!modifiers.licenseOnly) {
+          urlItems.push({ sku: hwSku, qty });
+        }
+        if (licenseSkus && !modifiers.hardwareOnly) {
+          const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+          if (licSku) urlItems.push({ sku: licSku, qty });
+        }
       }
-      if (licenseSkus) {
-        const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-        if (licSku) urlItems.push({ sku: licSku, qty });
+      if (urlItems.length > 0) {
+        const url = buildStratusUrl(urlItems);
+        const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+        lines.push(`**${termLabel}:** ${url}`);
+        lines.push('');
       }
-    }
-    if (urlItems.length > 0) {
-      const url = buildStratusUrl(urlItems);
-      const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
-      lines.push(`**${termLabel}:** ${url}`);
-      lines.push('');
     }
   }
 
@@ -619,15 +788,24 @@ Items and quantities are separate comma-separated lists in matching order.
 IMPORTANT: Users often omit the -HW suffix. If someone says "MR44", they mean the hardware appliance (MR44-HW). Handle this gracefully.
 
 ## LICENSE RULES (term format matters!)
-Three license types exist:
-- ENT (Enterprise): Used for APs, legacy switches, MG, MT
-- SEC (Advanced Security): Used for MX, Z-series, GX
-- SDW (SD-WAN): Used for SD-WAN deployments (rare, don't assume)
+Three license tiers exist for MX/Z/GX:
+- ENT (Enterprise): Available for ALL product families
+- SEC (Advanced Security): Available for MX (all models), Z4/Z4C, GX
+- SDW (SD-WAN): Available for MX (all models) only
+
+Tier selection rules:
+- MX: Supports ENT, SEC, SDW. Default = SEC unless user requests otherwise.
+- Z1, Z3, Z3C: ENT ONLY. If user asks for Security, explain these only support Enterprise.
+- Z4, Z4C: ENT + SEC. Default = ENT unless user requests Security.
+- All other families (MR, MS, MV, MT, MG): ENT only.
+- GX: SEC only.
 
 Specific mappings:
 - All APs (MR + CW) → LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR
-- MX → LIC-MX{model}-SEC-1YR / -3YR / -5YR
-- Z-series → LIC-Z{model}-SEC-1Y / -3Y / -5Y (newer -Y format)
+- MX older (67/68/250/450) → LIC-MX{model}-{ENT|SEC}-1YR / -3YR / -5YR (note: SDW uses -Y not -YR)
+- MX newer (75/85/95/105) → LIC-MX{model}-{ENT|SEC|SDW}-1Y / -3Y / -5Y
+- Z1/Z3/Z3C → LIC-Z{model}-ENT-1YR / -3YR / -5YR (ENT only, older -YR format)
+- Z4/Z4C → LIC-Z{model}-{ENT|SEC}-1Y / -3Y / -5Y (newer -Y format)
 - MG → LIC-MG{model}-ENT-1Y / -3Y / -5Y (newer -Y format)
 - MV → LIC-MV-1YR / -3YR / -5YR
 - MT → LIC-MT-1Y / -3Y / -5Y
@@ -638,7 +816,13 @@ Specific mappings:
 - MS390, MS450 → no license in URL (DNA license handled separately)
 - GX → LIC-GX{model}-SEC-1Y / -3Y / -5Y
 - Legacy switches → LIC-ENT-1YR / -3YR / -5YR
-IMPORTANT: Watch for -YR vs -Y. Older products (MR, MX, MV, legacy switches) use -1YR/-3YR/-5YR. Newer products (MS130, MS150, Z, MG, MT, GX) use -1Y/-3Y/-5Y.
+IMPORTANT: Watch for -YR vs -Y. Older products (MR, MX67/68/250/450, MV, legacy switches) use -1YR/-3YR/-5YR. Newer products (MX75/85/95/105, MS130, MS150, Z4, MG, MT, GX) use -1Y/-3Y/-5Y. SDW always uses -Y format.
+
+## MODIFIER HANDLING
+Users may request hardware-only or license-only quotes:
+- "hardware only", "without a license", "no license", "just the hardware" → exclude licenses from URL
+- "license only", "just the license", "renewal only", "no hardware" → exclude hardware from URL
+If detected, adjust the URL accordingly.
 
 ## VALID PRODUCT CATALOG
 NEVER assume a product exists if it's not on this list. If not found, ask for clarification and suggest alternatives.
@@ -703,7 +887,25 @@ I found multiple MS150 48-port variants. Which one do you need?
 
 User: "2 MR44 and 1 MX75 3 year only"
 Response:
-3-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR,MX75-HW,LIC-MX75-SEC-3YR&qty=2,2,1,1`;
+3-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR,MX75-HW,LIC-MX75-SEC-3Y&qty=2,2,1,1
+
+User: "1 MX67 enterprise"
+Response:
+1-Year: https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-ENT-1YR&qty=1,1
+
+3-Year: https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-ENT-3YR&qty=1,1
+
+5-Year: https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-ENT-5YR&qty=1,1
+
+User: "5 MR44 hardware only"
+Response:
+https://stratusinfosystems.com/order/?item=MR44-HW&qty=5
+
+User: "What's the difference between the MX75 and MX85?"
+Response:
+The MX75 and MX85 are both next-gen Meraki security appliances. The MX85 offers higher throughput and is designed for larger deployments (up to ~600 users), while the MX75 covers mid-range deployments (up to ~200 users). Both support Enterprise, Advanced Security, and SD-WAN licensing.
+
+Want me to put together a quote for either one?`;
 
 async function askClaude(userMessage, personId) {
   if (!anthropic) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';

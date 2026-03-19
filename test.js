@@ -148,9 +148,9 @@ test('CW9172I → LIC-ENT-{1,3,5}YR (APs use ENT)', () => {
   assert(lics[1].sku === 'LIC-ENT-3YR', `3Y got: ${lics[1].sku}`);
 });
 
-test('MX75 → LIC-MX75-SEC-3YR (older format)', () => {
+test('MX75 → LIC-MX75-SEC-3Y (newer format, model ≥75)', () => {
   const lics = getLicenseSkus('MX75');
-  assert(lics[1].sku === 'LIC-MX75-SEC-3YR', `3Y got: ${lics[1].sku}`);
+  assert(lics[1].sku === 'LIC-MX75-SEC-3Y', `3Y got: ${lics[1].sku}`);
 });
 
 test('MX68CW → LIC-MX68CW-SEC-3YR', () => {
@@ -163,19 +163,24 @@ test('MX67C-NA → LIC-MX67C-SEC-3YR (strip -NA for license)', () => {
   assert(lics[1].sku === 'LIC-MX67C-SEC-3YR', `3Y got: ${lics[1].sku}`);
 });
 
-test('Z4 → LIC-Z4-SEC-3Y (newer format, SEC tier)', () => {
+test('Z4 → LIC-Z4-ENT-3Y (newer format, default ENT)', () => {
   const lics = getLicenseSkus('Z4');
+  assert(lics[1].sku === 'LIC-Z4-ENT-3Y', `3Y got: ${lics[1].sku}`);
+});
+
+test('Z4 with SEC tier → LIC-Z4-SEC-3Y', () => {
+  const lics = getLicenseSkus('Z4', 'SEC');
   assert(lics[1].sku === 'LIC-Z4-SEC-3Y', `3Y got: ${lics[1].sku}`);
 });
 
-test('Z4X → LIC-Z4X-SEC-3Y', () => {
+test('Z4X → LIC-Z4-ENT-3Y (uses Z4 license, default ENT)', () => {
   const lics = getLicenseSkus('Z4X');
-  assert(lics[1].sku === 'LIC-Z4X-SEC-3Y', `3Y got: ${lics[1].sku}`);
+  assert(lics[1].sku === 'LIC-Z4-ENT-3Y', `3Y got: ${lics[1].sku}`);
 });
 
-test('Z4CX → LIC-Z4CX-SEC-3Y', () => {
+test('Z4CX → LIC-Z4C-ENT-3Y (uses Z4C license, default ENT)', () => {
   const lics = getLicenseSkus('Z4CX');
-  assert(lics[1].sku === 'LIC-Z4CX-SEC-3Y', `3Y got: ${lics[1].sku}`);
+  assert(lics[1].sku === 'LIC-Z4C-ENT-3Y', `3Y got: ${lics[1].sku}`);
 });
 
 test('MG41 → LIC-MG41-ENT-3Y (newer format, ENT tier)', () => {
@@ -423,11 +428,11 @@ test('Test 10: "10 MR36 just 3 year" → only 3Y URL', () => {
   assert(!result.message.includes('5-Year'), 'Should NOT show 5-Year');
 });
 
-test('Test 11: "1 Z4" → Z4-HW + LIC-Z4-SEC-3Y (SEC tier, newer format)', () => {
+test('Test 11: "1 Z4" → Z4-HW + LIC-Z4-ENT-3Y (default ENT, newer format)', () => {
   const result = runQuote('1 Z4');
   assert(result && !result.needsLlm, 'Should not need LLM');
   assert(result.message.includes('Z4-HW'), `Missing Z4-HW. Got:\n${result.message}`);
-  assert(result.message.includes('LIC-Z4-SEC-3Y'), `Missing Z4 SEC license. Got:\n${result.message}`);
+  assert(result.message.includes('LIC-Z4-ENT-3Y'), `Missing Z4 ENT license. Got:\n${result.message}`);
 });
 
 test('Test 12: "1 MG41" → MG41-HW + LIC-MG41-ENT-3Y', () => {
@@ -458,10 +463,10 @@ test('Test 15: "3 MT15" → MT15-HW + LIC-MT-3Y', () => {
   assert(result.message.includes('LIC-MT-3Y'), `Missing MT license. Got:\n${result.message}`);
 });
 
-test('Test 16: "1 Z4X" → Z4X (no suffix) + LIC-Z4X-SEC-3Y', () => {
+test('Test 16: "1 Z4X" → Z4X (no suffix) + LIC-Z4-ENT-3Y (uses Z4 license)', () => {
   const result = runQuote('1 Z4X');
   assert(result && !result.needsLlm, 'Should not need LLM');
-  assert(result.message.includes('LIC-Z4X-SEC-3Y'), `Missing Z4X license. Got:\n${result.message}`);
+  assert(result.message.includes('LIC-Z4-ENT-3Y'), `Missing Z4 ENT license. Got:\n${result.message}`);
 });
 
 
@@ -582,6 +587,145 @@ test('getHistory auto-clears expired entries', () => {
   const history = getHistory('old-user');
   assert(history.length === 0, `Expected 0 (expired), got ${history.length}`);
   assert(!conversationHistory.has('old-user'), 'Should have deleted the entry');
+});
+
+
+console.log('\n=== PHASE 1: PARSER FIXES ===');
+
+test('Subsumption: "2 MS150-48FP-4G" → only MS150-48FP-4G, no phantom MS150-48FP', () => {
+  const parsed = parseMessage('2 MS150-48FP-4G');
+  assert(parsed.items.length === 1, `Expected 1 item, got ${parsed.items.length}: ${JSON.stringify(parsed.items)}`);
+  assert(parsed.items[0].baseSku === 'MS150-48FP-4G', `Got: ${parsed.items[0].baseSku}`);
+});
+
+test('Plural strip: "5 MR44s" → MR44 (not MR44S)', () => {
+  const parsed = parseMessage('5 MR44s');
+  assert(parsed.items[0].baseSku === 'MR44', `Got: ${parsed.items[0].baseSku}`);
+});
+
+test('Input-order: "3 MX68 and 10 MR44" → MX68 first, MR44 second', () => {
+  const parsed = parseMessage('3 MX68 and 10 MR44');
+  assert(parsed.items[0].baseSku === 'MX68', `First should be MX68, got: ${parsed.items[0].baseSku}`);
+  assert(parsed.items[1].baseSku === 'MR44', `Second should be MR44, got: ${parsed.items[1].baseSku}`);
+});
+
+
+console.log('\n=== PHASE 2: MODIFIERS & INTENT ===');
+
+test('Hardware-only modifier: "10 MR44 hardware only" → URL without licenses', () => {
+  const result = runQuote('10 MR44 hardware only');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('MR44-HW'), 'Should have hardware');
+  assert(!result.message.includes('LIC-ENT'), 'Should NOT have license');
+});
+
+test('License-only modifier: "10 MR44 license only" → URL without hardware', () => {
+  const result = runQuote('10 MR44 license only');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(!result.message.includes('MR44-HW'), 'Should NOT have hardware');
+  assert(result.message.includes('LIC-ENT'), 'Should have license');
+});
+
+test('Advisory intent: "what is the difference between MR44 and MR46" → needsLlm', () => {
+  const result = runQuote('what is the difference between MR44 and MR46');
+  assert(result !== null, 'Should parse SKUs');
+  assert(result.needsLlm === true, 'Should route to Claude');
+  assert(result.advisory === true, 'Should flag as advisory');
+});
+
+test('Advisory intent: "which should I get MX75 or MX85" → needsLlm', () => {
+  const result = runQuote('which should I get MX75 or MX85');
+  assert(result !== null, 'Should parse');
+  assert(result.needsLlm === true, 'Should route to Claude');
+});
+
+test('Non-advisory: "quote 5 MR44" → not advisory', () => {
+  const parsed = parseMessage('quote 5 MR44');
+  assert(parsed.isAdvisory === false, 'Should not be advisory');
+});
+
+
+console.log('\n=== PHASE 3: LICENSE TIER SELECTION ===');
+
+test('MX67 default → SEC', () => {
+  const lics = getLicenseSkus('MX67');
+  assert(lics[1].sku === 'LIC-MX67-SEC-3YR', `Got: ${lics[1].sku}`);
+});
+
+test('MX67 ENT → LIC-MX67-ENT-3YR', () => {
+  const lics = getLicenseSkus('MX67', 'ENT');
+  assert(lics[1].sku === 'LIC-MX67-ENT-3YR', `Got: ${lics[1].sku}`);
+});
+
+test('MX75 SDW → LIC-MX75-SDW-3Y (newer -Y format)', () => {
+  const lics = getLicenseSkus('MX75', 'SDW');
+  assert(lics[1].sku === 'LIC-MX75-SDW-3Y', `Got: ${lics[1].sku}`);
+});
+
+test('MX67 SDW → LIC-MX67-SDW-3Y (SDW always uses -Y)', () => {
+  const lics = getLicenseSkus('MX67', 'SDW');
+  assert(lics[1].sku === 'LIC-MX67-SDW-3Y', `Got: ${lics[1].sku}`);
+});
+
+test('MX250 default → SEC with -YR format', () => {
+  const lics = getLicenseSkus('MX250');
+  assert(lics[1].sku === 'LIC-MX250-SEC-3YR', `Got: ${lics[1].sku}`);
+});
+
+test('Z3 → ENT only, -YR format', () => {
+  const lics = getLicenseSkus('Z3');
+  assert(lics[1].sku === 'LIC-Z3-ENT-3YR', `Got: ${lics[1].sku}`);
+});
+
+test('Z3C → ENT only, -YR format', () => {
+  const lics = getLicenseSkus('Z3C');
+  assert(lics[1].sku === 'LIC-Z3C-ENT-3YR', `Got: ${lics[1].sku}`);
+});
+
+test('Z1 → ENT only, -YR format', () => {
+  const lics = getLicenseSkus('Z1');
+  assert(lics[1].sku === 'LIC-Z1-ENT-3YR', `Got: ${lics[1].sku}`);
+});
+
+test('Z4C SEC → LIC-Z4C-SEC-3Y', () => {
+  const lics = getLicenseSkus('Z4C', 'SEC');
+  assert(lics[1].sku === 'LIC-Z4C-SEC-3Y', `Got: ${lics[1].sku}`);
+});
+
+test('Full quote: "1 MX67 enterprise" → ENT license', () => {
+  const result = runQuote('1 MX67 enterprise');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('LIC-MX67-ENT-3YR'), `Missing ENT license. Got:\n${result.message}`);
+});
+
+test('Full quote: "1 Z4 advanced security" → SEC license', () => {
+  const result = runQuote('1 Z4 advanced security');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('LIC-Z4-SEC-3Y'), `Missing SEC license. Got:\n${result.message}`);
+});
+
+
+console.log('\n=== PHASE 4: HARD-STOP ON ERRORS ===');
+
+test('Mixed valid+invalid: "5 MR44 and 1 MR99" → hard-stop, no URL', () => {
+  const result = runQuote('5 MR44 and 1 MR99');
+  assert(result && !result.needsLlm, 'Should not fall to LLM');
+  assert(result.message.includes('MR99'), 'Should mention invalid SKU');
+  assert(result.message.includes('correct the invalid'), 'Should ask to correct');
+  assert(!result.message.includes('stratusinfosystems.com'), 'Should NOT have URL');
+});
+
+
+console.log('\n=== PHASE 5: EOL DUAL-OPTION ===');
+
+test('EOL: "1 MR42" → Option A (renew) + Option B (refresh to MR44)', () => {
+  const result = runQuote('1 MR42');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('End-of-Life'), 'Should mention EOL');
+  assert(result.message.includes('MR44'), 'Should mention replacement MR44');
+  assert(result.message.includes('Option A'), 'Should have Option A');
+  assert(result.message.includes('Option B'), 'Should have Option B');
+  assert(result.message.includes('stratusinfosystems.com'), 'Should have URLs');
 });
 
 
