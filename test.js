@@ -1,9 +1,10 @@
 /**
  * Stress test for Stratus AI quoting engine
  * Tests parseMessage + buildQuoteResponse against SKILL.md expected outputs
+ * v2: expanded with auto-catalog coverage tests
  */
 
-const { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol } = require('./index.js');
+const { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, VALID_SKUS } = require('./index.js');
 
 let passed = 0;
 let failed = 0;
@@ -78,6 +79,55 @@ test('MG41 → MG41-HW', () => {
   assert(applySuffix('MG41') === 'MG41-HW', `Got: ${applySuffix('MG41')}`);
 });
 
+// New suffix tests for previously-failing SKUs
+test('MS130R-8P → MS130R-8P-HW', () => {
+  assert(applySuffix('MS130R-8P') === 'MS130R-8P-HW', `Got: ${applySuffix('MS130R-8P')}`);
+});
+
+test('MS210-24P → MS210-24P-HW (legacy)', () => {
+  assert(applySuffix('MS210-24P') === 'MS210-24P-HW', `Got: ${applySuffix('MS210-24P')}`);
+});
+
+test('MS225-48FP → MS225-48FP-HW (legacy)', () => {
+  assert(applySuffix('MS225-48FP') === 'MS225-48FP-HW', `Got: ${applySuffix('MS225-48FP')}`);
+});
+
+test('MS350-48 → MS350-48-HW (legacy)', () => {
+  assert(applySuffix('MS350-48') === 'MS350-48-HW', `Got: ${applySuffix('MS350-48')}`);
+});
+
+test('MS450-12 → MS450-12 (no suffix)', () => {
+  assert(applySuffix('MS450-12') === 'MS450-12', `Got: ${applySuffix('MS450-12')}`);
+});
+
+test('MX67C-NA → MX67C-NA (variant name, no extra suffix)', () => {
+  assert(applySuffix('MX67C-NA') === 'MX67C-NA', `Got: ${applySuffix('MX67C-NA')}`);
+});
+
+test('MX68CW-NA → MX68CW-NA (variant name)', () => {
+  assert(applySuffix('MX68CW-NA') === 'MX68CW-NA', `Got: ${applySuffix('MX68CW-NA')}`);
+});
+
+test('Z4X → Z4X (no suffix, sold as-is)', () => {
+  assert(applySuffix('Z4X') === 'Z4X', `Got: ${applySuffix('Z4X')}`);
+});
+
+test('Z4CX → Z4CX (no suffix, sold as-is)', () => {
+  assert(applySuffix('Z4CX') === 'Z4CX', `Got: ${applySuffix('Z4CX')}`);
+});
+
+test('GX20 → GX20 (no suffix)', () => {
+  assert(applySuffix('GX20') === 'GX20', `Got: ${applySuffix('GX20')}`);
+});
+
+test('MV93M → MV93M-HW', () => {
+  assert(applySuffix('MV93M') === 'MV93M-HW', `Got: ${applySuffix('MV93M')}`);
+});
+
+test('MV84X → MV84X-HW', () => {
+  assert(applySuffix('MV84X') === 'MV84X-HW', `Got: ${applySuffix('MV84X')}`);
+});
+
 
 console.log('\n=== LICENSE RULES ===');
 
@@ -108,9 +158,24 @@ test('MX68CW → LIC-MX68CW-SEC-3YR', () => {
   assert(lics[1].sku === 'LIC-MX68CW-SEC-3YR', `3Y got: ${lics[1].sku}`);
 });
 
+test('MX67C-NA → LIC-MX67C-SEC-3YR (strip -NA for license)', () => {
+  const lics = getLicenseSkus('MX67C-NA');
+  assert(lics[1].sku === 'LIC-MX67C-SEC-3YR', `3Y got: ${lics[1].sku}`);
+});
+
 test('Z4 → LIC-Z4-SEC-3Y (newer format, SEC tier)', () => {
   const lics = getLicenseSkus('Z4');
   assert(lics[1].sku === 'LIC-Z4-SEC-3Y', `3Y got: ${lics[1].sku}`);
+});
+
+test('Z4X → LIC-Z4X-SEC-3Y', () => {
+  const lics = getLicenseSkus('Z4X');
+  assert(lics[1].sku === 'LIC-Z4X-SEC-3Y', `3Y got: ${lics[1].sku}`);
+});
+
+test('Z4CX → LIC-Z4CX-SEC-3Y', () => {
+  const lics = getLicenseSkus('Z4CX');
+  assert(lics[1].sku === 'LIC-Z4CX-SEC-3Y', `3Y got: ${lics[1].sku}`);
 });
 
 test('MG41 → LIC-MG41-ENT-3Y (newer format, ENT tier)', () => {
@@ -118,8 +183,23 @@ test('MG41 → LIC-MG41-ENT-3Y (newer format, ENT tier)', () => {
   assert(lics[1].sku === 'LIC-MG41-ENT-3Y', `3Y got: ${lics[1].sku}`);
 });
 
+test('MG21 → LIC-MG21-ENT-3Y', () => {
+  const lics = getLicenseSkus('MG21');
+  assert(lics[1].sku === 'LIC-MG21-ENT-3Y', `3Y got: ${lics[1].sku}`);
+});
+
+test('MG21E → LIC-MG21E-ENT-3Y', () => {
+  const lics = getLicenseSkus('MG21E');
+  assert(lics[1].sku === 'LIC-MG21E-ENT-3Y', `3Y got: ${lics[1].sku}`);
+});
+
 test('MS130-8P → LIC-MS130-CMPT-3Y (compact)', () => {
   const lics = getLicenseSkus('MS130-8P');
+  assert(lics[1].sku === 'LIC-MS130-CMPT-3Y', `3Y got: ${lics[1].sku}`);
+});
+
+test('MS130R-8P → LIC-MS130-CMPT-3Y (rugged compact)', () => {
+  const lics = getLicenseSkus('MS130R-8P');
   assert(lics[1].sku === 'LIC-MS130-CMPT-3Y', `3Y got: ${lics[1].sku}`);
 });
 
@@ -136,6 +216,39 @@ test('MS150-48LP-4G → LIC-MS150-48-3Y', () => {
 test('MS390-24UX → no license', () => {
   const lics = getLicenseSkus('MS390-24UX');
   assert(lics === null, `Expected null, got: ${JSON.stringify(lics)}`);
+});
+
+test('MS450-12 → no license (DNA separate)', () => {
+  const lics = getLicenseSkus('MS450-12');
+  assert(lics === null, `Expected null, got: ${JSON.stringify(lics)}`);
+});
+
+test('MS210-24P → LIC-ENT-3YR (legacy switch)', () => {
+  const lics = getLicenseSkus('MS210-24P');
+  assert(lics[1].sku === 'LIC-ENT-3YR', `3Y got: ${lics[1].sku}`);
+});
+
+test('MS225-48FP → LIC-ENT-3YR (legacy switch)', () => {
+  const lics = getLicenseSkus('MS225-48FP');
+  assert(lics[1].sku === 'LIC-ENT-3YR', `3Y got: ${lics[1].sku}`);
+});
+
+test('MV93M → LIC-MV-3YR (camera license)', () => {
+  const lics = getLicenseSkus('MV93M');
+  assert(lics !== null, 'Should have licenses');
+  assert(lics[1].sku === 'LIC-MV-3YR', `3Y got: ${lics[1].sku}`);
+});
+
+test('MT15 → LIC-MT-3Y (sensor license)', () => {
+  const lics = getLicenseSkus('MT15');
+  assert(lics !== null, 'Should have licenses');
+  assert(lics[1].sku === 'LIC-MT-3Y', `3Y got: ${lics[1].sku}`);
+});
+
+test('GX20 → LIC-GX20-SEC-3Y', () => {
+  const lics = getLicenseSkus('GX20');
+  assert(lics !== null, 'Should have licenses');
+  assert(lics[1].sku === 'LIC-GX20-SEC-3Y', `3Y got: ${lics[1].sku}`);
 });
 
 
@@ -156,6 +269,87 @@ test('buildStratusUrl multi item', () => {
 });
 
 
+console.log('\n=== VALIDATION (auto-catalog) ===');
+
+test('MR36 validates', () => {
+  assert(validateSku('MR36').valid === true, 'MR36 should be valid');
+});
+
+test('MG21 validates (was failing before)', () => {
+  assert(validateSku('MG21').valid === true, 'MG21 should be valid');
+});
+
+test('MG21E validates (was failing before)', () => {
+  assert(validateSku('MG21E').valid === true, 'MG21E should be valid');
+});
+
+test('MV73X validates (was failing before)', () => {
+  assert(validateSku('MV73X').valid === true, 'MV73X should be valid');
+});
+
+test('MV84X validates (was failing before)', () => {
+  assert(validateSku('MV84X').valid === true, 'MV84X should be valid');
+});
+
+test('MV93M validates (was failing before)', () => {
+  assert(validateSku('MV93M').valid === true, 'MV93M should be valid');
+});
+
+test('MS130R-8P validates (was failing before)', () => {
+  assert(validateSku('MS130R-8P').valid === true, 'MS130R-8P should be valid');
+});
+
+test('MS210-24P validates (legacy, was failing before)', () => {
+  assert(validateSku('MS210-24P').valid === true, 'MS210-24P should be valid');
+});
+
+test('MS225-48FP validates (legacy, was failing before)', () => {
+  assert(validateSku('MS225-48FP').valid === true, 'MS225-48FP should be valid');
+});
+
+test('MS350-48 validates (legacy, was failing before)', () => {
+  assert(validateSku('MS350-48').valid === true, 'MS350-48 should be valid');
+});
+
+test('MS450-12 validates (was failing before)', () => {
+  assert(validateSku('MS450-12').valid === true, 'MS450-12 should be valid');
+});
+
+test('Z4X validates (was failing before)', () => {
+  assert(validateSku('Z4X').valid === true, 'Z4X should be valid');
+});
+
+test('Z4CX validates (was failing before)', () => {
+  assert(validateSku('Z4CX').valid === true, 'Z4CX should be valid');
+});
+
+test('MX67C-NA validates (was failing before)', () => {
+  assert(validateSku('MX67C-NA').valid === true, 'MX67C-NA should be valid');
+});
+
+test('MX68CW-NA validates (was failing before)', () => {
+  assert(validateSku('MX68CW-NA').valid === true, 'MX68CW-NA should be valid');
+});
+
+test('GX20 validates (was failing before)', () => {
+  assert(validateSku('GX20').valid === true, 'GX20 should be valid');
+});
+
+test('GX50 validates (was failing before)', () => {
+  assert(validateSku('GX50').valid === true, 'GX50 should be valid');
+});
+
+test('Bogus SKU "MR99" fails validation', () => {
+  const result = validateSku('MR99');
+  assert(result.valid === false, 'MR99 should be invalid');
+  assert(result.suggest && result.suggest.length > 0, 'Should have suggestions');
+});
+
+test('VALID_SKUS set has 180+ entries', () => {
+  assert(VALID_SKUS.size >= 180, `Only ${VALID_SKUS.size} entries in VALID_SKUS`);
+});
+
+
 console.log('\n=== FULL QUOTE TESTS ===');
 
 test('Test 1: "quote 10 MR36" → 3 URLs, 3Y has MR36-HW,LIC-ENT-3YR qty 10,10', () => {
@@ -170,7 +364,6 @@ test('Test 1: "quote 10 MR36" → 3 URLs, 3Y has MR36-HW,LIC-ENT-3YR qty 10,10',
 test('Test 2: "5 MX68 and 10 MR44" → multi-product URL', () => {
   const result = runQuote('5 MX68 and 10 MR44');
   assert(result && !result.needsLlm, 'Should not need LLM');
-  // 3Y URL should have both products
   assert(result.message.includes('MX68-HW'), 'Missing MX68-HW');
   assert(result.message.includes('LIC-MX68-SEC-3YR'), 'Missing MX68 license');
   assert(result.message.includes('MR44-HW'), 'Missing MR44-HW');
@@ -244,6 +437,33 @@ test('Test 12: "1 MG41" → MG41-HW + LIC-MG41-ENT-3Y', () => {
   assert(result.message.includes('LIC-MG41-ENT-3Y'), `Missing MG41 ENT license. Got:\n${result.message}`);
 });
 
+// New full quote tests for previously-failing families
+test('Test 13: "2 MG21" → MG21-HW + LIC-MG21-ENT-3Y', () => {
+  const result = runQuote('2 MG21');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('LIC-MG21-ENT-3Y'), `Missing MG21 license. Got:\n${result.message}`);
+});
+
+test('Test 14: "1 MV93M" → MV93M-HW + LIC-MV-3YR', () => {
+  const result = runQuote('1 MV93M');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('MV93M-HW'), `Missing MV93M-HW. Got:\n${result.message}`);
+  assert(result.message.includes('LIC-MV-3YR'), `Missing MV license. Got:\n${result.message}`);
+});
+
+test('Test 15: "3 MT15" → MT15-HW + LIC-MT-3Y', () => {
+  const result = runQuote('3 MT15');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('MT15-HW'), `Missing MT15-HW. Got:\n${result.message}`);
+  assert(result.message.includes('LIC-MT-3Y'), `Missing MT license. Got:\n${result.message}`);
+});
+
+test('Test 16: "1 Z4X" → Z4X (no suffix) + LIC-Z4X-SEC-3Y', () => {
+  const result = runQuote('1 Z4X');
+  assert(result && !result.needsLlm, 'Should not need LLM');
+  assert(result.message.includes('LIC-Z4X-SEC-3Y'), `Missing Z4X license. Got:\n${result.message}`);
+});
+
 
 console.log('\n=== EOL HANDLING ===');
 
@@ -275,6 +495,24 @@ test('"quote MR36" → qty defaults to 1', () => {
 test('"20x MR36" → qty 20', () => {
   const parsed = parseMessage('20x MR36');
   assert(parsed.items[0].qty === 20, `Expected qty 20, got: ${parsed.items[0].qty}`);
+});
+
+test('"1 MX67C-NA" parses correctly', () => {
+  const parsed = parseMessage('1 MX67C-NA');
+  assert(parsed !== null, 'Should parse');
+  assert(parsed.items[0].baseSku === 'MX67C-NA', `Got: ${parsed.items[0].baseSku}`);
+});
+
+test('"2 MS210-24P" parses correctly (legacy switch)', () => {
+  const parsed = parseMessage('2 MS210-24P');
+  assert(parsed !== null, 'Should parse');
+  assert(parsed.items[0].baseSku === 'MS210-24P', `Got: ${parsed.items[0].baseSku}`);
+});
+
+test('"1 GX20" parses correctly', () => {
+  const parsed = parseMessage('1 GX20');
+  assert(parsed !== null, 'Should parse');
+  assert(parsed.items[0].baseSku === 'GX20', `Got: ${parsed.items[0].baseSku}`);
 });
 
 

@@ -26,10 +26,22 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Load Catalogs ───────────────────────────────────────────────────────────
 const prices = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'prices.json'))).prices;
-const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'valid_skus.json')));
+const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'auto-catalog.json')));
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
 const EOL_REPLACEMENTS = catalog._EOL_REPLACEMENTS || {};
 const COMMON_MISTAKES = catalog._COMMON_MISTAKES || {};
+const PASSTHROUGH = new Set(catalog._PASSTHROUGH || []);
+
+// Build a flat Set of all valid base SKUs for fast lookup
+const VALID_SKUS = new Set();
+for (const [key, value] of Object.entries(catalog)) {
+  if (key.startsWith('_')) continue; // skip meta keys
+  if (Array.isArray(value)) {
+    for (const sku of value) VALID_SKUS.add(sku.toUpperCase());
+  }
+}
+// Add passthrough SKUs
+for (const sku of PASSTHROUGH) VALID_SKUS.add(sku.toUpperCase());
 
 const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
 
@@ -69,24 +81,44 @@ async function sendMessage(roomId, markdown) {
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
 
+  // CW accessories/mounts/antennas — no suffix
+  if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
+
   // CW Wi-Fi 7 (917x family) → -RTG
   if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
 
   // CW Wi-Fi 6E (916x family) → -MR
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
 
-  // MS150, C9xxx, MA- accessories → no suffix
-  if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('MA-')) return upper;
+  // MS150, MS450, C9xxx, MA- accessories, GX → no suffix
+  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('MA-') || upper.startsWith('GX')) return upper;
 
-  // MS130, MS390 → -HW
-  if (upper.startsWith('MS130') || upper.startsWith('MS390')) {
+  // MS130 (including MS130R) → -HW
+  if (/^MS130R?-/.test(upper)) {
     return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   }
 
-  // MX cellular variants (MXxxC or MXxxCW) → -HW-NA
+  // MS390 → -HW
+  if (upper.startsWith('MS390')) {
+    return upper.endsWith('-HW') ? upper : `${upper}-HW`;
+  }
+
+  // Legacy switches (MS120/125/210/225/250/350/425) → -HW
+  if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
+    return upper.endsWith('-HW') ? upper : `${upper}-HW`;
+  }
+
+  // MX with -NA suffix already (e.g., MX67C-NA) → -HW-NA already baked in as variant name
+  // These exist in catalog as "MX67C-NA" — suffix is handled differently
+  if (/^MX\d+C[W]?-NA$/i.test(upper)) return upper;
+
+  // MX cellular variants (MXxxC or MXxxCW, without -NA) → -HW-NA
   if (/^MX\d+C(W)?$/i.test(upper)) {
     return upper.endsWith('-HW-NA') ? upper : `${upper}-HW-NA`;
   }
+
+  // Z-series with X suffix (Z4X, Z4CX) — no suffix (sold as-is per prices.json)
+  if (/^Z\d+C?X$/i.test(upper)) return upper;
 
   // All other hardware families: MR, MX, MV, MT, MG, Z → -HW
   if (/^(MR|MX|MV|MT|MG|Z)\d/.test(upper)) {
@@ -105,11 +137,22 @@ function getLicenseSkus(baseSku) {
   const upper = baseSku.toUpperCase();
 
   // AP families (MR + all CW models) → LIC-ENT (older format: -YR)
-  if (/^MR\d/.test(upper) || /^CW9/.test(upper)) {
+  if (/^MR\d/.test(upper) || /^CW9\d/.test(upper)) {
     return [
       { term: '1Y', sku: 'LIC-ENT-1YR' },
       { term: '3Y', sku: 'LIC-ENT-3YR' },
       { term: '5Y', sku: 'LIC-ENT-5YR' }
+    ];
+  }
+
+  // MX with -NA variant name (MX67C-NA, MX68CW-NA) → strip -NA for license model
+  const mxNaMatch = upper.match(/^MX(\d+C[W]?)-NA$/);
+  if (mxNaMatch) {
+    const model = mxNaMatch[1];
+    return [
+      { term: '1Y', sku: `LIC-MX${model}-SEC-1YR` },
+      { term: '3Y', sku: `LIC-MX${model}-SEC-3YR` },
+      { term: '5Y', sku: `LIC-MX${model}-SEC-5YR` }
     ];
   }
 
@@ -125,7 +168,9 @@ function getLicenseSkus(baseSku) {
   }
 
   // Z-series → SEC tier, newer format: -Y (SKILL.md line 313)
-  const zMatch = upper.match(/^Z(\d+C?)/);
+  // Z4, Z4C → LIC-Z4-SEC / LIC-Z4C-SEC
+  // Z4X, Z4CX → LIC-Z4X-SEC / LIC-Z4CX-SEC
+  const zMatch = upper.match(/^Z(\d+C?X?)/);
   if (zMatch) {
     const model = zMatch[1];
     return [
@@ -143,6 +188,15 @@ function getLicenseSkus(baseSku) {
       { term: '1Y', sku: `LIC-MG${model}-ENT-1Y` },
       { term: '3Y', sku: `LIC-MG${model}-ENT-3Y` },
       { term: '5Y', sku: `LIC-MG${model}-ENT-5Y` }
+    ];
+  }
+
+  // MS130R compact → same as MS130 compact
+  if (/^MS130R-/.test(upper)) {
+    return [
+      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
+      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
+      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
     ];
   }
 
@@ -177,10 +231,52 @@ function getLicenseSkus(baseSku) {
     ];
   }
 
-  // MS390 → no license in URL
-  if (/^MS390/.test(upper)) return null;
+  // MS390, MS450 → no license in URL (DNA license separate)
+  if (/^MS[34][59]0/.test(upper)) return null;
 
-  // No license mapping found
+  // GX → SEC license, newer format
+  const gxMatch = upper.match(/^GX(\d+)/);
+  if (gxMatch) {
+    const model = gxMatch[1];
+    return [
+      { term: '1Y', sku: `LIC-GX${model}-SEC-1Y` },
+      { term: '3Y', sku: `LIC-GX${model}-SEC-3Y` },
+      { term: '5Y', sku: `LIC-GX${model}-SEC-5Y` }
+    ];
+  }
+
+  // MV cameras → ENT license, older format
+  const mvMatch = upper.match(/^MV(\d+)/);
+  if (mvMatch) {
+    // MV uses per-model license: LIC-MV{model}-{term}
+    // But the standard storage options vary. Use ENT tier for simplicity.
+    return [
+      { term: '1Y', sku: 'LIC-MV-1YR' },
+      { term: '3Y', sku: 'LIC-MV-3YR' },
+      { term: '5Y', sku: 'LIC-MV-5YR' }
+    ];
+  }
+
+  // MT sensors → ENT license, newer format
+  const mtMatch = upper.match(/^MT(\d+)/);
+  if (mtMatch) {
+    return [
+      { term: '1Y', sku: 'LIC-MT-1Y' },
+      { term: '3Y', sku: 'LIC-MT-3Y' },
+      { term: '5Y', sku: 'LIC-MT-5Y' }
+    ];
+  }
+
+  // Legacy switches (MS120/125/210/225/250/350/425) → ENT license, older format
+  if (/^MS[12345]\d{2}-/.test(upper) && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
+    return [
+      { term: '1Y', sku: 'LIC-ENT-1YR' },
+      { term: '3Y', sku: 'LIC-ENT-3YR' },
+      { term: '5Y', sku: 'LIC-ENT-5YR' }
+    ];
+  }
+
+  // CW accessories, Catalyst, passthrough — no license
   return null;
 }
 
@@ -237,6 +333,7 @@ function fixCommonMistake(sku) {
 }
 
 // ─── SKU Validation (SKILL.md Step 2a) ───────────────────────────────────────
+// Uses flat VALID_SKUS set auto-generated from prices.json
 
 function validateSku(baseSku) {
   const upper = baseSku.toUpperCase();
@@ -245,88 +342,49 @@ function validateSku(baseSku) {
   const mistake = fixCommonMistake(upper);
   if (mistake) return { valid: false, reason: mistake.error, suggest: mistake.suggest };
 
-  // MR
-  if (/^MR\d/.test(upper)) {
-    const variant = upper.replace('MR', '');
-    if (catalog.MR && catalog.MR.includes(variant)) return { valid: true };
-    if (EOL_PRODUCTS.MR && EOL_PRODUCTS.MR.includes(variant)) return { valid: true, eol: true };
-    return { valid: false, reason: `MR${variant} is not a recognized model`, suggest: catalog.MR?.map(v => `MR${v}`) };
+  // Direct lookup in auto-generated catalog
+  if (VALID_SKUS.has(upper)) {
+    // Check if it's also EOL
+    const eol = isEol(upper);
+    return eol ? { valid: true, eol: true } : { valid: true };
   }
 
-  // MX
-  if (/^MX\d/.test(upper)) {
-    const variant = upper.replace('MX', '');
-    if (catalog.MX && catalog.MX.includes(variant)) return { valid: true };
-    if (EOL_PRODUCTS.MX && EOL_PRODUCTS.MX.includes(variant)) return { valid: true, eol: true };
-    return { valid: false, reason: `MX${variant} is not a recognized model`, suggest: catalog.MX?.map(v => `MX${v}`) };
-  }
+  // Check EOL products (may not be in prices.json but are still recognizable)
+  if (isEol(upper)) return { valid: true, eol: true };
 
-  // MV
-  if (/^MV\d/.test(upper)) {
-    const variant = upper.replace('MV', '');
-    if (catalog.MV && catalog.MV.includes(variant)) return { valid: true };
-    return { valid: false, reason: `MV${variant} is not a recognized model` };
-  }
+  // MA- accessories always pass through
+  if (/^MA-/.test(upper)) return { valid: true };
 
-  // MT
-  if (/^MT\d/.test(upper)) {
-    const variant = upper.replace('MT', '');
-    if (catalog.MT && catalog.MT.includes(variant)) return { valid: true };
-    return { valid: false, reason: `MT${variant} is not a recognized model`, suggest: catalog.MT?.map(v => `MT${v}`) };
+  // Find the family for suggestions
+  const family = detectFamily(upper);
+  if (family && catalog[family]) {
+    const suggestions = catalog[family].slice(0, 5);
+    return { valid: false, reason: `${upper} is not a recognized model`, suggest: suggestions };
   }
-
-  // MG
-  if (/^MG\d/.test(upper)) {
-    const variant = upper.replace('MG', '');
-    if (catalog.MG && catalog.MG.includes(variant)) return { valid: true };
-    return { valid: false, reason: `MG${variant} is not a recognized model` };
-  }
-
-  // Z-series
-  if (/^Z\d/.test(upper)) {
-    const variant = upper.replace('Z', '');
-    if (catalog.Z && catalog.Z.includes(variant)) return { valid: true };
-    if (EOL_PRODUCTS.Z && EOL_PRODUCTS.Z.includes(variant)) return { valid: true, eol: true };
-    return { valid: false, reason: `Z${variant} is not a recognized model`, suggest: ['Z4', 'Z4C'] };
-  }
-
-  // MS130
-  if (/^MS130-/.test(upper)) {
-    const variant = upper.replace('MS130-', '');
-    if (catalog.MS130 && catalog.MS130.includes(variant)) return { valid: true };
-    return { valid: false, reason: `MS130-${variant} is not a valid variant`, suggest: catalog.MS130?.map(v => `MS130-${v}`) };
-  }
-
-  // MS150
-  if (/^MS150-/.test(upper)) {
-    const variant = upper.replace('MS150-', '');
-    if (catalog.MS150 && catalog.MS150.includes(variant)) return { valid: true };
-    return { valid: false, reason: `MS150-${variant} is not a valid variant`, suggest: catalog.MS150?.map(v => `MS150-${v}`) };
-  }
-
-  // MS390
-  if (/^MS390-/.test(upper)) {
-    const variant = upper.replace('MS390-', '');
-    if (catalog.MS390 && catalog.MS390.includes(variant)) return { valid: true };
-    return { valid: false, reason: `MS390-${variant} is not a valid variant`, suggest: catalog.MS390?.map(v => `MS390-${v}`) };
-  }
-
-  // CW families
-  if (/^CW9/.test(upper)) {
-    for (const family of Object.keys(catalog).filter(k => k.startsWith('CW9'))) {
-      if (upper.startsWith(family)) {
-        const variant = upper.slice(family.length);
-        if (!variant) return { valid: false, reason: `${family} requires a variant`, suggest: catalog[family].map(v => `${family}${v}`) };
-        if (catalog[family].includes(variant)) return { valid: true };
-      }
-    }
-    return { valid: false, reason: `${upper} is not a recognized CW model` };
-  }
-
-  // C9xxx and MA- accessories — pass through
-  if (/^C9/.test(upper) || /^MA-/.test(upper)) return { valid: true };
 
   return { valid: false, reason: `${upper} is not a recognized SKU` };
+}
+
+// ─── Family Detection (for suggestions on invalid SKUs) ─────────────────────
+
+function detectFamily(sku) {
+  if (/^MR\d/.test(sku)) return 'MR';
+  if (/^MX\d/.test(sku)) return 'MX';
+  if (/^MV\d/.test(sku)) return 'MV';
+  if (/^MT\d/.test(sku)) return 'MT';
+  if (/^MG\d/.test(sku)) return 'MG';
+  if (/^Z\d/.test(sku)) return 'Z';
+  if (/^GX\d/.test(sku)) return 'GX';
+  if (/^MS130/.test(sku)) return 'MS130';
+  if (/^MS150/.test(sku)) return 'MS150';
+  if (/^MS390/.test(sku)) return 'MS390';
+  if (/^MS450/.test(sku)) return 'MS450';
+  if (/^CW9/.test(sku)) return 'CW';
+  if (/^C9300X/.test(sku)) return 'C9300X';
+  if (/^C9300L/.test(sku)) return 'C9300L';
+  if (/^C9300/.test(sku)) return 'C9300';
+  if (/^C9200L/.test(sku)) return 'C9200L';
+  return null;
 }
 
 // ─── Message Parser ──────────────────────────────────────────────────────────
@@ -345,13 +403,16 @@ function parseMessage(text) {
 
   // SKU patterns to match (order matters — more specific first)
   const skuPatterns = [
-    /C9[23]\d{2}L?-[\dA-Z]+-[\dA-Z]+-M/gi,
-    /MA-[A-Z0-9-]+/gi,
-    /CW9\d{3}[A-Z0-9]*/gi,
-    /MS150-[\dA-Z]+-[\dA-Z]+/gi,
-    /MS[13][39]0-[\dA-Z]+/gi,
-    /(?:MR|MX|MV|MT|MG)\d+[A-Z]*/gi,
-    /Z\d+[A-Z]*/gi
+    /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,  // Catalyst C9200L/C9300/C9300X
+    /MA-[A-Z0-9-]+/gi,                                   // Meraki accessories
+    /CW9\d{3}[A-Z0-9]*/gi,                               // CW APs
+    /MS150-[\dA-Z]+-[\dA-Z]+/gi,                          // MS150 (3-part SKU)
+    /MS450-\d+/gi,                                        // MS450
+    /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,               // All MS families (130/150/210/225/250/350/390/425)
+    /(?:MR|MV|MT|MG)\d+[A-Z]*/gi,                        // MR, MV, MT, MG
+    /MX\d+[A-Z]*(?:-NA)?/gi,                             // MX (including MX67C-NA, MX68CW-NA)
+    /GX\d+/gi,                                            // GX
+    /Z\d+[A-Z]*/gi                                        // Z-series
   ];
 
   const foundItems = [];
@@ -581,4 +642,4 @@ app.listen(PORT, () => {
 });
 
 // ─── Exports for testing ─────────────────────────────────────────────────────
-module.exports = { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol };
+module.exports = { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, detectFamily, VALID_SKUS };

@@ -1,0 +1,468 @@
+{
+  "_generated": "2026-03-19T19:12:50.757Z",
+  "_source": "prices.json",
+  "_description": "Auto-generated valid SKU catalog. Do not edit manually — run build-catalog.js instead.",
+  "_EOL_PRODUCTS": {
+    "MR": [
+      "33",
+      "42",
+      "42E",
+      "52",
+      "53",
+      "53E",
+      "56",
+      "74",
+      "84"
+    ],
+    "MX": [
+      "60",
+      "60W",
+      "64",
+      "64W",
+      "65",
+      "65W",
+      "80",
+      "84"
+    ],
+    "MG": [
+      "21",
+      "21E"
+    ],
+    "Z": [
+      "1",
+      "3",
+      "3C"
+    ],
+    "MS120": [
+      "8",
+      "8LP",
+      "8FP",
+      "24",
+      "24P",
+      "48",
+      "48LP",
+      "48FP"
+    ],
+    "MS125": [
+      "24",
+      "24P",
+      "48",
+      "48LP",
+      "48FP"
+    ],
+    "MS210": [
+      "24",
+      "24P",
+      "48",
+      "48LP",
+      "48FP"
+    ],
+    "MS220": [
+      "8",
+      "8P",
+      "24",
+      "24P",
+      "48",
+      "48LP",
+      "48FP"
+    ],
+    "MS225": [
+      "24",
+      "24P",
+      "48",
+      "48LP",
+      "48FP"
+    ],
+    "MS250": [
+      "24",
+      "24P",
+      "48",
+      "48LP",
+      "48FP"
+    ],
+    "MS320": [
+      "24",
+      "24P",
+      "48",
+      "48LP",
+      "48FP"
+    ],
+    "MS350": [
+      "24",
+      "24P",
+      "24X",
+      "48",
+      "48LP",
+      "48FP",
+      "48X"
+    ],
+    "MS410": [
+      "16",
+      "32"
+    ],
+    "MS420": [
+      "24",
+      "48"
+    ],
+    "MS425": [
+      "16",
+      "32"
+    ]
+  },
+  "_EOL_REPLACEMENTS": {
+    "MR33": "MR36",
+    "MR42": "MR44",
+    "MR42E": "MR46E",
+    "MR52": "MR57",
+    "MR53": "MR57",
+    "MR53E": "MR57",
+    "MR56": "MR57",
+    "MR74": "MR76",
+    "MR84": "MR86",
+    "MX60": "MX67",
+    "MX60W": "MX67W",
+    "MX64": "MX67",
+    "MX64W": "MX67W",
+    "MX65": "MX68",
+    "MX65W": "MX68W",
+    "MX80": "MX85",
+    "MX84": "MX85",
+    "MG21": "MG41",
+    "MG21E": "MG41E",
+    "Z1": "Z4",
+    "Z3": "Z4",
+    "Z3C": "Z4C",
+    "MS120": "MS130",
+    "MS125": "MS130",
+    "MS210": "MS130",
+    "MS220": "MS130",
+    "MS225": "MS130",
+    "MS250": "MS150",
+    "MS320": "MS150",
+    "MS350": "MS390",
+    "MS410": "MS390",
+    "MS420": "MS390",
+    "MS425": "MS390"
+  },
+  "_COMMON_MISTAKES": {
+    "MS130-13X": {
+      "error": "Does not exist",
+      "suggest": [
+        "MS130-12X"
+      ]
+    },
+    "MS130-24FP": {
+      "error": "FP variant not available",
+      "suggest": [
+        "MS130-24P",
+        "MS130-24X"
+      ]
+    },
+    "MS130-48FP": {
+      "error": "FP variant not available",
+      "suggest": [
+        "MS130-48P",
+        "MS130-48X"
+      ]
+    },
+    "MS150-48P": {
+      "error": "Must specify variant",
+      "suggest": [
+        "MS150-48LP-4G",
+        "MS150-48FP-4G",
+        "MS150-48LP-4X",
+        "MS150-48FP-4X"
+      ]
+    },
+    "MS150-24P": {
+      "error": "Must specify variant",
+      "suggest": [
+        "MS150-24P-4G",
+        "MS150-24P-4X"
+      ]
+    },
+    "MS140": {
+      "error": "Family does not exist",
+      "suggest": [
+        "MS130",
+        "MS150"
+      ]
+    },
+    "MR55": {
+      "error": "Never existed",
+      "suggest": [
+        "MR57"
+      ]
+    },
+    "MT13": {
+      "error": "Never existed",
+      "suggest": [
+        "MT10",
+        "MT11",
+        "MT14"
+      ]
+    },
+    "CW9162": {
+      "error": "Must specify antenna type",
+      "suggest": [
+        "CW9162I"
+      ]
+    },
+    "CW9163": {
+      "error": "Must specify antenna type",
+      "suggest": [
+        "CW9163E"
+      ]
+    },
+    "CW9172": {
+      "error": "Must specify variant",
+      "suggest": [
+        "CW9172I",
+        "CW9172H"
+      ]
+    },
+    "CW9176": {
+      "error": "Must specify variant",
+      "suggest": [
+        "CW9176I",
+        "CW9176D1"
+      ]
+    }
+  },
+  "_PASSTHROUGH": [
+    "CW-ACC-KIT1-00",
+    "CW-ANT-D1-NS-00",
+    "CW-ANT-GPS1-M-00",
+    "CW-ANT-GPS2-S-00",
+    "CW-ANT-O1-NS-00",
+    "CW-INJ-8",
+    "CW-MNT-ART2-00",
+    "CW9800H1-MCG"
+  ],
+  "MR": [
+    "MR28",
+    "MR36",
+    "MR36H",
+    "MR44",
+    "MR46",
+    "MR46E",
+    "MR52",
+    "MR57",
+    "MR76",
+    "MR78",
+    "MR86"
+  ],
+  "MX": [
+    "MX100",
+    "MX105",
+    "MX250",
+    "MX450",
+    "MX67",
+    "MX67C",
+    "MX67C-NA",
+    "MX67W",
+    "MX68",
+    "MX68CW",
+    "MX68CW-NA",
+    "MX68W",
+    "MX75",
+    "MX85",
+    "MX95"
+  ],
+  "MV": [
+    "MV12N",
+    "MV12W",
+    "MV12WE",
+    "MV13",
+    "MV13M",
+    "MV2",
+    "MV22",
+    "MV22X",
+    "MV23M",
+    "MV23X",
+    "MV32",
+    "MV33",
+    "MV33M",
+    "MV52",
+    "MV53X",
+    "MV63",
+    "MV63M",
+    "MV63X",
+    "MV72",
+    "MV72X",
+    "MV73M",
+    "MV73X",
+    "MV84X",
+    "MV93",
+    "MV93M",
+    "MV93X"
+  ],
+  "MT": [
+    "MT10",
+    "MT11",
+    "MT12",
+    "MT14",
+    "MT15",
+    "MT20",
+    "MT30",
+    "MT40"
+  ],
+  "MG": [
+    "MG21",
+    "MG21E",
+    "MG41",
+    "MG41E",
+    "MG51",
+    "MG51E",
+    "MG52",
+    "MG52E"
+  ],
+  "Z": [
+    "Z1",
+    "Z3C",
+    "Z4",
+    "Z4C",
+    "Z4CX",
+    "Z4X"
+  ],
+  "GX": [
+    "GX20",
+    "GX50"
+  ],
+  "MS130": [
+    "MS130-12X",
+    "MS130-24",
+    "MS130-24P",
+    "MS130-24X",
+    "MS130-48",
+    "MS130-48P",
+    "MS130-48X",
+    "MS130-8",
+    "MS130-8P",
+    "MS130-8P-I",
+    "MS130-8X",
+    "MS130R-8P"
+  ],
+  "MS150": [
+    "MS150-24MP-4X",
+    "MS150-24P-4G",
+    "MS150-24P-4X",
+    "MS150-24T-4G",
+    "MS150-24T-4X",
+    "MS150-48FP-4G",
+    "MS150-48FP-4X",
+    "MS150-48LP-4G",
+    "MS150-48LP-4X",
+    "MS150-48MP-4X",
+    "MS150-48T-4G",
+    "MS150-48T-4X"
+  ],
+  "MS390": [
+    "MS390-24UX",
+    "MS390-48UX",
+    "MS390-48UX2"
+  ],
+  "MS450": [
+    "MS450-12"
+  ],
+  "MS120": [
+    "MS120-48"
+  ],
+  "MS125": [
+    "MS125-24P"
+  ],
+  "MS210": [
+    "MS210-24",
+    "MS210-24P",
+    "MS210-48",
+    "MS210-48FP",
+    "MS210-48LP"
+  ],
+  "MS225": [
+    "MS225-24",
+    "MS225-24P",
+    "MS225-48",
+    "MS225-48FP",
+    "MS225-48FP-RF",
+    "MS225-48LP",
+    "MS225-48LP-RF"
+  ],
+  "MS250": [
+    "MS250-24P",
+    "MS250-48FP"
+  ],
+  "MS350": [
+    "MS350-24X",
+    "MS350-48",
+    "MS350-48FP"
+  ],
+  "MS425": [
+    "MS425-16"
+  ],
+  "CW": [
+    "CW9162I",
+    "CW9163E",
+    "CW9164I",
+    "CW9166D1",
+    "CW9166I",
+    "CW9172H",
+    "CW9172I",
+    "CW9176D1",
+    "CW9176I",
+    "CW9178I"
+  ],
+  "C9200L": [
+    "C9200L-24P-4G-M",
+    "C9200L-24P-4X-M",
+    "C9200L-24PXG-2Y-M",
+    "C9200L-24PXG-4X-M",
+    "C9200L-24T-4G-M",
+    "C9200L-24T-4X-M",
+    "C9200L-48P-4G-M",
+    "C9200L-48P-4X-M",
+    "C9200L-48PL-4G-M",
+    "C9200L-48PL-4X-M",
+    "C9200L-48PXG-2Y-M",
+    "C9200L-48PXG-4X-M",
+    "C9200L-48T-4G-M",
+    "C9200L-48T-4X-M",
+    "C9200L-STA-KIT-M-O",
+    "C9200L-STAK-KIT-M"
+  ],
+  "C9300": [
+    "C9300-24P-M",
+    "C9300-24S-M",
+    "C9300-24T-M",
+    "C9300-24U-M",
+    "C9300-24UX-M",
+    "C9300-48P-M",
+    "C9300-48S-M",
+    "C9300-48T-M",
+    "C9300-48U-M",
+    "C9300-48UN-M",
+    "C9300-48UXM-M",
+    "C9300-NM-2Q-M",
+    "C9300-NM-2Y-M",
+    "C9300-NM-8X-M"
+  ],
+  "C9300L": [
+    "C9300L-24P-4X-M",
+    "C9300L-24T-4X-M",
+    "C9300L-24UXG-4X-M",
+    "C9300L-48P-4X-M",
+    "C9300L-48PF-4X-M",
+    "C9300L-48T-4X-M",
+    "C9300L-48UXG-4X-M",
+    "C9300L-STAK-KIT2-M"
+  ],
+  "C9300X": [
+    "C9300X-12Y-M",
+    "C9300X-24HX-M",
+    "C9300X-24Y-M",
+    "C9300X-48HX-M",
+    "C9300X-48HXN-M",
+    "C9300X-48TX-M",
+    "C9300X-NM-2C-M",
+    "C9300X-NM-8Y-M"
+  ]
+}
