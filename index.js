@@ -45,6 +45,36 @@ for (const sku of PASSTHROUGH) VALID_SKUS.add(sku.toUpperCase());
 
 const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
 
+// ─── Conversation Memory (per-user, in-memory) ──────────────────────────────
+const conversationHistory = new Map();
+const MAX_HISTORY = 10;
+const HISTORY_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+function getHistory(personId) {
+  const entry = conversationHistory.get(personId);
+  if (!entry) return [];
+  // Auto-clear if older than TTL
+  if (Date.now() - entry.lastActive > HISTORY_TTL_MS) {
+    conversationHistory.delete(personId);
+    return [];
+  }
+  return entry.messages;
+}
+
+function addToHistory(personId, role, content) {
+  let entry = conversationHistory.get(personId);
+  if (!entry) {
+    entry = { messages: [], lastActive: Date.now() };
+    conversationHistory.set(personId, entry);
+  }
+  entry.messages.push({ role, content });
+  entry.lastActive = Date.now();
+  // Trim to MAX_HISTORY (keeping pairs where possible)
+  while (entry.messages.length > MAX_HISTORY) {
+    entry.messages.shift();
+  }
+}
+
 // ─── Bot Identity ─────────────────────────────────────────────────────────────
 let BOT_PERSON_ID = null;
 async function getBotPersonId() {
@@ -358,8 +388,11 @@ function validateSku(baseSku) {
   // Find the family for suggestions
   const family = detectFamily(upper);
   if (family && catalog[family]) {
-    const suggestions = catalog[family].slice(0, 5);
-    return { valid: false, reason: `${upper} is not a recognized model`, suggest: suggestions };
+    // Filter to entries that contain the user's partial input (e.g., "MS150-48" matches MS150-48T-4G, MS150-48LP-4G, etc.)
+    const partialMatches = catalog[family].filter(s => s.toUpperCase().includes(upper) || upper.includes(s.toUpperCase()));
+    const suggestions = partialMatches.length > 0 ? partialMatches : catalog[family].slice(0, 5);
+    const isPartialMatch = partialMatches.length > 1;
+    return { valid: false, reason: `${upper} is not a recognized model`, suggest: suggestions, isPartialMatch };
   }
 
   return { valid: false, reason: `${upper} is not a recognized SKU` };
@@ -478,8 +511,32 @@ function buildQuoteResponse(parsed) {
     resolvedItems.push({ baseSku, hwSku, qty, licenseSkus, eol });
   }
 
-  // If ALL SKUs failed validation, trigger LLM fallback
+  // If ALL SKUs failed validation, check if we can handle with clarification instead of LLM
   if (errors.length > 0 && resolvedItems.length === 0) {
+    // Check if all errors have partial-match suggestions (ambiguous SKU, not unknown)
+    const allPartialMatches = parsed.items.every(({ baseSku }) => {
+      const v = validateSku(baseSku);
+      return !v.valid && v.isPartialMatch && v.suggest && v.suggest.length > 0;
+    });
+
+    if (allPartialMatches) {
+      // Build clarification message directly instead of falling to Claude
+      const lines = [];
+      for (const { baseSku } of parsed.items) {
+        const v = validateSku(baseSku);
+        const family = detectFamily(baseSku.toUpperCase());
+        const familyLabel = family || baseSku.toUpperCase();
+        // Extract port hint from input (e.g., "48" from "MS150-48")
+        const portMatch = baseSku.match(/\d+$/);
+        const portHint = portMatch ? ` ${portMatch[0]}-port` : '';
+        lines.push(`I found multiple ${familyLabel}${portHint} variants. Which one do you need?`);
+        for (const s of v.suggest) {
+          lines.push(`• ${s}`);
+        }
+      }
+      return { message: lines.join('\n'), needsLlm: false };
+    }
+
     return { message: null, needsLlm: true, errors };
   }
 
@@ -524,23 +581,34 @@ function buildQuoteResponse(parsed) {
 
 // ─── Claude API Fallback ─────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are Stratus AI, a Cisco/Meraki quoting assistant for Stratus Information Systems.
+const SYSTEM_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products.
 
-Your job is to generate Stratus order URLs for Cisco/Meraki products. You are the fallback when our deterministic engine can't resolve a request, so you'll typically see ambiguous SKUs, partial names, common mistakes, or general questions.
+## YOUR ROLE
+You are the fallback when our deterministic quoting engine can't resolve a request. You'll typically see ambiguous SKUs, partial product names, common mistakes, natural language questions, or follow-up requests referencing prior context.
+
+## REASONING APPROACH
+Think through each request step by step before generating URLs:
+1. Identify what products the user is asking about
+2. Verify each SKU exists in the catalog below. NEVER assume a product exists. NEVER invent SKUs, pricing, or specifications.
+3. Apply the correct hardware suffix
+4. Pair with the correct license SKU and term format
+5. Build the URL
+
+If a product can't be found, ask the user to clarify. Suggest the closest alternatives from the catalog.
+
+## PERSONA
+Professional, concise, action-oriented. Give direct answers without conversational fluff. Short answers for well-defined questions. Positive and engaging tone. You're a knowledgeable colleague, not a help desk.
+
+## STRATUS CONTEXT
+Stratus Information Systems is a Cisco-exclusive reseller specializing in Meraki cloud-managed networking. We serve K-12, higher ed, healthcare, and enterprise customers. Our quoting tool generates instant order URLs that populate a cart on stratusinfosystems.com.
 
 ## URL FORMAT
 https://stratusinfosystems.com/order/?item={item1},{item2}&qty={qty1},{qty2}
 
-Items is a comma-separated list of SKUs. Qty is a separate comma-separated list of quantities in the same order.
-
-Example for 10 MR44 with 3-year licenses:
-https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=10,10
-
-Example for 2 MR44 + 1 MS130-24P + 1 MX75 with 3-year:
-https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR,MS130-24P-HW,LIC-MS130-24-3Y,MX75-HW,LIC-MX75-SEC-3YR&qty=2,2,1,1,1,1
+Items and quantities are separate comma-separated lists in matching order.
 
 ## SKU SUFFIX RULES
-- MR, MV, MT, MG, MS130, MS390, Z → add -HW
+- MR, MV, MT, MG, MS130, MS130R, MS390, Z (not Z4X/Z4CX) → add -HW
 - MX non-cellular → add -HW
 - MX cellular (MXxxC, MXxxCW) → add -HW-NA
 - CW Wi-Fi 6E (CW916x) → add -MR
@@ -548,46 +616,61 @@ https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR,MS130-24P-HW,LIC-
 - MS150, MS450, C9xxx-M, MA- accessories, GX → no suffix
 - Z4X, Z4CX → no suffix (sold as-is)
 - Legacy switches (MS120/125/210/225/250/350/425) → add -HW
+IMPORTANT: Users often omit the -HW suffix. If someone says "MR44", they mean the hardware appliance (MR44-HW). Handle this gracefully.
 
 ## LICENSE RULES (term format matters!)
+Three license types exist:
+- ENT (Enterprise): Used for APs, legacy switches, MG, MT
+- SEC (Advanced Security): Used for MX, Z-series, GX
+- SDW (SD-WAN): Used for SD-WAN deployments (rare, don't assume)
+
+Specific mappings:
 - All APs (MR + CW) → LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR
 - MX → LIC-MX{model}-SEC-1YR / -3YR / -5YR
-- Z-series → LIC-Z{model}-SEC-1Y / -3Y / -5Y
-- MG → LIC-MG{model}-ENT-1Y / -3Y / -5Y
+- Z-series → LIC-Z{model}-SEC-1Y / -3Y / -5Y (newer -Y format)
+- MG → LIC-MG{model}-ENT-1Y / -3Y / -5Y (newer -Y format)
 - MV → LIC-MV-1YR / -3YR / -5YR
 - MT → LIC-MT-1Y / -3Y / -5Y
 - MS130 compact (8/8P/8X/12X) → LIC-MS130-CMPT-1Y / -3Y / -5Y
 - MS130 standard (24/48) → LIC-MS130-{24/48}-1Y / -3Y / -5Y
 - MS150 24-port → LIC-MS150-24-1Y / -3Y / -5Y
 - MS150 48-port → LIC-MS150-48-1Y / -3Y / -5Y
-- MS390, MS450 → no license in URL (DNA license separate)
+- MS390, MS450 → no license in URL (DNA license handled separately)
 - GX → LIC-GX{model}-SEC-1Y / -3Y / -5Y
 - Legacy switches → LIC-ENT-1YR / -3YR / -5YR
+IMPORTANT: Watch for -YR vs -Y. Older products (MR, MX, MV, legacy switches) use -1YR/-3YR/-5YR. Newer products (MS130, MS150, Z, MG, MT, GX) use -1Y/-3Y/-5Y.
 
 ## VALID PRODUCT CATALOG
-Use this list to resolve ambiguous requests. If a user says a partial name, match to the closest model(s) and ask for clarification if multiple match.
+NEVER assume a product exists if it's not on this list. If not found, ask for clarification and suggest alternatives.
 
-**APs (MR):** MR28, MR36, MR36H, MR44, MR46, MR46E, MR52, MR57, MR76, MR78, MR86
-**APs (CW Wi-Fi 6E):** CW9162I, CW9163E, CW9164I, CW9166I, CW9166D1
-**APs (CW Wi-Fi 7):** CW9172I, CW9172H, CW9176D1, CW9176I, CW9178I
-**MX Security:** MX67, MX67W, MX67C, MX68, MX68W, MX68CW, MX75, MX85, MX95, MX105, MX250, MX450
-**MS130 Switches:** MS130-8, MS130-8P, MS130-8P-I, MS130-8X, MS130-12X, MS130-24, MS130-24P, MS130-24X, MS130-48, MS130-48P, MS130-48X, MS130R-8P
-**MS150 Switches:** MS150-24T-4G, MS150-24P-4G, MS150-24T-4X, MS150-24P-4X, MS150-24MP-4X, MS150-48T-4G, MS150-48LP-4G, MS150-48FP-4G, MS150-48T-4X, MS150-48LP-4X, MS150-48FP-4X, MS150-48MP-4X
-**MS390 Switches:** MS390-24UX, MS390-48UX, MS390-48UX2
-**MS450 Switches:** MS450-12
-**MV Cameras:** MV2, MV13, MV13M, MV22, MV22X, MV23M, MV23X, MV32, MV33, MV33M, MV52, MV53X, MV63, MV63M, MV63X, MV72, MV72X, MV73X, MV73M, MV84X, MV93, MV93M, MV93X
-**MT Sensors:** MT10, MT11, MT12, MT14, MT15, MT20, MT30, MT40
-**MG Cellular:** MG21, MG21E, MG41, MG41E, MG51, MG51E, MG52, MG52E
-**Z-Series:** Z4, Z4C, Z4X, Z4CX
-**GX:** GX20, GX50
+APs (MR): MR28, MR36, MR36H, MR44, MR46, MR46E, MR52, MR57, MR76, MR78, MR86
+APs (CW Wi-Fi 6E): CW9162I, CW9163E, CW9164I, CW9166I, CW9166D1
+APs (CW Wi-Fi 7): CW9172I, CW9172H, CW9176D1, CW9176I, CW9178I
+MX Security: MX67, MX67W, MX67C, MX67C-NA, MX68, MX68W, MX68CW, MX68CW-NA, MX75, MX85, MX95, MX105, MX250, MX450
+MS130 Switches: MS130-8, MS130-8P, MS130-8P-I, MS130-8X, MS130-12X, MS130-24, MS130-24P, MS130-24X, MS130-48, MS130-48P, MS130-48X, MS130R-8P
+MS150 Switches: MS150-24T-4G, MS150-24P-4G, MS150-24T-4X, MS150-24P-4X, MS150-24MP-4X, MS150-48T-4G, MS150-48LP-4G, MS150-48FP-4G, MS150-48T-4X, MS150-48LP-4X, MS150-48FP-4X, MS150-48MP-4X
+MS390 Switches: MS390-24UX, MS390-48UX, MS390-48UX2
+MS450 Switches: MS450-12
+MV Cameras: MV2, MV13, MV13M, MV22, MV22X, MV23M, MV23X, MV32, MV33, MV33M, MV52, MV53X, MV63, MV63M, MV63X, MV72, MV72X, MV73X, MV73M, MV84X, MV93, MV93M, MV93X
+MT Sensors: MT10, MT11, MT12, MT14, MT15, MT20, MT30, MT40
+MG Cellular: MG21, MG21E, MG41, MG41E, MG51, MG51E, MG52, MG52E
+Z-Series: Z4, Z4C, Z4X, Z4CX
+GX: GX20, GX50
+
+## HANDLING INVALID OR AMBIGUOUS SKUs
+- INVALID SKU: "I couldn't find that SKU in our catalog. Could you double-check the product code? Here are some similar options: [list]"
+- AMBIGUOUS SKU: "I found multiple products that match. Which one do you need?" then list the options with bullet points.
+- EMPTY RESULTS: If a product truly can't be matched, say so clearly and suggest the user verify the model number.
+NEVER guess. If uncertain, ask.
 
 ## OUTPUT RULES
 - Always show 1-Year, 3-Year, and 5-Year URLs unless user says "just" or "only" with one term
 - URL-only output by default, no pricing tables
 - If user asks "how much", "price", or "cost" you may add pricing context
 - If a SKU is EOL, note the replacement and offer renewal vs refresh options
-- If a SKU is ambiguous (like "MS150-48"), list the valid variants and ask which one they need
-- If you truly can't determine the product, say so and list nearby options
+- Use bullet points, not tables (tables don't render well in Webex)
+- Post URLs as plain text (not markdown links, since Webex auto-links them)
+- Keep responses concise
 
 ## EOL REPLACEMENTS
 MR33→MR36, MR42→MR44, MR42E→MR46E, MR52/53/56→MR57, MR74→MR76, MR84→MR86
@@ -597,18 +680,53 @@ MS120/125/210/220/225→MS130, MS250/320→MS150, MS350/410/420/425→MS390
 ## COMMON MISTAKES
 MR55 doesn't exist (suggest MR57). MS130-13X doesn't exist (suggest MS130-12X). MS350-24 is EOL (suggest MS390-24UX).
 
-Keep responses concise, formatted for Webex markdown.`;
+## FEW-SHOT EXAMPLES
 
-async function askClaude(userMessage) {
+User: "quote 10 MR44"
+Response:
+1-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-1YR&qty=10,10
+
+3-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=10,10
+
+5-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-5YR&qty=10,10
+
+User: "I need 5 MS150-48s"
+Response:
+I found multiple MS150 48-port variants. Which one do you need?
+• MS150-48T-4G
+• MS150-48LP-4G (PoE)
+• MS150-48FP-4G (Full PoE)
+• MS150-48T-4X (10G uplink)
+• MS150-48LP-4X (PoE + 10G uplink)
+• MS150-48FP-4X (Full PoE + 10G uplink)
+• MS150-48MP-4X (mGig PoE)
+
+User: "2 MR44 and 1 MX75 3 year only"
+Response:
+3-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR,MX75-HW,LIC-MX75-SEC-3YR&qty=2,2,1,1`;
+
+async function askClaude(userMessage, personId) {
   if (!anthropic) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
+    // Build messages array with conversation history
+    const history = personId ? getHistory(personId) : [];
+    const messages = [...history, { role: 'user', content: userMessage }];
+
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userMessage }]
+      messages
     });
-    return response.content[0].text;
+    const reply = response.content[0].text;
+
+    // Log both sides to history
+    if (personId) {
+      addToHistory(personId, 'user', userMessage);
+      addToHistory(personId, 'assistant', reply);
+    }
+
+    return reply;
   } catch (err) {
     console.error('Claude API error:', err.message);
     return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44" or "5 MS150-48LP-4G".`;
@@ -625,7 +743,8 @@ app.post('/webhook', async (req, res) => {
     if (event.resource !== 'messages' || event.event !== 'created') return;
 
     const botId = await getBotPersonId();
-    if (event.data.personId === botId) return;
+    const personId = event.data.personId;
+    if (personId === botId) return;
 
     const msg = await getMessage(event.data.id);
     const text = (msg.text || '').trim();
@@ -640,6 +759,9 @@ app.post('/webhook', async (req, res) => {
       const result = buildQuoteResponse(parsed);
 
       if (!result.needsLlm && result.message) {
+        // Log successful JSON engine interactions to history for context continuity
+        addToHistory(personId, 'user', text);
+        addToHistory(personId, 'assistant', result.message);
         await sendMessage(roomId, result.message);
         return;
       }
@@ -647,14 +769,14 @@ app.post('/webhook', async (req, res) => {
       // If errors exist but we're falling back, include them for context
       if (result.errors && result.errors.length > 0) {
         const errorContext = result.errors.join('\n');
-        const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`);
+        const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId);
         await sendMessage(roomId, claudeReply);
         return;
       }
     }
 
     // Full fallback to Claude API
-    const claudeReply = await askClaude(text);
+    const claudeReply = await askClaude(text, personId);
     await sendMessage(roomId, claudeReply);
 
   } catch (err) {
@@ -683,4 +805,4 @@ app.listen(PORT, () => {
 });
 
 // ─── Exports for testing ─────────────────────────────────────────────────────
-module.exports = { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, detectFamily, VALID_SKUS };
+module.exports = { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, detectFamily, VALID_SKUS, getHistory, addToHistory, conversationHistory };

@@ -4,7 +4,7 @@
  * v2: expanded with auto-catalog coverage tests
  */
 
-const { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, VALID_SKUS } = require('./index.js');
+const { parseMessage, buildQuoteResponse, applySuffix, getLicenseSkus, buildStratusUrl, validateSku, isEol, checkEol, VALID_SKUS, getHistory, addToHistory, conversationHistory } = require('./index.js');
 
 let passed = 0;
 let failed = 0;
@@ -513,6 +513,75 @@ test('"1 GX20" parses correctly', () => {
   const parsed = parseMessage('1 GX20');
   assert(parsed !== null, 'Should parse');
   assert(parsed.items[0].baseSku === 'GX20', `Got: ${parsed.items[0].baseSku}`);
+});
+
+
+console.log('\n=== AMBIGUITY DETECTION ===');
+
+test('Ambiguity: "quote MS150-48" → clarification message, NOT needsLlm', () => {
+  const result = runQuote('quote MS150-48');
+  assert(result !== null, 'Should parse MS150-48');
+  assert(result.needsLlm === false, `Should NOT need LLM, got needsLlm=${result.needsLlm}`);
+  assert(result.message.includes('MS150-48T-4G'), `Should suggest MS150-48T-4G. Got:\n${result.message}`);
+  assert(result.message.includes('MS150-48LP-4G'), `Should suggest MS150-48LP-4G. Got:\n${result.message}`);
+  assert(result.message.includes('Which one'), `Should ask which one. Got:\n${result.message}`);
+});
+
+test('Ambiguity: "quote MS130-24" → exact match exists, should NOT be ambiguous', () => {
+  const result = runQuote('quote MS130-24');
+  assert(result !== null, 'Should parse MS130-24');
+  assert(result.needsLlm === false, 'Should NOT need LLM');
+  assert(result.message.includes('MS130-24'), 'Should contain MS130-24 in URL');
+  assert(!result.message.includes('Which one'), 'Should NOT ask for clarification (exact match)');
+});
+
+test('Ambiguity: "quote MS150-24" → clarification for 24-port variants', () => {
+  const result = runQuote('quote MS150-24');
+  assert(result !== null, 'Should parse MS150-24');
+  assert(result.needsLlm === false, 'Should NOT need LLM');
+  assert(result.message.includes('MS150-24T-4G'), `Should suggest variants. Got:\n${result.message}`);
+});
+
+
+console.log('\n=== CONVERSATION MEMORY ===');
+
+test('addToHistory stores messages', () => {
+  conversationHistory.clear();
+  addToHistory('test-user-1', 'user', 'quote 10 MR44');
+  addToHistory('test-user-1', 'assistant', 'Here are your URLs...');
+  const history = getHistory('test-user-1');
+  assert(history.length === 2, `Expected 2 messages, got ${history.length}`);
+  assert(history[0].role === 'user', 'First should be user');
+  assert(history[1].role === 'assistant', 'Second should be assistant');
+  conversationHistory.clear();
+});
+
+test('getHistory returns empty for unknown user', () => {
+  conversationHistory.clear();
+  const history = getHistory('unknown-user');
+  assert(history.length === 0, `Expected 0, got ${history.length}`);
+});
+
+test('addToHistory trims to MAX_HISTORY', () => {
+  conversationHistory.clear();
+  for (let i = 0; i < 15; i++) {
+    addToHistory('trim-user', 'user', `message ${i}`);
+  }
+  const history = getHistory('trim-user');
+  assert(history.length <= 10, `Expected <=10, got ${history.length}`);
+  conversationHistory.clear();
+});
+
+test('getHistory auto-clears expired entries', () => {
+  conversationHistory.clear();
+  // Manually insert an old entry
+  conversationHistory.set('old-user', {
+    messages: [{ role: 'user', content: 'old message' }],
+    lastActive: Date.now() - 31 * 60 * 1000 // 31 minutes ago
+  });
+  const history = getHistory('old-user');
+  assert(history.length === 0, `Expected 0 (expired), got ${history.length}`);
+  assert(!conversationHistory.has('old-user'), 'Should have deleted the entry');
 });
 
 
