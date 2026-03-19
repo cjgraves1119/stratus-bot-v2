@@ -976,7 +976,7 @@ test('SYSTEM_PROMPT contains revision few-shot examples', () => {
 test('askClaude uses correct model string', () => {
   // Read the source to verify model string
   const src = require('fs').readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
-  assert(src.includes("model: 'claude-3-5-sonnet-latest'"), 'Should use claude-3-5-sonnet-latest model');
+  assert(src.includes("model: 'claude-sonnet-4-20250514'"), 'Should use claude-sonnet-4-20250514 model');
   assert(!src.includes("model: 'claude-sonnet-4-6'"), 'Should NOT use old claude-sonnet-4-6 model');
 });
 
