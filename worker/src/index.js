@@ -597,6 +597,257 @@ function getPrice(sku) {
   return null;
 }
 
+// ─── Pricing Calculator ──────────────────────────────────────────────────────
+
+/**
+ * Parse a Stratus URL into { skus: string[], qtys: number[] }
+ */
+function parseStratusUrl(url) {
+  try {
+    const u = new URL(url);
+    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const qtyStr = (u.searchParams.get('qty') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+    if (items.length === 0) return null;
+    // If qtys missing or mismatched, default all to 1
+    const qtys = qtyStr.length === items.length ? qtyStr : items.map(() => 1);
+    return { skus: items, qtys };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Calculate pricing for a list of SKUs and quantities.
+ * Returns { lines: string[], cartTotal: number, found: number, missing: string[] }
+ */
+function calculatePricing(skus, qtys) {
+  const lines = [];
+  let cartTotal = 0;
+  const missing = [];
+  let found = 0;
+
+  for (let i = 0; i < skus.length; i++) {
+    const sku = skus[i];
+    const qty = qtys[i] || 1;
+    const p = getPrice(sku);
+    if (p) {
+      found++;
+      const lineTotal = p.price * qty;
+      cartTotal += lineTotal;
+      if (qty > 1) {
+        lines.push(`• ${qty} × ${sku} - $${p.price.toLocaleString('en-US', { minimumFractionDigits: 2 })} each ($${lineTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })})`);
+      } else {
+        lines.push(`• ${sku} - $${p.price.toLocaleString('en-US', { minimumFractionDigits: 2 })}`);
+      }
+    } else {
+      missing.push(sku);
+    }
+  }
+
+  return { lines, cartTotal, found, missing };
+}
+
+/**
+ * Format a full pricing response for a single URL or SKU set.
+ */
+function formatPricingResponse(label, skus, qtys) {
+  const { lines, cartTotal, found, missing } = calculatePricing(skus, qtys);
+  if (found === 0) return null;
+
+  const parts = [];
+  if (label) parts.push(`**${label}**`);
+  // Add URL for reference
+  const url = buildStratusUrl(skus.map((s, i) => ({ sku: s, qty: qtys[i] })));
+  parts.push(url);
+  parts.push('');
+  parts.push(...lines);
+  parts.push(`**Cart Total: $${cartTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}**`);
+  if (missing.length > 0) {
+    parts.push(`\n_Pricing unavailable for: ${missing.join(', ')}_`);
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Detect pricing intent and handle deterministically.
+ * Returns a response string if handled, or null to pass through to Claude.
+ */
+async function handlePricingRequest(text, personId, kv) {
+  const upper = text.toUpperCase();
+
+  // Detect pricing intent keywords
+  const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|WHAT DOES .* COST|WHAT IS THE COST|WHAT('S| IS) THE PRICE|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(text);
+  if (!pricingIntent) return null;
+
+  // Pattern 1: Direct SKU pricing request like "cost of 2x MS150-48FP-4X" or "price of MR44"
+  const directSkuMatch = text.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for))?\s+(\d+)\s*x?\s+([A-Z0-9][-A-Z0-9]+)/i);
+  const singleSkuMatch = !directSkuMatch && text.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for|is|does))?\s+(?:an?\s+)?([A-Z0-9][-A-Z0-9]+)/i);
+
+  if (directSkuMatch) {
+    const qty = parseInt(directSkuMatch[1]);
+    const sku = directSkuMatch[2].toUpperCase();
+    const resp = formatPricingResponse(null, [sku], [qty]);
+    if (resp) return resp;
+    // SKU not found in prices — fall through to Claude
+  }
+
+  if (singleSkuMatch) {
+    const sku = singleSkuMatch[1].toUpperCase();
+    // Filter out common false positives
+    if (!/^(OPTION|THE|THIS|THAT|MY|IT|A|AN)$/i.test(sku)) {
+      const resp = formatPricingResponse(null, [sku], [1]);
+      if (resp) return resp;
+    }
+  }
+
+  // Pattern 2: References to "Option A/B/B1/B2" or "X-Year" from prior conversation
+  const optionRef = text.match(/\b(?:OPTION\s+(A|B|B1|B2))\b/i);
+  const termRef = text.match(/\b(\d)\s*-?\s*YEAR/i);
+
+  if (!personId || !kv) return null;
+
+  // Search recent assistant messages for one containing the referenced option/URLs
+  const history = await getHistory(kv, personId);
+  if (history.length === 0) return null;
+
+  const assistantMsgs = history.filter(h => h.role === 'assistant').reverse();
+  if (assistantMsgs.length === 0) return null;
+
+  // Find the best assistant message: one that contains the referenced option, or has Stratus URLs
+  let lastResponse = null;
+  if (optionRef) {
+    const optKey = `OPTION ${optionRef[1].toUpperCase()}`;
+    lastResponse = assistantMsgs.find(m => m.content.toUpperCase().includes(optKey))?.content;
+  }
+  // Fallback: find the most recent message with Stratus order URLs
+  if (!lastResponse) {
+    lastResponse = assistantMsgs.find(m => m.content.includes('stratusinfosystems.com/order/'))?.content;
+  }
+  if (!lastResponse) return null;
+
+  // Extract all URLs from last response, grouped by their preceding label
+  const urlBlocks = [];
+  const responseLines = lastResponse.split('\n');
+  let currentLabel = '';
+
+  for (const line of responseLines) {
+    const trimmed = line.trim();
+    // Track section headers (Option A, Option B1, Option B2, etc.)
+    if (/option\s+(a|b|b1|b2)/i.test(trimmed)) {
+      currentLabel = trimmed.replace(/[*:]+/g, '').trim();
+    }
+    // Track term labels
+    const termLabel = trimmed.match(/^(\d-Year\s+Co-Term):/i);
+    if (termLabel) {
+      const urlMatch = trimmed.match(/(https:\/\/stratusinfosystems\.com\/order\/\?[^\s]+)/);
+      if (urlMatch) {
+        urlBlocks.push({
+          section: currentLabel,
+          term: termLabel[1],
+          url: urlMatch[1]
+        });
+      }
+    }
+    // Also catch bare URLs on the same line as term
+    if (!termLabel) {
+      const bareUrl = trimmed.match(/(https:\/\/stratusinfosystems\.com\/order\/\?[^\s]+)/);
+      if (bareUrl && !urlBlocks.find(b => b.url === bareUrl[1])) {
+        urlBlocks.push({
+          section: currentLabel,
+          term: '',
+          url: bareUrl[1]
+        });
+      }
+    }
+  }
+
+  if (urlBlocks.length === 0) return null;
+
+  // Filter by option reference if specified
+  let filtered = urlBlocks;
+  if (optionRef) {
+    const opt = optionRef[1].toUpperCase();
+    filtered = urlBlocks.filter(b => {
+      const sectionUpper = b.section.toUpperCase();
+      if (opt === 'A') return sectionUpper.includes('OPTION A');
+      if (opt === 'B1') return sectionUpper.includes('OPTION B1') || sectionUpper.includes('B1');
+      if (opt === 'B2') return sectionUpper.includes('OPTION B2') || sectionUpper.includes('B2');
+      if (opt === 'B') return sectionUpper.includes('OPTION B') && !sectionUpper.includes('B1') && !sectionUpper.includes('B2');
+      return false;
+    });
+    // If "Option B" but we only have B1/B2, include both
+    if (opt === 'B' && filtered.length === 0) {
+      filtered = urlBlocks.filter(b => b.section.toUpperCase().includes('OPTION B'));
+    }
+  }
+
+  // Filter by term if specified
+  if (termRef) {
+    const termNum = termRef[1];
+    const termFiltered = filtered.filter(b => b.term.startsWith(termNum));
+    if (termFiltered.length > 0) filtered = termFiltered;
+  }
+
+  if (filtered.length === 0) filtered = urlBlocks;
+
+  // Build pricing response for each matching URL
+  const responses = [];
+  for (const block of filtered) {
+    const parsed = parseStratusUrl(block.url);
+    if (!parsed) continue;
+    const label = [block.section, block.term].filter(Boolean).join(' — ');
+    const resp = formatPricingResponse(label || null, parsed.skus, parsed.qtys);
+    if (resp) responses.push(resp);
+  }
+
+  if (responses.length === 0) return null;
+  return responses.join('\n\n');
+}
+
+/**
+ * Extract relevant SKU prices for injection into Claude's system prompt (Option 3).
+ * Returns a pricing context string or null.
+ */
+function getRelevantPriceContext(text, history) {
+  const skusToLookup = new Set();
+
+  // Extract SKUs from the user message
+  const skuPattern = /\b([A-Z]{1,3}\d{1,4}[-A-Z0-9]*)\b/gi;
+  let match;
+  while ((match = skuPattern.exec(text)) !== null) {
+    skusToLookup.add(match[1].toUpperCase());
+  }
+
+  // Extract SKUs from recent assistant responses (URLs)
+  if (history && history.length > 0) {
+    const recentAssistant = history.filter(h => h.role === 'assistant').slice(-2);
+    for (const msg of recentAssistant) {
+      const urls = msg.content.match(/https:\/\/stratusinfosystems\.com\/order\/\?item=([^&\s]+)/g) || [];
+      for (const url of urls) {
+        const itemMatch = url.match(/item=([^&\s]+)/);
+        if (itemMatch) {
+          itemMatch[1].split(',').forEach(s => skusToLookup.add(s.trim().toUpperCase()));
+        }
+      }
+    }
+  }
+
+  if (skusToLookup.size === 0) return null;
+
+  // Look up prices for all detected SKUs
+  const priceLines = [];
+  for (const sku of skusToLookup) {
+    const p = getPrice(sku);
+    if (p) {
+      priceLines.push(`${sku}: $${p.price.toLocaleString('en-US', { minimumFractionDigits: 2 })} (list: $${p.list.toLocaleString('en-US', { minimumFractionDigits: 2 })})`);
+    }
+  }
+
+  if (priceLines.length === 0) return null;
+
+  return `## RELEVANT PRICING (Stratus eComm prices)\nUse these prices when the user asks about costs, pricing, or totals. Show itemized breakdowns with per-unit and line totals.\n${priceLines.join('\n')}`;
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   const upper = text.toUpperCase();
@@ -1385,6 +1636,13 @@ async function askClaude(userMessage, personId, env, imageData = null) {
 
     const history = personId ? await getHistory(kv, personId) : [];
 
+    // Option 3: Inject relevant pricing into system prompt for pricing questions
+    const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(userMessage);
+    if (pricingIntent) {
+      const priceContext = getRelevantPriceContext(userMessage, history);
+      if (priceContext) systemPrompt += '\n\n' + priceContext;
+    }
+
     let userContent;
     if (imageData) {
       userContent = [
@@ -1528,6 +1786,15 @@ export default {
               await sendMessage(roomId, claudeReply, token);
               return;
             }
+          }
+
+          // Try deterministic pricing calculator before Claude fallback
+          const pricingReply = await handlePricingRequest(text, personId, kv);
+          if (pricingReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', pricingReply);
+            await sendMessage(roomId, pricingReply, token);
+            return;
           }
 
           // Full fallback to Claude API
