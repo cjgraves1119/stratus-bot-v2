@@ -35,7 +35,7 @@ const PASSTHROUGH = new Set(catalog._PASSTHROUGH || []);
 
 // ─── Live Datasheet RAG ──────────────────────────────────────────────────────
 const DATASHEET_URLS = {
-  // MX Security Appliances
+  // MX Security Appliances (all verified 200 OK)
   MX67: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
   MX67W: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
   MX67C: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
@@ -48,21 +48,20 @@ const DATASHEET_URLS = {
   MX105: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95//105_Datasheet',
   MX250: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX250_Datasheet',
   MX450: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX450_Datasheet',
-  // MR Access Points
+  // MR Access Points (all verified 200 OK except MR52 which has no dedicated page)
   MR28: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR28_Datasheet',
   MR36: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36_Datasheet',
   MR36H: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36H_Datasheet',
   MR44: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR44_Datasheet',
   MR46: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR46_Datasheet',
   MR46E: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR46E_Datasheet',
-  MR52: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR52_Datasheet',
   MR57: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR57_Datasheet',
   MR76: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR76_Datasheet',
   MR78: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR78_Datasheet',
   MR86: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR86_Datasheet',
-  // CW Access Points (use family datasheets)
+  // CW Access Points (all verified 200 OK)
   CW9162I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9162_Datasheet',
-  CW9163E: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9163_Datasheet',
+  CW9163E: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9163E_Datasheet',
   CW9164I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9164_Datasheet',
   CW9166I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9166_Datasheet',
   CW9166D1: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9166_Datasheet',
@@ -70,15 +69,16 @@ const DATASHEET_URLS = {
   CW9176I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9176I_%2F%2F_CW9176D1_Datasheet',
   CW9176D1: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9176I_%2F%2F_CW9176D1_Datasheet',
   CW9178I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9178I_Datasheet',
-  // MS Switches
+  // MS Switches (verified 200 OK)
   MS130: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS130_Datasheet',
   MS150: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS150_Datasheet',
   MS390: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS390_Datasheet',
-  MS450: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS450_Datasheet',
-  // Catalyst
-  C9300: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300X-M_Datasheet',
-  // MV Cameras
-  MV2: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV2_Datasheet',
+  MS450: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS450_Overview_and_Specifications',
+  // Catalyst (all three variants verified 200 OK)
+  C9300: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300-M_Datasheet',
+  C9300X: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300X-M_Datasheet',
+  C9300L: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300L-M_Datasheet',
+  // MV Cameras (verified 200 OK)
   MV13: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV13_Datasheet',
   MV22X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/Second_Generation_MV_Cameras:_Overview_and_Specifications',
   MV23X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV23_Series_Datasheet',
@@ -88,18 +88,18 @@ const DATASHEET_URLS = {
   MV73X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV73_Series_Datasheet',
   MV84X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV84X_Datasheet',
   MV93: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV93_Series_Datasheet',
-  // Z-Series
+  // Z-Series (verified 200 OK)
   Z4: 'https://documentation.meraki.com/SASE_and_SD-WAN/Z-Series_Teleworker_Gateways/Product_Information/Z4_Datasheet',
-  // MG Cellular
-  MG21: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG21_and_MG21E_Datasheet',
-  MG41: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG41_and_MG41E_Datasheet',
-  MG51: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG51_and_MG51E_Datasheet',
-  MG52: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG52_and_MG52E_Datasheet',
-  // MT Sensors
-  MT10: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT10_and_MT11_Datasheet',
-  MT14: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT14_and_MT15_Datasheet',
-  MT20: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT20_Datasheet',
-  MT40: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT40_Datasheet',
+  // MG Cellular (verified correct paths)
+  MG21: 'https://documentation.meraki.com/SASE_and_SD-WAN/Cellular/Product_Information/Overviews_and_Datasheets',
+  MG41: 'https://documentation.meraki.com/SASE_and_SD-WAN/Cellular/Product_Information/MG_Antenna_Datasheets/MG41_Internal_Antenna_Datasheet',
+  MG51: 'https://documentation.meraki.com/SASE_and_SD-WAN/Cellular/Product_Information/MG_Antenna_Datasheets/MG51_Internal_Antenna_Datasheet',
+  MG52: 'https://documentation.meraki.com/SASE_and_SD-WAN/Cellular/Product_Information/MG_Antenna_Datasheets/MG52_Internal_Antenna_Datasheet',
+  // MT Sensors (verified correct paths)
+  MT10: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT10_Datasheet_-_Temperature_and_Humidity',
+  MT14: 'https://documentation.meraki.com/MT/MT_Datasheets/MT14_Datasheet_-_Indoor_Air_Quality_Monitor',
+  MT20: 'https://documentation.meraki.com/MT/MT_Datasheets/MT20_Datasheet_-_Open%2F%2FClose_Detection',
+  MT40: 'https://documentation.meraki.com/MT/MT_Datasheets/MT40_Datasheet_-_Smart_Power_Controller',
 };
 
 // Map model variants to their base model for datasheet lookup
@@ -122,7 +122,9 @@ function getDatasheetKey(model) {
   // Switch families (MS130-24P → MS130, MS150-48FP-4X → MS150)
   const msMatch = upper.match(/^(MS\d+)/);
   if (msMatch && DATASHEET_URLS[msMatch[1]]) return msMatch[1];
-  // Catalyst (C9300-24P-M → C9300)
+  // Catalyst (differentiate C9300X, C9300L, C9300)
+  if (upper.startsWith('C9300X')) return 'C9300X';
+  if (upper.startsWith('C9300L')) return 'C9300L';
   if (upper.startsWith('C9300') || upper.startsWith('C9200')) return 'C9300';
   // Z variants
   if (/^Z4/.test(upper)) return 'Z4';
@@ -176,7 +178,7 @@ function getStaticSpecsContext(message) {
   const modelPatterns = [
     /\b(MX\d+[A-Z]*)/g, /\b(MR\d+[A-Z]*)/g, /\b(CW\d+[A-Z]*\d*)/g,
     /\b(MS\d{3}[R]?(?:-\d+[A-Z]*(?:-\d+[A-Z])?)?)/g, /\b(MV\d+[A-Z]*)/g,
-    /\b(MT\d+)/g, /\b(MG\d+[A-Z]*)/g, /\b(Z4[A-Z]*)/g, /\b(GX\d+)/g,
+    /\b(MT\d+)/g, /\b(MG\d+[A-Z]*)/g, /\b(Z4[A-Z]*)/g,
     /\b(C9\d{3}[A-Z]*)/g,
   ];
   const found = [];
@@ -192,7 +194,7 @@ function getStaticSpecsContext(message) {
           found.push({ model, specs: familyData[model] });
         }
         // Try base model match (e.g., MS150-48FP-4G → check MS150 family)
-        const baseMatch = model.match(/^(MS\d{3}|MX\d+|MR\d+|MV\d+|MG\d+|MT\d+|CW\d+[A-Z]*\d*|Z4|GX\d+)/);
+        const baseMatch = model.match(/^(MS\d{3}|MX\d+|MR\d+|MV\d+|MG\d+|MT\d+|CW\d+[A-Z]*\d*|Z4)/);
         if (baseMatch && familyData[baseMatch[1]] && !found.some(f => f.model === baseMatch[1])) {
           found.push({ model: baseMatch[1], specs: familyData[baseMatch[1]] });
         }
@@ -231,7 +233,6 @@ async function getRelevantDatasheetContext(message) {
     /\b(MT\d+)/g,
     /\b(MG\d+[A-Z]*)/g,
     /\b(Z4[A-Z]*)/g,
-    /\b(GX\d+)/g,
     /\b(C9\d{3}[A-Z]*)/g,
   ];
   const models = new Set();
@@ -363,8 +364,8 @@ function applySuffix(sku) {
   // CW Wi-Fi 6E (916x family) → -MR
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
 
-  // MS150, MS450, C9xxx, MA- accessories, GX → no suffix
-  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('MA-') || upper.startsWith('GX')) return upper;
+  // MS150, MS450, C9xxx, MA- accessories → no suffix
+  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('MA-')) return upper;
 
   // MS130 (including MS130R) → -HW
   if (/^MS130R?-/.test(upper)) {
@@ -542,17 +543,6 @@ function getLicenseSkus(baseSku, requestedTier) {
   // MS390, MS450 → no license in URL (DNA license separate)
   if (/^MS[34][59]0/.test(upper)) return null;
 
-  // GX → SEC license, newer format
-  const gxMatch = upper.match(/^GX(\d+)/);
-  if (gxMatch) {
-    const model = gxMatch[1];
-    return [
-      { term: '1Y', sku: `LIC-GX${model}-SEC-1Y` },
-      { term: '3Y', sku: `LIC-GX${model}-SEC-3Y` },
-      { term: '5Y', sku: `LIC-GX${model}-SEC-5Y` }
-    ];
-  }
-
   // MV cameras → ENT license, older format
   const mvMatch = upper.match(/^MV(\d+)/);
   if (mvMatch) {
@@ -689,7 +679,6 @@ function detectFamily(sku) {
   if (/^MT\d/.test(sku)) return 'MT';
   if (/^MG\d/.test(sku)) return 'MG';
   if (/^Z\d/.test(sku)) return 'Z';
-  if (/^GX\d/.test(sku)) return 'GX';
   if (/^MS130/.test(sku)) return 'MS130';
   if (/^MS150/.test(sku)) return 'MS150';
   if (/^MS390/.test(sku)) return 'MS390';
@@ -825,7 +814,6 @@ function parseMessage(text) {
     /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,               // All MS families (130/150/210/225/250/350/390/425)
     /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,              // MR, MV, MT, MG — only 0-1 trailing alpha (prevents MR44S from plural "s")
     /MX\d+[A-Z]*(?:-NA)?/gi,                             // MX (including MX67C-NA, MX68CW-NA)
-    /GX\d+/gi,                                            // GX
     /Z\d+[A-Z]*/gi                                        // Z-series
   ];
 
@@ -1156,15 +1144,15 @@ Items and quantities are separate comma-separated lists in matching order.
 - MX cellular (MXxxC, MXxxCW) → add -HW-NA
 - CW Wi-Fi 6E (CW916x) → add -MR
 - CW Wi-Fi 7 (CW917x) → add -RTG
-- MS150, MS450, C9xxx-M, MA- accessories, GX → no suffix
+- MS150, MS450, C9xxx-M, MA- accessories → no suffix
 - Z4X, Z4CX → no suffix (sold as-is)
 - Legacy switches (MS120/125/210/225/250/350/425) → add -HW
 IMPORTANT: Users often omit the -HW suffix. If someone says "MR44", they mean the hardware appliance (MR44-HW). Handle this gracefully.
 
 ## LICENSE RULES (term format matters!)
-Three license tiers exist for MX/Z/GX:
+Three license tiers exist for MX/Z:
 - ENT (Enterprise): Available for ALL product families
-- SEC (Advanced Security): Available for MX (all models), Z4/Z4C, GX
+- SEC (Advanced Security): Available for MX (all models), Z4/Z4C
 - SDW (SD-WAN): Available for MX (all models) only
 
 Tier selection rules:
@@ -1172,8 +1160,6 @@ Tier selection rules:
 - Z1, Z3, Z3C: ENT ONLY. If user asks for Security, explain these only support Enterprise.
 - Z4, Z4C: ENT + SEC. Default = ENT unless user requests Security.
 - All other families (MR, MS, MV, MT, MG): ENT only.
-- GX: SEC only.
-
 Specific mappings:
 - All APs (MR + CW) → LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR
 - MX older (67/68/250/450) → LIC-MX{model}-{ENT|SEC}-1YR / -3YR / -5YR (note: SDW uses -Y not -YR)
@@ -1188,9 +1174,8 @@ Specific mappings:
 - MS150 24-port → LIC-MS150-24-1Y / -3Y / -5Y
 - MS150 48-port → LIC-MS150-48-1Y / -3Y / -5Y
 - MS390, MS450 → no license in URL (DNA license handled separately)
-- GX → LIC-GX{model}-SEC-1Y / -3Y / -5Y
 - Legacy switches (MS120/125/210/220/225/250/350/425) → LIC-MS{model}-{port}-1YR / -3YR / -5YR (e.g., MS220-48 → LIC-MS220-48-3YR)
-IMPORTANT: Watch for -YR vs -Y. Older products (MR, MX67/68/250/450, MV, legacy switches) use -1YR/-3YR/-5YR. Newer products (MX75/85/95/105, MS130, MS150, Z4, MG, MT, GX) use -1Y/-3Y/-5Y. SDW always uses -Y format.
+IMPORTANT: Watch for -YR vs -Y. Older products (MR, MX67/68/250/450, MV, legacy switches) use -1YR/-3YR/-5YR. Newer products (MX75/85/95/105, MS130, MS150, Z4, MG, MT) use -1Y/-3Y/-5Y. SDW always uses -Y format.
 
 ## MODIFIER HANDLING
 Users may request hardware-only or license-only quotes:
@@ -1214,7 +1199,6 @@ MV Cameras: MV2, MV13, MV13M, MV22, MV22X, MV23M, MV23X, MV32, MV33, MV33M, MV52
 MT Sensors: MT10, MT11, MT12, MT14, MT15, MT20, MT30, MT40
 MG Cellular: MG21, MG21E, MG41, MG41E, MG51, MG51E, MG52, MG52E
 Z-Series: Z4, Z4C, Z4X, Z4CX
-GX: GX20, GX50
 
 ## ACCURACY RULES — NEVER FABRICATE SPECS
 CRITICAL: Do NOT invent throughput numbers, user counts, port counts, or any technical specifications.

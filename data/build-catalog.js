@@ -41,7 +41,6 @@ const catalog = {
   MT: new Set(),
   MG: new Set(),
   Z: new Set(),
-  GX: new Set(),
   // Switch families need full base SKU (e.g., MS130-24P)
   MS130: new Set(),
   MS150: new Set(),
@@ -98,7 +97,6 @@ for (const rawSku of priceKeys) {
   else if (/^MT\d/.test(base)) { catalog.MT.add(base); matched = true; }
   else if (/^MG\d/.test(base)) { catalog.MG.add(base); matched = true; }
   else if (/^Z\d/.test(base)) { catalog.Z.add(base); matched = true; }
-  else if (/^GX\d/.test(base)) { catalog.GX.add(base); matched = true; }
   // Switch families (order matters — more specific first)
   else if (/^MS130R?-/.test(base)) { catalog.MS130.add(base); matched = true; }
   else if (/^MS150-/.test(base)) { catalog.MS150.add(base); matched = true; }

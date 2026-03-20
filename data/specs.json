@@ -377,8 +377,8 @@
     "MS450-12": { "ports": "12x 25G SFP28", "uplinks": "2x 100G QSFP28", "poe": "None", "switchingCapacity": "1.2 Tbps" }
   },
 
-  "C9300-M": {
-    "_family": "Catalyst 9300X-M cloud-managed with IOS-XE",
+  "C9300X-M": {
+    "_family": "Catalyst 9300X-M cloud-managed with IOS-XE (high-performance)",
     "_stacking": "1 Tbps / 480 Gbps",
     "C9300X-12Y-M": { "ports": "12x 1/10/25G SFP28", "uplinks": "Modular 10/25/40/100G", "poe": "None", "switchingCapacity": "1 Tbps" },
     "C9300X-24Y-M": { "ports": "24x 1/10/25G SFP28", "uplinks": "Modular 10/25/40/100G", "poe": "None", "switchingCapacity": "2 Tbps" },
@@ -386,6 +386,30 @@
     "C9300X-48TX-M": { "ports": "48x 10G mGig RJ45", "uplinks": "Modular", "poe": "None", "switchingCapacity": "2 Tbps" },
     "C9300X-48HX-M": { "ports": "48x 10G mGig UPoE+ RJ45", "uplinks": "Modular", "poe": "590W (single) / 1690W (dual)", "switchingCapacity": "2 Tbps" },
     "C9300X-48HXN-M": { "ports": "8x 10G + 40x 5G mGig UPoE+ RJ45", "uplinks": "Modular", "poe": "690W (single) / 1790W (dual)", "switchingCapacity": "2 Tbps" }
+  },
+
+  "C9300-M": {
+    "_family": "Catalyst 9300-M cloud-managed with IOS-XE (standard)",
+    "C9300-24T-M": { "ports": "24x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "None", "switchingCapacity": "208 Gbps" },
+    "C9300-24P-M": { "ports": "24x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "445W PoE+", "switchingCapacity": "208 Gbps" },
+    "C9300-24U-M": { "ports": "24x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "800W UPoE", "switchingCapacity": "208 Gbps" },
+    "C9300-24UX-M": { "ports": "24x mGig (8x 10G + 16x 1G)", "uplinks": "Modular 1G/10G/25G", "poe": "800W UPoE", "switchingCapacity": "480 Gbps" },
+    "C9300-48T-M": { "ports": "48x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "None", "switchingCapacity": "208 Gbps" },
+    "C9300-48P-M": { "ports": "48x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "445W PoE+", "switchingCapacity": "208 Gbps" },
+    "C9300-48U-M": { "ports": "48x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "800W UPoE", "switchingCapacity": "208 Gbps" },
+    "C9300-48UXM-M": { "ports": "48x mGig (36x 10G + 12x 1G)", "uplinks": "Modular 1G/10G/25G", "poe": "490W UPoE", "switchingCapacity": "880 Gbps" }
+  },
+
+  "C9300L-M": {
+    "_family": "Catalyst 9300L-M cloud-managed with IOS-XE (compact/cost-optimized)",
+    "C9300L-24T-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "56 Gbps" },
+    "C9300L-24P-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "445W PoE+", "switchingCapacity": "56 Gbps" },
+    "C9300L-24T-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "128 Gbps" },
+    "C9300L-24P-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "445W PoE+", "switchingCapacity": "128 Gbps" },
+    "C9300L-48T-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "104 Gbps" },
+    "C9300L-48P-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "445W PoE+", "switchingCapacity": "104 Gbps" },
+    "C9300L-48T-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "176 Gbps" },
+    "C9300L-48P-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "445W PoE+", "switchingCapacity": "176 Gbps" }
   },
 
   "Z": {
@@ -480,10 +504,5 @@
     "MG51E": { "type": "Cellular Gateway", "cellular": "5G Sub-6 + LTE", "ports": "1x 2.5G WAN, 1x GbE LAN", "note": "External antenna" },
     "MG52": { "type": "Cellular Gateway", "cellular": "5G mmWave + Sub-6 + LTE", "ports": "1x 2.5G WAN, 1x GbE LAN" },
     "MG52E": { "type": "Cellular Gateway", "cellular": "5G mmWave + Sub-6 + LTE", "ports": "1x 2.5G WAN, 1x GbE LAN", "note": "External antenna" }
-  },
-
-  "GX": {
-    "GX20": { "type": "SD-WAN appliance (small branch)", "firewallThroughput": "200 Mbps", "ports": "5x GbE" },
-    "GX50": { "type": "SD-WAN appliance (medium branch)", "firewallThroughput": "500 Mbps", "ports": "5x GbE + 1x SFP" }
   }
 }
