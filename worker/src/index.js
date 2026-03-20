@@ -814,6 +814,8 @@ function buildQuoteResponse(parsed) {
   // Multi-line license SKU list (CSV from dashboard)
   if (parsed.directLicenseList) {
     const lines = [];
+    const _primary = (r) => Array.isArray(r) ? r[0] : r;
+    const _hasAlt = (r) => Array.isArray(r) && r.length > 1;
 
     // Detect term from license SKUs (e.g. LIC-ENT-3YR → 3, LIC-MT-3Y → 3)
     let detectedTerm = null;
@@ -821,11 +823,12 @@ function buildQuoteResponse(parsed) {
       const termMatch = sku.match(/(\d+)\s*Y(?:R|EA)?$/i);
       if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
     }
-    const termLabel = detectedTerm ? `${detectedTerm}-Year Co-Term` : 'Co-Term';
+    const terms = detectedTerm ? [detectedTerm] : [1, 3, 5];
+    const requestedTier = parsed.requestedTier || null;
 
-    // Check for EOL hardware referenced in license SKUs
-    const eolWarnings = [];
-    for (const { sku } of parsed.directLicenseList) {
+    // Extract base hardware model from each license SKU and check EOL
+    const eolFound = []; // { baseModel, replacement, sku, qty }
+    for (const { sku, qty } of parsed.directLicenseList) {
       const modelMatch = sku.match(/^LIC-(MS\d{3}-[A-Z0-9]+)-\d+Y/i) ||
                          sku.match(/^LIC-(MX\d+[A-Z]*)-[A-Z]+-\d+Y/i) ||
                          sku.match(/^LIC-(Z\d+[A-Z]*)-[A-Z]+-\d+Y/i) ||
@@ -835,26 +838,102 @@ function buildQuoteResponse(parsed) {
         if (isEol(baseModel)) {
           const replacement = checkEol(baseModel);
           if (replacement) {
-            const hasAlt = Array.isArray(replacement) && replacement.length > 1;
-            if (hasAlt) {
-              eolWarnings.push(`⚠️ **${baseModel}** is End-of-Life. Replacements: **${replacement[0]}** (1G Uplink) / **${replacement[1]}** (10G Uplink)`);
-            } else {
-              const repl = Array.isArray(replacement) ? replacement[0] : replacement;
-              eolWarnings.push(`⚠️ **${baseModel}** is End-of-Life. Replacement: **${repl}**`);
-            }
+            eolFound.push({ baseModel, replacement, sku, qty });
           }
         }
       }
     }
 
-    if (eolWarnings.length > 0) {
-      lines.push(...eolWarnings);
+    // Show EOL warnings
+    if (eolFound.length > 0) {
+      for (const { baseModel, replacement } of eolFound) {
+        if (_hasAlt(replacement)) {
+          lines.push(`⚠️ **${baseModel}** is End-of-Life. Replacements: **${replacement[0]}** (1G Uplink) / **${replacement[1]}** (10G Uplink)`);
+        } else {
+          lines.push(`⚠️ **${baseModel}** is End-of-Life. Replacement: **${_primary(replacement)}**`);
+        }
+      }
       lines.push('');
     }
 
-    const url = buildStratusUrl(parsed.directLicenseList);
-    lines.push(`${termLabel}: ${url}`);
-    if (parsed.showPricing) lines.push(buildPricingBlock(parsed.directLicenseList, true));
+    // Option A — Renew existing licenses (original SKUs as submitted)
+    lines.push(`**Option A — Renew Existing Licenses:**`);
+    for (const term of terms) {
+      const url = buildStratusUrl(parsed.directLicenseList);
+      const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+      lines.push(`${termLabel}: ${url}`);
+      lines.push('');
+    }
+
+    // Option B — Refresh (only if EOL items found)
+    if (eolFound.length > 0) {
+      const hasDualUplink = eolFound.some(({ replacement }) => _hasAlt(replacement));
+
+      // Helper: build refresh URL items for a given uplink choice
+      const _buildRefreshItems = (term, uplinkIdx) => {
+        const urlItems = [];
+        const processedEolModels = new Set();
+
+        for (const { sku, qty } of parsed.directLicenseList) {
+          // Check if this license is for an EOL model
+          const eolEntry = eolFound.find(e => e.sku === sku);
+          if (eolEntry && !processedEolModels.has(eolEntry.baseModel)) {
+            processedEolModels.add(eolEntry.baseModel);
+            const repl = _hasAlt(eolEntry.replacement) ? eolEntry.replacement[uplinkIdx] : _primary(eolEntry.replacement);
+            const replHwSku = applySuffix(repl);
+            const replLicenses = getLicenseSkus(repl, requestedTier);
+            urlItems.push({ sku: replHwSku, qty });
+            if (replLicenses) {
+              const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
+              if (licSku) urlItems.push({ sku: licSku, qty });
+            }
+          } else if (!eolEntry) {
+            // Non-EOL license — pass through as-is
+            urlItems.push({ sku, qty });
+          }
+        }
+        return urlItems;
+      };
+
+      if (hasDualUplink) {
+        lines.push(`**Option B1 — Refresh (1G Uplink):**`);
+        for (const term of terms) {
+          const urlItems = _buildRefreshItems(term, 0);
+          if (urlItems.length > 0) {
+            const url = buildStratusUrl(urlItems);
+            const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+            lines.push(`${termLabel}: ${url}`);
+            lines.push('');
+          }
+        }
+        lines.push(`**Option B2 — Refresh (10G Uplink):**`);
+        for (const term of terms) {
+          const urlItems = _buildRefreshItems(term, 1);
+          if (urlItems.length > 0) {
+            const url = buildStratusUrl(urlItems);
+            const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+            lines.push(`${termLabel}: ${url}`);
+            lines.push('');
+          }
+        }
+      } else {
+        const replacementNames = [];
+        for (const { replacement } of eolFound) {
+          const name = _primary(replacement);
+          if (!replacementNames.includes(name)) replacementNames.push(name);
+        }
+        lines.push(`**Option B — Refresh to ${replacementNames.join(' / ')}:**`);
+        for (const term of terms) {
+          const urlItems = _buildRefreshItems(term, 0);
+          if (urlItems.length > 0) {
+            const url = buildStratusUrl(urlItems);
+            const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+            lines.push(`${termLabel}: ${url}`);
+            lines.push('');
+          }
+        }
+      }
+    }
 
     return { message: lines.join('\n').trim(), needsLlm: false };
   }
