@@ -813,10 +813,50 @@ function buildPricingBlock(urlItems, showPricing) {
 function buildQuoteResponse(parsed) {
   // Multi-line license SKU list (CSV from dashboard)
   if (parsed.directLicenseList) {
+    const lines = [];
+
+    // Detect term from license SKUs (e.g. LIC-ENT-3YR → 3, LIC-MT-3Y → 3)
+    let detectedTerm = null;
+    for (const { sku } of parsed.directLicenseList) {
+      const termMatch = sku.match(/(\d+)\s*Y(?:R|EA)?$/i);
+      if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
+    }
+    const termLabel = detectedTerm ? `${detectedTerm}-Year Co-Term` : 'Co-Term';
+
+    // Check for EOL hardware referenced in license SKUs
+    const eolWarnings = [];
+    for (const { sku } of parsed.directLicenseList) {
+      const modelMatch = sku.match(/^LIC-(MS\d{3}-[A-Z0-9]+)-\d+Y/i) ||
+                         sku.match(/^LIC-(MX\d+[A-Z]*)-[A-Z]+-\d+Y/i) ||
+                         sku.match(/^LIC-(Z\d+[A-Z]*)-[A-Z]+-\d+Y/i) ||
+                         sku.match(/^LIC-(MG\d+[A-Z]*)-[A-Z]+-\d+Y/i);
+      if (modelMatch) {
+        const baseModel = modelMatch[1].toUpperCase();
+        if (isEol(baseModel)) {
+          const replacement = checkEol(baseModel);
+          if (replacement) {
+            const hasAlt = Array.isArray(replacement) && replacement.length > 1;
+            if (hasAlt) {
+              eolWarnings.push(`⚠️ **${baseModel}** is End-of-Life. Replacements: **${replacement[0]}** (1G Uplink) / **${replacement[1]}** (10G Uplink)`);
+            } else {
+              const repl = Array.isArray(replacement) ? replacement[0] : replacement;
+              eolWarnings.push(`⚠️ **${baseModel}** is End-of-Life. Replacement: **${repl}**`);
+            }
+          }
+        }
+      }
+    }
+
+    if (eolWarnings.length > 0) {
+      lines.push(...eolWarnings);
+      lines.push('');
+    }
+
     const url = buildStratusUrl(parsed.directLicenseList);
-    let message = url;
-    if (parsed.showPricing) message += buildPricingBlock(parsed.directLicenseList, true);
-    return { message, needsLlm: false };
+    lines.push(`${termLabel}: ${url}`);
+    if (parsed.showPricing) lines.push(buildPricingBlock(parsed.directLicenseList, true));
+
+    return { message: lines.join('\n').trim(), needsLlm: false };
   }
 
   if (parsed.directLicense) {
