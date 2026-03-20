@@ -919,11 +919,11 @@ function buildQuoteResponse(parsed) {
         }
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
-          const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+          const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
           lines.push(`${termLabel}: ${url}`);
+          lines.push('');
         }
       }
-      lines.push('');
     }
 
     // Option B — Consolidated refresh (replacement hardware + licenses for all)
@@ -949,11 +949,11 @@ function buildQuoteResponse(parsed) {
       }
       if (urlItems.length > 0) {
         const url = buildStratusUrl(urlItems);
-        const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+        const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
         lines.push(`${termLabel}: ${url}`);
+        lines.push('');
       }
     }
-    lines.push('');
 
     // When there are EOL items AND non-EOL resolved items, we already included
     // resolved items in both Option A and B above, so skip the normal output block
@@ -1002,7 +1002,7 @@ function buildQuoteResponse(parsed) {
         }
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
-          const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+          const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
           lines.push(`**${termLabel}:** ${url}`);
           if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
           lines.push('');
