@@ -1,5 +1,5 @@
 {
-  "_generated": "2026-03-19T19:12:50.757Z",
+  "_generated": "2026-03-20T04:23:39.499Z",
   "_source": "prices.json",
   "_description": "Auto-generated valid SKU catalog. Do not edit manually — run build-catalog.js instead.",
   "_EOL_PRODUCTS": {
@@ -271,11 +271,9 @@
   ],
   "MV": [
     "MV12N",
-    "MV12W",
     "MV12WE",
     "MV13",
     "MV13M",
-    "MV2",
     "MV22",
     "MV22X",
     "MV23M",
@@ -325,10 +323,7 @@
     "Z4CX",
     "Z4X"
   ],
-  "GX": [
-    "GX20",
-    "GX50"
-  ],
+  "GX": [],
   "MS130": [
     "MS130-12X",
     "MS130-24",
@@ -383,9 +378,7 @@
     "MS225-24P",
     "MS225-48",
     "MS225-48FP",
-    "MS225-48FP-RF",
-    "MS225-48LP",
-    "MS225-48LP-RF"
+    "MS225-48LP"
   ],
   "MS250": [
     "MS250-24P",
@@ -405,11 +398,7 @@
     "CW9164I",
     "CW9166D1",
     "CW9166I",
-    "CW9172H",
-    "CW9172I",
-    "CW9176D1",
-    "CW9176I",
-    "CW9178I"
+    "CW9172H"
   ],
   "C9200L": [
     "C9200L-24P-4G-M",

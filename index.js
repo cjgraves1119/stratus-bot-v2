@@ -332,12 +332,16 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // Legacy switches (MS120/125/210/225/250/350/425) → ENT license, older format
-  if (/^MS[12345]\d{2}-/.test(upper) && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
+  // Legacy switches (MS120/125/210/225/250/350/425) → LIC-MS{model}-{port}-{term} (older -YR format)
+  // e.g., MS220-48 → LIC-MS220-48-1YR, MS225-48FP → LIC-MS225-48FP-3YR
+  const legacyMatch = upper.match(/^(MS\d{3})-(.+)/);
+  if (legacyMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150') && !upper.startsWith('MS390') && !upper.startsWith('MS450')) {
+    const model = legacyMatch[1];  // e.g., "MS220"
+    const port = legacyMatch[2];    // e.g., "48" or "48FP" or "48LP"
     return [
-      { term: '1Y', sku: 'LIC-ENT-1YR' },
-      { term: '3Y', sku: 'LIC-ENT-3YR' },
-      { term: '5Y', sku: 'LIC-ENT-5YR' }
+      { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
+      { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
+      { term: '5Y', sku: `LIC-${model}-${port}-5YR` }
     ];
   }
 
@@ -457,8 +461,67 @@ function detectFamily(sku) {
 
 // ─── Message Parser ──────────────────────────────────────────────────────────
 
+// ─── Price Lookup Helper ────────────────────────────────────────────────────
+function getPrice(sku) {
+  const upper = sku.toUpperCase();
+  if (prices[upper]) return prices[upper];
+  // Try without -HW suffix (some prices indexed by base)
+  const noHw = upper.replace(/-HW(-NA)?$/, '');
+  if (prices[noHw]) return prices[noHw];
+  return null;
+}
+
 function parseMessage(text) {
   const upper = text.toUpperCase();
+
+  // ─── Direct License SKU Input (Fix 2) ──────────────────────────────────────
+  // If user types a license SKU directly (e.g., "LIC-MS150-24-3Y"), pass it through
+  const licDirectMatch = upper.match(/^\s*((?:LIC-[A-Z0-9-]+?)(?:\s+[X×]?\s*(\d+))?)\s*$/);
+  if (licDirectMatch) {
+    // Extract just the SKU part (strip quantity if appended)
+    const fullInput = licDirectMatch[0].trim();
+    const qtyAfter = fullInput.match(/\s+[X×]?\s*(\d+)\s*$/);
+    let licSku = fullInput;
+    let qty = 1;
+    if (qtyAfter) {
+      qty = parseInt(qtyAfter[1]);
+      licSku = fullInput.slice(0, fullInput.length - qtyAfter[0].length).trim();
+    }
+    // Also check for qty before: "5 LIC-MS150-24-3Y"
+    const qtyBefore = upper.match(/^\s*(\d+)\s*[X×]?\s*(LIC-[A-Z0-9-]+)\s*$/);
+    if (qtyBefore) {
+      qty = parseInt(qtyBefore[1]);
+      licSku = qtyBefore[2];
+    }
+
+    if (licSku.startsWith('LIC-')) {
+      // Validate against prices.json
+      const priceEntry = prices[licSku];
+      if (priceEntry) {
+        return {
+          items: [],
+          directLicense: { sku: licSku, qty },
+          requestedTerm: null,
+          modifiers: { hardwareOnly: false, licenseOnly: true },
+          requestedTier: null,
+          isAdvisory: false,
+          isRevision: false,
+          showPricing: false
+        };
+      }
+      // If not found in prices, still return it — Claude or the user knows what they want
+      return {
+        items: [],
+        directLicense: { sku: licSku, qty },
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false
+      };
+    }
+  }
 
   // Detect explicitly requested term (only single-term if "just" or "only" used)
   let requestedTerm = null;
@@ -477,6 +540,9 @@ function parseMessage(text) {
   if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY)\b/.test(upper)) {
     modifiers.licenseOnly = true;
   }
+
+  // ─── Pricing Display Detection (Fix 3) ──────────────────────────────────────
+  const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
 
   // ─── License Tier Detection (Phase 3) ───────────────────────────────────────
   let requestedTier = null;
@@ -593,16 +659,51 @@ function parseMessage(text) {
   if (items.length === 0) {
     // No SKUs found — could be a revision or advisory, but not a quote request
     if (isRevision || isAdvisory) {
-      return { items: [], requestedTerm, modifiers, requestedTier, isAdvisory, isRevision };
+      return { items: [], requestedTerm, modifiers, requestedTier, isAdvisory, isRevision, showPricing };
     }
     return null;
   }
-  return { items, requestedTerm, modifiers, requestedTier, isAdvisory, isRevision };
+  return { items, requestedTerm, modifiers, requestedTier, isAdvisory, isRevision, showPricing };
 }
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
 
+function formatPrice(num) {
+  return '$' + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function buildPricingBlock(urlItems, showPricing) {
+  if (!showPricing) return '';
+  let lines = [];
+  let cartTotal = 0;
+  for (const { sku, qty } of urlItems) {
+    const priceData = getPrice(sku);
+    if (priceData) {
+      const lineTotal = priceData.price * qty;
+      cartTotal += lineTotal;
+      lines.push(`• ${qty} × ${sku} — ${formatPrice(priceData.price)} each (${formatPrice(lineTotal)})`);
+    } else {
+      lines.push(`• ${qty} × ${sku} — price not available`);
+    }
+  }
+  if (cartTotal > 0) {
+    lines.push(`**Cart Total: ${formatPrice(cartTotal)}**`);
+  }
+  return '\n' + lines.join('\n');
+}
+
 function buildQuoteResponse(parsed) {
+  // ─── Direct License SKU Passthrough (Fix 2) ──────────────────────────────
+  if (parsed.directLicense) {
+    const { sku, qty } = parsed.directLicense;
+    const url = buildStratusUrl([{ sku, qty }]);
+    let message = url;
+    if (parsed.showPricing) {
+      message += buildPricingBlock([{ sku, qty }], true);
+    }
+    return { message, needsLlm: false };
+  }
+
   // ─── Advisory intent → route to Claude (Error 3 fix) ─────────────────────
   if (parsed.isAdvisory) {
     return { message: null, needsLlm: true, advisory: true };
@@ -767,6 +868,9 @@ function buildQuoteResponse(parsed) {
         const url = buildStratusUrl(urlItems);
         const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
         lines.push(`**${termLabel}:** ${url}`);
+        if (parsed.showPricing) {
+          lines.push(buildPricingBlock(urlItems, true));
+        }
         lines.push('');
       }
     }
@@ -842,7 +946,7 @@ Specific mappings:
 - MS150 48-port → LIC-MS150-48-1Y / -3Y / -5Y
 - MS390, MS450 → no license in URL (DNA license handled separately)
 - GX → LIC-GX{model}-SEC-1Y / -3Y / -5Y
-- Legacy switches → LIC-ENT-1YR / -3YR / -5YR
+- Legacy switches (MS120/125/210/220/225/250/350/425) → LIC-MS{model}-{port}-1YR / -3YR / -5YR (e.g., MS220-48 → LIC-MS220-48-3YR)
 IMPORTANT: Watch for -YR vs -Y. Older products (MR, MX67/68/250/450, MV, legacy switches) use -1YR/-3YR/-5YR. Newer products (MX75/85/95/105, MS130, MS150, Z4, MG, MT, GX) use -1Y/-3Y/-5Y. SDW always uses -Y format.
 
 ## MODIFIER HANDLING
