@@ -340,6 +340,25 @@ async function getMessage(messageId) {
   return res.data;
 }
 
+// Download a Webex file attachment and return as base64 + media type
+async function downloadWebexFile(fileUrl) {
+  try {
+    // First request gets the redirect to the actual file
+    const res = await axios.get(fileUrl, {
+      headers: { Authorization: `Bearer ${WEBEX_BOT_TOKEN}` },
+      responseType: 'arraybuffer',
+      timeout: 15000,
+      maxContentLength: 10 * 1024 * 1024 // 10MB max
+    });
+    const contentType = res.headers['content-type'] || 'image/png';
+    const base64 = Buffer.from(res.data).toString('base64');
+    return { base64, mediaType: contentType.split(';')[0].trim() };
+  } catch (err) {
+    console.error('File download error:', err.message);
+    return null;
+  }
+}
+
 async function sendMessage(roomId, markdown) {
   await axios.post('https://webexapis.com/v1/messages', {
     roomId,
@@ -1206,6 +1225,18 @@ MT Sensors: MT10, MT11, MT12, MT14, MT15, MT20, MT30, MT40
 MG Cellular: MG21, MG21E, MG41, MG41E, MG51, MG51E, MG52, MG52E
 Z-Series: Z4, Z4C, Z4X, Z4CX
 
+## LICENSE DASHBOARD SCREENSHOT HANDLING
+When a user sends a screenshot of a Meraki license dashboard, extract the license SKU table AND the deployment table ("What your deployment looks like now").
+Apply these rules to determine the renewal quote:
+
+1. MATCH (license limit = current device count): Include at device count. No flag needed.
+2. FEWER ACTIVE DEVICES (device count < license limit): Include at the LOWER device count. Generate the URL based on device count, then note: "I noticed you have [limit] licensed but only [count] active [product]. I went with [count] for the renewal based on what's currently deployed. Let me know if you'd prefer to keep it at [limit] instead."
+3. ZERO ACTIVE DEVICES (device count = 0): REMOVE that SKU from the renewal entirely. Explain naturally: "Since you no longer have [product] currently installed, I went ahead and removed [SKU] from your renewal. If you're planning to reactivate that unit or if it's been replaced with something else, just let me know and I can revise. Otherwise everything looks good based on your current active devices."
+4. MORE DEVICES THAN LICENSES (device count > license limit): Include at device count (they need to cover all active devices). Flag the overage: "Heads up — you have [count] active [product] but only [limit] licensed. I included all [count] in the renewal to make sure you're fully covered."
+5. MT SENSORS: Skip MT entirely if device count is 5 or fewer (Meraki includes 5 free MT licenses). If device count exceeds 5, include ONLY the overage (devices minus 5). Example: 7 MT devices = include 2 MT licenses.
+
+After applying the rules, generate the renewal quote URL using only the confirmed license SKUs. Present the quote conversationally with the license list, any flags, and the quote URL. Always end by asking if any adjustments are needed.
+
 ## ACCURACY RULES — NEVER FABRICATE SPECS
 CRITICAL: Do NOT invent throughput numbers, user counts, port counts, or any technical specifications.
 When a PRODUCT SPECS section is provided, use ONLY those specs. They come from our verified specs.json cache.
@@ -1318,7 +1349,7 @@ Updated with Enterprise licensing:
 
 5-Year: https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-ENT-5Y&qty=2,2`;
 
-async function askClaude(userMessage, personId) {
+async function askClaude(userMessage, personId, imageData = null) {
   if (!anthropic) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
@@ -1356,7 +1387,18 @@ async function askClaude(userMessage, personId) {
 
     // Build messages array with conversation history
     const history = personId ? getHistory(personId) : [];
-    const messages = [...history, { role: 'user', content: userMessage }];
+
+    // Build user content — text-only or multimodal (text + image)
+    let userContent;
+    if (imageData) {
+      userContent = [
+        { type: 'image', source: { type: 'base64', media_type: imageData.mediaType, data: imageData.base64 } },
+        { type: 'text', text: userMessage || 'Please analyze this image.' }
+      ];
+    } else {
+      userContent = userMessage;
+    }
+    const messages = [...history, { role: 'user', content: userContent }];
 
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -1394,9 +1436,22 @@ app.post('/webhook', async (req, res) => {
 
     const msg = await getMessage(event.data.id);
     const text = (msg.text || '').trim();
-    if (!text) return;
-
     const roomId = msg.roomId;
+
+    // Check for image attachments (e.g., license dashboard screenshots)
+    if (msg.files && msg.files.length > 0) {
+      const fileUrl = msg.files[0]; // Process first attachment
+      const imageData = await downloadWebexFile(fileUrl);
+      if (imageData && imageData.mediaType.startsWith('image/')) {
+        const prompt = text || 'A user sent this image. Analyze it and respond accordingly.';
+        const claudeReply = await askClaude(prompt, personId, imageData);
+        await sendMessage(roomId, claudeReply);
+        return;
+      }
+      // Non-image file or download failed — fall through to text processing
+    }
+
+    if (!text) return;
 
     // Try JSON engine first
     const parsed = parseMessage(text);
