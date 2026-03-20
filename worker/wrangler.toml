@@ -1,0 +1,12 @@
+name = "stratus-ai-bot"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# Non-secret config (secrets set via `wrangler secret put`)
+# WEBEX_BOT_TOKEN = set via wrangler secret
+# ANTHROPIC_API_KEY = set via wrangler secret
+
+[[kv_namespaces]]
+binding = "CONVERSATION_KV"
+id = "360fbb8a75bf400e87cb96893a811a56"

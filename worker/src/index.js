@@ -888,31 +888,34 @@ function buildQuoteResponse(parsed) {
   if (tierWarnings.length > 0) lines.push(...tierWarnings, '');
 
   if (eolItems.length > 0) {
-    for (const { baseSku, qty, replacement } of eolItems) {
+    // List all EOL warnings first
+    const replacementNames = [];
+    for (const { baseSku, replacement } of eolItems) {
       lines.push(`⚠️ **${baseSku}** is End-of-Life. Replacement: **${replacement}**`);
-      lines.push('');
-      const renewLicenses = getLicenseSkus(baseSku, requestedTier);
-      if (renewLicenses) {
-        lines.push(`**Option A — Renew Existing ${baseSku} License:**`);
-        for (const term of terms) {
-          const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
-          if (licSku) {
-            const url = buildStratusUrl([{ sku: licSku, qty }]);
-            const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
-            lines.push(`${termLabel}: ${url}`);
-          }
-        }
-        lines.push('');
-      }
-      const replHwSku = applySuffix(replacement);
-      const replLicenses = getLicenseSkus(replacement, requestedTier);
-      lines.push(`**Option B — Refresh to ${replacement}:**`);
+      if (!replacementNames.includes(replacement)) replacementNames.push(replacement);
+    }
+    lines.push('');
+
+    // Option A — Consolidated renewal (license-only for existing EOL hardware)
+    const hasRenewLicenses = eolItems.some(({ baseSku }) => getLicenseSkus(baseSku, requestedTier));
+    if (hasRenewLicenses) {
+      lines.push(`**Option A — Renew Existing Licenses:**`);
       for (const term of terms) {
         const urlItems = [];
-        if (!modifiers.licenseOnly) urlItems.push({ sku: replHwSku, qty });
-        if (replLicenses && !modifiers.hardwareOnly) {
-          const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
-          if (licSku) urlItems.push({ sku: licSku, qty });
+        for (const { baseSku, qty } of eolItems) {
+          const renewLicenses = getLicenseSkus(baseSku, requestedTier);
+          if (renewLicenses) {
+            const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
+            if (licSku) urlItems.push({ sku: licSku, qty });
+          }
+        }
+        // Also include any non-EOL resolved items in the renewal URL
+        for (const { hwSku, qty, licenseSkus } of resolvedItems) {
+          if (!modifiers.licenseOnly) urlItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !modifiers.hardwareOnly) {
+            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+            if (licSku) urlItems.push({ sku: licSku, qty });
+          }
         }
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
@@ -921,6 +924,52 @@ function buildQuoteResponse(parsed) {
         }
       }
       lines.push('');
+    }
+
+    // Option B — Consolidated refresh (replacement hardware + licenses for all)
+    lines.push(`**Option B — Refresh to ${replacementNames.join(' / ')}:**`);
+    for (const term of terms) {
+      const urlItems = [];
+      for (const { baseSku, qty, replacement } of eolItems) {
+        const replHwSku = applySuffix(replacement);
+        const replLicenses = getLicenseSkus(replacement, requestedTier);
+        if (!modifiers.licenseOnly) urlItems.push({ sku: replHwSku, qty });
+        if (replLicenses && !modifiers.hardwareOnly) {
+          const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
+          if (licSku) urlItems.push({ sku: licSku, qty });
+        }
+      }
+      // Also include any non-EOL resolved items in the refresh URL
+      for (const { hwSku, qty, licenseSkus } of resolvedItems) {
+        if (!modifiers.licenseOnly) urlItems.push({ sku: hwSku, qty });
+        if (licenseSkus && !modifiers.hardwareOnly) {
+          const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+          if (licSku) urlItems.push({ sku: licSku, qty });
+        }
+      }
+      if (urlItems.length > 0) {
+        const url = buildStratusUrl(urlItems);
+        const termLabel = term === 1 ? '1-Year' : term === 3 ? '3-Year' : '5-Year';
+        lines.push(`${termLabel}: ${url}`);
+      }
+    }
+    lines.push('');
+
+    // When there are EOL items AND non-EOL resolved items, we already included
+    // resolved items in both Option A and B above, so skip the normal output block
+    if (resolvedItems.length > 0) {
+      if (parsed.showPricing) {
+        const allItems = [];
+        for (const { hwSku, qty, licenseSkus } of resolvedItems) {
+          if (!modifiers.licenseOnly) allItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !modifiers.hardwareOnly) {
+            const licSku = licenseSkus.find(l => l.term === '3Y')?.sku;
+            if (licSku) allItems.push({ sku: licSku, qty });
+          }
+        }
+        lines.push(buildPricingBlock(allItems, false));
+      }
+      return { message: lines.join('\n').trim(), needsLlm: false };
     }
   }
 
