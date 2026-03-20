@@ -494,9 +494,14 @@ function getLicenseSkus(baseSku, requestedTier) {
 
 // ─── URL Builder ─────────────────────────────────────────────────────────────
 function buildStratusUrl(items) {
-  const itemStr = items.map(i => i.sku).join(',');
-  const qtyStr = items.map(i => i.qty).join(',');
-  return `https://stratusinfosystems.com/order/?item=${itemStr}&qty=${qtyStr}`;
+  // Consolidate duplicate SKUs by summing quantities
+  const merged = new Map();
+  for (const { sku, qty } of items) {
+    merged.set(sku, (merged.get(sku) || 0) + qty);
+  }
+  const skus = [...merged.keys()];
+  const qtys = skus.map(s => merged.get(s));
+  return `https://stratusinfosystems.com/order/?item=${skus.join(',')}&qty=${qtys.join(',')}`;
 }
 
 // ─── EOL Check ───────────────────────────────────────────────────────────────
@@ -602,13 +607,11 @@ function parseMessage(text) {
   //   SKU,Count\nLIC-ENT-3YR,26\n...
   //   LIC-ENT-3YR 26\nLIC-MS120-8FP-3YR 4\n...
   const lines = text.trim().split(/[\n\r]+/).map(l => l.trim()).filter(Boolean);
-  // Strip header row if present
-  const dataLines = lines.filter(l => !/^\s*(SKU|ITEM|LICENSE|PRODUCT)/i.test(l));
-  if (dataLines.length >= 2) {
+  // Extract all LIC- entries, skipping headers and non-matching lines
+  if (lines.length >= 2) {
     const licItems = [];
-    let allLicense = true;
-    for (const line of dataLines) {
-      // Match: LIC-xxx,qty or LIC-xxx qty or LIC-xxx (no qty = 1)
+    for (const line of lines) {
+      // Match: LIC-xxx,qty or LIC-xxx qty
       const csvMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*[,\s]\s*(\d+)\s*$/i);
       if (csvMatch) {
         licItems.push({ sku: csvMatch[1].toUpperCase(), qty: parseInt(csvMatch[2]) });
@@ -616,16 +619,23 @@ function parseMessage(text) {
         const singleMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*$/i);
         if (singleMatch) {
           licItems.push({ sku: singleMatch[1].toUpperCase(), qty: 1 });
-        } else {
-          allLicense = false;
-          break;
         }
+        // Skip non-matching lines (headers, garbage, double-pasted data)
       }
     }
-    if (allLicense && licItems.length >= 2) {
+    // Deduplicate: if same SKU appears multiple times (e.g. double-pasted input), keep first occurrence
+    const seenSkus = new Set();
+    const dedupedItems = [];
+    for (const item of licItems) {
+      if (!seenSkus.has(item.sku)) {
+        seenSkus.add(item.sku);
+        dedupedItems.push(item);
+      }
+    }
+    if (dedupedItems.length >= 2) {
       return {
         items: [],
-        directLicenseList: licItems,
+        directLicenseList: dedupedItems,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
         requestedTier: null,
@@ -1328,7 +1338,13 @@ export default {
           if (personId === botId) return;
 
           const msg = await getMessage(event.data.id, token);
-          const text = (msg.text || '').trim();
+          // Prefer html field to preserve line breaks (Webex text field collapses newlines to spaces)
+          let text;
+          if (msg.html) {
+            text = msg.html.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+          } else {
+            text = (msg.text || '').trim();
+          }
           const roomId = msg.roomId;
 
           // Check for image attachments
