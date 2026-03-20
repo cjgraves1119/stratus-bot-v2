@@ -866,8 +866,11 @@ function parseMessage(text) {
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
 
       let qty = 1;
-      const beforeQty = before.match(/(\d+)\s*[X×]?\s*$/);
-      const afterQty = after.match(/^\s*[X×]?\s*(\d+)/);
+      // Match quantity before SKU, but NOT if the digits are part of another model number
+      // e.g., "MX75 MX85" — the "75" in MX75 should NOT be parsed as qty for MX85
+      // Require that digits are either at start of context or preceded by non-alphanumeric
+      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
+      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
 
       if (beforeQty) qty = parseInt(beforeQty[1]);
       else if (afterQty) qty = parseInt(afterQty[1]);
