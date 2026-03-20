@@ -811,6 +811,24 @@ function buildPricingBlock(urlItems, showPricing) {
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
 function buildQuoteResponse(parsed) {
+  // Build "source→target" upgrade mapping string for Option B headers
+  // eolList: array of { baseSku/baseModel, replacement } objects
+  const _buildUpgradeMap = (eolList, uplinkIdx) => {
+    const _p = (r) => Array.isArray(r) ? r[uplinkIdx || 0] : r;
+    const pairs = [];
+    const seen = new Set();
+    for (const item of eolList) {
+      const src = item.baseSku || item.baseModel;
+      const tgt = _p(item.replacement);
+      const key = `${src}→${tgt}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        pairs.push(key);
+      }
+    }
+    return pairs.join(', ');
+  };
+
   // Multi-line license SKU list (CSV from dashboard)
   if (parsed.directLicenseList) {
     const lines = [];
@@ -896,7 +914,7 @@ function buildQuoteResponse(parsed) {
       };
 
       if (hasDualUplink) {
-        lines.push(`**Option B1 — Refresh (1G Uplink):**`);
+        lines.push(`**Option B1 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolFound, 0)}):**`);
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
@@ -906,7 +924,7 @@ function buildQuoteResponse(parsed) {
             lines.push('');
           }
         }
-        lines.push(`**Option B2 — Refresh (10G Uplink):**`);
+        lines.push(`**Option B2 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolFound, 1)}):**`);
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 1);
           if (urlItems.length > 0) {
@@ -917,12 +935,7 @@ function buildQuoteResponse(parsed) {
           }
         }
       } else {
-        const replacementNames = [];
-        for (const { replacement } of eolFound) {
-          const name = _primary(replacement);
-          if (!replacementNames.includes(name)) replacementNames.push(name);
-        }
-        lines.push(`**Option B — Refresh to ${replacementNames.join(' / ')}:**`);
+        lines.push(`**Option B — Hardware Refresh (${_buildUpgradeMap(eolFound, 0)}):**`);
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
@@ -1090,8 +1103,7 @@ function buildQuoteResponse(parsed) {
     };
 
     if (hasDualUplink) {
-      // Option B1 — 1G Uplink refresh
-      lines.push(`**Option B1 — Refresh (1G Uplink):**`);
+      lines.push(`**Option B1 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolItems, 0)}):**`);
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
@@ -1102,8 +1114,7 @@ function buildQuoteResponse(parsed) {
         }
       }
 
-      // Option B2 — 10G Uplink refresh
-      lines.push(`**Option B2 — Refresh (10G Uplink):**`);
+      lines.push(`**Option B2 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolItems, 1)}):**`);
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 1);
         if (urlItems.length > 0) {
@@ -1114,13 +1125,7 @@ function buildQuoteResponse(parsed) {
         }
       }
     } else {
-      // Single replacement — Option B as before
-      const replacementNames = [];
-      for (const { replacement } of eolItems) {
-        const name = _primary(replacement);
-        if (!replacementNames.includes(name)) replacementNames.push(name);
-      }
-      lines.push(`**Option B — Refresh to ${replacementNames.join(' / ')}:**`);
+      lines.push(`**Option B — Hardware Refresh (${_buildUpgradeMap(eolItems, 0)}):**`);
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
