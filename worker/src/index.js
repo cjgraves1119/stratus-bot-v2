@@ -888,11 +888,18 @@ function buildQuoteResponse(parsed) {
   if (tierWarnings.length > 0) lines.push(...tierWarnings, '');
 
   if (eolItems.length > 0) {
+    // Normalize replacement to always be primary (first option) for warnings
+    // replacement can be a string or an array of [4G, 4X] options
+    const _primary = (r) => Array.isArray(r) ? r[0] : r;
+    const _hasAlt = (r) => Array.isArray(r) && r.length > 1;
+
     // List all EOL warnings first
-    const replacementNames = [];
     for (const { baseSku, replacement } of eolItems) {
-      lines.push(`⚠️ **${baseSku}** is End-of-Life. Replacement: **${replacement}**`);
-      if (!replacementNames.includes(replacement)) replacementNames.push(replacement);
+      if (_hasAlt(replacement)) {
+        lines.push(`⚠️ **${baseSku}** is End-of-Life. Replacements: **${replacement[0]}** (1G Uplink) / **${replacement[1]}** (10G Uplink)`);
+      } else {
+        lines.push(`⚠️ **${baseSku}** is End-of-Life. Replacement: **${_primary(replacement)}**`);
+      }
     }
     lines.push('');
 
@@ -926,20 +933,23 @@ function buildQuoteResponse(parsed) {
       }
     }
 
-    // Option B — Consolidated refresh (replacement hardware + licenses for all)
-    lines.push(`**Option B — Refresh to ${replacementNames.join(' / ')}:**`);
-    for (const term of terms) {
+    // Check if any EOL item has dual-uplink options
+    const hasDualUplink = eolItems.some(({ replacement }) => _hasAlt(replacement));
+
+    // Helper: build refresh URL items for a given uplink choice (0 = 4G, 1 = 4X)
+    const _buildRefreshItems = (term, uplinkIdx) => {
       const urlItems = [];
       for (const { baseSku, qty, replacement } of eolItems) {
-        const replHwSku = applySuffix(replacement);
-        const replLicenses = getLicenseSkus(replacement, requestedTier);
+        const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
+        const replHwSku = applySuffix(repl);
+        const replLicenses = getLicenseSkus(repl, requestedTier);
         if (!modifiers.licenseOnly) urlItems.push({ sku: replHwSku, qty });
         if (replLicenses && !modifiers.hardwareOnly) {
           const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
           if (licSku) urlItems.push({ sku: licSku, qty });
         }
       }
-      // Also include any non-EOL resolved items in the refresh URL
+      // Also include any non-EOL resolved items
       for (const { hwSku, qty, licenseSkus } of resolvedItems) {
         if (!modifiers.licenseOnly) urlItems.push({ sku: hwSku, qty });
         if (licenseSkus && !modifiers.hardwareOnly) {
@@ -947,11 +957,49 @@ function buildQuoteResponse(parsed) {
           if (licSku) urlItems.push({ sku: licSku, qty });
         }
       }
-      if (urlItems.length > 0) {
-        const url = buildStratusUrl(urlItems);
-        const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-        lines.push(`${termLabel}: ${url}`);
-        lines.push('');
+      return urlItems;
+    };
+
+    if (hasDualUplink) {
+      // Option B1 — 1G Uplink refresh
+      lines.push(`**Option B1 — Refresh (1G Uplink):**`);
+      for (const term of terms) {
+        const urlItems = _buildRefreshItems(term, 0);
+        if (urlItems.length > 0) {
+          const url = buildStratusUrl(urlItems);
+          const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+          lines.push(`${termLabel}: ${url}`);
+          lines.push('');
+        }
+      }
+
+      // Option B2 — 10G Uplink refresh
+      lines.push(`**Option B2 — Refresh (10G Uplink):**`);
+      for (const term of terms) {
+        const urlItems = _buildRefreshItems(term, 1);
+        if (urlItems.length > 0) {
+          const url = buildStratusUrl(urlItems);
+          const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+          lines.push(`${termLabel}: ${url}`);
+          lines.push('');
+        }
+      }
+    } else {
+      // Single replacement — Option B as before
+      const replacementNames = [];
+      for (const { replacement } of eolItems) {
+        const name = _primary(replacement);
+        if (!replacementNames.includes(name)) replacementNames.push(name);
+      }
+      lines.push(`**Option B — Refresh to ${replacementNames.join(' / ')}:**`);
+      for (const term of terms) {
+        const urlItems = _buildRefreshItems(term, 0);
+        if (urlItems.length > 0) {
+          const url = buildStratusUrl(urlItems);
+          const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+          lines.push(`${termLabel}: ${url}`);
+          lines.push('');
+        }
       }
     }
 
