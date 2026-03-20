@@ -700,8 +700,8 @@ async function handlePricingRequest(text, personId, kv) {
     }
   }
 
-  // Pattern 2: References to "Option A/B/B1/B2" or "X-Year" from prior conversation
-  const optionRef = text.match(/\b(?:OPTION\s+(A|B|B1|B2))\b/i);
+  // Pattern 2: References to "Option 1/2/3" (or legacy A/B/B1/B2) or "X-Year" from prior conversation
+  const optionRef = text.match(/\b(?:OPTION\s+(1|2|3|A|B|B1|B2))\b/i);
   const termRef = text.match(/\b(\d)\s*-?\s*YEAR/i);
 
   if (!personId || !kv) return null;
@@ -713,11 +713,23 @@ async function handlePricingRequest(text, personId, kv) {
   const assistantMsgs = history.filter(h => h.role === 'assistant').reverse();
   if (assistantMsgs.length === 0) return null;
 
+  // Normalize legacy option references: A→1, B1→2, B2→3, B→2
+  let normalizedOpt = optionRef ? optionRef[1].toUpperCase() : null;
+  if (normalizedOpt === 'A') normalizedOpt = '1';
+  if (normalizedOpt === 'B1') normalizedOpt = '2';
+  if (normalizedOpt === 'B2') normalizedOpt = '3';
+  if (normalizedOpt === 'B') normalizedOpt = '2'; // single refresh = Option 2
+
   // Find the best assistant message: one that contains the referenced option, or has Stratus URLs
   let lastResponse = null;
-  if (optionRef) {
-    const optKey = `OPTION ${optionRef[1].toUpperCase()}`;
+  if (normalizedOpt) {
+    const optKey = `OPTION ${normalizedOpt}`;
     lastResponse = assistantMsgs.find(m => m.content.toUpperCase().includes(optKey))?.content;
+    // Also check legacy format in history
+    if (!lastResponse && optionRef) {
+      const legacyKey = `OPTION ${optionRef[1].toUpperCase()}`;
+      lastResponse = assistantMsgs.find(m => m.content.toUpperCase().includes(legacyKey))?.content;
+    }
   }
   // Fallback: find the most recent message with Stratus order URLs
   if (!lastResponse) {
@@ -732,8 +744,8 @@ async function handlePricingRequest(text, personId, kv) {
 
   for (const line of responseLines) {
     const trimmed = line.trim();
-    // Track section headers (Option A, Option B1, Option B2, etc.)
-    if (/option\s+(a|b|b1|b2)/i.test(trimmed)) {
+    // Track section headers (Option 1, Option 2, Option 3, or legacy A/B/B1/B2)
+    if (/option\s+(\d|a|b|b1|b2)/i.test(trimmed)) {
       currentLabel = trimmed.replace(/[*:]+/g, '').trim();
     }
     // Track term labels
@@ -763,21 +775,22 @@ async function handlePricingRequest(text, personId, kv) {
 
   if (urlBlocks.length === 0) return null;
 
-  // Filter by option reference if specified
+  // Filter by option reference if specified (supports both new 1/2/3 and legacy A/B/B1/B2)
   let filtered = urlBlocks;
-  if (optionRef) {
-    const opt = optionRef[1].toUpperCase();
+  if (normalizedOpt) {
     filtered = urlBlocks.filter(b => {
-      const sectionUpper = b.section.toUpperCase();
-      if (opt === 'A') return sectionUpper.includes('OPTION A');
-      if (opt === 'B1') return sectionUpper.includes('OPTION B1') || sectionUpper.includes('B1');
-      if (opt === 'B2') return sectionUpper.includes('OPTION B2') || sectionUpper.includes('B2');
-      if (opt === 'B') return sectionUpper.includes('OPTION B') && !sectionUpper.includes('B1') && !sectionUpper.includes('B2');
+      const su = b.section.toUpperCase();
+      // Match new format: "OPTION 1", "OPTION 2", "OPTION 3"
+      if (su.includes(`OPTION ${normalizedOpt}`)) return true;
+      // Match legacy format for backward compatibility with conversation history
+      if (normalizedOpt === '1' && su.includes('OPTION A')) return true;
+      if (normalizedOpt === '2' && (su.includes('OPTION B1') || (su.includes('OPTION B') && !su.includes('B1') && !su.includes('B2')))) return true;
+      if (normalizedOpt === '3' && su.includes('OPTION B2')) return true;
       return false;
     });
-    // If "Option B" but we only have B1/B2, include both
-    if (opt === 'B' && filtered.length === 0) {
-      filtered = urlBlocks.filter(b => b.section.toUpperCase().includes('OPTION B'));
+    // If Option 2 matched nothing but there are Option B entries, try broader match
+    if (normalizedOpt === '2' && filtered.length === 0) {
+      filtered = urlBlocks.filter(b => b.section.toUpperCase().includes('OPTION B') || b.section.toUpperCase().includes('OPTION 2'));
     }
   }
 
@@ -1062,7 +1075,7 @@ function buildPricingBlock(urlItems, showPricing) {
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
 function buildQuoteResponse(parsed) {
-  // Build "source→target" upgrade mapping string for Option B headers
+  // Build "source→target" upgrade mapping string for refresh option headers
   // eolList: array of { baseSku/baseModel, replacement } objects
   const _buildUpgradeMap = (eolList, uplinkIdx) => {
     const _p = (r) => Array.isArray(r) ? r[uplinkIdx || 0] : r;
@@ -1125,8 +1138,8 @@ function buildQuoteResponse(parsed) {
       lines.push('');
     }
 
-    // Option A — Renew existing licenses (original SKUs as submitted)
-    lines.push(`**Option A — Renew Existing Licenses:**`);
+    // Option 1 — Renew existing licenses (original SKUs as submitted)
+    lines.push(`**Option 1 — Renew Existing Licenses:**`);
     for (const term of terms) {
       const url = buildStratusUrl(parsed.directLicenseList);
       const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
@@ -1134,7 +1147,7 @@ function buildQuoteResponse(parsed) {
       lines.push('');
     }
 
-    // Option B — Refresh (only if EOL items found)
+    // Option 2/3 — Refresh (only if EOL items found)
     if (eolFound.length > 0) {
       const hasDualUplink = eolFound.some(({ replacement }) => _hasAlt(replacement));
 
@@ -1165,7 +1178,7 @@ function buildQuoteResponse(parsed) {
       };
 
       if (hasDualUplink) {
-        lines.push(`**Option B1 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolFound, 0)}):**`);
+        lines.push(`**Option 2 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolFound, 0)}):**`);
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
@@ -1175,7 +1188,7 @@ function buildQuoteResponse(parsed) {
             lines.push('');
           }
         }
-        lines.push(`**Option B2 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolFound, 1)}):**`);
+        lines.push(`**Option 3 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolFound, 1)}):**`);
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 1);
           if (urlItems.length > 0) {
@@ -1186,7 +1199,7 @@ function buildQuoteResponse(parsed) {
           }
         }
       } else {
-        lines.push(`**Option B — Hardware Refresh (${_buildUpgradeMap(eolFound, 0)}):**`);
+        lines.push(`**Option 2 — Hardware Refresh (${_buildUpgradeMap(eolFound, 0)}):**`);
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
@@ -1296,10 +1309,10 @@ function buildQuoteResponse(parsed) {
     }
     lines.push('');
 
-    // Option A — Consolidated renewal (license-only for existing EOL hardware)
+    // Option 1 — Consolidated renewal (license-only for existing EOL hardware)
     const hasRenewLicenses = eolItems.some(({ baseSku }) => getLicenseSkus(baseSku, requestedTier));
     if (hasRenewLicenses) {
-      lines.push(`**Option A — Renew Existing Licenses:**`);
+      lines.push(`**Option 1 — Renew Existing Licenses:**`);
       for (const term of terms) {
         const urlItems = [];
         for (const { baseSku, qty } of eolItems) {
@@ -1354,7 +1367,7 @@ function buildQuoteResponse(parsed) {
     };
 
     if (hasDualUplink) {
-      lines.push(`**Option B1 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolItems, 0)}):**`);
+      lines.push(`**Option 2 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolItems, 0)}):**`);
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
@@ -1365,7 +1378,7 @@ function buildQuoteResponse(parsed) {
         }
       }
 
-      lines.push(`**Option B2 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolItems, 1)}):**`);
+      lines.push(`**Option 3 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolItems, 1)}):**`);
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 1);
         if (urlItems.length > 0) {
@@ -1376,7 +1389,7 @@ function buildQuoteResponse(parsed) {
         }
       }
     } else {
-      lines.push(`**Option B — Hardware Refresh (${_buildUpgradeMap(eolItems, 0)}):**`);
+      lines.push(`**Option 2 — Hardware Refresh (${_buildUpgradeMap(eolItems, 0)}):**`);
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
@@ -1389,7 +1402,7 @@ function buildQuoteResponse(parsed) {
     }
 
     // When there are EOL items AND non-EOL resolved items, we already included
-    // resolved items in both Option A and B above, so skip the normal output block
+    // resolved items in both Option 1 and 2/3 above, so skip the normal output block
     if (resolvedItems.length > 0) {
       if (parsed.showPricing) {
         const allItems = [];
@@ -1533,7 +1546,7 @@ These products are End-of-Life. ALWAYS check every product in a screenshot or re
 
 Replacements: MX60/64→MX67, MX65→MX68, MX80/84→MX85, MX100→MX105, MR33→MR36, MR42→MR44, MR52/53/56→MR57, MR74→MR76, MR84→MR86, MS120/125/210/220/225→MS130, MS250/320→MS150, MS350/410/420/425→MS390, MG21→MG41, Z1/3→Z4, Z3C→Z4C
 
-When you identify ANY EOL product, ALWAYS flag it in Important Notes AND include both a renewal option (license-only) and a refresh option (replacement hardware + all licenses).
+When you identify ANY EOL product, ALWAYS flag it in Important Notes AND include both Option 1 (renewal, license-only) and Option 2 (hardware refresh with replacement hardware + all licenses). If any replacement switch has 1G/10G uplink variants, show Option 2 (1G Uplink) and Option 3 (10G Uplink).
 
 ## LICENSE DASHBOARD SCREENSHOT HANDLING
 When a user sends a screenshot of a Meraki license dashboard, ALWAYS use this exact response format:
@@ -1563,21 +1576,21 @@ Quote the licenses EXACTLY as shown in the table. Do NOT ask for device counts. 
 • Flag any license overages
 • Flag any anomalies (0 licensed but active devices, etc.)
 
-**Renewal Quote (keeping current EOL products):**
+**Option 1 — Renew Existing Licenses:**
 
-1-Year: {URL with all license SKUs at determined quantities}
+1-Year Co-Term: {URL with all license SKUs at determined quantities}
 
-3-Year: {URL with all license SKUs at determined quantities}
+3-Year Co-Term: {URL with all license SKUs at determined quantities}
 
-5-Year: {URL with all license SKUs at determined quantities}
+5-Year Co-Term: {URL with all license SKUs at determined quantities}
 
 If ANY EOL products were found, ALWAYS include a refresh section without being asked:
 
-**Refresh Quote (upgrade to current models):**
+**Option 2 — Hardware Refresh ({source}→{replacement} mappings):**
 
-3-Year: {URL with replacement hardware SKUs (-HW suffix) + ALL license SKUs including non-EOL ones}
+3-Year Co-Term: {URL with replacement hardware SKUs (-HW suffix) + ALL license SKUs including non-EOL ones}
 
-The refresh quote replaces EOL hardware with successors and carries over ALL other licenses from the renewal. Default to 3-Year for refresh unless user specifies otherwise.
+The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. Default to 3-Year for refresh unless user specifies otherwise. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 for 1G Uplink and Option 3 for 10G Uplink.
 
 ## REFRESH / UPGRADE / HARDWARE UPGRADE SEMANTICS
 When a user asks for a "refresh option" or "upgrade option" in the context of a renewal quote:
@@ -1586,6 +1599,7 @@ When a user asks for a "refresh option" or "upgrade option" in the context of a 
 - Include the new hardware SKU with correct suffix (-HW for most, see suffix rules).
 - ALWAYS carry over ALL other licenses from the original quote. If the original had MR ENT licenses, MS licenses, etc., include ALL of them in the refresh option.
 - "Upgrade" does NOT mean changing the license tier (SEC→SDW) unless the user explicitly says "upgrade to SD-WAN" or "upgrade license".
+- Label sections as Option 1 (renewal), Option 2 (refresh / 1G uplink), Option 3 (10G uplink when applicable). Never use "Option A" or "Option B".
 
 ## HARDWARE-ONLY MODE
 When the user says "hardware only" or "hardware" (without asking about specs/info), they want ONLY hardware SKUs with NO licenses.
