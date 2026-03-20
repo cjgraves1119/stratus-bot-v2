@@ -170,6 +170,54 @@ async function fetchDatasheet(url) {
   }
 }
 
+// Extract static specs from specs.json for products mentioned in message
+function getStaticSpecsContext(message) {
+  const upper = message.toUpperCase();
+  const modelPatterns = [
+    /\b(MX\d+[A-Z]*)/g, /\b(MR\d+[A-Z]*)/g, /\b(CW\d+[A-Z]*\d*)/g,
+    /\b(MS\d{3}[R]?(?:-\d+[A-Z]*(?:-\d+[A-Z])?)?)/g, /\b(MV\d+[A-Z]*)/g,
+    /\b(MT\d+)/g, /\b(MG\d+[A-Z]*)/g, /\b(Z4[A-Z]*)/g, /\b(GX\d+)/g,
+    /\b(C9\d{3}[A-Z]*)/g,
+  ];
+  const found = [];
+  for (const pat of modelPatterns) {
+    let m;
+    while ((m = pat.exec(upper)) !== null) {
+      const model = m[1];
+      // Search all families in specs.json
+      for (const [family, familyData] of Object.entries(specs)) {
+        if (family.startsWith('_')) continue;
+        // Direct match
+        if (familyData[model]) {
+          found.push({ model, specs: familyData[model] });
+        }
+        // Try base model match (e.g., MS150-48FP-4G → check MS150 family)
+        const baseMatch = model.match(/^(MS\d{3}|MX\d+|MR\d+|MV\d+|MG\d+|MT\d+|CW\d+[A-Z]*\d*|Z4|GX\d+)/);
+        if (baseMatch && familyData[baseMatch[1]] && !found.some(f => f.model === baseMatch[1])) {
+          found.push({ model: baseMatch[1], specs: familyData[baseMatch[1]] });
+        }
+      }
+    }
+  }
+  if (found.length === 0) return null;
+
+  // Deduplicate
+  const seen = new Set();
+  const unique = found.filter(f => {
+    if (seen.has(f.model)) return false;
+    seen.add(f.model);
+    return true;
+  });
+
+  let context = '## PRODUCT SPECS (from specs.json, current as of March 2026)\n';
+  context += 'Use ONLY these specs when answering. Do not supplement with training data.\n';
+  context += 'After answering, add: "*Specs current as of March 2026. Want me to pull the latest datasheet to check for updates?"\n\n';
+  for (const { model, specs: s } of unique) {
+    context += `${model}: ${JSON.stringify(s)}\n`;
+  }
+  return context;
+}
+
 // Extract product models mentioned in a message and fetch their datasheets
 async function getRelevantDatasheetContext(message) {
   const upper = message.toUpperCase();
@@ -1170,8 +1218,10 @@ GX: GX20, GX50
 
 ## ACCURACY RULES — NEVER FABRICATE SPECS
 CRITICAL: Do NOT invent throughput numbers, user counts, port counts, or any technical specifications.
-When live datasheet content is provided (in a LIVE DATASHEET CONTENT section), use ONLY those specs. The live datasheet is fetched directly from documentation.meraki.com and is always more accurate than your training data.
-If no live datasheet is provided and you lack cached specs, say "I'd recommend checking the official Meraki datasheet for exact specs" and link to documentation.meraki.com rather than guessing. Wrong specs erode trust with customers.
+When a PRODUCT SPECS section is provided, use ONLY those specs. They come from our verified specs.json cache.
+When a LIVE DATASHEET CONTENT section is provided, it was fetched live from documentation.meraki.com and takes precedence over everything else.
+If neither is provided and you don't have specs, say "I'd recommend checking the official Meraki datasheet for exact specs" rather than guessing. Wrong specs erode trust with customers.
+After answering any spec/comparison question using cached specs, always add: "*Specs current as of March 2026. Want me to pull the latest datasheet to check for updates?"
 
 ## HANDLING INVALID OR AMBIGUOUS SKUs
 - INVALID SKU: "I couldn't find that SKU in our catalog. Could you double-check the product code? Here are some similar options: [list]"
@@ -1260,6 +1310,8 @@ The MX85 is the better fit if you need rack mounting, more VPN tunnels, or SFP L
 
 Want me to put together a quote for either one?
 
+*Specs current as of March 2026. Want me to pull the latest datasheet to check for updates?
+
 User (follow-up after quoting "10 MR44"): "remove the license"
 Response:
 Here's the updated quote with hardware only:
@@ -1279,13 +1331,37 @@ Updated with Enterprise licensing:
 async function askClaude(userMessage, personId) {
   if (!anthropic) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
-    // Fetch live datasheet context if product models are mentioned
-    const datasheetContext = await getRelevantDatasheetContext(userMessage);
+    const upper = userMessage.toUpperCase();
 
-    // Build system prompt with optional live datasheet injection
+    // Detect if user is opting in to live datasheet verification
+    const wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
+
     let systemPrompt = SYSTEM_PROMPT;
-    if (datasheetContext) {
-      systemPrompt += '\n\n' + datasheetContext;
+
+    if (wantsLiveDatasheet) {
+      // User opted in — fetch live datasheets
+      const datasheetContext = await getRelevantDatasheetContext(userMessage);
+      // Also check conversation history for product models if none found in current msg
+      if (!datasheetContext && personId) {
+        const history = getHistory(personId);
+        const lastAssistant = [...history].reverse().find(h => h.role === 'assistant');
+        if (lastAssistant) {
+          const historyContext = await getRelevantDatasheetContext(lastAssistant.content);
+          if (historyContext) {
+            systemPrompt += '\n\n' + historyContext;
+            systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences.';
+          }
+        }
+      } else if (datasheetContext) {
+        systemPrompt += '\n\n' + datasheetContext;
+        systemPrompt += '\n\nThe user requested live datasheet verification. Use the live datasheet content above as the authoritative source. Note the verification date.';
+      }
+    } else {
+      // Default path — inject static specs from specs.json for relevant products
+      const staticContext = getStaticSpecsContext(userMessage);
+      if (staticContext) {
+        systemPrompt += '\n\n' + staticContext;
+      }
     }
 
     // Build messages array with conversation history
