@@ -78,6 +78,7 @@ const DATASHEET_URLS = {
   C9300: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300-M_Datasheet',
   C9300X: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300X-M_Datasheet',
   C9300L: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300L-M_Datasheet',
+  C9200L: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9200L-M_Datasheet',
   // MV Cameras (verified 200 OK)
   MV13: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV13_Datasheet',
   MV22X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/Second_Generation_MV_Cameras:_Overview_and_Specifications',
@@ -122,10 +123,11 @@ function getDatasheetKey(model) {
   // Switch families (MS130-24P → MS130, MS150-48FP-4X → MS150)
   const msMatch = upper.match(/^(MS\d+)/);
   if (msMatch && DATASHEET_URLS[msMatch[1]]) return msMatch[1];
-  // Catalyst (differentiate C9300X, C9300L, C9300)
+  // Catalyst (differentiate C9300X, C9300L, C9300, C9200L)
   if (upper.startsWith('C9300X')) return 'C9300X';
   if (upper.startsWith('C9300L')) return 'C9300L';
-  if (upper.startsWith('C9300') || upper.startsWith('C9200')) return 'C9300';
+  if (upper.startsWith('C9300')) return 'C9300';
+  if (upper.startsWith('C9200')) return 'C9200L';
   // Z variants
   if (/^Z4/.test(upper)) return 'Z4';
   return null;
@@ -1195,6 +1197,10 @@ MS130 Switches: MS130-8, MS130-8P, MS130-8P-I, MS130-8X, MS130-12X, MS130-24, MS
 MS150 Switches: MS150-24T-4G, MS150-24P-4G, MS150-24T-4X, MS150-24P-4X, MS150-24MP-4X, MS150-48T-4G, MS150-48LP-4G, MS150-48FP-4G, MS150-48T-4X, MS150-48LP-4X, MS150-48FP-4X, MS150-48MP-4X
 MS390 Switches: MS390-24UX, MS390-48UX, MS390-48UX2
 MS450 Switches: MS450-12
+Catalyst C9300-M: C9300-24T-M, C9300-24P-M, C9300-24U-M, C9300-24UX-M, C9300-24S-M, C9300-48T-M, C9300-48P-M, C9300-48U-M, C9300-48UXM-M, C9300-48S-M, C9300-48UN-M
+Catalyst C9300X-M: C9300X-12Y-M, C9300X-24Y-M, C9300X-24HX-M, C9300X-48TX-M, C9300X-48HX-M, C9300X-48HXN-M
+Catalyst C9300L-M: C9300L-24T-4X-M, C9300L-24P-4X-M, C9300L-24UXG-4X-M, C9300L-48T-4X-M, C9300L-48P-4X-M, C9300L-48PF-4X-M, C9300L-48UXG-4X-M
+Catalyst C9200L-M: C9200L-24T-4G-M, C9200L-24P-4G-M, C9200L-24T-4X-M, C9200L-24P-4X-M, C9200L-24PXG-4X-M, C9200L-24PXG-2Y-M, C9200L-48T-4G-M, C9200L-48P-4G-M, C9200L-48PL-4G-M, C9200L-48T-4X-M, C9200L-48P-4X-M, C9200L-48PL-4X-M, C9200L-48PXG-4X-M, C9200L-48PXG-2Y-M
 MV Cameras: MV2, MV13, MV13M, MV22, MV22X, MV23M, MV23X, MV32, MV33, MV33M, MV52, MV53X, MV63, MV63M, MV63X, MV72, MV72X, MV73X, MV73M, MV84X, MV93, MV93M, MV93X
 MT Sensors: MT10, MT11, MT12, MT14, MT15, MT20, MT30, MT40
 MG Cellular: MG21, MG21E, MG41, MG41E, MG51, MG51E, MG52, MG52E

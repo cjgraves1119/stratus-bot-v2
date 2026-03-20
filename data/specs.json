@@ -412,6 +412,25 @@
     "C9300L-48P-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "445W PoE+", "switchingCapacity": "176 Gbps" }
   },
 
+  "C9200L-M": {
+    "_family": "Catalyst 9200L-M cloud-managed with IOS-XE (entry-level)",
+    "_stacking": "80 Gbps, up to 8 switches",
+    "C9200L-24T-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "56 Gbps" },
+    "C9200L-24P-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "370W PoE+", "switchingCapacity": "56 Gbps" },
+    "C9200L-24T-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "128 Gbps" },
+    "C9200L-24P-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "370W PoE+", "switchingCapacity": "128 Gbps" },
+    "C9200L-24PXG-4X-M": { "ports": "24x PoE+ (8x mGig + 16x 1G)", "uplinks": "4x 10G SFP+", "poe": "370W PoE+", "switchingCapacity": "272 Gbps" },
+    "C9200L-24PXG-2Y-M": { "ports": "24x PoE+ (8x mGig + 16x 1G)", "uplinks": "2x 25G SFP28", "poe": "370W PoE+", "switchingCapacity": "292 Gbps" },
+    "C9200L-48T-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "104 Gbps" },
+    "C9200L-48P-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "740W PoE+", "switchingCapacity": "104 Gbps" },
+    "C9200L-48PL-4G-M": { "ports": "48x 1G RJ45 (partial PoE+)", "uplinks": "4x 1G SFP", "poe": "370W PoE+", "switchingCapacity": "104 Gbps" },
+    "C9200L-48T-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "176 Gbps" },
+    "C9200L-48P-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "740W PoE+", "switchingCapacity": "176 Gbps" },
+    "C9200L-48PL-4X-M": { "ports": "48x 1G RJ45 (partial PoE+)", "uplinks": "4x 10G SFP+", "poe": "370W PoE+", "switchingCapacity": "176 Gbps" },
+    "C9200L-48PXG-4X-M": { "ports": "48x PoE+ (12x mGig + 36x 1G)", "uplinks": "4x 10G SFP+", "poe": "740W PoE+", "switchingCapacity": "392 Gbps" },
+    "C9200L-48PXG-2Y-M": { "ports": "48x PoE+ (8x mGig + 40x 1G)", "uplinks": "2x 25G SFP28", "poe": "740W PoE+", "switchingCapacity": "340 Gbps" }
+  },
+
   "Z": {
     "Z4": {
       "type": "Teleworker Gateway",
