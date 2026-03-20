@@ -27,10 +27,205 @@ const PORT = process.env.PORT || 3000;
 // ─── Load Catalogs ───────────────────────────────────────────────────────────
 const prices = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'prices.json'))).prices;
 const catalog = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'auto-catalog.json')));
+const specs = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'specs.json')));
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
 const EOL_REPLACEMENTS = catalog._EOL_REPLACEMENTS || {};
 const COMMON_MISTAKES = catalog._COMMON_MISTAKES || {};
 const PASSTHROUGH = new Set(catalog._PASSTHROUGH || []);
+
+// ─── Live Datasheet RAG ──────────────────────────────────────────────────────
+const DATASHEET_URLS = {
+  // MX Security Appliances
+  MX67: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
+  MX67W: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
+  MX67C: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
+  MX68: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
+  MX68W: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
+  MX68CW: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
+  MX75: 'https://documentation.meraki.com/MX/MX_Overviews_and_Specifications/MX75_Datasheet',
+  MX85: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX85_Datasheet',
+  MX95: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95//105_Datasheet',
+  MX105: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95//105_Datasheet',
+  MX250: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX250_Datasheet',
+  MX450: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX450_Datasheet',
+  // MR Access Points
+  MR28: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR28_Datasheet',
+  MR36: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36_Datasheet',
+  MR36H: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36H_Datasheet',
+  MR44: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR44_Datasheet',
+  MR46: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR46_Datasheet',
+  MR46E: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR46E_Datasheet',
+  MR52: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR52_Datasheet',
+  MR57: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR57_Datasheet',
+  MR76: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR76_Datasheet',
+  MR78: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR78_Datasheet',
+  MR86: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR86_Datasheet',
+  // CW Access Points (use family datasheets)
+  CW9162I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9162_Datasheet',
+  CW9163E: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9163_Datasheet',
+  CW9164I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9164_Datasheet',
+  CW9166I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9166_Datasheet',
+  CW9166D1: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9166_Datasheet',
+  CW9172H: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9172H_Datasheet',
+  CW9176I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9176I_%2F%2F_CW9176D1_Datasheet',
+  CW9176D1: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9176I_%2F%2F_CW9176D1_Datasheet',
+  CW9178I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9178I_Datasheet',
+  // MS Switches
+  MS130: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS130_Datasheet',
+  MS150: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS150_Datasheet',
+  MS390: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS390_Datasheet',
+  MS450: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS450_Datasheet',
+  // Catalyst
+  C9300: 'https://documentation.meraki.com/Switching/Cloud_Management_with_IOS_XE/Product_Information/Overviews_and_Datasheets/Catalyst_9300X-M_Datasheet',
+  // MV Cameras
+  MV2: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV2_Datasheet',
+  MV13: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV13_Datasheet',
+  MV22X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/Second_Generation_MV_Cameras:_Overview_and_Specifications',
+  MV23X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV23_Series_Datasheet',
+  MV33: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV33_Datasheet',
+  MV53X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV53X_Datasheet',
+  MV63: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/Third_Generation_MV_Cameras:_Overview_and_Specifications',
+  MV73X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV73_Series_Datasheet',
+  MV84X: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV84X_Datasheet',
+  MV93: 'https://documentation.meraki.com/IoT/MV_-_Smart_Cameras/Product_Information/MV_Overviews_and_Datasheets/MV93_Series_Datasheet',
+  // Z-Series
+  Z4: 'https://documentation.meraki.com/SASE_and_SD-WAN/Z-Series_Teleworker_Gateways/Product_Information/Z4_Datasheet',
+  // MG Cellular
+  MG21: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG21_and_MG21E_Datasheet',
+  MG41: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG41_and_MG41E_Datasheet',
+  MG51: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG51_and_MG51E_Datasheet',
+  MG52: 'https://documentation.meraki.com/IoT/MG_-_Cellular_Gateway/Product_Information/MG_Overviews_and_Datasheets/MG52_and_MG52E_Datasheet',
+  // MT Sensors
+  MT10: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT10_and_MT11_Datasheet',
+  MT14: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT14_and_MT15_Datasheet',
+  MT20: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT20_Datasheet',
+  MT40: 'https://documentation.meraki.com/IoT/MT_-_Sensors/Product_Information/MT_Overviews_and_Datasheets/MT40_Datasheet',
+};
+
+// Map model variants to their base model for datasheet lookup
+function getDatasheetKey(model) {
+  const upper = model.toUpperCase();
+  // Direct match
+  if (DATASHEET_URLS[upper]) return upper;
+  // MX variants (MX67C-NA → MX67C → MX67)
+  const mxMatch = upper.match(/^(MX\d+[A-Z]*)/);
+  if (mxMatch && DATASHEET_URLS[mxMatch[1]]) return mxMatch[1];
+  // MG/MT variants (MG21E → MG21)
+  const mgmtMatch = upper.match(/^(M[GT]\d+)/);
+  if (mgmtMatch && DATASHEET_URLS[mgmtMatch[1]]) return mgmtMatch[1];
+  // MV variants (MV33M → MV33, MV63M → MV63)
+  const mvMatch = upper.match(/^(MV\d+)/);
+  if (mvMatch && DATASHEET_URLS[mvMatch[1]]) return mvMatch[1];
+  // CW variants
+  const cwMatch = upper.match(/^(CW\d+[A-Z]*\d*)/);
+  if (cwMatch && DATASHEET_URLS[cwMatch[1]]) return cwMatch[1];
+  // Switch families (MS130-24P → MS130, MS150-48FP-4X → MS150)
+  const msMatch = upper.match(/^(MS\d+)/);
+  if (msMatch && DATASHEET_URLS[msMatch[1]]) return msMatch[1];
+  // Catalyst (C9300-24P-M → C9300)
+  if (upper.startsWith('C9300') || upper.startsWith('C9200')) return 'C9300';
+  // Z variants
+  if (/^Z4/.test(upper)) return 'Z4';
+  return null;
+}
+
+// Fetch datasheet content with cache (5 min TTL)
+const datasheetCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000;
+
+async function fetchDatasheet(url) {
+  const now = Date.now();
+  const cached = datasheetCache.get(url);
+  if (cached && (now - cached.time) < CACHE_TTL) return cached.text;
+
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'StratusAI-Bot/1.0 (spec-lookup)' },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    // Strip HTML tags, collapse whitespace, extract text content
+    const text = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
+      .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
+      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#\d+;/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    // Truncate to ~3000 chars to keep Claude context lean
+    const truncated = text.length > 3000 ? text.slice(0, 3000) + '...' : text;
+    datasheetCache.set(url, { text: truncated, time: now });
+    return truncated;
+  } catch (e) {
+    console.error(`Datasheet fetch failed for ${url}:`, e.message);
+    return null;
+  }
+}
+
+// Extract product models mentioned in a message and fetch their datasheets
+async function getRelevantDatasheetContext(message) {
+  const upper = message.toUpperCase();
+  // Find all product models mentioned
+  const modelPatterns = [
+    /\b(MX\d+[A-Z]*)/g,
+    /\b(MR\d+[A-Z]*)/g,
+    /\b(CW\d+[A-Z]*\d*)/g,
+    /\b(MS\d{3}[R]?(?:-\d+[A-Z]*(?:-\d+[A-Z])?)?)/g,
+    /\b(MV\d+[A-Z]*)/g,
+    /\b(MT\d+)/g,
+    /\b(MG\d+[A-Z]*)/g,
+    /\b(Z4[A-Z]*)/g,
+    /\b(GX\d+)/g,
+    /\b(C9\d{3}[A-Z]*)/g,
+  ];
+  const models = new Set();
+  for (const pat of modelPatterns) {
+    let m;
+    while ((m = pat.exec(upper)) !== null) {
+      const key = getDatasheetKey(m[1]);
+      if (key) models.add(key);
+    }
+  }
+  if (models.size === 0) return null;
+
+  // Fetch datasheets in parallel (max 3 to limit latency)
+  const keys = [...models].slice(0, 3);
+  const uniqueUrls = [...new Set(keys.map(k => DATASHEET_URLS[k]))];
+  const fetches = uniqueUrls.map(async url => {
+    const text = await fetchDatasheet(url);
+    return text ? `[Datasheet: ${url}]\n${text}` : null;
+  });
+  const results = (await Promise.all(fetches)).filter(Boolean);
+  if (results.length === 0) return null;
+
+  // Also include static specs as quick-reference fallback
+  const staticSpecs = [];
+  for (const key of keys) {
+    for (const family of Object.keys(specs)) {
+      if (family.startsWith('_')) continue;
+      const familyData = specs[family];
+      if (familyData[key]) {
+        staticSpecs.push(`${key}: ${JSON.stringify(familyData[key])}`);
+      }
+    }
+  }
+
+  let context = '## LIVE DATASHEET CONTENT (use this as your primary source for specs)\n' +
+    results.join('\n\n');
+  if (staticSpecs.length > 0) {
+    context += '\n\n## CACHED SPECS (fallback if datasheet content is unclear)\n' +
+      staticSpecs.join('\n');
+  }
+  return context;
+}
 
 // Build a flat Set of all valid base SKUs for fast lookup
 const VALID_SKUS = new Set();
@@ -974,17 +1169,9 @@ Z-Series: Z4, Z4C, Z4X, Z4CX
 GX: GX20, GX50
 
 ## ACCURACY RULES — NEVER FABRICATE SPECS
-CRITICAL: Do NOT invent throughput numbers, user counts, port counts, or any technical specifications. If you are not certain of a spec from the reference data below, say "I'd recommend checking the official Meraki datasheet for exact specs" rather than guessing. Wrong specs erode trust with customers.
-
-## PRODUCT SPECS REFERENCE (use ONLY these when answering comparison/spec questions)
-MX75: 1 Gbps firewall/VPN throughput, up to 200 devices, desktop form factor, 3 WAN (1x SFP + 2x RJ45), 10 LAN (8x RJ45 + 2x RJ45 PoE+), 75 max VPN tunnels
-MX85: 1 Gbps firewall/VPN throughput, up to 250 devices, rack-mount form factor, 4 WAN (2x SFP + 2x RJ45 with PoE+ on port 4), 10 LAN (8x RJ45 + 2x SFP), 200 max VPN tunnels, dedicated mgmt port
-MX95: 2 Gbps firewall throughput, up to 500 devices, rack-mount
-MX105: 3 Gbps firewall throughput, up to 750 devices, rack-mount
-MX250: 4 Gbps firewall throughput, up to 2000 devices, rack-mount
-MX450: 6 Gbps firewall throughput, up to 10000 devices, rack-mount
-MX67/68: 450 Mbps firewall throughput, up to 50 devices, desktop
-For any specs not listed above, direct the user to documentation.meraki.com for the official datasheet.
+CRITICAL: Do NOT invent throughput numbers, user counts, port counts, or any technical specifications.
+When live datasheet content is provided (in a LIVE DATASHEET CONTENT section), use ONLY those specs. The live datasheet is fetched directly from documentation.meraki.com and is always more accurate than your training data.
+If no live datasheet is provided and you lack cached specs, say "I'd recommend checking the official Meraki datasheet for exact specs" and link to documentation.meraki.com rather than guessing. Wrong specs erode trust with customers.
 
 ## HANDLING INVALID OR AMBIGUOUS SKUs
 - INVALID SKU: "I couldn't find that SKU in our catalog. Could you double-check the product code? Here are some similar options: [list]"
@@ -1092,6 +1279,15 @@ Updated with Enterprise licensing:
 async function askClaude(userMessage, personId) {
   if (!anthropic) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
+    // Fetch live datasheet context if product models are mentioned
+    const datasheetContext = await getRelevantDatasheetContext(userMessage);
+
+    // Build system prompt with optional live datasheet injection
+    let systemPrompt = SYSTEM_PROMPT;
+    if (datasheetContext) {
+      systemPrompt += '\n\n' + datasheetContext;
+    }
+
     // Build messages array with conversation history
     const history = personId ? getHistory(personId) : [];
     const messages = [...history, { role: 'user', content: userMessage }];
@@ -1099,7 +1295,7 @@ async function askClaude(userMessage, personId) {
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages
     });
     const reply = response.content[0].text;
