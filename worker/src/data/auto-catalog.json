@@ -4,13 +4,24 @@
   "_description": "Auto-generated valid SKU catalog. Do not edit manually — run build-catalog.js instead.",
   "_EOL_PRODUCTS": {
     "MR": [
+      "12",
+      "16",
+      "18",
+      "24",
+      "26",
+      "30H",
+      "32",
       "33",
+      "34",
       "42",
       "42E",
       "52",
       "53",
       "53E",
       "56",
+      "62",
+      "66",
+      "72",
       "74",
       "84"
     ],
@@ -23,7 +34,12 @@
       "65W",
       "80",
       "84",
-      "100"
+      "100",
+      "400",
+      "600"
+    ],
+    "MV": [
+      "21"
     ],
     "MG": [
       "21",
@@ -97,6 +113,12 @@
       "48FP",
       "48X"
     ],
+    "MS355": [
+      "24X",
+      "24X2",
+      "48X",
+      "48X2"
+    ],
     "MS410": [
       "16",
       "32"
@@ -111,7 +133,15 @@
     ]
   },
   "_EOL_REPLACEMENTS": {
+    "MR12": "MR28",
+    "MR16": "MR28",
+    "MR18": "MR28",
+    "MR24": "MR36",
+    "MR26": "MR36",
+    "MR30H": "MR36H",
+    "MR32": "MR36",
     "MR33": "MR36",
+    "MR34": "MR44",
     "MR42": "MR44",
     "MR42E": "MR46E",
     "MR52": "MR57",
@@ -119,6 +149,9 @@
     "MR53E": "MR57",
     "MR56": "MR57",
     "MR74": "MR76",
+    "MR62": "MR76",
+    "MR66": "MR78",
+    "MR72": "MR86",
     "MR84": "MR86",
     "MX60": "MX67",
     "MX60W": "MX67W",
@@ -129,6 +162,9 @@
     "MX80": "MX85",
     "MX84": "MX85",
     "MX100": "MX105",
+    "MX400": "MX450",
+    "MX600": "MX450",
+    "MV21": "MV23M",
     "MG21": "MG41",
     "MG21E": "MG41E",
     "Z1": "Z4",
@@ -181,6 +217,11 @@
     "MS320-48": ["MS150-48T-4G", "MS150-48T-4X"],
     "MS320-48LP": ["MS150-48LP-4G", "MS150-48LP-4X"],
     "MS320-48FP": ["MS150-48FP-4G", "MS150-48FP-4X"],
+    "MS355": "MS390",
+    "MS355-24X": "MS390-24UX",
+    "MS355-24X2": "MS390-24UX",
+    "MS355-48X": "MS390-48UX",
+    "MS355-48X2": "MS390-48UX",
     "MS350": "MS390",
     "MS350-24": "MS390-24UX",
     "MS350-24P": "MS390-24UX",
@@ -281,6 +322,38 @@
       "suggest": [
         "CW9176I",
         "CW9176D1"
+      ]
+    },
+    "MV12W": {
+      "error": "SKU updated to MV12WE",
+      "suggest": [
+        "MV12WE"
+      ]
+    },
+    "MS390-48P": {
+      "error": "MS390 only comes in UX variants",
+      "suggest": [
+        "MS390-48UX",
+        "MS390-48UX2"
+      ]
+    },
+    "MS390-24P": {
+      "error": "MS390 only comes in UX variants",
+      "suggest": [
+        "MS390-24UX"
+      ]
+    },
+    "MS390-48": {
+      "error": "MS390 only comes in UX variants",
+      "suggest": [
+        "MS390-48UX",
+        "MS390-48UX2"
+      ]
+    },
+    "MS390-24": {
+      "error": "MS390 only comes in UX variants",
+      "suggest": [
+        "MS390-24UX"
       ]
     }
   },

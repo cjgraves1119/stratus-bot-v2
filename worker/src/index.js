@@ -458,7 +458,9 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  if (/^MS[34][59]0/.test(upper)) return null;
+  // MS390 and MS450 use Cisco DNA licensing (not Meraki), so return null
+  // Note: MS350 and MS355 DO use Meraki licensing — don't block them
+  if (/^MS390/.test(upper) || /^MS450/.test(upper)) return null;
 
   const mvMatch = upper.match(/^MV(\d+)/);
   if (mvMatch) {
@@ -910,6 +912,39 @@ function parseMessage(text) {
     }
   }
 
+  // Multi-line bare model list (one device per line, no quantities)
+  // Detects patterns like: MR36\nMR36\nMS250-24P\nMR44\n...
+  // Counts occurrences of each model to derive quantities
+  if (lines.length >= 3) {
+    const modelPattern = /^\s*((?:MR|MV|MT|MG|MX|CW9|MS|C9|Z)\d[A-Z0-9-]*)\s*$/i;
+    const modelLines = lines.filter(l => modelPattern.test(l));
+    // If at least 70% of non-empty lines are bare model numbers, treat as a device list
+    if (modelLines.length >= 3 && modelLines.length / lines.length >= 0.7) {
+      const counts = new Map();
+      for (const line of modelLines) {
+        const m = line.match(modelPattern);
+        if (m) {
+          const sku = m[1].toUpperCase();
+          counts.set(sku, (counts.get(sku) || 0) + 1);
+        }
+      }
+      const items = [...counts.entries()].map(([baseSku, qty]) => ({ baseSku, qty }));
+      // Detect license-related intent from surrounding text
+      const nonModelLines = lines.filter(l => !modelPattern.test(l)).join(' ').toUpperCase();
+      const isLicenseOnly = /\b(LICENSE|RENEWAL|RENEW|LIC)\b/.test(nonModelLines);
+      const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?)\b/.test(nonModelLines);
+      return {
+        items,
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: isLicenseOnly },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing
+      };
+    }
+  }
+
   // Direct License SKU Input (single line)
   const licDirectMatch = upper.match(/^\s*((?:LIC-[A-Z0-9-]+?)(?:\s+[X×]?\s*(\d+))?)\s*$/);
   if (licDirectMatch) {
@@ -1262,17 +1297,12 @@ function buildQuoteResponse(parsed) {
     resolvedItems.push({ baseSku, hwSku, qty, licenseSkus, eol: false });
   }
 
-  if (errors.length > 0) {
+  if (errors.length > 0 && resolvedItems.length === 0 && eolItems.length === 0) {
+    // ALL items are invalid — block entirely
     const allPartialMatches = parsed.items.every(({ baseSku }) => {
       const v = validateSku(baseSku);
       return v.valid || (!v.valid && v.isPartialMatch && v.suggest && v.suggest.length > 0);
     });
-    if (resolvedItems.length > 0) {
-      const lines = [...errors];
-      lines.push('');
-      lines.push('Please correct the invalid SKU(s) above and try again. I can only generate a quote when all items are valid.');
-      return { message: lines.join('\n'), needsLlm: false };
-    }
     if (allPartialMatches) {
       const lines = [];
       for (const { baseSku } of parsed.items) {
@@ -1289,8 +1319,15 @@ function buildQuoteResponse(parsed) {
     }
     return { message: null, needsLlm: true, errors };
   }
+  // If some items are invalid but others are valid/EOL, proceed with valid items
+  // and append errors as warnings at the top
 
   let lines = [];
+  // Prepend invalid SKU warnings when processing alongside valid items
+  if (errors.length > 0) {
+    lines.push(...errors, '');
+    lines.push('_The items above were skipped. Quote generated for recognized models below._', '');
+  }
   if (tierWarnings.length > 0) lines.push(...tierWarnings, '');
 
   if (eolItems.length > 0) {
