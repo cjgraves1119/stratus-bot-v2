@@ -872,6 +872,60 @@ function handleEolDateRequest(text) {
 }
 
 /**
+ * Detect "yes, generate a quote" type follow-ups and route through the deterministic engine.
+ * Extracts SKUs from the last assistant message (specs response or product discussion)
+ * and builds a proper quote via parseMessage() + buildQuoteResponse().
+ * Returns a response string if handled, or null to pass through to Claude.
+ */
+async function handleQuoteConfirmation(text, personId, kv) {
+  // Detect quote confirmation intent
+  const confirmIntent = /^\s*(yes|yeah|yep|yea|sure|please|go ahead|do it|quote it|generate (a |the )?quote|yes.*quote|please.*quote|let'?s do it|go for it)\s*[.!]?\s*$/i.test(text);
+  if (!confirmIntent) return null;
+  if (!personId || !kv) return null;
+
+  const history = await getHistory(kv, personId);
+  if (history.length === 0) return null;
+
+  // Find the most recent assistant message
+  const assistantMsgs = history.filter(h => h.role === 'assistant').reverse();
+  if (assistantMsgs.length === 0) return null;
+
+  const lastAssistant = assistantMsgs[0].content;
+
+  // Check if the last assistant message was offering to generate a quote (specs/advisory response)
+  // and does NOT already contain Stratus order URLs (already a quote)
+  if (lastAssistant.includes('stratusinfosystems.com/order/')) return null;
+  if (!/quote|would you like/i.test(lastAssistant)) return null;
+
+  // Extract SKUs from the assistant's response — look for bold product names or SKU patterns
+  const skuPattern = /\b((?:MR|MX|MV|MG|MS|MT|CW|Z|C9)\d[\w-]*(?:-M)?)\b/gi;
+  const matches = [...lastAssistant.matchAll(skuPattern)];
+  if (matches.length === 0) return null;
+
+  // Deduplicate and take the first/primary SKU mentioned (typically the one in the title)
+  const allSkus = [...new Set(matches.map(m => m[1].toUpperCase()))];
+
+  // Filter to likely hardware SKUs (not license SKUs or generic terms)
+  const hwSkus = allSkus.filter(s => !s.startsWith('LIC-') && !s.startsWith('LIC'));
+
+  if (hwSkus.length === 0) return null;
+
+  // Build a synthetic quote request and route through parseMessage + buildQuoteResponse
+  const syntheticRequest = `quote ${hwSkus.map(s => `1 ${s}`).join(', ')}`;
+  const parsed = parseMessage(syntheticRequest);
+
+  if (parsed && parsed.items && parsed.items.length > 0) {
+    const result = buildQuoteResponse(parsed);
+    if (!result.needsLlm && result.message) {
+      return result.message;
+    }
+  }
+
+  // Couldn't build deterministic quote — fall through to Claude
+  return null;
+}
+
+/**
  * Detect pricing intent and handle deterministically.
  * Returns a response string if handled, or null to pass through to Claude.
  */
@@ -1813,27 +1867,84 @@ Items and quantities are separate comma-separated lists in matching order.
 - Z4X, Z4CX → no suffix (sold as-is)
 - Legacy switches (MS120/125/210/225/250/350/425) → add -HW
 
-## LICENSE RULES (term format matters!)
+## LICENSE RULES (CRITICAL — term suffix format matters! Follow EXACTLY)
 Three license tiers exist for MX/Z:
 - ENT (Enterprise): Available for ALL product families
-- SEC (Advanced Security): Available for MX (all models), Z4/Z4C
-- SDW (SD-WAN): Available for MX (all models) only
+- SEC (Advanced Security): Available for MX (all models), Z4/Z4C. DEFAULT for MX and Z4/Z4C.
+- SDW (SD-WAN): Available for MX (all models) only. ALWAYS uses -Y suffix regardless of model age.
 
-Specific mappings:
-- All APs (MR + CW) → LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR
-- MX older (67/68/250/450) → LIC-MX{model}-{ENT|SEC}-1YR / -3YR / -5YR
-- MX newer (75/85/95/105) → LIC-MX{model}-{ENT|SEC|SDW}-1Y / -3Y / -5Y
-- Z1/Z3/Z3C → LIC-Z{model}-ENT-1YR / -3YR / -5YR
-- Z4/Z4C → LIC-Z{model}-{SEC|ENT}-1Y / -3Y / -5Y (default SEC)
-- MG → LIC-MG{model}-ENT-1Y / -3Y / -5Y
-- MV → LIC-MV-1YR / -3YR / -5YR
-- MT → LIC-MT-1Y / -3Y / -5Y
-- MS130 compact (8/8P/8X/12X) → LIC-MS130-CMPT-1Y / -3Y / -5Y
-- MS130 standard (24/48) → LIC-MS130-{24/48}-1Y / -3Y / -5Y
-- MS150 → LIC-MS150-{24/48}-1Y / -3Y / -5Y
-- MS390 → LIC-MS390-{model}-{term} (e.g. LIC-MS390-48UX-1YR)
-- MS450 → LIC-MS450-{model}-{term} (e.g. LIC-MS450-12-1YR)
-- Legacy switches → LIC-MS{model}-{port}-1YR / -3YR / -5YR
+EXACT license SKU mappings by product family:
+
+### APs (MR + CW) — all use generic ENT license
+- All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
+- CW9800 wireless controllers → NO license association
+
+### MX Security Appliances — term suffix depends on model number
+- MX67, MX67W, MX67C, MX68, MX68W, MX68CW, MX250, MX450 (older) → -YR suffix
+  Examples: LIC-MX67-SEC-1YR, LIC-MX68CW-SEC-3YR, LIC-MX250-SEC-5YR
+- MX75, MX85, MX95, MX105 (newer) → -Y suffix
+  Examples: LIC-MX75-SEC-1Y, LIC-MX85-SEC-3Y, LIC-MX95-ENT-5Y
+- MX cellular (-NA variants): license uses the C/CW model WITHOUT -NA
+  Examples: MX67C-HW-NA → LIC-MX67C-SEC-1YR, MX68CW-HW-NA → LIC-MX68CW-SEC-1YR
+- SDW tier ALWAYS uses -Y suffix: LIC-MX85-SDW-1Y, LIC-MX67-SDW-1Y
+
+### Z-Series
+- Z1, Z3, Z3C (legacy) → ENT only, -YR suffix: LIC-Z1-ENT-1YR, LIC-Z3C-ENT-3YR
+- Z4, Z4C → SEC default, -Y suffix: LIC-Z4-SEC-1Y, LIC-Z4C-SEC-3Y
+- Z4X, Z4CX → same as Z4/Z4C (X is hardware suffix only, not in license SKU)
+
+### MG Cellular Gateways — -Y suffix, strip E from model
+- MG21/MG21E → LIC-MG21-ENT-1Y, -3Y, -5Y
+- MG41/MG41E → LIC-MG41-ENT-1Y, -3Y, -5Y
+- MG51/MG51E → LIC-MG51-ENT-1Y, -3Y, -5Y
+- MG52/MG52E → LIC-MG52-ENT-1Y, -3Y, -5Y
+
+### MV Cameras — generic, -YR suffix
+- ALL MV models → LIC-MV-1YR, LIC-MV-3YR, LIC-MV-5YR
+
+### MT Sensors — generic, -Y suffix
+- ALL MT models → LIC-MT-1Y, LIC-MT-3Y, LIC-MT-5Y
+
+### MS130 Switches — -Y suffix
+- Compact (8/8P/8X/8P-I/12X, MS130R-8P) → LIC-MS130-CMPT-1Y, -3Y, -5Y
+- Standard → LIC-MS130-{24|48}-1Y, -3Y, -5Y
+
+### MS150 Switches — -Y suffix
+- All variants → LIC-MS150-{24|48}-1Y, -3Y, -5Y (port count only, ignore uplink)
+
+### MS390 Switches — port count + tier, -Y suffix
+- MS390-24UX → LIC-MS390-24E-1Y, -3Y, -5Y
+- MS390-48UX → LIC-MS390-48E-1Y, -3Y, -5Y
+- Use port count only (24 or 48), drop variant letters. Tier A or E (default E).
+
+### MS450 Switches — -Y suffix
+- MS450-12 → LIC-MS450-12E-1Y, -3Y, -5Y
+
+### Catalyst C9300-M — port count + tier, -Y suffix
+- C9300-24T-M, C9300-24P-M, etc. → LIC-C9300-24E-1Y, -3Y, -5Y
+- C9300-48T-M, C9300-48P-M, C9300-48UXM-M, etc. → LIC-C9300-48E-1Y, -3Y, -5Y
+
+### Catalyst C9300X-M — MAPS TO C9300 licenses (C9300X has NO its own license SKUs!)
+- C9300X-24Y-M, C9300X-24HX-M → LIC-C9300-24E-1Y, -3Y, -5Y
+- C9300X-48TX-M, C9300X-48HX-M, C9300X-48HXN-M → LIC-C9300-48E-1Y, -3Y, -5Y
+- C9300X-12Y-M → LIC-C9300-24E-1Y, -3Y, -5Y (12-port uses 24-port license!)
+
+### Catalyst C9300L-M — MAPS TO C9300 licenses (C9300L has NO its own license SKUs!)
+- C9300L-24T-4X-M, C9300L-24P-4X-M, etc. → LIC-C9300-24E-1Y, -3Y, -5Y
+- C9300L-48T-4X-M, C9300L-48P-4X-M, etc. → LIC-C9300-48E-1Y, -3Y, -5Y
+
+### Catalyst C9200L-M — -Y suffix
+- C9200L-24T-4G-M, C9200L-24P-4X-M, etc. → LIC-C9200L-24E-1Y, -3Y, -5Y
+- C9200L-48T-4G-M, C9200L-48P-4X-M, etc. → LIC-C9200L-48E-1Y, -3Y, -5Y
+
+### Catalyst C9350 — NO 1Y option, only 3Y and 5Y
+- C9350-24* → LIC-C9350-24E-3Y, LIC-C9350-24E-5Y
+- C9350-48* → LIC-C9350-48E-3Y, LIC-C9350-48E-5Y
+
+### Legacy Switches (all EOL) — -YR suffix
+- MS120/125/210/220/225/250/320/350/355/410/420/425 → LIC-{model}-{variant}-1YR, -3YR, -5YR
+  Examples: LIC-MS250-48FP-1YR, LIC-MS350-24X-1YR
+  Exception: MS350-48X uses LIC-MS350-48-1YR (drop the X from 48-port only)
 
 ## VALID PRODUCT CATALOG
 APs (MR): MR28, MR36, MR36H, MR44, MR46, MR46E, MR52, MR57, MR76, MR78, MR86
@@ -2101,6 +2212,15 @@ export default {
             await addToHistory(kv, personId, 'user', text);
             await addToHistory(kv, personId, 'assistant', eolDateReply);
             await sendMessage(roomId, eolDateReply, token);
+            return;
+          }
+
+          // Try deterministic quote confirmation (e.g. "yes" after a specs response)
+          const quoteConfirmReply = await handleQuoteConfirmation(text, personId, kv);
+          if (quoteConfirmReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', quoteConfirmReply);
+            await sendMessage(roomId, quoteConfirmReply, token);
             return;
           }
 
