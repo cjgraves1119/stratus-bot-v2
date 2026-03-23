@@ -344,7 +344,7 @@ function applySuffix(sku) {
   if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
     return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   }
-  if (/^MX\d+C[W]?-NA$/i.test(upper)) return upper;
+  if (/^MX\d+C[W]?(-HW)?-NA$/i.test(upper)) return upper;
   if (/^MX\d+C(W)?$/i.test(upper)) return upper.endsWith('-HW-NA') ? upper : `${upper}-HW-NA`;
   if (/^Z\d+C?X$/i.test(upper)) return upper;
   if (/^(MR|MX|MV|MT|MG|Z)\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
