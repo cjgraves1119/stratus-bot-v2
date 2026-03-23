@@ -1455,13 +1455,28 @@ function buildQuoteResponse(parsed) {
     lines.push('');
 
     // Option 1 — Consolidated renewal (license-only for existing EOL hardware)
-    const hasRenewLicenses = eolItems.some(({ baseSku }) => getLicenseSkus(baseSku, requestedTier));
+    // For products where getLicenseSkus returns null (MS390, MS450), generate legacy license SKU
+    const _getEolRenewalLicenses = (baseSku) => {
+      const lics = getLicenseSkus(baseSku, requestedTier);
+      if (lics) return lics;
+      // Fallback: generate legacy switch license pattern (e.g. LIC-MS390-48UX-1YR)
+      const legacyMatch = baseSku.toUpperCase().match(/^(MS\d{3})-(.+)/);
+      if (legacyMatch) {
+        return [
+          { term: '1Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-1YR` },
+          { term: '3Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-3YR` },
+          { term: '5Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-5YR` }
+        ];
+      }
+      return null;
+    };
+    const hasRenewLicenses = eolItems.some(({ baseSku }) => _getEolRenewalLicenses(baseSku));
     if (hasRenewLicenses) {
       lines.push(`**Option 1 — Renew Existing Licenses:**`);
       for (const term of terms) {
         const urlItems = [];
         for (const { baseSku, qty } of eolItems) {
-          const renewLicenses = getLicenseSkus(baseSku, requestedTier);
+          const renewLicenses = _getEolRenewalLicenses(baseSku);
           if (renewLicenses) {
             const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty });
