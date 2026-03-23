@@ -252,6 +252,79 @@ function getLicenseSkus(baseSku, requestedTier) {
   return null;
 }
 
+// ─── EOL Date Lookup (mirrors index.js) ──────────────────────────────────────
+const EOL_DATES_DATA = catalog._EOL_DATES || {};
+
+function handleEolDateRequest(text) {
+  const upper = text.toUpperCase();
+  const eolIntent = /\b(END OF (SUPPORT|SALE|LIFE)|EOL|EOS|EOST|WHEN (DOES|DID|IS|WAS|WILL) .+ (EOL|END|EXPIRE|SUNSET|DISCONTINUED)|LIFECYCLE|LAST DAY OF SUPPORT)\b/i.test(text);
+  if (!eolIntent) return null;
+
+  const skuPattern = /\b((?:MR|MX|MV|MG|MS|MT|CW|Z)\d[\w-]*)\b/gi;
+  const matches = [...upper.matchAll(skuPattern)].map(m => m[1]);
+  const skus = [...new Set(matches)];
+  if (skus.length === 0) return null;
+
+  const lines = [];
+  for (const sku of skus) {
+    const skuUpper = sku.toUpperCase();
+    let isEolProduct = false;
+    let fullSkuKey = skuUpper;
+
+    if (EOL_DATES_DATA[skuUpper]) {
+      isEolProduct = true;
+    } else {
+      for (const [family, variants] of Object.entries(EOL_PRODUCTS)) {
+        if (skuUpper.startsWith(family)) {
+          const raw = skuUpper.slice(family.length);
+          const variant = raw.startsWith('-') ? raw.slice(1) : raw;
+          if (variants.includes(variant)) {
+            isEolProduct = true;
+            fullSkuKey = skuUpper;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!isEolProduct) {
+      lines.push(`**${skuUpper}** — ✅ Active product (not end-of-life)`);
+      continue;
+    }
+
+    const dates = EOL_DATES_DATA[fullSkuKey];
+    const replacement = EOL_REPLACEMENTS[fullSkuKey];
+    let line = `**${skuUpper}**`;
+    if (dates) {
+      const eosDate = new Date(dates.eos);
+      const eostDate = new Date(dates.eost);
+      const now = new Date();
+      line += `\n  📅 End of Sale: **${dates.eos}**`;
+      line += `\n  🛡️ End of Support: **${dates.eost}**`;
+      const daysToEost = Math.round((eostDate - now) / (1000 * 60 * 60 * 24));
+      if (daysToEost > 0) {
+        line += ` _(${daysToEost} days remaining)_`;
+      } else {
+        line += ` _(${Math.abs(daysToEost)} days ago)_`;
+      }
+    } else {
+      line += '\n  📅 EOL confirmed (exact dates not available)';
+    }
+    if (replacement) {
+      if (Array.isArray(replacement)) {
+        line += `\n  🔄 Replacement: **${replacement[0]}** (1G) or **${replacement[1]}** (10G)`;
+      } else {
+        line += `\n  🔄 Replacement: **${replacement}**`;
+      }
+    }
+    lines.push(line);
+  }
+
+  if (lines.length === 0) return null;
+  const header = skus.length === 1 ? '**End-of-Life Status**' : `**End-of-Life Status (${skus.length} products)**`;
+  return `${header}\n\n${lines.join('\n\n')}`;
+}
+
 function _extractVariant(upper, family) {
   const raw = upper.slice(family.length);
   return raw.startsWith('-') ? raw.slice(1) : raw;
@@ -1166,6 +1239,150 @@ const tests = [
       const lics = getLicenseSkus('MX250', 'SDW');
       const pass = lics && lics[0].sku === 'LIC-MX250-SDW-1Y';
       return { pass, actual: JSON.stringify(lics?.map(l => l.sku)) };
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CATEGORY 9: handleEolDateRequest() — EOL date lookup (~20 tests)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Single product EOL queries
+  { name: '[EOL-LOOKUP] "when does MX64 go end of support"',
+    customTest: () => {
+      const r = handleEolDateRequest('when does MX64 go end of support');
+      const pass = r && r.includes('MX64') && r.includes('2022-07-26') && r.includes('2027-07-26') && r.includes('MX67');
+      return { pass, actual: r ? r.substring(0, 120) : 'null' };
+    }
+  },
+  { name: '[EOL-LOOKUP] "EOL date for MS220-24P"',
+    customTest: () => {
+      const r = handleEolDateRequest('EOL date for MS220-24P');
+      const pass = r && r.includes('MS220-24P') && r.includes('MS130-24P');
+      return { pass, actual: r ? r.substring(0, 120) : 'null' };
+    }
+  },
+  { name: '[EOL-LOOKUP] "end of life MS390-48UX"',
+    customTest: () => {
+      const r = handleEolDateRequest('end of life MS390-48UX');
+      const pass = r && r.includes('MS390-48UX') && r.includes('2025-03-28') && r.includes('C9300-48UXM-M');
+      return { pass, actual: r ? r.substring(0, 120) : 'null' };
+    }
+  },
+  { name: '[EOL-LOOKUP] "EOS for MR42"',
+    customTest: () => {
+      const r = handleEolDateRequest('EOS for MR42');
+      const pass = r && r.includes('MR42') && r.includes('MR44');
+      return { pass, actual: r ? r.substring(0, 120) : 'null' };
+    }
+  },
+
+  // Batch EOL queries
+  { name: '[EOL-LOOKUP] batch: "end of support for MX64, MS220-24P, MS390-48UX"',
+    customTest: () => {
+      const r = handleEolDateRequest('end of support for MX64, MS220-24P, MS390-48UX');
+      const pass = r && r.includes('3 products') && r.includes('MX64') && r.includes('MS220-24P') && r.includes('MS390-48UX');
+      return { pass, actual: r ? `len=${r.length}, has3=${r.includes('3 products')}` : 'null' };
+    }
+  },
+  { name: '[EOL-LOOKUP] batch: "EOL MR42 MR72 MG51"',
+    customTest: () => {
+      const r = handleEolDateRequest('EOL MR42 MR72 MG51');
+      const pass = r && r.includes('3 products') && r.includes('MR44') && r.includes('MR86') && r.includes('MG52');
+      return { pass, actual: r ? `has_replacements=${r.includes('MR44') && r.includes('MR86') && r.includes('MG52')}` : 'null' };
+    }
+  },
+
+  // Active product (not EOL)
+  { name: '[EOL-LOOKUP] active product: "EOL MR44"',
+    customTest: () => {
+      const r = handleEolDateRequest('EOL MR44');
+      const pass = r && r.includes('Active product');
+      return { pass, actual: r ? r.substring(0, 80) : 'null' };
+    }
+  },
+  { name: '[EOL-LOOKUP] active product: "end of support MX67"',
+    customTest: () => {
+      const r = handleEolDateRequest('end of support MX67');
+      const pass = r && r.includes('Active product');
+      return { pass, actual: r ? r.substring(0, 80) : 'null' };
+    }
+  },
+
+  // Mixed EOL + active
+  { name: '[EOL-LOOKUP] mixed: "EOL for MX64, MR44"',
+    customTest: () => {
+      const r = handleEolDateRequest('EOL for MX64, MR44');
+      const pass = r && r.includes('2 products') && r.includes('2027-07-26') && r.includes('Active product');
+      return { pass, actual: r ? `len=${r.length}` : 'null' };
+    }
+  },
+
+  // Dual uplink replacement shows 1G/10G
+  { name: '[EOL-LOOKUP] dual uplink: "end of support MS210-24P"',
+    customTest: () => {
+      const r = handleEolDateRequest('end of support MS210-24P');
+      const pass = r && r.includes('MS150-24P-4G') && r.includes('MS150-24P-4X') && r.includes('1G') && r.includes('10G');
+      return { pass, actual: r ? r.substring(0, 150) : 'null' };
+    }
+  },
+
+  // No intent → returns null
+  { name: '[EOL-LOOKUP] no intent: "quote 10 MR44" → null',
+    customTest: () => {
+      const r = handleEolDateRequest('quote 10 MR44');
+      return { pass: r === null, actual: r === null ? 'null (correct)' : r.substring(0, 50) };
+    }
+  },
+  { name: '[EOL-LOOKUP] no intent: "cost of MX64" → null',
+    customTest: () => {
+      const r = handleEolDateRequest('cost of MX64');
+      return { pass: r === null, actual: r === null ? 'null (correct)' : r.substring(0, 50) };
+    }
+  },
+
+  // No SKU in message → null
+  { name: '[EOL-LOOKUP] no SKU: "when does it go end of life" → null',
+    customTest: () => {
+      const r = handleEolDateRequest('when does it go end of life');
+      return { pass: r === null, actual: r === null ? 'null (correct)' : r.substring(0, 50) };
+    }
+  },
+
+  // Various phrasing variations
+  { name: '[EOL-LOOKUP] "is MX80 discontinued"',
+    customTest: () => {
+      const r = handleEolDateRequest('is MX80 discontinued');
+      return { pass: r === null, actual: r === null ? 'null (no EOL keyword match)' : r.substring(0, 80) };
+    }
+  },
+  { name: '[EOL-LOOKUP] "when was MX80 end of sale"',
+    customTest: () => {
+      const r = handleEolDateRequest('when was MX80 end of sale');
+      const pass = r && r.includes('MX80') && r.includes('MX85');
+      return { pass, actual: r ? r.substring(0, 120) : 'null' };
+    }
+  },
+  { name: '[EOL-LOOKUP] "lifecycle MR72"',
+    customTest: () => {
+      const r = handleEolDateRequest('lifecycle MR72');
+      const pass = r && r.includes('MR72') && r.includes('MR86');
+      return { pass, actual: r ? r.substring(0, 120) : 'null' };
+    }
+  },
+  { name: '[EOL-LOOKUP] "last day of support for Z1"',
+    customTest: () => {
+      const r = handleEolDateRequest('last day of support for Z1');
+      const pass = r && r.includes('Z1') && r.includes('Z4');
+      return { pass, actual: r ? r.substring(0, 120) : 'null' };
+    }
+  },
+
+  // Dedup: same SKU mentioned twice
+  { name: '[EOL-LOOKUP] dedup: "EOL MX64 MX64" → single entry',
+    customTest: () => {
+      const r = handleEolDateRequest('EOL MX64 MX64');
+      const pass = r && r.includes('End-of-Life Status') && !r.includes('2 products');
+      return { pass, actual: r ? `single=${!r.includes('2 products')}` : 'null' };
     }
   },
 ];

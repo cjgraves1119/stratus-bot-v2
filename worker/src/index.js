@@ -777,6 +777,100 @@ function formatPricingResponse(label, skus, qtys) {
   return parts.join('\n');
 }
 
+// ─── EOL Date Lookup ──────────────────────────────────────────────────────────
+/**
+ * Detect EOL/end-of-support date queries and respond deterministically.
+ * Supports single and batch lookups.
+ * Returns a response string if handled, or null to pass through.
+ */
+function handleEolDateRequest(text) {
+  const upper = text.toUpperCase();
+
+  // Detect EOL date intent
+  const eolIntent = /\b(END OF (SUPPORT|SALE|LIFE)|EOL|EOS|EOST|WHEN (DOES|DID|IS|WAS|WILL) .+ (EOL|END|EXPIRE|SUNSET|DISCONTINUED)|LIFECYCLE|LAST DAY OF SUPPORT)\b/i.test(text);
+  if (!eolIntent) return null;
+
+  // Extract SKU-like tokens from the message
+  const skuPattern = /\b((?:MR|MX|MV|MG|MS|MT|CW|Z)\d[\w-]*)\b/gi;
+  const matches = [...upper.matchAll(skuPattern)].map(m => m[1]);
+
+  // Deduplicate
+  const skus = [...new Set(matches)];
+  if (skus.length === 0) return null;
+
+  const lines = [];
+
+  for (const sku of skus) {
+    const skuUpper = sku.toUpperCase();
+
+    // Check if EOL
+    let isEolProduct = false;
+    let fullSkuKey = skuUpper;
+
+    // Direct date lookup first
+    if (EOL_DATES[skuUpper]) {
+      isEolProduct = true;
+    } else {
+      // Try family + variant lookup
+      for (const [family, variants] of Object.entries(EOL_PRODUCTS)) {
+        if (skuUpper.startsWith(family)) {
+          const raw = skuUpper.slice(family.length);
+          const variant = raw.startsWith('-') ? raw.slice(1) : raw;
+          if (variants.includes(variant)) {
+            isEolProduct = true;
+            fullSkuKey = skuUpper;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!isEolProduct) {
+      lines.push(`**${skuUpper}** — ✅ Active product (not end-of-life)`);
+      continue;
+    }
+
+    const dates = EOL_DATES[fullSkuKey];
+    const replacement = EOL_REPLACEMENTS[fullSkuKey];
+
+    let line = `**${skuUpper}**`;
+    if (dates) {
+      const eosDate = new Date(dates.eos);
+      const eostDate = new Date(dates.eost);
+      const now = new Date();
+      const eosLabel = eosDate <= now ? 'End of Sale' : 'End of Sale';
+      const eostLabel = eostDate <= now ? 'End of Support (passed)' : 'End of Support';
+      line += `\n  📅 ${eosLabel}: **${dates.eos}**`;
+      line += `\n  🛡️ ${eostLabel}: **${dates.eost}**`;
+
+      // Days until/since EOST
+      const daysToEost = Math.round((eostDate - now) / (1000 * 60 * 60 * 24));
+      if (daysToEost > 0) {
+        line += ` _(${daysToEost} days remaining)_`;
+      } else {
+        line += ` _(${Math.abs(daysToEost)} days ago)_`;
+      }
+    } else {
+      line += '\n  📅 EOL confirmed (exact dates not available)';
+    }
+
+    if (replacement) {
+      if (Array.isArray(replacement)) {
+        line += `\n  🔄 Replacement: **${replacement[0]}** (1G) or **${replacement[1]}** (10G)`;
+      } else {
+        line += `\n  🔄 Replacement: **${replacement}**`;
+      }
+    }
+
+    lines.push(line);
+  }
+
+  if (lines.length === 0) return null;
+
+  const header = skus.length === 1 ? '**End-of-Life Status**' : `**End-of-Life Status (${skus.length} products)**`;
+  return `${header}\n\n${lines.join('\n\n')}`;
+}
+
 /**
  * Detect pricing intent and handle deterministically.
  * Returns a response string if handled, or null to pass through to Claude.
@@ -2000,6 +2094,15 @@ export default {
           }
 
           if (!text) return;
+
+          // Try deterministic EOL date lookup first (before quoting engine)
+          const eolDateReply = handleEolDateRequest(text);
+          if (eolDateReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', eolDateReply);
+            await sendMessage(roomId, eolDateReply, token);
+            return;
+          }
 
           // Try deterministic engine first
           const parsed = parseMessage(text);
