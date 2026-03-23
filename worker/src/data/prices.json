@@ -4222,8 +4222,8 @@
     },
     "CW9800H1-MCG": {
       "list": 129642,
-      "price": 87173,
-      "discount": 42
+      "price": 67056,
+      "discount": 55
     },
     "MS450-12-HW": {
       "list": 29464,
@@ -4924,6 +4924,276 @@
       "list": 1398,
       "price": 941,
       "discount": 41
+    },
+    "CW9171I-RTG": {
+      "list": 918,
+      "price": 475,
+      "discount": 55
+    },
+    "CW9172I-RTG": {
+      "list": 1677,
+      "price": 867,
+      "discount": 55
+    },
+    "CW9174I-RTG": {
+      "list": 2523,
+      "price": 1305,
+      "discount": 55
+    },
+    "CW9176I-RTG": {
+      "list": 3246,
+      "price": 1679,
+      "discount": 55
+    },
+    "CW9176D1-RTG": {
+      "list": 3636,
+      "price": 1881,
+      "discount": 55
+    },
+    "CW9178I-RTG": {
+      "list": 3896,
+      "price": 2015,
+      "discount": 55
+    },
+    "CW9179F": {
+      "list": 9756,
+      "price": 5046,
+      "discount": 55
+    },
+    "C8111-G2-MX": {
+      "list": 1256,
+      "price": 837,
+      "discount": 42
+    },
+    "LIC-C8111-ENT-1Y": {
+      "list": 558,
+      "price": 372,
+      "discount": 42
+    },
+    "LIC-C8111-ENT-3Y": {
+      "list": 1256,
+      "price": 837,
+      "discount": 42
+    },
+    "LIC-C8111-ENT-5Y": {
+      "list": 2094,
+      "price": 1396,
+      "discount": 42
+    },
+    "LIC-C8111-SEC-1Y": {
+      "list": 1117,
+      "price": 745,
+      "discount": 42
+    },
+    "LIC-C8111-SEC-3Y": {
+      "list": 2513,
+      "price": 1675,
+      "discount": 42
+    },
+    "LIC-C8111-SEC-5Y": {
+      "list": 4188,
+      "price": 2792,
+      "discount": 42
+    },
+    "LIC-C8111-SDW-1Y": {
+      "list": 1675,
+      "price": 1117,
+      "discount": 42
+    },
+    "LIC-C8111-SDW-3Y": {
+      "list": 3769,
+      "price": 2513,
+      "discount": 42
+    },
+    "LIC-C8111-SDW-5Y": {
+      "list": 6281,
+      "price": 4187,
+      "discount": 42
+    },
+    "C8455-G2-MX": {
+      "list": 44451,
+      "price": 29634,
+      "discount": 42
+    },
+    "LIC-C8455-SEC-1Y": {
+      "list": 18380,
+      "price": 12465,
+      "discount": 41
+    },
+    "LIC-C8455-SEC-3Y": {
+      "list": 41357,
+      "price": 28047,
+      "discount": 41
+    },
+    "LIC-C8455-SEC-5Y": {
+      "list": 68927,
+      "price": 46744,
+      "discount": 41
+    },
+    "LIC-C8455-SDW-1Y": {
+      "list": 26753,
+      "price": 18143,
+      "discount": 41
+    },
+    "LIC-C8455-SDW-3Y": {
+      "list": 60179,
+      "price": 40811,
+      "discount": 41
+    },
+    "LIC-C8455-SDW-5Y": {
+      "list": 100299,
+      "price": 68019,
+      "discount": 41
+    },
+    "LIC-UMB-DNS-ESS-K9-1YR": {
+      "list": 62,
+      "price": 41,
+      "discount": 42
+    },
+    "LIC-UMB-DNS-ESS-K9-3YR": {
+      "list": 186,
+      "price": 124,
+      "discount": 42
+    },
+    "LIC-UMB-DNS-ESS-K9-5YR": {
+      "list": 311,
+      "price": 207,
+      "discount": 42
+    },
+    "LIC-UMB-DNS-ADV-K9-1YR": {
+      "list": 93,
+      "price": 62,
+      "discount": 42
+    },
+    "LIC-UMB-DNS-ADV-K9-3YR": {
+      "list": 279,
+      "price": 186,
+      "discount": 42
+    },
+    "LIC-UMB-DNS-ADV-K9-5YR": {
+      "list": 466,
+      "price": 311,
+      "discount": 42
+    },
+    "LIC-UMB-SIG-ESS-K9-1YR": {
+      "list": 130,
+      "price": 87,
+      "discount": 42
+    },
+    "LIC-UMB-SIG-ESS-K9-3YR": {
+      "list": 389,
+      "price": 259,
+      "discount": 42
+    },
+    "LIC-UMB-SIG-ESS-K9-5YR": {
+      "list": 648,
+      "price": 432,
+      "discount": 42
+    },
+    "LIC-UMB-SIG-ADV-K9-1YR": {
+      "list": 199,
+      "price": 133,
+      "discount": 42
+    },
+    "LIC-UMB-SIG-ADV-K9-3YR": {
+      "list": 597,
+      "price": 398,
+      "discount": 42
+    },
+    "LIC-UMB-SIG-ADV-K9-5YR": {
+      "list": 995,
+      "price": 663,
+      "discount": 42
+    },
+    "LIC-DUO-ESSENTIALS-1YR": {
+      "list": 36,
+      "price": 24,
+      "discount": 42
+    },
+    "LIC-DUO-ESSENTIALS-3YR": {
+      "list": 108,
+      "price": 72,
+      "discount": 42
+    },
+    "LIC-DUO-ESSENTIALS-5YR": {
+      "list": 180,
+      "price": 120,
+      "discount": 42
+    },
+    "LIC-DUO-ADVANTAGE-1YR": {
+      "list": 72,
+      "price": 48,
+      "discount": 42
+    },
+    "LIC-DUO-ADVANTAGE-3YR": {
+      "list": 216,
+      "price": 144,
+      "discount": 42
+    },
+    "LIC-DUO-ADVANTAGE-5YR": {
+      "list": 360,
+      "price": 240,
+      "discount": 42
+    },
+    "LIC-DUO-PREMIER-1YR": {
+      "list": 108,
+      "price": 72,
+      "discount": 42
+    },
+    "LIC-DUO-PREMIER-3YR": {
+      "list": 324,
+      "price": 216,
+      "discount": 42
+    },
+    "LIC-DUO-PREMIER-5YR": {
+      "list": 540,
+      "price": 360,
+      "discount": 42
+    },
+    "AIR-AP-BRACKET-1=": {
+      "list": 26,
+      "price": 17,
+      "discount": 42
+    },
+    "AIR-AP-BRACKET-2=": {
+      "list": 26,
+      "price": 17,
+      "discount": 42
+    },
+    "MA-INJ-4": {
+      "list": 150,
+      "price": 100,
+      "discount": 42
+    },
+    "MA-INJ-6": {
+      "list": 375,
+      "price": 250,
+      "discount": 42
+    },
+    "MA-PWR-300W-INDADP": {
+      "list": 830,
+      "price": 553,
+      "discount": 42
+    },
+    "MA-PWR-CORD-TW": {
+      "list": 15,
+      "price": 10,
+      "discount": 42
+    },
+    "MA-SIMTRAY-2C": {
+      "list": 21,
+      "price": 14,
+      "discount": 42
+    },
+    "MA-SIMTRAY-5C": {
+      "list": 31,
+      "price": 21,
+      "discount": 42
+    },
+    "MV2": {
+      "list": 519,
+      "price": 346,
+      "discount": 42
     }
   },
   "_meta": {

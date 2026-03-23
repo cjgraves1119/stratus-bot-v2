@@ -333,9 +333,10 @@ async function sendMessage(roomId, markdown, token) {
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
+  if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
   if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
-  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('MA-')) return upper;
+  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (upper.startsWith('MS390')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
@@ -351,6 +352,21 @@ function applySuffix(sku) {
 // ─── License SKU Rules ───────────────────────────────────────────────────────
 function getLicenseSkus(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
+
+  // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers
+  const c8Match = upper.match(/^C(8111|8455)/);
+  if (c8Match) {
+    const model = c8Match[1];
+    const tier = requestedTier || 'ENT';
+    return [
+      { term: '1Y', sku: `LIC-C${model}-${tier}-1Y` },
+      { term: '3Y', sku: `LIC-C${model}-${tier}-3Y` },
+      { term: '5Y', sku: `LIC-C${model}-${tier}-5Y` }
+    ];
+  }
+
+  // CW9800 Wireless Controller — no standard license association
+  if (/^CW9800/.test(upper)) return null;
 
   if (/^MR\d/.test(upper) || /^CW9\d/.test(upper)) {
     return [
@@ -587,6 +603,8 @@ function detectFamily(sku) {
   if (/^C9300L/.test(sku)) return 'C9300L';
   if (/^C9300/.test(sku)) return 'C9300';
   if (/^C9200L/.test(sku)) return 'C9200L';
+  if (/^C8111/.test(sku)) return 'C8111';
+  if (/^C8455/.test(sku)) return 'C8455';
   return null;
 }
 
@@ -916,7 +934,7 @@ function parseMessage(text) {
   // Detects patterns like: MR36\nMR36\nMS250-24P\nMR44\n...
   // Counts occurrences of each model to derive quantities
   if (lines.length >= 3) {
-    const modelPattern = /^\s*((?:MR|MV|MT|MG|MX|CW9|MS|C9|Z)\d[A-Z0-9-]*)\s*$/i;
+    const modelPattern = /^\s*((?:MR|MV|MT|MG|MX|CW9|MS|C9|C8|Z)\d[A-Z0-9-]*)\s*$/i;
     const modelLines = lines.filter(l => modelPattern.test(l));
     // If at least 70% of non-empty lines are bare model numbers, treat as a device list
     if (modelLines.length >= 3 && modelLines.length / lines.length >= 0.7) {
@@ -1013,6 +1031,7 @@ function parseMessage(text) {
 
   const skuPatterns = [
     /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
+    /C8[14]\d{2}-G2-MX/gi,
     /MA-[A-Z0-9-]+/gi,
     /CW9\d{3}[A-Z0-9]*/gi,
     /MS150-[\dA-Z]+-[\dA-Z]+/gi,

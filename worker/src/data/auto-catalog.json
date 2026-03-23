@@ -317,11 +317,23 @@
         "CW9172H"
       ]
     },
+    "CW9174": {
+      "error": "Must specify antenna type",
+      "suggest": [
+        "CW9174I"
+      ]
+    },
     "CW9176": {
       "error": "Must specify variant",
       "suggest": [
         "CW9176I",
         "CW9176D1"
+      ]
+    },
+    "CW9178": {
+      "error": "Must specify antenna type",
+      "suggest": [
+        "CW9178I"
       ]
     },
     "MV12W": {
@@ -358,6 +370,8 @@
     }
   },
   "_PASSTHROUGH": [
+    "AIR-AP-BRACKET-1=",
+    "AIR-AP-BRACKET-2=",
     "CW-ACC-KIT1-00",
     "CW-ANT-D1-NS-00",
     "CW-ANT-GPS1-M-00",
@@ -365,7 +379,12 @@
     "CW-ANT-O1-NS-00",
     "CW-INJ-8",
     "CW-MNT-ART2-00",
-    "CW9800H1-MCG"
+    "MA-INJ-4",
+    "MA-INJ-6",
+    "MA-PWR-300W-INDADP",
+    "MA-PWR-CORD-TW",
+    "MA-SIMTRAY-2C",
+    "MA-SIMTRAY-5C"
   ],
   "MR": [
     "MR28",
@@ -398,6 +417,7 @@
     "MX95"
   ],
   "MV": [
+    "MV2",
     "MV12N",
     "MV12WE",
     "MV13",
@@ -525,7 +545,15 @@
     "CW9164I",
     "CW9166D1",
     "CW9166I",
-    "CW9172H"
+    "CW9171I",
+    "CW9172H",
+    "CW9172I",
+    "CW9174I",
+    "CW9176D1",
+    "CW9176I",
+    "CW9178I",
+    "CW9179F",
+    "CW9800H1"
   ],
   "C9200L": [
     "C9200L-24P-4G-M",
@@ -580,5 +608,11 @@
     "C9300X-48TX-M",
     "C9300X-NM-2C-M",
     "C9300X-NM-8Y-M"
+  ],
+  "C8111": [
+    "C8111-G2-MX"
+  ],
+  "C8455": [
+    "C8455-G2-MX"
   ]
 }
