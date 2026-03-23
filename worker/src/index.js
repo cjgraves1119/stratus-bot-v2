@@ -476,15 +476,16 @@ function getLicenseSkus(baseSku, requestedTier) {
   }
 
 
-  // Catalyst M-series: C9200L, C9300, C9300L, C9300X — LIC-{family}-{ports}-{term}
-  const catMatch = upper.match(/^(C9\d{3}[LX]?)-(\d+[A-Z]*)-/);
+  // Catalyst M-series: C9200L, C9300, C9300L, C9300X — LIC-{family}-{portCount}-{term}
+  // Port count is just the leading digits (e.g. C9300-48UXM-M → 48, C9300X-24HX-M → 24)
+  const catMatch = upper.match(/^(C9\d{3}[LX]?)-(\d+)/);
   if (catMatch) {
     const family = catMatch[1];
-    const ports = catMatch[2];
+    const portCount = catMatch[2];
     return [
-      { term: '1Y', sku: `LIC-${family}-${ports}-1Y` },
-      { term: '3Y', sku: `LIC-${family}-${ports}-3Y` },
-      { term: '5Y', sku: `LIC-${family}-${ports}-5Y` }
+      { term: '1Y', sku: `LIC-${family}-${portCount}-1Y` },
+      { term: '3Y', sku: `LIC-${family}-${portCount}-3Y` },
+      { term: '5Y', sku: `LIC-${family}-${portCount}-5Y` }
     ];
   }
 
