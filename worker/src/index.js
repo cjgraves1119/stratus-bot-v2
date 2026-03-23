@@ -476,6 +476,18 @@ function getLicenseSkus(baseSku, requestedTier) {
   }
 
 
+  // Catalyst M-series: C9200L, C9300, C9300L, C9300X — LIC-{family}-{ports}-{term}
+  const catMatch = upper.match(/^(C9\d{3}[LX]?)-(\d+[A-Z]*)-/);
+  if (catMatch) {
+    const family = catMatch[1];
+    const ports = catMatch[2];
+    return [
+      { term: '1Y', sku: `LIC-${family}-${ports}-1Y` },
+      { term: '3Y', sku: `LIC-${family}-${ports}-3Y` },
+      { term: '5Y', sku: `LIC-${family}-${ports}-5Y` }
+    ];
+  }
+
   const mvMatch = upper.match(/^MV(\d+)/);
   if (mvMatch) {
     return [
