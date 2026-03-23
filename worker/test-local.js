@@ -16,9 +16,10 @@ const PRICES = catalog.prices || {};
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
+  if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
   if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
-  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('MA-')) return upper;
+  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (upper.startsWith('MS390')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
@@ -201,14 +202,14 @@ const tests = [
     expect: { replacement: 'MS130-24P', hwSku: 'MS130-24P-HW' }
   },
   {
-    name: 'EOL switch with dual uplink (MS250)',
+    name: 'EOL switch MS250-48FP → C9300L (official replacement)',
     input: '1 MS250-48FP',
-    expect: { replacement: ['MS150-48FP-4G', 'MS150-48FP-4X'] }
+    expect: { replacement: 'C9300L-48PF-4X-M' }
   },
   {
-    name: 'MS250-24P dual uplink',
+    name: 'MS250-24P → C9300L (official replacement)',
     input: '1 MS250-24P',
-    expect: { replacement: ['MS150-24P-4G', 'MS150-24P-4X'] }
+    expect: { replacement: 'C9300L-24P-4X-M' }
   },
   {
     name: 'MS320-48LP dual uplink',
@@ -216,14 +217,14 @@ const tests = [
     expect: { replacement: ['MS150-48LP-4G', 'MS150-48LP-4X'] }
   },
   {
-    name: 'MS350-48FP → MS390-48UX (no dual uplink)',
+    name: 'MS350-48FP → C9300-48P-M (MS390 is EOL, skip to C9300)',
     input: '1 MS350-48FP',
-    expect: { replacement: 'MS390-48UX', hwSku: 'MS390-48UX-HW' }
+    expect: { replacement: 'C9300-48P-M' }
   },
   {
-    name: 'MS425-32 → MS390-48UX',
+    name: 'MS425-32 → C9300X-24Y-M (fixed per CLAUDE.md)',
     input: '1 MS425-32',
-    expect: { replacement: 'MS390-48UX' }
+    expect: { replacement: 'C9300X-24Y-M' }
   },
   {
     name: 'MS120-8FP → MS130-8P',
@@ -275,14 +276,52 @@ const tests = [
     expect: { replacement: 'MX67' }
   },
   {
-    name: 'MX100 → MX105',
+    name: 'MX100 → MX95 (official Meraki replacement)',
     input: '1 MX100',
-    expect: { replacement: 'MX105' }
+    expect: { replacement: 'MX95' }
   },
   {
     name: 'MX80 → MX85',
     input: '1 MX80',
     expect: { replacement: 'MX85' }
+  },
+  {
+    name: 'MS390-48UX → C9300-48UXM-M (MS390 now EOL)',
+    input: '1 MS390-48UX',
+    expect: { replacement: 'C9300-48UXM-M' }
+  },
+  {
+    name: 'MG51 → MG52 (new EOL product)',
+    input: '1 MG51',
+    expect: { replacement: 'MG52' }
+  },
+  {
+    name: 'MR70 → MR78 (new EOL product)',
+    input: '1 MR70',
+    expect: { replacement: 'MR78' }
+  },
+  {
+    name: 'MS210-24P dual uplink → MS150',
+    input: '1 MS210-24P',
+    expect: { replacement: ['MS150-24P-4G', 'MS150-24P-4X'] }
+  },
+  {
+    name: 'EOL dates loaded for MX64',
+    customTest: () => {
+      const EOL_DATES = catalog._EOL_DATES || {};
+      const dates = EOL_DATES['MX64'];
+      const pass = dates && dates.eos === '2022-07-26' && dates.eost === '2027-07-26';
+      return { pass, actual: JSON.stringify(dates) };
+    }
+  },
+  {
+    name: 'EOL dates loaded for MS390-48UX',
+    customTest: () => {
+      const EOL_DATES = catalog._EOL_DATES || {};
+      const dates = EOL_DATES['MS390-48UX'];
+      const pass = dates && dates.eos === '2025-03-28' && dates.eost === '2032-03-28';
+      return { pass, actual: JSON.stringify(dates) };
+    }
   }
 ];
 

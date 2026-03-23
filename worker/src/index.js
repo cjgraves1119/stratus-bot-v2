@@ -22,6 +22,7 @@ const catalog = catalogData;
 const specs = specsData;
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
 const EOL_REPLACEMENTS = catalog._EOL_REPLACEMENTS || {};
+const EOL_DATES = catalog._EOL_DATES || {};
 const COMMON_MISTAKES = catalog._COMMON_MISTAKES || {};
 const PASSTHROUGH = new Set(catalog._PASSTHROUGH || []);
 
@@ -555,6 +556,32 @@ function isEol(baseSku) {
   return false;
 }
 
+// ─── EOL Date Helpers ────────────────────────────────────────────────────────
+function getEolDates(baseSku) {
+  const upper = baseSku.toUpperCase();
+  if (EOL_DATES[upper]) return EOL_DATES[upper];
+  for (const key of Object.keys(EOL_DATES)) {
+    if (upper === key) return EOL_DATES[key];
+  }
+  return null;
+}
+
+function formatEolDate(isoDate) {
+  if (!isoDate) return '';
+  const d = new Date(isoDate + 'T00:00:00Z');
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+}
+
+function eolDateSuffix(baseSku) {
+  const dates = getEolDates(baseSku);
+  if (!dates) return '';
+  const parts = [];
+  if (dates.eos) parts.push(`EOS: ${formatEolDate(dates.eos)}`);
+  if (dates.eost) parts.push(`End of Support: ${formatEolDate(dates.eost)}`);
+  return parts.length > 0 ? ` (${parts.join(' | ')})` : '';
+}
+
 // ─── Common Mistakes ─────────────────────────────────────────────────────────
 function fixCommonMistake(sku) {
   const upper = sku.toUpperCase();
@@ -1029,6 +1056,48 @@ function parseMessage(text) {
   ];
   const isAdvisory = advisoryPatterns.some(p => p.test(upper));
 
+  // ── Duo / Umbrella natural language handler ──
+  // These are license-only products (no hardware), so intercept before hardware SKU parsing
+  const duoMatch = upper.match(/(\d+)\s*[X×]?\s*(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?/i)
+    || upper.match(/(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?\s*[X×]?\s*(\d+)?/i);
+  if (duoMatch && !isAdvisory) {
+    const qty = parseInt(duoMatch[1]) || parseInt(duoMatch[2]) || 1;
+    const tierRaw = (duoMatch[2] || duoMatch[1] || '').toUpperCase();
+    let tier = 'ESSENTIALS';
+    if (/ADVANTAGE/.test(tierRaw)) tier = 'ADVANTAGE';
+    else if (/PREMIER/.test(tierRaw)) tier = 'PREMIER';
+    else if (/ESSENTIAL/.test(tierRaw)) tier = 'ESSENTIALS';
+    else if (!/\d/.test(tierRaw) && tierRaw) tier = tierRaw.replace(/S$/, '') === 'ESSENTIAL' ? 'ESSENTIALS' : tierRaw;
+    return {
+      items: [
+        { baseSku: `LIC-DUO-${tier}-1YR`, qty, isLicenseOnly: true },
+        { baseSku: `LIC-DUO-${tier}-3YR`, qty, isLicenseOnly: true },
+        { baseSku: `LIC-DUO-${tier}-5YR`, qty, isLicenseOnly: true }
+      ],
+      isQuote: true,
+      isDuoUmbrella: true
+    };
+  }
+
+  const umbMatch = upper.match(/(\d+)\s*[X×]?\s*(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?/i)
+    || upper.match(/(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?\s*[X×]?\s*(\d+)?/i);
+  if (umbMatch && !isAdvisory) {
+    const qty = parseInt(umbMatch[1]) || parseInt(umbMatch[3]) || 1;
+    const typeRaw = (umbMatch[2] || umbMatch[1] || 'DNS').toUpperCase();
+    const tierRaw = (umbMatch[3] || umbMatch[2] || 'ESS').toUpperCase();
+    const type = /SIG/.test(typeRaw) ? 'SIG' : 'DNS';
+    const tier = /ADV/.test(tierRaw) ? 'ADV' : 'ESS';
+    return {
+      items: [
+        { baseSku: `LIC-UMB-${type}-${tier}-K9-1YR`, qty, isLicenseOnly: true },
+        { baseSku: `LIC-UMB-${type}-${tier}-K9-3YR`, qty, isLicenseOnly: true },
+        { baseSku: `LIC-UMB-${type}-${tier}-K9-5YR`, qty, isLicenseOnly: true }
+      ],
+      isQuote: true,
+      isDuoUmbrella: true
+    };
+  }
+
   const skuPatterns = [
     /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
     /C8[14]\d{2}-G2-MX/gi,
@@ -1146,6 +1215,26 @@ function buildQuoteResponse(parsed) {
     }
     return pairs.join(', ');
   };
+
+  // Duo / Umbrella license-only products — return 1Y/3Y/5Y URLs directly
+  if (parsed.isDuoUmbrella && parsed.items) {
+    const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
+    for (const item of parsed.items) {
+      const termMatch = item.baseSku.match(/(\d)YR$/);
+      if (termMatch) {
+        const key = `${termMatch[1]}YR`;
+        if (termGroups[key]) termGroups[key].push({ sku: item.baseSku, qty: item.qty });
+      }
+    }
+    const lines = [];
+    for (const [term, skus] of Object.entries(termGroups)) {
+      if (skus.length > 0) {
+        const url = buildStratusUrl(skus);
+        lines.push(`**${term.replace('YR', '-Year')}:** ${url}`);
+      }
+    }
+    return { text: lines.join('\n\n'), needsLlm: false };
+  }
 
   // Multi-line license SKU list (CSV from dashboard)
   if (parsed.directLicenseList) {
@@ -1594,15 +1683,23 @@ Z-Series: Z4, Z4C, Z4X, Z4CX
 
 ## EOL PRODUCT KNOWLEDGE
 These products are End-of-Life. ALWAYS check every product in a screenshot or request against this list:
-- MX: MX60, MX60W, MX64, MX64W, MX65, MX65W, MX80, MX84, MX100
-- MR: MR33, MR42, MR42E, MR52, MR53, MR53E, MR56, MR74, MR84
-- MS: MS120 (all), MS125 (all), MS210 (all), MS220 (all), MS225 (all), MS250 (all), MS320 (all), MS350 (all), MS410 (all), MS420 (all), MS425 (all)
-- MG: MG21, MG21E
+- MX: MX60, MX60W, MX64, MX64W, MX65, MX65W, MX80, MX84, MX100, MX400, MX600
+- MR: MR12, MR16, MR18, MR20, MR24, MR26, MR30H, MR32, MR33, MR34, MR42, MR42E, MR45, MR52, MR53, MR53E, MR55, MR56, MR62, MR66, MR70, MR72, MR74, MR84
+- MV: MV12N, MV12W, MV12WE, MV21, MV22, MV22X, MV32, MV52, MV71, MV72, MV72X
+- MS: MS120 (all), MS125 (all), MS210 (all), MS220 (all), MS225 (all), MS250 (all), MS320 (all), MS350 (all), MS355 (all), MS390 (all), MS410 (all), MS420 (all), MS425 (all)
+- MG: MG21, MG21E, MG51, MG51E
 - Z: Z1, Z3, Z3C
 
-Replacements: MX60/64→MX67, MX65→MX68, MX80/84→MX85, MX100→MX105, MR33→MR36, MR42→MR44, MR52/53/56→MR57, MR74→MR76, MR84→MR86, MS120/125/210/220/225→MS130, MS250/320→MS150, MS350/410/420/425→MS390, MG21→MG41, Z1/3→Z4, Z3C→Z4C
+Replacements: MX60/64→MX67, MX65→MX68, MX80/84→MX85, MX100→MX95, MX400→MX250, MX600→MX450, MR20→MR28, MR30H→MR36H, MR33→MR36, MR42→MR44, MR45→MR46, MR52/53/56→MR57, MR55→MR57, MR70→MR78, MR74→MR76, MR84→MR86, MV Gen 2→Gen 3, MS120/125→MS130, MS210/220/225→MS130/MS150, MS250→C9300L, MS320→MS150, MS350→C9300, MS355→C9300X, MS390→C9300, MS410/420→C9300, MS425→C9300X, MG21→MG41, MG51→MG52, Z1/3→Z4, Z3C→Z4C
 
-When you identify ANY EOL product, ALWAYS flag it in Important Notes AND include both Option 1 (renewal, license-only) and Option 2 (hardware refresh with replacement hardware + all licenses). If any replacement switch has 1G/10G uplink variants, show Option 2 (1G Uplink) and Option 3 (10G Uplink).
+When you identify ANY EOL product, ALWAYS flag it in Important Notes with EOS/End-of-Support dates AND include both Option 1 (renewal, license-only) and Option 2 (hardware refresh with replacement hardware + all licenses). If any replacement switch has 1G/10G uplink variants, show Option 2 (1G Uplink) and Option 3 (10G Uplink).
+
+## CISCO SECURITY PRODUCTS (License-Only, No Hardware)
+We also quote these Cisco security licenses. They are per-user, per-year licenses with NO hardware component:
+- Duo MFA: LIC-DUO-ESSENTIALS, LIC-DUO-ADVANTAGE, LIC-DUO-PREMIER (1YR/3YR/5YR each)
+- Umbrella DNS: LIC-UMB-DNS-ESS-K9, LIC-UMB-DNS-ADV-K9 (1YR/3YR/5YR each)
+- Umbrella SIG: LIC-UMB-SIG-ESS-K9, LIC-UMB-SIG-ADV-K9 (1YR/3YR/5YR each)
+When a user asks about Duo or Umbrella licensing, provide quote URLs with 1Y/3Y/5Y options just like hardware quotes.
 
 ## LICENSE DASHBOARD SCREENSHOT HANDLING
 When a user sends a screenshot of a Meraki license dashboard, ALWAYS use this exact response format:
