@@ -475,9 +475,6 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // MS390 and MS450 use Cisco DNA licensing (not Meraki), so return null
-  // Note: MS350 and MS355 DO use Meraki licensing — don't block them
-  if (/^MS390/.test(upper) || /^MS450/.test(upper)) return null;
 
   const mvMatch = upper.match(/^MV(\d+)/);
   if (mvMatch) {
@@ -498,7 +495,7 @@ function getLicenseSkus(baseSku, requestedTier) {
   }
 
   const legacyMatch = upper.match(/^(MS\d{3})-(.+)/);
-  if (legacyMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150') && !upper.startsWith('MS390') && !upper.startsWith('MS450')) {
+  if (legacyMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
     const model = legacyMatch[1];
     const port = legacyMatch[2];
     return [
@@ -1675,7 +1672,8 @@ Specific mappings:
 - MS130 compact (8/8P/8X/12X) → LIC-MS130-CMPT-1Y / -3Y / -5Y
 - MS130 standard (24/48) → LIC-MS130-{24/48}-1Y / -3Y / -5Y
 - MS150 → LIC-MS150-{24/48}-1Y / -3Y / -5Y
-- MS390, MS450 → no license in URL (DNA license handled separately)
+- MS390 → LIC-MS390-{model}-{term} (e.g. LIC-MS390-48UX-1YR)
+- MS450 → LIC-MS450-{model}-{term} (e.g. LIC-MS450-12-1YR)
 - Legacy switches → LIC-MS{model}-{port}-1YR / -3YR / -5YR
 
 ## VALID PRODUCT CATALOG
