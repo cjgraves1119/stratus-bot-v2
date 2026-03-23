@@ -36,8 +36,8 @@ const DATASHEET_URLS = {
   MX68CW: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
   MX75: 'https://documentation.meraki.com/MX/MX_Overviews_and_Specifications/MX75_Datasheet',
   MX85: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX85_Datasheet',
-  MX95: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95//105_Datasheet',
-  MX105: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95//105_Datasheet',
+  MX95: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95%2F%2F105_Datasheet',
+  MX105: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95%2F%2F105_Datasheet',
   MX250: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX250_Datasheet',
   MX450: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX450_Datasheet',
   MR28: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR28_Datasheet',
@@ -895,7 +895,9 @@ async function handleQuoteConfirmation(text, personId, kv) {
   // Check if the last assistant message was offering to generate a quote (specs/advisory response)
   // and does NOT already contain Stratus order URLs (already a quote)
   if (lastAssistant.includes('stratusinfosystems.com/order/')) return null;
-  if (!/quote|would you like/i.test(lastAssistant)) return null;
+  // If the last message was offering a datasheet check, don't intercept — let askClaude handle it
+  if (/datasheet|check for updates/i.test(lastAssistant)) return null;
+  if (!/quote|would you like|pricing/i.test(lastAssistant)) return null;
 
   // Extract SKUs from the assistant's response — look for bold product names or SKU patterns
   const skuPattern = /\b((?:MR|MX|MV|MG|MS|MT|CW|Z|C9)\d[\w-]*(?:-M)?)\b/gi;
@@ -2058,12 +2060,22 @@ async function askClaude(userMessage, personId, env, imageData = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
-    const wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
 
     let systemPrompt = SYSTEM_PROMPT;
     const kv = env.CONVERSATION_KV;
 
+    // Context-aware: bare "yes"/"yeah"/"sure" after bot offered datasheet check
+    if (!wantsLiveDatasheet && /^\s*(yes|yeah|yep|yea|sure|please|go ahead|do it)\s*[.!]?\s*$/i.test(userMessage) && personId && kv) {
+      const recentHistory = await getHistory(kv, personId);
+      const lastAssistant = [...recentHistory].reverse().find(h => h.role === 'assistant');
+      if (lastAssistant && /datasheet|check for updates/i.test(lastAssistant.content)) {
+        wantsLiveDatasheet = true;
+      }
+    }
+
     if (wantsLiveDatasheet) {
+      let datasheetFetched = false;
       const datasheetContext = await getRelevantDatasheetContext(userMessage);
       if (!datasheetContext && personId) {
         const history = await getHistory(kv, personId);
@@ -2073,11 +2085,24 @@ async function askClaude(userMessage, personId, env, imageData = null) {
           if (historyContext) {
             systemPrompt += '\n\n' + historyContext;
             systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences.';
+            datasheetFetched = true;
           }
         }
       } else if (datasheetContext) {
         systemPrompt += '\n\n' + datasheetContext;
         systemPrompt += '\n\nThe user requested live datasheet verification. Use the live datasheet content above as the authoritative source.';
+        datasheetFetched = true;
+      }
+      // If datasheet fetch failed, tell Claude it has the capability but the fetch failed
+      if (!datasheetFetched) {
+        systemPrompt += '\n\nThe user asked to verify specs against the latest datasheet. The live datasheet fetch was attempted but failed (the page may be temporarily unavailable). Tell the user the datasheet check was attempted but the page was unreachable, and offer to try again. Do NOT say you lack the ability to fetch datasheets — you DO have this capability, but it failed this time. Fall back to the specs.json data you already have.';
+        // Still inject static specs as fallback
+        const recentHistory = await getHistory(kv, personId);
+        const lastAssistant = [...recentHistory].reverse().find(h => h.role === 'assistant');
+        if (lastAssistant) {
+          const staticContext = getStaticSpecsContext(lastAssistant.content);
+          if (staticContext) systemPrompt += '\n\n' + staticContext;
+        }
       }
     } else {
       const staticContext = getStaticSpecsContext(userMessage);
