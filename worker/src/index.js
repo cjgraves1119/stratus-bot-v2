@@ -337,7 +337,8 @@ function applySuffix(sku) {
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
   if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
-  if (upper.startsWith('MS150') || upper.startsWith('MS450') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
+  if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
+  if (upper.startsWith('MS450')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (upper.startsWith('MS390')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
@@ -399,7 +400,9 @@ function getLicenseSkus(baseSku, requestedTier) {
     const tier = requestedTier || 'SEC';
     const numMatch = model.match(/^(\d+)/);
     const modelNum = numMatch ? parseInt(numMatch[1]) : 0;
-    const isNewer = modelNum >= 75 && modelNum < 250;
+    // Only MX75, MX85, MX95, MX105 use -Y for ENT/SEC. All others use -YR.
+    const newerModels = [75, 85, 95, 105];
+    const isNewer = newerModels.includes(modelNum);
     const suffix = isNewer ? 'Y' : 'YR';
     const termSuffix = tier === 'SDW' ? 'Y' : suffix;
     return [
@@ -429,8 +432,10 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  const mgMatch = upper.match(/^MG(\d+E?)/);
+  const mgMatch = upper.match(/^MG(\d+)/);
   if (mgMatch) {
+    // MG21E uses same license as MG21, MG51E uses MG51, etc.
+    // License SKUs never include the E suffix
     const model = mgMatch[1];
     return [
       { term: '1Y', sku: `LIC-MG${model}-ENT-1Y` },
@@ -475,17 +480,61 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
+  // MS125: Uses -Y suffix (not -YR) — LIC-MS125-{variant}-{1Y|3Y|5Y}
+  const ms125Match = upper.match(/^MS125-(.+)/);
+  if (ms125Match) {
+    const variant = ms125Match[1];
+    return [
+      { term: '1Y', sku: `LIC-MS125-${variant}-1Y` },
+      { term: '3Y', sku: `LIC-MS125-${variant}-3Y` },
+      { term: '5Y', sku: `LIC-MS125-${variant}-5Y` }
+    ];
+  }
 
-  // Catalyst M-series: C9200L, C9300, C9300L, C9300X — LIC-{family}-{portCount}-{term}
-  // Port count is just the leading digits (e.g. C9300-48UXM-M → 48, C9300X-24HX-M → 24)
+  // MS390: Uses {portCount}{A|E}-{term}Y format (NOT legacy -1YR format)
+  // MS390-24UX → LIC-MS390-24E-1Y, MS390-48P → LIC-MS390-48E-1Y
+  const ms390Match = upper.match(/^MS390-(\d+)/);
+  if (ms390Match) {
+    const portCount = ms390Match[1];
+    const tier = (requestedTier === 'A') ? 'A' : 'E';
+    return [
+      { term: '1Y', sku: `LIC-MS390-${portCount}${tier}-1Y` },
+      { term: '3Y', sku: `LIC-MS390-${portCount}${tier}-3Y` },
+      { term: '5Y', sku: `LIC-MS390-${portCount}${tier}-5Y` }
+    ];
+  }
+
+  // Catalyst M-series: C9200L, C9300, C9350 — LIC-{family}-{portCount}{A|E}-{term}
+  // C9300-48UXM-M → LIC-C9300-48E-1Y, C9200L-24P-4G-M → LIC-C9200L-24E-1Y
+  // C9300X and C9300L have no license SKUs in prices, they use C9300 licenses
+  // C9300X-12Y uses the 24-port license (LIC-C9300-24E)
+  // C9350 has only 3Y and 5Y (no 1Y)
   const catMatch = upper.match(/^(C9\d{3}[LX]?)-(\d+)/);
   if (catMatch) {
-    const family = catMatch[1];
-    const portCount = catMatch[2];
+    let family = catMatch[1];
+    let portCount = catMatch[2];
+    const tier = (requestedTier === 'A') ? 'A' : 'E';
+
+    // C9300X and C9300L map to C9300 license SKUs
+    if (family === 'C9300X' || family === 'C9300L') {
+      family = 'C9300';
+    }
+
+    // C9300X-12Y uses the 24-port license
+    if (portCount === '12') portCount = '24';
+
+    // C9350 has no 1Y option
+    if (family === 'C9350') {
+      return [
+        { term: '3Y', sku: `LIC-C9350-${portCount}${tier}-3Y` },
+        { term: '5Y', sku: `LIC-C9350-${portCount}${tier}-5Y` }
+      ];
+    }
+
     return [
-      { term: '1Y', sku: `LIC-${family}-${portCount}-1Y` },
-      { term: '3Y', sku: `LIC-${family}-${portCount}-3Y` },
-      { term: '5Y', sku: `LIC-${family}-${portCount}-5Y` }
+      { term: '1Y', sku: `LIC-${family}-${portCount}${tier}-1Y` },
+      { term: '3Y', sku: `LIC-${family}-${portCount}${tier}-3Y` },
+      { term: '5Y', sku: `LIC-${family}-${portCount}${tier}-5Y` }
     ];
   }
 
@@ -510,7 +559,10 @@ function getLicenseSkus(baseSku, requestedTier) {
   const legacyMatch = upper.match(/^(MS\d{3})-(.+)/);
   if (legacyMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
     const model = legacyMatch[1];
-    const port = legacyMatch[2];
+    let port = legacyMatch[2];
+    // MS350-48X uses the 48-port license (LIC-MS350-48, no X)
+    // MS350-24X has its own license (LIC-MS350-24X), so only strip X from 48-port
+    if (model === 'MS350' && port === '48X') port = '48';
     return [
       { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
       { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
