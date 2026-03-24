@@ -593,13 +593,88 @@ function eolDateSuffix(baseSku) {
   return parts.length > 0 ? ` (${parts.join(' | ')})` : '';
 }
 
+// ─── Levenshtein Distance ───────────────────────────────────────────────────
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let curr = new Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+// ─── Fuzzy Matching ─────────────────────────────────────────────────────────
+function fuzzyMatchInFamily(input, family) {
+  const upper = input.toUpperCase();
+  const variants = catalog[family];
+  if (!variants || !Array.isArray(variants)) return [];
+  const candidates = variants.map(v => {
+    return { sku: v, distance: levenshtein(upper, v.toUpperCase()) };
+  });
+  return candidates
+    .filter(c => c.distance <= 3 && c.distance > 0)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 5);
+}
+
+function fuzzyMatchAllFamilies(input) {
+  const upper = input.toUpperCase();
+  const results = [];
+  for (const [family, variants] of Object.entries(catalog)) {
+    if (family.startsWith('_') || !Array.isArray(variants)) continue;
+    for (const sku of variants) {
+      const dist = levenshtein(upper, sku.toUpperCase());
+      if (dist <= 2) results.push({ sku, distance: dist });
+    }
+  }
+  return results.sort((a, b) => a.distance - b.distance).slice(0, 5);
+}
+
 // ─── Common Mistakes ─────────────────────────────────────────────────────────
 function fixCommonMistake(sku) {
   const upper = sku.toUpperCase();
+
+  // Exact match first
   const mistake = COMMON_MISTAKES[upper];
   if (mistake && mistake.suggest && mistake.suggest.length > 0) {
     return { error: mistake.error, suggest: mistake.suggest };
   }
+
+  // Prefix match: check if input extends a common mistake key
+  // e.g., "MS150-48P-4X" starts with mistake key "MS150-48P"
+  for (const [key, val] of Object.entries(COMMON_MISTAKES)) {
+    if (upper.startsWith(key + '-') && val.suggest && val.suggest.length > 0) {
+      const suffix = upper.slice(key.length).toUpperCase(); // e.g., "-4X"
+
+      // Strategy 1: Append suffix to suggestions and check validity
+      const appended = val.suggest
+        .map(s => s + suffix)
+        .filter(s => VALID_SKUS.has(s.toUpperCase()) || isEol(s));
+      if (appended.length > 0) {
+        return { error: val.error, suggest: appended };
+      }
+
+      // Strategy 2: Filter suggestions that already end with the same suffix
+      // (handles cases where suggestions already include uplink variants)
+      const filtered = val.suggest.filter(s => s.toUpperCase().endsWith(suffix));
+      if (filtered.length > 0) {
+        return { error: val.error, suggest: filtered };
+      }
+
+      // Fallback: return all original suggestions
+      return { error: val.error, suggest: val.suggest };
+    }
+  }
+
   return null;
 }
 
@@ -607,7 +682,7 @@ function fixCommonMistake(sku) {
 function validateSku(baseSku) {
   const upper = baseSku.toUpperCase();
   const mistake = fixCommonMistake(upper);
-  if (mistake) return { valid: false, reason: mistake.error, suggest: mistake.suggest };
+  if (mistake) return { valid: false, reason: mistake.error, suggest: mistake.suggest, isCommonMistake: true };
   if (VALID_SKUS.has(upper)) {
     const eol = isEol(upper);
     return eol ? { valid: true, eol: true } : { valid: true };
@@ -616,10 +691,38 @@ function validateSku(baseSku) {
   if (/^MA-/.test(upper)) return { valid: true };
   const family = detectFamily(upper);
   if (family && catalog[family]) {
+    // Try partial string matching first
     const partialMatches = catalog[family].filter(s => s.toUpperCase().includes(upper) || upper.includes(s.toUpperCase()));
-    const suggestions = partialMatches.length > 0 ? partialMatches : catalog[family].slice(0, 5);
-    const isPartialMatch = partialMatches.length > 1;
-    return { valid: false, reason: `${upper} is not a recognized model`, suggest: suggestions, isPartialMatch };
+    if (partialMatches.length > 0) {
+      return { valid: false, reason: `${upper} is not a recognized model`, suggest: partialMatches, isPartialMatch: partialMatches.length > 1 };
+    }
+    // Fuzzy match within the family (Levenshtein distance <= 3)
+    const fuzzyMatches = fuzzyMatchInFamily(upper, family);
+    if (fuzzyMatches.length > 0) {
+      const suggestions = fuzzyMatches.map(m => m.sku);
+      const closest = fuzzyMatches[0];
+      return {
+        valid: false,
+        reason: `${upper} is not a recognized model`,
+        suggest: suggestions,
+        isFuzzyMatch: true,
+        closestDistance: closest.distance
+      };
+    }
+    // Fallback: show first 5 variants in the family
+    const suggestions = catalog[family].slice(0, 5);
+    return { valid: false, reason: `${upper} is not a recognized model`, suggest: suggestions, isPartialMatch: false };
+  }
+  // No family detected — try cross-family fuzzy match
+  const crossFamilyMatches = fuzzyMatchAllFamilies(upper);
+  if (crossFamilyMatches.length > 0) {
+    return {
+      valid: false,
+      reason: `${upper} is not a recognized SKU`,
+      suggest: crossFamilyMatches.map(m => m.sku),
+      isFuzzyMatch: true,
+      closestDistance: crossFamilyMatches[0].distance
+    };
   }
   return { valid: false, reason: `${upper} is not a recognized SKU` };
 }
@@ -634,7 +737,19 @@ function detectFamily(sku) {
   if (/^Z\d/.test(sku)) return 'Z';
   if (/^MS130/.test(sku)) return 'MS130';
   if (/^MS150/.test(sku)) return 'MS150';
+  if (/^MS120/.test(sku)) return 'MS120';
+  if (/^MS125/.test(sku)) return 'MS125';
+  if (/^MS210/.test(sku)) return 'MS210';
+  if (/^MS220/.test(sku)) return 'MS220';
+  if (/^MS225/.test(sku)) return 'MS225';
+  if (/^MS250/.test(sku)) return 'MS250';
+  if (/^MS320/.test(sku)) return 'MS320';
+  if (/^MS350/.test(sku)) return 'MS350';
+  if (/^MS355/.test(sku)) return 'MS355';
   if (/^MS390/.test(sku)) return 'MS390';
+  if (/^MS410/.test(sku)) return 'MS410';
+  if (/^MS420/.test(sku)) return 'MS420';
+  if (/^MS425/.test(sku)) return 'MS425';
   if (/^MS450/.test(sku)) return 'MS450';
   if (/^CW9/.test(sku)) return 'CW';
   if (/^C9300X/.test(sku)) return 'C9300X';
@@ -1937,19 +2052,30 @@ function buildQuoteResponse(parsed) {
     // ALL items are invalid — block entirely
     const allPartialMatches = parsed.items.every(({ baseSku }) => {
       const v = validateSku(baseSku);
-      return v.valid || (!v.valid && v.isPartialMatch && v.suggest && v.suggest.length > 0);
+      return v.valid || (!v.valid && (v.isPartialMatch || v.isFuzzyMatch || v.isCommonMistake) && v.suggest && v.suggest.length > 0);
     });
     if (allPartialMatches) {
       const lines = [];
       for (const { baseSku } of parsed.items) {
         const v = validateSku(baseSku);
         if (v.valid) continue;
-        const family = detectFamily(baseSku.toUpperCase());
-        const familyLabel = family || baseSku.toUpperCase();
-        const portMatch = baseSku.match(/\d+$/);
-        const portHint = portMatch ? ` ${portMatch[0]}-port` : '';
-        lines.push(`I found multiple ${familyLabel}${portHint} variants. Which one do you need?`);
-        for (const s of v.suggest) lines.push(`• ${s}`);
+        const upper = baseSku.toUpperCase();
+        if (v.suggest && v.suggest.length === 1) {
+          // Single suggestion — strong "Did you mean?" prompt
+          lines.push(`⚠️ **${upper}** is not a recognized SKU. Did you mean **${v.suggest[0]}**?`);
+        } else if (v.isFuzzyMatch || v.isCommonMistake || v.reason) {
+          // Fuzzy match or common mistake — show suggestions with context
+          lines.push(`⚠️ **${upper}** is not a recognized SKU.${v.reason && !v.reason.includes('not a recognized') ? ' ' + v.reason + '.' : ''} Did you mean:`);
+          for (const s of v.suggest) lines.push(`• ${s}`);
+        } else {
+          // Multiple partial matches — variant disambiguation
+          const family = detectFamily(upper);
+          const familyLabel = family || upper;
+          const portMatch = baseSku.match(/\d+$/);
+          const portHint = portMatch ? ` ${portMatch[0]}-port` : '';
+          lines.push(`I found multiple ${familyLabel}${portHint} variants. Which one do you need?`);
+          for (const s of v.suggest) lines.push(`• ${s}`);
+        }
       }
       return { message: lines.join('\n'), needsLlm: false };
     }

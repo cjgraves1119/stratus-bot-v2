@@ -741,7 +741,7 @@ function fixCommonMistake(sku) {
 function validateSku(baseSku) {
   const upper = baseSku.toUpperCase();
   const mistake = fixCommonMistake(upper);
-  if (mistake) return { valid: false, reason: mistake.error, suggest: mistake.suggest };
+  if (mistake) return { valid: false, reason: mistake.error, suggest: mistake.suggest, isCommonMistake: true };
   if (VALID_SKUS.has(upper)) {
     const eol = isEol(upper);
     return eol ? { valid: true, eol: true } : { valid: true };
@@ -2111,7 +2111,7 @@ function buildQuoteResponse(parsed) {
     // ALL items are invalid — block entirely
     const allPartialMatches = parsed.items.every(({ baseSku }) => {
       const v = validateSku(baseSku);
-      return v.valid || (!v.valid && (v.isPartialMatch || v.isFuzzyMatch) && v.suggest && v.suggest.length > 0);
+      return v.valid || (!v.valid && (v.isPartialMatch || v.isFuzzyMatch || v.isCommonMistake) && v.suggest && v.suggest.length > 0);
     });
     if (allPartialMatches) {
       const lines = [];
