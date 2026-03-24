@@ -2933,6 +2933,43 @@ async function verifyGoogleChatToken(request, env) {
 }
 
 // ─── Main Worker Entry Point (Google Chat) ────────────────────────────────────
+/**
+ * Google Chat Bot for Stratus AI Quoting
+ *
+ * ENVIRONMENT SETUP REQUIRED:
+ * In Google Cloud Console > Chat API > App Configuration:
+ *
+ * 1. Basic Information
+ *    - App name: Stratus AI Bot
+ *    - Avatar URL: (optional)
+ *    - Description: Cisco/Meraki quoting assistant
+ *
+ * 2. Functionality
+ *    - Slash commands: (optional, for /quote, /price)
+ *
+ * 3. Connection Settings
+ *    - HTTP endpoint URL: https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev
+ *    - Verification token: (optional, for extra security)
+ *
+ * 4. Permissions
+ *    - Receive 1:1 messages: ENABLED
+ *    - Join spaces and group conversations: ENABLED
+ *    - See messages in spaces where bot is added: YES
+ *    - Read basic space information: YES
+ *
+ * USAGE:
+ * - DMs: Send messages directly to @StratusAI
+ * - Spaces: Add bot to space, then:
+ *   - @mention bot to trigger quote parsing
+ *   - Use Gmail "Share to Chat" feature to share emails directly
+ *   - Bot extracts email content and finds relevant products
+ *
+ * GMAIL INTEGRATION:
+ * Once bot is in a Space, Gmail users can right-click emails
+ * and select "Share to Google Chat" to send them to the Space.
+ * The bot will parse email content and extract any Cisco/Meraki
+ * products mentioned, generating quote links.
+ */
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -2942,10 +2979,10 @@ export default {
 
     // Health check
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
-      return new Response(JSON.stringify({ 
-        status: 'Stratus AI (Google Chat) running', 
-        version: '1.0.0-gchat', 
-        runtime: 'cloudflare-workers' 
+      return new Response(JSON.stringify({
+        status: 'Stratus AI (Google Chat) running',
+        version: '1.0.0-gchat',
+        runtime: 'cloudflare-workers'
       }), {
         headers: { 'Content-Type': 'application/json' }
       });
@@ -2982,18 +3019,11 @@ export default {
         // Detect Workspace Add-on format (commonEventObject present)
         const isAddon = !!event.commonEventObject;
 
-        // Extract message text from either format
-        let messageText = '';
-        if (isAddon) {
-          // Workspace Add-on format: text at chat.messagePayload.message.argumentText
-          messageText = event.chat?.messagePayload?.message?.argumentText
-            || event.chat?.messagePayload?.message?.text
-            || '';
-        } else {
-          // Standalone Chat app format
-          messageText = event.message?.argumentText || event.message?.text || '';
-        }
-        messageText = messageText.trim();
+        // Detect if message is in a Space (not a DM)
+        const isSpace = event.space?.type === 'ROOM';
+
+        // Extract message text from either format (handles attachments, cards, etc.)
+        const messageText = extractMessageText(event, isAddon);
 
         // Extract sender ID for conversation history
         const personId = isAddon
@@ -3216,6 +3246,124 @@ export default {
     });
   }
 };
+
+/**
+ * Extracts message text from Google Chat events, handling both DMs and Spaces.
+ * In Spaces, the bot receives messages when:
+ * 1. @mentioned (argumentText strips the @mention, text includes it)
+ * 2. Configured in GCP to receive all messages in the space
+ *
+ * GCP Chat App Configuration Requirements:
+ * - Enable "Receive 1:1 messages" (for DMs)
+ * - Enable "Join spaces and group conversations"
+ * - Set HTTP endpoint URL in Connection settings
+ * - If only @mentions desired: no additional config needed
+ * - If all messages desired: requires GCP permission scopes
+ */
+function extractMessageText(event, isAddon) {
+  let text = '';
+
+  if (isAddon) {
+    // Workspace Add-on format: text at chat.messagePayload.message.argumentText
+    text = event.chat?.messagePayload?.message?.argumentText
+      || event.chat?.messagePayload?.message?.text
+      || '';
+  } else {
+    // Standalone Chat app format (DMs and Spaces)
+    text = event.message?.argumentText || event.message?.text || '';
+  }
+
+  // If no text, try to extract from attachments (Gmail shares, etc.)
+  if (!text && event.message?.attachment) {
+    text = extractFromAttachments(event.message.attachment);
+  }
+
+  // Also try cardsV2 (newer format)
+  if (!text && event.message?.cardsV2) {
+    text = extractFromCards(event.message.cardsV2);
+  }
+
+  return text.trim();
+}
+
+/**
+ * Extracts text from Gmail shared email attachments.
+ * Gmail "Share to Chat" feature sends email content as attachments.
+ */
+function extractFromAttachments(attachments) {
+  if (!Array.isArray(attachments)) return '';
+
+  let fullText = '';
+
+  for (const attachment of attachments) {
+    // Gmail shared email typically has contentName or fileName
+    const name = attachment.name || attachment.contentName || '';
+
+    // Extract text content from attachment
+    if (attachment.source?.attachmentDataUri) {
+      // For base64 encoded data
+      try {
+        const base64Data = attachment.source.attachmentDataUri.split(',')[1] || attachment.source.attachmentDataUri;
+        const decoded = atob(base64Data);
+        fullText += decoded + '\n';
+      } catch (e) {
+        console.warn('[GCHAT] Failed to decode attachment:', e.message);
+      }
+    }
+
+    // Some formats include the text directly
+    if (attachment.text) {
+      fullText += attachment.text + '\n';
+    }
+  }
+
+  return fullText;
+}
+
+/**
+ * Extracts text from card widgets (newer Google Chat format).
+ * Gmail shares can appear as rich cards with email subject and preview.
+ */
+function extractFromCards(cardsV2) {
+  if (!Array.isArray(cardsV2)) return '';
+
+  let fullText = '';
+
+  for (const cardWrapper of cardsV2) {
+    const card = cardWrapper.card || {};
+
+    // Extract from sections
+    if (card.sections && Array.isArray(card.sections)) {
+      for (const section of card.sections) {
+        if (section.header) {
+          fullText += section.header + '\n';
+        }
+
+        if (section.widgets && Array.isArray(section.widgets)) {
+          for (const widget of section.widgets) {
+            // Text paragraphs
+            if (widget.textParagraph?.text) {
+              fullText += widget.textParagraph.text + '\n';
+            }
+
+            // Decorated text (has label and value)
+            if (widget.decoratedText?.text) {
+              fullText += widget.decoratedText.text + '\n';
+            }
+            if (widget.decoratedText?.topLabel) {
+              fullText += widget.decoratedText.topLabel + ': ';
+            }
+            if (widget.decoratedText?.bottomLabel) {
+              fullText += widget.decoratedText.bottomLabel + '\n';
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return fullText;
+}
 
 // Helper: format response for Google Chat (Add-on or standalone)
 function sendGChatResponse(text, isAddon) {
