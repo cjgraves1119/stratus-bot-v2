@@ -1846,9 +1846,6 @@ function formatPrice(num) {
 }
 
 function buildPricingBlock(urlItems, showPricing) {
-  // Pricing disabled — prices.json needs to be refreshed before re-enabling
-  return '';
-  // eslint-disable-next-line no-unreachable
   if (!showPricing) return '';
   let lines = [];
   let cartTotal = 0;
@@ -2965,9 +2962,11 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     const history = personId ? await getHistory(kv, personId) : [];
 
     // Option 3: Inject relevant pricing into system prompt for pricing questions
-    // Price context injection disabled — prices.json needs to be refreshed
-    // const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(userMessage);
-    // if (pricingIntent) { const priceContext = getRelevantPriceContext(userMessage, history); ... }
+    const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(userMessage);
+    if (pricingIntent) {
+      const priceContext = getRelevantPriceContext(userMessage, history);
+      if (priceContext) systemPrompt += '\n\n' + priceContext;
+    }
 
     // Phase 4: Inject accessories/connectivity context for design questions
     const accessoriesContext = getAccessoriesContext(userMessage);
@@ -3242,8 +3241,11 @@ export default {
           }
         }
 
-        // Pricing calculator disabled — prices.json needs to be refreshed
-        // if (!reply) { const pricingReply = await handlePricingRequest(...) }
+        // Option 4: Deterministic pricing calculator
+        if (!reply) {
+          const pricingReply = await handlePricingRequest(text, personId, kv);
+          if (pricingReply) reply = pricingReply;
+        }
 
         if (!reply) {
           reply = await askClaude(text, personId, env);
@@ -3339,8 +3341,11 @@ export default {
           }
         }
 
-        // Pricing calculator disabled — prices.json needs to be refreshed
-        // if (!reply) { const pricingReply = await handlePricingRequest(...) }
+        // Option 4: Deterministic pricing calculator
+        if (!reply) {
+          const pricingReply = await handlePricingRequest(text, personId, kv);
+          if (pricingReply) reply = pricingReply;
+        }
 
         if (!reply) {
           // Full fallback to Claude API
