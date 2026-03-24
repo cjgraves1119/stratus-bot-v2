@@ -1767,8 +1767,9 @@ function parseMessage(text) {
       let qty = 1;
       const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
       const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
-      if (beforeQty) qty = parseInt(beforeQty[1]);
-      else if (afterQty) qty = parseInt(afterQty[1]);
+      // For inline format (SKU1 qty1 SKU2 qty2...), prefer afterQty to avoid picking up previous SKU's quantity
+      if (afterQty) qty = parseInt(afterQty[1]);
+      else if (beforeQty) qty = parseInt(beforeQty[1]);
       rawMatches.push({ baseSku: sku, qty, position: pos });
     }
   }
