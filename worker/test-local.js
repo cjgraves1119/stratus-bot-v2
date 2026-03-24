@@ -1629,6 +1629,229 @@ const tests = [
   },
 ];
 
+// ─── Fuzzy Match Functions (duplicated from index.js for testing) ────────────
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  let curr = new Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+function fuzzyMatchInFamily(input, family) {
+  const upper = input.toUpperCase();
+  const variants = catalog[family];
+  if (!variants || !Array.isArray(variants)) return [];
+  return variants.map(v => ({ sku: v, distance: levenshtein(upper, v.toUpperCase()) }))
+    .filter(c => c.distance <= 3 && c.distance > 0)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 5);
+}
+
+function fuzzyMatchAllFamilies(input) {
+  const upper = input.toUpperCase();
+  const results = [];
+  for (const [family, variants] of Object.entries(catalog)) {
+    if (family.startsWith('_') || !Array.isArray(variants)) continue;
+    for (const sku of variants) {
+      const dist = levenshtein(upper, sku.toUpperCase());
+      if (dist <= 2) results.push({ sku, distance: dist });
+    }
+  }
+  return results.sort((a, b) => a.distance - b.distance).slice(0, 5);
+}
+
+// Build VALID_SKUS set for fuzzy test validation
+const VALID_SKUS_SET = new Set();
+for (const [family, variants] of Object.entries(catalog)) {
+  if (family.startsWith('_')) continue;
+  if (Array.isArray(variants)) variants.forEach(v => VALID_SKUS_SET.add(v.toUpperCase()));
+}
+
+function testFixCommonMistake(sku) {
+  const upper = sku.toUpperCase();
+  const exact = COMMON_MISTAKES[upper];
+  if (exact && exact.suggest && exact.suggest.length > 0) {
+    return { error: exact.error, suggest: exact.suggest };
+  }
+  for (const [key, val] of Object.entries(COMMON_MISTAKES)) {
+    if (upper.startsWith(key + '-') && val.suggest && val.suggest.length > 0) {
+      const suffix = upper.slice(key.length).toUpperCase();
+      const appended = val.suggest.map(s => s + suffix).filter(s => VALID_SKUS_SET.has(s.toUpperCase()) || isEol(s));
+      if (appended.length > 0) return { error: val.error, suggest: appended };
+      const filtered = val.suggest.filter(s => s.toUpperCase().endsWith(suffix));
+      if (filtered.length > 0) return { error: val.error, suggest: filtered };
+      return { error: val.error, suggest: val.suggest };
+    }
+  }
+  return null;
+}
+
+function testDetectFamily(sku) {
+  if (/^MR\d/.test(sku)) return 'MR';
+  if (/^MX\d/.test(sku)) return 'MX';
+  if (/^MV\d/.test(sku)) return 'MV';
+  if (/^MT\d/.test(sku)) return 'MT';
+  if (/^MG\d/.test(sku)) return 'MG';
+  if (/^Z\d/.test(sku)) return 'Z';
+  if (/^MS130/.test(sku)) return 'MS130';
+  if (/^MS150/.test(sku)) return 'MS150';
+  if (/^MS120/.test(sku)) return 'MS120';
+  if (/^MS125/.test(sku)) return 'MS125';
+  if (/^MS210/.test(sku)) return 'MS210';
+  if (/^MS220/.test(sku)) return 'MS220';
+  if (/^MS225/.test(sku)) return 'MS225';
+  if (/^MS250/.test(sku)) return 'MS250';
+  if (/^MS320/.test(sku)) return 'MS320';
+  if (/^MS350/.test(sku)) return 'MS350';
+  if (/^MS355/.test(sku)) return 'MS355';
+  if (/^MS390/.test(sku)) return 'MS390';
+  if (/^MS410/.test(sku)) return 'MS410';
+  if (/^MS420/.test(sku)) return 'MS420';
+  if (/^MS425/.test(sku)) return 'MS425';
+  if (/^MS450/.test(sku)) return 'MS450';
+  if (/^CW9/.test(sku)) return 'CW';
+  if (/^C9300X/.test(sku)) return 'C9300X';
+  if (/^C9300L/.test(sku)) return 'C9300L';
+  if (/^C9300/.test(sku)) return 'C9300';
+  if (/^C9200L/.test(sku)) return 'C9200L';
+  if (/^C8111/.test(sku)) return 'C8111';
+  if (/^C8455/.test(sku)) return 'C8455';
+  return null;
+}
+
+function testValidateSku(baseSku) {
+  const upper = baseSku.toUpperCase();
+  const mistake = testFixCommonMistake(upper);
+  if (mistake) return { valid: false, reason: mistake.error, suggest: mistake.suggest };
+  if (VALID_SKUS_SET.has(upper)) {
+    const eol = isEol(upper);
+    return eol ? { valid: true, eol: true } : { valid: true };
+  }
+  if (isEol(upper)) return { valid: true, eol: true };
+  if (/^MA-/.test(upper)) return { valid: true };
+  const family = testDetectFamily(upper);
+  if (family && catalog[family]) {
+    const partialMatches = catalog[family].filter(s => s.toUpperCase().includes(upper) || upper.includes(s.toUpperCase()));
+    if (partialMatches.length > 0) {
+      return { valid: false, reason: `${upper} is not a recognized model`, suggest: partialMatches, isPartialMatch: true };
+    }
+    const fuzzyMatches = fuzzyMatchInFamily(upper, family);
+    if (fuzzyMatches.length > 0) {
+      return { valid: false, reason: `${upper} is not a recognized model`, suggest: fuzzyMatches.map(m => m.sku), isFuzzyMatch: true };
+    }
+    return { valid: false, reason: `${upper} is not a recognized model`, suggest: catalog[family].slice(0, 5) };
+  }
+  const crossMatches = fuzzyMatchAllFamilies(upper);
+  if (crossMatches.length > 0) {
+    return { valid: false, reason: `${upper} is not a recognized SKU`, suggest: crossMatches.map(m => m.sku), isFuzzyMatch: true };
+  }
+  return { valid: false, reason: `${upper} is not a recognized SKU` };
+}
+
+// ─── Fuzzy Match Test Cases ─────────────────────────────────────────────────
+const fuzzyTests = [
+  { name: '[FUZZY] MS150-48P-4X → suggests MS150-48FP-4X or MS150-48LP-4X',
+    customTest: () => {
+      const result = testValidateSku('MS150-48P-4X');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      if (!result.suggest || result.suggest.length === 0) return { pass: false, actual: 'No suggestions' };
+      const sugs = result.suggest.map(s => s.toUpperCase());
+      const hasMatch = sugs.includes('MS150-48FP-4X') || sugs.includes('MS150-48LP-4X');
+      return { pass: hasMatch, actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] MS150-48P-4G → suggests MS150-48FP-4G or MS150-48LP-4G',
+    customTest: () => {
+      const result = testValidateSku('MS150-48P-4G');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      const sugs = (result.suggest || []).map(s => s.toUpperCase());
+      const hasMatch = sugs.includes('MS150-48FP-4G') || sugs.includes('MS150-48LP-4G');
+      return { pass: hasMatch, actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] MR43 → suggests MR44 (distance 1, not a real SKU)',
+    customTest: () => {
+      const result = testValidateSku('MR43');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      const sugs = (result.suggest || []).map(s => s.toUpperCase());
+      return { pass: sugs.includes('MR44'), actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] MX86 → suggests MX85',
+    customTest: () => {
+      const result = testValidateSku('MX86');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      const sugs = (result.suggest || []).map(s => s.toUpperCase());
+      return { pass: sugs.includes('MX85'), actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] CW9162E → suggests CW9162I',
+    customTest: () => {
+      const result = testValidateSku('CW9162E');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      const sugs = (result.suggest || []).map(s => s.toUpperCase());
+      return { pass: sugs.includes('CW9162I'), actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] MS390-48P-4G → suggests MS390-48UX',
+    customTest: () => {
+      const result = testValidateSku('MS390-48P-4G');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      const sugs = (result.suggest || []).map(s => s.toUpperCase());
+      return { pass: sugs.includes('MS390-48UX') || sugs.includes('MS390-48UX2'), actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] C9300-48P → suggests C9300-48P-M (missing -M)',
+    customTest: () => {
+      const result = testValidateSku('C9300-48P');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      const sugs = (result.suggest || []).map(s => s.toUpperCase());
+      return { pass: sugs.includes('C9300-48P-M'), actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] valid SKU MS150-48FP-4G → passes (no false positive)',
+    customTest: () => {
+      const result = testValidateSku('MS150-48FP-4G');
+      return { pass: result.valid === true, actual: result.valid ? 'valid' : 'invalid: ' + result.reason };
+    }
+  },
+  { name: '[FUZZY] valid SKU MR44 → passes (no false positive)',
+    customTest: () => {
+      const result = testValidateSku('MR44');
+      return { pass: result.valid === true, actual: result.valid ? 'valid' : 'invalid: ' + result.reason };
+    }
+  },
+  { name: '[FUZZY] MS130-48FP → suggests MS130-48P (exact common mistake)',
+    customTest: () => {
+      const result = testValidateSku('MS130-48FP');
+      if (result.valid) return { pass: false, actual: 'Should be invalid' };
+      const sugs = (result.suggest || []).map(s => s.toUpperCase());
+      return { pass: sugs.includes('MS130-48P'), actual: sugs.join(', ') };
+    }
+  },
+  { name: '[FUZZY] C9300L-48PF-4X → valid (existing SKU, no false rejection)',
+    customTest: () => {
+      const result = testValidateSku('C9300L-48PF-4X-M');
+      return { pass: result.valid === true, actual: result.valid ? 'valid' : 'invalid: ' + result.reason };
+    }
+  },
+  { name: '[FUZZY] MS250-48FP → valid EOL (no false rejection)',
+    customTest: () => {
+      const result = testValidateSku('MS250-48FP');
+      return { pass: result.valid === true, actual: result.valid ? 'valid (eol: ' + result.eol + ')' : 'invalid: ' + result.reason };
+    }
+  },
+];
+
 // ─── Simple parseMessage for testing (extracts items from text) ──────────────
 function testParseItems(text) {
   const upper = text.toUpperCase().trim();
@@ -1680,10 +1903,11 @@ function testParseItems(text) {
 }
 
 // ─── Run Tests ───────────────────────────────────────────────────────────────
+const allTests = [...tests, ...fuzzyTests];
 let passed = 0;
 let failed = 0;
 
-for (const test of tests) {
+for (const test of allTests) {
   process.stdout.write(`  ${test.name}... `);
 
   if (test.customTest) {
