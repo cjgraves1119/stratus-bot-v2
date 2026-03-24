@@ -153,6 +153,32 @@
       "poe": false,
       "wireless": false,
       "cellular": false
+    },
+    "C8111-G2-MX": {
+      "type": "Security Appliance (Next-Gen, replaces MX67)",
+      "firewallThroughput": "2 Gbps",
+      "vpnThroughput": "1.2 Gbps",
+      "recommendedDevices": 200,
+      "formFactor": "Desktop",
+      "wanPorts": "2x 2.5G mGig RJ45 (1x PoE+, 30W for cellular gateway)",
+      "lanPorts": "4x 1 GbE RJ45 (1x PoE, 45W budget)",
+      "poe": "1x LAN PoE (45W) + 1x WAN PoE+ (30W)",
+      "wireless": false,
+      "cellular": false,
+      "notes": "Catalyst-based hardware running MX OS. 2.5G WAN uplinks. Replaces MX67 with ~3x throughput. Licensed as C8K-G2-MX Small."
+    },
+    "C8121-G2-MX": {
+      "type": "Security Appliance (Next-Gen, replaces MX68)",
+      "firewallThroughput": "2 Gbps",
+      "vpnThroughput": "1.2 Gbps",
+      "recommendedDevices": 200,
+      "formFactor": "Desktop",
+      "wanPorts": "2x 2.5G mGig RJ45 (1x PoE+, 30W for cellular gateway)",
+      "lanPorts": "10x 1 GbE RJ45 (3x PoE, 45W budget)",
+      "poe": "3x LAN PoE (45W) + 1x WAN PoE+ (30W)",
+      "wireless": false,
+      "cellular": false,
+      "notes": "Catalyst-based hardware running MX OS. 2.5G WAN uplinks. Replaces MX68 with ~3x throughput and more LAN ports/PoE. Licensed as C8K-G2-MX Small."
     }
   },
 
