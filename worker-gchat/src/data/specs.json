@@ -1,0 +1,527 @@
+{
+  "_generated": "2026-03-20",
+  "_source": "documentation.meraki.com official datasheets",
+  "_description": "Product specs for Claude advisory responses. Do not fabricate specs not in this file.",
+
+  "MX": {
+    "MX67": {
+      "type": "Security Appliance",
+      "firewallThroughput": "700 Mbps",
+      "vpnThroughput": "400 Mbps",
+      "recommendedDevices": 50,
+      "formFactor": "Desktop",
+      "wanPorts": "1x GbE dedicated + 1x GbE convertible",
+      "lanPorts": "3x GbE RJ45",
+      "poe": false,
+      "wireless": false,
+      "cellular": false
+    },
+    "MX67W": {
+      "type": "Security Appliance",
+      "firewallThroughput": "700 Mbps",
+      "vpnThroughput": "400 Mbps",
+      "recommendedDevices": 50,
+      "formFactor": "Desktop",
+      "wanPorts": "1x GbE dedicated + 1x GbE convertible",
+      "lanPorts": "3x GbE RJ45",
+      "poe": false,
+      "wireless": "802.11ac Wave 2, 1.3 Gbps",
+      "cellular": false
+    },
+    "MX67C": {
+      "type": "Security Appliance",
+      "firewallThroughput": "700 Mbps",
+      "vpnThroughput": "400 Mbps",
+      "recommendedDevices": 50,
+      "formFactor": "Desktop",
+      "wanPorts": "1x GbE dedicated + 1x GbE convertible",
+      "lanPorts": "3x GbE RJ45",
+      "poe": false,
+      "wireless": false,
+      "cellular": "CAT 6 LTE built-in"
+    },
+    "MX68": {
+      "type": "Security Appliance",
+      "firewallThroughput": "700 Mbps",
+      "vpnThroughput": "400 Mbps",
+      "recommendedDevices": 50,
+      "formFactor": "Desktop",
+      "wanPorts": "2x GbE RJ45",
+      "lanPorts": "8x GbE RJ45",
+      "poe": false,
+      "wireless": false,
+      "cellular": false
+    },
+    "MX68W": {
+      "type": "Security Appliance",
+      "firewallThroughput": "700 Mbps",
+      "vpnThroughput": "400 Mbps",
+      "recommendedDevices": 50,
+      "formFactor": "Desktop",
+      "wanPorts": "2x GbE RJ45",
+      "lanPorts": "8x GbE RJ45",
+      "poe": false,
+      "wireless": "802.11ac Wave 2, 1.3 Gbps",
+      "cellular": false
+    },
+    "MX68CW": {
+      "type": "Security Appliance",
+      "firewallThroughput": "700 Mbps",
+      "vpnThroughput": "400 Mbps",
+      "recommendedDevices": 50,
+      "formFactor": "Desktop",
+      "wanPorts": "2x GbE RJ45",
+      "lanPorts": "8x GbE RJ45 (2x PoE+)",
+      "poe": "2 ports PoE+",
+      "wireless": "802.11ac Wave 2, 1.3 Gbps",
+      "cellular": "CAT 6 LTE built-in"
+    },
+    "MX75": {
+      "type": "Security Appliance",
+      "firewallThroughput": "1 Gbps",
+      "vpnThroughput": "1 Gbps",
+      "recommendedDevices": 200,
+      "formFactor": "Desktop",
+      "wanPorts": "1x SFP + 2x GbE RJ45 (3 total)",
+      "lanPorts": "8x GbE RJ45 + 2x GbE RJ45 PoE+ (10 total)",
+      "poe": "2 LAN ports PoE+",
+      "maxVpnTunnels": 75,
+      "wireless": false,
+      "cellular": false
+    },
+    "MX85": {
+      "type": "Security Appliance",
+      "firewallThroughput": "1 Gbps",
+      "vpnThroughput": "1 Gbps",
+      "recommendedDevices": 250,
+      "formFactor": "Rack mount",
+      "wanPorts": "2x SFP + 2x GbE RJ45 (PoE+ on port 4) (4 total)",
+      "lanPorts": "8x GbE RJ45 + 2x SFP (10 total)",
+      "poe": "PoE+ on WAN port 4",
+      "maxVpnTunnels": 200,
+      "mgmtPort": true,
+      "wireless": false,
+      "cellular": false
+    },
+    "MX95": {
+      "type": "Security Appliance",
+      "firewallThroughput": "3 Gbps",
+      "vpnThroughput": "2.5 Gbps",
+      "recommendedDevices": 500,
+      "formFactor": "Rack mount (1U)",
+      "wanPorts": "2x 10G SFP+ + 1x 2.5G RJ45 + 1x 2.5G RJ45 PoE+ (4 total)",
+      "lanPorts": "4x GbE RJ45 + 2x 10G SFP+ (6 total)",
+      "poe": "PoE+ on 1x 2.5G WAN port",
+      "maxVpnTunnels": 250,
+      "wireless": false,
+      "cellular": false
+    },
+    "MX105": {
+      "type": "Security Appliance",
+      "firewallThroughput": "5 Gbps",
+      "vpnThroughput": "3.5 Gbps",
+      "recommendedDevices": 750,
+      "formFactor": "Rack mount (1U)",
+      "wanPorts": "2x 10G SFP+ + 1x 2.5G RJ45 + 1x 2.5G RJ45 PoE+ (4 total)",
+      "lanPorts": "4x GbE RJ45 + 2x 10G SFP+ (6 total)",
+      "poe": "PoE+ on 1x 2.5G WAN port",
+      "maxVpnTunnels": 500,
+      "dualPsu": true,
+      "wireless": false,
+      "cellular": false
+    },
+    "MX250": {
+      "type": "Security Appliance",
+      "firewallThroughput": "7.5 Gbps (NAT) / 2 Gbps (NGFW)",
+      "vpnThroughput": "4 Gbps",
+      "recommendedDevices": 2000,
+      "formFactor": "Rack mount",
+      "wanPorts": "2x 10G SFP+",
+      "lanPorts": "8x 10G SFP+ + 8x 1G SFP + 8x GbE RJ45 (24 total)",
+      "poe": false,
+      "wireless": false,
+      "cellular": false
+    },
+    "MX450": {
+      "type": "Security Appliance",
+      "firewallThroughput": "10 Gbps (NAT) / 5 Gbps (NGFW)",
+      "vpnThroughput": "6.5 Gbps",
+      "recommendedDevices": 10000,
+      "formFactor": "Rack mount",
+      "wanPorts": "2x 10G SFP+",
+      "lanPorts": "8x 10G SFP+ + 8x 1G SFP + 8x GbE RJ45 (24 total)",
+      "poe": false,
+      "wireless": false,
+      "cellular": false
+    }
+  },
+
+  "MR": {
+    "MR28": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "2x2:2 dual-band",
+      "maxDataRate": "1.5 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Indoor",
+      "poeRequirement": "802.3af (15W max)",
+      "ethernetPorts": "1x GbE RJ45"
+    },
+    "MR36": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "2x2:2 dual-band + scanning + BLE",
+      "maxDataRate": "1.5 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Indoor",
+      "poeRequirement": "802.3af (15W max)",
+      "ethernetPorts": "1x GbE RJ45"
+    },
+    "MR36H": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "2x2:2 dual-band",
+      "maxDataRate": "1.5 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Indoor wall-plate (hospitality)",
+      "poeRequirement": "802.3af",
+      "ethernetPorts": "1x GbE uplink + passthrough ports"
+    },
+    "MR44": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "2x2:2 (2.4G) + 4x4:4 (5G) + scanning + BLE",
+      "maxDataRate": "2.7 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Indoor",
+      "poeRequirement": "802.3at (PoE+), 802.3af low-power mode",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    },
+    "MR46": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "4x4:4 dual-band + scanning + BLE",
+      "maxDataRate": "3.0 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Indoor",
+      "poeRequirement": "802.3at (30W max)",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    },
+    "MR46E": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "4x4:4 dual-band + scanning + BLE, external antennas",
+      "maxDataRate": "3.0 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Indoor (external antenna)",
+      "poeRequirement": "802.3at (30W max)",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    },
+    "MR52": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "4x4:4 dual-band + scanning + BLE",
+      "maxDataRate": "3.0 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Indoor (high density)",
+      "poeRequirement": "802.3at",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    },
+    "MR57": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6E (802.11ax)",
+      "radioConfig": "4x4:4 tri-band + scanning + BLE",
+      "maxDataRate": "7.78 Gbps",
+      "bands": "2.4 GHz, 5 GHz, 6 GHz",
+      "environment": "Indoor",
+      "poeRequirement": "802.3at/802.3bt",
+      "ethernetPorts": "2x 5G mGig RJ45"
+    },
+    "MR76": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "2x2:2 dual-band + scanning + BLE",
+      "maxDataRate": "1.5 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Outdoor (IP67)",
+      "poeRequirement": "802.3af (15W max)",
+      "ethernetPorts": "1x GbE RJ45"
+    },
+    "MR78": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "2x2:2 dual-band + BLE",
+      "maxDataRate": "1.5 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Outdoor (IP67)",
+      "poeRequirement": "802.3af (15W max)",
+      "ethernetPorts": "1x GbE RJ45"
+    },
+    "MR86": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6 (802.11ax)",
+      "radioConfig": "4x4:4 dual-band + scanning + BLE",
+      "maxDataRate": "3.0 Gbps",
+      "bands": "2.4 GHz, 5 GHz",
+      "environment": "Outdoor (IP67)",
+      "poeRequirement": "802.3at (30W max)",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    }
+  },
+
+  "CW": {
+    "CW9162I": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6E (802.11ax)",
+      "radioConfig": "2x2:2 tri-band + scanning + BLE",
+      "maxDataRate": "3.9 Gbps",
+      "bands": "2.4 GHz, 5 GHz, 6 GHz",
+      "environment": "Indoor",
+      "poeRequirement": "802.3at (30W max)",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    },
+    "CW9163E": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6E (802.11ax)",
+      "radioConfig": "2x2:2 tri-band + scanning + BLE, external antennas",
+      "maxDataRate": "3.9 Gbps",
+      "bands": "2.4 GHz, 5 GHz, 6 GHz",
+      "environment": "Outdoor / external antenna",
+      "poeRequirement": "802.3at",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    },
+    "CW9164I": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6E (802.11ax)",
+      "radioConfig": "2x2:2 (2.4G) + 4x4:4 (5G + 6G) + scanning + BLE",
+      "maxDataRate": "7.49 Gbps",
+      "bands": "2.4 GHz, 5 GHz, 6 GHz",
+      "environment": "Indoor",
+      "poeRequirement": "802.3bt (UPoE) 30.5W / 802.3at 25W",
+      "ethernetPorts": "1x 2.5G mGig RJ45"
+    },
+    "CW9166I": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6E (802.11ax)",
+      "radioConfig": "4x4:4 tri-band + scanning + BLE",
+      "maxDataRate": "7.78 Gbps",
+      "bands": "2.4 GHz, 5 GHz, 6 GHz",
+      "environment": "Indoor (omnidirectional)",
+      "poeRequirement": "802.3at (PoE+) / 802.3bt (UPoE)",
+      "ethernetPorts": "1x 5G mGig RJ45"
+    },
+    "CW9166D1": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 6E (802.11ax)",
+      "radioConfig": "4x4:4 tri-band + scanning + BLE",
+      "maxDataRate": "7.78 Gbps",
+      "bands": "2.4 GHz, 5 GHz, 6 GHz",
+      "environment": "Indoor (directional, high-ceiling)",
+      "poeRequirement": "802.3at (PoE+) / 802.3bt (UPoE)",
+      "ethernetPorts": "1x 5G mGig RJ45"
+    },
+    "CW9172H": {
+      "type": "Access Point",
+      "wifiStandard": "Wi-Fi 7 (802.11be)",
+      "radioConfig": "Tri-band (2.4/5/6 GHz) + scanning + BLE",
+      "maxDataRate": "9 Gbps",
+      "bands": "2.4 GHz, 5 GHz, 6 GHz",
+      "environment": "Indoor wall-plate (Hospitality)",
+      "poeRequirement": "802.3bt/802.3at/802.3af (32W max)",
+      "ethernetPorts": "1x 2.5G mGig uplink + 3x GbE LAN (1x PoE out) + 1x passthrough"
+    }
+  },
+
+  "MS130": {
+    "_family": "Cloud-managed access switch",
+    "MS130-8": { "ports": "8x GbE", "uplinks": "2x 1G SFP", "poe": "None", "switchingCapacity": "20 Gbps" },
+    "MS130-8P": { "ports": "8x GbE", "uplinks": "2x 1G SFP", "poe": "120W", "switchingCapacity": "20 Gbps" },
+    "MS130-8P-I": { "ports": "8x GbE", "uplinks": "2x 1G SFP", "poe": "120W (internal PSU)", "switchingCapacity": "20 Gbps" },
+    "MS130-8X": { "ports": "6x GbE + 2x 2.5G mGig", "uplinks": "2x 10G SFP+", "poe": "120W", "switchingCapacity": "62 Gbps" },
+    "MS130-12X": { "ports": "8x GbE + 4x 2.5G mGig", "uplinks": "2x 10G SFP+", "poe": "240W", "switchingCapacity": "76 Gbps" },
+    "MS130-24": { "ports": "24x GbE", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "56 Gbps" },
+    "MS130-24P": { "ports": "24x GbE", "uplinks": "4x 1G SFP", "poe": "370W", "switchingCapacity": "56 Gbps" },
+    "MS130-24X": { "ports": "18x GbE + 6x 2.5G mGig", "uplinks": "4x 10G SFP+", "poe": "370W", "switchingCapacity": "146 Gbps" },
+    "MS130-48": { "ports": "48x GbE", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "104 Gbps" },
+    "MS130-48P": { "ports": "48x GbE", "uplinks": "4x 1G SFP", "poe": "740W", "switchingCapacity": "104 Gbps" },
+    "MS130-48X": { "ports": "40x GbE + 8x 2.5G mGig", "uplinks": "4x 10G SFP+", "poe": "740W", "switchingCapacity": "200 Gbps" }
+  },
+
+  "MS150": {
+    "_family": "Cloud-managed stackable access switch",
+    "_stacking": "80 Gbps via 2x dedicated stack ports",
+    "MS150-24T-4G": { "ports": "24x GbE", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "56 Gbps" },
+    "MS150-24P-4G": { "ports": "24x GbE", "uplinks": "4x 1G SFP", "poe": "370W (30W/port)", "switchingCapacity": "56 Gbps" },
+    "MS150-24T-4X": { "ports": "24x GbE", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "128 Gbps" },
+    "MS150-24P-4X": { "ports": "24x GbE", "uplinks": "4x 10G SFP+", "poe": "370W (30W/port)", "switchingCapacity": "128 Gbps" },
+    "MS150-24MP-4X": { "ports": "16x GbE + 8x 5G mGig", "uplinks": "4x 10G SFP+", "poe": "370W (60W/port)", "switchingCapacity": "192 Gbps" },
+    "MS150-48T-4G": { "ports": "48x GbE", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "104 Gbps" },
+    "MS150-48LP-4G": { "ports": "48x GbE", "uplinks": "4x 1G SFP", "poe": "370W (30W/port)", "switchingCapacity": "104 Gbps" },
+    "MS150-48FP-4G": { "ports": "48x GbE", "uplinks": "4x 1G SFP", "poe": "740W (30W/port)", "switchingCapacity": "104 Gbps" },
+    "MS150-48T-4X": { "ports": "48x GbE", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "176 Gbps" },
+    "MS150-48LP-4X": { "ports": "48x GbE", "uplinks": "4x 10G SFP+", "poe": "370W (30W/port)", "switchingCapacity": "176 Gbps" },
+    "MS150-48FP-4X": { "ports": "48x GbE", "uplinks": "4x 10G SFP+", "poe": "740W (30W/port)", "switchingCapacity": "176 Gbps" },
+    "MS150-48MP-4X": { "ports": "32x GbE + 16x 5G mGig", "uplinks": "4x 10G SFP+", "poe": "740W (60W/port)", "switchingCapacity": "304 Gbps" }
+  },
+
+  "MS390": {
+    "_family": "Cloud-managed aggregation switch with modular uplinks",
+    "_stacking": "480 Gbps",
+    "MS390-24UX": { "ports": "24x mGig (up to 10G)", "uplinks": "Modular 10/40G", "poe": "560W", "switchingCapacity": "640 Gbps" },
+    "MS390-48UX": { "ports": "36x 2.5G + 12x 10G mGig", "uplinks": "Modular 10/40G", "poe": "490W", "switchingCapacity": "580 Gbps" },
+    "MS390-48UX2": { "ports": "48x 5G mGig", "uplinks": "Modular 10/40G", "poe": "645W", "switchingCapacity": "640 Gbps" }
+  },
+
+  "MS450": {
+    "_family": "Cloud-managed aggregation switch",
+    "MS450-12": { "ports": "12x 25G SFP28", "uplinks": "2x 100G QSFP28", "poe": "None", "switchingCapacity": "1.2 Tbps" }
+  },
+
+  "C9300X-M": {
+    "_family": "Catalyst 9300X-M cloud-managed with IOS-XE (high-performance)",
+    "_stacking": "1 Tbps / 480 Gbps",
+    "C9300X-12Y-M": { "ports": "12x 1/10/25G SFP28", "uplinks": "Modular 10/25/40/100G", "poe": "None", "switchingCapacity": "1 Tbps" },
+    "C9300X-24Y-M": { "ports": "24x 1/10/25G SFP28", "uplinks": "Modular 10/25/40/100G", "poe": "None", "switchingCapacity": "2 Tbps" },
+    "C9300X-24HX-M": { "ports": "24x 10G mGig UPoE+ RJ45", "uplinks": "Modular", "poe": "735W (single) / 1835W (dual)", "switchingCapacity": "880 Gbps" },
+    "C9300X-48TX-M": { "ports": "48x 10G mGig RJ45", "uplinks": "Modular", "poe": "None", "switchingCapacity": "2 Tbps" },
+    "C9300X-48HX-M": { "ports": "48x 10G mGig UPoE+ RJ45", "uplinks": "Modular", "poe": "590W (single) / 1690W (dual)", "switchingCapacity": "2 Tbps" },
+    "C9300X-48HXN-M": { "ports": "8x 10G + 40x 5G mGig UPoE+ RJ45", "uplinks": "Modular", "poe": "690W (single) / 1790W (dual)", "switchingCapacity": "2 Tbps" }
+  },
+
+  "C9300-M": {
+    "_family": "Catalyst 9300-M cloud-managed with IOS-XE (standard)",
+    "C9300-24T-M": { "ports": "24x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "None", "switchingCapacity": "208 Gbps" },
+    "C9300-24P-M": { "ports": "24x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "445W PoE+", "switchingCapacity": "208 Gbps" },
+    "C9300-24U-M": { "ports": "24x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "800W UPoE", "switchingCapacity": "208 Gbps" },
+    "C9300-24UX-M": { "ports": "24x mGig (8x 10G + 16x 1G)", "uplinks": "Modular 1G/10G/25G", "poe": "800W UPoE", "switchingCapacity": "480 Gbps" },
+    "C9300-48T-M": { "ports": "48x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "None", "switchingCapacity": "208 Gbps" },
+    "C9300-48P-M": { "ports": "48x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "445W PoE+", "switchingCapacity": "208 Gbps" },
+    "C9300-48U-M": { "ports": "48x 1G RJ45", "uplinks": "Modular 1G/10G/25G", "poe": "800W UPoE", "switchingCapacity": "208 Gbps" },
+    "C9300-48UXM-M": { "ports": "48x mGig (36x 10G + 12x 1G)", "uplinks": "Modular 1G/10G/25G", "poe": "490W UPoE", "switchingCapacity": "880 Gbps" }
+  },
+
+  "C9300L-M": {
+    "_family": "Catalyst 9300L-M cloud-managed with IOS-XE (compact/cost-optimized)",
+    "C9300L-24T-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "56 Gbps" },
+    "C9300L-24P-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "445W PoE+", "switchingCapacity": "56 Gbps" },
+    "C9300L-24T-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "128 Gbps" },
+    "C9300L-24P-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "445W PoE+", "switchingCapacity": "128 Gbps" },
+    "C9300L-48T-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "104 Gbps" },
+    "C9300L-48P-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "445W PoE+", "switchingCapacity": "104 Gbps" },
+    "C9300L-48T-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "176 Gbps" },
+    "C9300L-48P-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "445W PoE+", "switchingCapacity": "176 Gbps" }
+  },
+
+  "C9200L-M": {
+    "_family": "Catalyst 9200L-M cloud-managed with IOS-XE (entry-level)",
+    "_stacking": "80 Gbps, up to 8 switches",
+    "C9200L-24T-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "56 Gbps" },
+    "C9200L-24P-4G-M": { "ports": "24x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "370W PoE+", "switchingCapacity": "56 Gbps" },
+    "C9200L-24T-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "128 Gbps" },
+    "C9200L-24P-4X-M": { "ports": "24x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "370W PoE+", "switchingCapacity": "128 Gbps" },
+    "C9200L-24PXG-4X-M": { "ports": "24x PoE+ (8x mGig + 16x 1G)", "uplinks": "4x 10G SFP+", "poe": "370W PoE+", "switchingCapacity": "272 Gbps" },
+    "C9200L-24PXG-2Y-M": { "ports": "24x PoE+ (8x mGig + 16x 1G)", "uplinks": "2x 25G SFP28", "poe": "370W PoE+", "switchingCapacity": "292 Gbps" },
+    "C9200L-48T-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "None", "switchingCapacity": "104 Gbps" },
+    "C9200L-48P-4G-M": { "ports": "48x 1G RJ45", "uplinks": "4x 1G SFP", "poe": "740W PoE+", "switchingCapacity": "104 Gbps" },
+    "C9200L-48PL-4G-M": { "ports": "48x 1G RJ45 (partial PoE+)", "uplinks": "4x 1G SFP", "poe": "370W PoE+", "switchingCapacity": "104 Gbps" },
+    "C9200L-48T-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "None", "switchingCapacity": "176 Gbps" },
+    "C9200L-48P-4X-M": { "ports": "48x 1G RJ45", "uplinks": "4x 10G SFP+", "poe": "740W PoE+", "switchingCapacity": "176 Gbps" },
+    "C9200L-48PL-4X-M": { "ports": "48x 1G RJ45 (partial PoE+)", "uplinks": "4x 10G SFP+", "poe": "370W PoE+", "switchingCapacity": "176 Gbps" },
+    "C9200L-48PXG-4X-M": { "ports": "48x PoE+ (12x mGig + 36x 1G)", "uplinks": "4x 10G SFP+", "poe": "740W PoE+", "switchingCapacity": "392 Gbps" },
+    "C9200L-48PXG-2Y-M": { "ports": "48x PoE+ (8x mGig + 40x 1G)", "uplinks": "2x 25G SFP28", "poe": "740W PoE+", "switchingCapacity": "340 Gbps" }
+  },
+
+  "Z": {
+    "Z4": {
+      "type": "Teleworker Gateway",
+      "firewallThroughput": "500 Mbps",
+      "vpnThroughput": "250 Mbps",
+      "recommendedDevices": 15,
+      "formFactor": "Desktop",
+      "wanPorts": "1x GbE",
+      "lanPorts": "4x GbE (1x PoE+)",
+      "poe": "1x PoE+ LAN port",
+      "wireless": "Wi-Fi 6 (802.11ax) 2x2 MU-MIMO, 1.5 Gbps",
+      "cellular": false
+    },
+    "Z4C": {
+      "type": "Teleworker Gateway",
+      "firewallThroughput": "500 Mbps",
+      "vpnThroughput": "250 Mbps",
+      "recommendedDevices": 15,
+      "formFactor": "Desktop",
+      "wanPorts": "1x GbE + CAT 12 LTE modem",
+      "lanPorts": "4x GbE (1x PoE+)",
+      "poe": "1x 802.3at PoE+ LAN port",
+      "wireless": "Wi-Fi 6 (802.11ax) 2x2 MU-MIMO, 1.5 Gbps",
+      "cellular": "CAT 12 LTE built-in"
+    },
+    "Z4X": {
+      "type": "Teleworker Gateway",
+      "firewallThroughput": "500 Mbps",
+      "vpnThroughput": "250 Mbps",
+      "recommendedDevices": 15,
+      "formFactor": "Desktop",
+      "note": "Enhanced model, see datasheet for port details"
+    },
+    "Z4CX": {
+      "type": "Teleworker Gateway",
+      "firewallThroughput": "500 Mbps",
+      "vpnThroughput": "250 Mbps",
+      "recommendedDevices": 15,
+      "formFactor": "Desktop",
+      "cellular": "Built-in LTE",
+      "note": "Enhanced cellular model, see datasheet for port details"
+    }
+  },
+
+  "MV": {
+    "_family": "Smart cameras with built-in storage and edge analytics",
+    "MV2": { "resolution": "4MP", "type": "Indoor mini dome", "fov": "113° H" },
+    "MV13": { "resolution": "8MP / 4K", "type": "Indoor mini dome", "fov": "101° H" },
+    "MV13M": { "resolution": "8MP / 4K", "type": "Indoor mini dome (M12 connector)", "fov": "101° H" },
+    "MV22X": { "resolution": "4MP", "type": "Indoor varifocal dome", "fov": "Varifocal" },
+    "MV23M": { "resolution": "8MP / 4K", "type": "Indoor varifocal dome (M12)", "fov": "Varifocal" },
+    "MV23X": { "resolution": "8MP / 4K", "type": "Indoor varifocal dome", "fov": "Varifocal" },
+    "MV32": { "resolution": "8.4MP", "type": "Indoor fisheye", "fov": "360°" },
+    "MV33": { "resolution": "12.4MP", "type": "Indoor mini fisheye", "fov": "360°" },
+    "MV33M": { "resolution": "12.4MP", "type": "Indoor mini fisheye (M12)", "fov": "360°" },
+    "MV52": { "resolution": "8.4MP", "type": "Outdoor fisheye", "fov": "360°" },
+    "MV53X": { "resolution": "8MP / 4K", "type": "Outdoor bullet", "fov": "Varifocal" },
+    "MV63": { "resolution": "8MP / 4K", "type": "Outdoor dome", "fov": "101° H" },
+    "MV63M": { "resolution": "8MP / 4K", "type": "Outdoor dome (M12)", "fov": "101° H" },
+    "MV63X": { "resolution": "8MP / 4K", "type": "Outdoor varifocal dome", "fov": "Varifocal" },
+    "MV72": { "resolution": "4MP", "type": "Outdoor dome", "fov": "Varifocal" },
+    "MV72X": { "resolution": "4MP", "type": "Outdoor varifocal dome", "fov": "Varifocal" },
+    "MV73X": { "resolution": "8MP / 4K", "type": "Outdoor varifocal dome", "fov": "Varifocal" },
+    "MV73M": { "resolution": "8MP / 4K", "type": "Outdoor varifocal dome (M12)", "fov": "Varifocal" },
+    "MV84X": { "resolution": "20MP", "type": "Outdoor multi-sensor", "fov": "360°" },
+    "MV93": { "resolution": "12MP", "type": "Outdoor fisheye", "fov": "360°" },
+    "MV93M": { "resolution": "12MP", "type": "Outdoor fisheye (M12)", "fov": "360°" },
+    "MV93X": { "resolution": "12MP", "type": "Outdoor fisheye (varifocal)", "fov": "360°" }
+  },
+
+  "MT": {
+    "_family": "IoT sensors",
+    "MT10": { "type": "Temperature & Humidity sensor" },
+    "MT11": { "type": "Temperature probe sensor" },
+    "MT12": { "type": "Water leak detection sensor" },
+    "MT14": { "type": "Indoor air quality sensor (CO2, TVOC, PM2.5, temp, humidity)" },
+    "MT15": { "type": "Air quality sensor (CO2, TVOC, PM2.5)" },
+    "MT20": { "type": "Open/close door sensor" },
+    "MT30": { "type": "Button/remote sensor" },
+    "MT40": { "type": "Automation IO relay" }
+  },
+
+  "MG": {
+    "_family": "Cellular gateways",
+    "MG21": { "type": "Cellular Gateway", "cellular": "CAT 6 LTE (300 Mbps down)", "ports": "1x GbE WAN, 1x GbE LAN" },
+    "MG21E": { "type": "Cellular Gateway", "cellular": "CAT 6 LTE (300 Mbps down)", "ports": "1x GbE WAN, 1x GbE LAN", "note": "External antenna" },
+    "MG41": { "type": "Cellular Gateway", "cellular": "CAT 18 LTE (1.2 Gbps down)", "ports": "1x GbE WAN, 1x GbE LAN" },
+    "MG41E": { "type": "Cellular Gateway", "cellular": "CAT 18 LTE (1.2 Gbps down)", "ports": "1x GbE WAN, 1x GbE LAN", "note": "External antenna" },
+    "MG51": { "type": "Cellular Gateway", "cellular": "5G Sub-6 + LTE", "ports": "1x 2.5G WAN, 1x GbE LAN" },
+    "MG51E": { "type": "Cellular Gateway", "cellular": "5G Sub-6 + LTE", "ports": "1x 2.5G WAN, 1x GbE LAN", "note": "External antenna" },
+    "MG52": { "type": "Cellular Gateway", "cellular": "5G mmWave + Sub-6 + LTE", "ports": "1x 2.5G WAN, 1x GbE LAN" },
+    "MG52E": { "type": "Cellular Gateway", "cellular": "5G mmWave + Sub-6 + LTE", "ports": "1x 2.5G WAN, 1x GbE LAN", "note": "External antenna" }
+  }
+}

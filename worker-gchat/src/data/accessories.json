@@ -1,0 +1,491 @@
+{
+  "_generated": "2026-03-23",
+  "_source": "documentation.meraki.com SFP_and_Stacking_Accessories + product datasheets",
+  "_description": "Accessory compatibility engine data. SFP modules, stacking cables, uplink modules, and device port profiles for network design recommendations.",
+  "_live_rag_url": "https://documentation.meraki.com/General_Administration/Cross-Platform_Content/SFP_and_Stacking_Accessories",
+
+  "sfp_modules": {
+    "1G_SFP": [
+      {
+        "sku": "MA-SFP-1GB-SX",
+        "speed": "1G",
+        "type": "SFP",
+        "medium": "MMF",
+        "wavelength": "850nm",
+        "range": "550m (OM2) / 220m (OM1)",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Short-range multi-mode, building backbone, most common"
+      },
+      {
+        "sku": "MA-SFP-1GB-LX10",
+        "speed": "1G",
+        "type": "SFP",
+        "medium": "SMF",
+        "wavelength": "1310nm",
+        "range": "10km",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Long-range single-mode, campus backbone, between buildings"
+      },
+      {
+        "sku": "MA-SFP-1GB-TX",
+        "speed": "1G",
+        "type": "SFP",
+        "medium": "copper",
+        "wavelength": null,
+        "range": "100m",
+        "connector": "RJ45",
+        "incompatible_with": ["MS390", "C9300", "C9300X", "C9300L"],
+        "use_case": "Copper SFP for existing Cat5e/6 infrastructure, NOT supported on Catalyst or MS390"
+      }
+    ],
+    "10G_SFP+": [
+      {
+        "sku": "MA-SFP-10GB-SR",
+        "speed": "10G",
+        "type": "SFP+",
+        "medium": "MMF",
+        "wavelength": "850nm",
+        "range": "300m (OM3) / 400m (OM4) / 26m (OM1)",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Most common 10G optic, short-range multi-mode"
+      },
+      {
+        "sku": "MA-SFP-10GB-LR",
+        "speed": "10G",
+        "type": "SFP+",
+        "medium": "SMF",
+        "wavelength": "1310nm",
+        "range": "10km",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Long-range single-mode, campus/metro backbone"
+      },
+      {
+        "sku": "MA-SFP-10GB-LRM",
+        "speed": "10G",
+        "type": "SFP+",
+        "medium": "MMF",
+        "wavelength": "1310nm",
+        "range": "220m (OM1) / 300m (OM3)",
+        "connector": "LC duplex",
+        "incompatible_with": ["C9300X"],
+        "use_case": "Medium-range multi-mode, good for legacy OM1/OM2 fiber"
+      },
+      {
+        "sku": "MA-SFP-10GB-ER",
+        "speed": "10G",
+        "type": "SFP+",
+        "medium": "SMF",
+        "wavelength": "1550nm",
+        "range": "40km",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Extended reach, metro/campus with long runs"
+      },
+      {
+        "sku": "MA-SFP-10GB-ZR",
+        "speed": "10G",
+        "type": "SFP+",
+        "medium": "SMF",
+        "wavelength": "1550nm",
+        "range": "80km",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Very long reach, metro rings, carrier connections"
+      }
+    ],
+    "10G_DAC": [
+      {
+        "sku": "MA-CBL-TA-1M",
+        "speed": "10G",
+        "type": "DAC",
+        "medium": "copper twinax",
+        "wavelength": null,
+        "range": "1m",
+        "connector": "SFP+ direct attach",
+        "incompatible_with": [],
+        "use_case": "Same-rack connections, cheapest 10G option, no fiber needed"
+      },
+      {
+        "sku": "MA-CBL-TA-3M",
+        "speed": "10G",
+        "type": "DAC",
+        "medium": "copper twinax",
+        "wavelength": null,
+        "range": "3m",
+        "connector": "SFP+ direct attach",
+        "incompatible_with": [],
+        "use_case": "Adjacent-rack connections, no fiber needed"
+      }
+    ],
+    "40G_QSFP": [
+      {
+        "sku": "MA-QSFP-40G-SR4",
+        "speed": "40G",
+        "type": "QSFP+",
+        "medium": "MMF",
+        "wavelength": "850nm",
+        "range": "150m (OM4) / 100m (OM3)",
+        "connector": "MPO-12",
+        "incompatible_with": [],
+        "use_case": "Short-range 40G, data center interconnects"
+      },
+      {
+        "sku": "MA-QSFP-40G-LR4",
+        "speed": "40G",
+        "type": "QSFP+",
+        "medium": "SMF",
+        "wavelength": "1310nm",
+        "range": "10km",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Long-range 40G over single-mode fiber"
+      },
+      {
+        "sku": "MA-QSFP-40G-CSR4",
+        "speed": "40G",
+        "type": "QSFP+",
+        "medium": "MMF",
+        "wavelength": "850nm",
+        "range": "400m (OM4) / 300m (OM3)",
+        "connector": "MPO-12",
+        "incompatible_with": [],
+        "use_case": "Extended-reach 40G multi-mode, building backbone"
+      },
+      {
+        "sku": "MA-QSFP-40G-SR-BD",
+        "speed": "40G",
+        "type": "QSFP+",
+        "medium": "MMF",
+        "wavelength": "850/900nm",
+        "range": "150m (OM4)",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "40G over LC duplex (not MPO), reuse existing patch panels"
+      }
+    ],
+    "100G_QSFP28": [
+      {
+        "sku": "MA-QSFP-100G-SR4",
+        "speed": "100G",
+        "type": "QSFP28",
+        "medium": "MMF",
+        "wavelength": "850nm",
+        "range": "100m (OM4) / 70m (OM3)",
+        "connector": "MPO-12",
+        "incompatible_with": [],
+        "use_case": "Short-range 100G, MS450 uplinks"
+      },
+      {
+        "sku": "MA-QSFP-100G-LR4",
+        "speed": "100G",
+        "type": "QSFP28",
+        "medium": "SMF",
+        "wavelength": "1310nm",
+        "range": "10km",
+        "connector": "LC duplex",
+        "incompatible_with": [],
+        "use_case": "Long-range 100G, campus core"
+      }
+    ]
+  },
+
+  "stacking": {
+    "families": {
+      "40G": {
+        "cables": {
+          "MA-CBL-40G-50CM": { "length": "50cm", "use_case": "Same-shelf stacking" },
+          "MA-CBL-40G-1M": { "length": "1m", "use_case": "Same-rack stacking (default)" },
+          "MA-CBL-40G-3M": { "length": "3m", "use_case": "Adjacent-rack stacking" }
+        },
+        "bandwidth": "40 Gbps per cable",
+        "type": "QSFP+",
+        "compatible_switches": ["MS210", "MS225", "MS250", "MS350", "MS410", "MS425"],
+        "max_stack_size": 8,
+        "topology": "ring or chain",
+        "note": "Ring topology requires N cables for N switches. Chain requires N-1."
+      },
+      "100G": {
+        "cables": {
+          "MA-CBL-100G-50CM": { "length": "50cm", "use_case": "Same-shelf stacking" },
+          "MA-CBL-100G-1M": { "length": "1m", "use_case": "Same-rack stacking (default)" },
+          "MA-CBL-100G-3M": { "length": "3m", "use_case": "Adjacent-rack stacking" }
+        },
+        "bandwidth": "100 Gbps per cable",
+        "type": "QSFP28",
+        "compatible_switches": ["MS150", "MS355", "MS450"],
+        "max_stack_size": 8,
+        "topology": "ring or chain"
+      },
+      "120G_StackWise480": {
+        "cables": {
+          "MA-CBL-120G-50CM": { "length": "50cm" },
+          "MA-CBL-120G-1M": { "length": "1m", "use_case": "Same-rack stacking (default)" },
+          "MA-CBL-120G-3M": { "length": "3m" }
+        },
+        "bandwidth": "480 Gbps (4x 120G)",
+        "type": "StackWise-480",
+        "compatible_switches": ["MS390"],
+        "max_stack_size": 8,
+        "topology": "ring",
+        "stackpower": {
+          "cables": ["MA-CBL-SPWR-30CM", "MA-CBL-SPWR-150CM"],
+          "note": "Optional StackPower for shared power pool across stack members"
+        }
+      },
+      "STACK-T1": {
+        "cables": {
+          "STACK-T1-50CM-M": { "length": "50cm" },
+          "STACK-T1-1M-M": { "length": "1m", "use_case": "Same-rack stacking (default)" },
+          "STACK-T1-3M-M": { "length": "3m" }
+        },
+        "bandwidth": "480 Gbps (C9300) / 1 Tbps (C9300X)",
+        "type": "StackWise-480/1T",
+        "compatible_switches": ["C9300", "C9300X"],
+        "max_stack_size": 8,
+        "topology": "ring",
+        "stackpower": {
+          "cables": ["CAB-SPWR-30CM-M", "CAB-SPWR-150CM-M"],
+          "note": "Optional StackPower for shared power pool"
+        }
+      },
+      "STACK-T3A": {
+        "cables": {
+          "STACK-T3A-50CM-M": { "length": "50cm" },
+          "STACK-T3A-1M-M": { "length": "1m", "use_case": "Same-rack stacking (default)" },
+          "STACK-T3A-3M-M": { "length": "3m" }
+        },
+        "bandwidth": "320 Gbps",
+        "type": "StackWise-320",
+        "compatible_switches": ["C9300L"],
+        "max_stack_size": 8,
+        "topology": "ring",
+        "requires_kit": "C9300L-STACK-KIT2-M",
+        "kit_note": "Required stacking module, sold separately. One per switch."
+      },
+      "STACK-T4": {
+        "cables": {
+          "STACK-T4-50CM-M": { "length": "50cm" },
+          "STACK-T4-1M-M": { "length": "1m", "use_case": "Same-rack stacking (default)" },
+          "STACK-T4-3M-M": { "length": "3m" }
+        },
+        "bandwidth": "80 Gbps",
+        "type": "FlexStack-Plus",
+        "compatible_switches": ["C9200L"],
+        "max_stack_size": 8,
+        "topology": "ring"
+      }
+    },
+    "not_stackable": ["MS130", "MS130R"],
+    "rules": [
+      "Only like-family switches can stack together (e.g., MS150 with MS150, NOT MS150 with MS130)",
+      "Different port-count variants within a family CAN stack (e.g., MS150-24P-4X with MS150-48FP-4X)",
+      "Ring topology provides redundancy - if one cable fails, stack stays up via the other path",
+      "Chain topology uses N-1 cables but has no redundancy - one cable failure splits the stack",
+      "For production environments, always recommend ring topology"
+    ]
+  },
+
+  "uplink_modules": {
+    "MS390": {
+      "modules": [
+        { "sku": "MA-MOD-8X10G", "ports": 8, "speed": "10G", "type": "SFP+", "in_prices": true },
+        { "sku": "MA-MOD-4X10G", "ports": 4, "speed": "10G", "type": "SFP+", "in_prices": false, "note": "Check availability, may be EOL" },
+        { "sku": "MA-MOD-2X40G", "ports": 2, "speed": "40G", "type": "QSFP+", "in_prices": true }
+      ],
+      "note": "MS390 ships without uplink module. One module required per switch."
+    },
+    "C9300": {
+      "modules": [
+        { "sku": "C9300-NM-8X-M", "ports": 8, "speed": "10G", "type": "SFP+", "in_prices": true, "recommended": true },
+        { "sku": "C9300-NM-2Q-M", "ports": 2, "speed": "40G", "type": "QSFP+", "in_prices": true },
+        { "sku": "C9300-NM-2Y-M", "ports": 2, "speed": "25G", "type": "SFP28", "in_prices": true },
+        { "sku": "C9300-NM-4G",   "ports": 4, "speed": "1G",  "type": "SFP", "in_prices": false, "note": "1G only, SFP+ will NOT work" },
+        { "sku": "C9300-NM-4X",   "ports": 4, "speed": "10G", "type": "SFP+", "in_prices": false },
+        { "sku": "C9300-NM-2T",   "ports": 2, "speed": "25G", "type": "SFP28", "in_prices": false },
+        { "sku": "C9300-NM-4M",   "ports": 4, "speed": "mGig", "type": "RJ45", "in_prices": false }
+      ],
+      "note": "C9300 ships without uplink module. Module required for uplink connectivity."
+    },
+    "C9300X": {
+      "modules": [
+        { "sku": "C9300X-NM-8Y-M", "ports": 8, "speed": "25G", "type": "SFP28", "in_prices": true },
+        { "sku": "C9300X-NM-2C-M", "ports": 2, "speed": "100G", "type": "QSFP28", "in_prices": true }
+      ],
+      "note": "C9300X already has fixed high-speed ports. Modules add additional uplink capacity."
+    }
+  },
+
+  "port_profiles": {
+    "_description": "Machine-readable port profile for every device. Used by the accessory resolver to determine what connects to what.",
+
+    "MX": {
+      "MX67":   { "sfp_uplinks": [], "sfp_lan": [], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX67W":  { "sfp_uplinks": [], "sfp_lan": [], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX67C":  { "sfp_uplinks": [], "sfp_lan": [], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX68":   { "sfp_uplinks": [], "sfp_lan": [], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX68W":  { "sfp_uplinks": [], "sfp_lan": [], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX68CW": { "sfp_uplinks": [], "sfp_lan": [], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX75":   { "sfp_uplinks": [{"count": 1, "speed": "1G", "form": "SFP"}], "sfp_lan": [{"count": 2, "speed": "10G", "form": "SFP+"}], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX85":   { "sfp_uplinks": [{"count": 2, "speed": "1G", "form": "SFP"}], "sfp_lan": [{"count": 2, "speed": "10G", "form": "SFP+"}], "rj45_wan": [{"count": 2, "speed": "1G"}], "stackable": false },
+      "MX95":   { "sfp_uplinks": [{"count": 2, "speed": "10G", "form": "SFP+"}], "sfp_lan": [{"count": 2, "speed": "10G", "form": "SFP+"}], "rj45_wan": [{"count": 2, "speed": "2.5G"}], "stackable": false },
+      "MX105":  { "sfp_uplinks": [{"count": 2, "speed": "10G", "form": "SFP+"}], "sfp_lan": [{"count": 2, "speed": "10G", "form": "SFP+"}], "rj45_wan": [{"count": 2, "speed": "2.5G"}], "stackable": false },
+      "MX250":  { "sfp_uplinks": [{"count": 2, "speed": "10G", "form": "SFP+"}], "sfp_lan": [{"count": 8, "speed": "10G", "form": "SFP+"}, {"count": 8, "speed": "1G", "form": "SFP"}], "rj45_wan": [], "stackable": false },
+      "MX450":  { "sfp_uplinks": [{"count": 2, "speed": "10G", "form": "SFP+"}], "sfp_lan": [{"count": 8, "speed": "10G", "form": "SFP+"}, {"count": 8, "speed": "1G", "form": "SFP"}], "rj45_wan": [], "stackable": false }
+    },
+
+    "MS130": {
+      "_stackable": false,
+      "_stack_note": "MS130 does NOT support physical stacking. This is a hard limitation.",
+      "MS130-8":     { "uplinks": [{"count": 2, "speed": "1G", "form": "SFP"}], "stackable": false },
+      "MS130-8P":    { "uplinks": [{"count": 2, "speed": "1G", "form": "SFP"}], "stackable": false },
+      "MS130-8P-I":  { "uplinks": [{"count": 2, "speed": "1G", "form": "SFP"}], "stackable": false },
+      "MS130-8X":    { "uplinks": [{"count": 2, "speed": "10G", "form": "SFP+"}], "stackable": false },
+      "MS130-12X":   { "uplinks": [{"count": 2, "speed": "10G", "form": "SFP+"}], "stackable": false },
+      "MS130-24":    { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": false },
+      "MS130-24P":   { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": false },
+      "MS130-24X":   { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": false },
+      "MS130-48":    { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": false },
+      "MS130-48P":   { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": false },
+      "MS130-48X":   { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": false }
+    },
+
+    "MS150": {
+      "_stackable": true,
+      "_stack_type": "100G",
+      "MS150-24T-4G":  { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": true, "stack_type": "100G" },
+      "MS150-24P-4G":  { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": true, "stack_type": "100G" },
+      "MS150-24T-4X":  { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "100G" },
+      "MS150-24P-4X":  { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "100G" },
+      "MS150-24MP-4X": { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "100G" },
+      "MS150-48T-4G":  { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": true, "stack_type": "100G" },
+      "MS150-48LP-4G": { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": true, "stack_type": "100G" },
+      "MS150-48FP-4G": { "uplinks": [{"count": 4, "speed": "1G", "form": "SFP"}], "stackable": true, "stack_type": "100G" },
+      "MS150-48T-4X":  { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "100G" },
+      "MS150-48LP-4X": { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "100G" },
+      "MS150-48FP-4X": { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "100G" },
+      "MS150-48MP-4X": { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "100G" }
+    },
+
+    "MS390": {
+      "_stackable": true,
+      "_stack_type": "120G_StackWise480",
+      "_uplink_type": "modular",
+      "MS390-24UX":  { "uplinks": "modular", "stackable": true, "stack_type": "120G_StackWise480" },
+      "MS390-48UX":  { "uplinks": "modular", "stackable": true, "stack_type": "120G_StackWise480" },
+      "MS390-48UX2": { "uplinks": "modular", "stackable": true, "stack_type": "120G_StackWise480" }
+    },
+
+    "MS450": {
+      "_stackable": true,
+      "_stack_type": "100G",
+      "MS450-12": { "uplinks": [{"count": 2, "speed": "100G", "form": "QSFP28"}], "stackable": true, "stack_type": "100G" }
+    },
+
+    "C9300": {
+      "_stackable": true,
+      "_stack_type": "STACK-T1",
+      "_uplink_type": "modular",
+      "C9300-24T-M":    { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-24P-M":    { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-24U-M":    { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-24UX-M":   { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-48T-M":    { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-48P-M":    { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-48U-M":    { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-48UXM-M":  { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300-48UN-M":   { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" }
+    },
+
+    "C9300X": {
+      "_stackable": true,
+      "_stack_type": "STACK-T1",
+      "_uplink_type": "modular",
+      "C9300X-12Y-M":   { "uplinks": "modular", "fixed_ports": [{"count": 12, "speed": "25G", "form": "SFP28"}], "stackable": true, "stack_type": "STACK-T1" },
+      "C9300X-24Y-M":   { "uplinks": "modular", "fixed_ports": [{"count": 24, "speed": "25G", "form": "SFP28"}], "stackable": true, "stack_type": "STACK-T1" },
+      "C9300X-24HX-M":  { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300X-48TX-M":  { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300X-48HX-M":  { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" },
+      "C9300X-48HXN-M": { "uplinks": "modular", "stackable": true, "stack_type": "STACK-T1" }
+    },
+
+    "C9300L": {
+      "_stackable": true,
+      "_stack_type": "STACK-T3A",
+      "_stack_kit_required": "C9300L-STACK-KIT2-M",
+      "C9300L-24T-4G-M":   { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-24P-4G-M":   { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-24T-4X-M":   { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-24P-4X-M":   { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-48T-4G-M":   { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-48P-4G-M":   { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-48T-4X-M":   { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-48P-4X-M":   { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-48PF-4X-M":  { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T3A" },
+      "C9300L-48UXG-4X-M": { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T3A" }
+    },
+
+    "C9200L": {
+      "_stackable": true,
+      "_stack_type": "STACK-T4",
+      "C9200L-24T-4G-M":    { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-24P-4G-M":    { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-24T-4X-M":    { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-24P-4X-M":    { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-24PXG-4X-M":  { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-24PXG-2Y-M":  { "uplinks": [{"count": 2, "speed": "25G", "form": "SFP28"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48T-4G-M":    { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48P-4G-M":    { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48PL-4G-M":   { "uplinks": [{"count": 4, "speed": "1G",  "form": "SFP"}],  "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48T-4X-M":    { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48P-4X-M":    { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48PL-4X-M":   { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48PXG-4X-M":  { "uplinks": [{"count": 4, "speed": "10G", "form": "SFP+"}], "stackable": true, "stack_type": "STACK-T4" },
+      "C9200L-48PXG-2Y-M":  { "uplinks": [{"count": 2, "speed": "25G", "form": "SFP28"}], "stackable": true, "stack_type": "STACK-T4" }
+    },
+
+    "Z": {
+      "Z4":   { "sfp_uplinks": [], "rj45_wan": [{"count": 1, "speed": "1G"}], "stackable": false },
+      "Z4C":  { "sfp_uplinks": [], "rj45_wan": [{"count": 1, "speed": "1G"}], "stackable": false },
+      "Z4X":  { "sfp_uplinks": [], "rj45_wan": [{"count": 1, "speed": "2.5G"}], "stackable": false },
+      "Z4CX": { "sfp_uplinks": [], "rj45_wan": [{"count": 1, "speed": "2.5G"}], "stackable": false }
+    }
+  },
+
+  "design_rules": {
+    "matching": [
+      "Both ends of a fiber link MUST match: same speed tier, same wavelength, same fiber type (MMF/SMF)",
+      "10G SFP+ ports are backward-compatible with 1G SFP modules",
+      "25G SFP28 ports are backward-compatible with 10G SFP+ and 1G SFP modules",
+      "1G SFP ports do NOT support 10G SFP+ modules (speed mismatch, will not link)"
+    ],
+    "brand_guidance": [
+      "Use MA-branded SFPs on Meraki switches for support alignment",
+      "Cisco GLC-series SFPs are generally compatible with Meraki but may complicate RMA",
+      "MA-SFP modules work fine in Catalyst 9300 series switches",
+      "For ER/ZR extended reach (>10km), Cisco-branded modules are the only option"
+    ],
+    "common_mistakes": [
+      "MA-SFP-1GB-TX (copper SFP) is NOT supported on MS390, C9300, C9300X, or C9300L",
+      "MA-SFP-10GB-LRM is NOT supported on C9300X",
+      "C9300-NM-4G module only supports 1G SFP, NOT 10G SFP+ (common ordering mistake)",
+      "MS130 is NOT stackable - do not recommend stacking cables",
+      "C9300L requires C9300L-STACK-KIT2-M stacking module (sold separately per switch)",
+      "C9300/MS390 ship without uplink modules - always ask about uplink needs"
+    ],
+    "sfp_selection_guide": {
+      "same_rack_10G": { "primary": "MA-CBL-TA-1M", "alt": "MA-SFP-10GB-SR", "reason": "DAC is cheapest for <3m" },
+      "same_rack_1G": { "primary": "MA-SFP-1GB-TX", "alt": "MA-SFP-1GB-SX", "reason": "Copper SFP uses existing Cat5e/6, but check device compatibility" },
+      "same_building_MMF_10G": { "primary": "MA-SFP-10GB-SR", "reason": "Multi-mode, up to 300m OM3 / 400m OM4" },
+      "same_building_MMF_1G": { "primary": "MA-SFP-1GB-SX", "reason": "Multi-mode, up to 550m OM2" },
+      "between_buildings_10G": { "primary": "MA-SFP-10GB-LR", "reason": "Single-mode, up to 10km" },
+      "between_buildings_1G": { "primary": "MA-SFP-1GB-LX10", "reason": "Single-mode, up to 10km" },
+      "campus_extended_10G": { "primary": "MA-SFP-10GB-ER", "reason": "Single-mode, up to 40km" },
+      "metro_long_haul_10G": { "primary": "MA-SFP-10GB-ZR", "reason": "Single-mode, up to 80km" },
+      "legacy_fiber_10G": { "primary": "MA-SFP-10GB-LRM", "reason": "Works with OM1/OM2 legacy fiber up to 220m" }
+    }
+  }
+}
