@@ -2212,7 +2212,21 @@ function buildQuoteResponse(parsed) {
     };
     const hasRenewLicenses = eolItems.some(({ baseSku }) => _getEolRenewalLicenses(baseSku));
     if (hasRenewLicenses) {
-      lines.push(`**Option 1 — Renew Existing Licenses:**`);
+      if (modifiers.licenseOnly) {
+        // User explicitly asked for license renewal — simple label, everything is license-only
+        lines.push(`**Option 1 — Renew Existing Licenses:**`);
+      } else {
+        // Regular quote — clarify that EOL items are license-only while current gear includes hardware
+        const eolNames = eolItems.map(e => e.baseSku).join(', ');
+        lines.push(`**Option 1 — As Quoted:**`);
+        for (const { baseSku } of eolItems) {
+          lines.push(`ℹ️ ${baseSku} — license renewal only (no longer orderable)`);
+        }
+        if (resolvedItems.length > 0) {
+          lines.push(`All other hardware included. See Option 2 for replacement hardware.`);
+        }
+        lines.push('');
+      }
       for (const term of terms) {
         const urlItems = [];
         for (const { baseSku, qty } of eolItems) {
