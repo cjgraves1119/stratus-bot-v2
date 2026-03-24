@@ -1,0 +1,69 @@
+name: Sync Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'worker/src/data/**'
+      - 'worker-gchat/src/data/**'
+      - 'worker/src/index.js'
+      - 'worker-gchat/src/index.js'
+  push:
+    branches:
+      - main
+
+jobs:
+  check-data-sync:
+    name: Check Data File Synchronization
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run sync check
+        run: bash sync-engine.sh
+        continue-on-error: true
+
+      - name: Check prices.json
+        run: |
+          if ! diff -q worker/src/data/prices.json worker-gchat/src/data/prices.json > /dev/null 2>&1; then
+            echo "❌ prices.json differs between workers"
+            echo "Run: bash sync-engine.sh --sync"
+            exit 1
+          fi
+          echo "✓ prices.json synchronized"
+
+      - name: Check auto-catalog.json
+        run: |
+          if ! diff -q worker/src/data/auto-catalog.json worker-gchat/src/data/auto-catalog.json > /dev/null 2>&1; then
+            echo "❌ auto-catalog.json differs between workers"
+            echo "Run: bash sync-engine.sh --sync"
+            exit 1
+          fi
+          echo "✓ auto-catalog.json synchronized"
+
+      - name: Check specs.json
+        run: |
+          if ! diff -q worker/src/data/specs.json worker-gchat/src/data/specs.json > /dev/null 2>&1; then
+            echo "❌ specs.json differs between workers"
+            echo "Run: bash sync-engine.sh --sync"
+            exit 1
+          fi
+          echo "✓ specs.json synchronized"
+
+      - name: Check accessories.json
+        run: |
+          if [ -f worker/src/data/accessories.json ] && [ -f worker-gchat/src/data/accessories.json ]; then
+            if ! diff -q worker/src/data/accessories.json worker-gchat/src/data/accessories.json > /dev/null 2>&1; then
+              echo "❌ accessories.json differs between workers"
+              echo "Run: bash sync-engine.sh --sync"
+              exit 1
+            fi
+            echo "✓ accessories.json synchronized"
+          fi
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "✓ All data files are synchronized between workers"
+          echo "Ready to deploy!"
