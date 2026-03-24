@@ -508,10 +508,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // MS450: Return null — uses DNA subscription licensing, not per-device
-  if (/^MS450/.test(upper)) {
-    return null;
-  }
+  // MS450: Falls through to legacy MS handler below (LIC-MS450-{port}-{term}YR)
 
   // Legacy MS switches (MS210, MS220, MS225, MS250, MS350, MS410, MS425) — LIC-{model}-{port}-{term}YR
   const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);

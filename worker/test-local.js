@@ -264,10 +264,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // MS450: Return null — uses DNA subscription licensing, not per-device
-  if (/^MS450/.test(upper)) {
-    return null;
-  }
+  // MS450: Falls through to legacy MS handler below (LIC-MS450-{port}-{term}YR)
 
   // Legacy MS switches (MS210, MS220, MS225, MS250, MS350, MS410, MS425) — LIC-{model}-{port}-{term}YR
   const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
@@ -1056,11 +1053,13 @@ const tests = [
     }
   })),
 
-  // MS450 → null (DNA subscription licensing, not per-device)
-  { name: '[LICENSE] MS450-12 → null (DNA subscription)',
+  // MS450 → legacy -YR format (Meraki licensing)
+  { name: '[LICENSE] MS450-12 → LIC-MS450-12-*YR',
     customTest: () => {
       const lics = getLicenseSkus('MS450-12');
-      return { pass: lics === null, actual: JSON.stringify(lics) };
+      const expected = ['LIC-MS450-12-1YR', 'LIC-MS450-12-3YR', 'LIC-MS450-12-5YR'];
+      const actual = lics?.map(l => l.sku);
+      return { pass: JSON.stringify(actual) === JSON.stringify(expected), actual: JSON.stringify(actual) };
     }
   },
 
@@ -1097,7 +1096,7 @@ const tests = [
     'MS150-24P-4G', 'MS150-48FP-4X', 'MS125-24P',
     'MS390-24UX', 'C9200L-24P-4G-M', 'C9300-48P-M',
     'C9300X-12Y-M', 'C9300L-48PF-4X-M', 'C8111-G2-MX', 'C8455-G2-MX',
-    'MV63X', 'MT10',
+    'MV63X', 'MT10', 'MS450-12',
     'MS210-24P', 'MS350-24X', 'MS355-48X', 'MS425-32',
   ].map(sku => ({
     name: `[LICENSE-PRICE] ${sku} → all licenses exist in prices.json`,
