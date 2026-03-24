@@ -1906,6 +1906,9 @@ function formatPrice(num) {
 }
 
 function buildPricingBlock(urlItems, showPricing) {
+  // Pricing disabled — prices.json needs to be refreshed before re-enabling
+  return '';
+  // eslint-disable-next-line no-unreachable
   if (!showPricing) return '';
   let lines = [];
   let cartTotal = 0;
@@ -1998,13 +2001,14 @@ function buildQuoteResponse(parsed) {
       }
     }
 
-    // Show EOL warnings
+    // Show EOL warnings (compact format, no EOS dates)
     if (eolFound.length > 0) {
+      lines.push(`**Products End of Life:**`);
       for (const { baseModel, replacement } of eolFound) {
         if (_hasAlt(replacement)) {
-          lines.push(`⚠️ **${baseModel}** is End-of-Life. Replacements: **${replacement[0]}** (1G Uplink) / **${replacement[1]}** (10G Uplink)`);
+          lines.push(`• ${baseModel} (EOL) → Replacements: ${replacement[0]} (1G) / ${replacement[1]} (10G)`);
         } else {
-          lines.push(`⚠️ **${baseModel}** is End-of-Life. Replacement: **${_primary(replacement)}**`);
+          lines.push(`• ${baseModel} (EOL) → Replacement: ${_primary(replacement)}`);
         }
       }
       lines.push('');
@@ -2217,12 +2221,13 @@ function buildQuoteResponse(parsed) {
     const _primary = (r) => Array.isArray(r) ? r[0] : r;
     const _hasAlt = (r) => Array.isArray(r) && r.length > 1;
 
-    // List all EOL warnings first
+    // List all EOL warnings first (compact format, no EOS dates)
+    lines.push(`**Products End of Life:**`);
     for (const { baseSku, replacement } of eolItems) {
       if (_hasAlt(replacement)) {
-        lines.push(`⚠️ **${baseSku}** is End-of-Life. Replacements: **${replacement[0]}** (1G Uplink) / **${replacement[1]}** (10G Uplink)`);
+        lines.push(`• ${baseSku} (EOL) → Replacements: ${replacement[0]} (1G) / ${replacement[1]} (10G)`);
       } else {
-        lines.push(`⚠️ **${baseSku}** is End-of-Life. Replacement: **${_primary(replacement)}**`);
+        lines.push(`• ${baseSku} (EOL) → Replacement: ${_primary(replacement)}`);
       }
     }
     lines.push('');
@@ -2687,7 +2692,7 @@ These products are End-of-Life. ALWAYS check every product in a screenshot or re
 
 Replacements: MX60/64→MX67, MX65→MX68, MX80/84→MX85, MX100→MX95, MX400→MX250, MX600→MX450, MR20→MR28, MR30H→MR36H, MR33→MR36, MR42→MR44, MR45→MR46, MR52/53/56→MR57, MR55→MR57, MR70→MR78, MR74→MR76, MR84→MR86, MV Gen 2→Gen 3, MS120/125→MS130, MS210/220/225→MS130/MS150, MS250→C9300L, MS320→MS150, MS350→C9300, MS355→C9300X, MS390→C9300, MS410/420→C9300, MS425→C9300X, MG21→MG41, MG51→MG52, Z1/3→Z4, Z3C→Z4C
 
-When you identify ANY EOL product, ALWAYS flag it in Important Notes with EOS/End-of-Support dates AND include both Option 1 (renewal, license-only) and Option 2 (hardware refresh with replacement hardware + all licenses). If any replacement switch has 1G/10G uplink variants, show Option 2 (1G Uplink) and Option 3 (10G Uplink).
+When you identify ANY EOL product, flag it using the compact format below (NO EOS dates, NO End-of-Support dates — those are only shown when explicitly requested). ALWAYS include both Option 1 (renewal, license-only) and Option 2 (hardware refresh with replacement hardware + all licenses). If any replacement switch has 1G/10G uplink variants, show Option 2 (1G Uplink) and Option 3 (10G Uplink). Flag ALL EOL products found regardless of whether they have a license overage — EOL status is based on the product family, not the license gap.
 
 ## AP MODEL DEFAULTS AND UPGRADE TIERS
 
@@ -2743,18 +2748,16 @@ Quote the licenses EXACTLY as shown in the table. Do NOT ask for device counts. 
 
 ### After analysis, ALWAYS output in this format:
 
-**Important Notes:**
-• Flag ALL EOL products found (check EVERY product against the EOL list above)
-• Flag any license overages
-• Flag any anomalies (0 licensed but active devices, etc.)
+**Products End of Life:**
+• {MODEL} (EOL) → Replacement: {REPLACEMENT MODEL}
+(list ALL EOL products found — regardless of overage status. If replacement has 1G/10G variants: "→ Replacements: {MODEL-4G} (1G) / {MODEL-4X} (10G)")
+
+**License Overages (if any):**
+• {device}: licensed {X}, active {Y} — adjusted to {Y}
 
 **Option 1 — Renew Existing Licenses:**
 
-1-Year Co-Term: {URL with all license SKUs at determined quantities}
-
 3-Year Co-Term: {URL with all license SKUs at determined quantities}
-
-5-Year Co-Term: {URL with all license SKUs at determined quantities}
 
 If ANY EOL products were found, ALWAYS include a refresh section without being asked:
 
@@ -2762,7 +2765,9 @@ If ANY EOL products were found, ALWAYS include a refresh section without being a
 
 3-Year Co-Term: {URL with replacement hardware SKUs (-HW suffix) + ALL license SKUs including non-EOL ones}
 
-The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. Default to 3-Year for refresh unless user specifies otherwise. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 for 1G Uplink and Option 3 for 10G Uplink.
+CRITICAL DEDUP RULE: When multiple EOL models share the same replacement SKU, COMBINE their quantities into a single URL entry. Example: MS120-8FP ×26 + MS220-8P ×6 both map to MS130-8P → use MS130-8P-HW ×32 (NOT two separate MS130-8P-HW entries). Always sum quantities before building the URL.
+
+The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Only show 3-Year for dashboard screenshot responses unless user specifies otherwise.
 
 ## REFRESH / UPGRADE / HARDWARE UPGRADE SEMANTICS
 When a user asks for a "refresh option" or "upgrade option" in the context of a renewal quote:
@@ -2782,12 +2787,14 @@ When the user says "hardware only" or "hardware" (without asking about specs/inf
 Z4 and Z4C default to SEC (Advanced Security) licensing unless the user explicitly requests ENT (Enterprise).
 
 ## OUTPUT RULES
-- Always show 1-Year, 3-Year, and 5-Year URLs unless user says "just" or "only" with one term
+- For dashboard screenshots: show ONLY the 3-Year URL for all options. Never show 1-Year or 5-Year for dashboard analysis unless user explicitly requests it.
+- For regular SKU quotes: always show 1-Year, 3-Year, and 5-Year URLs unless user says "just" or "only" with one term.
 - URL-only output by default for simple quotes
 - For dashboard screenshots, ALWAYS use the standardized format above
 - Keep responses concise but complete — never skip EOL products
 - NEVER use bullet points (•) before URLs. Just put the URL on its own line after the term label.
-- Use bullet points (•) only for License Analysis and Important Notes sections, never for URLs
+- Use bullet points (•) only for License Analysis sections, never for URLs
+- NEVER include EOS dates, End-of-Support dates, or lifecycle dates in responses unless the user explicitly asks for EOL dates
 
 ## ACCESSORY & CONNECTIVITY GUIDANCE
 When asked about SFPs, stacking cables, uplink modules, or how to connect two devices:
@@ -2862,11 +2869,9 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     const history = personId ? await getHistory(kv, personId) : [];
 
     // Option 3: Inject relevant pricing into system prompt for pricing questions
-    const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(userMessage);
-    if (pricingIntent) {
-      const priceContext = getRelevantPriceContext(userMessage, history);
-      if (priceContext) systemPrompt += '\n\n' + priceContext;
-    }
+    // Price context injection disabled — prices.json needs to be refreshed
+    // const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(userMessage);
+    // if (pricingIntent) { const priceContext = getRelevantPriceContext(userMessage, history); ... }
 
     // Phase 4: Inject accessories/connectivity context for design questions
     const accessoriesContext = getAccessoriesContext(userMessage);
@@ -3035,14 +3040,9 @@ export default {
             }
           }
 
-          // Try deterministic pricing calculator before Claude fallback
-          const pricingReply = await handlePricingRequest(text, personId, kv);
-          if (pricingReply) {
-            await addToHistory(kv, personId, 'user', text);
-            await addToHistory(kv, personId, 'assistant', pricingReply);
-            await sendMessage(roomId, pricingReply, token);
-            return;
-          }
+          // Pricing calculator disabled — prices.json needs to be refreshed
+          // const pricingReply = await handlePricingRequest(text, personId, kv);
+          // if (pricingReply) { ... }
 
           // Full fallback to Claude API
           const claudeReply = await askClaude(text, personId, env);
