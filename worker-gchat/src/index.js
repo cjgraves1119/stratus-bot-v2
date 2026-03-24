@@ -2142,9 +2142,8 @@ function buildQuoteResponse(parsed) {
             if (licSku) urlItems.push({ sku: licSku, qty });
           }
         }
-        // Also include any non-EOL resolved items in the renewal URL
-        for (const { hwSku, qty, licenseSkus } of resolvedItems) {
-          if (!modifiers.licenseOnly) urlItems.push({ sku: hwSku, qty });
+        // Also include non-EOL resolved items — LICENSE ONLY (Option 1 is renewal, no hardware)
+        for (const { qty, licenseSkus } of resolvedItems) {
           if (licenseSkus && !modifiers.hardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty });
@@ -2175,9 +2174,8 @@ function buildQuoteResponse(parsed) {
           if (licSku) urlItems.push({ sku: licSku, qty });
         }
       }
-      // Also include any non-EOL resolved items
-      for (const { hwSku, qty, licenseSkus } of resolvedItems) {
-        if (!modifiers.licenseOnly) urlItems.push({ sku: hwSku, qty });
+      // Also include non-EOL resolved items — LICENSE ONLY (refresh is for EOL hardware only)
+      for (const { qty, licenseSkus } of resolvedItems) {
         if (licenseSkus && !modifiers.hardwareOnly) {
           const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
           if (licSku) urlItems.push({ sku: licSku, qty });
