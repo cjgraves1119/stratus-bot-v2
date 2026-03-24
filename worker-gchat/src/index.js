@@ -393,10 +393,86 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // MS-series switches: Return null — switches are hardware-only in quoting URLs
-  // Switch licensing (Advantage/Premier) is NOT included in standard quotes
-  if (/^MS\d/.test(upper)) {
+  // MS130R (compact) — uses LIC-MS130-CMPT
+  if (/^MS130R-/.test(upper)) {
+    return [
+      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
+      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
+      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
+    ];
+  }
+
+  // MS130-8P, MS130-12P (small form factor) — uses LIC-MS130-CMPT
+  if (/^MS130-(8|12)/.test(upper)) {
+    return [
+      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
+      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
+      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
+    ];
+  }
+
+  // MS130-24/48 — uses LIC-MS130-{portCount}
+  const ms130Match = upper.match(/^MS130-(24|48)/);
+  if (ms130Match) {
+    const ports = ms130Match[1];
+    return [
+      { term: '1Y', sku: `LIC-MS130-${ports}-1Y` },
+      { term: '3Y', sku: `LIC-MS130-${ports}-3Y` },
+      { term: '5Y', sku: `LIC-MS130-${ports}-5Y` }
+    ];
+  }
+
+  // MS150 — uses LIC-MS150-{portCount}
+  const ms150Match = upper.match(/^MS150-(24|48)/);
+  if (ms150Match) {
+    const ports = ms150Match[1];
+    return [
+      { term: '1Y', sku: `LIC-MS150-${ports}-1Y` },
+      { term: '3Y', sku: `LIC-MS150-${ports}-3Y` },
+      { term: '5Y', sku: `LIC-MS150-${ports}-5Y` }
+    ];
+  }
+
+  // MS125: Uses -Y suffix — LIC-MS125-{variant}-{1Y|3Y|5Y}
+  const ms125Match = upper.match(/^MS125-(.+)/);
+  if (ms125Match) {
+    const variant = ms125Match[1];
+    return [
+      { term: '1Y', sku: `LIC-MS125-${variant}-1Y` },
+      { term: '3Y', sku: `LIC-MS125-${variant}-3Y` },
+      { term: '5Y', sku: `LIC-MS125-${variant}-5Y` }
+    ];
+  }
+
+  // MS390: Uses {portCount}{A|E}-{term}Y format
+  const ms390Match = upper.match(/^MS390-(\d+)/);
+  if (ms390Match) {
+    const portCount = ms390Match[1];
+    const tier = (requestedTier === 'A') ? 'A' : 'E';
+    return [
+      { term: '1Y', sku: `LIC-MS390-${portCount}${tier}-1Y` },
+      { term: '3Y', sku: `LIC-MS390-${portCount}${tier}-3Y` },
+      { term: '5Y', sku: `LIC-MS390-${portCount}${tier}-5Y` }
+    ];
+  }
+
+  // MS450: Return null — uses DNA subscription licensing, not per-device
+  if (/^MS450/.test(upper)) {
     return null;
+  }
+
+  // Legacy MS switches (MS210, MS220, MS225, MS250, MS350, MS410, MS425) — LIC-{model}-{port}-{term}YR
+  const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
+  if (legacyMsMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
+    const model = legacyMsMatch[1];
+    let port = legacyMsMatch[2];
+    // MS350-48X uses the 48-port license (no X)
+    if (model === 'MS350' && port === '48X') port = '48';
+    return [
+      { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
+      { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
+      { term: '5Y', sku: `LIC-${model}-${port}-5YR` }
+    ];
   }
 
   // Catalyst M-series: C9200L, C9300, C9350 — LIC-{family}-{portCount}{A|E}-{term}

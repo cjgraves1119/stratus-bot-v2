@@ -1,5 +1,12 @@
 // Local test harness for deterministic quoting engine
 // Run: node test-local.js
+//
+// IMPORTANT: This file must stay in sync with worker/src/index.js.
+// A sync check runs automatically before tests — if functions diverge,
+// the suite fails immediately with clear instructions.
+
+const fs = require('fs');
+const crypto = require('crypto');
 
 // Import the catalog data
 const catalog = require('./src/data/auto-catalog.json');
@@ -10,8 +17,77 @@ const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
 const EOL_REPLACEMENTS = catalog._EOL_REPLACEMENTS || {};
 const PRICES = catalog.prices || {};
 
-// Copy the core functions from index.js inline for testing
-// (We extract them so we don't need to refactor the worker)
+// ─── Sync Verification ──────────────────────────────────────────────────────
+// Extracts a function body from source code and returns a normalized hash.
+// This catches drift between test-local.js and index.js.
+function extractFunctionBody(source, funcName) {
+  // Match "function funcName(" and capture everything until balanced braces close
+  const startPattern = new RegExp(`function ${funcName}\\s*\\(`);
+  const match = startPattern.exec(source);
+  if (!match) return null;
+
+  let depth = 0;
+  let started = false;
+  let bodyStart = match.index;
+  for (let i = match.index; i < source.length; i++) {
+    if (source[i] === '{') { depth++; started = true; }
+    if (source[i] === '}') { depth--; }
+    if (started && depth === 0) {
+      // Normalize: strip whitespace and comments for comparison
+      const body = source.slice(bodyStart, i + 1)
+        .replace(/\/\/.*$/gm, '')     // strip line comments
+        .replace(/\/\*[\s\S]*?\*\//g, '') // strip block comments
+        .replace(/\s+/g, ' ')         // normalize whitespace
+        .trim();
+      return crypto.createHash('md5').update(body).digest('hex');
+    }
+  }
+  return null;
+}
+
+// Functions that MUST stay in sync between test-local.js and index.js
+const SYNC_FUNCTIONS = [
+  'applySuffix',
+  'getLicenseSkus',
+  'checkEol',
+  'isEol',
+  'buildStratusUrl',
+  'handleEolDateRequest',
+];
+
+const indexSource = fs.readFileSync('./src/index.js', 'utf-8');
+const testSource = fs.readFileSync('./test-local.js', 'utf-8');
+
+let syncErrors = 0;
+console.log('─── Sync Check: test-local.js vs index.js ───');
+for (const fn of SYNC_FUNCTIONS) {
+  const indexHash = extractFunctionBody(indexSource, fn);
+  const testHash = extractFunctionBody(testSource, fn);
+  if (!indexHash) {
+    console.log(`  ⚠️  ${fn}: not found in index.js (skipping)`);
+    continue;
+  }
+  if (!testHash) {
+    console.log(`  ⚠️  ${fn}: not found in test-local.js (skipping)`);
+    continue;
+  }
+  if (indexHash !== testHash) {
+    console.log(`  ❌ ${fn}: OUT OF SYNC — test copy differs from index.js`);
+    syncErrors++;
+  } else {
+    console.log(`  ✅ ${fn}: in sync`);
+  }
+}
+
+if (syncErrors > 0) {
+  console.log(`\n🚨 ${syncErrors} function(s) out of sync! Tests are using stale code.`);
+  console.log('   Copy the updated function(s) from src/index.js into test-local.js,');
+  console.log('   or run: node sync-test-functions.js');
+  process.exit(1);
+}
+console.log('  All synced ✅\n');
+
+// ─── Core functions (must match index.js — see sync check above) ────────────
 
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
@@ -125,6 +201,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
+  // MS130R (compact) — uses LIC-MS130-CMPT
   if (/^MS130R-/.test(upper)) {
     return [
       { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
@@ -133,6 +210,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
+  // MS130-8P, MS130-12P (small form factor) — uses LIC-MS130-CMPT
   if (/^MS130-(8|12)/.test(upper)) {
     return [
       { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
@@ -141,6 +219,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
+  // MS130-24/48 — uses LIC-MS130-{portCount}
   const ms130Match = upper.match(/^MS130-(24|48)/);
   if (ms130Match) {
     const ports = ms130Match[1];
@@ -151,6 +230,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
+  // MS150 — uses LIC-MS150-{portCount}
   const ms150Match = upper.match(/^MS150-(24|48)/);
   if (ms150Match) {
     const ports = ms150Match[1];
@@ -161,7 +241,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // MS125: Uses -Y suffix (not -YR) — LIC-MS125-{variant}-{1Y|3Y|5Y}
+  // MS125: Uses -Y suffix — LIC-MS125-{variant}-{1Y|3Y|5Y}
   const ms125Match = upper.match(/^MS125-(.+)/);
   if (ms125Match) {
     const variant = ms125Match[1];
@@ -172,8 +252,7 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // MS390: Uses {portCount}{A|E}-{term}Y format (NOT legacy -1YR format)
-  // MS390-24UX → LIC-MS390-24E-1Y, MS390-48P → LIC-MS390-48E-1Y
+  // MS390: Uses {portCount}{A|E}-{term}Y format
   const ms390Match = upper.match(/^MS390-(\d+)/);
   if (ms390Match) {
     const portCount = ms390Match[1];
@@ -185,7 +264,27 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
+  // MS450: Return null — uses DNA subscription licensing, not per-device
+  if (/^MS450/.test(upper)) {
+    return null;
+  }
+
+  // Legacy MS switches (MS210, MS220, MS225, MS250, MS350, MS410, MS425) — LIC-{model}-{port}-{term}YR
+  const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
+  if (legacyMsMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
+    const model = legacyMsMatch[1];
+    let port = legacyMsMatch[2];
+    // MS350-48X uses the 48-port license (no X)
+    if (model === 'MS350' && port === '48X') port = '48';
+    return [
+      { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
+      { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
+      { term: '5Y', sku: `LIC-${model}-${port}-5YR` }
+    ];
+  }
+
   // Catalyst M-series: C9200L, C9300, C9350 — LIC-{family}-{portCount}{A|E}-{term}
+  // C9300-48UXM-M → LIC-C9300-48E-1Y, C9200L-24P-4G-M → LIC-C9200L-24E-1Y
   // C9300X and C9300L have no license SKUs in prices, they use C9300 licenses
   // C9300X-12Y uses the 24-port license (LIC-C9300-24E)
   // C9350 has only 3Y and 5Y (no 1Y)
@@ -236,44 +335,43 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  const legacyMatch = upper.match(/^(MS\d{3})-(.+)/);
-  if (legacyMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
-    const model = legacyMatch[1];
-    let port = legacyMatch[2];
-    // MS350-48X uses the 48-port license (LIC-MS350-48, no X)
-    if (model === 'MS350' && port === '48X') port = '48';
-    return [
-      { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
-      { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
-      { term: '5Y', sku: `LIC-${model}-${port}-5YR` }
-    ];
-  }
 
   return null;
 }
 
 // ─── EOL Date Lookup (mirrors index.js) ──────────────────────────────────────
 const EOL_DATES_DATA = catalog._EOL_DATES || {};
+const EOL_DATES = EOL_DATES_DATA; // alias used by synced handleEolDateRequest from index.js
 
 function handleEolDateRequest(text) {
   const upper = text.toUpperCase();
+
+  // Detect EOL date intent
   const eolIntent = /\b(END OF (SUPPORT|SALE|LIFE)|EOL|EOS|EOST|WHEN (DOES|DID|IS|WAS|WILL) .+ (EOL|END|EXPIRE|SUNSET|DISCONTINUED)|LIFECYCLE|LAST DAY OF SUPPORT)\b/i.test(text);
   if (!eolIntent) return null;
 
+  // Extract SKU-like tokens from the message
   const skuPattern = /\b((?:MR|MX|MV|MG|MS|MT|CW|Z)\d[\w-]*)\b/gi;
   const matches = [...upper.matchAll(skuPattern)].map(m => m[1]);
+
+  // Deduplicate
   const skus = [...new Set(matches)];
   if (skus.length === 0) return null;
 
   const lines = [];
+
   for (const sku of skus) {
     const skuUpper = sku.toUpperCase();
+
+    // Check if EOL
     let isEolProduct = false;
     let fullSkuKey = skuUpper;
 
-    if (EOL_DATES_DATA[skuUpper]) {
+    // Direct date lookup first
+    if (EOL_DATES[skuUpper]) {
       isEolProduct = true;
     } else {
+      // Try family + variant lookup
       for (const [family, variants] of Object.entries(EOL_PRODUCTS)) {
         if (skuUpper.startsWith(family)) {
           const raw = skuUpper.slice(family.length);
@@ -292,15 +390,20 @@ function handleEolDateRequest(text) {
       continue;
     }
 
-    const dates = EOL_DATES_DATA[fullSkuKey];
+    const dates = EOL_DATES[fullSkuKey];
     const replacement = EOL_REPLACEMENTS[fullSkuKey];
+
     let line = `**${skuUpper}**`;
     if (dates) {
       const eosDate = new Date(dates.eos);
       const eostDate = new Date(dates.eost);
       const now = new Date();
-      line += `\n  📅 End of Sale: **${dates.eos}**`;
-      line += `\n  🛡️ End of Support: **${dates.eost}**`;
+      const eosLabel = eosDate <= now ? 'End of Sale' : 'End of Sale';
+      const eostLabel = eostDate <= now ? 'End of Support (passed)' : 'End of Support';
+      line += `\n  📅 ${eosLabel}: **${dates.eos}**`;
+      line += `\n  🛡️ ${eostLabel}: **${dates.eost}**`;
+
+      // Days until/since EOST
       const daysToEost = Math.round((eostDate - now) / (1000 * 60 * 60 * 24));
       if (daysToEost > 0) {
         line += ` _(${daysToEost} days remaining)_`;
@@ -310,6 +413,7 @@ function handleEolDateRequest(text) {
     } else {
       line += '\n  📅 EOL confirmed (exact dates not available)';
     }
+
     if (replacement) {
       if (Array.isArray(replacement)) {
         line += `\n  🔄 Replacement: **${replacement[0]}** (1G) or **${replacement[1]}** (10G)`;
@@ -317,10 +421,12 @@ function handleEolDateRequest(text) {
         line += `\n  🔄 Replacement: **${replacement}**`;
       }
     }
+
     lines.push(line);
   }
 
   if (lines.length === 0) return null;
+
   const header = skus.length === 1 ? '**End-of-Life Status**' : `**End-of-Life Status (${skus.length} products)**`;
   return `${header}\n\n${lines.join('\n\n')}`;
 }
@@ -356,6 +462,7 @@ function isEol(baseSku) {
 }
 
 function buildStratusUrl(items) {
+  // Consolidate duplicate SKUs by summing quantities
   const merged = new Map();
   for (const { sku, qty } of items) {
     merged.set(sku, (merged.get(sku) || 0) + qty);
@@ -949,13 +1056,11 @@ const tests = [
     }
   })),
 
-  // MS450 → legacy -YR format
-  { name: '[LICENSE] MS450-12 → LIC-MS450-12-*YR',
+  // MS450 → null (DNA subscription licensing, not per-device)
+  { name: '[LICENSE] MS450-12 → null (DNA subscription)',
     customTest: () => {
       const lics = getLicenseSkus('MS450-12');
-      const expected = ['LIC-MS450-12-1YR', 'LIC-MS450-12-3YR', 'LIC-MS450-12-5YR'];
-      const actual = lics?.map(l => l.sku);
-      return { pass: JSON.stringify(actual) === JSON.stringify(expected), actual: JSON.stringify(actual) };
+      return { pass: lics === null, actual: JSON.stringify(lics) };
     }
   },
 
@@ -992,7 +1097,7 @@ const tests = [
     'MS150-24P-4G', 'MS150-48FP-4X', 'MS125-24P',
     'MS390-24UX', 'C9200L-24P-4G-M', 'C9300-48P-M',
     'C9300X-12Y-M', 'C9300L-48PF-4X-M', 'C8111-G2-MX', 'C8455-G2-MX',
-    'MV63X', 'MT10', 'MS450-12',
+    'MV63X', 'MT10',
     'MS210-24P', 'MS350-24X', 'MS355-48X', 'MS425-32',
   ].map(sku => ({
     name: `[LICENSE-PRICE] ${sku} → all licenses exist in prices.json`,
