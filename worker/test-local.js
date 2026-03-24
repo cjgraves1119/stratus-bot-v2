@@ -370,6 +370,92 @@ const pricesData = require('./src/data/prices.json');
 const priceMap = pricesData.prices || {};
 function priceExists(sku) { return sku in priceMap; }
 
+// ─── Accessory Resolver Functions (Phase 2 tests) ────────────────────────────
+const accessoriesData = require('./src/data/accessories.json');
+const portProfiles = accessoriesData.port_profiles;
+const sfpModules = accessoriesData.sfp_modules;
+const stackingDataTest = accessoriesData.stacking;
+const uplinkModulesTest = accessoriesData.uplink_modules;
+
+function getPortProfile(deviceModel) {
+  const upper = deviceModel.toUpperCase().replace(/-HW(-NA)?$/, '').replace(/-MR$/, '').replace(/-RTG$/, '');
+  for (const [family, models] of Object.entries(portProfiles)) {
+    if (models[upper]) return { profile: models[upper], family, model: upper };
+    if (models[upper + '-M']) return { profile: models[upper + '-M'], family, model: upper + '-M' };
+    const noM = upper.replace(/-M$/, '');
+    if (models[noM]) return { profile: models[noM], family, model: noM };
+  }
+  return null;
+}
+
+function getDeviceUplinkPorts(profileData) {
+  if (!profileData) return [];
+  const { profile, family } = profileData;
+  if (profile.uplinks === 'modular') {
+    const mods = uplinkModulesTest[family];
+    if (!mods) return [];
+    return mods.modules.map(m => ({ speed: m.speed, form: m.type, count: m.ports, sku: m.sku, modular: true, recommended: m.recommended || false }));
+  }
+  const ports = [];
+  if (profile.sfp_uplinks) for (const p of profile.sfp_uplinks) ports.push({ speed: p.speed, form: p.form, count: p.count });
+  if (profile.uplinks && Array.isArray(profile.uplinks)) for (const p of profile.uplinks) ports.push({ speed: p.speed, form: p.form, count: p.count });
+  if (profile.sfp_lan) for (const p of profile.sfp_lan) ports.push({ speed: p.speed, form: p.form, count: p.count, isLan: true });
+  return ports;
+}
+
+function findCommonSpeed(portsA, portsB) {
+  const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+  const speedsA = new Set(portsA.map(p => p.speed));
+  const speedsB = new Set(portsB.map(p => p.speed));
+  const expandedA = new Set(speedsA);
+  const expandedB = new Set(speedsB);
+  if (speedsA.has('25G')) { expandedA.add('10G'); expandedA.add('1G'); }
+  if (speedsA.has('10G')) expandedA.add('1G');
+  if (speedsB.has('25G')) { expandedB.add('10G'); expandedB.add('1G'); }
+  if (speedsB.has('10G')) expandedB.add('1G');
+  let bestSpeed = null;
+  let bestRank = 0;
+  for (const speed of expandedA) {
+    if (expandedB.has(speed) && (speedRank[speed] || 0) > bestRank) {
+      bestSpeed = speed;
+      bestRank = speedRank[speed];
+    }
+  }
+  return bestSpeed;
+}
+
+function getCompatibleSfps(speed, deviceFamilies) {
+  const speedCategories = { '1G': '1G_SFP', '10G': ['10G_SFP+', '10G_DAC'], '25G': '25G_SFP28', '40G': '40G_QSFP', '100G': '100G_QSFP28' };
+  const cats = speedCategories[speed];
+  if (!cats) return [];
+  const categoryList = Array.isArray(cats) ? cats : [cats];
+  const results = [];
+  for (const cat of categoryList) {
+    const modules = sfpModules[cat] || [];
+    for (const mod of modules) {
+      const isIncompat = mod.incompatible_with.some(f => deviceFamilies.includes(f));
+      if (!isIncompat) results.push({ ...mod, category: cat });
+    }
+  }
+  return results;
+}
+
+function getStackingSuggestion(baseSku, qty) {
+  if (qty < 2) return null;
+  const profile = getPortProfile(baseSku);
+  if (!profile || !profile.profile.stackable) return null;
+  const stackType = profile.profile.stack_type;
+  if (!stackType) return null;
+  const stackFamily = stackingDataTest.families[stackType];
+  if (!stackFamily) return null;
+  const defaultCable = Object.entries(stackFamily.cables).find(([_, v]) => v.use_case && v.use_case.includes('default'));
+  const cableSku = defaultCable ? defaultCable[0] : Object.keys(stackFamily.cables)[1];
+  const cableQty = qty;
+  const result = { stackType, bandwidth: stackFamily.bandwidth, cableSku, cableQty };
+  if (stackFamily.requires_kit) { result.kitSku = stackFamily.requires_kit; result.kitQty = qty; }
+  return result;
+}
+
 // ─── Test Cases ──────────────────────────────────────────────────────────────
 // 200+ tests organized by category
 
@@ -1383,6 +1469,162 @@ const tests = [
       const r = handleEolDateRequest('EOL MX64 MX64');
       const pass = r && r.includes('End-of-Life Status') && !r.includes('2 products');
       return { pass, actual: r ? `single=${!r.includes('2 products')}` : 'null' };
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CATEGORY: Accessory Resolver Engine (Phase 2 tests)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Port profile lookups
+  { name: '[ACCESSORIES] getPortProfile MX95 → has 10G SFP+ uplinks',
+    customTest: () => {
+      const p = getPortProfile('MX95');
+      const pass = p && p.family === 'MX' && p.profile.sfp_uplinks.some(u => u.speed === '10G');
+      return { pass, actual: p ? `family=${p.family}, uplinks=${JSON.stringify(p.profile.sfp_uplinks)}` : 'null' };
+    }
+  },
+  { name: '[ACCESSORIES] getPortProfile C9300-48P → modular uplinks',
+    customTest: () => {
+      const p = getPortProfile('C9300-48P');
+      const pass = p && p.family === 'C9300' && p.profile.uplinks === 'modular';
+      return { pass, actual: p ? `family=${p.family}, uplinks=${p.profile.uplinks}` : 'null' };
+    }
+  },
+  { name: '[ACCESSORIES] getPortProfile MS130-24P → 1G SFP uplinks, not stackable',
+    customTest: () => {
+      const p = getPortProfile('MS130-24P');
+      const pass = p && p.family === 'MS130' && !p.profile.stackable && p.profile.uplinks.some(u => u.speed === '1G');
+      return { pass, actual: p ? `stackable=${p.profile.stackable}, speed=${p.profile.uplinks[0].speed}` : 'null' };
+    }
+  },
+  { name: '[ACCESSORIES] getPortProfile MS150-48FP-4X → 10G SFP+ uplinks, stackable',
+    customTest: () => {
+      const p = getPortProfile('MS150-48FP-4X');
+      const pass = p && p.family === 'MS150' && p.profile.stackable && p.profile.uplinks.some(u => u.speed === '10G');
+      return { pass, actual: p ? `stackable=${p.profile.stackable}, speed=${p.profile.uplinks[0].speed}` : 'null' };
+    }
+  },
+  { name: '[ACCESSORIES] getPortProfile MX67 → no SFP ports (RJ45 only)',
+    customTest: () => {
+      const p = getPortProfile('MX67');
+      const ports = getDeviceUplinkPorts(p);
+      const pass = p && ports.length === 0;
+      return { pass, actual: p ? `ports=${ports.length}` : 'null' };
+    }
+  },
+
+  // Speed matching
+  { name: '[ACCESSORIES] findCommonSpeed: MX95 (10G) + MS150-4X (10G) → 10G',
+    customTest: () => {
+      const pA = getPortProfile('MX95');
+      const pB = getPortProfile('MS150-48FP-4X');
+      const portsA = getDeviceUplinkPorts(pA);
+      const portsB = getDeviceUplinkPorts(pB);
+      const speed = findCommonSpeed(portsA, portsB);
+      return { pass: speed === '10G', actual: `speed=${speed}` };
+    }
+  },
+  { name: '[ACCESSORIES] findCommonSpeed: MS130-24P (1G) + MX75 (1G+10G) → 1G',
+    customTest: () => {
+      const pA = getPortProfile('MS130-24P');
+      const pB = getPortProfile('MX75');
+      const portsA = getDeviceUplinkPorts(pA);
+      const portsB = getDeviceUplinkPorts(pB);
+      const speed = findCommonSpeed(portsA, portsB);
+      return { pass: speed === '1G', actual: `speed=${speed}` };
+    }
+  },
+
+  // SFP compatibility filtering
+  { name: '[ACCESSORIES] getCompatibleSfps 1G: MA-SFP-1GB-TX excluded for C9300',
+    customTest: () => {
+      const sfps = getCompatibleSfps('1G', ['C9300']);
+      const hasTX = sfps.some(s => s.sku === 'MA-SFP-1GB-TX');
+      const hasSX = sfps.some(s => s.sku === 'MA-SFP-1GB-SX');
+      return { pass: !hasTX && hasSX, actual: `TX=${hasTX}, SX=${hasSX}` };
+    }
+  },
+  { name: '[ACCESSORIES] getCompatibleSfps 10G: MA-SFP-10GB-LRM excluded for C9300X',
+    customTest: () => {
+      const sfps = getCompatibleSfps('10G', ['C9300X']);
+      const hasLRM = sfps.some(s => s.sku === 'MA-SFP-10GB-LRM');
+      const hasSR = sfps.some(s => s.sku === 'MA-SFP-10GB-SR');
+      return { pass: !hasLRM && hasSR, actual: `LRM=${hasLRM}, SR=${hasSR}` };
+    }
+  },
+  { name: '[ACCESSORIES] getCompatibleSfps 10G generic: includes DAC cables',
+    customTest: () => {
+      const sfps = getCompatibleSfps('10G', ['MS150']);
+      const hasDAC = sfps.some(s => s.type === 'DAC');
+      const hasSFP = sfps.some(s => s.type === 'SFP+');
+      return { pass: hasDAC && hasSFP, actual: `DAC=${hasDAC}, SFP+=${hasSFP}` };
+    }
+  },
+
+  // Stacking suggestions
+  { name: '[ACCESSORIES] getStackingSuggestion: 4x MS150-48FP-4X → 100G, 4 cables',
+    customTest: () => {
+      const s = getStackingSuggestion('MS150-48FP-4X', 4);
+      const pass = s && s.stackType === '100G' && s.cableQty === 4 && s.cableSku.includes('100G');
+      return { pass, actual: s ? `type=${s.stackType}, cables=${s.cableQty}x ${s.cableSku}` : 'null' };
+    }
+  },
+  { name: '[ACCESSORIES] getStackingSuggestion: 3x C9300-48P → STACK-T1, 3 cables',
+    customTest: () => {
+      const s = getStackingSuggestion('C9300-48P', 3);
+      const pass = s && s.stackType === 'STACK-T1' && s.cableQty === 3 && s.cableSku.includes('STACK-T1');
+      return { pass, actual: s ? `type=${s.stackType}, cables=${s.cableQty}x ${s.cableSku}` : 'null' };
+    }
+  },
+  { name: '[ACCESSORIES] getStackingSuggestion: C9300L needs kit module',
+    customTest: () => {
+      const s = getStackingSuggestion('C9300L-48P-4X', 2);
+      const pass = s && s.kitSku === 'C9300L-STACK-KIT2-M' && s.kitQty === 2;
+      return { pass, actual: s ? `kit=${s.kitSku}, kitQty=${s.kitQty}` : 'null' };
+    }
+  },
+  { name: '[ACCESSORIES] getStackingSuggestion: MS130-24P → null (not stackable)',
+    customTest: () => {
+      const s = getStackingSuggestion('MS130-24P', 3);
+      return { pass: s === null, actual: s ? JSON.stringify(s) : 'null (correct)' };
+    }
+  },
+  { name: '[ACCESSORIES] getStackingSuggestion: qty=1 → null (need 2+ to stack)',
+    customTest: () => {
+      const s = getStackingSuggestion('MS150-48FP-4X', 1);
+      return { pass: s === null, actual: s ? JSON.stringify(s) : 'null (correct)' };
+    }
+  },
+  { name: '[ACCESSORIES] getStackingSuggestion: MS390 → 120G StackWise480',
+    customTest: () => {
+      const s = getStackingSuggestion('MS390-48UX', 2);
+      const pass = s && s.stackType === '120G_StackWise480' && s.cableSku.includes('120G');
+      return { pass, actual: s ? `type=${s.stackType}, cable=${s.cableSku}` : 'null' };
+    }
+  },
+
+  // All accessory SKUs in prices.json validation
+  { name: '[ACCESSORIES] all SFP SKUs exist in prices.json',
+    customTest: () => {
+      const missing = [];
+      for (const [cat, mods] of Object.entries(sfpModules)) {
+        for (const mod of mods) {
+          if (!priceExists(mod.sku)) missing.push(mod.sku);
+        }
+      }
+      return { pass: missing.length === 0, actual: missing.length > 0 ? `missing: ${missing.join(', ')}` : 'all present' };
+    }
+  },
+  { name: '[ACCESSORIES] stacking cable SKUs exist in prices.json',
+    customTest: () => {
+      const missing = [];
+      for (const [type, family] of Object.entries(stackingDataTest.families)) {
+        for (const sku of Object.keys(family.cables)) {
+          if (!priceExists(sku)) missing.push(sku);
+        }
+      }
+      return { pass: missing.length === 0, actual: missing.length > 0 ? `missing: ${missing.join(', ')}` : 'all present' };
     }
   },
 ];

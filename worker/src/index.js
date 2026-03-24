@@ -16,6 +16,7 @@
 import pricesData from './data/prices.json';
 import catalogData from './data/auto-catalog.json';
 import specsData from './data/specs.json';
+import accessoriesData from './data/accessories.json';
 
 const prices = pricesData.prices;
 const catalog = catalogData;
@@ -1120,6 +1121,363 @@ function getRelevantPriceContext(text, history) {
   return `## RELEVANT PRICING (Stratus eComm prices)\nUse these prices when the user asks about costs, pricing, or totals. Show itemized breakdowns with per-unit and line totals.\n${priceLines.join('\n')}`;
 }
 
+// ─── Accessory Resolver Engine (Phase 2) ─────────────────────────────────────
+const accessories = accessoriesData;
+const portProfiles = accessories.port_profiles;
+const sfpModules = accessories.sfp_modules;
+const stackingData = accessories.stacking;
+const uplinkModules = accessories.uplink_modules;
+
+/**
+ * Look up a device's port profile from accessories.json.
+ * Handles both exact matches and family-level lookups (e.g., "C9300-48P-4X" → strip -M suffix).
+ */
+function getPortProfile(deviceModel) {
+  const upper = deviceModel.toUpperCase().replace(/-HW(-NA)?$/, '').replace(/-MR$/, '').replace(/-RTG$/, '');
+  // Try each family in port_profiles
+  for (const [family, models] of Object.entries(portProfiles)) {
+    if (models[upper]) return { profile: models[upper], family, model: upper };
+    // Try with -M suffix for Catalyst
+    if (models[upper + '-M']) return { profile: models[upper + '-M'], family, model: upper + '-M' };
+    // Try stripping -M suffix if present
+    const noM = upper.replace(/-M$/, '');
+    if (models[noM]) return { profile: models[noM], family, model: noM };
+  }
+  return null;
+}
+
+/**
+ * Get the SFP port capabilities of a device (what speeds/forms its uplink ports accept).
+ * Returns array of {speed, form, count} objects.
+ */
+function getDeviceUplinkPorts(profileData) {
+  if (!profileData) return [];
+  const { profile, family } = profileData;
+
+  // Modular devices (MS390, C9300, C9300X) - uplinks depend on which module is installed
+  if (profile.uplinks === 'modular') {
+    const mods = uplinkModules[family];
+    if (!mods) return [];
+    // Return all possible module options so resolver can recommend
+    return mods.modules.map(m => ({
+      speed: m.speed, form: m.type, count: m.ports, sku: m.sku, modular: true,
+      recommended: m.recommended || false
+    }));
+  }
+
+  // Fixed uplink devices - merge sfp_uplinks (MX) and uplinks (switches)
+  const ports = [];
+  if (profile.sfp_uplinks) {
+    for (const p of profile.sfp_uplinks) ports.push({ speed: p.speed, form: p.form, count: p.count });
+  }
+  if (profile.uplinks && Array.isArray(profile.uplinks)) {
+    for (const p of profile.uplinks) ports.push({ speed: p.speed, form: p.form, count: p.count });
+  }
+  // Also check sfp_lan for MX devices (can be used for interconnects)
+  if (profile.sfp_lan) {
+    for (const p of profile.sfp_lan) ports.push({ speed: p.speed, form: p.form, count: p.count, isLan: true });
+  }
+  return ports;
+}
+
+/**
+ * Find the maximum common speed between two devices' SFP ports.
+ * Returns the best matching speed tier or null if no SFP interconnect is possible.
+ */
+function findCommonSpeed(portsA, portsB) {
+  const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+  const speedsA = new Set(portsA.map(p => p.speed));
+  const speedsB = new Set(portsB.map(p => p.speed));
+
+  // Also account for backward compatibility: 10G SFP+ accepts 1G SFP, 25G SFP28 accepts 10G/1G
+  const expandedA = new Set(speedsA);
+  const expandedB = new Set(speedsB);
+  if (speedsA.has('25G')) { expandedA.add('10G'); expandedA.add('1G'); }
+  if (speedsA.has('10G')) expandedA.add('1G');
+  if (speedsB.has('25G')) { expandedB.add('10G'); expandedB.add('1G'); }
+  if (speedsB.has('10G')) expandedB.add('1G');
+
+  // Find best common speed (prefer native match at highest speed)
+  let bestSpeed = null;
+  let bestRank = 0;
+  for (const speed of expandedA) {
+    if (expandedB.has(speed) && (speedRank[speed] || 0) > bestRank) {
+      bestSpeed = speed;
+      bestRank = speedRank[speed];
+    }
+  }
+  return bestSpeed;
+}
+
+/**
+ * Get compatible SFP modules for a given speed tier, checking device incompatibilities.
+ * Returns array of SFP options sorted by use case relevance.
+ */
+function getCompatibleSfps(speed, deviceFamilies) {
+  const speedCategories = {
+    '1G': '1G_SFP',
+    '10G': ['10G_SFP+', '10G_DAC'],
+    '25G': '25G_SFP28',  // future-proofing
+    '40G': '40G_QSFP',
+    '100G': '100G_QSFP28'
+  };
+  const cats = speedCategories[speed];
+  if (!cats) return [];
+  const categoryList = Array.isArray(cats) ? cats : [cats];
+
+  const results = [];
+  for (const cat of categoryList) {
+    const modules = sfpModules[cat] || [];
+    for (const mod of modules) {
+      // Check incompatibilities against both device families
+      const isIncompat = mod.incompatible_with.some(f => deviceFamilies.includes(f));
+      if (!isIncompat) {
+        results.push({ ...mod, category: cat });
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * Main accessory resolver: given two device models, determine what SFPs/cables are needed.
+ * Returns a structured recommendation object.
+ */
+function resolveAccessories(deviceA, deviceB) {
+  const profileA = getPortProfile(deviceA);
+  const profileB = getPortProfile(deviceB);
+
+  if (!profileA && !profileB) {
+    return { error: true, message: `I couldn't find port profiles for either ${deviceA} or ${deviceB}. Could you double-check the model numbers?` };
+  }
+  if (!profileA) {
+    return { error: true, message: `I don't have port profile data for ${deviceA}. Could you verify the model number?` };
+  }
+  if (!profileB) {
+    return { error: true, message: `I don't have port profile data for ${deviceB}. Could you verify the model number?` };
+  }
+
+  const portsA = getDeviceUplinkPorts(profileA);
+  const portsB = getDeviceUplinkPorts(profileB);
+
+  // Check if either device has no SFP ports (RJ45 only)
+  if (portsA.length === 0) {
+    return { error: true, message: `The ${deviceA} only has RJ45 ports — no SFP slots available for fiber/DAC connections. It connects via standard Ethernet cable.` };
+  }
+  if (portsB.length === 0) {
+    return { error: true, message: `The ${deviceB} only has RJ45 ports — no SFP slots available for fiber/DAC connections. It connects via standard Ethernet cable.` };
+  }
+
+  const families = [profileA.family, profileB.family];
+  const isModularA = portsA.some(p => p.modular);
+  const isModularB = portsB.some(p => p.modular);
+
+  const bestSpeed = findCommonSpeed(portsA, portsB);
+  if (!bestSpeed) {
+    return { error: true, message: `No compatible SFP speed tier found between ${deviceA} and ${deviceB}. These devices may not have directly compatible uplink ports.` };
+  }
+
+  const sfpOptions = getCompatibleSfps(bestSpeed, families);
+
+  // Build recommendation
+  const result = {
+    error: false,
+    deviceA: { model: profileA.model, family: profileA.family, ports: portsA },
+    deviceB: { model: profileB.model, family: profileB.family, ports: portsB },
+    recommendedSpeed: bestSpeed,
+    sfpOptions,
+    modulesNeeded: [],
+    notes: [],
+    quantity: 2 // One SFP per end (pair needed)
+  };
+
+  // Flag modular devices that need uplink modules
+  if (isModularA) {
+    const mods = uplinkModules[profileA.family];
+    if (mods) {
+      const compatMods = mods.modules.filter(m => {
+        const modSpeed = m.speed;
+        const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+        return (speedRank[modSpeed] || 0) >= (speedRank[bestSpeed] || 0);
+      });
+      result.modulesNeeded.push({
+        device: profileA.model,
+        family: profileA.family,
+        options: compatMods,
+        note: mods.note
+      });
+    }
+  }
+  if (isModularB) {
+    const mods = uplinkModules[profileB.family];
+    if (mods) {
+      const compatMods = mods.modules.filter(m => {
+        const modSpeed = m.speed;
+        const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+        return (speedRank[modSpeed] || 0) >= (speedRank[bestSpeed] || 0);
+      });
+      result.modulesNeeded.push({
+        device: profileB.model,
+        family: profileB.family,
+        options: compatMods,
+        note: mods.note
+      });
+    }
+  }
+
+  // Add incompatibility notes
+  if (families.includes('MS390') || families.includes('C9300') || families.includes('C9300X') || families.includes('C9300L')) {
+    result.notes.push('MA-SFP-1GB-TX (copper SFP) is NOT supported on Catalyst/MS390 platforms.');
+  }
+  if (families.includes('C9300X')) {
+    result.notes.push('MA-SFP-10GB-LRM is NOT supported on C9300X.');
+  }
+
+  return result;
+}
+
+/**
+ * Get stacking cable recommendations for a given switch model and quantity.
+ * Returns structured stacking info or null if not stackable.
+ */
+function getStackingSuggestion(baseSku, qty) {
+  if (qty < 2) return null;
+
+  const profile = getPortProfile(baseSku);
+  if (!profile || !profile.profile.stackable) return null;
+
+  const stackType = profile.profile.stack_type;
+  if (!stackType) return null;
+
+  const stackFamily = stackingData.families[stackType];
+  if (!stackFamily) return null;
+
+  // Default 1M cable recommendation
+  const defaultCable = Object.entries(stackFamily.cables).find(([_, v]) => v.use_case && v.use_case.includes('default'));
+  const cableSku = defaultCable ? defaultCable[0] : Object.keys(stackFamily.cables)[1]; // fallback to 1M (usually index 1)
+  const cableQty = qty; // ring topology = N cables for N switches
+
+  const result = {
+    stackType,
+    bandwidth: stackFamily.bandwidth,
+    maxStackSize: stackFamily.max_stack_size,
+    cableSku,
+    cableQty,
+    topology: 'ring (recommended)',
+    note: `${qty} ${baseSku} can be stacked. Ring topology needs ${qty} cables.`
+  };
+
+  // C9300L needs stacking kit
+  if (stackFamily.requires_kit) {
+    result.kitSku = stackFamily.requires_kit;
+    result.kitQty = qty; // one per switch
+    result.kitNote = stackFamily.kit_note;
+  }
+
+  // StackPower info
+  if (stackFamily.stackpower) {
+    result.stackpower = stackFamily.stackpower;
+  }
+
+  return result;
+}
+
+/**
+ * Build a one-liner stacking suggestion for appending to quote output.
+ * Light touch per user preference.
+ */
+function buildStackingSuggestionLine(baseSku, qty) {
+  const suggestion = getStackingSuggestion(baseSku, qty);
+  if (!suggestion) return null;
+
+  let line = `💡 **Stacking:** ${qty}x ${baseSku} can be stacked (${suggestion.bandwidth}). `;
+  line += `Ring topology needs ${suggestion.cableQty}x ${suggestion.cableSku}.`;
+
+  if (suggestion.kitSku) {
+    line += ` Each switch also requires 1x ${suggestion.kitSku} stacking module.`;
+  }
+
+  return line;
+}
+
+/**
+ * Build accessories context string for Claude system prompt injection.
+ * Only injects relevant data based on devices mentioned in the message.
+ */
+function getAccessoriesContext(userMessage) {
+  const upper = userMessage.toUpperCase();
+
+  // Check if message involves connectivity/accessories topics
+  const accessoryIntent = /\b(SFP|OPTIC|TRANSCEIVER|FIBER|DAC|TWINAX|STACK(ING)?|UPLINK|MODULE|CONNECT|INTERCONNECT|CABLE|PORT|COMPATIBLE|COMPATIBILITY)\b/i.test(userMessage);
+  const designIntent = /\b(CONNECT .+ TO|BETWEEN .+ AND|LINK .+ (TO|WITH)|UPLINK .+ (TO|FROM)|HOOK UP|TIE .+ TOGETHER)\b/i.test(userMessage);
+
+  if (!accessoryIntent && !designIntent) return null;
+
+  // Extract device models mentioned
+  const devicePatterns = [
+    /MX\d+[A-Z]*/gi, /MS\d{3}[A-Z]?-[\dA-Z-]+/gi, /MS\d{3}/gi,
+    /C9[23]\d{2}[LX]?(?:-[\dA-Z]+-[\dA-Z]+)?(?:-M)?/gi,
+    /MR\d+[A-Z]*/gi, /CW9\d{3}[A-Z]*/gi
+  ];
+
+  const mentionedDevices = new Set();
+  for (const pattern of devicePatterns) {
+    let match;
+    while ((match = pattern.exec(upper)) !== null) {
+      mentionedDevices.add(match[0]);
+    }
+  }
+
+  let context = '## ACCESSORY & CONNECTIVITY REFERENCE\n';
+  context += 'Use this data when answering questions about SFPs, stacking cables, uplink modules, or device connectivity.\n\n';
+
+  // Inject relevant port profiles for mentioned devices
+  if (mentionedDevices.size > 0) {
+    context += '### Device Port Profiles\n';
+    for (const dev of mentionedDevices) {
+      const profile = getPortProfile(dev);
+      if (profile) {
+        context += `${profile.model} (${profile.family}): ${JSON.stringify(profile.profile)}\n`;
+      }
+    }
+    context += '\n';
+  }
+
+  // Always inject SFP module catalog when SFP/optic/fiber topics come up
+  if (/\b(SFP|OPTIC|TRANSCEIVER|FIBER|DAC|TWINAX)\b/i.test(userMessage)) {
+    context += '### SFP Module Catalog\n';
+    for (const [category, modules] of Object.entries(sfpModules)) {
+      context += `${category}: ${modules.map(m => `${m.sku} (${m.medium}, ${m.range})`).join(', ')}\n`;
+    }
+    context += '\n';
+  }
+
+  // Inject stacking info when stacking topics come up
+  if (/\b(STACK|STACKING)\b/i.test(userMessage)) {
+    context += '### Stacking Cable Families\n';
+    for (const [type, family] of Object.entries(stackingData.families)) {
+      context += `${type} (${family.bandwidth}): ${family.compatible_switches.join(', ')} — cables: ${Object.keys(family.cables).join(', ')}\n`;
+    }
+    context += `Not stackable: ${stackingData.not_stackable.join(', ')}\n\n`;
+  }
+
+  // Inject uplink module info when modular devices or modules are mentioned
+  if (/\b(MODULE|UPLINK|MS390|C9300|MODULAR)\b/i.test(userMessage)) {
+    context += '### Uplink Modules (Modular Devices)\n';
+    for (const [platform, data] of Object.entries(uplinkModules)) {
+      context += `${platform}: ${data.modules.map(m => `${m.sku} (${m.ports}x ${m.speed} ${m.type})`).join(', ')} — ${data.note}\n`;
+    }
+    context += '\n';
+  }
+
+  // Always inject design rules
+  context += '### Design Rules\n';
+  context += accessories.design_rules.matching.join('\n') + '\n';
+  context += accessories.design_rules.common_mistakes.join('\n') + '\n';
+
+  return context;
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   const upper = text.toUpperCase();
@@ -1264,7 +1622,17 @@ function parseMessage(text) {
     /\bDO I NEED\b/, /\bIS .+ COMPATIBLE\b/, /\bCAN I USE\b/,
     /\bSHOULD I (GET|USE|GO|CHOOSE|PICK)\b/, /\bWHAT (DO YOU|WOULD YOU) (RECOMMEND|SUGGEST)\b/,
     /\bCOMPARE\b/, /\bTELL ME ABOUT\b/, /\bWHAT('?S| IS) THE BEST\b/,
-    /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/, /\bSPECS?\b/, /\bDIFFERENCE BETWEEN\b/
+    /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/, /\bSPECS?\b/, /\bDIFFERENCE BETWEEN\b/,
+    // Accessory/connectivity intent patterns (Phase 2)
+    /\bWHAT SFP\b/, /\bWHICH SFP\b/, /\bWHAT OPTIC\b/, /\bWHICH OPTIC\b/,
+    /\bCONNECT .+ TO\b/, /\bLINK .+ TO\b/, /\bHOOK UP\b/,
+    /\bWHAT (CABLE|STACKING|STACK)\b/, /\bSTACK(ING|ABLE)? (CABLE)?\b/,
+    /\bIS .+ STACKABLE\b/, /\bCAN .+ (BE )?STACK(ED)?\b/,
+    /\bUPLINK MODULE\b/, /\bWHAT MODULE\b/, /\bWHICH MODULE\b/,
+    /\bFIBER (TYPE|OPTIC|CABLE)\b/, /\bDAC\b/, /\bTWINAX\b/,
+    /\bSFP.{0,20}(NEED|REQUIRE|USE|COMPATIBLE)\b/,
+    /\bCOMPATIBLE (SFP|OPTIC|MODULE|TRANSCEIVER)\b/,
+    /\bHOW (DO I |TO )?(CONNECT|LINK|UPLINK)\b/
   ];
   const isAdvisory = advisoryPatterns.some(p => p.test(upper));
 
@@ -1829,6 +2197,33 @@ function buildQuoteResponse(parsed) {
     }
   }
 
+  // Phase 3: Stacking auto-suggest for stackable switches with qty > 1
+  const stackableFamilies = new Set();
+  for (const { baseSku, qty } of parsed.items) {
+    if (qty >= 2) {
+      const suggestion = buildStackingSuggestionLine(baseSku, qty);
+      if (suggestion && !stackableFamilies.has(baseSku)) {
+        stackableFamilies.add(baseSku);
+        lines.push('');
+        lines.push(suggestion);
+      }
+    }
+  }
+
+  // Phase 3: Uplink module reminder for modular devices (MS390, C9300, C9300X)
+  const modularFamiliesFound = new Set();
+  for (const { baseSku } of parsed.items) {
+    const profile = getPortProfile(baseSku);
+    if (profile && profile.profile.uplinks === 'modular' && !modularFamiliesFound.has(profile.family)) {
+      modularFamiliesFound.add(profile.family);
+      const mods = uplinkModules[profile.family];
+      if (mods) {
+        lines.push('');
+        lines.push(`💡 **Uplink Module:** ${profile.family} ships without uplink module. Popular choice: ${mods.modules[0].sku} (${mods.modules[0].ports}x ${mods.modules[0].speed} ${mods.modules[0].type}).`);
+      }
+    }
+  }
+
   return { message: lines.join('\n').trim(), needsLlm: false };
 }
 
@@ -2053,7 +2448,23 @@ Z4 and Z4C default to SEC (Advanced Security) licensing unless the user explicit
 - For dashboard screenshots, ALWAYS use the standardized format above
 - Keep responses concise but complete — never skip EOL products
 - NEVER use bullet points (•) before URLs. Just put the URL on its own line after the term label.
-- Use bullet points (•) only for License Analysis and Important Notes sections, never for URLs`;
+- Use bullet points (•) only for License Analysis and Important Notes sections, never for URLs
+
+## ACCESSORY & CONNECTIVITY GUIDANCE
+When asked about SFPs, stacking cables, uplink modules, or how to connect two devices:
+- If specific accessory data is injected below this prompt, use it as the authoritative source
+- Both ends of a fiber link must match: same speed, same wavelength, same fiber type (MMF/SMF)
+- 10G SFP+ ports accept 1G SFP modules (backward compatible). 25G SFP28 accepts 10G/1G.
+- 1G SFP ports do NOT accept 10G SFP+ modules.
+- MA-SFP-1GB-TX (copper SFP) is NOT supported on MS390, C9300, C9300X, C9300L
+- C9300 and MS390 ship without uplink modules. Always ask about uplink needs.
+- For stacking, recommend ring topology for production. Ring uses N cables for N switches.
+- MS130 does NOT support physical stacking.
+- C9300L requires a separate C9300L-STACK-KIT2-M stacking module per switch.
+- Default cable recommendation: 1M length for same-rack. Note 50cm and 3M also available.
+- When recommending SFPs, ask about fiber type (MMF/SMF) and distance if not specified.
+- For same-rack 10G, DAC cables (MA-CBL-TA-1M) are cheapest. For >3m, use SFP+ optics.
+- Include quote URLs for recommended accessories whenever possible.`;
 
 // ─── Claude API (direct fetch, no SDK) ───────────────────────────────────────
 async function askClaude(userMessage, personId, env, imageData = null) {
@@ -2117,6 +2528,10 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       const priceContext = getRelevantPriceContext(userMessage, history);
       if (priceContext) systemPrompt += '\n\n' + priceContext;
     }
+
+    // Phase 4: Inject accessories/connectivity context for design questions
+    const accessoriesContext = getAccessoriesContext(userMessage);
+    if (accessoriesContext) systemPrompt += '\n\n' + accessoriesContext;
 
     let userContent;
     if (imageData) {
