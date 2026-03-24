@@ -1670,7 +1670,7 @@ function parseMessage(text) {
   if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper) && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
     modifiers.hardwareOnly = true;
   }
-  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY)\b/.test(upper)) {
+  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/.test(upper)) {
     modifiers.licenseOnly = true;
   }
 
@@ -2142,8 +2142,11 @@ function buildQuoteResponse(parsed) {
             if (licSku) urlItems.push({ sku: licSku, qty });
           }
         }
-        // Also include non-EOL resolved items — LICENSE ONLY (Option 1 is renewal, no hardware)
-        for (const { qty, licenseSkus } of resolvedItems) {
+        // Also include non-EOL resolved items
+        // Default: hardware + licenses (user asked for a regular quote, non-EOL gear is current)
+        // licenseOnly: license-only (user explicitly asked for license renewal)
+        for (const { hwSku, qty, licenseSkus } of resolvedItems) {
+          if (!modifiers.licenseOnly && !modifiers.hardwareOnly) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !modifiers.hardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty });
@@ -2168,14 +2171,18 @@ function buildQuoteResponse(parsed) {
         const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
         const replHwSku = applySuffix(repl);
         const replLicenses = getLicenseSkus(repl, requestedTier);
-        if (!modifiers.licenseOnly) urlItems.push({ sku: replHwSku, qty });
+        // EOL replacement hardware ALWAYS included in refresh (that's the whole point)
+        urlItems.push({ sku: replHwSku, qty });
         if (replLicenses && !modifiers.hardwareOnly) {
           const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
           if (licSku) urlItems.push({ sku: licSku, qty });
         }
       }
-      // Also include non-EOL resolved items — LICENSE ONLY (refresh is for EOL hardware only)
-      for (const { qty, licenseSkus } of resolvedItems) {
+      // Also include non-EOL resolved items
+      // Default: hardware + licenses (refresh option includes all current gear as-is)
+      // licenseOnly: license-only for non-EOL (user asked for license renewal, only EOL gets replacement hw)
+      for (const { hwSku, qty, licenseSkus } of resolvedItems) {
+        if (!modifiers.licenseOnly && !modifiers.hardwareOnly) urlItems.push({ sku: hwSku, qty });
         if (licenseSkus && !modifiers.hardwareOnly) {
           const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
           if (licSku) urlItems.push({ sku: licSku, qty });
