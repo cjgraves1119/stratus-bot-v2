@@ -2049,8 +2049,37 @@ function buildQuoteResponse(parsed) {
         return urlItems;
       };
 
+      // Hardware breakdown for license CSV path (shows combined quantities with source tracking)
+      const _buildHardwareBreakdownLic = (uplinkIdx) => {
+        const hwMap = new Map();
+        const processedModels = new Set();
+        for (const { baseModel, qty, replacement } of eolFound) {
+          if (processedModels.has(baseModel)) continue;
+          processedModels.add(baseModel);
+          const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
+          const replHwSku = applySuffix(repl);
+          if (!hwMap.has(replHwSku)) hwMap.set(replHwSku, { total: 0, parts: [] });
+          const entry = hwMap.get(replHwSku);
+          entry.total += qty;
+          entry.parts.push({ qty, source: `replacing ${baseModel}` });
+        }
+        if (hwMap.size === 0) return [];
+        const bdLines = [];
+        for (const [hwSku, { total, parts }] of hwMap) {
+          if (parts.length === 1) {
+            bdLines.push(`• ${hwSku} × ${total} (${parts[0].source})`);
+          } else {
+            const detail = parts.map(p => `${p.qty} ${p.source}`).join(' + ');
+            bdLines.push(`• ${hwSku} × ${total} (${detail})`);
+          }
+        }
+        return bdLines;
+      };
+
       if (hasDualUplink) {
-        lines.push(`**Option 2 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolFound, 0)}):**`);
+        lines.push(`**Option 2 — Hardware Refresh, 1G Uplink:**`);
+        lines.push(..._buildHardwareBreakdownLic(0));
+        lines.push('');
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
@@ -2060,7 +2089,9 @@ function buildQuoteResponse(parsed) {
             lines.push('');
           }
         }
-        lines.push(`**Option 3 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolFound, 1)}):**`);
+        lines.push(`**Option 3 — Hardware Refresh, 10G Uplink:**`);
+        lines.push(..._buildHardwareBreakdownLic(1));
+        lines.push('');
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 1);
           if (urlItems.length > 0) {
@@ -2071,7 +2102,9 @@ function buildQuoteResponse(parsed) {
           }
         }
       } else {
-        lines.push(`**Option 2 — Hardware Refresh (${_buildUpgradeMap(eolFound, 0)}):**`);
+        lines.push(`**Option 2 — Hardware Refresh:**`);
+        lines.push(..._buildHardwareBreakdownLic(0));
+        lines.push('');
         for (const term of terms) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
@@ -2307,7 +2340,7 @@ function buildQuoteResponse(parsed) {
         }
       }
       if (hwMap.size === 0) return [];
-      const bdLines = ['', '📋 **Hardware Breakdown:**'];
+      const bdLines = [];
       for (const [hwSku, { total, parts }] of hwMap) {
         if (parts.length === 1 && parts[0].source === 'existing') {
           bdLines.push(`• ${hwSku} × ${total}`);
@@ -2318,7 +2351,6 @@ function buildQuoteResponse(parsed) {
           bdLines.push(`• ${hwSku} × ${total} (${detail})`);
         }
       }
-      bdLines.push('');
       return bdLines;
     };
 
@@ -2369,8 +2401,9 @@ function buildQuoteResponse(parsed) {
     };
 
     if (hasDualUplink) {
-      lines.push(`**Option 2 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolItems, 0)}):**`);
+      lines.push(`**Option 2 — Hardware Refresh, 1G Uplink:**`);
       lines.push(..._buildHardwareBreakdown(0));
+      lines.push('');
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
@@ -2385,8 +2418,9 @@ function buildQuoteResponse(parsed) {
       for (const s of opt2Suggestions) { lines.push(s); }
       if (opt2Suggestions.length > 0) lines.push('');
 
-      lines.push(`**Option 3 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolItems, 1)}):**`);
+      lines.push(`**Option 3 — Hardware Refresh, 10G Uplink:**`);
       lines.push(..._buildHardwareBreakdown(1));
+      lines.push('');
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 1);
         if (urlItems.length > 0) {
@@ -2401,8 +2435,9 @@ function buildQuoteResponse(parsed) {
       for (const s of opt3Suggestions) { lines.push(s); }
       if (opt3Suggestions.length > 0) lines.push('');
     } else {
-      lines.push(`**Option 2 — Hardware Refresh (${_buildUpgradeMap(eolItems, 0)}):**`);
+      lines.push(`**Option 2 — Hardware Refresh:**`);
       lines.push(..._buildHardwareBreakdown(0));
+      lines.push('');
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
