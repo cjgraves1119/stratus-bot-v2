@@ -2473,6 +2473,163 @@ When asked about SFPs, stacking cables, uplink modules, or how to connect two de
 - When recommending SFPs, ask about fiber type (MMF/SMF) and distance if not specified.
 - For same-rack 10G, DAC cables (MA-CBL-TA-1M) are cheapest. For >3m, use SFP+ optics.
 - Include quote URLs for recommended accessories whenever possible.`;
+
+// ─── Email Thread Parsing ────────────────────────────────────────────────────
+/**
+ * Detects if message contains email content (forwarded messages, threads, etc.)
+ * Looks for patterns like "From:", "Subject:", "Forwarded message", email signatures
+ */
+function detectEmailContent(text) {
+  const emailPatterns = [
+    /^From:\s*.+?@.+?\s*$/m,           // From: name@domain.com
+    /^Subject:\s*.+/m,                  // Subject: line
+    /------+\s*Forwarded message/i,     // Gmail forwarded message separator
+    /On\s+.+?[,.]?\s+.+?\s+wrote:/i,    // "On Mon, Jan 5, 2026 at 3:30 PM, John wrote:"
+    />\s*On\s+.+?[,.]?\s+.+?\s+wrote:/i, // Quoted version
+    />+\s*From:/,                        // Quoted From line
+    /Sent\s+from\s+my\s+(iPhone|Android|device)/i, // Sent from signature
+    /Best\s+regards|Kind\s+regards|Cheers|Thanks/i, // Email closings with quotes
+    /^>\s{1,2}.+(@|From:|Subject:)/m,   // Multiple quoted lines starting with >
+  ];
+
+  return emailPatterns.some(pattern => pattern.test(text));
+}
+
+/**
+ * Builds a specialized Claude prompt for extracting products from email
+ */
+function buildEmailParsingPrompt(emailText) {
+  return `You are analyzing an email thread to extract Cisco/Meraki product requests.
+
+## YOUR TASK
+Extract ALL Cisco/Meraki products mentioned in the email. Return a JSON block with:
+- items: array of {sku, quantity, context}
+- summary: one-sentence summary of the request
+
+## PRODUCT FAMILIES TO LOOK FOR
+- **Access Points (AP)**: MR-series (MR36, MR44, MR46, MR57, etc.), CW-series (CW9166I, CW9172H, etc.)
+- **Firewalls**: MX-series (MX67, MX85, MX95, etc.)
+- **Switches**: MS150, MS390, C9300, C9300X, C9300L, C9200L
+- **Cameras**: MV13, MV33, MV53X, MV63, MV73X, MV84X, MV93
+- **Sensors**: MT10, MT14, MT20, MT40
+- **Cellular Gateways**: MG21, MG41, MG51, MG52
+- **Teleworker Gateways**: Z4, Z4C
+- **Licenses**: Any mention of "license renewal", "co-term", "refresh", "support", "upgrade"
+
+## QUANTITY INFERENCE
+- "we need 50 APs for 50 classrooms" → {sku: "MR44", qty: 50}
+- "replace 5 old MX64 units" → {sku: "MX85", qty: 5}
+- Count actual device numbers if listed as a table or line-by-line list
+- If no quantity is explicit, infer from context (number of sites, classrooms, offices, etc.)
+- If still unclear, use qty: 1 as default
+
+## CONTEXT EXTRACTION
+Also identify:
+- New deployment, refresh/replacement, expansion, license renewal, support renewal
+- EOL product mentions (old models being replaced)
+- Uplink requirements (1G, 4G, 10G)
+- Hardware vs license vs both
+
+## RETURN FORMAT
+Return ONLY valid JSON like this (no markdown, no code fence):
+{
+  "items": [
+    {"sku": "MR44", "qty": 10, "context": "new deployment for 10 classrooms"},
+    {"sku": "MX85", "qty": 2, "context": "refresh from EOL MX64"}
+  ],
+  "summary": "Email requests 10 MR44 APs and 2 MX85 firewalls for campus refresh"
+}
+
+## CRITICAL RULES
+- NEVER invent SKUs. Only use real Meraki model numbers.
+- If you find a product mention but can't determine quantity, infer from surrounding context
+- License mentions should be captured as the base hardware model (e.g., "MR44" not license SKU)
+- Ignore signature lines, disclaimers, and non-product text
+
+Here is the email to analyze:
+
+${emailText}`;
+}
+
+/**
+ * Process an email thread: detect products via Claude, then run through deterministic engine
+ */
+async function processEmailThread(text, personId, env, kv) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+
+  try {
+    // Use Claude to extract products from the email
+    const prompt = buildEmailParsingPrompt(text);
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 512,
+        system: 'You are a JSON extraction tool. Return ONLY valid JSON with no markdown or extra text.',
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!response.ok) {
+      console.error('Email parsing: Claude API error', response.status);
+      return null;
+    }
+
+    const data = await response.json();
+    const rawJson = data.content[0].text.trim();
+
+    // Parse JSON response
+    let parsed;
+    try {
+      // Remove markdown code fence if present
+      const jsonStr = rawJson.replace(/^```(?:json)?\n?|\n?```$/g, '').trim();
+      parsed = JSON.parse(jsonStr);
+    } catch (e) {
+      console.error('Email parsing: JSON parse error', e.message);
+      return null;
+    }
+
+    if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
+      return null;
+    }
+
+    // Build a quote request string from the extracted items
+    // For each item: "quote {qty} {sku}"
+    const quoteRequests = parsed.items
+      .map(item => {
+        const sku = (item.sku || '').toUpperCase().trim();
+        const qty = item.qty || 1;
+        return `${qty} ${sku}`;
+      })
+      .filter(Boolean);
+
+    if (quoteRequests.length === 0) return null;
+
+    const combinedRequest = `quote ${quoteRequests.join(', ')}`;
+
+    // Run the combined request through the deterministic parser
+    const parsed2 = parseMessage(combinedRequest);
+    if (!parsed2) return null;
+
+    const result = buildQuoteResponse(parsed2);
+    if (!result.message) return null;
+
+    // Build response: summary + quote URLs
+    const emailSummary = parsed.summary || 'Email products extracted';
+    const reply = `*Email Thread Analysis*\n\n${emailSummary}\n\n*Generated Quotes:*\n\n${result.message}`;
+
+    return reply;
+  } catch (err) {
+    console.error('Email processing error:', err.message);
+    return null;
+  }
+}
+
 // ─── Claude API (direct fetch, no SDK) ───────────────────────────────────────
 async function askClaude(userMessage, personId, env, imageData = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
@@ -2742,6 +2899,15 @@ export default {
             await addToHistory(kv, personId, 'user', text);
             await addToHistory(kv, personId, 'assistant', quoteConfirmReply);
             reply = quoteConfirmReply;
+          }
+        }
+
+        if (!reply && detectEmailContent(text)) {
+          const emailReply = await processEmailThread(text, personId, env, kv);
+          if (emailReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', emailReply);
+            reply = emailReply;
           }
         }
 
