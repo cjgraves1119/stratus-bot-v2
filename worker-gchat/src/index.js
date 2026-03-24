@@ -2564,8 +2564,8 @@ EXACT license SKU mappings by product family:
 
 ## VALID PRODUCT CATALOG
 APs (MR): MR28, MR36, MR36H, MR44, MR46, MR46E, MR52, MR57, MR76, MR78, MR86
-APs (CW Wi-Fi 6E): CW9162I, CW9163E, CW9164I, CW9166I, CW9166D1
-APs (CW Wi-Fi 7): CW9172H (Hospitality)
+APs (CW Wi-Fi 6E): CW9162I, CW9163E (external antenna), CW9164I, CW9166I, CW9166D1 (directional)
+APs (CW Wi-Fi 7): CW9171I (entry), CW9172I (mid-range, DEFAULT), CW9172H (hospitality), CW9174I (high-perf), CW9176I (premium), CW9176D1 (directional), CW9178I (top-tier), CW9179F (outdoor)
 MX Security: MX67, MX67W, MX67C, MX67C-NA, MX68, MX68W, MX68CW, MX68CW-NA, MX75, MX85, MX95, MX105, MX250, MX450
 MS130 Switches: MS130-8, MS130-8P, MS130-8P-I, MS130-8X, MS130-12X, MS130-24, MS130-24P, MS130-24X, MS130-48, MS130-48P, MS130-48X, MS130R-8P
 MS150 Switches: MS150-24T-4G, MS150-24P-4G, MS150-24T-4X, MS150-24P-4X, MS150-24MP-4X, MS150-48T-4G, MS150-48LP-4G, MS150-48FP-4G, MS150-48T-4X, MS150-48LP-4X, MS150-48FP-4X, MS150-48MP-4X
@@ -2592,6 +2592,30 @@ These products are End-of-Life. ALWAYS check every product in a screenshot or re
 Replacements: MX60/64→MX67, MX65→MX68, MX80/84→MX85, MX100→MX95, MX400→MX250, MX600→MX450, MR20→MR28, MR30H→MR36H, MR33→MR36, MR42→MR44, MR45→MR46, MR52/53/56→MR57, MR55→MR57, MR70→MR78, MR74→MR76, MR84→MR86, MV Gen 2→Gen 3, MS120/125→MS130, MS210/220/225→MS130/MS150, MS250→C9300L, MS320→MS150, MS350→C9300, MS355→C9300X, MS390→C9300, MS410/420→C9300, MS425→C9300X, MG21→MG41, MG51→MG52, Z1/3→Z4, Z3C→Z4C
 
 When you identify ANY EOL product, ALWAYS flag it in Important Notes with EOS/End-of-Support dates AND include both Option 1 (renewal, license-only) and Option 2 (hardware refresh with replacement hardware + all licenses). If any replacement switch has 1G/10G uplink variants, show Option 2 (1G Uplink) and Option 3 (10G Uplink).
+
+## AP MODEL DEFAULTS AND UPGRADE TIERS
+
+### Antenna Suffix Defaults
+- (I) Internal Antenna = DEFAULT for all APs unless otherwise specified
+- (H) Hospitality = only when replacing another H-series AP or when specifically requested
+- (E) External Antenna = when replacing an E-series AP or when requested. ALWAYS auto-add 2× MA-ANT-20 (omni-directional antenna) per AP, as external antenna APs do not include antennas. Notify the user: "ℹ️ External antenna model selected — 2× MA-ANT-20 (omni-directional) added per AP (antennas not included by default)."
+
+### MR → Wi-Fi 7 Tier Mapping (use when user asks for "Wi-Fi 7 equivalent/upgrade")
+- MR28 → CW9171I (entry)
+- MR36 → CW9172I (mid-range)
+- MR36H → CW9172H (hospitality)
+- MR44 / MR46 → CW9174I (high-performance)
+- MR46E → CW9174I + 2× MA-ANT-20 per AP (external antenna — see note above)
+- MR57 / MR56 / MR52 / MR53 → CW9178I (top-tier)
+- MR76 / MR78 → CW9179F (outdoor)
+- MR86 → CW9179F (outdoor)
+
+### Wi-Fi 6E: When user asks for "Wi-Fi 6E" without specifying a model, show all available internal antenna options: CW9162I (entry), CW9164I (mid), CW9166I (premium). If the context suggests external antenna, show CW9163E + MA-ANT-20.
+
+### Wi-Fi 7: Default model is CW9172I (internal antenna, mid-range). When user asks for "Wi-Fi 7 AP" without specifying, use CW9172I. Only use CW9172H when replacing an H-series model or when explicitly requested.
+
+### Upgrade Path Priority
+Default EOL replacement = MR equivalent (same generation). When user asks for Wi-Fi 6E or Wi-Fi 7 equivalent, use the tier mapping above. When asked for just "upgrade" in the context of APs, default to MR replacement and mention Wi-Fi 7 as an option.
 
 ## CISCO SECURITY PRODUCTS (License-Only, No Hardware)
 We also quote these Cisco security licenses. They are per-user, per-year licenses with NO hardware component:
