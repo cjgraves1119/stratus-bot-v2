@@ -393,64 +393,10 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  if (/^MS130R-/.test(upper)) {
-    return [
-      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
-      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
-      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
-    ];
-  }
-
-  if (/^MS130-(8|12)/.test(upper)) {
-    return [
-      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
-      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
-      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
-    ];
-  }
-
-  const ms130Match = upper.match(/^MS130-(24|48)/);
-  if (ms130Match) {
-    const ports = ms130Match[1];
-    return [
-      { term: '1Y', sku: `LIC-MS130-${ports}-1Y` },
-      { term: '3Y', sku: `LIC-MS130-${ports}-3Y` },
-      { term: '5Y', sku: `LIC-MS130-${ports}-5Y` }
-    ];
-  }
-
-  const ms150Match = upper.match(/^MS150-(24|48)/);
-  if (ms150Match) {
-    const ports = ms150Match[1];
-    return [
-      { term: '1Y', sku: `LIC-MS150-${ports}-1Y` },
-      { term: '3Y', sku: `LIC-MS150-${ports}-3Y` },
-      { term: '5Y', sku: `LIC-MS150-${ports}-5Y` }
-    ];
-  }
-
-  // MS125: Uses -Y suffix (not -YR) — LIC-MS125-{variant}-{1Y|3Y|5Y}
-  const ms125Match = upper.match(/^MS125-(.+)/);
-  if (ms125Match) {
-    const variant = ms125Match[1];
-    return [
-      { term: '1Y', sku: `LIC-MS125-${variant}-1Y` },
-      { term: '3Y', sku: `LIC-MS125-${variant}-3Y` },
-      { term: '5Y', sku: `LIC-MS125-${variant}-5Y` }
-    ];
-  }
-
-  // MS390: Uses {portCount}{A|E}-{term}Y format (NOT legacy -1YR format)
-  // MS390-24UX → LIC-MS390-24E-1Y, MS390-48P → LIC-MS390-48E-1Y
-  const ms390Match = upper.match(/^MS390-(\d+)/);
-  if (ms390Match) {
-    const portCount = ms390Match[1];
-    const tier = (requestedTier === 'A') ? 'A' : 'E';
-    return [
-      { term: '1Y', sku: `LIC-MS390-${portCount}${tier}-1Y` },
-      { term: '3Y', sku: `LIC-MS390-${portCount}${tier}-3Y` },
-      { term: '5Y', sku: `LIC-MS390-${portCount}${tier}-5Y` }
-    ];
+  // MS-series switches: Return null — switches are hardware-only in quoting URLs
+  // Switch licensing (Advantage/Premier) is NOT included in standard quotes
+  if (/^MS\d/.test(upper)) {
+    return null;
   }
 
   // Catalyst M-series: C9200L, C9300, C9350 — LIC-{family}-{portCount}{A|E}-{term}
@@ -502,20 +448,6 @@ function getLicenseSkus(baseSku, requestedTier) {
       { term: '1Y', sku: 'LIC-MT-1Y' },
       { term: '3Y', sku: 'LIC-MT-3Y' },
       { term: '5Y', sku: 'LIC-MT-5Y' }
-    ];
-  }
-
-  const legacyMatch = upper.match(/^(MS\d{3})-(.+)/);
-  if (legacyMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
-    const model = legacyMatch[1];
-    let port = legacyMatch[2];
-    // MS350-48X uses the 48-port license (LIC-MS350-48, no X)
-    // MS350-24X has its own license (LIC-MS350-24X), so only strip X from 48-port
-    if (model === 'MS350' && port === '48X') port = '48';
-    return [
-      { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
-      { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
-      { term: '5Y', sku: `LIC-${model}-${port}-5YR` }
     ];
   }
 
