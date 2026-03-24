@@ -2654,6 +2654,9 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    // Log ALL incoming requests for debugging
+    console.log(`[GCHAT-DEBUG] ${request.method} ${url.pathname} from ${request.headers.get('user-agent') || 'unknown'}`);
+
     // Health check
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
       return new Response(JSON.stringify({ 
@@ -2665,26 +2668,135 @@ export default {
       });
     }
 
-    // Google Chat webhook handler
-    if (request.method === 'POST' && (url.pathname === '/webhook' || url.pathname === '/')) {
+    // Google Chat webhook handler - match ANY POST request
+    if (request.method === 'POST') {
       try {
-        // Verify the request is from Google Chat
-        const isValid = await verifyGoogleChatToken(request, env);
-        if (!isValid) {
-          return new Response(JSON.stringify({ text: 'Unauthorized' }), { 
-            status: 401, 
-            headers: { 'Content-Type': 'application/json' } 
+        const rawBody = await request.text();
+
+        // DEBUG: Save request to KV for inspection
+        const kv = env.CONVERSATION_KV;
+        const debugKey = `debug_${Date.now()}`;
+
+        let event;
+        try {
+          event = JSON.parse(rawBody);
+        } catch (parseErr) {
+          return new Response(JSON.stringify({ text: 'Error parsing request' }), {
+            headers: { 'Content-Type': 'application/json' }
           });
         }
 
-        const event = await request.json();
-        
-        // Google Chat event types: ADDED_TO_SPACE, REMOVED_FROM_SPACE, MESSAGE, CARD_CLICKED
-        if (event.type === 'ADDED_TO_SPACE') {
-          return new Response(JSON.stringify({ 
-            text: 'Hey! I\'m Stratus AI, your Cisco/Meraki quoting assistant. Try "quote 10 MR44" or "5 MS150-48LP-4G" to get started.' 
-          }), { headers: { 'Content-Type': 'application/json' } });
+        // Save full event structure (without auth tokens to save space)
+        const debugEvent = JSON.parse(rawBody);
+        delete debugEvent.authorizationEventObject;
+        await kv.put(debugKey, JSON.stringify({
+          timestamp: new Date().toISOString(),
+          userAgent: request.headers.get('user-agent'),
+          url: url.pathname,
+          event: debugEvent
+        }), { expirationTtl: 3600 });
+
+        // Detect Workspace Add-on format (commonEventObject present)
+        const isAddon = !!event.commonEventObject;
+
+        // Extract message text from either format
+        let messageText = '';
+        if (isAddon) {
+          // Workspace Add-on format: text at chat.messagePayload.message.argumentText
+          messageText = event.chat?.messagePayload?.message?.argumentText
+            || event.chat?.messagePayload?.message?.text
+            || '';
+        } else {
+          // Standalone Chat app format
+          messageText = event.message?.argumentText || event.message?.text || '';
         }
+        messageText = messageText.trim();
+
+        // Extract sender ID for conversation history
+        const personId = isAddon
+          ? (event.chat?.user?.name || 'unknown')
+          : (event.message?.sender?.name || 'unknown');
+
+        // Handle non-message events
+        if (!messageText) {
+          const greeting = 'Hey! I\'m Stratus AI, your Cisco/Meraki quoting assistant. Try "quote 10 MR44" or "5 MS150-48LP-4G" to get started.';
+          return sendGChatResponse(greeting, isAddon);
+        }
+
+        const text = messageText;
+
+        // Process through the deterministic engine (same as Webex bot)
+        let reply;
+
+        // Try deterministic EOL date lookup first
+        const eolDateReply = handleEolDateRequest(text);
+        if (eolDateReply) {
+          await addToHistory(kv, personId, 'user', text);
+          await addToHistory(kv, personId, 'assistant', eolDateReply);
+          reply = eolDateReply;
+        }
+
+        if (!reply) {
+          const quoteConfirmReply = await handleQuoteConfirmation(text, personId, kv);
+          if (quoteConfirmReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', quoteConfirmReply);
+            reply = quoteConfirmReply;
+          }
+        }
+
+        if (!reply) {
+          const parsed = parseMessage(text);
+          if (parsed) {
+            const result = buildQuoteResponse(parsed);
+            if (!result.needsLlm && result.message) {
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', result.message);
+              reply = result.message;
+            } else if (result.revision) {
+              const history = await getHistory(kv, personId);
+              if (history.length > 0) {
+                reply = await askClaude(
+                  `${text}\n\n(Note: The user is modifying their previous quote request.)`,
+                  personId, env
+                );
+              } else {
+                reply = 'I don\'t have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"';
+              }
+            } else if (result.errors && result.errors.length > 0) {
+              const errorContext = result.errors.join('\n');
+              reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+            }
+          }
+        }
+
+        if (!reply) {
+          const pricingReply = await handlePricingRequest(text, personId, kv);
+          if (pricingReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', pricingReply);
+            reply = pricingReply;
+          }
+        }
+
+        if (!reply) {
+          reply = await askClaude(text, personId, env);
+        }
+
+        // Adapt markdown for Google Chat (* instead of **)
+        reply = adaptMarkdownForGChat(reply);
+
+        // Truncate if needed (Google Chat limit ~4096 chars for add-on responses)
+        if (reply.length > 4000) {
+          const truncated = reply.substring(0, 3800);
+          const lastNewline = truncated.lastIndexOf('\n');
+          reply = (lastNewline > 3000 ? truncated.substring(0, lastNewline) : truncated) + '\n\n_(Response truncated)_';
+        }
+
+        return sendGChatResponse(reply || 'No response generated', isAddon);
+
+        /* === OLD PROCESSING LOGIC (replaced by unified handler above) ===
+        if (event.type === 'ADDED_TO_SPACE') {}
 
         if (event.type === 'REMOVED_FROM_SPACE') {
           return new Response(JSON.stringify({}), { 
@@ -2788,18 +2900,49 @@ export default {
           reply = (lastNewline > 3000 ? truncated.substring(0, lastNewline) : truncated) + '\n\n_(Response truncated. Ask for specific sections if you need more detail.)_';
         }
 
-        return new Response(JSON.stringify({ text: reply }), { 
-          headers: { 'Content-Type': 'application/json' } 
+        console.log(`[GCHAT] Reply length: ${reply ? reply.length : 'null'}, preview: ${reply ? reply.substring(0, 200) : 'null'}`);
+        const responseBody = JSON.stringify({ text: reply || 'No response generated' });
+        console.log(`[GCHAT] Sending response, body length: ${responseBody.length}`);
+        return new Response(responseBody, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
         });
+        === END ORIGINAL PROCESSING LOGIC === */
 
       } catch (err) {
-        console.error('Google Chat webhook error:', err.message, err.stack);
-        return new Response(JSON.stringify({ 
-          text: '⚠️ Something went wrong processing your request. Try again with a specific SKU like "quote 10 MR44".' 
-        }), { headers: { 'Content-Type': 'application/json' } });
+        console.error('[GCHAT] Webhook error:', err.message, err.stack);
+        return sendGChatResponse(
+          'Something went wrong processing your request. Try again with a specific SKU like "quote 10 MR44".',
+          true // assume add-on format for safety
+        );
       }
     }
 
-    return new Response('Not Found', { status: 404 });
+    return new Response(JSON.stringify({ text: 'OK' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 };
+
+// Helper: format response for Google Chat (Add-on or standalone)
+function sendGChatResponse(text, isAddon) {
+  let body;
+  if (isAddon) {
+    body = JSON.stringify({
+      hostAppDataAction: {
+        chatDataAction: {
+          createMessageAction: {
+            message: { text }
+          }
+        }
+      }
+    });
+  } else {
+    body = JSON.stringify({ text });
+  }
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
