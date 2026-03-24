@@ -2106,6 +2106,52 @@ function buildQuoteResponse(parsed) {
       return urlItems;
     };
 
+    // Helper: generate stacking + module suggestions for replacement SKUs
+    const _buildReplacementAccessorySuggestions = (uplinkIdx) => {
+      const suggestionLines = [];
+      const seenStackFamilies = new Set();
+      const seenModFamilies = new Set();
+      for (const { qty, replacement } of eolItems) {
+        const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
+        // Stacking suggestion for replacement
+        if (qty >= 2 && !seenStackFamilies.has(repl)) {
+          const suggestion = buildStackingSuggestionLine(repl, qty);
+          if (suggestion) {
+            seenStackFamilies.add(repl);
+            suggestionLines.push(suggestion);
+          }
+        }
+        // Uplink module reminder for replacement
+        const profile = getPortProfile(repl);
+        if (profile && profile.profile.uplinks === 'modular' && !seenModFamilies.has(profile.family)) {
+          seenModFamilies.add(profile.family);
+          const mods = uplinkModules[profile.family];
+          if (mods) {
+            suggestionLines.push(`💡 **Uplink Module:** ${profile.family} ships without uplink module. Popular choice: ${mods.modules[0].sku} (${mods.modules[0].ports}x ${mods.modules[0].speed} ${mods.modules[0].type}).`);
+          }
+        }
+      }
+      // Also check non-EOL resolved items
+      for (const { baseSku, qty } of resolvedItems) {
+        if (qty >= 2 && !seenStackFamilies.has(baseSku)) {
+          const suggestion = buildStackingSuggestionLine(baseSku, qty);
+          if (suggestion) {
+            seenStackFamilies.add(baseSku);
+            suggestionLines.push(suggestion);
+          }
+        }
+        const profile = getPortProfile(baseSku);
+        if (profile && profile.profile.uplinks === 'modular' && !seenModFamilies.has(profile.family)) {
+          seenModFamilies.add(profile.family);
+          const mods = uplinkModules[profile.family];
+          if (mods) {
+            suggestionLines.push(`💡 **Uplink Module:** ${profile.family} ships without uplink module. Popular choice: ${mods.modules[0].sku} (${mods.modules[0].ports}x ${mods.modules[0].speed} ${mods.modules[0].type}).`);
+          }
+        }
+      }
+      return suggestionLines;
+    };
+
     if (hasDualUplink) {
       lines.push(`**Option 2 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolItems, 0)}):**`);
       for (const term of terms) {
@@ -2117,6 +2163,10 @@ function buildQuoteResponse(parsed) {
           lines.push('');
         }
       }
+      // Accessory suggestions for Option 2 replacement SKUs
+      const opt2Suggestions = _buildReplacementAccessorySuggestions(0);
+      for (const s of opt2Suggestions) { lines.push(s); }
+      if (opt2Suggestions.length > 0) lines.push('');
 
       lines.push(`**Option 3 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolItems, 1)}):**`);
       for (const term of terms) {
@@ -2128,6 +2178,10 @@ function buildQuoteResponse(parsed) {
           lines.push('');
         }
       }
+      // Accessory suggestions for Option 3 replacement SKUs
+      const opt3Suggestions = _buildReplacementAccessorySuggestions(1);
+      for (const s of opt3Suggestions) { lines.push(s); }
+      if (opt3Suggestions.length > 0) lines.push('');
     } else {
       lines.push(`**Option 2 — Hardware Refresh (${_buildUpgradeMap(eolItems, 0)}):**`);
       for (const term of terms) {
@@ -2139,6 +2193,10 @@ function buildQuoteResponse(parsed) {
           lines.push('');
         }
       }
+      // Accessory suggestions for Option 2 replacement SKUs
+      const opt2Suggestions = _buildReplacementAccessorySuggestions(0);
+      for (const s of opt2Suggestions) { lines.push(s); }
+      if (opt2Suggestions.length > 0) lines.push('');
     }
 
     // When there are EOL items AND non-EOL resolved items, we already included
@@ -2197,10 +2255,11 @@ function buildQuoteResponse(parsed) {
     }
   }
 
-  // Phase 3: Stacking auto-suggest for stackable switches with qty > 1
+  // Phase 3: Stacking auto-suggest for non-EOL stackable switches with qty > 1
+  // (EOL items get suggestions on their replacement SKUs inside Option 2/3 sections)
   const stackableFamilies = new Set();
   for (const { baseSku, qty } of parsed.items) {
-    if (qty >= 2) {
+    if (qty >= 2 && !isEol(baseSku)) {
       const suggestion = buildStackingSuggestionLine(baseSku, qty);
       if (suggestion && !stackableFamilies.has(baseSku)) {
         stackableFamilies.add(baseSku);
@@ -2210,9 +2269,10 @@ function buildQuoteResponse(parsed) {
     }
   }
 
-  // Phase 3: Uplink module reminder for modular devices (MS390, C9300, C9300X)
+  // Phase 3: Uplink module reminder for non-EOL modular devices (MS390, C9300, C9300X)
   const modularFamiliesFound = new Set();
   for (const { baseSku } of parsed.items) {
+    if (isEol(baseSku)) continue; // Skip EOL — handled in Option 2/3
     const profile = getPortProfile(baseSku);
     if (profile && profile.profile.uplinks === 'modular' && !modularFamiliesFound.has(profile.family)) {
       modularFamiliesFound.add(profile.family);
