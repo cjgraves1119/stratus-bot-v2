@@ -534,9 +534,29 @@ function buildStratusUrl(items) {
   for (const { sku, qty } of items) {
     merged.set(sku, (merged.get(sku) || 0) + qty);
   }
-  const skus = [...merged.keys()];
-  const qtys = skus.map(s => merged.get(s));
-  return `https://stratusinfosystems.com/order/?item=${skus.join(',')}&qty=${qtys.join(',')}`;
+
+  // Sort by product family group, hardware before licenses within each group
+  const _skuSortKey = (sku) => {
+    const upper = sku.toUpperCase();
+    const isLicense = upper.startsWith('LIC-');
+    // Determine product family for grouping order
+    let familyOrder;
+    if (/^(MR\d|CW9|LIC-ENT|LIC-CW)/.test(upper)) familyOrder = '1-AP';
+    else if (/^(MS\d|LIC-MS)/.test(upper)) familyOrder = '2-SW';
+    else if (/^(C9\d|LIC-C9)/.test(upper)) familyOrder = '3-CAT';
+    else if (/^(MX\d|LIC-MX|Z\d|LIC-Z)/.test(upper)) familyOrder = '4-SEC';
+    else if (/^(MV\d|LIC-MV)/.test(upper)) familyOrder = '5-CAM';
+    else if (/^(MT\d|LIC-MT)/.test(upper)) familyOrder = '6-SENS';
+    else if (/^(MG\d|LIC-MG)/.test(upper)) familyOrder = '7-CELL';
+    else if (/^(MA-SFP|STACK)/.test(upper)) familyOrder = '8-ACC';
+    else familyOrder = '9-OTHER';
+    // Within group: hardware (0) before licenses (1), then alphabetical
+    return `${familyOrder}-${isLicense ? '1' : '0'}-${upper}`;
+  };
+
+  const sortedSkus = [...merged.keys()].sort((a, b) => _skuSortKey(a).localeCompare(_skuSortKey(b)));
+  const qtys = sortedSkus.map(s => merged.get(s));
+  return `https://stratusinfosystems.com/order/?item=${sortedSkus.join(',')}&qty=${qtys.join(',')}`;
 }
 
 // ─── EOL Check ───────────────────────────────────────────────────────────────
@@ -2191,6 +2211,43 @@ function buildQuoteResponse(parsed) {
       return urlItems;
     };
 
+    // Helper: build hardware breakdown showing what's existing vs replacement
+    const _buildHardwareBreakdown = (uplinkIdx) => {
+      const hwMap = new Map(); // finalHwSku -> { total, parts: [{qty, source}] }
+      // EOL replacement hardware
+      for (const { baseSku, qty, replacement } of eolItems) {
+        const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
+        const replHwSku = applySuffix(repl);
+        if (!hwMap.has(replHwSku)) hwMap.set(replHwSku, { total: 0, parts: [] });
+        const entry = hwMap.get(replHwSku);
+        entry.total += qty;
+        entry.parts.push({ qty, source: `replacing ${baseSku}` });
+      }
+      // Non-EOL hardware (only in regular quote mode, not license renewal)
+      if (!modifiers.licenseOnly) {
+        for (const { hwSku, qty } of resolvedItems) {
+          if (!hwMap.has(hwSku)) hwMap.set(hwSku, { total: 0, parts: [] });
+          const entry = hwMap.get(hwSku);
+          entry.total += qty;
+          entry.parts.push({ qty, source: 'existing' });
+        }
+      }
+      if (hwMap.size === 0) return [];
+      const bdLines = ['', '📋 **Hardware Breakdown:**'];
+      for (const [hwSku, { total, parts }] of hwMap) {
+        if (parts.length === 1 && parts[0].source === 'existing') {
+          bdLines.push(`• ${hwSku} × ${total}`);
+        } else if (parts.length === 1) {
+          bdLines.push(`• ${hwSku} × ${total} (${parts[0].source})`);
+        } else {
+          const detail = parts.map(p => `${p.qty} ${p.source}`).join(' + ');
+          bdLines.push(`• ${hwSku} × ${total} (${detail})`);
+        }
+      }
+      bdLines.push('');
+      return bdLines;
+    };
+
     // Helper: generate stacking + module suggestions for replacement SKUs
     const _buildReplacementAccessorySuggestions = (uplinkIdx) => {
       const suggestionLines = [];
@@ -2239,6 +2296,7 @@ function buildQuoteResponse(parsed) {
 
     if (hasDualUplink) {
       lines.push(`**Option 2 — Hardware Refresh, 1G Uplink (${_buildUpgradeMap(eolItems, 0)}):**`);
+      lines.push(..._buildHardwareBreakdown(0));
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
@@ -2254,6 +2312,7 @@ function buildQuoteResponse(parsed) {
       if (opt2Suggestions.length > 0) lines.push('');
 
       lines.push(`**Option 3 — Hardware Refresh, 10G Uplink (${_buildUpgradeMap(eolItems, 1)}):**`);
+      lines.push(..._buildHardwareBreakdown(1));
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 1);
         if (urlItems.length > 0) {
@@ -2269,6 +2328,7 @@ function buildQuoteResponse(parsed) {
       if (opt3Suggestions.length > 0) lines.push('');
     } else {
       lines.push(`**Option 2 — Hardware Refresh (${_buildUpgradeMap(eolItems, 0)}):**`);
+      lines.push(..._buildHardwareBreakdown(0));
       for (const term of terms) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
