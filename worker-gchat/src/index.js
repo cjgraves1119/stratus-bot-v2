@@ -1024,7 +1024,7 @@ async function handlePricingRequest(text, personId, kv) {
   const upper = text.toUpperCase();
 
   // Detect pricing intent keywords
-  const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|WHAT DOES .* COST|WHAT IS THE COST|WHAT('S| IS) THE PRICE|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(text);
+  const pricingIntent = /\b(COSTS?|PRICES?|PRICING|HOW MUCH|TOTAL|WHAT DOES .* COSTS?|WHAT IS THE COSTS?|WHAT('S| IS) THE PRICES?|CART TOTAL|BREAKDOWN|ESTIMATE|INCLUDE\s+(COST|COSTS|PRICE|PRICES|PRICING)|WITH\s+(COST|COSTS|PRICE|PRICES|PRICING))\b/i.test(text);
   if (!pricingIntent) return null;
 
   // Pattern 1: Direct SKU pricing request like "cost of 2x MS150-48FP-4X" or "price of MR44"
@@ -2962,7 +2962,7 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     const history = personId ? await getHistory(kv, personId) : [];
 
     // Option 3: Inject relevant pricing into system prompt for pricing questions
-    const pricingIntent = /\b(COST|PRICE|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE)\b/i.test(userMessage);
+    const pricingIntent = /\b(COSTS?|PRICES?|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE|INCLUDE\s+(COST|COSTS|PRICE|PRICES|PRICING)|WITH\s+(COST|COSTS|PRICE|PRICES|PRICING))\b/i.test(userMessage);
     if (pricingIntent) {
       const priceContext = getRelevantPriceContext(userMessage, history);
       if (priceContext) systemPrompt += '\n\n' + priceContext;
