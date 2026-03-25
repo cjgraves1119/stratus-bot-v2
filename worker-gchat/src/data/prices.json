@@ -217,8 +217,8 @@
     },
     "LIC-MS130-48A-5Y": {
       "list": 2243,
-      "price": 1509,
-      "discount": 41
+      "price": 587,
+      "discount": 0.7383
     },
     "LIC-MS120-8-5YR": {
       "list": 177,
@@ -292,23 +292,23 @@
     },
     "LIC-MS130-24A-1Y": {
       "list": 346,
-      "price": 233,
-      "discount": 42
+      "price": 91,
+      "discount": 0.737
     },
     "LIC-MS130-24A-5Y": {
       "list": 1296,
-      "price": 872,
-      "discount": 41
+      "price": 339,
+      "discount": 0.7384
     },
     "LIC-MS130-48A-1Y": {
       "list": 597,
-      "price": 402,
-      "discount": 42
+      "price": 156,
+      "discount": 0.7387
     },
     "LIC-MS130-CMPTA-5Y": {
       "list": 500,
-      "price": 337,
-      "discount": 41
+      "price": 131,
+      "discount": 0.738
     },
     "LIC-C9350-48A-5Y": {
       "list": 9467,
@@ -487,8 +487,8 @@
     },
     "LIC-MS130-24A-3Y": {
       "list": 778,
-      "price": 524,
-      "discount": 42
+      "price": 203,
+      "discount": 0.7391
     },
     "LIC-MS210-24P-3YR": {
       "list": 558,
@@ -632,8 +632,8 @@
     },
     "LIC-MS130-CMPTA-1Y": {
       "list": 135,
-      "price": 91,
-      "discount": 42
+      "price": 36,
+      "discount": 0.7333
     },
     "LIC-MX85-SEC-1Y": {
       "list": 2453,
@@ -1232,8 +1232,8 @@
     },
     "LIC-MS130-48A-3Y": {
       "list": 1345,
-      "price": 905,
-      "discount": 42
+      "price": 352,
+      "discount": 0.7383
     },
     "LIC-MX67C-ENT-1YR": {
       "list": 417,
@@ -1682,8 +1682,8 @@
     },
     "LIC-MS130-CMPTA-3Y": {
       "list": 302,
-      "price": 203,
-      "discount": 42
+      "price": 79,
+      "discount": 0.7384
     },
     "LIC-MX67W-SDW-1Y": {
       "list": 1024,
