@@ -1325,6 +1325,10 @@ const tests = [
     input: 'LIC-ENT-3YR,26\nLIC-MS120-8FP-3YR,4\nLIC-MS220-8P-3YR,2\nLIC-MS225-24P-3YR,5\nLIC-MS225-48FP-3YR,1\nLIC-MS250-48FP-3YR,6\nLIC-MS425-32-3YR,1\nLIC-MT-3Y,1',
     expect: { directLicense: true, itemCount: 8, firstQty: 26 }
   },
+  { name: '[PARSE] Multi-line license qty-first format (2 x LIC-ENT-1YR)',
+    input: '2 x LIC-ENT-1YR\n1 x LIC-MS225-48FP-1YR\n1 x LIC-MX100-ENT-1YR',
+    expect: { directLicense: true, itemCount: 3, firstQty: 2 }
+  },
   { name: '[PARSE] Multi-line license CSV (double-pasted with header)',
     input: 'LIC-ENT-3YR,26\nLIC-MS120-8FP-3YR,4\nLIC-MT-3Y,1\nSKU,Count\nLIC-ENT-3YR,26\nLIC-MS120-8FP-3YR,4\nLIC-MT-3Y,1',
     expect: { directLicense: true, itemCount: 3, firstQty: 26 }
@@ -1986,8 +1990,11 @@ function testParseItems(text) {
     const licItems = [];
     for (const line of lines) {
       const csvMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*[,\s]\s*(\d+)\s*$/i);
+      const qtyFirstMatch = !csvMatch && line.match(/^\s*(\d+)\s*[xX×]?\s*(LIC-[A-Z0-9-]+)\s*$/i);
       if (csvMatch) {
         licItems.push({ sku: csvMatch[1].toUpperCase(), qty: parseInt(csvMatch[2]) });
+      } else if (qtyFirstMatch) {
+        licItems.push({ sku: qtyFirstMatch[2].toUpperCase(), qty: parseInt(qtyFirstMatch[1]) });
       } else {
         const singleMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*$/i);
         if (singleMatch) {
