@@ -3954,8 +3954,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       iteration++;
 
       const requestBody = {
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: useTools ? 4096 : 1024,
+        // CRM tool-use: use Haiku (1-2s/call vs 6-10s for Sonnet) so 5-6 iterations
+        // fit within the 25s ctx.waitUntil deadline. Sonnet for non-tool chat.
+        model: useTools ? 'claude-haiku-3-5-20241022' : 'claude-sonnet-4-20250514',
+        max_tokens: useTools ? 2048 : 1024,
         system: systemPrompt,
         messages
       };
@@ -4014,14 +4016,14 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           if (block.type === 'tool_use') {
             console.log(`[GCHAT-AGENT] Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
 
-            // Send progress update to user before executing the tool
+            // Fire-and-forget progress update (no await) — don't block the tool loop.
+            // Saving ~500ms per message × 4-5 messages = 2-3s off the deadline.
             if (progressCallback) {
-              // If Claude narrated something, prepend it to the first progress message
               const progressMsg = toolProgressMessage(block.name, block.input);
               const fullProgress = interimText && toolResults.length === 0
                 ? `${interimText}\n\n${progressMsg}`
                 : progressMsg;
-              try { await progressCallback(fullProgress); } catch (e) { /* ignore */ }
+              try { progressCallback(fullProgress).catch(() => {}); } catch (e) { /* ignore */ }
             }
 
             const result = await executeToolCall(block.name, block.input, env);
@@ -4486,10 +4488,10 @@ export default {
                     await sendAsyncGChatMessage(spaceName, formatted, null, env);
                   };
 
-                  // 22s deadline: Cloudflare gives ctx.waitUntil ~30s wall clock after sync response.
-                  // Sonnet takes 5-10s per call, so we cap the tool loop at 22s and return
-                  // a partial response rather than dying silently.
-                  let asyncReply = await askClaude(text, personId, env, null, true, progressCallback, 22000);
+                  // 25s deadline: Cloudflare gives ctx.waitUntil ~30s wall clock after sync response.
+                  // CRM loop uses Haiku (1-2s/call), so 5-6 iterations fit comfortably.
+                  // Deadline guard fires before each Anthropic call to return partials gracefully.
+                  let asyncReply = await askClaude(text, personId, env, null, true, progressCallback, 25000);
                   asyncReply = adaptMarkdownForGChat(asyncReply);
                   asyncReply = truncateGChatReply(asyncReply);
                   await sendAsyncGChatMessage(spaceName, asyncReply, null, env);
