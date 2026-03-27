@@ -6,6 +6,19 @@ compatibility_date = "2024-01-01"
 # Non-secret config (secrets set via `wrangler secret put`)
 # ANTHROPIC_API_KEY = set via wrangler secret
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
+#
+# ─── CRM & Email Agent Secrets (POC) ───
+# Set these via: wrangler secret put <NAME>
+#
+# Zoho CRM OAuth (create Self Client at api-console.zoho.com)
+# ZOHO_CLIENT_ID = Zoho self-client ID
+# ZOHO_CLIENT_SECRET = Zoho self-client secret
+# ZOHO_REFRESH_TOKEN = Zoho offline refresh token (scope: ZohoCRM.modules.ALL,ZohoCRM.settings.fields.ALL,ZohoCRM.coql.READ)
+#
+# Gmail API OAuth (uses existing GCP project swift-catfish-474413-d5)
+# GOOGLE_CLIENT_ID = GCP OAuth client ID
+# GOOGLE_CLIENT_SECRET = GCP OAuth client secret
+# GOOGLE_REFRESH_TOKEN = Gmail offline refresh token (scope: gmail.readonly,gmail.compose,gmail.send)
 
 [[kv_namespaces]]
 binding = "CONVERSATION_KV"

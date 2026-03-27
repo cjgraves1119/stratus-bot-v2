@@ -2909,8 +2909,561 @@ async function processEmailThread(text, personId, env, kv) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── CRM & EMAIL AGENT ENGINE (POC) ──────────────────────────────────────────
+// Adds Zoho CRM and Gmail tool-use capabilities to the Claude fallback path.
+// When a user message indicates CRM or email intent, Claude is given tools it
+// can call in a loop until it produces a final text response.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Zoho OAuth Token Manager ─────────────────────────────────────────────────
+// Caches access tokens in KV with TTL. Refreshes from client credentials.
+async function getZohoAccessToken(env) {
+  const kv = env.CONVERSATION_KV;
+  // Check KV cache first
+  const cached = await kv.get('zoho_access_token');
+  if (cached) return cached;
+
+  // Refresh from OAuth
+  if (!env.ZOHO_CLIENT_ID || !env.ZOHO_CLIENT_SECRET || !env.ZOHO_REFRESH_TOKEN) {
+    throw new Error('Zoho OAuth credentials not configured');
+  }
+
+  const params = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: env.ZOHO_CLIENT_ID,
+    client_secret: env.ZOHO_CLIENT_SECRET,
+    refresh_token: env.ZOHO_REFRESH_TOKEN
+  });
+
+  const res = await fetch('https://accounts.zoho.com/oauth/v2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString()
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Zoho token refresh failed: ${res.status} ${err}`);
+  }
+
+  const data = await res.json();
+  if (!data.access_token) throw new Error('No access_token in Zoho response');
+
+  // Cache for 50 minutes (tokens last 60 min)
+  await kv.put('zoho_access_token', data.access_token, { expirationTtl: 3000 });
+  return data.access_token;
+}
+
+// ─── Gmail OAuth Token Manager ────────────────────────────────────────────────
+async function getGmailAccessToken(env) {
+  const kv = env.CONVERSATION_KV;
+  const cached = await kv.get('gmail_access_token');
+  if (cached) return cached;
+
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.GOOGLE_REFRESH_TOKEN) {
+    throw new Error('Gmail OAuth credentials not configured');
+  }
+
+  const params = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: env.GOOGLE_CLIENT_ID,
+    client_secret: env.GOOGLE_CLIENT_SECRET,
+    refresh_token: env.GOOGLE_REFRESH_TOKEN
+  });
+
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString()
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gmail token refresh failed: ${res.status} ${err}`);
+  }
+
+  const data = await res.json();
+  if (!data.access_token) throw new Error('No access_token in Gmail response');
+
+  await kv.put('gmail_access_token', data.access_token, { expirationTtl: 3000 });
+  return data.access_token;
+}
+
+// ─── Zoho CRM API Client ─────────────────────────────────────────────────────
+async function zohoApiCall(method, path, env, body = null) {
+  const token = await getZohoAccessToken(env);
+  const url = `https://www.zohoapis.com/crm/v2/${path}`;
+  const opts = {
+    method,
+    headers: {
+      'Authorization': `Zoho-oauthtoken ${token}`,
+      'Content-Type': 'application/json'
+    }
+  };
+  if (body) opts.body = JSON.stringify(body);
+
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text, status: res.status };
+  }
+}
+
+// ─── Gmail API Client ─────────────────────────────────────────────────────────
+async function gmailApiCall(method, path, env, body = null) {
+  const token = await getGmailAccessToken(env);
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/${path}`;
+  const opts = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    }
+  };
+  if (body) opts.body = JSON.stringify(body);
+
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text, status: res.status };
+  }
+}
+
+// ─── Tool Execution Router ────────────────────────────────────────────────────
+async function executeToolCall(toolName, toolInput, env) {
+  try {
+    switch (toolName) {
+      // ── Zoho CRM Tools ──
+      case 'zoho_search_records': {
+        const { module_name, criteria, fields, page, per_page } = toolInput;
+        const params = new URLSearchParams();
+        if (criteria) params.set('criteria', criteria);
+        if (fields) params.set('fields', fields);
+        if (page) params.set('page', String(page));
+        if (per_page) params.set('per_page', String(per_page));
+        return await zohoApiCall('GET', `${module_name}/search?${params}`, env);
+      }
+
+      case 'zoho_get_record': {
+        const { module_name, record_id, fields } = toolInput;
+        const params = fields ? `?fields=${fields}` : '';
+        return await zohoApiCall('GET', `${module_name}/${record_id}${params}`, env);
+      }
+
+      case 'zoho_create_record': {
+        const { module_name, data } = toolInput;
+        return await zohoApiCall('POST', module_name, env, { data: Array.isArray(data) ? data : [data] });
+      }
+
+      case 'zoho_update_record': {
+        const { module_name, record_id, data } = toolInput;
+        return await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
+      }
+
+      case 'zoho_get_related_records': {
+        const { module_name, record_id, related_module, fields } = toolInput;
+        const params = fields ? `?fields=${fields}` : '';
+        return await zohoApiCall('GET', `${module_name}/${record_id}/${related_module}${params}`, env);
+      }
+
+      case 'zoho_get_field': {
+        const { module_name, field_name } = toolInput;
+        return await zohoApiCall('GET', `settings/fields?module=${module_name}&field_api_name=${field_name}`, env);
+      }
+
+      case 'zoho_coql_query': {
+        const { query } = toolInput;
+        return await zohoApiCall('POST', 'coql', env, { select_query: query });
+      }
+
+      // ── Gmail Tools ──
+      case 'gmail_search_messages': {
+        const { query, max_results } = toolInput;
+        const params = new URLSearchParams({ q: query, maxResults: String(max_results || 10) });
+        return await gmailApiCall('GET', `messages?${params}`, env);
+      }
+
+      case 'gmail_read_message': {
+        const { message_id, format } = toolInput;
+        const params = format ? `?format=${format}` : '?format=full';
+        const data = await gmailApiCall('GET', `messages/${message_id}${params}`, env);
+        // Extract readable content from the response
+        if (data.payload) {
+          const headers = (data.payload.headers || []).reduce((acc, h) => {
+            acc[h.name.toLowerCase()] = h.value;
+            return acc;
+          }, {});
+          let body = '';
+          if (data.payload.body?.data) {
+            body = atob(data.payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+          } else if (data.payload.parts) {
+            const textPart = data.payload.parts.find(p => p.mimeType === 'text/plain');
+            if (textPart?.body?.data) {
+              body = atob(textPart.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+            }
+          }
+          return {
+            id: data.id,
+            threadId: data.threadId,
+            from: headers.from || '',
+            to: headers.to || '',
+            cc: headers.cc || '',
+            subject: headers.subject || '',
+            date: headers.date || '',
+            snippet: data.snippet || '',
+            body: body.substring(0, 3000) // Truncate to save tokens
+          };
+        }
+        return data;
+      }
+
+      case 'gmail_read_thread': {
+        const { thread_id } = toolInput;
+        const data = await gmailApiCall('GET', `threads/${thread_id}?format=full`, env);
+        if (data.messages) {
+          return {
+            id: data.id,
+            message_count: data.messages.length,
+            messages: data.messages.map(msg => {
+              const headers = (msg.payload?.headers || []).reduce((acc, h) => {
+                acc[h.name.toLowerCase()] = h.value;
+                return acc;
+              }, {});
+              let body = '';
+              if (msg.payload?.body?.data) {
+                body = atob(msg.payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+              } else if (msg.payload?.parts) {
+                const textPart = msg.payload.parts.find(p => p.mimeType === 'text/plain');
+                if (textPart?.body?.data) {
+                  body = atob(textPart.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+                }
+              }
+              return {
+                id: msg.id,
+                from: headers.from || '',
+                to: headers.to || '',
+                subject: headers.subject || '',
+                date: headers.date || '',
+                snippet: msg.snippet || '',
+                body: body.substring(0, 2000)
+              };
+            })
+          };
+        }
+        return data;
+      }
+
+      case 'gmail_create_draft': {
+        const { to, subject, body, cc, bcc, in_reply_to, thread_id } = toolInput;
+        // Build RFC 2822 message
+        let raw = `To: ${to}\r\n`;
+        if (cc) raw += `Cc: ${cc}\r\n`;
+        if (bcc) raw += `Bcc: ${bcc}\r\n`;
+        raw += `Subject: ${subject}\r\n`;
+        if (in_reply_to) raw += `In-Reply-To: ${in_reply_to}\r\nReferences: ${in_reply_to}\r\n`;
+        raw += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`;
+        raw += body;
+        // Base64url encode
+        const encoded = btoa(unescape(encodeURIComponent(raw)))
+          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const draftBody = { message: { raw: encoded } };
+        if (thread_id) draftBody.message.threadId = thread_id;
+        return await gmailApiCall('POST', 'drafts', env, draftBody);
+      }
+
+      case 'gmail_send_email': {
+        const { to, subject, body, cc, bcc, in_reply_to, thread_id } = toolInput;
+        let raw = `To: ${to}\r\n`;
+        if (cc) raw += `Cc: ${cc}\r\n`;
+        if (bcc) raw += `Bcc: ${bcc}\r\n`;
+        raw += `Subject: ${subject}\r\n`;
+        if (in_reply_to) raw += `In-Reply-To: ${in_reply_to}\r\nReferences: ${in_reply_to}\r\n`;
+        raw += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`;
+        raw += body;
+        const encoded = btoa(unescape(encodeURIComponent(raw)))
+          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const sendBody = { raw: encoded };
+        if (thread_id) sendBody.threadId = thread_id;
+        return await gmailApiCall('POST', 'messages/send', env, sendBody);
+      }
+
+      default:
+        return { error: `Unknown tool: ${toolName}` };
+    }
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+// ─── Tool Definitions for Claude API ──────────────────────────────────────────
+const CRM_EMAIL_TOOLS = [
+  // Zoho CRM
+  {
+    name: 'zoho_search_records',
+    description: 'Search Zoho CRM records in any module (Deals, Quotes, Contacts, Accounts, Tasks, Products, Sales_Orders, Invoices). Uses COQL criteria syntax like (Account_Name:equals:Acme Corp) or (Stage:equals:Qualification). Multiple criteria joined with "and"/"or".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        module_name: { type: 'string', description: 'CRM module API name: Deals, Quotes, Contacts, Accounts, Tasks, Products, Sales_Orders, Invoices' },
+        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:2570562000141711002) and (Stage:not_equals:Closed Won)' },
+        fields: { type: 'string', description: 'Comma-separated field API names to return. Example: id,Deal_Name,Stage,Amount,Account_Name' },
+        page: { type: 'number', description: 'Page number (default 1)' },
+        per_page: { type: 'number', description: 'Records per page (max 200, default 20)' }
+      },
+      required: ['module_name', 'criteria']
+    }
+  },
+  {
+    name: 'zoho_get_record',
+    description: 'Get a specific Zoho CRM record by its ID. Returns full record details.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        module_name: { type: 'string', description: 'CRM module API name' },
+        record_id: { type: 'string', description: 'Record ID (numeric string)' },
+        fields: { type: 'string', description: 'Optional comma-separated fields to return' }
+      },
+      required: ['module_name', 'record_id']
+    }
+  },
+  {
+    name: 'zoho_create_record',
+    description: 'Create a new record in Zoho CRM. IMPORTANT: For Deals, always include Lead_Source, Stage (default "Qualification"), Owner, Closing_Date. For Quotes, include Subject, Deal_Name (linked deal ID), Valid_Till, Product_Details array. Always validate picklist values before creating.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        module_name: { type: 'string', description: 'CRM module API name' },
+        data: { type: 'object', description: 'Record data object with field API names as keys' }
+      },
+      required: ['module_name', 'data']
+    }
+  },
+  {
+    name: 'zoho_update_record',
+    description: 'Update an existing Zoho CRM record. NEVER manually set Stage to "Closed Won" — deals auto-close when a PO is attached.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        module_name: { type: 'string', description: 'CRM module API name' },
+        record_id: { type: 'string', description: 'Record ID to update' },
+        data: { type: 'object', description: 'Fields to update' }
+      },
+      required: ['module_name', 'record_id', 'data']
+    }
+  },
+  {
+    name: 'zoho_get_related_records',
+    description: 'Get records related to a parent record (e.g., Quotes under a Deal, Tasks linked to a Deal, Contacts under an Account).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        module_name: { type: 'string', description: 'Parent module API name' },
+        record_id: { type: 'string', description: 'Parent record ID' },
+        related_module: { type: 'string', description: 'Related module API name (Quotes, Tasks, Contacts, etc.)' },
+        fields: { type: 'string', description: 'Optional fields to return' }
+      },
+      required: ['module_name', 'record_id', 'related_module']
+    }
+  },
+  {
+    name: 'zoho_get_field',
+    description: 'Get field metadata including picklist values. Use this to validate Stage values before creating/updating Deals.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        module_name: { type: 'string', description: 'Module API name' },
+        field_name: { type: 'string', description: 'Field API name (e.g., Stage, Lead_Source)' }
+      },
+      required: ['module_name', 'field_name']
+    }
+  },
+  {
+    name: 'zoho_coql_query',
+    description: 'Execute a COQL (CRM Object Query Language) query. Example: "select Deal_Name, Amount, Stage from Deals where Owner = 2570562000141711002 and Stage != \'Closed Won\' limit 20"',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'COQL SELECT query string' }
+      },
+      required: ['query']
+    }
+  },
+  // Gmail
+  {
+    name: 'gmail_search_messages',
+    description: 'Search Gmail messages using Gmail search syntax. Examples: "from:john@acme.com", "subject:quote request", "to:me is:unread", "from:customer after:2026/01/01"',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Gmail search query string' },
+        max_results: { type: 'number', description: 'Maximum messages to return (default 10, max 50)' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'gmail_read_message',
+    description: 'Read a specific Gmail message by ID. Returns from, to, cc, subject, date, and body text (truncated to 3000 chars).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        message_id: { type: 'string', description: 'Gmail message ID from search results' },
+        format: { type: 'string', description: 'Response format: full (default), metadata, minimal' }
+      },
+      required: ['message_id']
+    }
+  },
+  {
+    name: 'gmail_read_thread',
+    description: 'Read an entire Gmail thread (all messages in a conversation). Returns all messages with from, to, subject, date, and body.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        thread_id: { type: 'string', description: 'Gmail thread ID' }
+      },
+      required: ['thread_id']
+    }
+  },
+  {
+    name: 'gmail_create_draft',
+    description: 'Create a Gmail draft reply or new email. The draft will appear in the user\'s Drafts folder for review before sending. Use this for composing email responses.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient email address(es), comma-separated' },
+        subject: { type: 'string', description: 'Email subject line' },
+        body: { type: 'string', description: 'Plain text email body. Use blank lines between paragraphs.' },
+        cc: { type: 'string', description: 'CC recipients (optional)' },
+        bcc: { type: 'string', description: 'BCC recipients (optional)' },
+        in_reply_to: { type: 'string', description: 'Message-ID header of the email being replied to (for threading)' },
+        thread_id: { type: 'string', description: 'Gmail thread ID to attach this draft to' }
+      },
+      required: ['to', 'subject', 'body']
+    }
+  },
+  {
+    name: 'gmail_send_email',
+    description: 'Send an email directly via Gmail. WARNING: Only use after explicit user approval. Prefer gmail_create_draft for composing responses, then send only after review.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        to: { type: 'string', description: 'Recipient email address(es)' },
+        subject: { type: 'string', description: 'Email subject line' },
+        body: { type: 'string', description: 'Plain text email body' },
+        cc: { type: 'string', description: 'CC recipients (optional)' },
+        bcc: { type: 'string', description: 'BCC recipients (optional)' },
+        in_reply_to: { type: 'string', description: 'Message-ID for threading' },
+        thread_id: { type: 'string', description: 'Gmail thread ID for threading' }
+      },
+      required: ['to', 'subject', 'body']
+    }
+  }
+];
+
+// ─── CRM/Email Intent Detection ──────────────────────────────────────────────
+function detectCrmEmailIntent(text) {
+  const lower = text.toLowerCase();
+
+  // CRM intents
+  const crmPatterns = [
+    /\b(create|new|add)\s+(a\s+)?(deal|quote|task|contact|account)/i,
+    /\b(update|edit|change|modify)\s+(the\s+)?(deal|quote|task|contact|account)/i,
+    /\b(search|find|look\s*up|pull\s*up|get|show)\s+(me\s+)?(the\s+)?(deal|quote|task|contact|account|customer|client)/i,
+    /\b(close|complete|finish)\s+(the\s+)?(task|deal)/i,
+    /\b(what|when|how\s+many|how\s+much|who)\s+.*(deal|quote|customer|account|order|invoice|pipeline)/i,
+    /\bzoho\b/i,
+    /\bcrm\b/i,
+    /\b(pipeline|forecast|revenue|stage|closed\s+won|qualification)/i,
+    /\blast\s+(time|order|purchase|quote)\b/i,
+    /\b(open\s+deals|my\s+deals|active\s+deals|pending\s+tasks|overdue\s+tasks)/i,
+  ];
+
+  // Email intents
+  const emailPatterns = [
+    /\b(email|draft|send|reply|compose|write)\s+(an?\s+)?(email|message|response|follow[\s-]?up)/i,
+    /\b(check|read|search|find|look\s*up)\s+(my\s+)?(email|inbox|gmail|thread)/i,
+    /\b(what|any)\s+(new\s+)?(email|message)/i,
+    /\b(respond|reply)\s+to\s+/i,
+    /\bemail\s+(from|to|about|regarding)/i,
+    /\bgmail\b/i,
+    /\binbox\b/i,
+  ];
+
+  const hasCrm = crmPatterns.some(p => p.test(text));
+  const hasEmail = emailPatterns.some(p => p.test(text));
+
+  return { hasCrm, hasEmail, hasAny: hasCrm || hasEmail };
+}
+
+// ─── CRM System Prompt Extension ─────────────────────────────────────────────
+const CRM_SYSTEM_PROMPT = `
+
+## CRM & EMAIL ASSISTANT MODE
+
+You now have access to Zoho CRM and Gmail tools. Use them to help with customer relationship management tasks.
+
+### YOUR IDENTITY
+You are Stratus AI, the sales assistant for Stratus Information Systems, a Cisco-exclusive Meraki reseller. You help the sales team manage their CRM and email workflows.
+
+### ZOHO CRM CONTEXT
+- Organization ID: org647122552
+- CRM URL format: https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}
+- Owner (default): Chris Graves, ID 2570562000141711002, email chrisg@stratusinfosystems.com
+- Always filter queries by Owner = 2570562000141711002 unless told otherwise
+
+### DEAL CREATION RULES
+- Lead_Source valid values ONLY: Meraki ISR Referal, Meraki ADR Referal, VDC, Stratus Referal, Website, -None-
+- "Referal" is spelled with ONE R (not "Referral") — this is intentional for reporting
+- Default Lead_Source: "Stratus Referal" unless a Cisco rep referral is mentioned
+- Default Stage: "Qualification" (validate via zoho_get_field before any Stage write)
+- NEVER set Stage to "Closed Won" manually — deals auto-close when a PO is attached
+- "Closed (Lost)" has parentheses — never use "Closed Lost"
+- Always include: Deal_Name, Account_Name, Lead_Source, Stage, Closing_Date, Owner
+
+### QUOTE CREATION RULES
+- Always include: Subject, Deal_Name (linked deal ID), Valid_Till, Product_Details
+- For product lookups, search the Products module by Product_Code (SKU)
+- Ecomm pricing: use Stratus_Price field from Products (WooProducts) module
+
+### TASK RULES
+- All active deals MUST have at least one open follow-up task
+- Default follow-up: 3 business days out, skip weekends
+- Before closing a task on an active deal, check for successor tasks
+
+### PICKLIST PROTECTION
+NEVER create new dropdown values. Zoho silently accepts invalid values and creates duplicates.
+Always validate Stage via zoho_get_field before creating/updating Deals.
+
+### EMAIL RULES
+- When asked to email a customer, ALWAYS create a draft first (gmail_create_draft)
+- NEVER send an email without explicit user approval
+- Include proper paragraph spacing (blank lines between paragraphs)
+- Sign emails as Chris Graves, Regional Sales Director, Stratus Information Systems
+- Email voice: friendly, consultative, concise. End with a question or call to action.
+
+### GMAIL SEARCH TIPS
+- Search by sender: from:john@acme.com
+- Search by subject: subject:"quote request"
+- Date range: after:2026/01/01 before:2026/04/01
+- Combine: from:customer@acme.com subject:renewal after:2026/01/01
+
+### RESPONSE FORMAT
+- Always include Zoho CRM links when referencing records: https://crm.zoho.com/crm/org647122552/tab/{Module}/{RecordID}
+- Keep responses concise but complete
+- When showing deal/quote info, format as a clean summary, not raw JSON
+`;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── END CRM & EMAIL AGENT ENGINE ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
 // ─── Claude API (direct fetch, no SDK) ───────────────────────────────────────
-async function askClaude(userMessage, personId, env, imageData = null) {
+async function askClaude(userMessage, personId, env, imageData = null, useTools = false) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
@@ -2985,38 +3538,91 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     } else {
       userContent = userMessage;
     }
-    const messages = [...history, { role: 'user', content: userContent }];
+    let messages = [...history, { role: 'user', content: userContent }];
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
+    // Determine if we should include CRM/email tools
+    const tools = useTools ? CRM_EMAIL_TOOLS : [];
+    if (useTools) {
+      systemPrompt += CRM_SYSTEM_PROMPT;
+    }
+
+    // Agentic loop: Claude may call tools multiple times before returning text
+    const MAX_TOOL_ITERATIONS = 8;
+    let iteration = 0;
+
+    while (iteration < MAX_TOOL_ITERATIONS) {
+      iteration++;
+
+      const requestBody = {
+        model: useTools ? 'claude-sonnet-4-20250514' : 'claude-sonnet-4-20250514',
+        max_tokens: useTools ? 4096 : 1024,
         system: systemPrompt,
         messages
-      })
-    });
+      };
+      if (tools.length > 0) {
+        requestBody.tools = tools;
+      }
 
-    if (!response.ok) {
-      const errBody = await response.text();
-      console.error('Anthropic API error:', response.status, errBody);
-      return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44".`;
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text();
+        console.error('Anthropic API error:', response.status, errBody);
+        return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44".`;
+      }
+
+      const data = await response.json();
+
+      // Check if Claude wants to use tools
+      if (data.stop_reason === 'tool_use') {
+        console.log(`[GCHAT-AGENT] Tool use iteration ${iteration}`);
+
+        // Add Claude's response (with tool_use blocks) to messages
+        messages.push({ role: 'assistant', content: data.content });
+
+        // Execute each tool call and collect results
+        const toolResults = [];
+        for (const block of data.content) {
+          if (block.type === 'tool_use') {
+            console.log(`[GCHAT-AGENT] Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
+            const result = await executeToolCall(block.name, block.input, env);
+            const resultStr = JSON.stringify(result);
+            console.log(`[GCHAT-AGENT] Tool result: ${resultStr.substring(0, 200)}`);
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: resultStr.length > 8000 ? resultStr.substring(0, 8000) + '...(truncated)' : resultStr
+            });
+          }
+        }
+
+        // Add tool results to messages
+        messages.push({ role: 'user', content: toolResults });
+        continue; // Loop back for Claude to process tool results
+      }
+
+      // Claude returned a final text response (stop_reason = 'end_turn')
+      const textBlocks = data.content.filter(b => b.type === 'text');
+      const reply = textBlocks.map(b => b.text).join('\n');
+
+      if (personId) {
+        await addToHistory(kv, personId, 'user', userMessage);
+        await addToHistory(kv, personId, 'assistant', reply);
+      }
+
+      return reply;
     }
 
-    const data = await response.json();
-    const reply = data.content[0].text;
-
-    if (personId) {
-      await addToHistory(kv, personId, 'user', userMessage);
-      await addToHistory(kv, personId, 'assistant', reply);
-    }
-
-    return reply;
+    // If we exhausted iterations, return whatever we have
+    return 'I ran into a complex operation that required too many steps. Could you break your request into smaller pieces?';
   } catch (err) {
     console.error('Claude API error:', err.message);
     return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44" or "5 MS150-48LP-4G".`;
@@ -3252,17 +3858,29 @@ export default {
         }
 
         if (!reply) {
-          reply = await askClaude(text, personId, env);
+          // Check if this is a CRM or email intent — if so, enable tool use
+          const intent = detectCrmEmailIntent(text);
+          const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
+          const hasGmailCreds = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_REFRESH_TOKEN);
+          const useTools = intent.hasAny && (hasCrmCreds || hasGmailCreds);
+
+          if (useTools) {
+            console.log(`[GCHAT-AGENT] CRM/Email intent detected (crm=${intent.hasCrm}, email=${intent.hasEmail}). Enabling tool use.`);
+          }
+
+          reply = await askClaude(text, personId, env, null, useTools);
         }
 
         // Adapt markdown for Google Chat (* instead of **)
         reply = adaptMarkdownForGChat(reply);
 
-        // Truncate if needed (Google Chat limit ~4096 chars for add-on responses)
-        if (reply.length > 4000) {
-          const truncated = reply.substring(0, 3800);
+        // Truncate if needed (Google Chat has ~4096 char limit, but async responses can be longer)
+        // For tool-use responses that may be longer, we use a higher threshold
+        const maxLen = 4000;
+        if (reply.length > maxLen) {
+          const truncated = reply.substring(0, maxLen - 200);
           const lastNewline = truncated.lastIndexOf('\n');
-          reply = (lastNewline > 3000 ? truncated.substring(0, lastNewline) : truncated) + '\n\n_(Response truncated)_';
+          reply = (lastNewline > maxLen - 1000 ? truncated.substring(0, lastNewline) : truncated) + '\n\n_(Response truncated. Ask a follow-up for more detail.)_';
         }
 
         return sendGChatResponse(reply || 'No response generated', isAddon);
