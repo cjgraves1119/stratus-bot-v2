@@ -19,6 +19,11 @@ compatibility_date = "2024-01-01"
 # GOOGLE_CLIENT_ID = GCP OAuth client ID
 # GOOGLE_CLIENT_SECRET = GCP OAuth client secret
 # GOOGLE_REFRESH_TOKEN = Gmail offline refresh token (scope: gmail.readonly,gmail.compose,gmail.send)
+#
+# Google Chat Async Response (service account for Chat API)
+# GCP_SERVICE_ACCOUNT_KEY = Full JSON key from GCP service account (scope: chat.bot)
+#   Create at: https://console.cloud.google.com/iam-admin/serviceaccounts?project=swift-catfish-474413-d5
+#   Required for CRM/email queries that exceed Google Chat's 30-second sync timeout
 
 [[kv_namespaces]]
 binding = "CONVERSATION_KV"

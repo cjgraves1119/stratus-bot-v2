@@ -2916,6 +2916,140 @@ async function processEmailThread(text, personId, env, kv) {
 // can call in a loop until it produces a final text response.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ─── Google Chat Async Response (Service Account JWT) ─────────────────────────
+// For CRM/email tool-use queries that exceed Google Chat's 30-second sync timeout,
+// we return a quick "thinking" message synchronously and deliver the real answer
+// via the Google Chat REST API using a service account bearer token.
+
+/**
+ * Base64url encode a buffer or string (no padding, URL-safe)
+ */
+function base64url(input) {
+  const buf = typeof input === 'string' ? new TextEncoder().encode(input) : new Uint8Array(input);
+  let binary = '';
+  for (const byte of buf) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * Generate a Google Chat API access token using a GCP service account key.
+ * The key must be stored as the worker secret GCP_SERVICE_ACCOUNT_KEY (JSON string).
+ * Tokens are cached in KV for 50 minutes (they expire after 60).
+ */
+async function getGoogleChatBotToken(env) {
+  const kv = env.CONVERSATION_KV;
+  const cached = await kv.get('gchat_bot_token');
+  if (cached) return cached;
+
+  if (!env.GCP_SERVICE_ACCOUNT_KEY) {
+    throw new Error('GCP_SERVICE_ACCOUNT_KEY secret not configured — cannot send async Google Chat messages');
+  }
+
+  let sa;
+  try {
+    sa = JSON.parse(env.GCP_SERVICE_ACCOUNT_KEY);
+  } catch (e) {
+    throw new Error('GCP_SERVICE_ACCOUNT_KEY is not valid JSON');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss: sa.client_email,
+    sub: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/chat.bot',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600
+  };
+
+  const headerB64 = base64url(JSON.stringify(header));
+  const payloadB64 = base64url(JSON.stringify(payload));
+  const signingInput = `${headerB64}.${payloadB64}`;
+
+  // Import the RSA private key (PEM -> CryptoKey)
+  const pemBody = sa.private_key
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
+    .replace(/\s/g, '');
+  const keyBuf = Uint8Array.from(atob(pemBody), c => c.charCodeAt(0));
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8', keyBuf.buffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false, ['sign']
+  );
+
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    cryptoKey,
+    new TextEncoder().encode(signingInput)
+  );
+
+  const jwt = `${signingInput}.${base64url(signature)}`;
+
+  // Exchange JWT for access token
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: jwt
+    }).toString()
+  });
+
+  if (!tokenRes.ok) {
+    const err = await tokenRes.text();
+    throw new Error(`Google Chat token exchange failed: ${tokenRes.status} ${err}`);
+  }
+
+  const data = await tokenRes.json();
+  if (!data.access_token) throw new Error('No access_token in Google Chat token response');
+
+  // Cache for 50 minutes (tokens last 60 min)
+  await kv.put('gchat_bot_token', data.access_token, { expirationTtl: 3000 });
+  return data.access_token;
+}
+
+/**
+ * Send a message to a Google Chat space via the REST API (async follow-up).
+ * @param {string} spaceName - e.g. "spaces/AAAAxyz123"
+ * @param {string} text - message text
+ * @param {string|null} threadName - e.g. "spaces/AAAAxyz123/threads/abc" to reply in-thread
+ * @param {object} env - worker env with secrets
+ */
+async function sendAsyncGChatMessage(spaceName, text, threadName, env) {
+  const token = await getGoogleChatBotToken(env);
+
+  const body = { text };
+  if (threadName) {
+    body.thread = { name: threadName };
+  }
+
+  // Use REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD so it threads when possible
+  let url = `https://chat.googleapis.com/v1/${spaceName}/messages`;
+  if (threadName) {
+    url += '?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD';
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`[GCHAT-ASYNC] Failed to send async message: ${res.status} ${err}`);
+    throw new Error(`Google Chat API error: ${res.status} ${err}`);
+  }
+
+  console.log(`[GCHAT-ASYNC] Sent async message to ${spaceName}`);
+  return await res.json();
+}
+
 // ─── Zoho OAuth Token Manager ─────────────────────────────────────────────────
 // Caches access tokens in KV with TTL. Refreshes from client credentials.
 async function getZohoAccessToken(env) {
@@ -3458,6 +3592,12 @@ Always validate Stage via zoho_get_field before creating/updating Deals.
 - When showing deal/quote info, format as a clean summary, not raw JSON
 `;
 
+// Minimal system prompt for CRM/email agent mode (saves ~4K tokens vs full SYSTEM_PROMPT)
+const CRM_AGENT_SYSTEM_PROMPT = `You are Stratus AI, the sales assistant for Stratus Information Systems, a Cisco-exclusive Meraki reseller. You help with CRM and email tasks.
+
+Keep responses concise and well-formatted for Google Chat (* for bold, not **).
+${CRM_SYSTEM_PROMPT}`;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── END CRM & EMAIL AGENT ENGINE ────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3543,18 +3683,46 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     // Determine if we should include CRM/email tools
     const tools = useTools ? CRM_EMAIL_TOOLS : [];
     if (useTools) {
-      systemPrompt += CRM_SYSTEM_PROMPT;
+      // Use a minimal system prompt for CRM/email operations to stay under token limits.
+      // The full quoting system prompt (~5K tokens) isn't needed for CRM queries.
+      systemPrompt = CRM_AGENT_SYSTEM_PROMPT;
     }
 
     // Agentic loop: Claude may call tools multiple times before returning text
     const MAX_TOOL_ITERATIONS = 8;
     let iteration = 0;
 
+    // Helper: call Anthropic API with retry for 429 rate limits
+    async function callAnthropicWithRetry(body, maxRetries = 3) {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify(body)
+        });
+
+        if (response.status === 429 && attempt < maxRetries) {
+          // Rate limited — wait with exponential backoff (1s, 2s, 4s)
+          const retryAfter = response.headers.get('retry-after');
+          const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : (1000 * Math.pow(2, attempt));
+          console.log(`[GCHAT-AGENT] Rate limited (429), retry ${attempt + 1}/${maxRetries} after ${waitMs}ms`);
+          await new Promise(r => setTimeout(r, waitMs));
+          continue;
+        }
+
+        return response;
+      }
+    }
+
     while (iteration < MAX_TOOL_ITERATIONS) {
       iteration++;
 
       const requestBody = {
-        model: useTools ? 'claude-sonnet-4-20250514' : 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: useTools ? 4096 : 1024,
         system: systemPrompt,
         messages
@@ -3563,20 +3731,29 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         requestBody.tools = tools;
       }
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify(requestBody)
-      });
+      const response = await callAnthropicWithRetry(requestBody);
 
       if (!response.ok) {
         const errBody = await response.text();
         console.error('Anthropic API error:', response.status, errBody);
-        return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44".`;
+        // Save detailed error to KV for debugging
+        try {
+          const kv = env.CONVERSATION_KV;
+          if (kv) {
+            await kv.put(`api_error_${Date.now()}`, JSON.stringify({
+              timestamp: new Date().toISOString(),
+              status: response.status,
+              error: errBody.substring(0, 2000),
+              iteration,
+              useTools,
+              messageCount: messages.length,
+              systemPromptLen: systemPrompt.length,
+              bodyLen: JSON.stringify(requestBody).length,
+              userMessage: userMessage.substring(0, 200)
+            }), { expirationTtl: 7200 });
+          }
+        } catch (logErr) { /* ignore logging errors */ }
+        return `Sorry, I couldn't process that request (API ${response.status}). Try a specific SKU like "quote 10 MR44".`;
       }
 
       const data = await response.json();
@@ -3624,7 +3801,20 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     // If we exhausted iterations, return whatever we have
     return 'I ran into a complex operation that required too many steps. Could you break your request into smaller pieces?';
   } catch (err) {
-    console.error('Claude API error:', err.message);
+    console.error('Claude API error:', err.message, err.stack);
+    // Save exception details to KV
+    try {
+      const kv = env.CONVERSATION_KV;
+      if (kv) {
+        await kv.put(`api_exception_${Date.now()}`, JSON.stringify({
+          timestamp: new Date().toISOString(),
+          error: err.message,
+          stack: (err.stack || '').substring(0, 1000),
+          useTools,
+          userMessage: userMessage.substring(0, 200)
+        }), { expirationTtl: 7200 });
+      }
+    } catch (logErr) { /* ignore */ }
     return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44" or "5 MS150-48LP-4G".`;
   }
 }
@@ -3740,11 +3930,97 @@ export default {
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
       return new Response(JSON.stringify({
         status: 'Stratus AI (Google Chat) running',
-        version: '1.0.0-gchat',
+        version: '1.2.0-gchat-async',
         runtime: 'cloudflare-workers'
       }), {
         headers: { 'Content-Type': 'application/json' }
       });
+    }
+
+    // Diagnostic: test CRM agent flow end-to-end
+    if (request.method === 'GET' && url.pathname === '/test-agent') {
+      try {
+        const kv = env.CONVERSATION_KV;
+        const results = { timestamp: new Date().toISOString(), steps: [] };
+
+        // Step 1: Check secrets
+        results.steps.push({
+          step: 'secrets',
+          anthropic_key: env.ANTHROPIC_API_KEY ? `set (${env.ANTHROPIC_API_KEY.length} chars, starts: ${env.ANTHROPIC_API_KEY.substring(0, 12)}...)` : 'MISSING',
+          zoho_client_id: env.ZOHO_CLIENT_ID ? 'set' : 'MISSING',
+          zoho_refresh: env.ZOHO_REFRESH_TOKEN ? 'set' : 'MISSING',
+          google_client_id: env.GOOGLE_CLIENT_ID ? 'set' : 'MISSING',
+          google_refresh: env.GOOGLE_REFRESH_TOKEN ? 'set' : 'MISSING',
+          gcp_service_account: env.GCP_SERVICE_ACCOUNT_KEY ? 'set (async responses enabled)' : 'MISSING (sync-only mode, may timeout on CRM queries)'
+        });
+
+        // Step 2: Test Anthropic API with tools
+        const testBody = {
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 256,
+          system: 'You are a test assistant. Respond with "API working" and use the test_tool to confirm tool use works.',
+          messages: [{ role: 'user', content: 'test' }],
+          tools: [{
+            name: 'test_tool',
+            description: 'A test tool',
+            input_schema: { type: 'object', properties: { msg: { type: 'string' } }, required: ['msg'] }
+          }]
+        };
+        const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify(testBody)
+        });
+        const apiBody = await apiRes.text();
+        results.steps.push({
+          step: 'anthropic_api_with_tools',
+          status: apiRes.status,
+          ok: apiRes.ok,
+          bodyPreview: apiBody.substring(0, 500)
+        });
+
+        // Step 3: Test Zoho token
+        try {
+          const zohoToken = await getZohoAccessToken(env);
+          results.steps.push({ step: 'zoho_token', ok: true, tokenLen: zohoToken.length });
+        } catch (e) {
+          results.steps.push({ step: 'zoho_token', ok: false, error: e.message });
+        }
+
+        // Step 4: Test full CRM query
+        try {
+          const fullReply = await askClaude('what is my most recent deal?', 'test-diag', env, null, true);
+          results.steps.push({ step: 'full_crm_query', ok: true, replyPreview: fullReply.substring(0, 300) });
+        } catch (e) {
+          results.steps.push({ step: 'full_crm_query', ok: false, error: e.message });
+        }
+
+        // Step 5: Check for recent errors in KV
+        const keys = await kv.list({ prefix: 'api_error_' });
+        const errors = [];
+        for (const key of (keys.keys || []).slice(0, 5)) {
+          const val = await kv.get(key.name, 'json');
+          if (val) errors.push(val);
+        }
+        const exKeys = await kv.list({ prefix: 'api_exception_' });
+        for (const key of (exKeys.keys || []).slice(0, 5)) {
+          const val = await kv.get(key.name, 'json');
+          if (val) errors.push(val);
+        }
+        results.recentErrors = errors;
+
+        return new Response(JSON.stringify(results, null, 2), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message, stack: e.stack }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
     }
 
     // Google Chat webhook handler - match ANY POST request
@@ -3799,6 +4075,17 @@ export default {
 
         // Process through the deterministic engine (same as Webex bot)
         let reply;
+
+        // Check for Gmail "Share to Chat" (Gmail links or annotations)
+        const gmailShare = detectGmailShare(text, event, isAddon);
+        if (gmailShare.isGmailShare) {
+          console.log(`[GCHAT] Gmail Share to Chat detected: ${gmailShare.gmailUrl}`);
+          reply = await processGmailShareToChat(gmailShare, text, personId, env, kv);
+          if (reply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', reply);
+          }
+        }
 
         // Try deterministic EOL date lookup first
         const eolDateReply = handleEolDateRequest(text);
@@ -3866,6 +4153,50 @@ export default {
 
           if (useTools) {
             console.log(`[GCHAT-AGENT] CRM/Email intent detected (crm=${intent.hasCrm}, email=${intent.hasEmail}). Enabling tool use.`);
+
+            // ── Async response pattern ──────────────────────────────────────
+            // CRM/email tool-use calls can take 15-45+ seconds (multi-iteration
+            // agentic loop). Google Chat's synchronous webhook timeout is ~30s.
+            // Return a quick "thinking" message now, process in background,
+            // then deliver the real answer via the Google Chat REST API.
+            const spaceName = event.space?.name;
+            const threadName = event.message?.thread?.name
+              || event.chat?.messagePayload?.message?.thread?.name;
+            const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
+
+            if (spaceName && hasAsyncCreds) {
+              console.log(`[GCHAT-ASYNC] Using async pattern for CRM query in ${spaceName}`);
+
+              // Fire-and-forget background processing
+              ctx.waitUntil((async () => {
+                try {
+                  let asyncReply = await askClaude(text, personId, env, null, true);
+                  asyncReply = adaptMarkdownForGChat(asyncReply);
+                  asyncReply = truncateGChatReply(asyncReply);
+                  await sendAsyncGChatMessage(spaceName, asyncReply, threadName, env);
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', asyncReply);
+                } catch (asyncErr) {
+                  console.error(`[GCHAT-ASYNC] Background processing failed: ${asyncErr.message}`);
+                  try {
+                    await sendAsyncGChatMessage(
+                      spaceName,
+                      `Sorry, I ran into an issue processing that CRM request. Try again or rephrase your question.\n\n_Error: ${asyncErr.message.substring(0, 200)}_`,
+                      threadName,
+                      env
+                    );
+                  } catch (e2) {
+                    console.error(`[GCHAT-ASYNC] Failed to send error message: ${e2.message}`);
+                  }
+                }
+              })());
+
+              // Return a quick synchronous "thinking" message
+              return sendGChatResponse('🔍 Looking that up in the CRM... one moment.', isAddon);
+            }
+
+            // Fallback: no service account key, process synchronously (may timeout)
+            console.log(`[GCHAT-AGENT] No GCP_SERVICE_ACCOUNT_KEY — falling back to synchronous CRM processing`);
           }
 
           reply = await askClaude(text, personId, env, null, useTools);
@@ -3873,15 +4204,7 @@ export default {
 
         // Adapt markdown for Google Chat (* instead of **)
         reply = adaptMarkdownForGChat(reply);
-
-        // Truncate if needed (Google Chat has ~4096 char limit, but async responses can be longer)
-        // For tool-use responses that may be longer, we use a higher threshold
-        const maxLen = 4000;
-        if (reply.length > maxLen) {
-          const truncated = reply.substring(0, maxLen - 200);
-          const lastNewline = truncated.lastIndexOf('\n');
-          reply = (lastNewline > maxLen - 1000 ? truncated.substring(0, lastNewline) : truncated) + '\n\n_(Response truncated. Ask a follow-up for more detail.)_';
-        }
+        reply = truncateGChatReply(reply);
 
         return sendGChatResponse(reply || 'No response generated', isAddon);
 
@@ -4129,7 +4452,178 @@ function extractFromCards(cardsV2) {
   return fullText;
 }
 
+// ─── Gmail Share to Chat Detection & Processing ──────────────────────────────
+
+/**
+ * Detects if a message contains a Gmail link or is a Gmail "Share to Chat" event.
+ * Returns { isGmailShare: bool, gmailUrl: string|null, userComment: string|null, annotations: [] }
+ */
+function detectGmailShare(text, event, isAddon) {
+  const result = { isGmailShare: false, gmailUrl: null, userComment: null, searchHint: null };
+
+  // Check for Gmail URLs in message text
+  const gmailUrlMatch = text.match(/https:\/\/mail\.google\.com\/mail\/[^\s)>\]]+/i);
+  if (gmailUrlMatch) {
+    result.isGmailShare = true;
+    result.gmailUrl = gmailUrlMatch[0];
+    // User comment is everything except the URL
+    result.userComment = text.replace(gmailUrlMatch[0], '').trim() || null;
+  }
+
+  // Check for Google Chat annotations (rich links from Share to Chat)
+  const message = isAddon
+    ? event.chat?.messagePayload?.message
+    : event.message;
+
+  if (message?.annotation) {
+    for (const ann of message.annotation) {
+      if (ann.type === 'RICH_LINK' && ann.richLinkMetadata?.uri?.includes('mail.google.com')) {
+        result.isGmailShare = true;
+        result.gmailUrl = ann.richLinkMetadata.uri;
+        result.searchHint = ann.richLinkMetadata.richLinkType === 'GMAIL'
+          ? (ann.richLinkMetadata.subject || null) : null;
+      }
+    }
+  }
+
+  // Check matchedUrl (Google Chat auto-detected links)
+  if (message?.matchedUrl?.url?.includes('mail.google.com')) {
+    result.isGmailShare = true;
+    result.gmailUrl = message.matchedUrl.url;
+  }
+
+  return result;
+}
+
+/**
+ * Extracts a Gmail thread/message ID from a Gmail URL.
+ * Gmail URLs use formats like: #inbox/FMfcg... or #thread-f:... or ?compose=...
+ * The ID after the last / is typically a thread key we can search for.
+ */
+function extractGmailIdFromUrl(url) {
+  if (!url) return null;
+  // Try #inbox/<id>, #sent/<id>, #label/<name>/<id>, #search/<query>/<id>
+  const hashMatch = url.match(/#[^/]+\/([A-Za-z0-9_+-]+)$/);
+  if (hashMatch) return hashMatch[1];
+  // Try thread-f:<id> format
+  const threadMatch = url.match(/thread-f:(\d+)/);
+  if (threadMatch) return threadMatch[1];
+  return null;
+}
+
+/**
+ * Process a Gmail Share to Chat: fetch the email thread and pass to Claude with context.
+ */
+async function processGmailShareToChat(gmailShare, text, personId, env, kv) {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_REFRESH_TOKEN) {
+    return 'Gmail integration is not configured. I can still analyze the email if you paste the content directly.';
+  }
+
+  try {
+    let emailContent = null;
+    const gmailId = extractGmailIdFromUrl(gmailShare.gmailUrl);
+
+    // Strategy 1: Try to find by thread/message ID from URL
+    if (gmailId) {
+      // Search Gmail for this message using the rfc822msgid or general search
+      const searchResult = await gmailApiCall('GET', `messages?q=rfc822msgid:${gmailId}&maxResults=1`, env);
+      if (searchResult.messages?.length > 0) {
+        const threadId = searchResult.messages[0].threadId;
+        emailContent = await fetchGmailThread(threadId, env);
+      }
+    }
+
+    // Strategy 2: Search by subject hint from annotation
+    if (!emailContent && gmailShare.searchHint) {
+      const searchResult = await gmailApiCall('GET',
+        `messages?q=subject:"${encodeURIComponent(gmailShare.searchHint)}"&maxResults=3`, env);
+      if (searchResult.messages?.length > 0) {
+        const threadId = searchResult.messages[0].threadId;
+        emailContent = await fetchGmailThread(threadId, env);
+      }
+    }
+
+    // Strategy 3: Search for recent messages if no specific match
+    if (!emailContent) {
+      const searchResult = await gmailApiCall('GET', `messages?q=in:inbox&maxResults=5`, env);
+      if (searchResult.messages?.length > 0) {
+        // Get the most recent thread
+        const threadId = searchResult.messages[0].threadId;
+        emailContent = await fetchGmailThread(threadId, env);
+      }
+    }
+
+    if (!emailContent) {
+      return 'I couldn\'t find that email in Gmail. Try pasting the email content directly, or ask me to search for it by subject or sender.';
+    }
+
+    // Build context for Claude
+    const userIntent = gmailShare.userComment || text.replace(/https:\/\/mail\.google\.com[^\s]*/i, '').trim();
+    const emailContext = `## SHARED EMAIL THREAD\n${emailContent}\n\n## USER'S REQUEST\n${userIntent || 'The user shared this email. Analyze it for Cisco/Meraki product mentions, customer requests, or action items. If products are found, generate quote URLs.'}`;
+
+    // Determine if CRM tools should be enabled based on user comment
+    const intent = detectCrmEmailIntent(userIntent || 'analyze this email for products and create a quote');
+    const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
+    const useTools = intent.hasAny && hasCrmCreds;
+
+    const reply = await askClaude(emailContext, personId, env, null, useTools);
+    return reply;
+  } catch (err) {
+    console.error('[GCHAT] Gmail Share to Chat error:', err.message);
+    return `I had trouble fetching that email: ${err.message}. Try pasting the email content directly or telling me the subject line so I can search for it.`;
+  }
+}
+
+/**
+ * Fetch a Gmail thread and format it as readable text.
+ */
+async function fetchGmailThread(threadId, env) {
+  const data = await gmailApiCall('GET', `threads/${threadId}?format=full`, env);
+  if (!data.messages?.length) return null;
+
+  let formatted = '';
+  for (const msg of data.messages) {
+    const headers = (msg.payload?.headers || []).reduce((acc, h) => {
+      acc[h.name.toLowerCase()] = h.value;
+      return acc;
+    }, {});
+
+    let body = '';
+    if (msg.payload?.body?.data) {
+      body = atob(msg.payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+    } else if (msg.payload?.parts) {
+      const textPart = msg.payload.parts.find(p => p.mimeType === 'text/plain');
+      if (textPart?.body?.data) {
+        body = atob(textPart.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+      }
+    }
+
+    formatted += `From: ${headers.from || 'unknown'}\n`;
+    formatted += `To: ${headers.to || ''}\n`;
+    formatted += `Date: ${headers.date || ''}\n`;
+    formatted += `Subject: ${headers.subject || '(no subject)'}\n`;
+    formatted += `\n${body.substring(0, 3000)}\n`;
+    formatted += '---\n';
+  }
+
+  return formatted;
+}
+
 // Helper: format response for Google Chat (Add-on or standalone)
+/**
+ * Truncate a reply to fit Google Chat's message size limit (~4096 chars).
+ */
+function truncateGChatReply(reply) {
+  const maxLen = 4000;
+  if (reply && reply.length > maxLen) {
+    const truncated = reply.substring(0, maxLen - 200);
+    const lastNewline = truncated.lastIndexOf('\n');
+    return (lastNewline > maxLen - 1000 ? truncated.substring(0, lastNewline) : truncated) +
+      '\n\n_(Response truncated. Ask a follow-up for more detail.)_';
+  }
+  return reply || 'No response generated';
+}
+
 function sendGChatResponse(text, isAddon) {
   let body;
   if (isAddon) {
