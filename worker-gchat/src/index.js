@@ -3520,12 +3520,19 @@ function detectCrmEmailIntent(text) {
   // Email intents
   const emailPatterns = [
     /\b(email|draft|send|reply|compose|write)\s+(an?\s+)?(email|message|response|follow[\s-]?up)/i,
-    /\b(check|read|search|find|look\s*up)\s+(my\s+)?(email|inbox|gmail|thread)/i,
-    /\b(what|any)\s+(new\s+)?(email|message)/i,
+    /\b(check|read|search|find|look\s*up|summarize|sum up|review)\s+(my\s+)?(this\s+)?(email|inbox|gmail|thread|conversation)/i,
+    /\b(what|any)\s+.{0,30}(email|message|inbox)/i,       // "whats my most recent email", "what new emails", etc.
+    /\b(my|the|latest|last|recent|newest|most\s+recent)\s+(email|emails|message|messages)/i,  // "my most recent email", "latest email"
     /\b(respond|reply)\s+to\s+/i,
     /\bemail\s+(from|to|about|regarding)/i,
+    /\bdraft\b.{0,20}\b(email|response|reply|message)/i,  // "draft an email response to..."
     /\bgmail\b/i,
     /\binbox\b/i,
+    /\b(email|mail)\s+(connected|setup|working|access)/i,  // "is email connected?"
+    /\bsummarize\s+(this\s+)?(thread|email|conversation|message)/i,  // "summarize this thread"
+    /\b(RE|FW|Fwd):\s+/,  // Forwarded/replied subject lines indicate email context
+    /\bsubject\s*(line|:)/i,  // References to email subject lines
+    /\bsearch\s+(for\s+)?(the\s+)?(email|thread|message)/i,  // "search for the email"
   ];
 
   const hasCrm = crmPatterns.some(p => p.test(text));
@@ -3539,57 +3546,203 @@ const CRM_SYSTEM_PROMPT = `
 
 ## CRM & EMAIL ASSISTANT MODE
 
-You now have access to Zoho CRM and Gmail tools. Use them to help with customer relationship management tasks.
-
-### YOUR IDENTITY
-You are Stratus AI, the sales assistant for Stratus Information Systems, a Cisco-exclusive Meraki reseller. You help the sales team manage their CRM and email workflows.
+You now have access to Zoho CRM and Gmail tools. Use them to help with CRM and email tasks.
 
 ### ZOHO CRM CONTEXT
-- Organization ID: org647122552
-- CRM URL format: https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}
-- Owner (default): Chris Graves, ID 2570562000141711002, email chrisg@stratusinfosystems.com
+- Org ID: org647122552
+- CRM link format: https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}
+- Owner default: Chris Graves — ID 2570562000141711002
 - Always filter queries by Owner = 2570562000141711002 unless told otherwise
 
-### DEAL CREATION RULES
-- Lead_Source valid values ONLY: Meraki ISR Referal, Meraki ADR Referal, VDC, Stratus Referal, Website, -None-
-- "Referal" is spelled with ONE R (not "Referral") — this is intentional for reporting
-- Default Lead_Source: "Stratus Referal" unless a Cisco rep referral is mentioned
-- Default Stage: "Qualification" (validate via zoho_get_field before any Stage write)
-- NEVER set Stage to "Closed Won" manually — deals auto-close when a PO is attached
-- "Closed (Lost)" has parentheses — never use "Closed Lost"
-- Always include: Deal_Name, Account_Name, Lead_Source, Stage, Closing_Date, Owner
+---
 
-### QUOTE CREATION RULES
-- Always include: Subject, Deal_Name (linked deal ID), Valid_Till, Product_Details
-- For product lookups, search the Products module by Product_Code (SKU)
-- Ecomm pricing: use Stratus_Price field from Products (WooProducts) module
+## CLARIFYING QUESTIONS — ASK BEFORE CREATING
 
-### TASK RULES
+Before creating any Deal or Quote, you MUST have all required fields. If anything is missing, STOP and ask the user in a single friendly message. Do not guess or proceed with placeholders.
+
+Info needed for a Quote (gather all in one ask if missing):
+- Company name (Account)
+- Contact name
+- Products / SKUs and quantities
+- Any Cisco rep involvement? (determines Lead_Source)
+- Billing address (look up in Zoho Account first, then Gmail thread, then ask)
+
+Example: "To build this quote in Zoho I need a couple details — what's the company and contact name? And do you have a specific SKU list?"
+
+---
+
+## PRE-CREATION VALIDATION TABLE (MANDATORY)
+
+Before calling zoho_create_record for ANY Deal or Quote, display a validation table and wait for confirmation. Stop if any required field is missing or marked ⚠.
+
+Deal validation example:
+\`\`\`
+PRE-CREATION VALIDATION (DEAL):
+| Field        | Value                   | Status       |
+|--------------|-------------------------|--------------|
+| Deal_Name    | Acme - MR44 Refresh     | ✓            |
+| Account_Name | Acme Corp               | ✓            |
+| Contact_Name | John Smith              | ✓            |
+| Stage        | Qualification           | ✓ (default)  |
+| Lead_Source  | Stratus Referal         | ✓ (default)  |
+| Meraki_ISR   | Stratus Sales           | ✓ (default)  |
+| Closing_Date | 2026-04-26              | ✓ (today+30) |
+\`\`\`
+
+Quote validation example:
+\`\`\`
+PRE-CREATION VALIDATION (QUOTE):
+| Field              | Value                | Status       |
+|--------------------|----------------------|--------------|
+| Subject            | Acme - 10x MR44      | ✓            |
+| Deal_Name          | Acme - MR44 Refresh  | ✓            |
+| Contact_Name       | John Smith           | ✓            |
+| Valid_Till         | 2026-04-26           | ✓ (today+30) |
+| Cisco_Billing_Term | Prepaid Term         | ✓ (default)  |
+| Billing_Street     | 500 Industrial Blvd  | ✓ (Account)  |
+| Billing_City       | Milwaukee            | ✓            |
+| Billing_State      | WI                   | ✓            |
+| Billing_Code       | 53202                | ✓            |
+| Billing_Country    | US                   | ✓ (default)  |
+| Shipping_Country   | US                   | ✓ (default)  |
+| Line Items         | 10x MR44-HW + lic    | ✓            |
+\`\`\`
+
+If ANY field is ⚠ or missing → STOP and resolve before creating.
+Show BOTH tables when creating a Deal and Quote in the same workflow.
+
+---
+
+## DEAL CREATION — COMPLETE REQUIRED PAYLOAD
+
+Every Deal Create call MUST include ALL of these fields:
+\`\`\`json
+{
+  "Deal_Name": "{Account} - {Description}",
+  "Account_Name": {"id": "{account_id}"},
+  "Contact_Name": {"id": "{contact_id}"},
+  "Stage": "Qualification",
+  "Lead_Source": "Stratus Referal",
+  "Closing_Date": "{YYYY-MM-DD, today + 30 days}",
+  "Amount": 0,
+  "Meraki_ISR": {"id": "2570562000027286729"},
+  "Owner": {"id": "2570562000141711002"}
+}
+\`\`\`
+Closing_Date: calculate dynamically as today + 30 days, YYYY-MM-DD format.
+Never set Stage to "Closed Won" manually — deals auto-close when a PO is attached.
+
+---
+
+## QUOTE CREATION — COMPLETE REQUIRED PAYLOAD
+
+Every Quote Create call MUST include ALL of these fields:
+\`\`\`json
+{
+  "Subject": "{Account} - {Description}",
+  "Deal_Name": {"id": "{deal_id}"},
+  "Account_Name": {"id": "{account_id}"},
+  "Contact_Name": {"id": "{contact_id}"},
+  "Valid_Till": "{YYYY-MM-DD, today + 30 days}",
+  "Cisco_Billing_Term": "Prepaid Term",
+  "Billing_Street": "{from Account record or lookup}",
+  "Billing_City": "{from Account record or lookup}",
+  "Billing_State": "{2-LETTER STATE CODE}",
+  "Billing_Code": "{zip code}",
+  "Billing_Country": "US",
+  "Shipping_Country": "US",
+  "Owner": {"id": "2570562000141711002"},
+  "Quoted_Items": [
+    {"Quantity": 1, "Product_Name": {"id": "{zoho_product_id}"}, "Discount": 0}
+  ]
+}
+\`\`\`
+
+Billing address lookup order: (1) Zoho Account record fields → (2) Gmail thread/email signature → (3) Ask user. Never create a Quote with blank address fields.
+
+---
+
+## LEAD SOURCE & MERAKI ISR LOGIC
+
+Lead_Source valid values ONLY — "Referal" spelled with ONE R (intentional):
+- "Stratus Referal" — DEFAULT for 99% of deals
+- "Meraki ISR Referal" — Cisco rep referred the opportunity
+- "Meraki ADR Referal" — ADR involved (prompt for ADR name)
+- "VDC" — VDC lead
+- "Website" — website inquiry
+- NEVER use "-None-", never create new picklist values
+
+Meraki_ISR defaults:
+- Lead_Source = Stratus Referal / Website / VDC → Meraki_ISR = Stratus Sales (ID: 2570562000027286729)
+- Lead_Source = Meraki ISR Referal → Meraki_ISR = REQUIRED (ask for rep name), Reason = "Meraki ISR recommended"
+- Lead_Source = Meraki ADR Referal → prompt for ADR name
+
+Proceed-first rule: Create with Stratus Referal + Stratus Sales defaults. Ask about Cisco rep involvement AFTER creation unless a rep is obviously mentioned up front.
+
+---
+
+## ECOMM PRICING — EVERY QUOTE
+
+Never create a quote at list price. Apply Stratus ecomm pricing on every line:
+1. Search WooProducts module: criteria (WooProduct_Code:equals:{SKU}), fields: WooProduct_Code,Stratus_Price
+2. Discount per line = (List_Price − Stratus_Price) × Quantity  ← dollar amount, not percent
+3. Include Description = "{XX}% discount applied" on each line
+
+Zoho auto-populates List_Price from the Product record. Only send Product_Name.id, Quantity, Discount, Description per line item.
+
+---
+
+## PICKLIST PROTECTION
+
+NEVER create new dropdown values — Zoho silently accepts invalid values and creates duplicates.
+- WRONG: "Closed Lost" → CORRECT: "Closed (Lost)" with parentheses
+- WRONG: "Referral" → CORRECT: "Stratus Referal" (one R)
+- Always validate Stage live via zoho_get_field before any Stage write
+- Lead_Source is stable — use the cached list above
+
+---
+
+## TASK RULES
+
 - All active deals MUST have at least one open follow-up task
 - Default follow-up: 3 business days out, skip weekends
 - Before closing a task on an active deal, check for successor tasks
+- Every new Deal MUST have a follow-up task created as the FINAL step before reporting done
 
-### PICKLIST PROTECTION
-NEVER create new dropdown values. Zoho silently accepts invalid values and creates duplicates.
-Always validate Stage via zoho_get_field before creating/updating Deals.
+---
 
-### EMAIL RULES
-- When asked to email a customer, ALWAYS create a draft first (gmail_create_draft)
-- NEVER send an email without explicit user approval
-- Include proper paragraph spacing (blank lines between paragraphs)
-- Sign emails as Chris Graves, Regional Sales Director, Stratus Information Systems
-- Email voice: friendly, consultative, concise. End with a question or call to action.
+## EMAIL RULES
 
-### GMAIL SEARCH TIPS
-- Search by sender: from:john@acme.com
-- Search by subject: subject:"quote request"
-- Date range: after:2026/01/01 before:2026/04/01
-- Combine: from:customer@acme.com subject:renewal after:2026/01/01
+- Always create a Gmail draft first (gmail_create_draft) — NEVER send without approval
+- Blank line between every paragraph
+- Sign as: Chris Graves, Regional Sales Director, Stratus Information Systems
+- Voice: friendly, consultative, concise. End every customer email with a question or CTA.
 
-### RESPONSE FORMAT
-- Always include Zoho CRM links when referencing records: https://crm.zoho.com/crm/org647122552/tab/{Module}/{RecordID}
-- Keep responses concise but complete
-- When showing deal/quote info, format as a clean summary, not raw JSON
+---
+
+## GMAIL SEARCH TIPS
+- Sender: from:john@acme.com  |  Subject: subject:"quote"  |  Date: after:2026/01/01
+
+---
+
+## RESPONSE FORMAT
+- Link every Zoho record: https://crm.zoho.com/crm/org647122552/tab/{Module}/{RecordID}
+- Format deal/quote info as a clean summary, never raw JSON
+- Use * for bold in Google Chat (not **)
+- Keep responses concise — this is a chat interface
+
+## NARRATE AS YOU WORK (CRITICAL)
+
+The user cannot see your thinking or tool calls — only your text responses. This means you MUST narrate what you're doing and what you find as you go. Include a brief text block BEFORE each tool call explaining what you're about to do and why. After getting results, summarize what you found before moving to the next step.
+
+Examples of good narration:
+- Before searching: "Let me search Zoho for the Apollocare account first."
+- After finding account: "Found Apollocare (ID: 123). Now I'll pull their open deals."
+- Before creating: "Got everything I need — here's what I'm about to create:" [show validation table]
+- When something is missing: "I can see the account but there's no billing address on file. Let me check Gmail for their email signature."
+- When asking for input: "I need one more thing before I can create this — what SKUs and quantities should I quote?"
+
+Never jump straight to tool calls without a text explanation. The user should always know what step you're on and what you found.
 `;
 
 // Minimal system prompt for CRM/email agent mode (saves ~4K tokens vs full SYSTEM_PROMPT)
@@ -3603,7 +3756,52 @@ ${CRM_SYSTEM_PROMPT}`;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ─── Claude API (direct fetch, no SDK) ───────────────────────────────────────
-async function askClaude(userMessage, personId, env, imageData = null, useTools = false) {
+// Generate a human-readable progress message from a tool call
+function toolProgressMessage(toolName, toolInput) {
+  switch (toolName) {
+    case 'zoho_search_records': {
+      const mod = toolInput.module_name || 'records';
+      const criteria = toolInput.criteria ? toolInput.criteria.replace(/[()]/g, '').substring(0, 60) : '';
+      return `🔍 Searching Zoho ${mod}${criteria ? ` (${criteria})` : ''}...`;
+    }
+    case 'zoho_coql_query':
+      return `🔍 Running CRM query...`;
+    case 'zoho_get_record': {
+      const mod = toolInput.module_name || 'record';
+      return `📄 Loading ${mod} details...`;
+    }
+    case 'zoho_get_related_records': {
+      const rel = toolInput.related_module || 'related records';
+      return `🔗 Loading related ${rel}...`;
+    }
+    case 'zoho_create_record': {
+      const mod = toolInput.module_name || 'record';
+      return `✏️ Creating ${mod} in Zoho CRM...`;
+    }
+    case 'zoho_update_record': {
+      const mod = toolInput.module_name || 'record';
+      return `✏️ Updating ${mod}...`;
+    }
+    case 'zoho_get_field':
+      return `🔍 Validating ${toolInput.field_name || 'field'} picklist values...`;
+    case 'gmail_search_messages': {
+      const q = (toolInput.query || '').substring(0, 50);
+      return `📧 Searching Gmail: ${q}...`;
+    }
+    case 'gmail_read_message':
+      return `📧 Reading email...`;
+    case 'gmail_read_thread':
+      return `📧 Loading email thread...`;
+    case 'gmail_create_draft':
+      return `✍️ Creating draft email to ${toolInput.to || ''}...`;
+    case 'gmail_send_email':
+      return `📤 Sending email to ${toolInput.to || ''}...`;
+    default:
+      return `⚙️ Running ${toolName}...`;
+  }
+}
+
+async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
@@ -3689,11 +3887,15 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     }
 
     // Agentic loop: Claude may call tools multiple times before returning text
-    const MAX_TOOL_ITERATIONS = 8;
+    // Cap tool iterations lower (6) to reduce chance of hitting Cloudflare's
+    // ctx.waitUntil wall-clock limit (~30s). Sonnet takes 5-10s per call.
+    const MAX_TOOL_ITERATIONS = useTools ? 6 : 8;
     let iteration = 0;
+    const _loopStartMs = Date.now();
 
-    // Helper: call Anthropic API with retry for 429 rate limits
+    // Helper: call Anthropic API with retry for 429/529 + model fallback
     async function callAnthropicWithRetry(body, maxRetries = 3) {
+      let lastResponse = null;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         const response = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
@@ -3705,20 +3907,50 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           body: JSON.stringify(body)
         });
 
-        if (response.status === 429 && attempt < maxRetries) {
-          // Rate limited — wait with exponential backoff (1s, 2s, 4s)
+        if ((response.status === 429 || response.status === 529) && attempt < maxRetries) {
+          // Rate limited (429) or overloaded (529) — wait with exponential backoff (2s, 4s, 8s)
           const retryAfter = response.headers.get('retry-after');
-          const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : (1000 * Math.pow(2, attempt));
-          console.log(`[GCHAT-AGENT] Rate limited (429), retry ${attempt + 1}/${maxRetries} after ${waitMs}ms`);
+          const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : (2000 * Math.pow(2, attempt));
+          console.log(`[GCHAT-AGENT] API ${response.status}, retry ${attempt + 1}/${maxRetries} after ${waitMs}ms`);
           await new Promise(r => setTimeout(r, waitMs));
           continue;
         }
 
         return response;
       }
+      // All retries exhausted on primary model — try fallback to Haiku
+      if (body.model !== 'claude-haiku-3-5-20241022') {
+        console.log(`[GCHAT-AGENT] Primary model exhausted retries, falling back to Haiku`);
+        const fallbackBody = { ...body, model: 'claude-haiku-3-5-20241022' };
+        return await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify(fallbackBody)
+        });
+      }
     }
 
     while (iteration < MAX_TOOL_ITERATIONS) {
+      // Deadline guard: if we've burned past maxWallMs, return a partial response
+      // rather than dying silently when Cloudflare kills the ctx.waitUntil worker.
+      if (maxWallMs && (Date.now() - _loopStartMs) > maxWallMs) {
+        console.log(`[GCHAT] Deadline ${maxWallMs}ms exceeded at iteration ${iteration}, returning partial`);
+        // Try to surface any narrative text from the last assistant turn
+        const lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
+        const partialContent = lastAssistantMsg
+          ? (Array.isArray(lastAssistantMsg.content)
+            ? lastAssistantMsg.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+            : String(lastAssistantMsg.content))
+          : '';
+        return partialContent
+          ? `⏱️ I ran out of time before I could finish. Here's what I found so far:\n\n${partialContent}\n\n_Try asking a more focused question (e.g. search for the deal first, then create the quote separately)._`
+          : `⏱️ This request took too long to complete. Try breaking it into smaller steps — first search for the account, then ask me to create the quote.`;
+      }
+
       iteration++;
 
       const requestBody = {
@@ -3753,7 +3985,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
             }), { expirationTtl: 7200 });
           }
         } catch (logErr) { /* ignore logging errors */ }
-        return `Sorry, I couldn't process that request (API ${response.status}). Try a specific SKU like "quote 10 MR44".`;
+        if (response.status === 529) {
+          return `The AI service is temporarily overloaded. Please try again in a minute.`;
+        }
+        return useTools
+          ? `Sorry, I couldn't process that CRM/email request (API ${response.status}). Please try again shortly.`
+          : `Sorry, I couldn't process that request (API ${response.status}). Try a specific SKU like "quote 10 MR44".`;
       }
 
       const data = await response.json();
@@ -3766,10 +4003,27 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         messages.push({ role: 'assistant', content: data.content });
 
         // Execute each tool call and collect results
+        // Collect any interim text Claude narrated before the tool calls
+        const interimText = data.content
+          .filter(b => b.type === 'text' && b.text.trim().length > 0)
+          .map(b => b.text.trim())
+          .join('\n');
+
         const toolResults = [];
         for (const block of data.content) {
           if (block.type === 'tool_use') {
             console.log(`[GCHAT-AGENT] Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
+
+            // Send progress update to user before executing the tool
+            if (progressCallback) {
+              // If Claude narrated something, prepend it to the first progress message
+              const progressMsg = toolProgressMessage(block.name, block.input);
+              const fullProgress = interimText && toolResults.length === 0
+                ? `${interimText}\n\n${progressMsg}`
+                : progressMsg;
+              try { await progressCallback(fullProgress); } catch (e) { /* ignore */ }
+            }
+
             const result = await executeToolCall(block.name, block.input, env);
             const resultStr = JSON.stringify(result);
             console.log(`[GCHAT-AGENT] Tool result: ${resultStr.substring(0, 200)}`);
@@ -4073,6 +4327,40 @@ export default {
 
         const text = messageText;
 
+        // Log raw event structure for debugging Gmail Share to Chat
+        try {
+          const msg = isAddon ? event.chat?.messagePayload?.message : event.message;
+          if (msg) {
+            const debugPayload = {
+              timestamp: new Date().toISOString(),
+              text: (msg.argumentText || msg.text || '').substring(0, 300),
+              hasAnnotation: !!msg.annotation,
+              annotationCount: msg.annotation?.length || 0,
+              annotations: msg.annotation?.map(a => ({ type: a.type, metadata: a.richLinkMetadata || a.slashCommandMetadata || null })) || [],
+              hasMatchedUrl: !!msg.matchedUrl,
+              matchedUrl: msg.matchedUrl?.url || null,
+              hasAttachment: !!msg.attachment,
+              attachmentCount: msg.attachment?.length || 0,
+              hasCardsV2: !!msg.cardsV2,
+              cardCount: msg.cardsV2?.length || 0,
+              // Capture all space/name paths to find correct location for addon events
+              spaceName_eventSpace: event.space?.name || null,
+              spaceType_eventSpace: event.space?.type || null,
+              spaceName_msgSpace: msg.space?.name || null,
+              spaceType_msgSpace: msg.space?.type || null,
+              msgName: msg.name || null,
+              chatSpaceName: event.chat?.messagePayload?.space?.name || null,
+              chatMsgSpaceName: event.chat?.messagePayload?.message?.space?.name || null,
+              commonEventKeys: event.commonEventObject ? Object.keys(event.commonEventObject) : [],
+              chatKeys: event.chat ? Object.keys(event.chat) : [],
+              chatPayloadKeys: event.chat?.messagePayload ? Object.keys(event.chat.messagePayload) : [],
+              isAddon: isAddon
+            };
+            await kv.put(`event_debug_${Date.now()}`, JSON.stringify(debugPayload), { expirationTtl: 3600 });
+            console.log(`[GCHAT-DEBUG] Event payload: ${JSON.stringify(debugPayload)}`);
+          }
+        } catch (dbgErr) { /* ignore debug errors */ }
+
         // Process through the deterministic engine (same as Webex bot)
         let reply;
 
@@ -4113,7 +4401,24 @@ export default {
           }
         }
 
-        if (!reply) {
+        // Skip deterministic quoting engine for explicit CRM/Zoho requests
+        // e.g. "In zoho a new quote for 1 MR44" — the SKU parser would intercept
+        // before the CRM agent could handle it without this guard.
+        let isExplicitCrmRequest = /\bzoho\b|\bcrm\b|\bin\s+zoho\b|\bzoho\s+quote\b|\bzoho\s+deal\b|\bopen\s+deals?\b|\bcheck\s+(the\s+)?(crm|zoho)\b/i.test(text);
+
+        // "Try again" / "retry" should re-run as a CRM request if the previous
+        // user message was a CRM intent — prevents context confusion where
+        // "try again" gets treated as a quote revision and replies about wrong topic.
+        if (!isExplicitCrmRequest && /^\s*(try\s+again|retry|again|try\s+that\s+again)\s*[.!?]?\s*$/i.test(text)) {
+          const recentHistory = await getHistory(kv, personId);
+          const lastUserMsg = recentHistory.filter(m => m.role === 'user').slice(-2, -1)[0];
+          if (lastUserMsg && detectCrmEmailIntent(lastUserMsg.content).hasAny) {
+            console.log(`[GCHAT] "try again" detected after CRM query — re-routing to CRM agent`);
+            isExplicitCrmRequest = true;
+          }
+        }
+
+        if (!reply && !isExplicitCrmRequest) {
           const parsed = parseMessage(text);
           if (parsed) {
             const result = buildQuoteResponse(parsed);
@@ -4138,8 +4443,8 @@ export default {
           }
         }
 
-        // Option 4: Deterministic pricing calculator
-        if (!reply) {
+        // Option 4: Deterministic pricing calculator (skip for explicit CRM requests)
+        if (!reply && !isExplicitCrmRequest) {
           const pricingReply = await handlePricingRequest(text, personId, kv);
           if (pricingReply) reply = pricingReply;
         }
@@ -4159,7 +4464,11 @@ export default {
             // agentic loop). Google Chat's synchronous webhook timeout is ~30s.
             // Return a quick "thinking" message now, process in background,
             // then deliver the real answer via the Google Chat REST API.
-            const spaceName = event.space?.name;
+            // For addon events (isAddon=true), space is nested inside chat.messagePayload
+            // For direct webhook events (isAddon=false), space is at event.space
+            const spaceName = event.space?.name
+              || event.chat?.messagePayload?.message?.space?.name
+              || event.chat?.messagePayload?.space?.name;
             const threadName = event.message?.thread?.name
               || event.chat?.messagePayload?.message?.thread?.name;
             const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
@@ -4170,19 +4479,37 @@ export default {
               // Fire-and-forget background processing
               ctx.waitUntil((async () => {
                 try {
-                  let asyncReply = await askClaude(text, personId, env, null, true);
+                  // Progress callback: sends a top-level Google Chat message for each tool step
+                  // (no threadName = appears in main chat, not as a thread reply)
+                  const progressCallback = async (msg) => {
+                    const formatted = adaptMarkdownForGChat(msg);
+                    await sendAsyncGChatMessage(spaceName, formatted, null, env);
+                  };
+
+                  // 22s deadline: Cloudflare gives ctx.waitUntil ~30s wall clock after sync response.
+                  // Sonnet takes 5-10s per call, so we cap the tool loop at 22s and return
+                  // a partial response rather than dying silently.
+                  let asyncReply = await askClaude(text, personId, env, null, true, progressCallback, 22000);
                   asyncReply = adaptMarkdownForGChat(asyncReply);
                   asyncReply = truncateGChatReply(asyncReply);
-                  await sendAsyncGChatMessage(spaceName, asyncReply, threadName, env);
+                  await sendAsyncGChatMessage(spaceName, asyncReply, null, env);
                   await addToHistory(kv, personId, 'user', text);
                   await addToHistory(kv, personId, 'assistant', asyncReply);
                 } catch (asyncErr) {
                   console.error(`[GCHAT-ASYNC] Background processing failed: ${asyncErr.message}`);
+                  // Log to KV for debugging (no api_error_ entries = Cloudflare killed the worker)
+                  try {
+                    await kv.put(
+                      `async_error_${Date.now()}`,
+                      JSON.stringify({ error: asyncErr.message, stack: (asyncErr.stack || '').substring(0, 500), ts: new Date().toISOString() }),
+                      { expirationTtl: 3600 }
+                    );
+                  } catch (_) { /* ignore */ }
                   try {
                     await sendAsyncGChatMessage(
                       spaceName,
                       `Sorry, I ran into an issue processing that CRM request. Try again or rephrase your question.\n\n_Error: ${asyncErr.message.substring(0, 200)}_`,
-                      threadName,
+                      null,
                       env
                     );
                   } catch (e2) {
@@ -4490,6 +4817,37 @@ function detectGmailShare(text, event, isAddon) {
   if (message?.matchedUrl?.url?.includes('mail.google.com')) {
     result.isGmailShare = true;
     result.gmailUrl = message.matchedUrl.url;
+  }
+
+  // Fallback: detect Gmail Share by text patterns (subject line without URL)
+  // Gmail "Share to Chat" sometimes sends just the subject line as text with no URL
+  if (!result.isGmailShare) {
+    const subjectMatch = text.match(/^(.*?)\n\s*(?:📧\s*|✉️\s*)?(?:RE|FW|Fwd)?:?\s*(.+?)$/im);
+    if (subjectMatch) {
+      const userComment = subjectMatch[1].trim();
+      const possibleSubject = subjectMatch[2].trim();
+      // If user comment is a command and the second line looks like an email subject
+      if (/\b(summarize|read|review|analyze|look at|check|what|tell me about)\b/i.test(userComment) && possibleSubject.length > 5) {
+        result.isGmailShare = true;
+        result.searchHint = possibleSubject;
+        result.userComment = userComment;
+        console.log(`[GCHAT] Gmail Share detected by text pattern: subject="${possibleSubject}", comment="${userComment}"`);
+      }
+    }
+    // Also check for "RE:" or "FW:" patterns with a command
+    if (!result.isGmailShare) {
+      const reMatch = text.match(/(RE|FW|Fwd):\s*(.+)/i);
+      if (reMatch) {
+        const fullSubject = reMatch[0].trim();
+        const userComment = text.replace(fullSubject, '').trim();
+        if (userComment.length > 0 || /summarize|read|review|analyze/i.test(text)) {
+          result.isGmailShare = true;
+          result.searchHint = fullSubject;
+          result.userComment = userComment || 'summarize this email';
+          console.log(`[GCHAT] Gmail Share detected by RE/FW pattern: subject="${fullSubject}"`);
+        }
+      }
+    }
   }
 
   return result;
