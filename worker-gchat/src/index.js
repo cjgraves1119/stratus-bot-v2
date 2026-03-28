@@ -12,6 +12,14 @@
  *   - JSON imports instead of fs.readFileSync
  */
 
+// ─── Cloudflare AI Gateway ──────────────────────────────────────────────────
+// Routes all Anthropic API calls through CF AI Gateway for:
+//   - Response caching (identical prompts served from edge cache)
+//   - Analytics & cost tracking (token usage, latency, error rates)
+//   - Rate limiting (protect against runaway API costs)
+// Dashboard: https://dash.cloudflare.com/ec1888c5a0b51dc3eebf6bae13a3922b/ai/ai-gateway/gateways/stratus-ai-bot
+const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
+
 // ─── Data Imports (embedded at build time by wrangler) ──────────────────────
 import pricesData from './data/prices.json';
 import catalogData from './data/auto-catalog.json';
@@ -2839,7 +2847,7 @@ async function processEmailThread(text, personId, env, kv) {
   try {
     // Use Claude to extract products from the email
     const prompt = buildEmailParsingPrompt(text);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -3819,12 +3827,13 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 
   async function callAnthropicWithRetry(body, maxRetries = 2) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch(ANTHROPIC_API_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01'
+          'anthropic-version': '2023-06-01',
+          'cf-aig-cache-ttl': '3600'  // Cache identical prompts for 1 hour
         },
         body: JSON.stringify(body)
       });
@@ -4011,12 +4020,13 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     async function callAnthropicWithRetry(body, maxRetries = 3) {
       let lastResponse = null;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
+        const response = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01'
+            'anthropic-version': '2023-06-01',
+            'cf-aig-skip-cache': 'true'  // CRM tool-use calls are always unique
           },
           body: JSON.stringify(body)
         });
@@ -4036,12 +4046,13 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       if (body.model !== 'claude-haiku-4-5-20251001') {
         console.log(`[GCHAT-AGENT] Primary model exhausted retries, falling back to Haiku`);
         const fallbackBody = { ...body, model: 'claude-haiku-4-5-20251001' };
-        return await fetch('https://api.anthropic.com/v1/messages', {
+        return await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01'
+            'anthropic-version': '2023-06-01',
+            'cf-aig-skip-cache': 'true'
           },
           body: JSON.stringify(fallbackBody)
         });
@@ -4508,7 +4519,7 @@ export default {
             input_schema: { type: 'object', properties: { msg: { type: 'string' } }, required: ['msg'] }
           }]
         };
-        const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+        const apiRes = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

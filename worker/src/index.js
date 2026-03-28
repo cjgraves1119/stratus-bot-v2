@@ -12,6 +12,11 @@
  *   - JSON imports instead of fs.readFileSync
  */
 
+// ─── Cloudflare AI Gateway ──────────────────────────────────────────────────
+// Routes Anthropic API calls through CF AI Gateway for caching, analytics,
+// and rate limiting. Dashboard: dash.cloudflare.com > AI > AI Gateway
+const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
+
 // ─── Data Imports (embedded at build time by wrangler) ──────────────────────
 import pricesData from './data/prices.json';
 import catalogData from './data/auto-catalog.json';
@@ -2891,12 +2896,13 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     }
     const messages = [...history, { role: 'user', content: userContent }];
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
+        'anthropic-version': '2023-06-01',
+        'cf-aig-cache-ttl': '3600'  // Cache identical prompts for 1 hour
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
