@@ -3919,9 +3919,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         return response;
       }
       // All retries exhausted on primary model — try fallback to Haiku
-      if (body.model !== 'claude-haiku-3-5-20241022') {
+      if (body.model !== 'claude-3-5-haiku-20241022') {
         console.log(`[GCHAT-AGENT] Primary model exhausted retries, falling back to Haiku`);
-        const fallbackBody = { ...body, model: 'claude-haiku-3-5-20241022' };
+        const fallbackBody = { ...body, model: 'claude-3-5-haiku-20241022' };
         return await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
@@ -3956,7 +3956,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const requestBody = {
         // CRM tool-use: use Haiku (1-2s/call vs 6-10s for Sonnet) so 5-6 iterations
         // fit within the 25s ctx.waitUntil deadline. Sonnet for non-tool chat.
-        model: useTools ? 'claude-haiku-3-5-20241022' : 'claude-sonnet-4-20250514',
+        model: useTools ? 'claude-3-5-haiku-20241022' : 'claude-sonnet-4-20250514',
         max_tokens: useTools ? 2048 : 1024,
         system: systemPrompt,
         messages
