@@ -3176,6 +3176,141 @@ async function gmailApiCall(method, path, env, body = null) {
   }
 }
 
+// ─── CRM Validation Constants ─────────────────────────────────────────────────
+const VALID_DEAL_STAGES = [
+  'Qualification', 'Needs Analysis', 'Value Proposition', 'Identify Decision Makers',
+  'Proposal/Price Quote', 'Negotiation/Review', 'Closed Won', 'Closed (Lost)',
+  'Waiting on Customer', 'PO Received'
+];
+const VALID_LEAD_SOURCES = [
+  'Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website', 'PharosIQ'
+];
+const VALID_TASK_STATUSES = [
+  'Not Started', 'Deferred', 'In Progress', 'Waiting for input', 'Completed'
+];
+const BLOCKED_STAGE_VALUES = ['Closed Won']; // Must be set by PO automation, never manually
+
+// Common misspellings/wrong values → correct values for helpful error messages
+const PICKLIST_CORRECTIONS = {
+  'Closed Lost': 'Closed (Lost)',
+  'Closed-Lost': 'Closed (Lost)',
+  'closed lost': 'Closed (Lost)',
+  'Referral': 'Stratus Referal',
+  'Stratus Referral': 'Stratus Referal',
+  'Meraki ISR Referral': 'Meraki ISR Referal',
+  'Closed-Won': 'Closed Won',
+  '-None-': null  // Should never be used for Lead_Source
+};
+
+/**
+ * Validates picklist values before sending to Zoho.
+ * Returns { valid: true } or { valid: false, error: 'message' }
+ */
+function validateCrmWrite(module_name, data, isCreate = false) {
+  const errors = [];
+
+  if (module_name === 'Deals') {
+    // Stage validation
+    if (data.Stage) {
+      // Check for blocked values first
+      if (BLOCKED_STAGE_VALUES.includes(data.Stage)) {
+        errors.push(`❌ Stage "${data.Stage}" cannot be set manually. Deals auto-close to Closed Won when a PO (Sales_Order) is attached.`);
+      }
+      // Check for common misspellings
+      else if (PICKLIST_CORRECTIONS[data.Stage] !== undefined) {
+        const correction = PICKLIST_CORRECTIONS[data.Stage];
+        errors.push(`❌ Invalid Stage "${data.Stage}". Did you mean "${correction}"?`);
+      }
+      // Check against valid values
+      else if (!VALID_DEAL_STAGES.includes(data.Stage)) {
+        errors.push(`❌ Invalid Stage "${data.Stage}". Valid options: ${VALID_DEAL_STAGES.join(', ')}`);
+      }
+    }
+
+    // Lead_Source validation
+    if (data.Lead_Source) {
+      if (data.Lead_Source === '-None-') {
+        errors.push('❌ Lead_Source cannot be "-None-". Use "Stratus Referal" as default or specify the correct source.');
+      } else if (PICKLIST_CORRECTIONS[data.Lead_Source] !== undefined) {
+        const correction = PICKLIST_CORRECTIONS[data.Lead_Source];
+        errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Did you mean "${correction}"?`);
+      } else if (!VALID_LEAD_SOURCES.includes(data.Lead_Source)) {
+        errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Valid options: ${VALID_LEAD_SOURCES.join(', ')}`);
+      }
+    }
+
+    // Required fields on create
+    if (isCreate) {
+      const required = ['Deal_Name', 'Stage', 'Lead_Source', 'Owner', 'Closing_Date'];
+      for (const field of required) {
+        if (!data[field]) {
+          errors.push(`❌ Missing required field "${field}" for Deal creation.`);
+        }
+      }
+    }
+  }
+
+  if (module_name === 'Tasks') {
+    if (data.Status) {
+      if (!VALID_TASK_STATUSES.includes(data.Status)) {
+        errors.push(`❌ Invalid Task Status "${data.Status}". Valid options: ${VALID_TASK_STATUSES.join(', ')}`);
+      }
+    }
+  }
+
+  if (module_name === 'Quotes' && isCreate) {
+    const required = ['Subject', 'Deal_Name', 'Valid_Till'];
+    for (const field of required) {
+      if (!data[field]) {
+        errors.push(`❌ Missing required field "${field}" for Quote creation.`);
+      }
+    }
+  }
+
+  return errors.length > 0
+    ? { valid: false, error: errors.join('\n') }
+    : { valid: true };
+}
+
+/**
+ * Parse Zoho API response into a clear success/failure message.
+ */
+function parseZohoResponse(result, action = 'operation') {
+  // Handle raw error responses
+  if (result.error) {
+    return { success: false, message: `Zoho API error: ${result.error}`, data: result };
+  }
+
+  // Handle standard Zoho response format
+  if (result.data && Array.isArray(result.data)) {
+    const record = result.data[0];
+    if (record.code === 'SUCCESS') {
+      return {
+        success: true,
+        message: `✅ ${action} successful.`,
+        record_id: record.details?.id,
+        data: record
+      };
+    } else {
+      const detail = record.details
+        ? Object.entries(record.details).map(([k,v]) => `${k}: ${JSON.stringify(v)}`).join(', ')
+        : '';
+      return {
+        success: false,
+        message: `❌ ${action} failed: ${record.code} — ${record.message || ''}${detail ? ` (${detail})` : ''}`,
+        data: record
+      };
+    }
+  }
+
+  // Fallback — return as-is but flag if it looks like an error
+  if (result.status && result.status >= 400) {
+    return { success: false, message: `Zoho API returned status ${result.status}`, data: result };
+  }
+
+  return { success: true, message: `✅ ${action} completed.`, data: result };
+}
+
 // ─── Tool Execution Router ────────────────────────────────────────────────────
 async function executeToolCall(toolName, toolInput, env) {
   try {
@@ -3208,12 +3343,25 @@ async function executeToolCall(toolName, toolInput, env) {
 
       case 'zoho_create_record': {
         const { module_name, data } = toolInput;
-        return await zohoApiCall('POST', module_name, env, { data: Array.isArray(data) ? data : [data] });
+        const recordData = Array.isArray(data) ? data[0] : data;
+        // Pre-flight validation
+        const createCheck = validateCrmWrite(module_name, recordData, true);
+        if (!createCheck.valid) {
+          return { validation_error: true, message: createCheck.error, action: 'create_blocked' };
+        }
+        const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
+        return parseZohoResponse(createResult, `${module_name} record creation`);
       }
 
       case 'zoho_update_record': {
         const { module_name, record_id, data } = toolInput;
-        return await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
+        // Pre-flight validation
+        const updateCheck = validateCrmWrite(module_name, data, false);
+        if (!updateCheck.valid) {
+          return { validation_error: true, message: updateCheck.error, action: 'update_blocked' };
+        }
+        const updateResult = await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
+        return parseZohoResponse(updateResult, `${module_name} record update`);
       }
 
       case 'zoho_get_related_records': {
@@ -3384,7 +3532,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_create_record',
-    description: 'Create a new record in Zoho CRM. IMPORTANT: For Deals, always include Lead_Source, Stage (default "Qualification"), Owner, Closing_Date. For Quotes, include Subject, Deal_Name (linked deal ID), Valid_Till, Product_Details array. Always validate picklist values before creating.',
+    description: 'Create a new record in Zoho CRM. Server-side validation enforces required fields: Deals need Deal_Name, Stage, Lead_Source, Owner, Closing_Date. Quotes need Subject, Deal_Name, Valid_Till. Invalid picklist values are blocked before reaching Zoho. Response includes clear success/failure status.',
     input_schema: {
       type: 'object',
       properties: {
@@ -3396,7 +3544,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_update_record',
-    description: 'Update an existing Zoho CRM record. NEVER manually set Stage to "Closed Won" — deals auto-close when a PO is attached.',
+    description: 'Update an existing Zoho CRM record. Stage changes ARE supported (e.g., Qualification → Proposal/Price Quote, Negotiation/Review → Closed (Lost)). Server-side validation prevents invalid picklist values. Only "Closed Won" is blocked — deals auto-close when a PO is attached.',
     input_schema: {
       type: 'object',
       properties: {
@@ -3793,11 +3941,12 @@ function toolProgressMessage(toolName, toolInput) {
     }
     case 'zoho_create_record': {
       const mod = toolInput.module_name || 'record';
-      return `✏️ Creating ${mod} in Zoho CRM...`;
+      return `✏️ Validating & creating ${mod} in Zoho CRM...`;
     }
     case 'zoho_update_record': {
       const mod = toolInput.module_name || 'record';
-      return `✏️ Updating ${mod}...`;
+      const stageNote = (toolInput.data?.Stage) ? ` (Stage → ${toolInput.data.Stage})` : '';
+      return `✏️ Validating & updating ${mod}${stageNote}...`;
     }
     case 'zoho_get_field':
       return `🔍 Validating ${toolInput.field_name || 'field'} picklist values...`;
