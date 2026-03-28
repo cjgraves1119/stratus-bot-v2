@@ -5314,6 +5314,9 @@ function extractMessageText(event, isAddon) {
       || '';
   } else {
     // Standalone Chat app format (DMs and Spaces)
+    // argumentText strips @mention; text includes it. For DMs or un-mentioned
+    // space messages (when "App can read all space messages" is enabled), they're identical.
+    // Prefer argumentText (no @mention prefix) but fall back to text.
     text = event.message?.argumentText || event.message?.text || '';
   }
 
@@ -5464,18 +5467,17 @@ function detectGmailShare(text, event, isAddon) {
         console.log(`[GCHAT] Gmail Share detected by text pattern: subject="${possibleSubject}", comment="${userComment}"`);
       }
     }
-    // Also check for "RE:" or "FW:" patterns with a command
+    // Also check for "RE:" or "FW:" patterns — always treat as email share
+    // No need for an explicit command; if someone shares a subject with RE:/FW:, they want it processed
     if (!result.isGmailShare) {
       const reMatch = text.match(/(RE|FW|Fwd):\s*(.+)/i);
       if (reMatch) {
         const fullSubject = reMatch[0].trim();
         const userComment = text.replace(fullSubject, '').trim();
-        if (userComment.length > 0 || /summarize|read|review|analyze/i.test(text)) {
-          result.isGmailShare = true;
-          result.searchHint = fullSubject;
-          result.userComment = userComment || 'summarize this email';
-          console.log(`[GCHAT] Gmail Share detected by RE/FW pattern: subject="${fullSubject}"`);
-        }
+        result.isGmailShare = true;
+        result.searchHint = fullSubject;
+        result.userComment = userComment || null;
+        console.log(`[GCHAT] Gmail Share detected by RE/FW pattern: subject="${fullSubject}"`);
       }
     }
   }
@@ -5547,12 +5549,21 @@ async function processGmailShareToChat(gmailShare, text, personId, env, kv) {
 
     // Build context for Claude
     const userIntent = gmailShare.userComment || text.replace(/https:\/\/mail\.google\.com[^\s]*/i, '').trim();
-    const emailContext = `## SHARED EMAIL THREAD\n${emailContent}\n\n## USER'S REQUEST\n${userIntent || 'The user shared this email. Analyze it for Cisco/Meraki product mentions, customer requests, or action items. If products are found, generate quote URLs.'}`;
 
-    // Determine if CRM tools should be enabled based on user comment
-    const intent = detectCrmEmailIntent(userIntent || 'analyze this email for products and create a quote');
+    // Determine if this looks like a new customer / intake scenario
     const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
-    const useTools = intent.hasAny && hasCrmCreds;
+    const hasGmailCreds = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_REFRESH_TOKEN);
+
+    // Gmail shares ALWAYS enable CRM tools when credentials are available.
+    // The whole point of sharing an email to the bot is to take action on it.
+    const useTools = hasCrmCreds || hasGmailCreds;
+
+    // Build the email context with intake workflow guidance
+    const defaultIntent = useTools
+      ? 'The user shared this email for processing. Follow the NEW CUSTOMER EMAIL INTAKE WORKFLOW: analyze the thread for products/contact/business info, check if the account exists in Zoho, then present the intake summary for approval before creating Account → Contact → Deal → Quote → Task. If this is clearly NOT a new customer (e.g., existing customer, internal email), adapt accordingly but still offer relevant CRM actions.'
+      : 'The user shared this email. Analyze it for Cisco/Meraki product mentions, customer requests, or action items. If products are found, generate quote URLs.';
+
+    const emailContext = `## SHARED EMAIL THREAD\n${emailContent}\n\n## USER'S REQUEST\n${userIntent || defaultIntent}`;
 
     const reply = await askClaude(emailContext, personId, env, null, useTools);
     return reply;
