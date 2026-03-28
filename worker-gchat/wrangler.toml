@@ -2,6 +2,10 @@ name = "stratus-ai-bot-gchat"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
+# Workers Paid plan ($5/month): no wall-clock limit on ctx.waitUntil().
+# Free plan caps at ~30s which isn't enough for multi-step CRM agentic loops.
+# usage_model = "unbound" is deprecated and ignored by modern Wrangler.
+
 [vars]
 # Non-secret config (secrets set via `wrangler secret put`)
 # ANTHROPIC_API_KEY = set via wrangler secret
@@ -28,3 +32,10 @@ compatibility_date = "2024-01-01"
 [[kv_namespaces]]
 binding = "CONVERSATION_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
+
+# Service binding to self: Workers can't fetch their own URL directly
+# (same-zone restriction). This binding lets us self-invoke /_work and
+# /_continue endpoints for long-running CRM agentic loops.
+[[services]]
+binding = "SELF"
+service = "stratus-ai-bot-gchat"

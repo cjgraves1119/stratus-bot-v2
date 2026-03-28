@@ -3177,7 +3177,16 @@ async function executeToolCall(toolName, toolInput, env) {
         const { module_name, criteria, fields, page, per_page } = toolInput;
         const params = new URLSearchParams();
         if (criteria) params.set('criteria', criteria);
-        if (fields) params.set('fields', fields);
+        // Default fields per module to reduce response size (saves 2-3s per iteration)
+        const defaultFields = {
+          Accounts: 'id,Account_Name,Phone,Website',
+          Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
+          Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner',
+          Products: 'id,Product_Name,Product_Code,Unit_Price,Description',
+          Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
+          Tasks: 'id,Subject,Status,Due_Date,What_Id,Who_Id,Description'
+        };
+        params.set('fields', fields || defaultFields[module_name] || '');
         if (page) params.set('page', String(page));
         if (per_page) params.set('per_page', String(per_page));
         return await zohoApiCall('GET', `${module_name}/search?${params}`, env);
@@ -3801,6 +3810,111 @@ function toolProgressMessage(toolName, toolInput) {
   }
 }
 
+// Continuation variant of askClaude: resumes a tool loop from saved state.
+// Used by the /_continue self-invocation endpoint.
+async function askClaudeContinue(messages, tools, systemPrompt, startIteration, env, progressCallback, maxWallMs) {
+  const MAX_TOOL_ITERATIONS = 30;
+  let iteration = startIteration;
+  const _loopStartMs = Date.now();
+
+  async function callAnthropicWithRetry(body, maxRetries = 2) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify(body)
+      });
+      if ((response.status === 429 || response.status === 529) && attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt)));
+        continue;
+      }
+      return response;
+    }
+  }
+
+  while (iteration < MAX_TOOL_ITERATIONS) {
+    if (maxWallMs && (Date.now() - _loopStartMs) > maxWallMs) {
+      console.log(`[GCHAT-CONTINUE] Deadline hit at iteration ${iteration}, chaining`);
+      return { __continuation: true, messages, tools, systemPrompt, iteration };
+    }
+
+    iteration++;
+    console.log(`[GCHAT-CONTINUE] Iteration ${iteration}, wall=${Date.now() - _loopStartMs}ms`);
+
+    const requestBody = {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages
+    };
+    if (tools.length > 0) requestBody.tools = tools;
+
+    const response = await callAnthropicWithRetry(requestBody);
+    if (!response || !response.ok) {
+      return `Sorry, I couldn't complete that CRM request (API ${response?.status || 'error'}).`;
+    }
+
+    const data = await response.json();
+
+    if (data.stop_reason === 'tool_use') {
+      messages.push({ role: 'assistant', content: data.content });
+
+      const interimText = data.content
+        .filter(b => b.type === 'text' && b.text.trim().length > 0)
+        .map(b => b.text.trim())
+        .join('\n');
+
+      const toolBlocks = data.content.filter(b => b.type === 'tool_use');
+
+      if (progressCallback && toolBlocks.length > 0) {
+        const progressMsg = toolBlocks.map(b => toolProgressMessage(b.name, b.input)).join('\n');
+        const fullProgress = interimText ? `${interimText}\n\n${progressMsg}` : progressMsg;
+        try { progressCallback(fullProgress).catch(() => {}); } catch (_) { /* ignore */ }
+      }
+
+      const toolPromises = toolBlocks.map(async (block) => {
+        console.log(`[GCHAT-CONTINUE] Tool: ${block.name}`);
+        const result = await executeToolCall(block.name, block.input, env);
+        const resultStr = JSON.stringify(result);
+        return {
+          type: 'tool_result',
+          tool_use_id: block.id,
+          content: resultStr.length > 2000 ? resultStr.substring(0, 2000) + '...(truncated)' : resultStr
+        };
+      });
+
+      const toolResults = await Promise.all(toolPromises);
+      messages.push({ role: 'user', content: toolResults });
+
+      // Compact older messages
+      if (messages.length > 6) {
+        for (let i = 1; i < messages.length - 4; i++) {
+          const msg = messages[i];
+          if (msg.role === 'user' && Array.isArray(msg.content)) {
+            msg.content = msg.content.map(block => {
+              if (block.type === 'tool_result' && typeof block.content === 'string' && block.content.length > 300) {
+                return { ...block, content: block.content.substring(0, 300) + '...(compacted)' };
+              }
+              return block;
+            });
+          }
+        }
+      }
+      continue;
+    }
+
+    // Final text response
+    const textBlocks = data.content.filter(b => b.type === 'text');
+    return { reply: textBlocks.map(b => b.text).join('\n') };
+  }
+
+  return { reply: 'I ran into a complex operation that required too many steps. Could you break it into smaller pieces?' };
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
@@ -3886,10 +4000,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       systemPrompt = CRM_AGENT_SYSTEM_PROMPT;
     }
 
-    // Agentic loop: Claude may call tools multiple times before returning text
-    // Cap tool iterations lower (6) to reduce chance of hitting Cloudflare's
-    // ctx.waitUntil wall-clock limit (~30s). Sonnet takes 5-10s per call.
-    const MAX_TOOL_ITERATIONS = useTools ? 6 : 8;
+    // Agentic loop: Claude may call tools multiple times before returning text.
+    // Workers Unbound gives unlimited wall clock (30s CPU cap), so we can afford
+    // many iterations. Full quote creation needs 15-25 tool calls.
+    const MAX_TOOL_ITERATIONS = useTools ? 30 : 8;
     let iteration = 0;
     const _loopStartMs = Date.now();
 
@@ -3935,29 +4049,28 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     }
 
     while (iteration < MAX_TOOL_ITERATIONS) {
-      // Deadline guard: if we've burned past maxWallMs, return a partial response
-      // rather than dying silently when Cloudflare kills the ctx.waitUntil worker.
+      // Deadline guard: if we've burned past maxWallMs, return a continuation object
+      // so the caller can chain to /_continue. Safety net for runaway loops.
       if (maxWallMs && (Date.now() - _loopStartMs) > maxWallMs) {
-        console.log(`[GCHAT] Deadline ${maxWallMs}ms exceeded at iteration ${iteration}, returning partial`);
-        // Try to surface any narrative text from the last assistant turn
-        const lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
-        const partialContent = lastAssistantMsg
-          ? (Array.isArray(lastAssistantMsg.content)
-            ? lastAssistantMsg.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
-            : String(lastAssistantMsg.content))
-          : '';
-        return partialContent
-          ? `⏱️ I ran out of time before I could finish. Here's what I found so far:\n\n${partialContent}\n\n_Try asking a more focused question (e.g. search for the deal first, then create the quote separately)._`
-          : `⏱️ This request took too long to complete. Try breaking it into smaller steps — first search for the account, then ask me to create the quote.`;
+        console.log(`[GCHAT] Deadline ${maxWallMs}ms hit at iteration ${iteration}, requesting continuation`);
+        return {
+          __continuation: true,
+          messages,
+          tools,
+          systemPrompt,
+          iteration,
+          segment: 1
+        };
       }
 
       iteration++;
+      console.log(`[GCHAT-AGENT] Iteration ${iteration}/${MAX_TOOL_ITERATIONS}, wall=${Date.now() - _loopStartMs}ms`);
 
       const requestBody = {
-        // CRM tool-use: use Haiku (1-2s/call vs 6-10s for Sonnet) so 5-6 iterations
-        // fit within the 25s ctx.waitUntil deadline. Sonnet for non-tool chat.
+        // CRM tool-use: Haiku (1-2s/call) for speed across many iterations.
+        // Sonnet for non-tool conversational chat (higher quality responses).
         model: useTools ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-20250514',
-        max_tokens: useTools ? 2048 : 1024,
+        max_tokens: useTools ? 1024 : 1024,
         system: systemPrompt,
         messages
       };
@@ -4011,34 +4124,52 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           .map(b => b.text.trim())
           .join('\n');
 
-        const toolResults = [];
-        for (const block of data.content) {
-          if (block.type === 'tool_use') {
-            console.log(`[GCHAT-AGENT] Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
+        const toolBlocks = data.content.filter(b => b.type === 'tool_use');
 
-            // Fire-and-forget progress update (no await) — don't block the tool loop.
-            // Saving ~500ms per message × 4-5 messages = 2-3s off the deadline.
-            if (progressCallback) {
-              const progressMsg = toolProgressMessage(block.name, block.input);
-              const fullProgress = interimText && toolResults.length === 0
-                ? `${interimText}\n\n${progressMsg}`
-                : progressMsg;
-              try { progressCallback(fullProgress).catch(() => {}); } catch (e) { /* ignore */ }
-            }
-
-            const result = await executeToolCall(block.name, block.input, env);
-            const resultStr = JSON.stringify(result);
-            console.log(`[GCHAT-AGENT] Tool result: ${resultStr.substring(0, 200)}`);
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: block.id,
-              content: resultStr.length > 8000 ? resultStr.substring(0, 8000) + '...(truncated)' : resultStr
-            });
-          }
+        // Fire-and-forget progress update for all tools in this batch
+        if (progressCallback && toolBlocks.length > 0) {
+          const progressMsg = toolBlocks.map(b => toolProgressMessage(b.name, b.input)).join('\n');
+          const fullProgress = interimText ? `${interimText}\n\n${progressMsg}` : progressMsg;
+          try { progressCallback(fullProgress).catch(() => {}); } catch (e) { /* ignore */ }
         }
+
+        // Execute tool calls in parallel when multiple are returned
+        const toolPromises = toolBlocks.map(async (block) => {
+          console.log(`[GCHAT-AGENT] Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
+          const result = await executeToolCall(block.name, block.input, env);
+          const resultStr = JSON.stringify(result);
+          console.log(`[GCHAT-AGENT] Tool result (${block.name}): ${resultStr.substring(0, 200)}`);
+          // Aggressive truncation: keep payloads small so subsequent Anthropic calls are fast.
+          // Zoho responses contain many unused fields — 2KB is enough for IDs + key fields.
+          return {
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: resultStr.length > 2000 ? resultStr.substring(0, 2000) + '...(truncated)' : resultStr
+          };
+        });
+
+        const toolResults = await Promise.all(toolPromises);
 
         // Add tool results to messages
         messages.push({ role: 'user', content: toolResults });
+
+        // Message compaction: when conversation grows beyond 6 messages,
+        // replace older tool_result contents with a brief summary to keep
+        // the Anthropic API payload small (faster calls = more iterations in 30s).
+        if (messages.length > 6) {
+          for (let i = 1; i < messages.length - 4; i++) {
+            const msg = messages[i];
+            if (msg.role === 'user' && Array.isArray(msg.content)) {
+              msg.content = msg.content.map(block => {
+                if (block.type === 'tool_result' && typeof block.content === 'string' && block.content.length > 300) {
+                  return { ...block, content: block.content.substring(0, 300) + '...(compacted)' };
+                }
+                return block;
+              });
+            }
+          }
+        }
+
         continue; // Loop back for Claude to process tool results
       }
 
@@ -4181,6 +4312,161 @@ export default {
 
     // Log ALL incoming requests for debugging
     console.log(`[GCHAT-DEBUG] ${request.method} ${url.pathname} from ${request.headers.get('user-agent') || 'unknown'}`);
+
+    // ── /_work endpoint: Primary handler for CRM agentic loops ──
+    // Processes SYNCHRONOUSLY (not in ctx.waitUntil) to get unlimited wall-clock
+    // time. Per CF docs, HTTP requests have no wall-time limit while the
+    // connection is alive. ctx.waitUntil only gets 30s — not enough for CRM.
+    // The webhook handler fires a fetch to /_work and returns immediately.
+    if (request.method === 'POST' && url.pathname === '/_work') {
+      const _workStart = Date.now();
+      try {
+        const { token } = await request.json();
+        const stateJson = await env.CONVERSATION_KV.get(`work_${token}`);
+        if (!stateJson) {
+          return new Response('Work request expired', { status: 410 });
+        }
+        await env.CONVERSATION_KV.delete(`work_${token}`);
+        const state = JSON.parse(stateJson);
+        const kv = env.CONVERSATION_KV;
+        const { text, personId, spaceName } = state;
+        console.log(`[GCHAT-WORK] Starting CRM work for: "${text.substring(0, 80)}..."`);
+
+        try {
+          const progressCallback = async (msg) => {
+            const formatted = adaptMarkdownForGChat(msg);
+            await sendAsyncGChatMessage(spaceName, formatted, null, env);
+          };
+
+          // 5-minute safety-net deadline (unlimited wall time available)
+          let result = await askClaude(text, personId, env, null, true, progressCallback, 300000);
+          console.log(`[GCHAT-WORK] askClaude completed in ${Date.now() - _workStart}ms`);
+
+          // Handle continuation (safety net for 5-min deadline)
+          if (result && result.__continuation) {
+            console.log(`[GCHAT-WORK] Continuation needed at iteration ${result.iteration}, chaining to /_continue`);
+            const contToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            await kv.put(`cont_${contToken}`, JSON.stringify({
+              ...result,
+              spaceName,
+              personId,
+              originalText: text,
+              segment: 1
+            }), { expirationTtl: 300 });
+            // Chain via Service Binding — unlimited wall time
+            await env.SELF.fetch(new Request('https://self/_continue', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: contToken })
+            }));
+          } else {
+            // Normal completion
+            let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
+            finalReply = adaptMarkdownForGChat(finalReply);
+            finalReply = truncateGChatReply(finalReply);
+            await sendAsyncGChatMessage(spaceName, finalReply, null, env);
+            if (personId) {
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', finalReply);
+              await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 300 });
+            }
+          }
+          console.log(`[GCHAT-WORK] Completed in ${Date.now() - _workStart}ms total`);
+        } catch (err) {
+          console.error(`[GCHAT-WORK] Error: ${err.message}`);
+          try {
+            await kv.put(`work_error_${Date.now()}`, JSON.stringify({
+              error: err.message,
+              stack: (err.stack || '').substring(0, 500),
+              ts: new Date().toISOString(),
+              elapsed: Date.now() - _workStart
+            }), { expirationTtl: 3600 });
+          } catch (_) {}
+          try {
+            await sendAsyncGChatMessage(spaceName,
+              `Sorry, I ran into an issue processing that CRM request. Try again or rephrase your question.\n\n_Error: ${err.message.substring(0, 200)}_`,
+              null, env);
+          } catch (_) {}
+        }
+
+        return new Response('OK', { status: 200 });
+      } catch (err) {
+        console.error(`[GCHAT-WORK] Parse error: ${err.message}`);
+        return new Response('Invalid work request', { status: 400 });
+      }
+    }
+
+    // ── /_continue endpoint: Continuation chain for extremely long flows ──
+    // Safety net if /_work's 5-min deadline is hit. Same synchronous pattern.
+    if (request.method === 'POST' && url.pathname === '/_continue') {
+      try {
+        const { token } = await request.json();
+        const stateJson = await env.CONVERSATION_KV.get(`cont_${token}`);
+        if (!stateJson) {
+          return new Response('Continuation expired', { status: 410 });
+        }
+        await env.CONVERSATION_KV.delete(`cont_${token}`);
+        const state = JSON.parse(stateJson);
+        const kv = env.CONVERSATION_KV;
+        console.log(`[GCHAT-CONTINUE] Resuming from iteration ${state.iteration}, segment ${state.segment || 1}`);
+
+        try {
+          const progressCallback = async (msg) => {
+            const formatted = adaptMarkdownForGChat(msg);
+            await sendAsyncGChatMessage(state.spaceName, formatted, null, env);
+          };
+
+          // 5-minute deadline as safety net (unlimited wall time available)
+          const result = await askClaudeContinue(
+            state.messages, state.tools, state.systemPrompt,
+            state.iteration, env, progressCallback, 300000
+          );
+
+          if (result && result.__continuation) {
+            // Shouldn't happen often with 5-min deadline, but handle gracefully
+            const nextToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            await kv.put(`cont_${nextToken}`, JSON.stringify({
+              ...result,
+              spaceName: state.spaceName,
+              personId: state.personId,
+              originalText: state.originalText,
+              segment: (state.segment || 1) + 1
+            }), { expirationTtl: 300 });
+            console.log(`[GCHAT-CONTINUE] Chaining to segment ${(state.segment || 1) + 1}`);
+            // Chain via Service Binding — unlimited wall time
+            await env.SELF.fetch(new Request('https://self/_continue', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: nextToken })
+            }));
+          } else {
+            // Final response
+            let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
+            finalReply = adaptMarkdownForGChat(finalReply);
+            finalReply = truncateGChatReply(finalReply);
+            await sendAsyncGChatMessage(state.spaceName, finalReply, null, env);
+            if (state.personId) {
+              await addToHistory(kv, state.personId, 'user', state.originalText || '');
+              await addToHistory(kv, state.personId, 'assistant', finalReply);
+              await kv.put(`crm_session_${state.personId}`, 'active', { expirationTtl: 300 });
+            }
+            console.log(`[GCHAT-CONTINUE] Completed successfully`);
+          }
+        } catch (err) {
+          console.error(`[GCHAT-CONTINUE] Error: ${err.message}`);
+          try {
+            await sendAsyncGChatMessage(state.spaceName,
+              `Sorry, I ran into an issue continuing that request. Try again or break it into smaller steps.\n\n_Error: ${err.message.substring(0, 200)}_`,
+              null, env);
+          } catch (_) { /* ignore */ }
+        }
+
+        return new Response('OK', { status: 200 });
+      } catch (err) {
+        console.error(`[GCHAT-CONTINUE] Parse error: ${err.message}`);
+        return new Response('Invalid continuation', { status: 400 });
+      }
+    }
 
     // Health check
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
@@ -4408,6 +4694,18 @@ export default {
         // before the CRM agent could handle it without this guard.
         let isExplicitCrmRequest = /\bzoho\b|\bcrm\b|\bin\s+zoho\b|\bzoho\s+quote\b|\bzoho\s+deal\b|\bopen\s+deals?\b|\bcheck\s+(the\s+)?(crm|zoho)\b/i.test(text);
 
+        // CRM session continuation: if a CRM conversation is active (flag set by
+        // the async CRM handler), keep routing follow-up messages to the CRM agent
+        // even without explicit "zoho"/"crm" keywords. This allows multi-turn CRM
+        // workflows (ask clarifying questions → user answers → create quote).
+        if (!isExplicitCrmRequest && personId && kv) {
+          const crmSession = await kv.get(`crm_session_${personId}`);
+          if (crmSession) {
+            console.log(`[GCHAT] Active CRM session found for ${personId} — routing to CRM agent`);
+            isExplicitCrmRequest = true;
+          }
+        }
+
         // "Try again" / "retry" should re-run as a CRM request if the previous
         // user message was a CRM intent — prevents context confusion where
         // "try again" gets treated as a quote revision and replies about wrong topic.
@@ -4476,49 +4774,34 @@ export default {
             const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
 
             if (spaceName && hasAsyncCreds) {
-              console.log(`[GCHAT-ASYNC] Using async pattern for CRM query in ${spaceName}`);
+              console.log(`[GCHAT-ASYNC] Using /_work pattern for CRM query in ${spaceName}`);
 
-              // Fire-and-forget background processing
-              ctx.waitUntil((async () => {
-                try {
-                  // Progress callback: sends a top-level Google Chat message for each tool step
-                  // (no threadName = appears in main chat, not as a thread reply)
-                  const progressCallback = async (msg) => {
-                    const formatted = adaptMarkdownForGChat(msg);
-                    await sendAsyncGChatMessage(spaceName, formatted, null, env);
-                  };
+              // ARCHITECTURE: ctx.waitUntil() has a hard 30-second limit (all plans).
+              // Instead of doing heavy work in waitUntil, we immediately fire a fetch
+              // to /_work, which processes SYNCHRONOUSLY as a fresh HTTP request with
+              // UNLIMITED wall-clock time. waitUntil only needs to survive long enough
+              // to dispatch the fetch (milliseconds).
+              const workToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-                  // 25s deadline: Cloudflare gives ctx.waitUntil ~30s wall clock after sync response.
-                  // CRM loop uses Haiku (1-2s/call), so 5-6 iterations fit comfortably.
-                  // Deadline guard fires before each Anthropic call to return partials gracefully.
-                  let asyncReply = await askClaude(text, personId, env, null, true, progressCallback, 25000);
-                  asyncReply = adaptMarkdownForGChat(asyncReply);
-                  asyncReply = truncateGChatReply(asyncReply);
-                  await sendAsyncGChatMessage(spaceName, asyncReply, null, env);
-                  await addToHistory(kv, personId, 'user', text);
-                  await addToHistory(kv, personId, 'assistant', asyncReply);
-                } catch (asyncErr) {
-                  console.error(`[GCHAT-ASYNC] Background processing failed: ${asyncErr.message}`);
-                  // Log to KV for debugging (no api_error_ entries = Cloudflare killed the worker)
-                  try {
-                    await kv.put(
-                      `async_error_${Date.now()}`,
-                      JSON.stringify({ error: asyncErr.message, stack: (asyncErr.stack || '').substring(0, 500), ts: new Date().toISOString() }),
-                      { expirationTtl: 3600 }
-                    );
-                  } catch (_) { /* ignore */ }
-                  try {
-                    await sendAsyncGChatMessage(
-                      spaceName,
-                      `Sorry, I ran into an issue processing that CRM request. Try again or rephrase your question.\n\n_Error: ${asyncErr.message.substring(0, 200)}_`,
-                      null,
-                      env
-                    );
-                  } catch (e2) {
-                    console.error(`[GCHAT-ASYNC] Failed to send error message: ${e2.message}`);
-                  }
-                }
-              })());
+              // Save work request to KV (avoids body size issues with self-fetch)
+              await kv.put(`work_${workToken}`, JSON.stringify({
+                text,
+                personId,
+                spaceName,
+                ts: new Date().toISOString()
+              }), { expirationTtl: 600 });
+
+              // Fire-and-forget via Service Binding (env.SELF).
+              // Workers can't fetch their own URL (same-zone restriction).
+              // env.SELF.fetch() bypasses this — dispatches a fresh HTTP request
+              // to /_work which processes SYNCHRONOUSLY with unlimited wall time.
+              ctx.waitUntil(
+                env.SELF.fetch(new Request('https://self/_work', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ token: workToken })
+                })).catch(e => console.error(`[GCHAT-ASYNC] Work dispatch error: ${e.message}`))
+              );
 
               // Return a quick synchronous "thinking" message
               return sendGChatResponse('🔍 Looking that up in the CRM... one moment.', isAddon);
