@@ -5254,6 +5254,19 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
       }
     }
 
+    // Static icon for Gmail Add-on
+    if (request.method === 'GET' && url.pathname === '/icon.png') {
+      const iconBase64 = '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';
+      const iconBytes = Uint8Array.from(atob(iconBase64), c => c.charCodeAt(0));
+      return new Response(iconBytes, {
+        headers: {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'public, max-age=31536000',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
     // Health check
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
       return new Response(JSON.stringify({
