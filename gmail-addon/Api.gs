@@ -6,14 +6,14 @@
 
 /**
  * Generic API call to the Stratus worker.
- * @param {string} endpoint  Path under /api/ (e.g. '/api/analyze-email')
+ * @param {string} endpoint  Path under /api/
  * @param {Object} payload   JSON body
- * @param {number} [timeoutMs=55000]  Fetch timeout (Apps Script max is 60s)
+ * @param {number} [timeoutMs=55000]  Fetch timeout
  * @returns {Object} Parsed JSON response
  */
 function apiCall_(endpoint, payload, timeoutMs) {
-  const url = CONFIG.API_BASE + endpoint;
-  const options = {
+  var url = CONFIG.API_BASE + endpoint;
+  var options = {
     method: 'post',
     contentType: 'application/json',
     headers: {
@@ -23,39 +23,38 @@ function apiCall_(endpoint, payload, timeoutMs) {
     muteHttpExceptions: true,
   };
 
-  const response = UrlFetchApp.fetch(url, options);
-  const code = response.getResponseCode();
-  const text = response.getContentText();
+  var response = UrlFetchApp.fetch(url, options);
+  var code = response.getResponseCode();
+  var text = response.getContentText();
 
   if (code === 401) {
     throw new Error('Invalid API key. Check STRATUS_API_KEY in Script Properties.');
   }
   if (code >= 500) {
-    console.error(`API ${endpoint} returned ${code}: ${text.substring(0, 500)}`);
-    throw new Error(`Server error (${code}). Try again in a moment.`);
+    console.error('API ' + endpoint + ' returned ' + code + ': ' + text.substring(0, 500));
+    throw new Error('Server error (' + code + '). Try again in a moment.');
   }
 
   try {
     return JSON.parse(text);
   } catch (e) {
-    console.error(`API ${endpoint} non-JSON response: ${text.substring(0, 500)}`);
+    console.error('API ' + endpoint + ' non-JSON response: ' + text.substring(0, 500));
     throw new Error('Unexpected response from API.');
   }
 }
 
 /**
  * Analyze an email: summary, detected SKUs, CRM sender lookup.
- * Single call, returns everything the sidebar needs.
  */
 function analyzeEmail_(subject, body, senderEmail, senderName) {
-  const cacheKey = 'analyze_' + Utilities.computeDigest(
+  var cacheKey = 'analyze_' + Utilities.computeDigest(
     Utilities.DigestAlgorithm.MD5, subject + senderEmail
-  ).map(b => (b & 0xff).toString(16).padStart(2, '0')).join('');
+  ).map(function(b) { return (b & 0xff).toString(16).padStart(2, '0'); }).join('');
 
-  const cached = getCached_(cacheKey);
+  var cached = getCached_(cacheKey);
   if (cached) return cached;
 
-  const result = apiCall_('/api/analyze-email', {
+  var result = apiCall_('/api/analyze-email', {
     subject: subject,
     body: (body || '').substring(0, CONFIG.MAX_EMAIL_BODY_CHARS),
     senderEmail: senderEmail,
