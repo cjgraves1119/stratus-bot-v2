@@ -3326,6 +3326,7 @@ async function executeToolCall(toolName, toolInput, env) {
           Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
           Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner',
           Products: 'id,Product_Name,Product_Code,Unit_Price,Description',
+          WooProducts: 'id,WooProduct_Code,Stratus_Price,Product_Name',
           Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
           Tasks: 'id,Subject,Status,Due_Date,What_Id,Who_Id,Description'
         };
@@ -3759,6 +3760,11 @@ function detectCrmEmailIntent(text) {
     /\b(set\s*up|build\s*out|create\s+everything)\s+(for|from)\s+(this|the)/i,
     /\b(got|received|have)\s+(a|an)\s+(email|inquiry|request)\s+(from|about)\s+(a\s+)?(new|potential|prospective)/i,
     /\b(customer|prospect|lead)\s+(email|inquiry|request)\b.*\b(quote|meraki|cisco|network)/i,
+    // Follow-up patterns that reference CRM actions
+    /\b(status|confirm|progress)\b.{0,30}\b(quote|deal|account|contact|task|creation)/i,
+    /\bzoho\s+quote\b/i,
+    /\bmake\s+(a\s+|the\s+)?(zoho\s+)?quote\b/i,
+    /\b(individual|separate)\s+quote\s+for\s+each/i,
   ];
 
   // Email intents
@@ -3925,12 +3931,34 @@ Proceed-first rule: Create with Stratus Referal + Stratus Sales defaults. Ask ab
 
 ---
 
+## SKU SUFFIX RULES (CRITICAL — APPLY BEFORE ANY PRODUCT LOOKUP)
+
+WooProducts and Products in Zoho store SKUs with their FULL suffixed form. You MUST apply the correct suffix before searching:
+
+| Family | Suffix | Examples |
+|--------|--------|---------|
+| MR (all access points), MV, MT, MG, Z (not X) | -HW | MR44-HW, MR57-HW, Z4-HW |
+| MX non-cellular | -HW | MX67-HW, MX85-HW |
+| MX cellular | -HW-NA | MX67C-HW-NA |
+| CW916x (Wi-Fi 6E) | -MR | CW9166I-MR, CW9164I-MR |
+| CW917x (Wi-Fi 7) | -RTG | CW9172I-RTG, CW9172H-RTG, CW9176I-RTG |
+| MS130, MS130R, MS390 | -HW | MS130-24P-HW |
+| MS150, MS450, C9xxx-M | No suffix | MS150-48LP-4G |
+| Z4X, Z4CX | No suffix | Z4X |
+| License SKUs (LIC-*) | No suffix | LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR |
+
+When a user says "CW9172I", always search for "CW9172I-RTG". When they say "MR44", search for "MR44-HW".
+If a search returns no results, try without the suffix as a fallback, or try with starts_with criteria.
+
+---
+
 ## ECOMM PRICING — EVERY QUOTE
 
 Never create a quote at list price. Apply Stratus ecomm pricing on every line:
-1. Search WooProducts module: criteria (WooProduct_Code:equals:{SKU}), fields: WooProduct_Code,Stratus_Price
-2. Discount per line = (List_Price − Stratus_Price) × Quantity  ← dollar amount, not percent
-3. Include Description = "{XX}% discount applied" on each line
+1. Apply the correct SKU suffix (see rules above), then search WooProducts module: criteria (WooProduct_Code:equals:{SUFFIXED_SKU}), fields: WooProduct_Code,Stratus_Price
+2. If WooProducts returns no results, try the Products module: criteria (Product_Code:equals:{SUFFIXED_SKU}), fields: Product_Code,Unit_Price,Product_Name
+3. Discount per line = (List_Price − Stratus_Price) × Quantity  ← dollar amount, not percent
+4. Include Description = "{XX}% discount applied" on each line
 
 Zoho auto-populates List_Price from the Product record. Only send Product_Name.id, Quantity, Discount, Description per line item.
 
@@ -4713,7 +4741,7 @@ export default {
             if (personId) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', finalReply);
-              await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 300 });
+              await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 900 });
             }
           }
           console.log(`[GCHAT-WORK] Completed in ${Date.now() - _workStart}ms total`);
@@ -5051,15 +5079,27 @@ export default {
           }
         }
 
-        // "Try again" / "retry" should re-run as a CRM request if the previous
-        // user message was a CRM intent — prevents context confusion where
-        // "try again" gets treated as a quote revision and replies about wrong topic.
-        if (!isExplicitCrmRequest && /^\s*(try\s+again|retry|again|try\s+that\s+again)\s*[.!?]?\s*$/i.test(text)) {
-          const recentHistory = await getHistory(kv, personId);
-          const lastUserMsg = recentHistory.filter(m => m.role === 'user').slice(-2, -1)[0];
-          if (lastUserMsg && detectCrmEmailIntent(lastUserMsg.content).hasAny) {
-            console.log(`[GCHAT] "try again" detected after CRM query — re-routing to CRM agent`);
-            isExplicitCrmRequest = true;
+        // CRM follow-up detection: route short follow-up messages to CRM agent
+        // when the PREVIOUS user message was a CRM/email intent. This catches
+        // "try again", "confirm status", "go ahead", "yes proceed", etc.
+        if (!isExplicitCrmRequest && personId && kv) {
+          const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status)\s*[.!?]?\s*$/i;
+          // Also match messages that reference quote/deal creation status
+          const crmFollowUpPattern = /\b(status|confirm|progress|update)\b.{0,30}\b(quote|deal|account|contact|task|creation|create)/i;
+
+          if (followUpPattern.test(text) || crmFollowUpPattern.test(text)) {
+            const recentHistory = await getHistory(kv, personId);
+            const lastUserMsg = recentHistory.filter(m => m.role === 'user').slice(-2, -1)[0];
+            const lastAssistantMsg = recentHistory.filter(m => m.role === 'assistant').pop();
+
+            // Check if previous conversation involved CRM
+            const prevWasCrm = (lastUserMsg && detectCrmEmailIntent(lastUserMsg.content).hasAny)
+              || (lastAssistantMsg && /\b(zoho|crm|account|deal|quote|contact)\b/i.test(lastAssistantMsg.content));
+
+            if (prevWasCrm) {
+              console.log(`[GCHAT] CRM follow-up detected ("${text.substring(0, 40)}...") after CRM conversation — routing to CRM agent`);
+              isExplicitCrmRequest = true;
+            }
           }
         }
 
