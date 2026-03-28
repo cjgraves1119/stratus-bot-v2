@@ -4763,6 +4763,342 @@ export default {
       }), { headers: { 'Content-Type': 'application/json' } });
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // ── /api/* endpoints: Gmail Add-on backend ──
+    // Authenticated via X-API-Key header. Returns JSON responses.
+    // These reuse the existing quoting engine, Claude API, and CRM
+    // agent rather than duplicating any logic.
+    // ══════════════════════════════════════════════════════════════
+    if (url.pathname.startsWith('/api/')) {
+      const apiKey = request.headers.get('X-API-Key');
+      if (!apiKey || apiKey !== env.GMAIL_ADDON_API_KEY) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+        });
+      }
+
+      // CORS preflight
+      if (request.method === 'OPTIONS') {
+        return new Response(null, {
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+          }
+        });
+      }
+
+      if (request.method !== 'POST') {
+        return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+          status: 405, headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      const apiBody = await request.json();
+      const jsonHeaders = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' };
+
+      try {
+        let apiResult;
+        switch (url.pathname) {
+
+          // ── Analyze Email: summary + detected SKUs + CRM sender lookup ──
+          case '/api/analyze-email': {
+            const { subject, body, senderEmail, senderName } = apiBody;
+            if (!body && !subject) {
+              return new Response(JSON.stringify({ error: 'subject or body required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            // 1) Detect SKUs in the email body
+            const fullText = (subject || '') + ' ' + (body || '');
+            const parsed = parseMessage(fullText);
+            const detectedSkus = parsed && parsed.items ? parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })) : [];
+
+            // 2) CRM sender lookup (by email domain or name)
+            let crmAccount = null;
+            if (senderEmail) {
+              try {
+                const domain = senderEmail.split('@')[1];
+                if (domain && !['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com'].includes(domain.toLowerCase())) {
+                  // Search by website/domain
+                  const acctResp = await zohoApiCall('GET',
+                    `Accounts/search?criteria=(Website:equals:${domain})&fields=id,Account_Name,Phone,Website`, env
+                  );
+                  if (acctResp?.data?.[0]) {
+                    crmAccount = acctResp.data[0];
+                    // Try to get recent deals
+                    try {
+                      const dealsResp = await zohoApiCall('GET',
+                        `Accounts/${crmAccount.id}/Deals?fields=id,Deal_Name,Stage,Amount&per_page=5`, env
+                      );
+                      if (dealsResp?.data) crmAccount.recentDeals = dealsResp.data;
+                    } catch (_) {}
+                  }
+                }
+                // Fallback: search contacts by email
+                if (!crmAccount) {
+                  const contactResp = await zohoApiCall('GET',
+                    `Contacts/search?email=${encodeURIComponent(senderEmail)}&fields=id,First_Name,Last_Name,Email,Account_Name`, env
+                  );
+                  if (contactResp?.data?.[0]) {
+                    const contact = contactResp.data[0];
+                    if (contact.Account_Name?.id) {
+                      const acctDetail = await zohoApiCall('GET',
+                        `Accounts/${contact.Account_Name.id}?fields=id,Account_Name,Phone,Website`, env
+                      );
+                      if (acctDetail?.data?.[0]) {
+                        crmAccount = acctDetail.data[0];
+                        try {
+                          const dealsResp = await zohoApiCall('GET',
+                            `Accounts/${crmAccount.id}/Deals?fields=id,Deal_Name,Stage,Amount&per_page=5`, env
+                          );
+                          if (dealsResp?.data) crmAccount.recentDeals = dealsResp.data;
+                        } catch (_) {}
+                      }
+                    }
+                  }
+                }
+              } catch (crmErr) {
+                console.error(`[API] CRM lookup error: ${crmErr.message}`);
+              }
+            }
+
+            // 3) AI summary via Claude
+            let summary = null, urgency = null, actionItems = [];
+            try {
+              const summaryResp = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-api-key': env.ANTHROPIC_API_KEY,
+                  'anthropic-version': '2023-06-01'
+                },
+                body: JSON.stringify({
+                  model: 'claude-sonnet-4-20250514',
+                  max_tokens: 500,
+                  system: `You are a concise email analyzer for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
+{
+  "summary": "2-3 sentence summary of the email",
+  "urgency": "low|medium|high",
+  "actionItems": ["array of specific action items or requests"],
+  "suggestedApproach": "brief suggestion for how to respond"
+}
+Return ONLY the JSON object, no markdown or extra text.`,
+                  messages: [{ role: 'user', content: `Subject: ${subject}\nFrom: ${senderName} <${senderEmail}>\n\n${(body || '').substring(0, 6000)}` }]
+                })
+              });
+
+              if (summaryResp.ok) {
+                const summaryData = await summaryResp.json();
+                const text = summaryData.content?.[0]?.text || '';
+                try {
+                  const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
+                  summary = parsed.summary;
+                  urgency = parsed.urgency;
+                  actionItems = parsed.actionItems || [];
+                } catch (_) {
+                  summary = text.substring(0, 300);
+                }
+              }
+            } catch (aiErr) {
+              console.error(`[API] Claude summary error: ${aiErr.message}`);
+              summary = 'Could not generate summary.';
+            }
+
+            apiResult = { summary, urgency, actionItems, detectedSkus, crmAccount };
+            break;
+          }
+
+          // ── Draft Reply: AI-generated reply options ──
+          case '/api/draft-reply': {
+            const { subject, body, senderEmail, senderName, tone, instructions } = apiBody;
+            if (!body && !subject) {
+              return new Response(JSON.stringify({ error: 'subject or body required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            const toneGuide = {
+              warm: 'Friendly and personable. Use contractions. End with an engaging question.',
+              professional: 'Polished but approachable. Clear and direct. End with a specific next step.',
+              brief: 'Very concise, 2-3 sentences max. Get to the point fast. End with a question.'
+            };
+
+            const draftResp = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': env.ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01'
+              },
+              body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 1500,
+                system: `You are drafting email replies for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki exclusive reseller). Write in Chris's voice:
+
+STYLE RULES:
+- Personable, consultative, and concise
+- Vary sentence structure; mix short and long sentences
+- NEVER use em dashes (use commas, parentheses, or periods instead)
+- Use contractions naturally: I'll, you're, that's, we've, can't, won't
+- Keep paragraphs to 1-3 lines max with blank lines between
+- ALWAYS end with a question or specific call to action
+- Never start with "I hope this email finds you well" or similar filler
+- Signature is handled separately, do NOT include one
+
+TONE: ${toneGuide[tone] || toneGuide.warm}
+
+${instructions ? 'ADDITIONAL INSTRUCTIONS: ' + instructions : ''}
+
+Return ONLY valid JSON:
+{
+  "drafts": ["draft option 1", "draft option 2"]
+}
+Provide exactly 2 distinct reply options. Each draft should be the complete email body text only (no subject, no signature). Use \\n for line breaks between paragraphs.`,
+                messages: [{
+                  role: 'user',
+                  content: `Reply to this email:\n\nSubject: ${subject}\nFrom: ${senderName} <${senderEmail}>\n\n${(body || '').substring(0, 6000)}`
+                }]
+              })
+            });
+
+            if (!draftResp.ok) {
+              apiResult = { error: 'Claude API error: ' + draftResp.status };
+              break;
+            }
+
+            const draftData = await draftResp.json();
+            const draftText = draftData.content?.[0]?.text || '';
+            try {
+              apiResult = JSON.parse(draftText.replace(/```json\n?|\n?```/g, '').trim());
+            } catch (_) {
+              apiResult = { drafts: [draftText.substring(0, 2000)] };
+            }
+            break;
+          }
+
+          // ── Quote: Generate Stratus URL quote from SKU text ──
+          case '/api/quote': {
+            const { text } = apiBody;
+            if (!text) {
+              return new Response(JSON.stringify({ error: 'text required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            const parsed = parseMessage(text);
+            if (!parsed || !parsed.items || parsed.items.length === 0) {
+              apiResult = { error: 'No valid SKUs detected. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67' };
+              break;
+            }
+
+            const quoteResult = buildQuoteResponse(parsed);
+            // Extract URLs from the response (buildQuoteResponse returns { message, needsLlm })
+            const urlRegex = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
+            const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
+            const urls = responseText.match(urlRegex) || [];
+
+            const quoteUrls = [];
+            // Parse option headers from response text to get meaningful labels
+            const optionHeaders = responseText.match(/\*\*Option \d[^*]*\*\*/g) || [];
+            const termLabels = ['1-Year', '3-Year', '5-Year'];
+            let currentOption = '';
+            let optionIdx = 0;
+            const lines = responseText.split('\n');
+            const urlLabels = [];
+            for (const line of lines) {
+              const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
+              if (optMatch) { currentOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optionIdx = 0; }
+              const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
+              if (urlMatch) {
+                const label = currentOption
+                  ? `${currentOption} (${termLabels[optionIdx] || ''})`
+                  : termLabels[urlLabels.length] || 'Quote ' + (urlLabels.length + 1);
+                urlLabels.push({ url: urlMatch[0], label: label.trim() });
+                optionIdx++;
+              }
+            }
+            // Fallback if regex parsing didn't capture structured labels
+            if (urlLabels.length > 0) {
+              urlLabels.forEach(u => quoteUrls.push({ url: u.url, label: u.label, term: '' }));
+            } else {
+              urls.forEach((u, i) => {
+                quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1), term: termLabels[i] || '' });
+              });
+            }
+
+            // Check for EOL warnings
+            const eolWarnings = [];
+            if (parsed.items) {
+              parsed.items.forEach(item => {
+                const base = item.baseSku || item.sku;
+                if (isEol(base)) {
+                  const replacement = checkEol(base);
+                  eolWarnings.push(base + ' is End-of-Life' + (replacement ? ' → replaced by ' + (Array.isArray(replacement) ? replacement.join(' / ') : replacement) : ''));
+                }
+              });
+            }
+
+            apiResult = {
+              quoteUrls,
+              responseText: responseText.substring(0, 3000),
+              eolWarnings,
+              parsedItems: parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })),
+            };
+            break;
+          }
+
+          // ── CRM Search: Search Zoho CRM modules ──
+          case '/api/crm-search': {
+            const { query, module } = apiBody;
+            if (!query) {
+              return new Response(JSON.stringify({ error: 'query required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            const validModules = ['Accounts', 'Contacts', 'Deals', 'Quotes'];
+            const mod = validModules.includes(module) ? module : 'Accounts';
+
+            const fieldMap = {
+              Accounts: 'id,Account_Name,Phone,Website',
+              Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
+              Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name',
+              Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
+            };
+
+            try {
+              const searchResp = await zohoApiCall('GET',
+                `${mod}/search?word=${encodeURIComponent(query)}&fields=${fieldMap[mod]}&per_page=10`, env
+              );
+              apiResult = { records: searchResp?.data || [], module: mod, query };
+            } catch (crmErr) {
+              apiResult = { error: 'CRM search failed: ' + crmErr.message, records: [] };
+            }
+            break;
+          }
+
+          // ── Detect SKUs: Parse SKUs from arbitrary text ──
+          case '/api/detect-skus': {
+            const { text } = apiBody;
+            if (!text) {
+              return new Response(JSON.stringify({ error: 'text required' }), { status: 400, headers: jsonHeaders });
+            }
+            const parsed = parseMessage(text);
+            const skus = parsed && parsed.items ? parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })) : [];
+            apiResult = { skus };
+            break;
+          }
+
+          default:
+            return new Response(JSON.stringify({ error: 'Unknown endpoint: ' + url.pathname }), {
+              status: 404, headers: jsonHeaders
+            });
+        }
+
+        return new Response(JSON.stringify(apiResult), { headers: jsonHeaders });
+      } catch (apiErr) {
+        console.error(`[API] Error on ${url.pathname}: ${apiErr.message}`);
+        return new Response(JSON.stringify({ error: apiErr.message }), {
+          status: 500, headers: jsonHeaders
+        });
+      }
+    }
+
     // ── /_work endpoint: Primary handler for CRM agentic loops ──
     // Processes SYNCHRONOUSLY (not in ctx.waitUntil) to get unlimited wall-clock
     // time. Per CF docs, HTTP requests have no wall-time limit while the
