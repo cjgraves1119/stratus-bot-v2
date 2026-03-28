@@ -10,3 +10,8 @@ compatibility_date = "2024-01-01"
 [[kv_namespaces]]
 binding = "CONVERSATION_KV"
 id = "360fbb8a75bf400e87cb96893a811a56"
+
+# Shared pricing KV — written by GChat worker's daily cron, read here for live prices
+[[kv_namespaces]]
+binding = "PRICES_KV"
+id = "af24db17eaa644fe9456e2ae74379766"

@@ -33,9 +33,19 @@ compatibility_date = "2024-01-01"
 binding = "CONVERSATION_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
 
+# Shared pricing KV — daily cron writes prices_live here, both workers read from it
+[[kv_namespaces]]
+binding = "PRICES_KV"
+id = "af24db17eaa644fe9456e2ae74379766"
+
 # Service binding to self: Workers can't fetch their own URL directly
 # (same-zone restriction). This binding lets us self-invoke /_work and
 # /_continue endpoints for long-running CRM agentic loops.
 [[services]]
 binding = "SELF"
 service = "stratus-ai-bot-gchat"
+
+# Daily price refresh from Zoho WooProducts → KV
+# Runs at 11:00 UTC (6:00 AM CT / 5:00 AM CST)
+[triggers]
+crons = ["0 11 * * *"]

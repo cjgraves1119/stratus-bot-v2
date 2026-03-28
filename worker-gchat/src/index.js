@@ -26,7 +26,47 @@ import catalogData from './data/auto-catalog.json';
 import specsData from './data/specs.json';
 import accessoriesData from './data/accessories.json';
 
-const prices = pricesData.prices;
+const staticPrices = pricesData.prices;
+let livePrices = null;       // KV-cached prices (refreshed daily by cron)
+let livePricesCacheTs = 0;   // When we last read from KV (ms)
+const LIVE_PRICES_CACHE_TTL = 300000; // 5 minutes in-memory cache
+
+// Load live prices from KV (if available). Cached in-memory per isolate.
+// Accepts env object — uses PRICES_KV (preferred) or CONVERSATION_KV as fallback.
+async function loadLivePrices(env) {
+  const kv = env?.PRICES_KV || env?.CONVERSATION_KV || env;
+  if (!kv || typeof kv.get !== 'function') return null;
+  const now = Date.now();
+  if (livePrices && (now - livePricesCacheTs) < LIVE_PRICES_CACHE_TTL) {
+    return livePrices;
+  }
+  try {
+    const stored = await kv.get('prices_live', 'json');
+    if (stored?.prices) {
+      livePrices = stored.prices;
+      livePricesCacheTs = now;
+      console.log(`[PRICES] Loaded live prices from KV (refreshed: ${stored.refreshedAt}, ${stored.stats?.updated || '?'} updated)`);
+      return livePrices;
+    }
+  } catch (err) {
+    console.error(`[PRICES] KV read error: ${err.message}`);
+  }
+  return null;
+}
+
+// Merged price lookup: live KV prices → static prices.json fallback
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    // For live prices, check the KV cache first
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+
 const catalog = catalogData;
 const specs = specsData;
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
@@ -4681,10 +4721,47 @@ async function verifyGoogleChatToken(request, env) {
  */
 export default {
   async fetch(request, env, ctx) {
+    // Load KV-cached live prices (if available from daily cron refresh)
+    // This is fast: reads KV once, then cached in-memory for 5 minutes per isolate
+    if (env.CONVERSATION_KV) {
+      await loadLivePrices(env);
+    }
+
     const url = new URL(request.url);
 
     // Log ALL incoming requests for debugging
     console.log(`[GCHAT-DEBUG] ${request.method} ${url.pathname} from ${request.headers.get('user-agent') || 'unknown'}`);
+
+    // ── /_refresh-prices: Manual trigger for price refresh (same as cron) ──
+    if (request.method === 'POST' && url.pathname === '/_refresh-prices') {
+      // Reuse the scheduled handler logic
+      try {
+        await this.scheduled({ cron: 'manual' }, env, ctx);
+        const result = await env.CONVERSATION_KV.get('prices_live', 'json');
+        return new Response(JSON.stringify({
+          ok: true,
+          stats: result?.stats || {},
+          refreshedAt: result?.refreshedAt
+        }), { headers: { 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: err.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // ── /_prices-status: Check last refresh status ──
+    if (request.method === 'GET' && url.pathname === '/_prices-status') {
+      const result = await env.CONVERSATION_KV.get('prices_live', 'json');
+      const error = await env.CONVERSATION_KV.get('prices_live_error', 'json');
+      return new Response(JSON.stringify({
+        hasLivePrices: !!result,
+        refreshedAt: result?.refreshedAt || null,
+        stats: result?.stats || null,
+        lastError: error || null
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }
 
     // ── /_work endpoint: Primary handler for CRM agentic loops ──
     // Processes SYNCHRONOUSLY (not in ctx.waitUntil) to get unlimited wall-clock
@@ -5328,6 +5405,113 @@ export default {
       status: 200,
       headers: { 'Content-Type': 'application/json' }
     });
+  },
+
+  // ── Cron Trigger: Daily price refresh from Zoho WooProducts → KV ──
+  // Runs on schedule defined in wrangler.toml (default: daily 6 AM CT)
+  // Fetches Stratus_Price for every SKU in the static prices.json,
+  // builds an updated price map, and stores it in KV.
+  // Runtime reads KV first → falls back to static prices.json.
+  async scheduled(event, env, ctx) {
+    const startTime = Date.now();
+    console.log(`[PRICE-CRON] Starting daily price refresh at ${new Date().toISOString()}`);
+
+    // Use PRICES_KV (shared across both workers) with CONVERSATION_KV fallback
+    const kv = env.PRICES_KV || env.CONVERSATION_KV;
+    if (!env.ZOHO_CLIENT_ID || !env.ZOHO_REFRESH_TOKEN) {
+      console.error('[PRICE-CRON] Missing Zoho credentials — skipping refresh');
+      return;
+    }
+
+    try {
+      // Get all SKUs from the static prices.json (bundled at deploy time)
+      const staticPrices = pricesData.prices;
+      const skuList = Object.keys(staticPrices);
+      console.log(`[PRICE-CRON] Refreshing ${skuList.length} SKUs from Zoho WooProducts`);
+
+      // Batch SKUs into groups of 5 for concurrent fetch (respect Zoho rate limits)
+      const BATCH_SIZE = 5;
+      const updatedPrices = { ...staticPrices };
+      let updated = 0;
+      let skipped = 0;
+      let errors = 0;
+      let outliers = 0;
+
+      for (let i = 0; i < skuList.length; i += BATCH_SIZE) {
+        const batch = skuList.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map(async (sku) => {
+            try {
+              const result = await zohoApiCall(
+                'GET',
+                `WooProducts/search?criteria=(WooProduct_Code:equals:${encodeURIComponent(sku)})&fields=WooProduct_Code,Stratus_Price`,
+                env
+              );
+
+              if (!result?.data?.length) return { sku, price: null };
+
+              // Filter out bundles (codes with '+') and find exact match
+              const match = result.data.find(r =>
+                r.WooProduct_Code === sku && !r.WooProduct_Code.includes('+')
+              );
+
+              return { sku, price: match?.Stratus_Price ?? null };
+            } catch (err) {
+              console.error(`[PRICE-CRON] Error fetching ${sku}: ${err.message}`);
+              return { sku, price: null, error: true };
+            }
+          })
+        );
+
+        for (const result of results) {
+          if (result.status === 'rejected') { errors++; continue; }
+          const { sku, price, error } = result.value;
+
+          if (error) { errors++; continue; }
+          if (price == null || price === 0) { skipped++; continue; }
+
+          const existing = staticPrices[sku];
+          const listPrice = existing?.list || 0;
+
+          // Outlier check: Stratus price should never exceed list price
+          if (listPrice > 0 && price > listPrice) {
+            outliers++;
+            continue; // Keep existing price
+          }
+
+          updatedPrices[sku] = {
+            list: listPrice,
+            price: price,
+            discount: listPrice > 0 ? Math.round(((listPrice - price) / listPrice) * 10000) / 10000 : existing?.discount || 0
+          };
+          updated++;
+        }
+
+        // Small delay between batches to respect Zoho rate limits (15 req/min for free)
+        if (i + BATCH_SIZE < skuList.length) {
+          await new Promise(r => setTimeout(r, 200));
+        }
+      }
+
+      // Store refreshed prices in KV with 25-hour TTL (covers daily refresh + buffer)
+      const kvPayload = {
+        prices: updatedPrices,
+        refreshedAt: new Date().toISOString(),
+        stats: { total: skuList.length, updated, skipped, errors, outliers }
+      };
+      await kv.put('prices_live', JSON.stringify(kvPayload), { expirationTtl: 90000 });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`[PRICE-CRON] Complete in ${elapsed}s — updated: ${updated}, skipped: ${skipped}, errors: ${errors}, outliers: ${outliers}`);
+
+    } catch (err) {
+      console.error(`[PRICE-CRON] Fatal error: ${err.message}`);
+      // Store error state so we can debug
+      await kv.put('prices_live_error', JSON.stringify({
+        error: err.message,
+        ts: new Date().toISOString()
+      }), { expirationTtl: 86400 });
+    }
   }
 };
 

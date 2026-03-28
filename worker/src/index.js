@@ -23,7 +23,46 @@ import catalogData from './data/auto-catalog.json';
 import specsData from './data/specs.json';
 import accessoriesData from './data/accessories.json';
 
-const prices = pricesData.prices;
+const staticPrices = pricesData.prices;
+let livePrices = null;       // KV-cached prices (refreshed daily by GChat worker cron)
+let livePricesCacheTs = 0;   // When we last read from KV (ms)
+const LIVE_PRICES_CACHE_TTL = 300000; // 5 minutes in-memory cache
+
+// Load live prices from KV (if available). Cached in-memory per isolate.
+// GChat worker's daily cron writes to PRICES_KV; this worker reads from it.
+async function loadLivePrices(env) {
+  const kv = env?.PRICES_KV || env?.CONVERSATION_KV;
+  if (!kv || typeof kv.get !== 'function') return null;
+  const now = Date.now();
+  if (livePrices && (now - livePricesCacheTs) < LIVE_PRICES_CACHE_TTL) {
+    return livePrices;
+  }
+  try {
+    const stored = await kv.get('prices_live', 'json');
+    if (stored?.prices) {
+      livePrices = stored.prices;
+      livePricesCacheTs = now;
+      console.log(`[PRICES] Loaded live prices from KV (refreshed: ${stored.refreshedAt}, ${stored.stats?.updated || '?'} updated)`);
+      return livePrices;
+    }
+  } catch (err) {
+    console.error(`[PRICES] KV read error: ${err.message}`);
+  }
+  return null;
+}
+
+// Merged price lookup: live KV prices → static prices.json fallback
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+
 const catalog = catalogData;
 const specs = specsData;
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
@@ -2936,6 +2975,9 @@ async function askClaude(userMessage, personId, env, imageData = null) {
 // ─── Main Worker Entry Point ─────────────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
+    // Load KV-cached live prices (written by GChat worker's daily cron)
+    await loadLivePrices(env);
+
     const url = new URL(request.url);
 
     // Health check
