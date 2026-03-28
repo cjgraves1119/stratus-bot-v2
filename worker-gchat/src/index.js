@@ -3380,6 +3380,67 @@ async function executeToolCall(toolName, toolInput, env) {
         return await zohoApiCall('POST', 'coql', env, { select_query: query });
       }
 
+      // ── Web Enrichment Tools ──
+      case 'web_search_domain': {
+        const { domain } = toolInput;
+        try {
+          // Try fetching the domain homepage with a short timeout
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          const url = `https://${domain.replace(/^(https?:\/\/)?(www\.)?/, '')}`;
+          const res = await fetch(url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (compatible; StratusBot/1.0)',
+              'Accept': 'text/html'
+            },
+            signal: controller.signal,
+            redirect: 'follow'
+          });
+          clearTimeout(timeoutId);
+          const html = await res.text();
+          // Extract useful metadata from the page
+          const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+          const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([\s\S]*?)["']/i)
+            || html.match(/<meta[^>]*content=["']([\s\S]*?)["'][^>]*name=["']description["']/i);
+          const ogNameMatch = html.match(/<meta[^>]*property=["']og:site_name["'][^>]*content=["']([\s\S]*?)["']/i)
+            || html.match(/<meta[^>]*content=["']([\s\S]*?)["'][^>]*property=["']og:site_name["']/i);
+          // Try to find address in structured data
+          const addressMatch = html.match(/"streetAddress"\s*:\s*"([^"]+)"/i);
+          const cityMatch = html.match(/"addressLocality"\s*:\s*"([^"]+)"/i);
+          const stateMatch = html.match(/"addressRegion"\s*:\s*"([^"]+)"/i);
+          const zipMatch = html.match(/"postalCode"\s*:\s*"([^"]+)"/i);
+          // Extract visible text from body for Claude to analyze (limited)
+          const bodyText = html
+            .replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[\s\S]*?<\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .substring(0, 3000);
+          return {
+            domain: domain,
+            url: url,
+            status: res.status,
+            title: titleMatch ? titleMatch[1].trim() : null,
+            description: descMatch ? descMatch[1].trim() : null,
+            site_name: ogNameMatch ? ogNameMatch[1].trim() : null,
+            structured_address: (addressMatch || cityMatch) ? {
+              street: addressMatch ? addressMatch[1] : null,
+              city: cityMatch ? cityMatch[1] : null,
+              state: stateMatch ? stateMatch[1] : null,
+              zip: zipMatch ? zipMatch[1] : null
+            } : null,
+            page_text_preview: bodyText
+          };
+        } catch (e) {
+          return {
+            domain: domain,
+            error: `Could not fetch domain: ${e.message}`,
+            suggestion: 'Try inferring the business name from the email signature or ask the user for the company details.'
+          };
+        }
+      }
+
       // ── Gmail Tools ──
       case 'gmail_search_messages': {
         const { query, max_results } = toolInput;
@@ -3592,6 +3653,18 @@ const CRM_EMAIL_TOOLS = [
       required: ['query']
     }
   },
+  // Web enrichment
+  {
+    name: 'web_search_domain',
+    description: 'Look up a company by its email domain (e.g., "acme.com"). Fetches the domain homepage to extract business name, address, and description. Use this when a customer emails from an unknown domain and you need to identify the business for Zoho Account creation. Returns extracted metadata or raw page content for analysis.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'The email domain to look up (e.g., "riverside.k12.wi.us", "acmecorp.com"). Do NOT include "www." or "https://".' }
+      },
+      required: ['domain']
+    }
+  },
   // Gmail
   {
     name: 'gmail_search_messages',
@@ -3680,6 +3753,12 @@ function detectCrmEmailIntent(text) {
     /\b(pipeline|forecast|revenue|stage|closed\s+won|qualification)/i,
     /\blast\s+(time|order|purchase|quote)\b/i,
     /\b(open\s+deals|my\s+deals|active\s+deals|pending\s+tasks|overdue\s+tasks)/i,
+    // New customer intake workflow triggers
+    /\bnew\s+customer\b/i,
+    /\b(process|intake|onboard)\s+(this\s+)?(email|lead|customer|request|inquiry)/i,
+    /\b(set\s*up|build\s*out|create\s+everything)\s+(for|from)\s+(this|the)/i,
+    /\b(got|received|have)\s+(a|an)\s+(email|inquiry|request)\s+(from|about)\s+(a\s+)?(new|potential|prospective)/i,
+    /\b(customer|prospect|lead)\s+(email|inquiry|request)\b.*\b(quote|meraki|cisco|network)/i,
   ];
 
   // Email intents
@@ -3890,6 +3969,109 @@ NEVER create new dropdown values — Zoho silently accepts invalid values and cr
 
 ---
 
+## NEW CUSTOMER EMAIL INTAKE WORKFLOW
+
+When the user says "new customer", "process this email", "intake this lead", or references a customer email that needs CRM setup, follow this structured workflow:
+
+### PHASE 1 — EMAIL DISCOVERY & ANALYSIS
+1. Search Gmail to find the referenced email. Use context clues: sender name, company name, subject keywords, or recency ("the last email from...").
+2. Once found, read the FULL THREAD (gmail_read_thread), not just the single message.
+3. Extract and summarize:
+   - What the customer is asking for (products, services, timeline)
+   - Any specific Cisco/Meraki products mentioned
+   - Budget indicators or project scope
+   - Timeline or urgency signals
+
+### PHASE 2 — PRODUCT DETERMINATION
+Map the customer's needs to specific Cisco/Meraki SKUs:
+- If specific models are mentioned, validate them against the product catalog
+- If the request is vague (e.g., "we need better Wi-Fi"), recommend appropriate products based on context:
+  - Office Wi-Fi: MR57 (high-density) or CW9166I (Wi-Fi 6E standard)
+  - Switches: MS150 series (access), MS450 (aggregation)
+  - Security: MX series based on user count (MX75 for <200, MX85 for <500, MX95 for <1000)
+  - Cameras: MV2, MV12, MV72 based on indoor/outdoor
+- Always include appropriate licenses (LIC-ENT for APs, LIC-SEC for MX, LIC-MS for switches)
+- Flag products as "placeholder — needs refinement" if you're making assumptions
+
+### PHASE 3 — CONTACT IDENTIFICATION
+Extract the primary contact from the email thread:
+- Full name (First_Name, Last_Name)
+- Email address
+- Phone number (check email signatures)
+- Title/role (check email signatures)
+- If multiple people are in the thread, identify the decision-maker or primary requester
+
+### PHASE 4 — BUSINESS IDENTIFICATION & ENRICHMENT
+Determine the business/organization:
+1. Check the email signature for company name, address, phone
+2. If not clear from the signature, extract the email domain (e.g., user@riverside.k12.wi.us → riverside.k12.wi.us)
+3. Use web_search_domain to look up the domain and extract:
+   - Business/organization name
+   - Street address, city, state, zip
+   - Type of business (school district, healthcare, enterprise, etc.)
+4. Search Zoho CRM to check if this Account already exists:
+   - zoho_search_records in Accounts with criteria matching the company name or domain
+   - Also search Contacts for the email address
+5. If Account exists → use existing Account ID (do NOT create duplicate)
+6. If Account is new → prepare to create it with all discovered info
+
+### PHASE 5 — CONFIRMATION GATE (MANDATORY)
+Before creating ANY records, present a complete summary for approval:
+
+\`\`\`
+📋 NEW CUSTOMER INTAKE SUMMARY
+
+📧 Email Thread: [subject line]
+From: [sender name] <[email]>
+
+🏢 Account: [Business Name] [NEW or EXISTING - link]
+   Address: [street, city, state zip]
+
+👤 Contact: [Full Name] [NEW or EXISTING - link]
+   Email: [email] | Phone: [phone] | Title: [title]
+
+💼 Deal: [Account] - [Description]
+   Stage: Qualification | Lead Source: Stratus Referal
+   Meraki ISR: Stratus Sales
+
+📦 Products (Quote):
+   [qty]x [SKU] - [description] [placeholder?]
+   [qty]x [SKU] - [description]
+   ...
+
+⏭️ Ready to create: Account → Contact → Deal → Quote → Follow-up Task
+
+Proceed? (or tell me what to adjust)
+\`\`\`
+
+WAIT for user confirmation before proceeding. If anything is marked as placeholder or uncertain, highlight it clearly.
+
+### PHASE 6 — CRM RECORD CREATION CHAIN
+After user confirms, execute in this exact order:
+1. Create Account (if new) — include name, address, phone, website
+2. Create Contact — link to Account via Account_Name.id
+3. Create Deal — link to Account and Contact, use defaults:
+   - Stage: "Qualification"
+   - Lead_Source: "Stratus Referal"
+   - Meraki_ISR: Stratus Sales (ID: 2570562000027286729)
+   - Owner: Chris Graves (ID: 2570562000141711002)
+   - Closing_Date: today + 30 days
+4. Create Quote — link to Deal, include:
+   - Product line items with ecomm pricing (look up WooProducts for Stratus_Price)
+   - Billing address from Account
+   - Valid_Till: today + 30 days
+5. Create follow-up Task on the Deal — due in 3 business days
+6. Report all created records with Zoho links
+
+### PHASE 7 — OPTIONAL: DRAFT REPLY
+After CRM setup is complete, offer to draft a reply to the original email thread:
+- Reference the customer's request
+- Let them know you're working on their quote
+- Ask any clarifying questions that came up
+- Create as gmail_create_draft (never auto-send)
+
+---
+
 ## RESPONSE FORMAT
 - Link every Zoho record: https://crm.zoho.com/crm/org647122552/tab/{Module}/{RecordID}
 - Format deal/quote info as a clean summary, never raw JSON
@@ -3950,6 +4132,9 @@ function toolProgressMessage(toolName, toolInput) {
     }
     case 'zoho_get_field':
       return `🔍 Validating ${toolInput.field_name || 'field'} picklist values...`;
+    case 'web_search_domain': {
+      return `🌐 Looking up ${toolInput.domain || 'domain'}...`;
+    }
     case 'gmail_search_messages': {
       const q = (toolInput.query || '').substring(0, 50);
       return `📧 Searching Gmail: ${q}...`;
