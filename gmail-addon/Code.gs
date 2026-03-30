@@ -307,6 +307,38 @@ function onSendToStratusAI(e) {
     .build();
 }
 
+/** Send to Stratus AI from homepage — no email context required */
+function onSendToStratusAIFromHome(e) {
+  var requestText = e.formInput ? e.formInput.home_stratus_request : null;
+  if (!requestText || requestText.trim() === '') {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText('Please enter a request before sending.'))
+      .build();
+  }
+
+  var result;
+  try {
+    result = sendHandoffRequest_(requestText.trim(), null);
+  } catch (err) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText('Request failed: ' + err.message))
+      .build();
+  }
+
+  var notifText;
+  if (result && result.success) {
+    notifText = 'Sent! Check Google Chat for your response from Stratus AI.';
+  } else if (result && result.error && result.error.indexOf('No Google Chat space') !== -1) {
+    notifText = 'Setup needed: Send any message to Stratus AI in Google Chat first, then try again.';
+  } else {
+    notifText = 'Something went wrong. ' + (result && result.error ? result.error.substring(0, 80) : 'Try again.');
+  }
+
+  return CardService.newActionResponseBuilder()
+    .setNotification(CardService.newNotification().setText(notifText))
+    .build();
+}
+
 /** Build email context object for the handoff request */
 function buildEmailContextForHandoff_(e) {
   try {

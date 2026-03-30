@@ -1094,6 +1094,10 @@ async function handleQuoteConfirmation(text, personId, kv) {
   if (!confirmIntent) return null;
   if (!personId || !kv) return null;
 
+  // If there's an active CRM session, let the CRM agent handle this "yes" confirmation
+  const crmSession = await kv.get(`crm_session_${personId}`);
+  if (crmSession) return null;
+
   const history = await getHistory(kv, personId);
   if (history.length === 0) return null;
 
@@ -4018,7 +4022,13 @@ Every Quote Create call MUST include ALL of these fields:
   "Shipping_Country": "US",
   "Owner": {"id": "2570562000141711002"},
   "Quoted_Items": [
-    {"Quantity": 1, "Product_Name": {"id": "{zoho_product_id}"}, "Discount": 0}
+    {
+      "Product_Name": {"id": "{zoho_product_id}"},
+      "Quantity": 1,
+      "unit_price": 820,
+      "Discount": 0,
+      "Description": "Stratus ecomm price ({XX}% off list)"
+    }
   ]
 }
 \`\`\`
@@ -4072,10 +4082,10 @@ If a search returns no results, try without the suffix as a fallback, or try wit
 Never create a quote at list price. Apply Stratus ecomm pricing on every line:
 1. Apply the correct SKU suffix (see rules above), then search WooProducts module: criteria (WooProduct_Code:equals:{SUFFIXED_SKU}), fields: WooProduct_Code,Stratus_Price
 2. If WooProducts returns no results, try the Products module: criteria (Product_Code:equals:{SUFFIXED_SKU}), fields: Product_Code,Unit_Price,Product_Name
-3. Discount per line = (List_Price − Stratus_Price) × Quantity  ← dollar amount, not percent
-4. Include Description = "{XX}% discount applied" on each line
+3. Set unit_price = Stratus_Price (the Stratus ecomm price from WooProducts). Set Discount = 0. Calculate display percentage = round((1 - Stratus_Price / List_Price) * 100) for the Description only.
+4. Include Description = "Stratus ecomm price ({XX}% off list)" on each line
 
-Zoho auto-populates List_Price from the Product record. Only send Product_Name.id, Quantity, Discount, Description per line item.
+Zoho auto-populates List_Price from the Product record. Per line item send: Product_Name.id, Quantity, unit_price (Stratus ecomm price), Discount: 0, Description. Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentage.
 
 ---
 

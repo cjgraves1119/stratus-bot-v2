@@ -78,6 +78,38 @@ function buildHomepageCard_() {
 
   card.addSection(crmSection);
 
+  // ── Send to Stratus AI (GChat) ──
+  var handoffSection = CardService.newCardSection()
+    .setHeader('Send to Stratus AI \u2192 GChat')
+    .setCollapsible(false);
+
+  handoffSection.addWidget(
+    CardService.newTextParagraph().setText(
+      'Send a request to Stratus AI in Google Chat. ' +
+      'Use for CRM actions, quoting, or anything that needs the full AI agent.'
+    )
+  );
+
+  handoffSection.addWidget(
+    CardService.newTextInput()
+      .setFieldName('home_stratus_request')
+      .setTitle('Your request')
+      .setHint('e.g. "quote 10 MR44 under deal Ohio Valley Gas"')
+      .setMultiline(true)
+  );
+
+  handoffSection.addWidget(
+    CardService.newButtonSet().addButton(
+      CardService.newTextButton()
+        .setText('Send to Stratus AI \u2192 GChat')
+        .setOnClickAction(CardService.newAction().setFunctionName('onSendToStratusAIFromHome'))
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    )
+  );
+
+  card.addSection(handoffSection);
+
   // ── Info / Help ──
   var infoSection = CardService.newCardSection()
     .setHeader('Tips')
