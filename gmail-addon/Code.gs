@@ -75,7 +75,7 @@ function onGmailMessage(e) {
 // COMPOSE TRIGGER
 // ─────────────────────────────────────────────
 
-ComposeInsertQuote(e) {
+function onComposeInsertQuote(e) {
   return buildQuoteBuilderCard_('');
 }
 
