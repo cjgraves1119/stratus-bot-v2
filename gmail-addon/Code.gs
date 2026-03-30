@@ -75,7 +75,7 @@ function onGmailMessage(e) {
 // COMPOSE TRIGGER
 // ─────────────────────────────────────────────
 
-function onComposeInsertQuote(e) {
+ComposeInsertQuote(e) {
   return buildQuoteBuilderCard_('');
 }
 
@@ -266,6 +266,34 @@ function onDraftReplyCustom(e) {
     return buildErrorCard_('Draft generation failed: ' + err.message);
   }
   return buildDraftReplyCard_(result, ctx);
+}
+
+/** Send to Stratus AI via GChat */
+function onStratusHandoff(e) {
+  var ctx = getEmailContext_();
+  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
+
+  try {
+    var handoffUrl = 'https://gchat-worker.cjgraves1119.workers.dev/gmail-handoff';
+    var payload = {
+      subject: ctx.subject,
+      body: ctx.body,
+      senderEmail: ctx.senderEmail,
+      senderName: ctx.senderName,
+      messageId: ctx.messageId
+    };
+
+    var options = {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload)
+    };
+
+    var response = UrlFetchApp.fetch(handoffUrl, options);
+    return buildStratusHandoffCard_();
+  } catch (err) {
+    return buildErrorCard_('Handoff failed: ' + err.message);
+  }
 }
 
 /** Insert draft into Gmail */
