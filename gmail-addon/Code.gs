@@ -328,6 +328,32 @@ function onCopyText(e) {
     .build();
 }
 
+/**
+ * Suggest and create a follow-up task.
+ * Auto-creates lead/contact in Zoho if sender has no CRM record.
+ */
+function onSuggestTask(e) {
+  var params = e.commonEventObject.parameters || {};
+  var senderEmail = params.sender_email || '';
+  var senderName = params.sender_name || '';
+  var subject = params.subject || '';
+  var hasAccount = params.has_account === 'true';
+  var accountId = params.account_id || '';
+
+  try {
+    var result = callApi_('/api/suggest-task', {
+      senderEmail: senderEmail,
+      senderName: senderName,
+      subject: subject,
+      hasAccount: hasAccount,
+      accountId: accountId
+    });
+    return buildTaskResultCard_(result);
+  } catch (err) {
+    return buildErrorCard_('Task suggestion failed: ' + err.message);
+  }
+}
+
 // ─────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────

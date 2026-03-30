@@ -5081,7 +5081,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
             break;
           }
 
-          // ── Draft Reply: AI-generated reply options ──
+          // ── Draft Reply: AI-generated reply options with product intelligence ──
           case '/api/draft-reply': {
             const { subject, body, senderEmail, senderName, tone, instructions } = apiBody;
             if (!body && !subject) {
@@ -5094,6 +5094,98 @@ Return ONLY the JSON object, no markdown or extra text.`,
               brief: 'Very concise, 2-3 sentences max. Get to the point fast. End with a question.'
             };
 
+            // Detect SKUs in the email to provide product context and quote URLs
+            var detectedProducts = [];
+            var quoteContext = '';
+            try {
+              const emailText = (subject || '') + ' ' + (body || '');
+              const parsed = parseMessage(emailText);
+              if (parsed && parsed.items && parsed.items.length > 0) {
+                for (var pi = 0; pi < parsed.items.length; pi++) {
+                  var pItem = parsed.items[pi];
+                  var baseSku = pItem.sku;
+                  var eolInfo = checkEol(baseSku);
+                  detectedProducts.push({
+                    sku: baseSku,
+                    qty: pItem.qty || 1,
+                    isEol: !!eolInfo,
+                    replacement: eolInfo ? (Array.isArray(EOL_REPLACEMENTS[baseSku]) ? EOL_REPLACEMENTS[baseSku] : [EOL_REPLACEMENTS[baseSku]]) : null,
+                    eolDate: EOL_DATES[baseSku] || null
+                  });
+                }
+
+                // Build quote URLs for detected products
+                var quoteUrls = [];
+                if (detectedProducts.some(function(p) { return p.isEol; })) {
+                  // For EOL products, generate renewal + upgrade options
+                  var renewItems = [];
+                  var upgradeItems = [];
+                  for (var di = 0; di < detectedProducts.length; di++) {
+                    var dp = detectedProducts[di];
+                    if (dp.isEol && dp.replacement) {
+                      // Renewal (license only for existing hardware)
+                      var licSkus = getLicenseSkus(dp.sku);
+                      if (licSkus && licSkus.length > 0) {
+                        renewItems.push({ sku: licSkus[0], qty: dp.qty }); // 1Y
+                      }
+                      // Upgrade to replacement
+                      var repl = dp.replacement[0];
+                      upgradeItems.push({ sku: repl, qty: dp.qty });
+                      var replLic = getLicenseSkus(repl);
+                      if (replLic && replLic.length > 0) {
+                        upgradeItems.push({ sku: replLic[0], qty: dp.qty }); // 1Y
+                      }
+                    } else {
+                      // Non-EOL: just license renewal
+                      var neLic = getLicenseSkus(dp.sku);
+                      if (neLic && neLic.length > 0) {
+                        renewItems.push({ sku: neLic[0], qty: dp.qty });
+                      }
+                    }
+                  }
+
+                  // Build URLs using buildStratusUrl
+                  if (renewItems.length > 0) {
+                    quoteUrls.push({ label: 'License Renewal (1-Year)', url: buildStratusUrl(renewItems) });
+                  }
+                  if (upgradeItems.length > 0) {
+                    quoteUrls.push({ label: 'Hardware Upgrade (1-Year)', url: buildStratusUrl(upgradeItems) });
+                  }
+                } else {
+                  // Non-EOL products: standard 1Y/3Y/5Y
+                  var builtResp = buildQuoteResponse(parsed);
+                  if (builtResp && builtResp.urls) {
+                    for (var ui = 0; ui < builtResp.urls.length; ui++) {
+                      quoteUrls.push({ label: builtResp.urls[ui].label || ('Option ' + (ui+1)), url: builtResp.urls[ui].url });
+                    }
+                  }
+                }
+
+                quoteContext = '\n\nPRODUCT INTELLIGENCE (use this for accurate recommendations):\n';
+                quoteContext += 'Detected products in email: ' + detectedProducts.map(function(p) {
+                  var info = p.sku + ' (qty: ' + p.qty + ')';
+                  if (p.isEol) {
+                    info += ' [END OF LIFE' + (p.eolDate ? ' as of ' + p.eolDate : '') + ', replacement: ' + p.replacement.join(' or ') + ']';
+                  }
+                  return info;
+                }).join(', ') + '\n';
+                if (quoteUrls.length > 0) {
+                  quoteContext += 'Pre-built Stratus quote URLs to include in your reply:\n';
+                  for (var qi = 0; qi < quoteUrls.length; qi++) {
+                    quoteContext += '  ' + quoteUrls[qi].label + ': ' + quoteUrls[qi].url + '\n';
+                  }
+                }
+                quoteContext += '\nIMPORTANT PRODUCT RULES:\n';
+                quoteContext += '- NEVER recommend a product that is End of Life (EOL). Only recommend the listed replacement.\n';
+                quoteContext += '- Always use the pre-built Stratus quote URLs above (https://stratusinfosystems.com/order/...) rather than inventing URLs.\n';
+                quoteContext += '- If the customer needs a license renewal for existing hardware, provide the renewal URL.\n';
+                quoteContext += '- If recommending an upgrade, provide the hardware upgrade URL.\n';
+                quoteContext += '- Common EOL replacements: MX64->MX67, MX65->MX68, MX84->MX85, MX100->MX105, MS220->MS130, MS225->MS130, MS250->MS150, MS350->MS150.\n';
+              }
+            } catch (parseErr) {
+              console.error('[API] Draft product detection error:', parseErr.message);
+            }
+
             const draftResp = await fetch(ANTHROPIC_API_URL, {
               method: 'POST',
               headers: {
@@ -5104,7 +5196,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
               body: JSON.stringify({
                 model: 'claude-sonnet-4-20250514',
                 max_tokens: 1500,
-                system: `You are drafting email replies for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki exclusive reseller). Write in Chris's voice:
+                system: `You are drafting email replies for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki exclusive reseller specializing in Meraki). Write in Chris's voice:
 
 STYLE RULES:
 - Personable, consultative, and concise
@@ -5115,9 +5207,18 @@ STYLE RULES:
 - ALWAYS end with a question or specific call to action
 - Never start with "I hope this email finds you well" or similar filler
 - Signature is handled separately, do NOT include one
+- NEVER invent or fabricate URLs. Only use the pre-built Stratus quote URLs provided in the PRODUCT INTELLIGENCE section below.
+- If no quote URLs are provided, do NOT include any URLs in the draft.
+
+THREAD CHRONOLOGY:
+- Pay close attention to the dates of messages in the email thread.
+- The MOST RECENT message is the one you are replying to. Earlier messages are historical context.
+- If a customer wrote months/years ago AND wrote again recently, they are following up separately. The recent message is the active request.
+- Do not confuse old resolved conversations with the current request.
+- Today's date: ${new Date().toISOString().split('T')[0]}
 
 TONE: ${toneGuide[tone] || toneGuide.warm}
-
+${quoteContext}
 ${instructions ? 'ADDITIONAL INSTRUCTIONS: ' + instructions : ''}
 
 Return ONLY valid JSON:
@@ -5440,6 +5541,142 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               }
             } catch (actErr) {
               apiResult = { error: 'Task action failed: ' + actErr.message, success: false };
+            }
+            break;
+          }
+
+          // ── Suggest Task: Auto-create lead/contact + follow-up task ──
+          case '/api/suggest-task': {
+            const { senderEmail, senderName, subject: taskSubject, hasAccount, accountId } = apiBody;
+            if (!senderEmail) {
+              return new Response(JSON.stringify({ error: 'senderEmail required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              const domain = senderEmail.split('@')[1] || '';
+              const isGenericEmail = /^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac|comcast|att|verizon)\.\w+$/i.test(domain);
+
+              function suggestAddBusinessDays(startDate, days) {
+                let d = new Date(startDate);
+                let added = 0;
+                while (added < days) {
+                  d.setDate(d.getDate() + 1);
+                  const dow = d.getDay();
+                  if (dow !== 0 && dow !== 6) added++;
+                }
+                return d.toISOString().split('T')[0];
+              }
+              const followUpDate = suggestAddBusinessDays(new Date(), 3);
+
+              let resultAccountId = accountId || null;
+              let resultAccountName = '';
+              let contactId = null;
+              let contactCreated = false;
+              let leadCreated = false;
+              let taskCreated = false;
+              let taskId = null;
+
+              if (hasAccount && accountId) {
+                // Account exists. Check if contact exists for this email.
+                const acctResp = await zohoApiCall('GET', `Accounts/${accountId}?fields=Account_Name`, env);
+                resultAccountName = acctResp?.data?.[0]?.Account_Name || 'Unknown';
+
+                const contactSearch = await zohoApiCall('GET',
+                  `Contacts/search?email=${encodeURIComponent(senderEmail)}&fields=id,Full_Name,Email`, env
+                );
+                if (contactSearch?.data && contactSearch.data.length > 0) {
+                  contactId = contactSearch.data[0].id;
+                } else {
+                  // Create contact under existing account
+                  const nameParts = (senderName || '').split(' ');
+                  const firstName = nameParts[0] || senderEmail.split('@')[0];
+                  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '-';
+                  const contactPayload = {
+                    data: [{
+                      First_Name: firstName,
+                      Last_Name: lastName,
+                      Email: senderEmail,
+                      Account_Name: { id: accountId },
+                      Owner: '2570562000141711002'
+                    }]
+                  };
+                  const createContactResp = await zohoApiCall('POST', 'Contacts', env, contactPayload);
+                  if (createContactResp?.data?.[0]?.details?.id) {
+                    contactId = createContactResp.data[0].details.id;
+                    contactCreated = true;
+                  }
+                }
+              } else if (!isGenericEmail) {
+                // No account, non-generic email. Create a Lead.
+                const nameParts = (senderName || '').split(' ');
+                const firstName = nameParts[0] || senderEmail.split('@')[0];
+                const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '-';
+                const company = domain.split('.')[0].charAt(0).toUpperCase() + domain.split('.')[0].slice(1);
+                const leadPayload = {
+                  data: [{
+                    First_Name: firstName,
+                    Last_Name: lastName,
+                    Email: senderEmail,
+                    Company: company,
+                    Lead_Source: 'Website',
+                    Owner: '2570562000141711002'
+                  }]
+                };
+                const createLeadResp = await zohoApiCall('POST', 'Leads', env, leadPayload);
+                if (createLeadResp?.data?.[0]?.details?.id) {
+                  leadCreated = true;
+                  // Note: Leads don't link to accounts/contacts directly.
+                  // The task will be standalone with just the lead reference.
+                  contactId = null;
+                  resultAccountName = company;
+                }
+              }
+              // For generic emails (gmail.com etc.) without an account, we skip lead creation
+              // but still create the task as a standalone follow-up.
+
+              // Create follow-up task
+              const taskPayload = {
+                data: [{
+                  Subject: 'Follow up: ' + (taskSubject || senderName || senderEmail),
+                  Status: 'Not Started',
+                  Due_Date: followUpDate,
+                  Owner: '2570562000141711002',
+                  Description: 'Auto-created from Gmail add-on.\nSender: ' + senderName + ' <' + senderEmail + '>\nOriginal subject: ' + (taskSubject || 'N/A')
+                }]
+              };
+              if (contactId) {
+                taskPayload.data[0].Who_Id = contactId;
+              }
+              if (resultAccountId) {
+                taskPayload.data[0].What_Id = resultAccountId;
+                taskPayload.data[0].$se_module = 'Accounts';
+              }
+
+              const createTaskResp = await zohoApiCall('POST', 'Tasks', env, taskPayload);
+              if (createTaskResp?.data?.[0]?.details?.id) {
+                taskId = createTaskResp.data[0].details.id;
+                taskCreated = true;
+              }
+
+              let statusMsg = '';
+              if (leadCreated) statusMsg += 'Created lead for ' + resultAccountName + '. ';
+              if (contactCreated) statusMsg += 'Added ' + senderName + ' as contact to ' + resultAccountName + '. ';
+              if (taskCreated) statusMsg += 'Follow-up task created (due ' + followUpDate + ').';
+              if (!taskCreated) statusMsg += 'Could not create task. Check Zoho permissions.';
+
+              apiResult = {
+                success: taskCreated,
+                action: 'suggest_task',
+                message: statusMsg.trim(),
+                taskId: taskId,
+                newDueDate: followUpDate,
+                newSubject: 'Follow up: ' + (taskSubject || senderName || senderEmail),
+                leadCreated: leadCreated,
+                contactCreated: contactCreated,
+                accountName: resultAccountName
+              };
+            } catch (suggestErr) {
+              apiResult = { error: 'Task suggestion failed: ' + suggestErr.message, success: false };
             }
             break;
           }

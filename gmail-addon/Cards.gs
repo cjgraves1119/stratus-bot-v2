@@ -86,12 +86,12 @@ function buildHomepageCard_() {
 
   infoSection.addWidget(
     CardService.newTextParagraph().setText(
-      'Open any email to unlock AI features:\n' +
-      '• <b>AI Analysis</b> — summary, urgency, action items\n' +
-      '• <b>Open Tasks</b> — view/manage Zoho tasks for this account\n' +
-      '• <b>Draft Replies</b> — warm, professional, or brief tone\n' +
-      '• <b>CRM Lookup</b> — auto-finds sender in Zoho\n' +
-      '• <b>SKU Detection</b> — finds Cisco products in emails\n\n' +
+      'Open any email to unlock AI features:\n\n' +
+      '- <b>AI Analysis</b> - summary, urgency, action items\n' +
+      '- <b>Open Tasks</b> - view/manage Zoho tasks for this account\n' +
+      '- <b>Draft Replies</b> - warm, professional, or brief tone\n' +
+      '- <b>CRM Lookup</b> - auto-finds sender in Zoho\n' +
+      '- <b>SKU Detection</b> - finds Cisco products in emails\n\n' +
       'Use <b>Insert Stratus Quote</b> in the compose menu.'
     )
   );
@@ -243,7 +243,7 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
         CardService.newDecoratedText()
           .setTopLabel('Action Items')
           .setText(analysis.actionItems.map(function(item) {
-            return '• ' + item;
+            return '- ' + item;
           }).join('\n'))
           .setWrapText(true)
       );
@@ -282,7 +282,7 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
 
     if (acct.recentDeals && acct.recentDeals.length > 0) {
       var dealText = acct.recentDeals.map(function(d) {
-        return (d.Deal_Name || 'Unnamed') + ' — ' + (d.Stage || 'unknown');
+        return (d.Deal_Name || 'Unnamed') + ' - ' + (d.Stage || 'unknown');
       }).join('\n');
       senderSection.addWidget(
         CardService.newDecoratedText()
@@ -355,18 +355,43 @@ function buildTaskCard_(result, emailCtx) {
 
   if (tasks.length === 0) {
     var emptySection = CardService.newCardSection();
-    emptySection.addWidget(
-      CardService.newTextParagraph().setText(
-        'No open tasks found for accounts associated with this email thread.'
-      )
-    );
     if (result.accounts && result.accounts.length > 0) {
       emptySection.addWidget(
         CardService.newTextParagraph().setText(
-          '<i>Searched: ' + result.accounts.map(function(a) { return a.name; }).join(', ') + '</i>'
+          'No open tasks found for:\n<i>' + result.accounts.map(function(a) { return a.name; }).join(', ') + '</i>'
+        )
+      );
+    } else {
+      emptySection.addWidget(
+        CardService.newTextParagraph().setText(
+          'No matching accounts found in Zoho CRM for this email thread.'
         )
       );
     }
+
+    // Suggest Task button: auto-creates lead/contact if needed, then suggests a follow-up task
+    var suggestParams = {
+      sender_email: emailCtx.senderEmail || '',
+      sender_name: emailCtx.senderName || '',
+      subject: emailCtx.subject || '',
+      has_account: (result.accounts && result.accounts.length > 0) ? 'true' : 'false',
+      account_id: (result.accounts && result.accounts.length > 0) ? result.accounts[0].id : ''
+    };
+
+    emptySection.addWidget(
+      CardService.newButtonSet().addButton(
+        CardService.newTextButton()
+          .setText('Create Follow-Up Task')
+          .setOnClickAction(
+            CardService.newAction()
+              .setFunctionName('onSuggestTask')
+              .setParameters(suggestParams)
+          )
+          .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+          .setBackgroundColor(CONFIG.STRATUS_BLUE)
+      )
+    );
+
     card.addSection(emptySection);
     addBackToEmailButton_(card);
     return card.build();
@@ -399,7 +424,7 @@ function buildTaskCard_(result, emailCtx) {
     // Subject and due date
     var dueDateLabel = task.dueDate ? task.dueDate : 'No due date';
     var isOverdue = task.dueDate && new Date(task.dueDate + 'T23:59:59') < new Date();
-    var dueText = isOverdue ? '⚠️ OVERDUE: ' + dueDateLabel : dueDateLabel;
+    var dueText = isOverdue ? 'OVERDUE: ' + dueDateLabel : dueDateLabel;
 
     taskSection.addWidget(
       CardService.newDecoratedText()
@@ -549,7 +574,7 @@ function buildTaskResultCard_(result) {
   } else if (result.action === 'complete_and_followup') {
     section.addWidget(
       CardService.newTextParagraph().setText(
-        '✅ Task completed successfully!'
+        'Task completed successfully!'
       )
     );
     if (result.newTaskId) {
@@ -572,13 +597,49 @@ function buildTaskResultCard_(result) {
   } else if (result.action === 'reschedule') {
     section.addWidget(
       CardService.newTextParagraph().setText(
-        '📅 Task rescheduled to <b>' + result.newDueDate + '</b>'
+        'Task rescheduled to <b>' + result.newDueDate + '</b>'
       )
     );
   } else if (result.action === 'edit') {
     section.addWidget(
-      CardService.newTextParagraph().setText('✏️ Task updated successfully!')
+      CardService.newTextParagraph().setText('Task updated successfully!')
     );
+  } else if (result.action === 'suggest_task') {
+    var msg = result.message || 'Task created.';
+    section.addWidget(
+      CardService.newTextParagraph().setText(msg)
+    );
+    if (result.taskId) {
+      section.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel('Follow-Up Task')
+          .setText(result.newSubject || 'Follow up')
+          .setBottomLabel('Due: ' + (result.newDueDate || 'TBD'))
+          .setWrapText(true)
+          .setButton(
+            CardService.newTextButton()
+              .setText('Open')
+              .setOpenLink(
+                CardService.newOpenLink()
+                  .setUrl(CONFIG.ZOHO_ORG_URL + '/tab/Tasks/' + result.taskId)
+              )
+          )
+      );
+    }
+    if (result.leadCreated) {
+      section.addWidget(
+        CardService.newTextParagraph().setText(
+          '<i>New lead created for ' + (result.accountName || 'unknown') + '</i>'
+        )
+      );
+    }
+    if (result.contactCreated) {
+      section.addWidget(
+        CardService.newTextParagraph().setText(
+          '<i>New contact added to ' + (result.accountName || 'unknown') + '</i>'
+        )
+      );
+    }
   } else {
     section.addWidget(
       CardService.newTextParagraph().setText('Action completed.')
