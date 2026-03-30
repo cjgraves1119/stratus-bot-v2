@@ -67,6 +67,80 @@ const prices = new Proxy(staticPrices, {
   }
 });
 
+// ─── API Usage Tracking ─────────────────────────────────────────────────────
+// Pricing per 1M tokens (USD) by model
+const MODEL_PRICING = {
+  'claude-sonnet-4-20250514': { input: 3.00, output: 15.00 },
+  'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
+  'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00 },
+  'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
+};
+
+/**
+ * Track API usage from a Claude response.
+ * Stores per-request log entry and updates monthly totals in KV.
+ * @param {Object} env - Worker env with KV bindings
+ * @param {string} model - Model name used
+ * @param {Object} usage - { input_tokens, output_tokens } from API response
+ * @param {string} source - Where the call originated (e.g. 'gchat', 'addon-analyze', 'addon-draft', 'crm-agent')
+ */
+async function trackUsage(env, model, usage, source) {
+  if (!usage || !env?.CONVERSATION_KV) return;
+  try {
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-20250514'];
+    const inputCost = (usage.input_tokens / 1_000_000) * pricing.input;
+    const outputCost = (usage.output_tokens / 1_000_000) * pricing.output;
+    const totalCost = inputCost + outputCost;
+
+    const now = new Date();
+    const monthKey = `usage_${now.getFullYear()}_${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    // Read current monthly totals
+    var monthly = await env.CONVERSATION_KV.get(monthKey, 'json') || {
+      month: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCostUsd: 0,
+      requestCount: 0,
+      bySource: {},
+      recentRequests: []
+    };
+
+    // Update totals
+    monthly.totalInputTokens += usage.input_tokens;
+    monthly.totalOutputTokens += usage.output_tokens;
+    monthly.totalCostUsd += totalCost;
+    monthly.requestCount += 1;
+
+    // Track by source
+    if (!monthly.bySource[source]) {
+      monthly.bySource[source] = { requests: 0, costUsd: 0, inputTokens: 0, outputTokens: 0 };
+    }
+    monthly.bySource[source].requests += 1;
+    monthly.bySource[source].costUsd += totalCost;
+    monthly.bySource[source].inputTokens += usage.input_tokens;
+    monthly.bySource[source].outputTokens += usage.output_tokens;
+
+    // Keep last 50 requests for detail view
+    monthly.recentRequests.unshift({
+      ts: now.toISOString(),
+      model,
+      source,
+      inputTokens: usage.input_tokens,
+      outputTokens: usage.output_tokens,
+      costUsd: Math.round(totalCost * 1_000_000) / 1_000_000
+    });
+    if (monthly.recentRequests.length > 50) {
+      monthly.recentRequests = monthly.recentRequests.slice(0, 50);
+    }
+
+    // Write back with 90-day TTL (keeps ~3 months of history)
+    await env.CONVERSATION_KV.put(monthKey, JSON.stringify(monthly), { expirationTtl: 90 * 86400 });
+  } catch (err) {
+    console.error('[USAGE] tracking error:', err.message);
+  }
+}
+
 const catalog = catalogData;
 const specs = specsData;
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
@@ -2908,6 +2982,7 @@ async function processEmailThread(text, personId, env, kv) {
     }
 
     const data = await response.json();
+    trackUsage(env, 'claude-sonnet-4-20250514', data.usage, 'email-parse').catch(() => {});
     const rawJson = data.content[0].text.trim();
 
     // Parse JSON response
@@ -4270,6 +4345,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     }
 
     const data = await response.json();
+    trackUsage(env, 'claude-haiku-4-5-20251001', data.usage, 'crm-agent-continue').catch(() => {});
 
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
@@ -4523,6 +4599,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       const data = await response.json();
 
+      // Track API usage
+      const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
+      const usageModel = useTools ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-20250514';
+      trackUsage(env, usageModel, data.usage, usageSource).catch(() => {});
+
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
         console.log(`[GCHAT-AGENT] Tool use iteration ${iteration}`);
@@ -4763,6 +4844,96 @@ export default {
       }), { headers: { 'Content-Type': 'application/json' } });
     }
 
+    // ── /_admin/usage: API cost tracking dashboard ──
+    if (request.method === 'GET' && url.pathname === '/_admin/usage') {
+      const apiKey = request.headers.get('X-API-Key') || url.searchParams.get('key');
+      if (apiKey !== env.GMAIL_ADDON_API_KEY) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const now = new Date();
+      const monthParam = url.searchParams.get('month'); // e.g. "2026-03"
+      let year, month;
+      if (monthParam && /^\d{4}-\d{2}$/.test(monthParam)) {
+        [year, month] = monthParam.split('-');
+      } else {
+        year = now.getFullYear();
+        month = String(now.getMonth() + 1).padStart(2, '0');
+      }
+      const monthKey = `usage_${year}_${month}`;
+      const data = await env.CONVERSATION_KV.get(monthKey, 'json');
+      if (!data) {
+        return new Response(JSON.stringify({
+          month: `${year}-${month}`,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCostUsd: 0,
+          requestCount: 0,
+          bySource: {},
+          recentRequests: []
+        }), { headers: { 'Content-Type': 'application/json' } });
+      }
+      // Round cost for readability
+      data.totalCostUsd = Math.round(data.totalCostUsd * 1_000_000) / 1_000_000;
+      for (const src in data.bySource) {
+        data.bySource[src].costUsd = Math.round(data.bySource[src].costUsd * 1_000_000) / 1_000_000;
+      }
+      // Return HTML dashboard if ?format=html, otherwise JSON
+      if (url.searchParams.get('format') === 'html') {
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Stratus AI - API Usage</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f7fa;color:#333;padding:20px}
+.container{max-width:900px;margin:0 auto}.header{background:#1a73a7;color:#fff;padding:20px 24px;border-radius:12px 12px 0 0;display:flex;align-items:center;gap:12px}
+.header h1{font-size:20px;font-weight:600}.header .month{font-size:14px;opacity:.8;margin-left:auto}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:16px;background:#fff;border-bottom:1px solid #e5e8ec}
+.stat{text-align:center;padding:12px}.stat .value{font-size:24px;font-weight:700;color:#1a73a7}.stat .label{font-size:11px;color:#666;text-transform:uppercase;margin-top:4px}
+.section{background:#fff;padding:16px 20px;border-bottom:1px solid #e5e8ec}.section h2{font-size:14px;font-weight:600;margin-bottom:10px;color:#555}
+table{width:100%;border-collapse:collapse;font-size:13px}th{text-align:left;padding:6px 8px;border-bottom:2px solid #e5e8ec;font-weight:600;color:#666}
+td{padding:6px 8px;border-bottom:1px solid #f0f2f5}.cost{color:#1a73a7;font-weight:600}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-gchat{background:#e8f5e9;color:#2e7d32}.badge-addon{background:#e3f2fd;color:#1565c0}.badge-crm{background:#fff3e0;color:#e65100}.badge-email{background:#fce4ec;color:#c62828}
+.footer{background:#fff;padding:12px 20px;border-radius:0 0 12px 12px;font-size:11px;color:#999;text-align:center}
+.nav{padding:12px 20px;background:#fff;display:flex;gap:8px;border-bottom:1px solid #e5e8ec}
+.nav a{padding:4px 12px;border-radius:4px;text-decoration:none;font-size:12px;background:#f0f2f5;color:#555}.nav a:hover{background:#e3e6ea}
+</style></head><body><div class="container">
+<div class="header"><svg width="32" height="32" viewBox="0 0 256 256"><circle cx="128" cy="128" r="128" fill="#fff" opacity=".2"/><text x="128" y="170" font-size="160" font-weight="700" fill="#fff" text-anchor="middle" font-family="Arial">S</text></svg>
+<h1>Stratus AI Usage</h1><span class="month">${data.month}</span></div>
+<div class="nav">${(() => {
+  const months = [];
+  for (let i = 0; i < 3; i++) {
+    const d = new Date(parseInt(year), parseInt(month) - 1 - i, 1);
+    const m = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+    months.push('<a href="/_admin/usage?key=' + apiKey + '&format=html&month=' + m + '">' + m + '</a>');
+  }
+  return months.join('');
+})()}</div>
+<div class="stats">
+<div class="stat"><div class="value">${data.requestCount}</div><div class="label">Requests</div></div>
+<div class="stat"><div class="value">$${data.totalCostUsd.toFixed(4)}</div><div class="label">Total Cost</div></div>
+<div class="stat"><div class="value">${(data.totalInputTokens/1000).toFixed(1)}k</div><div class="label">Input Tokens</div></div>
+<div class="stat"><div class="value">${(data.totalOutputTokens/1000).toFixed(1)}k</div><div class="label">Output Tokens</div></div>
+</div>
+<div class="section"><h2>Cost by Source</h2><table><tr><th>Source</th><th>Requests</th><th>Input</th><th>Output</th><th>Cost</th></tr>
+${Object.entries(data.bySource).sort((a,b) => b[1].costUsd - a[1].costUsd).map(([src, s]) => {
+  const badge = src.startsWith('addon') ? 'addon' : src.startsWith('crm') ? 'crm' : src.startsWith('email') ? 'email' : 'gchat';
+  return '<tr><td><span class="badge badge-' + badge + '">' + src + '</span></td><td>' + s.requests + '</td><td>' + (s.inputTokens/1000).toFixed(1) + 'k</td><td>' + (s.outputTokens/1000).toFixed(1) + 'k</td><td class="cost">$' + s.costUsd.toFixed(4) + '</td></tr>';
+}).join('')}
+</table></div>
+<div class="section"><h2>Recent Requests (last 50)</h2><table><tr><th>Time</th><th>Source</th><th>Model</th><th>In/Out</th><th>Cost</th></tr>
+${(data.recentRequests || []).map(r => {
+  const t = new Date(r.ts);
+  const time = String(t.getMonth()+1).padStart(2,'0') + '/' + String(t.getDate()).padStart(2,'0') + ' ' + String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0');
+  const badge = r.source.startsWith('addon') ? 'addon' : r.source.startsWith('crm') ? 'crm' : r.source.startsWith('email') ? 'email' : 'gchat';
+  const model = r.model.includes('haiku') ? 'Haiku' : 'Sonnet';
+  return '<tr><td>' + time + '</td><td><span class="badge badge-' + badge + '">' + r.source + '</span></td><td>' + model + '</td><td>' + r.inputTokens + ' / ' + r.outputTokens + '</td><td class="cost">$' + r.costUsd.toFixed(6) + '</td></tr>';
+}).join('')}
+</table></div>
+<div class="footer">Stratus AI Bot &middot; Cloudflare Workers &middot; AI Gateway: <a href="https://dash.cloudflare.com/ec1888c5a0b51dc3eebf6bae13a3922b/ai/ai-gateway/gateways/stratus-ai-bot" style="color:#1a73a7">Dashboard</a></div>
+</div></body></html>`;
+        return new Response(html, { headers: { 'Content-Type': 'text/html' } });
+      }
+      return new Response(JSON.stringify(data, null, 2), { headers: { 'Content-Type': 'application/json' } });
+    }
+
     // ══════════════════════════════════════════════════════════════
     // ── /api/* endpoints: Gmail Add-on backend ──
     // Authenticated via X-API-Key header. Returns JSON responses.
@@ -4866,7 +5037,7 @@ export default {
             // 3) AI summary via Claude
             let summary = null, urgency = null, actionItems = [];
             try {
-              const summaryResp = await fetch('https://api.anthropic.com/v1/messages', {
+              const summaryResp = await fetch(ANTHROPIC_API_URL, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -4890,6 +5061,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
 
               if (summaryResp.ok) {
                 const summaryData = await summaryResp.json();
+                ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-20250514', summaryData.usage, 'addon-analyze'));
                 const text = summaryData.content?.[0]?.text || '';
                 try {
                   const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
@@ -4922,7 +5094,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
               brief: 'Very concise, 2-3 sentences max. Get to the point fast. End with a question.'
             };
 
-            const draftResp = await fetch('https://api.anthropic.com/v1/messages', {
+            const draftResp = await fetch(ANTHROPIC_API_URL, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -4966,6 +5138,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             }
 
             const draftData = await draftResp.json();
+            ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-20250514', draftData.usage, 'addon-draft'));
             const draftText = draftData.content?.[0]?.text || '';
             try {
               apiResult = JSON.parse(draftText.replace(/```json\n?|\n?```/g, '').trim());
