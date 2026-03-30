@@ -6,6 +6,8 @@
 
 var CONFIG = {
   API_BASE: 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev',
+  HANDOFF_ENDPOINT: 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev/api/handoff',
+  REGISTER_SPACE_ENDPOINT: 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev/api/register-space',
   CACHE_TTL_SECONDS: 300,
   MAX_EMAIL_BODY_CHARS: 8000,
   STRATUS_BLUE: '#1a73a7',

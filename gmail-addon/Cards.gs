@@ -366,6 +366,36 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
   }
 
   addBackToEmailButton_(card);
+
+  // ── Send to Stratus AI (GChat DM handoff) ──
+  var handoffSection2 = CardService.newCardSection()
+    .setHeader('Send to Stratus AI');
+
+  handoffSection2.addWidget(
+    CardService.newTextInput()
+      .setFieldName('stratus_request')
+      .setTitle('Your request')
+      .setHint('e.g. "Look up this account in Zoho" or "Create a follow-up task"')
+      .setMultiline(true)
+  );
+
+  handoffSection2.addWidget(
+    CardService.newButtonSet().addButton(
+      CardService.newTextButton()
+        .setText('Send to Stratus AI \u2192 GChat')
+        .setOnClickAction(CardService.newAction().setFunctionName('onSendToStratusAI'))
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    )
+  );
+
+  handoffSection2.addWidget(
+    CardService.newTextParagraph()
+      .setText('Your request will be processed and delivered as a Google Chat message from Stratus AI. Conversation continues in GChat.')
+  );
+
+  card.addSection(handoffSection2);
+
   return card.build();
 }
 

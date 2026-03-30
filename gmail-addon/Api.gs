@@ -133,3 +133,58 @@ function taskAction_(action, taskId, options) {
   }
   return apiCall_('/api/task-action', payload);
 }
+
+/**
+ * Send a free-form request from the Gmail sidebar to the GChat worker,
+ * which processes it and delivers a response as a Google Chat DM.
+ */
+function sendHandoffRequest_(requestText, emailContext) {
+  var payload = {
+    text: requestText,
+    emailContext: emailContext,
+    userEmail: Session.getEffectiveUser().getEmail(),
+  };
+  var options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'X-API-Key': getApiKey_() },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+    deadline: 55,
+  };
+  try {
+    var response = UrlFetchApp.fetch(CONFIG.HANDOFF_ENDPOINT, options);
+    var code = response.getResponseCode();
+    var text = response.getContentText();
+    if (code === 401) throw new Error('Invalid API key.');
+    if (code >= 500) throw new Error('Server error (' + code + ').');
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('[HANDOFF] sendHandoffRequest_ error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Register the user's Google Chat DM space with the worker,
+ * enabling the sidebar handoff to deliver responses via GChat.
+ */
+function registerGchatSpace_(spaceName) {
+  var payload = {
+    userEmail: Session.getEffectiveUser().getEmail(),
+    spaceName: spaceName,
+  };
+  var options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'X-API-Key': getApiKey_() },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  };
+  try {
+    var response = UrlFetchApp.fetch(CONFIG.REGISTER_SPACE_ENDPOINT, options);
+    return JSON.parse(response.getContentText());
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}

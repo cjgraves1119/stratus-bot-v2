@@ -268,32 +268,82 @@ function onDraftReplyCustom(e) {
   return buildDraftReplyCard_(result, ctx);
 }
 
-/** Send to Stratus AI via GChat */
-function onStratusHandoff(e) {
-  var ctx = getEmailContext_();
-  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
-
-  try {
-    var handoffUrl = 'https://gchat-worker.cjgraves1119.workers.dev/gmail-handoff';
-    var payload = {
-      subject: ctx.subject,
-      body: ctx.body,
-      senderEmail: ctx.senderEmail,
-      senderName: ctx.senderName,
-      messageId: ctx.messageId
-    };
-
-    var options = {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload)
-    };
-
-    var response = UrlFetchApp.fetch(handoffUrl, options);
-    return buildStratusHandoffCard_();
-  } catch (err) {
-    return buildErrorCard_('Handoff failed: ' + err.message);
+/** Send to Stratus AI — called by the "Send to Google Chat →" button */
+function onSendToStratusAI(e) {
+  var requestText = e.formInput ? e.formInput.stratus_request : null;
+  if (!requestText || requestText.trim() === '') {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText('Please enter a request before sending.'))
+      .build();
   }
+
+  var emailContext = buildEmailContextForHandoff_(e);
+  if (!emailContext) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText('Could not read email context. Please close and reopen the email.'))
+      .build();
+  }
+
+  var result;
+  try {
+    result = sendHandoffRequest_(requestText.trim(), emailContext);
+  } catch (err) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText('Request failed: ' + err.message))
+      .build();
+  }
+
+  var notifText;
+  if (result && result.success) {
+    notifText = 'Sent! Check Google Chat for your response from Stratus AI.';
+  } else if (result && result.error && result.error.indexOf('No Google Chat space') !== -1) {
+    notifText = 'Setup needed: Send any message to Stratus AI in Google Chat first, then try again.';
+  } else {
+    notifText = 'Something went wrong. ' + (result && result.error ? result.error.substring(0, 80) : 'Try again.');
+  }
+
+  return CardService.newActionResponseBuilder()
+    .setNotification(CardService.newNotification().setText(notifText))
+    .build();
+}
+
+/** Build email context object for the handoff request */
+function buildEmailContextForHandoff_(e) {
+  try {
+    var raw = PropertiesService.getUserProperties().getProperty('current_email_ctx');
+    if (!raw) return null;
+    var ctx = JSON.parse(raw);
+    var senderDomain = '';
+    if (ctx.senderEmail && ctx.senderEmail.indexOf('@') !== -1) {
+      senderDomain = ctx.senderEmail.split('@')[1] || '';
+    }
+    return {
+      subject:      ctx.subject      || '(no subject)',
+      senderEmail:  ctx.senderEmail  || '',
+      senderName:   ctx.senderName   || ctx.senderEmail || '',
+      senderDomain: senderDomain,
+      body:         (ctx.body || '').substring(0, 2000),
+      accountName:  ctx.accountName  || null,
+    };
+  } catch (err) {
+    console.error('[HANDOFF] buildEmailContextForHandoff_ error: ' + err.message);
+    return null;
+  }
+}
+
+/**
+ * One-time setup: manually register your Google Chat DM space.
+ * Set MY_GCHAT_SPACE in Script Properties (e.g. spaces/XXXXXXXXX),
+ * or just send any message to the Stratus AI bot in Google Chat — it registers automatically.
+ */
+function registerMyGchatSpace() {
+  var spaceName = PropertiesService.getScriptProperties().getProperty('MY_GCHAT_SPACE');
+  if (!spaceName) {
+    Logger.log('Set MY_GCHAT_SPACE in Script Properties, or send any message to Stratus AI bot in GChat (auto-registers).');
+    return;
+  }
+  var result = registerGchatSpace_(spaceName);
+  Logger.log('Registration result: ' + JSON.stringify(result));
 }
 
 /** Insert draft into Gmail */

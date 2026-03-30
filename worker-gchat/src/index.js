@@ -5959,6 +5959,132 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             break;
           }
 
+          case '/api/register-space': {
+            const { userEmail: regEmail, spaceName: regSpaceName } = body;
+            if (!regEmail || !regSpaceName) {
+              apiResult = { error: 'userEmail and spaceName are required' };
+              break;
+            }
+            await env.CONVERSATION_KV.put(
+              `gchat_dm_space:${regEmail.toLowerCase().trim()}`,
+              regSpaceName,
+              { expirationTtl: 86400 * 365 }
+            );
+            apiResult = { success: true, registered: { userEmail: regEmail, spaceName: regSpaceName } };
+            break;
+          }
+
+          case '/api/handoff': {
+            const { text: handoffText, emailContext: ec, userEmail: handoffUserEmail, gchatSpaceId: explicitSpaceId } = body;
+            if (!handoffText || !handoffUserEmail) {
+              apiResult = { error: 'text and userEmail are required' };
+              break;
+            }
+
+            const normalizedHandoffEmail = handoffUserEmail.toLowerCase().trim();
+            let targetSpaceName = explicitSpaceId || null;
+            if (!targetSpaceName) {
+              targetSpaceName = await env.CONVERSATION_KV.get(`gchat_dm_space:${normalizedHandoffEmail}`);
+            }
+            if (!targetSpaceName) {
+              apiResult = {
+                success: false,
+                error: 'No Google Chat space found for this user. Please send any message to the Stratus AI bot in Google Chat first, then try again.'
+              };
+              break;
+            }
+
+            const handoffPersonId = `email:${normalizedHandoffEmail}`;
+            const subject      = ec?.subject     || '(no subject)';
+            const senderName   = ec?.senderName  || ec?.senderEmail || 'unknown sender';
+            const senderEmail  = ec?.senderEmail || '';
+            const accountName  = ec?.accountName || null;
+            const emailBodySnippet = (ec?.body || '').substring(0, 2000);
+
+            const compositeMessage =
+              `[Email context: From ${senderName} (${senderEmail}), Subject: "${subject}", Account: ${accountName || 'unknown'}]\n\nUser request: ${handoffText}`;
+
+            // Seed conversation history with email context
+            if (emailBodySnippet) {
+              await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user',
+                `[Email thread context — Subject: "${subject}" from ${senderName}]\n${emailBodySnippet}`
+              );
+              await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant',
+                `I have the email context loaded. Subject: "${subject}", From: ${senderName}. Ready to help with any requests related to this email or account.`
+              );
+            }
+
+            let handoffReply;
+            try {
+              const handoffIntent = detectCrmEmailIntent(compositeMessage);
+              const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
+
+              if (handoffIntent.hasAny && hasCrmCreds) {
+                // Send a "thinking" message immediately, process async
+                const thinkingMsg = adaptMarkdownForGChat(
+                  `*Processing your request...*\n_Re: ${subject} from ${senderName}_\n\nLooking that up now — full response incoming shortly.`
+                );
+                await sendAsyncGChatMessage(targetSpaceName, thinkingMsg, null, env);
+
+                // Process CRM request and send full response
+                ctx.waitUntil((async () => {
+                  try {
+                    const crmReply = await handleCrmRequest(compositeMessage, handoffPersonId, env);
+                    if (crmReply) {
+                      await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
+                      await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', crmReply);
+                      const formattedCrmReply = adaptMarkdownForGChat(
+                        truncateGChatReply(`*From Gmail sidebar (Re: ${subject})*\n\n` + crmReply)
+                      );
+                      await sendAsyncGChatMessage(targetSpaceName, formattedCrmReply, null, env);
+                    }
+                  } catch (asyncErr) {
+                    console.error(`[HANDOFF] Async CRM error: ${asyncErr.message}`);
+                    await sendAsyncGChatMessage(targetSpaceName,
+                      `Something went wrong: ${asyncErr.message.substring(0, 200)}`, null, env);
+                  }
+                })());
+                handoffReply = '(async — full response incoming in GChat)';
+              } else {
+                // Quoting / Claude fallback — synchronous
+                const handoffParsed = parseMessage(compositeMessage);
+                if (handoffParsed) {
+                  const handoffResult = buildQuoteResponse(handoffParsed);
+                  if (!handoffResult.needsLlm && handoffResult.message) {
+                    handoffReply = handoffResult.message;
+                  }
+                }
+                if (!handoffReply) {
+                  handoffReply = await askClaude(compositeMessage, handoffPersonId, env, null, false, null, 50000);
+                }
+                if (handoffReply) {
+                  await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
+                  await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', handoffReply);
+                }
+                const formattedHandoffReply = adaptMarkdownForGChat(
+                  truncateGChatReply(`*From Gmail sidebar (Re: ${subject})*\n\n` + (handoffReply || 'No response generated.'))
+                );
+                await sendAsyncGChatMessage(targetSpaceName, formattedHandoffReply, null, env);
+              }
+            } catch (handoffErr) {
+              console.error(`[HANDOFF] Processing error: ${handoffErr.message}`);
+              try {
+                await sendAsyncGChatMessage(targetSpaceName,
+                  `Something went wrong processing your Gmail sidebar request: ${handoffErr.message.substring(0, 200)}`,
+                  null, env);
+              } catch (_) {}
+              apiResult = { success: false, error: handoffErr.message };
+              break;
+            }
+
+            apiResult = {
+              success: true,
+              preview: (typeof handoffReply === 'string' ? handoffReply : 'Processing...').substring(0, 100),
+              targetSpace: targetSpaceName
+            };
+            break;
+          }
+
           default:
             return new Response(JSON.stringify({ error: 'Unknown endpoint: ' + url.pathname }), {
               status: 404, headers: jsonHeaders
@@ -6269,6 +6395,23 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
 
         // Detect Workspace Add-on format (commonEventObject present)
         const isAddon = !!event.commonEventObject;
+
+        // Auto-register DM space for Gmail sidebar handoff
+        if (!isAddon && event.space?.type === 'DM' && event.message?.sender?.email) {
+          try {
+            const senderEmail = event.message.sender.email.toLowerCase().trim();
+            const dmSpaceName = event.space?.name;
+            if (senderEmail && dmSpaceName && env.CONVERSATION_KV) {
+              await env.CONVERSATION_KV.put(
+                `gchat_dm_space:${senderEmail}`,
+                dmSpaceName,
+                { expirationTtl: 86400 * 365 }
+              );
+            }
+          } catch (regErr) {
+            console.error(`[HANDOFF] Space registration error: ${regErr.message}`);
+          }
+        }
 
         // Detect if message is in a Space (not a DM)
         const isSpace = event.space?.type === 'ROOM';
