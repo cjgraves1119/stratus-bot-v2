@@ -5576,10 +5576,68 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               let taskCreated = false;
               let taskId = null;
 
-              if (hasAccount && accountId) {
+              // If no accountId provided, search Zoho for account by domain
+              // Strategy: 1) Search contacts by email (reveals linked account)
+              //           2) Search accounts by domain/website criteria
+              //           3) Search accounts by word (first portion of domain)
+              if (!resultAccountId && !isGenericEmail && domain) {
+                try {
+                  // Strategy 1: Check if a contact with this email already exists (linked to an account)
+                  const existingContact = await zohoApiCall('GET',
+                    `Contacts/search?email=${encodeURIComponent(senderEmail)}&fields=id,Account_Name,Full_Name`, env
+                  );
+                  if (existingContact?.data?.[0]?.Account_Name?.id) {
+                    resultAccountId = existingContact.data[0].Account_Name.id;
+                    resultAccountName = existingContact.data[0].Account_Name.name || '';
+                    contactId = existingContact.data[0].id;
+                  }
+                } catch (e) { /* contact search failed */ }
+
+                if (!resultAccountId) {
+                  try {
+                    // Strategy 2: Search accounts by website criteria containing domain
+                    const acctCriteria = await zohoApiCall('GET',
+                      `Accounts/search?criteria=(Website:contains:${encodeURIComponent(domain)})&fields=id,Account_Name,Website`, env
+                    );
+                    if (acctCriteria?.data && acctCriteria.data.length > 0) {
+                      resultAccountId = acctCriteria.data[0].id;
+                      resultAccountName = acctCriteria.data[0].Account_Name;
+                    }
+                  } catch (e) { /* criteria search failed */ }
+                }
+
+                if (!resultAccountId) {
+                  try {
+                    // Strategy 3: Word search with abbreviated domain parts
+                    // "mtischoolofknowledge.org" -> try "MTI" (first 3-4 chars if domain is one word)
+                    const domainBase = domain.split('.')[0];
+                    // Try first word-like segment (e.g. "mti" from "mtischoolofknowledge")
+                    const shortToken = domainBase.length > 8 ? domainBase.substring(0, 3).toUpperCase() : domainBase;
+                    const acctSearch = await zohoApiCall('GET',
+                      `Accounts/search?word=${encodeURIComponent(shortToken)}&fields=id,Account_Name,Website`, env
+                    );
+                    if (acctSearch?.data && acctSearch.data.length > 0) {
+                      const match = acctSearch.data.find(a =>
+                        (a.Website && a.Website.toLowerCase().includes(domain.toLowerCase())) ||
+                        a.Account_Name.toLowerCase().replace(/[^a-z0-9]/g, '').includes(domainBase.toLowerCase())
+                      );
+                      if (match) {
+                        resultAccountId = match.id;
+                        resultAccountName = match.Account_Name;
+                      }
+                    }
+                  } catch (e) { /* word search failed */ }
+                }
+              }
+
+              const foundAccount = !!(resultAccountId);
+
+              if ((hasAccount && accountId) || foundAccount) {
                 // Account exists. Check if contact exists for this email.
-                const acctResp = await zohoApiCall('GET', `Accounts/${accountId}?fields=Account_Name`, env);
-                resultAccountName = acctResp?.data?.[0]?.Account_Name || 'Unknown';
+                if (!resultAccountName) {
+                  const acctResp = await zohoApiCall('GET', `Accounts/${resultAccountId}?fields=Account_Name`, env);
+                  resultAccountName = acctResp?.data?.[0]?.Account_Name || 'Unknown';
+                }
 
                 const contactSearch = await zohoApiCall('GET',
                   `Contacts/search?email=${encodeURIComponent(senderEmail)}&fields=id,Full_Name,Email`, env
