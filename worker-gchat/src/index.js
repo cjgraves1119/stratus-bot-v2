@@ -4980,10 +4980,19 @@ ${(data.recentRequests || []).map(r => {
               return new Response(JSON.stringify({ error: 'subject or body required' }), { status: 400, headers: jsonHeaders });
             }
 
-            // 1) Detect SKUs in the email body
+            // 1) Detect SKUs in the email body (with catalog validation to filter false positives)
             const fullText = (subject || '') + ' ' + (body || '');
             const parsed = parseMessage(fullText);
-            const detectedSkus = parsed && parsed.items ? parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })) : [];
+            const detectedSkus = [];
+            if (parsed && parsed.items) {
+              for (const item of parsed.items) {
+                const baseSku = item.baseSku || item.sku;
+                const validation = validateSku(baseSku);
+                if (validation.valid) {
+                  detectedSkus.push({ sku: baseSku, qty: item.qty });
+                }
+              }
+            }
 
             // 2) CRM sender lookup (by email domain or name)
             let crmAccount = null;
@@ -5355,7 +5364,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
 
             try {
               // Step 1: Find accounts by domain match
-              const searchDomains = (domains || []).filter(d => d && !d.match(/gmail\.com|yahoo\.com|hotmail\.com|outlook\.com|aol\.com|icloud\.com/i));
+              const searchDomains = (domains || []).filter(d => d && !d.match(/gmail\.com|yahoo\.com|hotmail\.com|outlook\.com|aol\.com|icloud\.com|protonmail\.com|live\.com|msn\.com|me\.com|mac\.com|comcast\.\w+|att\.\w+|verizon\.\w+|stratusinfosystems\.com/i));
               let accounts = [];
 
               for (const domain of searchDomains) {
