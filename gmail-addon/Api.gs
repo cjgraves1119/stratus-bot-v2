@@ -106,3 +106,30 @@ function detectSkus_(text) {
     text: text,
   });
 }
+
+/**
+ * Fetch open tasks for accounts matching the given domains/emails.
+ */
+function fetchTasks_(domains, emails) {
+  return apiCall_('/api/tasks', {
+    domains: domains || [],
+    emails: emails || [],
+  });
+}
+
+/**
+ * Perform a task action: complete_and_followup, reschedule, or edit.
+ */
+function taskAction_(action, taskId, options) {
+  var payload = {
+    action: action,
+    taskId: taskId,
+  };
+  if (options) {
+    if (options.newSubject) payload.newSubject = options.newSubject;
+    if (options.newDueDate) payload.newDueDate = options.newDueDate;
+    if (options.dealId) payload.dealId = options.dealId;
+    if (options.contactId) payload.contactId = options.contactId;
+  }
+  return apiCall_('/api/task-action', payload);
+}

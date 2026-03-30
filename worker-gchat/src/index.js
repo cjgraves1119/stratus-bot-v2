@@ -5072,6 +5072,205 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             break;
           }
 
+          // ── Tasks: Fetch open Zoho tasks for account domains ──
+          case '/api/tasks': {
+            const { domains, emails } = apiBody;
+            if ((!domains || domains.length === 0) && (!emails || emails.length === 0)) {
+              return new Response(JSON.stringify({ error: 'domains or emails required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              // Step 1: Find accounts by domain match
+              const searchDomains = (domains || []).filter(d => d && !d.match(/gmail\.com|yahoo\.com|hotmail\.com|outlook\.com|aol\.com|icloud\.com/i));
+              let accounts = [];
+
+              for (const domain of searchDomains) {
+                try {
+                  const acctResp = await zohoApiCall('GET',
+                    `Accounts/search?criteria=((Website:contains:${encodeURIComponent(domain)}))&fields=id,Account_Name,Website&per_page=5`, env
+                  );
+                  if (acctResp && acctResp.data) {
+                    acctResp.data.forEach(a => {
+                      if (!accounts.find(existing => existing.id === a.id)) {
+                        accounts.push({ id: a.id, name: a.Account_Name, website: a.Website });
+                      }
+                    });
+                  }
+                } catch (_) { /* skip failed domain lookups */ }
+              }
+
+              // Step 2: If no accounts found via domain, try contact email lookup
+              if (accounts.length === 0 && emails && emails.length > 0) {
+                for (const email of emails.slice(0, 5)) {
+                  try {
+                    const contactResp = await zohoApiCall('GET',
+                      `Contacts/search?email=${encodeURIComponent(email)}&fields=id,Account_Name&per_page=3`, env
+                    );
+                    if (contactResp && contactResp.data) {
+                      contactResp.data.forEach(c => {
+                        if (c.Account_Name && c.Account_Name.id) {
+                          if (!accounts.find(existing => existing.id === c.Account_Name.id)) {
+                            accounts.push({ id: c.Account_Name.id, name: c.Account_Name.name || 'Unknown' });
+                          }
+                        }
+                      });
+                    }
+                  } catch (_) { /* skip */ }
+                }
+              }
+
+              if (accounts.length === 0) {
+                apiResult = { accounts: [], tasks: [], message: 'No matching accounts found' };
+                break;
+              }
+
+              // Step 3: Fetch open tasks for all found accounts via COQL
+              let allTasks = [];
+              for (const acct of accounts.slice(0, 5)) {
+                try {
+                  const coqlQuery = `select Subject, Status, Due_Date, Description, What_Id, Who_Id, Owner from Tasks where What_Id.Account_Name.id = '${acct.id}' and Status not in ('Completed') limit 50`;
+                  const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: coqlQuery });
+                  if (taskResp && taskResp.data) {
+                    taskResp.data.forEach(t => {
+                      allTasks.push({
+                        id: t.id,
+                        subject: t.Subject || '(no subject)',
+                        status: t.Status || 'Not Started',
+                        dueDate: t.Due_Date || null,
+                        description: t.Description ? t.Description.substring(0, 200) : '',
+                        dealId: t.What_Id ? t.What_Id.id : null,
+                        dealName: t.What_Id ? t.What_Id.name : null,
+                        contactId: t.Who_Id ? t.Who_Id.id : null,
+                        contactName: t.Who_Id ? t.Who_Id.name : null,
+                        ownerId: t.Owner ? t.Owner.id : null,
+                        ownerName: t.Owner ? t.Owner.name : null,
+                        accountId: acct.id,
+                        accountName: acct.name,
+                      });
+                    });
+                  }
+                } catch (tErr) {
+                  console.error(`[API/tasks] COQL error for account ${acct.id}: ${tErr.message}`);
+                }
+              }
+
+              // Sort by due date (soonest first, nulls last)
+              allTasks.sort((a, b) => {
+                if (!a.dueDate && !b.dueDate) return 0;
+                if (!a.dueDate) return 1;
+                if (!b.dueDate) return -1;
+                return new Date(a.dueDate) - new Date(b.dueDate);
+              });
+
+              apiResult = { accounts, tasks: allTasks };
+            } catch (taskErr) {
+              apiResult = { error: 'Task lookup failed: ' + taskErr.message, accounts: [], tasks: [] };
+            }
+            break;
+          }
+
+          // ── Task Action: Complete/reschedule/edit Zoho tasks ──
+          case '/api/task-action': {
+            const { action, taskId, newSubject, newDueDate, dealId, contactId, accountName } = apiBody;
+            if (!action || !taskId) {
+              return new Response(JSON.stringify({ error: 'action and taskId required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              // Helper: calculate N business days from today
+              function addBusinessDays(startDate, days) {
+                let d = new Date(startDate);
+                let added = 0;
+                while (added < days) {
+                  d.setDate(d.getDate() + 1);
+                  const dow = d.getDay();
+                  if (dow !== 0 && dow !== 6) added++;
+                }
+                return d.toISOString().split('T')[0]; // YYYY-MM-DD
+              }
+
+              switch (action) {
+                case 'complete_and_followup': {
+                  // 1. Complete the existing task
+                  const completeResp = await zohoApiCall('PUT', `Tasks/${taskId}`, env, {
+                    data: [{ Status: 'Completed' }]
+                  });
+                  if (completeResp.data && completeResp.data[0] && completeResp.data[0].code !== 'SUCCESS') {
+                    throw new Error('Failed to complete task: ' + (completeResp.data[0].message || 'unknown'));
+                  }
+
+                  // 2. Create successor task
+                  const followUpDate = addBusinessDays(new Date(), 3);
+                  const successorSubject = newSubject || 'Follow up: next steps';
+                  const successorPayload = {
+                    data: [{
+                      Subject: successorSubject,
+                      Status: 'Not Started',
+                      Due_Date: newDueDate || followUpDate,
+                      Owner: '2570562000141711002', // Chris Graves
+                    }]
+                  };
+                  // Attach to deal if available
+                  if (dealId) {
+                    successorPayload.data[0].What_Id = dealId;
+                    successorPayload.data[0].$se_module = 'Deals';
+                  }
+                  if (contactId) {
+                    successorPayload.data[0].Who_Id = contactId;
+                  }
+
+                  const createResp = await zohoApiCall('POST', 'Tasks', env, successorPayload);
+                  const newTaskId = (createResp.data && createResp.data[0]) ? createResp.data[0].details.id : null;
+
+                  apiResult = {
+                    success: true,
+                    action: 'complete_and_followup',
+                    completedTaskId: taskId,
+                    newTaskId: newTaskId,
+                    newDueDate: newDueDate || followUpDate,
+                    newSubject: successorSubject,
+                  };
+                  break;
+                }
+
+                case 'reschedule': {
+                  if (!newDueDate) {
+                    return new Response(JSON.stringify({ error: 'newDueDate required for reschedule' }), { status: 400, headers: jsonHeaders });
+                  }
+                  const reschedResp = await zohoApiCall('PUT', `Tasks/${taskId}`, env, {
+                    data: [{ Due_Date: newDueDate, ...(newSubject ? { Subject: newSubject } : {}) }]
+                  });
+                  if (reschedResp.data && reschedResp.data[0] && reschedResp.data[0].code !== 'SUCCESS') {
+                    throw new Error('Failed to reschedule: ' + (reschedResp.data[0].message || 'unknown'));
+                  }
+                  apiResult = { success: true, action: 'reschedule', taskId, newDueDate, newSubject: newSubject || null };
+                  break;
+                }
+
+                case 'edit': {
+                  const updateFields = {};
+                  if (newSubject) updateFields.Subject = newSubject;
+                  if (newDueDate) updateFields.Due_Date = newDueDate;
+                  if (Object.keys(updateFields).length === 0) {
+                    return new Response(JSON.stringify({ error: 'Nothing to update' }), { status: 400, headers: jsonHeaders });
+                  }
+                  const editResp = await zohoApiCall('PUT', `Tasks/${taskId}`, env, { data: [updateFields] });
+                  if (editResp.data && editResp.data[0] && editResp.data[0].code !== 'SUCCESS') {
+                    throw new Error('Failed to edit: ' + (editResp.data[0].message || 'unknown'));
+                  }
+                  apiResult = { success: true, action: 'edit', taskId, updates: updateFields };
+                  break;
+                }
+
+                default:
+                  return new Response(JSON.stringify({ error: 'Unknown action: ' + action }), { status: 400, headers: jsonHeaders });
+              }
+            } catch (actErr) {
+              apiResult = { error: 'Task action failed: ' + actErr.message, success: false };
+            }
+            break;
+          }
+
           // ── Detect SKUs: Parse SKUs from arbitrary text ──
           case '/api/detect-skus': {
             const { text } = apiBody;
@@ -5256,7 +5455,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
 
     // Static icon for Gmail Add-on
     if (request.method === 'GET' && url.pathname === '/icon.png') {
-      const iconBase64 = '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';
+      const iconBase64 = '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';
       const iconBytes = Uint8Array.from(atob(iconBase64), c => c.charCodeAt(0));
       return new Response(iconBytes, {
         headers: {

@@ -1,8 +1,8 @@
 /**
  * Stratus AI Gmail Add-on — Main Entry Points & Action Handlers
  *
- * Homepage trigger, contextual email trigger, compose trigger,
- * and all button action handlers.
+ * Lazy-loading design: sidebar opens instantly with action buttons.
+ * AI analysis, tasks, and drafts are triggered on-demand by button clicks.
  */
 
 // ─────────────────────────────────────────────
@@ -14,7 +14,7 @@ function onHomepage(e) {
 }
 
 // ─────────────────────────────────────────────
-// CONTEXTUAL TRIGGER (email opened)
+// CONTEXTUAL TRIGGER (email opened) — LAZY LOAD
 // ─────────────────────────────────────────────
 
 function onGmailMessage(e) {
@@ -34,29 +34,41 @@ function onGmailMessage(e) {
   var from = message.getFrom() || '';
   var senderParts = parseSender_(from);
 
-  // Store email context for action handlers
+  // Collect ALL emails and domains from the thread
+  var thread = message.getThread();
+  var messages = thread.getMessages();
+  var allEmails = {};
+  var allDomains = {};
+
+  for (var i = 0; i < messages.length; i++) {
+    var msg = messages[i];
+    var fields = [msg.getFrom(), msg.getTo(), msg.getCc()].join(', ');
+    var emailMatches = fields.match(/[\w.+-]+@[\w.-]+\.\w+/g) || [];
+    for (var j = 0; j < emailMatches.length; j++) {
+      var email = emailMatches[j].toLowerCase();
+      allEmails[email] = true;
+      var domain = email.split('@')[1];
+      if (domain) allDomains[domain] = true;
+    }
+  }
+
+  // Store email context for action handlers (no API call here)
   var emailCtx = {
     messageId: messageId,
     subject: subject,
     body: body.substring(0, CONFIG.MAX_EMAIL_BODY_CHARS),
     senderEmail: senderParts.email,
     senderName: senderParts.name,
-    threadId: message.getThread().getId(),
+    threadId: thread.getId(),
+    allEmails: Object.keys(allEmails),
+    allDomains: Object.keys(allDomains),
   };
   PropertiesService.getUserProperties().setProperty(
     'current_email_ctx', JSON.stringify(emailCtx)
   );
 
-  // Try AI analysis; fall back to manual-action card on failure
-  var analysis;
-  try {
-    analysis = analyzeEmail_(subject, body, senderParts.email, senderParts.name);
-  } catch (err) {
-    console.error('analyzeEmail_ error: ' + err.message);
-    return buildEmailManualCard_(subject, senderParts, err.message);
-  }
-
-  return buildEmailAnalysisCard_(subject, senderParts, analysis);
+  // Return instant card — NO API call
+  return buildInstantEmailCard_(subject, senderParts);
 }
 
 // ─────────────────────────────────────────────
@@ -85,6 +97,105 @@ function onGenerateQuote(e) {
     return buildErrorCard_('Quote generation failed: ' + err.message);
   }
   return buildQuoteResultCard_(result);
+}
+
+/** AI Analysis (triggered by button, not auto) */
+function onAnalyzeEmail(e) {
+  var ctx = getEmailContext_();
+  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
+
+  var result;
+  try {
+    result = analyzeEmail_(ctx.subject, ctx.body, ctx.senderEmail, ctx.senderName);
+  } catch (err) {
+    return buildErrorCard_('Analysis failed: ' + err.message);
+  }
+
+  return buildEmailAnalysisCard_(ctx.subject, { email: ctx.senderEmail, name: ctx.senderName }, result);
+}
+
+/** View Tasks for all accounts in this thread */
+function onViewTasks(e) {
+  var ctx = getEmailContext_();
+  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
+
+  var result;
+  try {
+    result = fetchTasks_(ctx.allDomains || [], ctx.allEmails || []);
+  } catch (err) {
+    return buildErrorCard_('Task lookup failed: ' + err.message);
+  }
+
+  return buildTaskCard_(result, ctx);
+}
+
+/** Task action: complete and create follow-up */
+function onTaskComplete(e) {
+  var taskId = e.parameters.task_id || '';
+  var dealId = e.parameters.deal_id || '';
+  var contactId = e.parameters.contact_id || '';
+  var subject = e.parameters.task_subject || 'Follow up: next steps';
+
+  if (!taskId) return notify_('No task ID.');
+
+  var result;
+  try {
+    result = taskAction_('complete_and_followup', taskId, {
+      dealId: dealId,
+      contactId: contactId,
+      newSubject: 'Follow up: ' + subject,
+    });
+  } catch (err) {
+    return buildErrorCard_('Task action failed: ' + err.message);
+  }
+
+  return buildTaskResultCard_(result);
+}
+
+/** Task action: reschedule to +3 business days */
+function onTaskReschedule(e) {
+  var taskId = e.parameters.task_id || '';
+  if (!taskId) return notify_('No task ID.');
+
+  // Calculate 3 business days from today
+  var newDate = addBusinessDays_(new Date(), 3);
+
+  var result;
+  try {
+    result = taskAction_('reschedule', taskId, {
+      newDueDate: formatDate_(newDate),
+    });
+  } catch (err) {
+    return buildErrorCard_('Reschedule failed: ' + err.message);
+  }
+
+  return buildTaskResultCard_(result);
+}
+
+/** Task action: edit with custom subject/date */
+function onTaskEdit(e) {
+  var taskId = e.parameters.task_id || '';
+  if (!taskId) return notify_('No task ID.');
+
+  var newSubject = e.formInput.edit_subject || '';
+  var newDueDate = e.formInput.edit_date || '';
+
+  if (!newSubject && !newDueDate) {
+    return notify_('Enter a new subject or date.');
+  }
+
+  var options = {};
+  if (newSubject) options.newSubject = newSubject;
+  if (newDueDate) options.newDueDate = newDueDate;
+
+  var result;
+  try {
+    result = taskAction_('edit', taskId, options);
+  } catch (err) {
+    return buildErrorCard_('Edit failed: ' + err.message);
+  }
+
+  return buildTaskResultCard_(result);
 }
 
 /** CRM lookup from email card (sender auto-filled) */
@@ -119,7 +230,14 @@ function onCrmSearch(e) {
   return buildCrmResultCard_(result, query.trim(), module);
 }
 
-/** Quick draft reply (tone button) */
+/** Show Draft Reply form (tone selector + instructions) */
+function onShowDraftReply(e) {
+  var ctx = getEmailContext_();
+  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
+  return buildDraftReplyFormCard_(ctx);
+}
+
+/** Quick draft reply (tone button from form) */
 function onDraftReply(e) {
   var tone = (e.parameters && e.parameters.tone) || 'warm';
   var ctx = getEmailContext_();
@@ -189,24 +307,16 @@ function onDetectSkus(e) {
   }
 }
 
-/** Analyze Email button (manual trigger from email card) */
-function onAnalyzeEmail(e) {
-  var ctx = getEmailContext_();
-  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
-
-  var result;
-  try {
-    result = analyzeEmail_(ctx.subject, ctx.body, ctx.senderEmail, ctx.senderName);
-  } catch (err) {
-    return buildErrorCard_('Analysis failed: ' + err.message);
-  }
-
-  return buildEmailAnalysisCard_(ctx.subject, { email: ctx.senderEmail, name: ctx.senderName }, result);
-}
-
 /** Navigate back to homepage */
 function onBackToHome(e) {
   return buildHomepageCard_();
+}
+
+/** Navigate back to instant email card */
+function onBackToEmail(e) {
+  var ctx = getEmailContext_();
+  if (!ctx) return buildHomepageCard_();
+  return buildInstantEmailCard_(ctx.subject, { email: ctx.senderEmail, name: ctx.senderName });
 }
 
 /** Copy text notification */
@@ -254,4 +364,28 @@ function truncate_(str, maxLen) {
 function capitalize_(str) {
   if (!str) return '';
   return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+/**
+ * Add N business days (skip weekends) to a date.
+ */
+function addBusinessDays_(startDate, days) {
+  var d = new Date(startDate.getTime());
+  var added = 0;
+  while (added < days) {
+    d.setDate(d.getDate() + 1);
+    var dow = d.getDay();
+    if (dow !== 0 && dow !== 6) added++;
+  }
+  return d;
+}
+
+/**
+ * Format date as YYYY-MM-DD.
+ */
+function formatDate_(date) {
+  var y = date.getFullYear();
+  var m = String(date.getMonth() + 1).padStart(2, '0');
+  var d = String(date.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
 }

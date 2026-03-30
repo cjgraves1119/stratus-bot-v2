@@ -1,8 +1,8 @@
 /**
- * Stratus AI Gmail Add-on — Card Builders (v2 redesign)
+ * Stratus AI Gmail Add-on — Card Builders (v3 lazy-load + tasks)
  *
- * Full-featured sidebar with collapsible sections, all tools accessible
- * from both homepage and email contexts.
+ * Instant sidebar on email open. AI features triggered by buttons.
+ * Task automation with complete/reschedule/edit actions.
  */
 
 // ─────────────────────────────────────────────
@@ -87,15 +87,120 @@ function buildHomepageCard_() {
   infoSection.addWidget(
     CardService.newTextParagraph().setText(
       'Open any email to unlock AI features:\n' +
-      '• <b>Email Analysis</b> — AI summary, urgency, action items\n' +
+      '• <b>AI Analysis</b> — summary, urgency, action items\n' +
+      '• <b>Open Tasks</b> — view/manage Zoho tasks for this account\n' +
       '• <b>Draft Replies</b> — warm, professional, or brief tone\n' +
       '• <b>CRM Lookup</b> — auto-finds sender in Zoho\n' +
       '• <b>SKU Detection</b> — finds Cisco products in emails\n\n' +
-      'Use <b>Insert Stratus Quote</b> in the compose menu to add quotes to outgoing emails.'
+      'Use <b>Insert Stratus Quote</b> in the compose menu.'
     )
   );
 
   card.addSection(infoSection);
+
+  return card.build();
+}
+
+// ─────────────────────────────────────────────
+// INSTANT EMAIL CARD (no API call — loads instantly)
+// ─────────────────────────────────────────────
+
+function buildInstantEmailCard_(subject, sender) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Stratus AI')
+        .setSubtitle(truncate_(subject, 50))
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  // ── Sender Info ──
+  var senderSection = CardService.newCardSection()
+    .setHeader('Sender');
+
+  senderSection.addWidget(
+    CardService.newDecoratedText()
+      .setText(sender.name)
+      .setBottomLabel(sender.email)
+      .setWrapText(true)
+  );
+
+  card.addSection(senderSection);
+
+  // ── Quick Quote (always available, no API needed) ──
+  var quoteSection = CardService.newCardSection()
+    .setHeader('Quick Quote');
+
+  quoteSection.addWidget(
+    CardService.newTextInput()
+      .setFieldName('sku_input')
+      .setTitle('Enter SKUs')
+      .setHint('e.g. 10 MR44, 5 MS130-24P')
+      .setMultiline(true)
+  );
+
+  quoteSection.addWidget(
+    CardService.newButtonSet().addButton(
+      CardService.newTextButton()
+        .setText('Generate Quote')
+        .setOnClickAction(CardService.newAction().setFunctionName('onGenerateQuote'))
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    )
+  );
+
+  card.addSection(quoteSection);
+
+  // ── AI Actions (each triggers its own API call) ──
+  var actionsSection = CardService.newCardSection()
+    .setHeader('AI Tools');
+
+  var actionButtons1 = CardService.newButtonSet();
+  actionButtons1.addButton(
+    CardService.newTextButton()
+      .setText('Analyze Email')
+      .setOnClickAction(CardService.newAction().setFunctionName('onAnalyzeEmail'))
+      .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+      .setBackgroundColor(CONFIG.STRATUS_BLUE)
+  );
+  actionButtons1.addButton(
+    CardService.newTextButton()
+      .setText('View Tasks')
+      .setOnClickAction(CardService.newAction().setFunctionName('onViewTasks'))
+      .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+      .setBackgroundColor(CONFIG.STRATUS_DARK)
+  );
+  actionsSection.addWidget(actionButtons1);
+
+  var actionButtons2 = CardService.newButtonSet();
+  actionButtons2.addButton(
+    CardService.newTextButton()
+      .setText('Draft Reply')
+      .setOnClickAction(CardService.newAction().setFunctionName('onShowDraftReply'))
+  );
+  actionButtons2.addButton(
+    CardService.newTextButton()
+      .setText('Detect SKUs')
+      .setOnClickAction(CardService.newAction().setFunctionName('onDetectSkus'))
+  );
+  actionsSection.addWidget(actionButtons2);
+
+  // CRM search buttons
+  var domain = sender.email.split('@')[1] || sender.email;
+  var crmButtons = CardService.newButtonSet();
+  crmButtons.addButton(
+    CardService.newTextButton()
+      .setText('Search CRM')
+      .setOnClickAction(
+        CardService.newAction()
+          .setFunctionName('onCrmLookup')
+          .setParameters({ query: domain, module: 'Accounts' })
+      )
+  );
+  actionsSection.addWidget(crmButtons);
+
+  card.addSection(actionsSection);
 
   return card.build();
 }
@@ -108,18 +213,17 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
   var card = CardService.newCardBuilder()
     .setHeader(
       CardService.newCardHeader()
-        .setTitle('Stratus AI')
+        .setTitle('AI Analysis')
         .setSubtitle(truncate_(subject, 50))
         .setImageStyle(CardService.ImageStyle.CIRCLE)
         .setImageUrl(CONFIG.ICON_URL)
     );
 
-  // ── AI Summary (always visible) ──
+  // ── AI Summary ──
   if (analysis.summary) {
     var summarySection = CardService.newCardSection()
-      .setHeader('AI Summary');
+      .setHeader('Summary');
 
-    // Urgency badge
     if (analysis.urgency) {
       var urgencyIcon = analysis.urgency === 'high' ? '🔴' :
                         analysis.urgency === 'medium' ? '🟡' : '🟢';
@@ -134,12 +238,11 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
       CardService.newTextParagraph().setText(analysis.summary)
     );
 
-    // Action items
     if (analysis.actionItems && analysis.actionItems.length > 0) {
       summarySection.addWidget(
         CardService.newDecoratedText()
           .setTopLabel('Action Items')
-          .setText(analysis.actionItems.map(function(item, i) {
+          .setText(analysis.actionItems.map(function(item) {
             return '• ' + item;
           }).join('\n'))
           .setWrapText(true)
@@ -188,28 +291,6 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
           .setWrapText(true)
       );
     }
-  } else {
-    // No CRM match — offer manual search
-    var searchButtons = CardService.newButtonSet();
-    searchButtons.addButton(
-      CardService.newTextButton()
-        .setText('Search Accounts')
-        .setOnClickAction(
-          CardService.newAction()
-            .setFunctionName('onCrmLookup')
-            .setParameters({ query: sender.email.split('@')[1] || sender.email, module: 'Accounts' })
-        )
-    );
-    searchButtons.addButton(
-      CardService.newTextButton()
-        .setText('Search Contacts')
-        .setOnClickAction(
-          CardService.newAction()
-            .setFunctionName('onCrmLookup')
-            .setParameters({ query: sender.email, module: 'Contacts' })
-        )
-    );
-    senderSection.addWidget(searchButtons);
   }
 
   card.addSection(senderSection);
@@ -242,9 +323,301 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
     card.addSection(skuSection);
   }
 
-  // ── Draft Reply ──
-  var replySection = CardService.newCardSection()
-    .setHeader('Draft Reply');
+  addBackToEmailButton_(card);
+  return card.build();
+}
+
+// ─────────────────────────────────────────────
+// TASK CARD (open tasks for account)
+// ─────────────────────────────────────────────
+
+function buildTaskCard_(result, emailCtx) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Open Tasks')
+        .setSubtitle(truncate_(emailCtx.subject, 50))
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  if (result.error) {
+    card.addSection(
+      CardService.newCardSection().addWidget(
+        CardService.newTextParagraph().setText('<font color="#cc0000">' + result.error + '</font>')
+      )
+    );
+    addBackToEmailButton_(card);
+    return card.build();
+  }
+
+  var tasks = result.tasks || [];
+
+  if (tasks.length === 0) {
+    var emptySection = CardService.newCardSection();
+    emptySection.addWidget(
+      CardService.newTextParagraph().setText(
+        'No open tasks found for accounts associated with this email thread.'
+      )
+    );
+    if (result.accounts && result.accounts.length > 0) {
+      emptySection.addWidget(
+        CardService.newTextParagraph().setText(
+          '<i>Searched: ' + result.accounts.map(function(a) { return a.name; }).join(', ') + '</i>'
+        )
+      );
+    }
+    card.addSection(emptySection);
+    addBackToEmailButton_(card);
+    return card.build();
+  }
+
+  // Show account info
+  if (result.accounts && result.accounts.length > 0) {
+    var acctSection = CardService.newCardSection();
+    acctSection.addWidget(
+      CardService.newDecoratedText()
+        .setTopLabel('Accounts Found')
+        .setText(result.accounts.map(function(a) { return a.name; }).join(', '))
+        .setWrapText(true)
+    );
+    acctSection.addWidget(
+      CardService.newTextParagraph().setText(
+        '<b>' + tasks.length + '</b> open task' + (tasks.length !== 1 ? 's' : '')
+      )
+    );
+    card.addSection(acctSection);
+  }
+
+  // Show each task (max 10 to avoid card size limits)
+  var maxTasks = Math.min(tasks.length, 10);
+  for (var i = 0; i < maxTasks; i++) {
+    var task = tasks[i];
+    var taskSection = CardService.newCardSection()
+      .setHeader('Task ' + (i + 1));
+
+    // Subject and due date
+    var dueDateLabel = task.dueDate ? task.dueDate : 'No due date';
+    var isOverdue = task.dueDate && new Date(task.dueDate + 'T23:59:59') < new Date();
+    var dueText = isOverdue ? '⚠️ OVERDUE: ' + dueDateLabel : dueDateLabel;
+
+    taskSection.addWidget(
+      CardService.newDecoratedText()
+        .setText(task.subject)
+        .setBottomLabel('Due: ' + dueText + ' | Status: ' + task.status)
+        .setWrapText(true)
+    );
+
+    // Deal/Contact info
+    if (task.dealName) {
+      taskSection.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel('Deal')
+          .setText(task.dealName)
+          .setWrapText(true)
+          .setButton(
+            CardService.newTextButton()
+              .setText('Open')
+              .setOpenLink(
+                CardService.newOpenLink()
+                  .setUrl(CONFIG.ZOHO_ORG_URL + '/tab/Deals/' + task.dealId)
+              )
+          )
+      );
+    }
+
+    if (task.contactName) {
+      taskSection.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel('Contact')
+          .setText(task.contactName)
+          .setWrapText(true)
+      );
+    }
+
+    // Action buttons
+    var taskParams = {
+      task_id: task.id,
+      deal_id: task.dealId || '',
+      contact_id: task.contactId || '',
+      task_subject: task.subject || '',
+    };
+
+    var btnSet = CardService.newButtonSet();
+
+    btnSet.addButton(
+      CardService.newTextButton()
+        .setText('Complete + Follow Up')
+        .setOnClickAction(
+          CardService.newAction()
+            .setFunctionName('onTaskComplete')
+            .setParameters(taskParams)
+        )
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    );
+
+    btnSet.addButton(
+      CardService.newTextButton()
+        .setText('Reschedule +3d')
+        .setOnClickAction(
+          CardService.newAction()
+            .setFunctionName('onTaskReschedule')
+            .setParameters(taskParams)
+        )
+    );
+
+    taskSection.addWidget(btnSet);
+
+    // Edit fields (collapsible via section)
+    taskSection.addWidget(
+      CardService.newTextInput()
+        .setFieldName('edit_subject')
+        .setTitle('New subject (optional)')
+        .setHint(task.subject)
+    );
+
+    taskSection.addWidget(
+      CardService.newTextInput()
+        .setFieldName('edit_date')
+        .setTitle('New date (YYYY-MM-DD)')
+        .setHint(task.dueDate || 'YYYY-MM-DD')
+    );
+
+    taskSection.addWidget(
+      CardService.newButtonSet().addButton(
+        CardService.newTextButton()
+          .setText('Edit Task')
+          .setOnClickAction(
+            CardService.newAction()
+              .setFunctionName('onTaskEdit')
+              .setParameters(taskParams)
+          )
+      )
+    );
+
+    // Open in Zoho
+    taskSection.addWidget(
+      CardService.newButtonSet().addButton(
+        CardService.newTextButton()
+          .setText('Open in Zoho')
+          .setOpenLink(
+            CardService.newOpenLink()
+              .setUrl(CONFIG.ZOHO_ORG_URL + '/tab/Tasks/' + task.id)
+          )
+      )
+    );
+
+    card.addSection(taskSection);
+  }
+
+  if (tasks.length > maxTasks) {
+    card.addSection(
+      CardService.newCardSection().addWidget(
+        CardService.newTextParagraph().setText(
+          '<i>' + (tasks.length - maxTasks) + ' more tasks not shown. Open Zoho to see all.</i>'
+        )
+      )
+    );
+  }
+
+  addBackToEmailButton_(card);
+  return card.build();
+}
+
+// ─────────────────────────────────────────────
+// TASK RESULT CARD (success/error after action)
+// ─────────────────────────────────────────────
+
+function buildTaskResultCard_(result) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Task Updated')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection();
+
+  if (result.error) {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        '<font color="#cc0000">' + result.error + '</font>'
+      )
+    );
+  } else if (result.action === 'complete_and_followup') {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        '✅ Task completed successfully!'
+      )
+    );
+    if (result.newTaskId) {
+      section.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel('Follow-up Created')
+          .setText(result.newSubject || 'Follow up: next steps')
+          .setBottomLabel('Due: ' + (result.newDueDate || 'TBD'))
+          .setWrapText(true)
+          .setButton(
+            CardService.newTextButton()
+              .setText('Open')
+              .setOpenLink(
+                CardService.newOpenLink()
+                  .setUrl(CONFIG.ZOHO_ORG_URL + '/tab/Tasks/' + result.newTaskId)
+              )
+          )
+      );
+    }
+  } else if (result.action === 'reschedule') {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        '📅 Task rescheduled to <b>' + result.newDueDate + '</b>'
+      )
+    );
+  } else if (result.action === 'edit') {
+    section.addWidget(
+      CardService.newTextParagraph().setText('✏️ Task updated successfully!')
+    );
+  } else {
+    section.addWidget(
+      CardService.newTextParagraph().setText('Action completed.')
+    );
+  }
+
+  card.addSection(section);
+
+  // Refresh tasks button
+  section.addWidget(
+    CardService.newButtonSet().addButton(
+      CardService.newTextButton()
+        .setText('Refresh Tasks')
+        .setOnClickAction(CardService.newAction().setFunctionName('onViewTasks'))
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    )
+  );
+
+  addBackToEmailButton_(card);
+  return card.build();
+}
+
+// ─────────────────────────────────────────────
+// DRAFT REPLY FORM CARD (tone selector + instructions)
+// ─────────────────────────────────────────────
+
+function buildDraftReplyFormCard_(ctx) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Draft Reply')
+        .setSubtitle('Re: ' + truncate_(ctx.subject, 40))
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection()
+    .setHeader('Quick Tone');
 
   // Quick tone buttons
   var toneButtons = CardService.newButtonSet();
@@ -258,20 +631,27 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
             .setFunctionName('onDraftReply')
             .setParameters({ tone: tone })
         )
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(tone === 'warm' ? CONFIG.STRATUS_BLUE : CONFIG.STRATUS_DARK)
     );
   });
-  replySection.addWidget(toneButtons);
+  section.addWidget(toneButtons);
+
+  card.addSection(section);
 
   // Custom instructions
-  replySection.addWidget(
+  var customSection = CardService.newCardSection()
+    .setHeader('Custom Draft');
+
+  customSection.addWidget(
     CardService.newTextInput()
       .setFieldName('reply_instructions')
-      .setTitle('Custom instructions (optional)')
+      .setTitle('Instructions')
       .setHint('e.g. "Include a 3-year renewal quote"')
       .setMultiline(true)
   );
 
-  replySection.addWidget(
+  customSection.addWidget(
     CardService.newSelectionInput()
       .setFieldName('reply_tone')
       .setTitle('Tone')
@@ -281,198 +661,73 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
       .addItem('Brief', 'brief', false)
   );
 
-  replySection.addWidget(
+  customSection.addWidget(
     CardService.newButtonSet().addButton(
       CardService.newTextButton()
-        .setText('Draft with Instructions')
+        .setText('Generate Draft')
         .setOnClickAction(CardService.newAction().setFunctionName('onDraftReplyCustom'))
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
         .setBackgroundColor(CONFIG.STRATUS_BLUE)
     )
   );
 
-  card.addSection(replySection);
+  card.addSection(customSection);
 
-  // ── Quick Quote (collapsible) ──
-  var quoteSection = CardService.newCardSection()
-    .setHeader('Quick Quote')
-    .setCollapsible(true)
-    .setNumUncollapsibleWidgets(0);
-
-  quoteSection.addWidget(
-    CardService.newTextInput()
-      .setFieldName('sku_input')
-      .setTitle('Enter SKUs')
-      .setHint('e.g. 10 MR44, 5 MS130-24P')
-      .setMultiline(true)
-  );
-
-  quoteSection.addWidget(
-    CardService.newButtonSet().addButton(
-      CardService.newTextButton()
-        .setText('Generate Quote')
-        .setOnClickAction(CardService.newAction().setFunctionName('onGenerateQuote'))
-        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
-        .setBackgroundColor(CONFIG.STRATUS_BLUE)
-    )
-  );
-
-  card.addSection(quoteSection);
-
+  addBackToEmailButton_(card);
   return card.build();
 }
 
 // ─────────────────────────────────────────────
-// EMAIL MANUAL CARD (API failed — still show all tools)
+// DRAFT REPLY CARD (generated drafts)
 // ─────────────────────────────────────────────
 
-function buildEmailManualCard_(subject, sender, errorMsg) {
+function buildDraftReplyCard_(result, emailCtx) {
   var card = CardService.newCardBuilder()
     .setHeader(
       CardService.newCardHeader()
-        .setTitle('Stratus AI')
-        .setSubtitle(truncate_(subject, 50))
+        .setTitle('Draft Reply')
+        .setSubtitle('Re: ' + truncate_(emailCtx.subject, 40))
         .setImageStyle(CardService.ImageStyle.CIRCLE)
         .setImageUrl(CONFIG.ICON_URL)
     );
 
-  // ── Sender Info ──
-  var senderSection = CardService.newCardSection()
-    .setHeader('Sender');
-
-  senderSection.addWidget(
-    CardService.newDecoratedText()
-      .setText(sender.name)
-      .setBottomLabel(sender.email)
-      .setWrapText(true)
-  );
-
-  // CRM search buttons
-  var crmButtons = CardService.newButtonSet();
-  crmButtons.addButton(
-    CardService.newTextButton()
-      .setText('Search Accounts')
-      .setOnClickAction(
-        CardService.newAction()
-          .setFunctionName('onCrmLookup')
-          .setParameters({ query: sender.email.split('@')[1] || sender.email, module: 'Accounts' })
-      )
-  );
-  crmButtons.addButton(
-    CardService.newTextButton()
-      .setText('Search Contacts')
-      .setOnClickAction(
-        CardService.newAction()
-          .setFunctionName('onCrmLookup')
-          .setParameters({ query: sender.email, module: 'Contacts' })
-      )
-  );
-  senderSection.addWidget(crmButtons);
-
-  card.addSection(senderSection);
-
-  // ── AI Analysis retry button ──
-  var aiSection = CardService.newCardSection()
-    .setHeader('AI Analysis');
-
-  aiSection.addWidget(
-    CardService.newTextParagraph().setText(
-      '<font color="#cc0000">AI analysis unavailable: ' + truncate_(errorMsg, 120) + '</font>'
-    )
-  );
-
-  if (errorMsg && errorMsg.indexOf('script.external_request') > -1) {
-    aiSection.addWidget(
-      CardService.newTextParagraph().setText(
-        '<b>Fix:</b> Open Apps Script editor, select the <b>authorize</b> function from the dropdown, click <b>Run</b>, and approve all permissions. Then uninstall and reinstall the test deployment.'
+  if (result.error) {
+    card.addSection(
+      CardService.newCardSection().addWidget(
+        CardService.newTextParagraph().setText('<font color="#cc0000">' + result.error + '</font>')
       )
     );
+    addBackToEmailButton_(card);
+    return card.build();
   }
 
-  aiSection.addWidget(
-    CardService.newButtonSet().addButton(
+  var drafts = result.drafts || [result.draft || result.reply || ''];
+  drafts.forEach(function(draft, idx) {
+    var section = CardService.newCardSection()
+      .setHeader('Option ' + (idx + 1));
+
+    section.addWidget(
+      CardService.newTextParagraph().setText(draft)
+    );
+
+    var buttons = CardService.newButtonSet();
+    buttons.addButton(
       CardService.newTextButton()
-        .setText('Retry Analysis')
-        .setOnClickAction(CardService.newAction().setFunctionName('onAnalyzeEmail'))
-    )
-  );
-
-  card.addSection(aiSection);
-
-  // ── Draft Reply (still works if API is fixed) ──
-  var replySection = CardService.newCardSection()
-    .setHeader('Draft Reply')
-    .setCollapsible(true)
-    .setNumUncollapsibleWidgets(0);
-
-  var toneButtons = CardService.newButtonSet();
-  ['warm', 'professional', 'brief'].forEach(function(tone) {
-    toneButtons.addButton(
-      CardService.newTextButton()
-        .setText(capitalize_(tone))
+        .setText('Create Gmail Draft')
         .setOnClickAction(
           CardService.newAction()
-            .setFunctionName('onDraftReply')
-            .setParameters({ tone: tone })
+            .setFunctionName('onInsertDraft')
+            .setParameters({ draft_body: draft })
         )
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
     );
+    section.addWidget(buttons);
+
+    card.addSection(section);
   });
-  replySection.addWidget(toneButtons);
 
-  replySection.addWidget(
-    CardService.newTextInput()
-      .setFieldName('reply_instructions')
-      .setTitle('Custom instructions')
-      .setHint('e.g. "Include 3-year quote"')
-      .setMultiline(true)
-  );
-
-  replySection.addWidget(
-    CardService.newSelectionInput()
-      .setFieldName('reply_tone')
-      .setTitle('Tone')
-      .setType(CardService.SelectionInputType.DROPDOWN)
-      .addItem('Warm', 'warm', true)
-      .addItem('Professional', 'professional', false)
-      .addItem('Brief', 'brief', false)
-  );
-
-  replySection.addWidget(
-    CardService.newButtonSet().addButton(
-      CardService.newTextButton()
-        .setText('Draft with Instructions')
-        .setOnClickAction(CardService.newAction().setFunctionName('onDraftReplyCustom'))
-        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
-        .setBackgroundColor(CONFIG.STRATUS_BLUE)
-    )
-  );
-
-  card.addSection(replySection);
-
-  // ── Quick Quote ──
-  var quoteSection = CardService.newCardSection()
-    .setHeader('Quick Quote');
-
-  quoteSection.addWidget(
-    CardService.newTextInput()
-      .setFieldName('sku_input')
-      .setTitle('Enter SKUs')
-      .setHint('e.g. 10 MR44, 5 MS130-24P')
-      .setMultiline(true)
-  );
-
-  quoteSection.addWidget(
-    CardService.newButtonSet().addButton(
-      CardService.newTextButton()
-        .setText('Generate Quote')
-        .setOnClickAction(CardService.newAction().setFunctionName('onGenerateQuote'))
-        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
-        .setBackgroundColor(CONFIG.STRATUS_BLUE)
-    )
-  );
-
-  card.addSection(quoteSection);
-
+  addBackToEmailButton_(card);
   return card.build();
 }
 
@@ -496,7 +751,7 @@ function buildQuoteResultCard_(result) {
         CardService.newTextParagraph().setText('<font color="#cc0000">' + result.error + '</font>')
       )
     );
-    addBackButton_(card);
+    addBackToEmailButton_(card);
     return card.build();
   }
 
@@ -537,7 +792,7 @@ function buildQuoteResultCard_(result) {
   // EOL warnings
   if (result.eolWarnings && result.eolWarnings.length > 0) {
     var eolSection = CardService.newCardSection()
-      .setHeader('⚠️ EOL Warnings');
+      .setHeader('EOL Warnings');
     result.eolWarnings.forEach(function(w) {
       eolSection.addWidget(
         CardService.newDecoratedText()
@@ -548,61 +803,7 @@ function buildQuoteResultCard_(result) {
     card.addSection(eolSection);
   }
 
-  addBackButton_(card);
-  return card.build();
-}
-
-// ─────────────────────────────────────────────
-// DRAFT REPLY CARD
-// ─────────────────────────────────────────────
-
-function buildDraftReplyCard_(result, emailCtx) {
-  var card = CardService.newCardBuilder()
-    .setHeader(
-      CardService.newCardHeader()
-        .setTitle('Draft Reply')
-        .setSubtitle('Re: ' + truncate_(emailCtx.subject, 40))
-        .setImageStyle(CardService.ImageStyle.CIRCLE)
-        .setImageUrl(CONFIG.ICON_URL)
-    );
-
-  if (result.error) {
-    card.addSection(
-      CardService.newCardSection().addWidget(
-        CardService.newTextParagraph().setText('<font color="#cc0000">' + result.error + '</font>')
-      )
-    );
-    addBackButton_(card);
-    return card.build();
-  }
-
-  var drafts = result.drafts || [result.draft || result.reply || ''];
-  drafts.forEach(function(draft, idx) {
-    var section = CardService.newCardSection()
-      .setHeader('Option ' + (idx + 1));
-
-    section.addWidget(
-      CardService.newTextParagraph().setText(draft)
-    );
-
-    var buttons = CardService.newButtonSet();
-    buttons.addButton(
-      CardService.newTextButton()
-        .setText('Create Gmail Draft')
-        .setOnClickAction(
-          CardService.newAction()
-            .setFunctionName('onInsertDraft')
-            .setParameters({ draft_body: draft })
-        )
-        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
-        .setBackgroundColor(CONFIG.STRATUS_BLUE)
-    );
-    section.addWidget(buttons);
-
-    card.addSection(section);
-  });
-
-  addBackButton_(card);
+  addBackToEmailButton_(card);
   return card.build();
 }
 
@@ -626,7 +827,7 @@ function buildCrmResultCard_(result, query, module) {
         CardService.newTextParagraph().setText('<font color="#cc0000">' + result.error + '</font>')
       )
     );
-    addBackButton_(card);
+    addBackToEmailButton_(card);
     return card.build();
   }
 
@@ -637,7 +838,7 @@ function buildCrmResultCard_(result, query, module) {
         CardService.newTextParagraph().setText('No results for "' + query + '" in ' + module + '.')
       )
     );
-    addBackButton_(card);
+    addBackToEmailButton_(card);
     return card.build();
   }
 
@@ -677,12 +878,12 @@ function buildCrmResultCard_(result, query, module) {
     card.addSection(section);
   });
 
-  addBackButton_(card);
+  addBackToEmailButton_(card);
   return card.build();
 }
 
 // ─────────────────────────────────────────────
-// QUOTE BUILDER CARD (compose trigger)
+// QUOTE BUILDER CARD (compose trigger + prefill)
 // ─────────────────────────────────────────────
 
 function buildQuoteBuilderCard_(prefill) {
@@ -739,7 +940,7 @@ function buildErrorCard_(message) {
       )
     );
 
-  addBackButton_(card);
+  addBackToEmailButton_(card);
   return card.build();
 }
 
@@ -747,14 +948,24 @@ function buildErrorCard_(message) {
 // SHARED HELPERS
 // ─────────────────────────────────────────────
 
-function addBackButton_(card) {
+function addBackToEmailButton_(card) {
   card.addSection(
     CardService.newCardSection().addWidget(
-      CardService.newButtonSet().addButton(
-        CardService.newTextButton()
-          .setText('← Back')
-          .setOnClickAction(CardService.newAction().setFunctionName('onBackToHome'))
-      )
+      CardService.newButtonSet()
+        .addButton(
+          CardService.newTextButton()
+            .setText('Back to Email')
+            .setOnClickAction(CardService.newAction().setFunctionName('onBackToEmail'))
+        )
+        .addButton(
+          CardService.newTextButton()
+            .setText('Home')
+            .setOnClickAction(CardService.newAction().setFunctionName('onBackToHome'))
+        )
     )
   );
+}
+
+function addBackButton_(card) {
+  addBackToEmailButton_(card);
 }
