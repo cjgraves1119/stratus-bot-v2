@@ -339,6 +339,7 @@ function onSuggestTask(e) {
   var subject = params.subject || '';
   var hasAccount = params.has_account === 'true';
   var accountId = params.account_id || '';
+  var threadDomains = (params.thread_domains || '').split(',').filter(function(d) { return d; });
 
   try {
     // Preview mode: check what would happen (account/contact lookup only)
@@ -347,7 +348,8 @@ function onSuggestTask(e) {
       senderName: senderName,
       subject: subject,
       hasAccount: hasAccount,
-      accountId: accountId
+      accountId: accountId,
+      threadDomains: threadDomains
     });
     return buildSuggestTaskPreviewCard_(preview, params);
   } catch (err) {
@@ -366,6 +368,7 @@ function onConfirmSuggestTask(e) {
   var hasAccount = params.has_account === 'true';
   var accountId = params.account_id || '';
   var createContact = params.create_contact === 'true';
+  var threadDomains = (params.thread_domains || '').split(',').filter(function(d) { return d; });
 
   try {
     var result = apiCall_('/api/suggest-task', {
@@ -374,7 +377,8 @@ function onConfirmSuggestTask(e) {
       subject: subject,
       hasAccount: hasAccount,
       accountId: accountId,
-      createContact: createContact
+      createContact: createContact,
+      threadDomains: threadDomains
     });
     return buildTaskResultCard_(result);
   } catch (err) {

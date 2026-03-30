@@ -5570,9 +5570,11 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               let prevAccountName = '';
               let prevContactFound = false;
               let prevContactName = '';
+              let prevAssociationUncertain = false;
 
-              // Search for account by domain (same logic as suggest-task)
-              if (!prevAccountId && !prevIsGeneric && prevDomain) {
+              // Strategy 1: ALWAYS search contacts by email (even generic domains)
+              // This catches cases where a gmail.com user is already a contact in CRM
+              if (!prevAccountId) {
                 try {
                   const ec = await zohoApiCall('GET', `Contacts/search?email=${encodeURIComponent(prevEmail)}&fields=id,Account_Name,Full_Name`, env);
                   if (ec?.data?.[0]?.Account_Name?.id) {
@@ -5582,14 +5584,17 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                     prevContactName = ec.data[0].Full_Name || '';
                   }
                 } catch (e) {}
+              }
 
-                if (!prevAccountId) {
-                  try {
-                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(prevDomain)})&fields=id,Account_Name`, env);
-                    if (ac?.data?.[0]) { prevAccountId = ac.data[0].id; prevAccountName = ac.data[0].Account_Name; }
-                  } catch (e) {}
-                }
+              // For non-generic domains, continue with domain-based strategies
+              if (!prevAccountId && !prevIsGeneric && prevDomain) {
+                // Strategy 2: Search accounts by website/domain
+                try {
+                  const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(prevDomain)})&fields=id,Account_Name`, env);
+                  if (ac?.data?.[0]) { prevAccountId = ac.data[0].id; prevAccountName = ac.data[0].Account_Name; }
+                } catch (e) {}
 
+                // Strategy 3: Word search with abbreviated domain
                 if (!prevAccountId) {
                   try {
                     const db = prevDomain.split('.')[0];
@@ -5601,17 +5606,38 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                     }
                   } catch (e) {}
                 }
+              }
 
-                // If account found but contact not yet checked
-                if (prevAccountId && !prevContactFound) {
+              // For generic emails with no account found yet, try thread context domains
+              // (excluding generic domains and the user's own stratusinfosystems.com domain)
+              if (!prevAccountId && prevIsGeneric && apiBody.threadDomains) {
+                const usableDomains = (apiBody.threadDomains || []).filter(d =>
+                  d && !/^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac|comcast|att|verizon)\.\w+$/i.test(d)
+                  && !d.toLowerCase().includes('stratusinfosystems')
+                );
+                for (const td of usableDomains) {
+                  if (prevAccountId) break;
                   try {
-                    const cs = await zohoApiCall('GET', `Contacts/search?email=${encodeURIComponent(prevEmail)}&fields=id,Full_Name`, env);
-                    if (cs?.data?.[0]) {
-                      prevContactFound = true;
-                      prevContactName = cs.data[0].Full_Name || '';
-                    }
+                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(td)})&fields=id,Account_Name`, env);
+                    if (ac?.data?.[0]) { prevAccountId = ac.data[0].id; prevAccountName = ac.data[0].Account_Name; }
                   } catch (e) {}
                 }
+              }
+
+              // If account found but contact not yet checked, verify contact
+              if (prevAccountId && !prevContactFound) {
+                try {
+                  const cs = await zohoApiCall('GET', `Contacts/search?email=${encodeURIComponent(prevEmail)}&fields=id,Full_Name`, env);
+                  if (cs?.data?.[0]) {
+                    prevContactFound = true;
+                    prevContactName = cs.data[0].Full_Name || '';
+                  }
+                } catch (e) {}
+              }
+
+              // Flag uncertainty: generic email + no existing contact + no clear account
+              if (prevIsGeneric && !prevContactFound && !prevAccountId) {
+                prevAssociationUncertain = true;
               }
 
               if (prevHasAcct && prevAcctId && !prevAccountName) {
@@ -5637,7 +5663,8 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 isGenericEmail: prevIsGeneric,
                 domain: prevDomain,
                 companyName: prevCompanyName,
-                suggestedDueDate: previewAddBizDays(new Date(), 3)
+                suggestedDueDate: previewAddBizDays(new Date(), 3),
+                associationUncertain: prevAssociationUncertain
               };
             } catch (err) {
               apiResult = { error: 'Preview failed: ' + err.message };
@@ -5675,24 +5702,28 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               let leadCreated = false;
               let taskCreated = false;
               let taskId = null;
+              let associationUncertain = false;
 
               // If no accountId provided, search Zoho for account by domain
-              // Strategy: 1) Search contacts by email (reveals linked account)
-              //           2) Search accounts by domain/website criteria
-              //           3) Search accounts by word (first portion of domain)
-              if (!resultAccountId && !isGenericEmail && domain) {
-                try {
-                  // Strategy 1: Check if a contact with this email already exists (linked to an account)
-                  const existingContact = await zohoApiCall('GET',
-                    `Contacts/search?email=${encodeURIComponent(senderEmail)}&fields=id,Account_Name,Full_Name`, env
-                  );
-                  if (existingContact?.data?.[0]?.Account_Name?.id) {
-                    resultAccountId = existingContact.data[0].Account_Name.id;
-                    resultAccountName = existingContact.data[0].Account_Name.name || '';
-                    contactId = existingContact.data[0].id;
-                  }
-                } catch (e) { /* contact search failed */ }
+              // Strategy: 1) ALWAYS search contacts by email (reveals linked account)
+              //           2) For non-generic domains: Search accounts by domain/website criteria
+              //           3) For non-generic domains: Search accounts by word (first portion of domain)
+              //           4) For generic emails: Try thread domains (if provided)
 
+              // Strategy 1: ALWAYS search contacts by email (even generic domains)
+              try {
+                const existingContact = await zohoApiCall('GET',
+                  `Contacts/search?email=${encodeURIComponent(senderEmail)}&fields=id,Account_Name,Full_Name`, env
+                );
+                if (existingContact?.data?.[0]?.Account_Name?.id) {
+                  resultAccountId = existingContact.data[0].Account_Name.id;
+                  resultAccountName = existingContact.data[0].Account_Name.name || '';
+                  contactId = existingContact.data[0].id;
+                }
+              } catch (e) { /* contact search failed */ }
+
+              // For non-generic domains, continue with domain-based strategies
+              if (!resultAccountId && !isGenericEmail && domain) {
                 if (!resultAccountId) {
                   try {
                     // Strategy 2: Search accounts by website criteria containing domain
@@ -5728,6 +5759,27 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                     }
                   } catch (e) { /* word search failed */ }
                 }
+              }
+
+              // For generic emails with no account found yet, try thread context domains
+              // (excluding generic domains and the user's own stratusinfosystems.com domain)
+              if (!resultAccountId && isGenericEmail && apiBody.threadDomains) {
+                const usableDomains = (apiBody.threadDomains || []).filter(d =>
+                  d && !/^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac|comcast|att|verizon)\.\w+$/i.test(d)
+                  && !d.toLowerCase().includes('stratusinfosystems')
+                );
+                for (const td of usableDomains) {
+                  if (resultAccountId) break;
+                  try {
+                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(td)})&fields=id,Account_Name`, env);
+                    if (ac?.data?.[0]) { resultAccountId = ac.data[0].id; resultAccountName = ac.data[0].Account_Name; }
+                  } catch (e) {}
+                }
+              }
+
+              // Flag uncertainty: generic email + no existing contact + no clear account
+              if (isGenericEmail && !contactId && !resultAccountId) {
+                associationUncertain = true;
               }
 
               const foundAccount = !!(resultAccountId);
@@ -5846,7 +5898,19 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               return new Response(JSON.stringify({ error: 'text required' }), { status: 400, headers: jsonHeaders });
             }
             const parsed = parseMessage(text);
-            const skus = parsed && parsed.items ? parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })) : [];
+            const skus = [];
+            if (parsed && parsed.items) {
+              for (const item of parsed.items) {
+                const baseSku = item.baseSku || item.sku;
+                // Validate SKU against auto-catalog to filter out false positives
+                const validation = validateSku(baseSku);
+                // Include SKU if it's valid (not EOL) or if EOL but still valid
+                if (validation.valid) {
+                  skus.push({ sku: baseSku, qty: item.qty });
+                }
+                // Skip invalid SKUs (false positives like "Z3IOQXQ")
+              }
+            }
             apiResult = { skus };
             break;
           }

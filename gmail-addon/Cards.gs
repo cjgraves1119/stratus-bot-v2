@@ -387,13 +387,16 @@ function buildTaskCard_(result, emailCtx) {
       );
     }
 
-    // Suggest Task button: auto-creates lead/contact if needed, then suggests a follow-up task
+    // Suggest Task button: let the preview endpoint determine account from sender email
+    // Do NOT pre-fill account_id from task card results (could be Chris's own company from thread context)
+    var threadDomains = (emailCtx.allDomains || []).join(',');
     var suggestParams = {
       sender_email: emailCtx.senderEmail || '',
       sender_name: emailCtx.senderName || '',
       subject: emailCtx.subject || '',
-      has_account: (result.accounts && result.accounts.length > 0) ? 'true' : 'false',
-      account_id: (result.accounts && result.accounts.length > 0) ? result.accounts[0].id : ''
+      has_account: 'false',
+      account_id: '',
+      thread_domains: threadDomains
     };
 
     emptySection.addWidget(
@@ -723,11 +726,27 @@ function buildSuggestTaskPreviewCard_(preview, originalParams) {
           .setWrapText(true)
       );
     }
-  } else if (preview.isGenericEmail) {
+  } else if (preview.associationUncertain) {
+    section.addWidget(
+      CardService.newDecoratedText()
+        .setTopLabel('Account Unknown')
+        .setText(preview.senderName + ' <' + preview.senderEmail + '>')
+        .setBottomLabel('Generic email, no existing CRM contact found')
+        .setWrapText(true)
+    );
     section.addWidget(
       CardService.newTextParagraph().setText(
-        'Generic email domain detected. A standalone follow-up task will be created (no lead or contact).'
+        'This person uses a generic email and is not in CRM yet. A standalone follow-up task will be created with no account or contact association. You can manually link them later in Zoho.'
       )
+    );
+  } else if (preview.isGenericEmail) {
+    // Generic email but contact/account WAS found (existing CRM contact)
+    section.addWidget(
+      CardService.newDecoratedText()
+        .setTopLabel('Generic Email')
+        .setText(preview.senderName + ' <' + preview.senderEmail + '>')
+        .setBottomLabel('Standalone task (no account link)')
+        .setWrapText(true)
     );
   } else {
     section.addWidget(
