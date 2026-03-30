@@ -5545,9 +5545,109 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             break;
           }
 
+          // ── Suggest Task Preview: lookup only, no writes ──
+          case '/api/suggest-task-preview': {
+            const { senderEmail: prevEmail, senderName: prevName, subject: prevSubject, hasAccount: prevHasAcct, accountId: prevAcctId } = apiBody;
+            if (!prevEmail) {
+              return new Response(JSON.stringify({ error: 'senderEmail required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              const prevDomain = prevEmail.split('@')[1] || '';
+              const prevIsGeneric = /^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac|comcast|att|verizon)\.\w+$/i.test(prevDomain);
+
+              function previewAddBizDays(start, days) {
+                let d = new Date(start);
+                let added = 0;
+                while (added < days) {
+                  d.setDate(d.getDate() + 1);
+                  if (d.getDay() !== 0 && d.getDay() !== 6) added++;
+                }
+                return d.toISOString().split('T')[0];
+              }
+
+              let prevAccountId = prevAcctId || null;
+              let prevAccountName = '';
+              let prevContactFound = false;
+              let prevContactName = '';
+
+              // Search for account by domain (same logic as suggest-task)
+              if (!prevAccountId && !prevIsGeneric && prevDomain) {
+                try {
+                  const ec = await zohoApiCall('GET', `Contacts/search?email=${encodeURIComponent(prevEmail)}&fields=id,Account_Name,Full_Name`, env);
+                  if (ec?.data?.[0]?.Account_Name?.id) {
+                    prevAccountId = ec.data[0].Account_Name.id;
+                    prevAccountName = ec.data[0].Account_Name.name || '';
+                    prevContactFound = true;
+                    prevContactName = ec.data[0].Full_Name || '';
+                  }
+                } catch (e) {}
+
+                if (!prevAccountId) {
+                  try {
+                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(prevDomain)})&fields=id,Account_Name`, env);
+                    if (ac?.data?.[0]) { prevAccountId = ac.data[0].id; prevAccountName = ac.data[0].Account_Name; }
+                  } catch (e) {}
+                }
+
+                if (!prevAccountId) {
+                  try {
+                    const db = prevDomain.split('.')[0];
+                    const st = db.length > 8 ? db.substring(0, 3).toUpperCase() : db;
+                    const as = await zohoApiCall('GET', `Accounts/search?word=${encodeURIComponent(st)}&fields=id,Account_Name,Website`, env);
+                    if (as?.data) {
+                      const m = as.data.find(a => (a.Website && a.Website.toLowerCase().includes(prevDomain.toLowerCase())) || a.Account_Name.toLowerCase().replace(/[^a-z0-9]/g, '').includes(db.toLowerCase()));
+                      if (m) { prevAccountId = m.id; prevAccountName = m.Account_Name; }
+                    }
+                  } catch (e) {}
+                }
+
+                // If account found but contact not yet checked
+                if (prevAccountId && !prevContactFound) {
+                  try {
+                    const cs = await zohoApiCall('GET', `Contacts/search?email=${encodeURIComponent(prevEmail)}&fields=id,Full_Name`, env);
+                    if (cs?.data?.[0]) {
+                      prevContactFound = true;
+                      prevContactName = cs.data[0].Full_Name || '';
+                    }
+                  } catch (e) {}
+                }
+              }
+
+              if (prevHasAcct && prevAcctId && !prevAccountName) {
+                try {
+                  const ar = await zohoApiCall('GET', `Accounts/${prevAcctId}?fields=Account_Name`, env);
+                  prevAccountName = ar?.data?.[0]?.Account_Name || '';
+                  prevAccountId = prevAcctId;
+                } catch (e) {}
+              }
+
+              const prevDomainBase = prevDomain.split('.')[0];
+              const prevCompanyName = prevDomainBase.charAt(0).toUpperCase() + prevDomainBase.slice(1);
+
+              apiResult = {
+                success: true,
+                accountFound: !!prevAccountId,
+                accountId: prevAccountId || '',
+                accountName: prevAccountName,
+                contactFound: prevContactFound,
+                contactName: prevContactName,
+                senderEmail: prevEmail,
+                senderName: prevName || '',
+                isGenericEmail: prevIsGeneric,
+                domain: prevDomain,
+                companyName: prevCompanyName,
+                suggestedDueDate: previewAddBizDays(new Date(), 3)
+              };
+            } catch (err) {
+              apiResult = { error: 'Preview failed: ' + err.message };
+            }
+            break;
+          }
+
           // ── Suggest Task: Auto-create lead/contact + follow-up task ──
           case '/api/suggest-task': {
-            const { senderEmail, senderName, subject: taskSubject, hasAccount, accountId } = apiBody;
+            const { senderEmail, senderName, subject: taskSubject, hasAccount, accountId, createContact: shouldCreateContact } = apiBody;
             if (!senderEmail) {
               return new Response(JSON.stringify({ error: 'senderEmail required' }), { status: 400, headers: jsonHeaders });
             }
@@ -5644,8 +5744,8 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 );
                 if (contactSearch?.data && contactSearch.data.length > 0) {
                   contactId = contactSearch.data[0].id;
-                } else {
-                  // Create contact under existing account
+                } else if (shouldCreateContact) {
+                  // Create contact under existing account (user confirmed via preview)
                   const nameParts = (senderName || '').split(' ');
                   const firstName = nameParts[0] || senderEmail.split('@')[0];
                   const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '-';
@@ -5654,7 +5754,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                       First_Name: firstName,
                       Last_Name: lastName,
                       Email: senderEmail,
-                      Account_Name: { id: accountId },
+                      Account_Name: { id: resultAccountId },
                       Owner: '2570562000141711002'
                     }]
                   };
@@ -5748,6 +5848,41 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const parsed = parseMessage(text);
             const skus = parsed && parsed.items ? parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })) : [];
             apiResult = { skus };
+            break;
+          }
+
+          // ── Admin Usage: API cost stats for sidebar dashboard ──
+          case '/api/admin-usage': {
+            try {
+              const now = new Date();
+              const monthKey = `usage_${now.getFullYear()}_${String(now.getMonth() + 1).padStart(2, '0')}`;
+              const kv = env.CONVERSATION_KV;
+              const usageData = await kv.get(monthKey, 'json');
+
+              // Get price refresh status
+              let priceStatus = null;
+              try {
+                priceStatus = await kv.get('prices_live', 'json');
+              } catch (e) {}
+
+              const pricesMeta = priceStatus ? {
+                lastPriceRefresh: priceStatus._lastRefresh || 'Unknown',
+                priceStats: (priceStatus._stats ? priceStatus._stats.updated + ' updated, ' + priceStatus._stats.skipped + ' skipped' : 'Unknown')
+              } : {};
+
+              apiResult = {
+                totalInputTokens: usageData?.totalInputTokens || 0,
+                totalOutputTokens: usageData?.totalOutputTokens || 0,
+                totalCostUsd: usageData?.totalCostUsd || 0,
+                requestCount: usageData?.requestCount || 0,
+                bySource: usageData?.bySource || {},
+                recentRequests: (usageData?.recentRequests || []).slice(0, 15),
+                workerVersion: 'gchat-v2.5',
+                ...pricesMeta
+              };
+            } catch (err) {
+              apiResult = { error: 'Usage fetch failed: ' + err.message };
+            }
             break;
           }
 

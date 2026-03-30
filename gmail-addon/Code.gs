@@ -330,7 +330,7 @@ function onCopyText(e) {
 
 /**
  * Suggest and create a follow-up task.
- * Auto-creates lead/contact in Zoho if sender has no CRM record.
+ * First calls preview mode to show what will happen, then executes on confirm.
  */
 function onSuggestTask(e) {
   var params = e.commonEventObject.parameters || {};
@@ -341,16 +341,56 @@ function onSuggestTask(e) {
   var accountId = params.account_id || '';
 
   try {
-    var result = callApi_('/api/suggest-task', {
+    // Preview mode: check what would happen (account/contact lookup only)
+    var preview = apiCall_('/api/suggest-task-preview', {
       senderEmail: senderEmail,
       senderName: senderName,
       subject: subject,
       hasAccount: hasAccount,
       accountId: accountId
     });
-    return buildTaskResultCard_(result);
+    return buildSuggestTaskPreviewCard_(preview, params);
   } catch (err) {
     return buildErrorCard_('Task suggestion failed: ' + err.message);
+  }
+}
+
+/**
+ * Execute the suggested task creation after user confirms.
+ */
+function onConfirmSuggestTask(e) {
+  var params = e.commonEventObject.parameters || {};
+  var senderEmail = params.sender_email || '';
+  var senderName = params.sender_name || '';
+  var subject = params.subject || '';
+  var hasAccount = params.has_account === 'true';
+  var accountId = params.account_id || '';
+  var createContact = params.create_contact === 'true';
+
+  try {
+    var result = apiCall_('/api/suggest-task', {
+      senderEmail: senderEmail,
+      senderName: senderName,
+      subject: subject,
+      hasAccount: hasAccount,
+      accountId: accountId,
+      createContact: createContact
+    });
+    return buildTaskResultCard_(result);
+  } catch (err) {
+    return buildErrorCard_('Task creation failed: ' + err.message);
+  }
+}
+
+/**
+ * View Admin dashboard (API usage stats).
+ */
+function onViewAdmin(e) {
+  try {
+    var result = apiCall_('/api/admin-usage', {});
+    return buildAdminCard_(result);
+  } catch (err) {
+    return buildErrorCard_('Admin data failed: ' + err.message);
   }
 }
 

@@ -98,6 +98,24 @@ function buildHomepageCard_() {
 
   card.addSection(infoSection);
 
+  // ── Admin ──
+  var adminSection = CardService.newCardSection()
+    .setHeader('Admin')
+    .setCollapsible(true)
+    .setNumUncollapsibleWidgets(0);
+
+  adminSection.addWidget(
+    CardService.newButtonSet().addButton(
+      CardService.newTextButton()
+        .setText('API Usage & Stats')
+        .setOnClickAction(CardService.newAction().setFunctionName('onViewAdmin'))
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_DARK)
+    )
+  );
+
+  card.addSection(adminSection);
+
   return card.build();
 }
 
@@ -661,6 +679,262 @@ function buildTaskResultCard_(result) {
 
   addBackToEmailButton_(card);
   return card.build();
+}
+
+// ─────────────────────────────────────────────
+// SUGGEST TASK PREVIEW CARD (confirmation before creating)
+// ─────────────────────────────────────────────
+
+function buildSuggestTaskPreviewCard_(preview, originalParams) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Create Follow-Up Task')
+        .setSubtitle('Review before creating')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection();
+
+  // Show what was found
+  if (preview.accountFound) {
+    section.addWidget(
+      CardService.newDecoratedText()
+        .setTopLabel('Account Found')
+        .setText(preview.accountName || 'Unknown')
+        .setWrapText(true)
+    );
+
+    if (preview.contactFound) {
+      section.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel('Contact')
+          .setText(preview.contactName || preview.senderEmail)
+          .setBottomLabel('Already in CRM')
+          .setWrapText(true)
+      );
+    } else {
+      section.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel('Contact Not Found')
+          .setText(preview.senderName + ' <' + preview.senderEmail + '>')
+          .setBottomLabel('Will be added to ' + (preview.accountName || 'account'))
+          .setWrapText(true)
+      );
+    }
+  } else if (preview.isGenericEmail) {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        'Generic email domain detected. A standalone follow-up task will be created (no lead or contact).'
+      )
+    );
+  } else {
+    section.addWidget(
+      CardService.newDecoratedText()
+        .setTopLabel('No Account Found')
+        .setText(preview.senderName + ' <' + preview.senderEmail + '>')
+        .setBottomLabel('A new lead will be created for ' + (preview.companyName || preview.domain || 'unknown'))
+        .setWrapText(true)
+    );
+  }
+
+  // Task preview
+  section.addWidget(
+    CardService.newDecoratedText()
+      .setTopLabel('Task')
+      .setText('Follow up: ' + (originalParams.subject || 'next steps'))
+      .setBottomLabel('Due: ' + (preview.suggestedDueDate || 'TBD'))
+      .setWrapText(true)
+  );
+
+  card.addSection(section);
+
+  // Confirm / Cancel buttons
+  var confirmParams = {
+    sender_email: originalParams.sender_email,
+    sender_name: originalParams.sender_name,
+    subject: originalParams.subject,
+    has_account: preview.accountFound ? 'true' : 'false',
+    account_id: preview.accountId || '',
+    create_contact: (preview.accountFound && !preview.contactFound) ? 'true' : 'false'
+  };
+
+  var btnSection = CardService.newCardSection();
+  btnSection.addWidget(
+    CardService.newButtonSet()
+      .addButton(
+        CardService.newTextButton()
+          .setText('Confirm')
+          .setOnClickAction(
+            CardService.newAction()
+              .setFunctionName('onConfirmSuggestTask')
+              .setParameters(confirmParams)
+          )
+          .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+          .setBackgroundColor(CONFIG.STRATUS_BLUE)
+      )
+      .addButton(
+        CardService.newTextButton()
+          .setText('Cancel')
+          .setOnClickAction(CardService.newAction().setFunctionName('onViewTasks'))
+      )
+  );
+
+  card.addSection(btnSection);
+  return card.build();
+}
+
+// ─────────────────────────────────────────────
+// ADMIN DASHBOARD CARD
+// ─────────────────────────────────────────────
+
+function buildAdminCard_(data) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Admin Dashboard')
+        .setSubtitle('API Usage & Stats')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  // Monthly usage summary
+  var usageSection = CardService.newCardSection()
+    .setHeader('This Month');
+
+  var totalCost = data.totalCostUsd || 0;
+  var requestCount = data.requestCount || 0;
+  var inputTokens = data.totalInputTokens || 0;
+  var outputTokens = data.totalOutputTokens || 0;
+
+  usageSection.addWidget(
+    CardService.newDecoratedText()
+      .setTopLabel('Total API Cost')
+      .setText('$' + totalCost.toFixed(4))
+      .setWrapText(true)
+  );
+
+  usageSection.addWidget(
+    CardService.newDecoratedText()
+      .setTopLabel('Requests')
+      .setText(String(requestCount))
+      .setBottomLabel(
+        'Input: ' + formatTokens_(inputTokens) + ' | Output: ' + formatTokens_(outputTokens)
+      )
+      .setWrapText(true)
+  );
+
+  card.addSection(usageSection);
+
+  // By source breakdown
+  if (data.bySource) {
+    var sourceSection = CardService.newCardSection()
+      .setHeader('By Feature')
+      .setCollapsible(true)
+      .setNumUncollapsibleWidgets(0);
+
+    var sources = Object.keys(data.bySource);
+    sources.sort(function(a, b) {
+      return (data.bySource[b].costUsd || 0) - (data.bySource[a].costUsd || 0);
+    });
+
+    for (var i = 0; i < sources.length; i++) {
+      var src = sources[i];
+      var s = data.bySource[src];
+      sourceSection.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel(src)
+          .setText(s.requests + ' req | $' + (s.costUsd || 0).toFixed(4))
+          .setWrapText(true)
+      );
+    }
+
+    card.addSection(sourceSection);
+  }
+
+  // Recent requests
+  if (data.recentRequests && data.recentRequests.length > 0) {
+    var recentSection = CardService.newCardSection()
+      .setHeader('Recent Requests')
+      .setCollapsible(true)
+      .setNumUncollapsibleWidgets(0);
+
+    var maxRecent = Math.min(data.recentRequests.length, 10);
+    for (var j = 0; j < maxRecent; j++) {
+      var req = data.recentRequests[j];
+      var ts = req.timestamp ? new Date(req.timestamp).toLocaleString() : 'unknown';
+      recentSection.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel(req.source || 'unknown')
+          .setText('$' + (req.costUsd || 0).toFixed(6))
+          .setBottomLabel(ts + ' | ' + (req.model || '').split('-').slice(0,2).join('-'))
+          .setWrapText(true)
+      );
+    }
+
+    card.addSection(recentSection);
+  }
+
+  // System info
+  var sysSection = CardService.newCardSection()
+    .setHeader('System')
+    .setCollapsible(true)
+    .setNumUncollapsibleWidgets(0);
+
+  if (data.lastPriceRefresh) {
+    sysSection.addWidget(
+      CardService.newDecoratedText()
+        .setTopLabel('Last Price Refresh')
+        .setText(data.lastPriceRefresh || 'Unknown')
+        .setWrapText(true)
+    );
+  }
+
+  if (data.priceStats) {
+    sysSection.addWidget(
+      CardService.newDecoratedText()
+        .setTopLabel('Live Prices')
+        .setText(data.priceStats || 'Unknown')
+        .setWrapText(true)
+    );
+  }
+
+  sysSection.addWidget(
+    CardService.newDecoratedText()
+      .setTopLabel('Worker Version')
+      .setText(data.workerVersion || 'Unknown')
+      .setWrapText(true)
+  );
+
+  card.addSection(sysSection);
+
+  // Refresh + Back
+  var navSection = CardService.newCardSection();
+  navSection.addWidget(
+    CardService.newButtonSet()
+      .addButton(
+        CardService.newTextButton()
+          .setText('Refresh')
+          .setOnClickAction(CardService.newAction().setFunctionName('onViewAdmin'))
+          .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+          .setBackgroundColor(CONFIG.STRATUS_BLUE)
+      )
+      .addButton(
+        CardService.newTextButton()
+          .setText('Home')
+          .setOnClickAction(CardService.newAction().setFunctionName('onBackToHome'))
+      )
+  );
+
+  card.addSection(navSection);
+  return card.build();
+}
+
+function formatTokens_(count) {
+  if (count >= 1000000) return (count / 1000000).toFixed(1) + 'M';
+  if (count >= 1000) return (count / 1000).toFixed(1) + 'K';
+  return String(count);
 }
 
 // ─────────────────────────────────────────────
