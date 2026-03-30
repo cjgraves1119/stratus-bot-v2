@@ -220,6 +220,30 @@ function buildInstantEmailCard_(subject, sender) {
 
   card.addSection(actionsSection);
 
+  // ── Send to Stratus AI (GChat DM handoff) ──
+  var handoffSection = CardService.newCardSection()
+    .setHeader('Send to Stratus AI');
+
+  handoffSection.addWidget(
+    CardService.newTextInput()
+      .setFieldName('stratus_request')
+      .setTitle('Your request')
+      .setHint('e.g. "Summarize this email and suggest next steps"')
+      .setMultiline(true)
+  );
+
+  handoffSection.addWidget(
+    CardService.newButtonSet().addButton(
+      CardService.newTextButton()
+        .setText('Send to Stratus AI → GChat')
+        .setOnClickAction(CardService.newAction().setFunctionName('onSendToStratusAI'))
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    )
+  );
+
+  card.addSection(handoffSection);
+
   return card.build();
 }
 
@@ -1322,4 +1346,47 @@ function addBackToEmailButton_(card) {
 
 function addBackButton_(card) {
   addBackToEmailButton_(card);
+}
+
+// ─────────────────────────────────────────────
+// STRATUS AI HANDOFF CONFIRMATION CARD
+// ─────────────────────────────────────────────
+
+function buildStratusHandoffCard_(result) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Stratus AI')
+        .setSubtitle('Request Sent')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection();
+
+  if (result && result.ok) {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        '✅ Your request has been sent! Stratus AI will reply to you via Google Chat DM shortly.'
+      )
+    );
+    if (result.message) {
+      section.addWidget(
+        CardService.newDecoratedText()
+          .setTopLabel('Status')
+          .setText(result.message)
+          .setWrapText(true)
+      );
+    }
+  } else {
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        '❌ Failed to send request. ' + ((result && result.error) || 'Please try again.')
+      )
+    );
+  }
+
+  card.addSection(section);
+  addBackToEmailButton_(card);
+  return card.build();
 }
