@@ -3177,6 +3177,107 @@ async function sendAsyncGChatMessage(spaceName, text, threadName, env) {
   return await res.json();
 }
 
+/**
+ * Update an existing Google Chat message (PATCH).
+ * Used for progress indicators — edit the "thinking" message in-place.
+ * @param {string} messageName - e.g. "spaces/AAAAxyz/messages/abc123"
+ * @param {string} text - updated message text
+ * @param {object} env - worker env with secrets
+ */
+async function updateGChatMessage(messageName, text, env) {
+  const token = await getGoogleChatBotToken(env);
+  const url = `https://chat.googleapis.com/v1/${messageName}?updateMask=text`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ text })
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    console.warn(`[GCHAT-ASYNC] Failed to update message: ${res.status} ${err}`);
+  }
+  return res.ok;
+}
+
+/**
+ * Download an image attachment from Google Chat using the media API.
+ * Google Chat attachments have a resourceName that can be fetched via
+ * the Media API: GET https://chat.googleapis.com/v1/media/{resourceName}?alt=media
+ *
+ * @param {object} attachment - Google Chat attachment object
+ * @param {object} env - worker env
+ * @returns {object|null} - { base64, mediaType } or null
+ */
+async function downloadGChatImage(attachment, env) {
+  try {
+    const token = await getGoogleChatBotToken(env);
+
+    // Google Chat provides attachmentDataRef.resourceName for downloadable attachments
+    const resourceName = attachment.attachmentDataRef?.resourceName;
+    if (!resourceName) {
+      console.warn('[GCHAT-IMG] No resourceName in attachment:', JSON.stringify(attachment).substring(0, 200));
+
+      // Fallback: try downloadUri if present
+      if (attachment.downloadUri) {
+        const res = await fetch(attachment.downloadUri, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) return null;
+        const contentType = res.headers.get('content-type') || attachment.contentType || 'image/png';
+        const arrayBuffer = await res.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return { base64: btoa(binary), mediaType: contentType.split(';')[0].trim() };
+      }
+      return null;
+    }
+
+    // Use the Media API to download the attachment content
+    const mediaUrl = `https://chat.googleapis.com/v1/media/${resourceName}?alt=media`;
+    const res = await fetch(mediaUrl, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!res.ok) {
+      console.error(`[GCHAT-IMG] Media download failed: ${res.status}`);
+      return null;
+    }
+
+    const contentType = res.headers.get('content-type') || attachment.contentType || 'image/png';
+    const arrayBuffer = await res.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+
+    console.log(`[GCHAT-IMG] Downloaded image: ${contentType}, ${bytes.length} bytes`);
+    return { base64: btoa(binary), mediaType: contentType.split(';')[0].trim() };
+  } catch (err) {
+    console.error(`[GCHAT-IMG] Download error: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Extract image attachments from a Google Chat event.
+ * Returns the first image attachment data or null.
+ */
+async function extractImageFromEvent(event, env) {
+  const msg = event.message || event.chat?.messagePayload?.message;
+  if (!msg?.attachment || !Array.isArray(msg.attachment)) return null;
+
+  for (const att of msg.attachment) {
+    const ct = (att.contentType || '').toLowerCase();
+    if (ct.startsWith('image/')) {
+      console.log(`[GCHAT-IMG] Found image attachment: ${ct}, name=${att.name || 'unnamed'}`);
+      return await downloadGChatImage(att, env);
+    }
+  }
+  return null;
+}
+
 // ─── Zoho OAuth Token Manager ─────────────────────────────────────────────────
 // Caches access tokens in KV with TTL. Refreshes from client credentials.
 async function getZohoAccessToken(env) {
@@ -7187,13 +7288,26 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           ? (event.chat?.user?.name || 'unknown')
           : (event.message?.sender?.name || 'unknown');
 
-        // Handle non-message events
-        if (!messageText) {
+        // Check for image attachments (screenshots, photos, license dashboards, etc.)
+        let imageData = null;
+        if (env.GCP_SERVICE_ACCOUNT_KEY) {
+          try {
+            imageData = await extractImageFromEvent(event, env);
+            if (imageData) {
+              console.log(`[GCHAT-IMG] Image extracted: ${imageData.mediaType}, ${imageData.base64.length} base64 chars`);
+            }
+          } catch (imgErr) {
+            console.warn(`[GCHAT-IMG] Image extraction failed: ${imgErr.message}`);
+          }
+        }
+
+        // Handle non-message events (but allow image-only messages through)
+        if (!messageText && !imageData) {
           const greeting = 'Hey! I\'m Stratus AI, your Cisco/Meraki quoting assistant. Try "quote 10 MR44" or "5 MS150-48LP-4G" to get started.';
           return sendGChatResponse(greeting, isAddon);
         }
 
-        const text = messageText;
+        const text = messageText || '';
 
         // Log raw event structure for debugging Gmail Share to Chat
         try {
@@ -7409,25 +7523,65 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               // the response open (Google Chat has a 30s sync timeout). Instead:
               // 1. Return a quick "thinking" response synchronously
               // 2. Use ctx.waitUntil for the CRM work (best effort, ~30s budget)
-              // 3. If the work finishes in time, great. If not, the agent_log entries
-              //    in KV will show where it stopped.
+              // 3. Progress indicator: update the thinking message with animated dots
+              //    so the user knows the bot is still working.
               //
               // For CRM requests that need >30s, use the Gmail sidebar handoff path
               // which processes SYNCHRONOUSLY (no response until done = unlimited time).
               const _crmSpaceName = spaceName;
+              const _crmThreadName = threadName;
               const _crmPersonId = personId;
               const _crmText = text;
               const _crmKv = kv;
               ctx.waitUntil((async () => {
                 const _crmStart = Date.now();
+                let _progressMsgName = null;
+                let _progressInterval = null;
+
                 try {
+                  // Send initial "thinking" message via REST API so we get the message name back
+                  const thinkingMsg = await sendAsyncGChatMessage(_crmSpaceName,
+                    '🔍 Working on it...', _crmThreadName, env);
+                  _progressMsgName = thinkingMsg?.name || null;
+
+                  // Start animated progress indicator (updates every 3 seconds)
+                  if (_progressMsgName) {
+                    const progressStages = [
+                      '🔍 Working on it.',
+                      '🔍 Working on it..',
+                      '🔍 Working on it...',
+                      '🔎 Searching CRM...',
+                      '🔎 Searching CRM.',
+                      '🔎 Searching CRM..',
+                      '⚙️ Processing results...',
+                      '⚙️ Processing results.',
+                      '⚙️ Processing results..',
+                      '⚙️ Almost there...',
+                      '⚙️ Almost there.',
+                      '⚙️ Almost there..',
+                    ];
+                    let _progressIdx = 0;
+                    _progressInterval = setInterval(async () => {
+                      try {
+                        const elapsed = Math.floor((Date.now() - _crmStart) / 1000);
+                        const stage = progressStages[Math.min(_progressIdx, progressStages.length - 1)];
+                        const timeNote = elapsed >= 10 ? `\n_${elapsed}s elapsed_` : '';
+                        await updateGChatMessage(_progressMsgName, stage + timeNote, env);
+                        _progressIdx++;
+                      } catch (_) { /* ignore progress update failures */ }
+                    }, 3000);
+                  }
+
                   const progressCb = async (msg) => {
-                    const formatted = adaptMarkdownForGChat(msg);
-                    await sendAsyncGChatMessage(_crmSpaceName, formatted, null, env);
+                    // When the agent sends a real progress update, show it on the progress message
+                    if (_progressMsgName) {
+                      const formatted = adaptMarkdownForGChat(msg);
+                      await updateGChatMessage(_progressMsgName, '⚙️ ' + formatted, env);
+                    }
                   };
 
                   console.log(`[GCHAT-CRM] Starting CRM work: "${_crmText.substring(0, 80)}..."`);
-                  let result = await askClaude(_crmText, _crmPersonId, env, null, true, progressCb, 300000);
+                  let result = await askClaude(_crmText, _crmPersonId, env, imageData, true, progressCb, 300000);
                   console.log(`[GCHAT-CRM] askClaude completed in ${Date.now() - _crmStart}ms`);
 
                   if (result && result.__continuation) {
@@ -7440,10 +7594,19 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                     else result = 'CRM workflow completed.';
                   }
 
+                  // Stop progress indicator
+                  if (_progressInterval) clearInterval(_progressInterval);
+
                   let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
                   finalReply = adaptMarkdownForGChat(finalReply);
                   finalReply = truncateGChatReply(finalReply);
-                  await sendAsyncGChatMessage(_crmSpaceName, finalReply, null, env);
+
+                  // Update the progress message with the final reply (instead of sending a new message)
+                  if (_progressMsgName) {
+                    await updateGChatMessage(_progressMsgName, finalReply, env);
+                  } else {
+                    await sendAsyncGChatMessage(_crmSpaceName, finalReply, _crmThreadName, env);
+                  }
 
                   if (_crmPersonId) {
                     await addToHistory(_crmKv, _crmPersonId, 'user', _crmText);
@@ -7452,24 +7615,36 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                   }
                   console.log(`[GCHAT-CRM] Completed in ${Date.now() - _crmStart}ms total`);
                 } catch (err) {
+                  if (_progressInterval) clearInterval(_progressInterval);
                   console.error(`[GCHAT-CRM] Error after ${Date.now() - _crmStart}ms: ${err.message}`);
+                  const errMsg = `❌ Sorry, I ran into an issue processing that CRM request.\n\n_Error: ${err.message.substring(0, 200)}_`;
                   try {
-                    await sendAsyncGChatMessage(_crmSpaceName,
-                      `Sorry, I ran into an issue processing that CRM request.\n\n_Error: ${err.message.substring(0, 200)}_`,
-                      null, env);
+                    if (_progressMsgName) {
+                      await updateGChatMessage(_progressMsgName, errMsg, env);
+                    } else {
+                      await sendAsyncGChatMessage(_crmSpaceName, errMsg, _crmThreadName, env);
+                    }
                   } catch (_) {}
                 }
               })());
 
-              // Return a quick synchronous "thinking" message
-              return sendGChatResponse('🔍 Looking that up in the CRM... one moment.', isAddon);
+              // Return empty response (the progress message is sent async via REST API)
+              // This avoids a duplicate "thinking" message — the progress indicator IS the thinking message.
+              return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } });
             }
 
             // Fallback: no service account key, process synchronously (may timeout)
             console.log(`[GCHAT-AGENT] No GCP_SERVICE_ACCOUNT_KEY — falling back to synchronous CRM processing`);
           }
 
-          reply = await askClaude(text, personId, env, null, useTools);
+          reply = await askClaude(text, personId, env, imageData, useTools);
+        }
+
+        // If we have an image but no reply yet (no CRM intent, no SKU match),
+        // send directly to Claude with the image for analysis
+        if (!reply && imageData) {
+          const prompt = text || 'A user sent this image. Analyze it and respond accordingly. If it contains Meraki license information, SKUs, or network details, provide relevant quoting or product guidance.';
+          reply = await askClaude(prompt, personId, env, imageData);
         }
 
         // Adapt markdown for Google Chat (* instead of **)
