@@ -4077,6 +4077,29 @@ If a search returns no results, try without the suffix as a fallback, or try wit
 
 ---
 
+## HARDWARE → LICENSE ASSOCIATION (CRITICAL FOR QUOTE LINE ITEMS)
+
+Every hardware product needs a matching license. When the user says "quote 1 MR44 with 1-year license", you must create TWO line items: 1x MR44-HW + 1x LIC-ENT-1YR. Always pair hardware with its correct license automatically.
+
+License mapping rules:
+- *MR access points* (MR44, MR57, etc.) and *CW Wi-Fi* (CW9166I, CW9172I, etc.): LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR (1 license per AP, co-term)
+- *MX security appliances* (MX67, MX85, etc.): LIC-MX{model}-SEC-{term} (e.g., LIC-MX67-SEC-1YR, LIC-MX85-SEC-1Y). Models 75/85/95/105 use -Y suffix; older models use -YR
+- *MS130 switches*: LIC-MS130-{portCount}-{term}Y (e.g., LIC-MS130-24-1Y, LIC-MS130-48-3Y). 8P/12P models use LIC-MS130-CMPT
+- *MS150 switches*: LIC-MS150-{portCount}-{term}Y (e.g., LIC-MS150-24-1Y)
+- *MS390 switches*: LIC-MS390-{portCount}E-{term}Y (e.g., LIC-MS390-48E-1Y)
+- *C9200L/C9300/C9300L/C9300X*: LIC-{family}-{portCount}E-{term}Y (e.g., LIC-C9300-24E-1Y). C9300L and C9300X use C9300 license SKUs
+- *MV cameras*: LIC-MV-1YR / LIC-MV-3YR / LIC-MV-5YR
+- *MT sensors*: LIC-MT-1Y / LIC-MT-3Y / LIC-MT-5Y (first 3 MT sensors per network are free)
+- *MG cellular*: LIC-MG{model}-ENT-{term}Y (e.g., LIC-MG21-ENT-1Y)
+- *Z-series*: Z1/Z3 use LIC-Z{n}[C]-ENT-{term}YR; Z4 uses LIC-Z4[C]-SEC-{term}Y
+
+License quantity always equals hardware quantity (1:1 ratio).
+"Enterprise license" / "ENT" is the default for APs and most products.
+"Security license" / "SEC" is the default for MX appliances.
+When user says "1 year license" or "1Y", use the 1-year term SKU.
+
+---
+
 ## ECOMM PRICING — EVERY QUOTE
 
 Never create a quote at list price. Apply Stratus ecomm pricing on every line:
@@ -4231,6 +4254,17 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 - Use * for bold in Google Chat (not **)
 - Keep responses concise — this is a chat interface
 
+## CRITICAL RULES FOR CRM QUOTES
+
+1. NEVER fall back to URL quotes (stratusinfosystems.com/order). You are in CRM mode — your job is to create Zoho CRM quotes with proper line items and ecomm pricing. If a user asks you to quote something, create it IN ZOHO, not as a URL.
+2. NEVER say "I don't have access to Zoho CRM." You DO have Zoho tools available. If a tool call fails, retry or troubleshoot — don't deny your capabilities.
+3. When parsing user input, be tolerant of natural language. "easy ice it the account name" means the account name IS "Easy Ice" — not "Easy Ice It". Parse for intent, not literal strings.
+4. Don't re-ask for information the user already provided. If they said "1 MR44 1 year enterprise license" in a previous message, use that — don't ask what product or what license type.
+5. When creating a quote, look up the Account first to get billing address, then look up or create the Deal, then create the Quote with proper line items. Don't stop mid-workflow.
+6. Always complete the full workflow: Account lookup → Contact lookup → Deal creation/lookup → Quote creation → Follow-up task. Don't stop partway and wait.
+
+---
+
 ## NARRATE AS YOU WORK (CRITICAL)
 
 The user cannot see your thinking or tool calls — only your text responses. This means you MUST narrate what you're doing and what you find as you go. Include a brief text block BEFORE each tool call explaining what you're about to do and why. After getting results, summarize what you found before moving to the next step.
@@ -4342,7 +4376,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     console.log(`[GCHAT-CONTINUE] Iteration ${iteration}, wall=${Date.now() - _loopStartMs}ms`);
 
     const requestBody = {
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
       system: systemPrompt,
       messages
@@ -4566,10 +4600,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       console.log(`[GCHAT-AGENT] Iteration ${iteration}/${MAX_TOOL_ITERATIONS}, wall=${Date.now() - _loopStartMs}ms`);
 
       const requestBody = {
-        // CRM tool-use: Haiku (1-2s/call) for speed across many iterations.
-        // Sonnet for non-tool conversational chat (higher quality responses).
-        model: useTools ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-20250514',
-        max_tokens: useTools ? 1024 : 1024,
+        // Sonnet for all operations. Haiku was too unreliable for CRM multi-step
+        // workflows (misinterpreted user input, asked for already-provided info,
+        // failed to follow through on complex quote creation flows).
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
         system: systemPrompt,
         messages
       };
@@ -6167,7 +6202,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             if (personId) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', finalReply);
-              await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 900 });
+              await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 1800 });
             }
           }
           console.log(`[GCHAT-WORK] Completed in ${Date.now() - _workStart}ms total`);
@@ -6247,7 +6282,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             if (state.personId) {
               await addToHistory(kv, state.personId, 'user', state.originalText || '');
               await addToHistory(kv, state.personId, 'assistant', finalReply);
-              await kv.put(`crm_session_${state.personId}`, 'active', { expirationTtl: 300 });
+              await kv.put(`crm_session_${state.personId}`, 'active', { expirationTtl: 1800 });
             }
             console.log(`[GCHAT-CONTINUE] Completed successfully`);
           }
@@ -6525,6 +6560,31 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         // before the CRM agent could handle it without this guard.
         let isExplicitCrmRequest = /\bzoho\b|\bcrm\b|\bin\s+zoho\b|\bzoho\s+quote\b|\bzoho\s+deal\b|\bopen\s+deals?\b|\bcheck\s+(the\s+)?(crm|zoho)\b/i.test(text);
 
+        // Detect "quote [SKUs] for [company]" pattern — when a company/account name
+        // is referenced alongside SKUs, route to CRM for Zoho quote creation.
+        // Matches: "quote 1 mr44 for easy ice", "quote 10 MR57 for Acme Corp",
+        //          "create a quote for 5 MR44 under easy ice"
+        if (!isExplicitCrmRequest) {
+          const forCompanyPattern = /\b(quote|create|build|make)\b.*\b(for|under|at)\s+([A-Z][a-zA-Z].*?)$/i;
+          const forMatch = text.match(forCompanyPattern);
+          if (forMatch) {
+            const possibleCompany = forMatch[3].trim().replace(/[.!?]+$/, '');
+            // Make sure it's not just a modifier like "for 1 year" or "for hardware only"
+            const isModifier = /^(\d+\s*(year|yr|y)|hardware|license|lic|pricing|cost|price|each|free)/i.test(possibleCompany);
+            if (!isModifier && possibleCompany.length > 2) {
+              console.log(`[GCHAT] Company-referenced quote detected: "${possibleCompany}" — routing to CRM agent`);
+              isExplicitCrmRequest = true;
+            }
+          }
+        }
+
+        // Detect "create that in zoho" / "put that in zoho" / "make a zoho quote"
+        if (!isExplicitCrmRequest) {
+          if (/\b(create|put|make|build|add)\s+(that|this|it)\s+(in|into|to)\s+(zoho|crm)\b/i.test(text)) {
+            isExplicitCrmRequest = true;
+          }
+        }
+
         // CRM session continuation: if a CRM conversation is active (flag set by
         // the async CRM handler), keep routing follow-up messages to the CRM agent
         // even without explicit "zoho"/"crm" keywords. This allows multi-turn CRM
@@ -6541,7 +6601,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         // when the PREVIOUS user message was a CRM/email intent. This catches
         // "try again", "confirm status", "go ahead", "yes proceed", etc.
         if (!isExplicitCrmRequest && personId && kv) {
-          const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status)\s*[.!?]?\s*$/i;
+          const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update|happening)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status|what\s+happened|is\s+it\s+done|are\s+we\s+good|any\s+update|where\s+are\s+we)\s*[.!?]?\s*$/i;
           // Also match messages that reference quote/deal creation status
           const crmFollowUpPattern = /\b(status|confirm|progress|update)\b.{0,30}\b(quote|deal|account|contact|task|creation|create)/i;
 
