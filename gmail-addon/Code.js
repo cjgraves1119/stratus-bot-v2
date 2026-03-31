@@ -417,6 +417,117 @@ function onDetectSkus(e) {
   }
 }
 
+// ─────────────────────────────────────────────
+// CREATE ZOHO QUOTE (email context → CRM)
+// ─────────────────────────────────────────────
+
+/**
+ * Step 1: Detect SKUs from the email and show a pre-populated
+ * Zoho Quote builder card with editable fields.
+ */
+function onCreateZohoQuote(e) {
+  var ctx = getEmailContext_();
+  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
+
+  // Auto-detect SKUs from the email body
+  var detectedSkus = [];
+  try {
+    var result = detectSkus_(ctx.body);
+    if (result && result.skus) {
+      detectedSkus = result.skus;
+    }
+  } catch (err) {
+    // SKU detection failed — continue without pre-populated SKUs
+    console.error('[ZOHO-QUOTE] SKU detection error: ' + err.message);
+  }
+
+  // Format detected SKUs as editable text
+  var skuText = '';
+  if (detectedSkus.length > 0) {
+    skuText = detectedSkus.map(function(s) {
+      return s.qty + ' ' + s.sku;
+    }).join(', ');
+  }
+
+  // Build the Zoho quote card
+  return buildZohoQuoteCard_(ctx, skuText);
+}
+
+/**
+ * Step 2: Send the Zoho quote request to Stratus AI via GChat handoff.
+ * The handoff text is structured to trigger CRM intent with explicit
+ * "Zoho quote" language so the bot creates in CRM, not a URL quote.
+ */
+function onConfirmZohoQuote(e) {
+  var formInput = e.formInput || {};
+  var skuText = (formInput.zoho_quote_skus || '').trim();
+  var licenseTerm = formInput.zoho_quote_license_term || '1Y';
+  var additionalNotes = (formInput.zoho_quote_notes || '').trim();
+
+  if (!skuText) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText('Please enter at least one SKU.'))
+      .build();
+  }
+
+  // Reconstruct email context
+  var emailContext = buildEmailContextForHandoff_(e);
+
+  // Build a structured CRM request message
+  var requestParts = [
+    'Create a Zoho CRM quote with the following:',
+    'Products: ' + skuText,
+    'License term: ' + licenseTerm,
+  ];
+
+  if (emailContext) {
+    if (emailContext.senderName && emailContext.senderName !== emailContext.senderEmail) {
+      requestParts.push('Contact: ' + emailContext.senderName + ' (' + emailContext.senderEmail + ')');
+    } else if (emailContext.senderEmail) {
+      requestParts.push('Contact email: ' + emailContext.senderEmail);
+    }
+    if (emailContext.accountName) {
+      requestParts.push('Account: ' + emailContext.accountName);
+    } else if (emailContext.senderDomain) {
+      requestParts.push('Look up the account by domain: ' + emailContext.senderDomain);
+    }
+  }
+
+  if (additionalNotes) {
+    requestParts.push('Notes: ' + additionalNotes);
+  }
+
+  requestParts.push('Include hardware and matching licenses at list price. Create the deal if one does not exist, and create a follow-up task.');
+
+  var handoffText = requestParts.join('\n');
+
+  var result;
+  try {
+    result = sendHandoffRequest_(handoffText, emailContext);
+  } catch (err) {
+    return CardService.newActionResponseBuilder()
+      .setNotification(CardService.newNotification().setText('Request failed: ' + err.message))
+      .build();
+  }
+
+  var notifText;
+  if (result && result.success && result.pending) {
+    // Worker is still processing (took >25s) — it continues running in the
+    // background and will deliver results to Google Chat when done.
+    notifText = 'Working on it — results will appear in Google Chat in a few minutes. ✅';
+  } else if (result && result.success) {
+    notifText = 'Zoho quote request sent! Check Google Chat for progress.';
+  } else if (result && result.error && result.error.indexOf('No Google Chat space') !== -1) {
+    notifText = 'Setup needed: Send any message to Stratus AI in Google Chat first.';
+  } else {
+    notifText = 'Something went wrong. ' + (result && result.error ? result.error.substring(0, 80) : 'Try again.');
+  }
+
+  return CardService.newActionResponseBuilder()
+    .setNotification(CardService.newNotification().setText(notifText))
+    .build();
+}
+
 /** Navigate back to homepage */
 function onBackToHome(e) {
   return buildHomepageCard_();

@@ -1,5 +1,5 @@
 /**
- * Stratus AI Gmail Add-on — API Client
+ * Stratus AI Gmail Add-on â API Client
  *
  * All HTTP communication with the Cloudflare Worker backend.
  */
@@ -150,7 +150,11 @@ function sendHandoffRequest_(requestText, emailContext) {
     headers: { 'X-API-Key': getApiKey_() },
     payload: JSON.stringify(payload),
     muteHttpExceptions: true,
-    deadline: 55,
+    // 25s deadline: Gmail add-on actions have a 30s hard limit from Google.
+    // Our Cloudflare worker processes CRM work for 4-5 min but CONTINUES
+    // running after the HTTP connection drops (CF docs confirm this behavior).
+    // So a timeout here means "still processing" — not an error.
+    deadline: 25,
   };
   try {
     var response = UrlFetchApp.fetch(CONFIG.HANDOFF_ENDPOINT, options);
@@ -160,6 +164,18 @@ function sendHandoffRequest_(requestText, emailContext) {
     if (code >= 500) throw new Error('Server error (' + code + ').');
     return JSON.parse(text);
   } catch (e) {
+    // Check if this is a timeout (deadline exceeded). The Cloudflare worker
+    // continues processing after disconnect — treat timeout as pending success.
+    var msg = e.message || '';
+    var isTimeout = msg.indexOf('Timed out') !== -1
+      || msg.indexOf('timed out') !== -1
+      || msg.indexOf('timeout') !== -1
+      || msg.indexOf('deadline') !== -1
+      || msg.indexOf('SocketTimeoutException') !== -1;
+    if (isTimeout) {
+      console.log('[HANDOFF] Request timed out — worker continues in background.');
+      return { success: true, pending: true };
+    }
     console.error('[HANDOFF] sendHandoffRequest_ error: ' + e.message);
     return { success: false, error: e.message };
   }

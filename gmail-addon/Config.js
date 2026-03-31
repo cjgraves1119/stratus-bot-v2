@@ -1,5 +1,5 @@
 /**
- * Stratus AI Gmail Add-on — Configuration
+ * Stratus AI Gmail Add-on â Configuration
  *
  * Constants, API URLs, property accessors, and authorization helpers.
  */
@@ -28,7 +28,7 @@ function getApiKey_() {
 }
 
 /**
- * AUTHORIZATION FIX — Run this function manually from the Script Editor
+ * AUTHORIZATION FIX â Run this function manually from the Script Editor
  * to force Google to prompt for ALL OAuth scopes including script.external_request.
  *
  * Steps:

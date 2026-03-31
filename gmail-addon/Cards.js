@@ -1,13 +1,13 @@
 /**
- * Stratus AI Gmail Add-on — Card Builders (v3 lazy-load + tasks)
+ * Stratus AI Gmail Add-on â Card Builders (v3 lazy-load + tasks)
  *
  * Instant sidebar on email open. AI features triggered by buttons.
  * Task automation with complete/reschedule/edit actions.
  */
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // HOMEPAGE CARD (no email context)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildHomepageCard_() {
   var card = CardService.newCardBuilder()
@@ -19,7 +19,7 @@ function buildHomepageCard_() {
         .setImageUrl(CONFIG.ICON_URL)
     );
 
-  // ── Quick Quote ──
+  // ââ Quick Quote ââ
   var quoteSection = CardService.newCardSection()
     .setHeader('Quick Quote')
     .setCollapsible(false);
@@ -44,7 +44,7 @@ function buildHomepageCard_() {
 
   card.addSection(quoteSection);
 
-  // ── CRM Search ──
+  // ââ CRM Search ââ
   var crmSection = CardService.newCardSection()
     .setHeader('CRM Search')
     .setCollapsible(true)
@@ -78,6 +78,7 @@ function buildHomepageCard_() {
 
   card.addSection(crmSection);
 
+
   // ── Send to Stratus AI (GChat) ──
   var handoffSection = CardService.newCardSection()
     .setHeader('Send to Stratus AI \u2192 GChat')
@@ -109,8 +110,7 @@ function buildHomepageCard_() {
   );
 
   card.addSection(handoffSection);
-
-  // ── Info / Help ──
+  // ââ Info / Help ââ
   var infoSection = CardService.newCardSection()
     .setHeader('Tips')
     .setCollapsible(true)
@@ -130,7 +130,7 @@ function buildHomepageCard_() {
 
   card.addSection(infoSection);
 
-  // ── Admin ──
+  // ââ Admin ââ
   var adminSection = CardService.newCardSection()
     .setHeader('Admin')
     .setCollapsible(true)
@@ -151,9 +151,9 @@ function buildHomepageCard_() {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
-// INSTANT EMAIL CARD (no API call — loads instantly)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
+// INSTANT EMAIL CARD (no API call â loads instantly)
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildInstantEmailCard_(subject, sender) {
   var card = CardService.newCardBuilder()
@@ -165,7 +165,7 @@ function buildInstantEmailCard_(subject, sender) {
         .setImageUrl(CONFIG.ICON_URL)
     );
 
-  // ── Sender Info ──
+  // ââ Sender Info ââ
   var senderSection = CardService.newCardSection()
     .setHeader('Sender');
 
@@ -178,7 +178,7 @@ function buildInstantEmailCard_(subject, sender) {
 
   card.addSection(senderSection);
 
-  // ── Quick Quote (always available, no API needed) ──
+  // ââ Quick Quote (always available, no API needed) ââ
   var quoteSection = CardService.newCardSection()
     .setHeader('Quick Quote');
 
@@ -202,7 +202,7 @@ function buildInstantEmailCard_(subject, sender) {
 
   card.addSection(quoteSection);
 
-  // ── AI Actions (each triggers its own API call) ──
+  // ââ AI Actions (each triggers its own API call) ââ
   var actionsSection = CardService.newCardSection()
     .setHeader('AI Tools');
 
@@ -248,11 +248,16 @@ function buildInstantEmailCard_(subject, sender) {
           .setParameters({ query: domain, module: 'Accounts' })
       )
   );
+  crmButtons.addButton(
+    CardService.newTextButton()
+      .setText('Zoho Quote')
+      .setOnClickAction(CardService.newAction().setFunctionName('onCreateZohoQuote'))
+  );
   actionsSection.addWidget(crmButtons);
 
   card.addSection(actionsSection);
 
-  // ── Send to Stratus AI (GChat DM handoff) ──
+  // ââ Send to Stratus AI (GChat DM handoff) ââ
   var handoffSection = CardService.newCardSection()
     .setHeader('Send to Stratus AI');
 
@@ -267,7 +272,7 @@ function buildInstantEmailCard_(subject, sender) {
   handoffSection.addWidget(
     CardService.newButtonSet().addButton(
       CardService.newTextButton()
-        .setText('Send to Stratus AI → GChat')
+        .setText('Send to Stratus AI â GChat')
         .setOnClickAction(CardService.newAction().setFunctionName('onSendToStratusAI'))
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
         .setBackgroundColor(CONFIG.STRATUS_BLUE)
@@ -279,9 +284,101 @@ function buildInstantEmailCard_(subject, sender) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════
+// ZOHO QUOTE CARD (pre-populated from email)
+// ═══════════════════════════════════════════
+
+function buildZohoQuoteCard_(ctx, skuText) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Create Zoho Quote')
+        .setSubtitle(truncate_(ctx.subject || '', 50))
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  // —— Email Context ——
+  var contextSection = CardService.newCardSection()
+    .setHeader('Email Context');
+
+  contextSection.addWidget(
+    CardService.newDecoratedText()
+      .setText(ctx.senderName || ctx.senderEmail || 'Unknown')
+      .setBottomLabel(ctx.senderEmail || '')
+      .setWrapText(true)
+  );
+
+  if (ctx.subject) {
+    contextSection.addWidget(
+      CardService.newDecoratedText()
+        .setText('Subject: ' + truncate_(ctx.subject, 60))
+        .setWrapText(true)
+    );
+  }
+
+  card.addSection(contextSection);
+
+  // —— SKU Entry ——
+  var skuSection = CardService.newCardSection()
+    .setHeader('Quote Details');
+
+  skuSection.addWidget(
+    CardService.newTextInput()
+      .setFieldName('zoho_quote_skus')
+      .setTitle('Products / SKUs')
+      .setHint('e.g. 10 MR44, 5 MS130-24P, 2 MX85')
+      .setMultiline(true)
+      .setValue(skuText || '')
+  );
+
+  skuSection.addWidget(
+    CardService.newSelectionInput()
+      .setFieldName('zoho_quote_license_term')
+      .setTitle('License Term')
+      .setType(CardService.SelectionInputType.DROPDOWN)
+      .addItem('1 Year', '1Y', true)
+      .addItem('3 Year', '3Y', false)
+      .addItem('5 Year', '5Y', false)
+  );
+
+  skuSection.addWidget(
+    CardService.newTextInput()
+      .setFieldName('zoho_quote_notes')
+      .setTitle('Additional Notes (optional)')
+      .setHint('e.g. "Customer needs rack mount kits", "Discount request"')
+      .setMultiline(true)
+  );
+
+  card.addSection(skuSection);
+
+  // —— Action Buttons ——
+  var actionSection = CardService.newCardSection();
+
+  actionSection.addWidget(
+    CardService.newButtonSet()
+      .addButton(
+        CardService.newTextButton()
+          .setText('Create Quote in Zoho')
+          .setOnClickAction(CardService.newAction().setFunctionName('onConfirmZohoQuote'))
+          .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+          .setBackgroundColor(CONFIG.STRATUS_BLUE)
+      )
+      .addButton(
+        CardService.newTextButton()
+          .setText('Back')
+          .setOnClickAction(CardService.newAction().setFunctionName('onBackToEmail'))
+      )
+  );
+
+  card.addSection(actionSection);
+
+  return card.build();
+}
+
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // EMAIL ANALYSIS CARD (AI analysis succeeded)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildEmailAnalysisCard_(subject, sender, analysis) {
   var card = CardService.newCardBuilder()
@@ -293,14 +390,14 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
         .setImageUrl(CONFIG.ICON_URL)
     );
 
-  // ── AI Summary ──
+  // ââ AI Summary ââ
   if (analysis.summary) {
     var summarySection = CardService.newCardSection()
       .setHeader('Summary');
 
     if (analysis.urgency) {
-      var urgencyIcon = analysis.urgency === 'high' ? '🔴' :
-                        analysis.urgency === 'medium' ? '🟡' : '🟢';
+      var urgencyIcon = analysis.urgency === 'high' ? 'ð´' :
+                        analysis.urgency === 'medium' ? 'ð¡' : 'ð¢';
       summarySection.addWidget(
         CardService.newDecoratedText()
           .setText(urgencyIcon + ' ' + capitalize_(analysis.urgency) + ' Priority')
@@ -326,7 +423,7 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
     card.addSection(summarySection);
   }
 
-  // ── Sender & CRM ──
+  // ââ Sender & CRM ââ
   var senderSection = CardService.newCardSection()
     .setHeader('Sender & CRM');
 
@@ -369,7 +466,7 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
 
   card.addSection(senderSection);
 
-  // ── Detected Products ──
+  // ââ Detected Products ââ
   if (analysis.detectedSkus && analysis.detectedSkus.length > 0) {
     var skuSection = CardService.newCardSection()
       .setHeader('Detected Products');
@@ -399,7 +496,7 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
 
   addBackToEmailButton_(card);
 
-  // ── Send to Stratus AI (GChat DM handoff) ──
+  // ââ Send to Stratus AI (GChat DM handoff) ââ
   var handoffSection2 = CardService.newCardSection()
     .setHeader('Send to Stratus AI');
 
@@ -431,9 +528,9 @@ function buildEmailAnalysisCard_(subject, sender, analysis) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // TASK CARD (open tasks for account)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildTaskCard_(result, emailCtx) {
   var card = CardService.newCardBuilder()
@@ -657,9 +754,9 @@ function buildTaskCard_(result, emailCtx) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // TASK RESULT CARD (success/error after action)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildTaskResultCard_(result) {
   var card = CardService.newCardBuilder()
@@ -770,9 +867,9 @@ function buildTaskResultCard_(result) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // SUGGEST TASK PREVIEW CARD (confirmation before creating)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildSuggestTaskPreviewCard_(preview, originalParams) {
   var card = CardService.newCardBuilder()
@@ -890,9 +987,9 @@ function buildSuggestTaskPreviewCard_(preview, originalParams) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // ADMIN DASHBOARD CARD
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildAdminCard_(data) {
   var card = CardService.newCardBuilder()
@@ -1042,9 +1139,9 @@ function formatTokens_(count) {
   return String(count);
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // DRAFT REPLY FORM CARD (tone selector + instructions)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildDraftReplyFormCard_(ctx) {
   var card = CardService.newCardBuilder()
@@ -1117,9 +1214,9 @@ function buildDraftReplyFormCard_(ctx) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // DRAFT REPLY CARD (generated drafts)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildDraftReplyCard_(result, emailCtx) {
   var card = CardService.newCardBuilder()
@@ -1171,9 +1268,9 @@ function buildDraftReplyCard_(result, emailCtx) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // QUOTE RESULT CARD
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildQuoteResultCard_(result) {
   var card = CardService.newCardBuilder()
@@ -1247,9 +1344,9 @@ function buildQuoteResultCard_(result) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // CRM RESULT CARD
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildCrmResultCard_(result, query, module) {
   var card = CardService.newCardBuilder()
@@ -1322,9 +1419,9 @@ function buildCrmResultCard_(result, query, module) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // QUOTE BUILDER CARD (compose trigger + prefill)
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildQuoteBuilderCard_(prefill) {
   var card = CardService.newCardBuilder()
@@ -1361,9 +1458,9 @@ function buildQuoteBuilderCard_(prefill) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // ERROR CARD
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildErrorCard_(message) {
   var card = CardService.newCardBuilder()
@@ -1384,9 +1481,9 @@ function buildErrorCard_(message) {
   return card.build();
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // SHARED HELPERS
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function addBackToEmailButton_(card) {
   card.addSection(
@@ -1410,9 +1507,9 @@ function addBackButton_(card) {
   addBackToEmailButton_(card);
 }
 
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 // STRATUS AI HANDOFF CONFIRMATION CARD
-// ─────────────────────────────────────────────
+// âââââââââââââââââââââââââââââââââââââââââââââ
 
 function buildStratusHandoffCard_(result) {
   var card = CardService.newCardBuilder()
@@ -1429,7 +1526,7 @@ function buildStratusHandoffCard_(result) {
   if (result && result.ok) {
     section.addWidget(
       CardService.newTextParagraph().setText(
-        '✅ Your request has been sent! Stratus AI will reply to you via Google Chat DM shortly.'
+        'â Your request has been sent! Stratus AI will reply to you via Google Chat DM shortly.'
       )
     );
     if (result.message) {
@@ -1443,7 +1540,7 @@ function buildStratusHandoffCard_(result) {
   } else {
     section.addWidget(
       CardService.newTextParagraph().setText(
-        '❌ Failed to send request. ' + ((result && result.error) || 'Please try again.')
+        'â Failed to send request. ' + ((result && result.error) || 'Please try again.')
       )
     );
   }

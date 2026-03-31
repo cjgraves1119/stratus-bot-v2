@@ -4473,8 +4473,19 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     iteration++;
     console.log(`[GCHAT-CONTINUE] Iteration ${iteration}, wall=${Date.now() - _loopStartMs}ms`);
 
+    // Dynamic model: Haiku for pure execution iterations (5+, no text in last assistant msg)
+    const _lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
+    const _isPureExec = _lastMsg
+      && Array.isArray(_lastMsg.content)
+      && _lastMsg.content.length > 0
+      && _lastMsg.content.every(b => b.type === 'tool_use');
+    const contModel = (iteration > 4 && _isPureExec)
+      ? 'claude-haiku-4-5-20251001'
+      : 'claude-sonnet-4-20250514';
+    console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec})`);
+
     const requestBody = {
-      model: 'claude-sonnet-4-20250514',
+      model: contModel,
       max_tokens: 4096,
       system: systemPrompt,
       messages
@@ -4487,7 +4498,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     }
 
     const data = await response.json();
-    trackUsage(env, 'claude-sonnet-4-20250514', data.usage, 'crm-agent-continue').catch(() => {});
+    trackUsage(env, contModel, data.usage, 'crm-agent-continue').catch(() => {});
 
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
@@ -4709,11 +4720,27 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         } catch (_) {}
       }
 
+      // Dynamic model selection:
+      // - Sonnet for iterations 1-4: planning, CRM lookup, interpreting results, deciding workflow
+      // - Haiku for iteration 5+ ONLY when in "pure execution mode": last Claude response had
+      //   zero text and only tool_use blocks (i.e. Claude is mechanically calling create/update
+      //   tools with no decision-making). Haiku is 3x cheaper and faster for these mechanical steps.
+      // - Always Sonnet for non-CRM (quoting) flows.
+      const _lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
+      const _inPureExecMode = useTools
+        && _lastAssistantMsg
+        && Array.isArray(_lastAssistantMsg.content)
+        && _lastAssistantMsg.content.length > 0
+        && _lastAssistantMsg.content.every(b => b.type === 'tool_use');
+      const activeModel = (useTools && iteration > 4 && _inPureExecMode)
+        ? 'claude-haiku-4-5-20251001'
+        : 'claude-sonnet-4-20250514';
+      if (useTools) {
+        console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode})`);
+      }
+
       const requestBody = {
-        // Sonnet for all operations. Haiku was too unreliable for CRM multi-step
-        // workflows (misinterpreted user input, asked for already-provided info,
-        // failed to follow through on complex quote creation flows).
-        model: 'claude-sonnet-4-20250514',
+        model: activeModel,
         max_tokens: 4096,
         system: systemPrompt,
         messages
@@ -4757,7 +4784,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       // Track API usage
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
-      trackUsage(env, 'claude-sonnet-4-20250514', data.usage, usageSource).catch(() => {});
+      trackUsage(env, activeModel, data.usage, usageSource).catch(() => {});
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
