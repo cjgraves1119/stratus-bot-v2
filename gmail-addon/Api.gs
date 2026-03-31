@@ -142,7 +142,7 @@ function sendHandoffRequest_(requestText, emailContext) {
   var payload = {
     text: requestText,
     emailContext: emailContext,
-    userEmail: Session.getEffectiveUser().getEmail(),
+    userEmail: 'chrisg@stratusinfosystems.com',
   };
   var options = {
     method: 'post',
@@ -171,7 +171,7 @@ function sendHandoffRequest_(requestText, emailContext) {
  */
 function registerGchatSpace_(spaceName) {
   var payload = {
-    userEmail: Session.getEffectiveUser().getEmail(),
+    userEmail: 'chrisg@stratusinfosystems.com',
     spaceName: spaceName,
   };
   var options = {
