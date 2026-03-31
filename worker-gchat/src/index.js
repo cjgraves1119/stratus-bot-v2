@@ -3441,7 +3441,7 @@ async function executeToolCall(toolName, toolInput, env) {
         if (criteria) params.set('criteria', criteria);
         // Default fields per module to reduce response size (saves 2-3s per iteration)
         const defaultFields = {
-          Accounts: 'id,Account_Name,Phone,Website',
+          Accounts: 'id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code',
           Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
           Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner',
           Products: 'id,Product_Name,Product_Code,Unit_Price,Description',
@@ -3498,6 +3498,43 @@ async function executeToolCall(toolName, toolInput, env) {
       case 'zoho_coql_query': {
         const { query } = toolInput;
         return await zohoApiCall('POST', 'coql', env, { select_query: query });
+      }
+
+      // ── Batch Product Lookup ──
+      case 'batch_product_lookup': {
+        const { skus } = toolInput;
+        // Apply suffix rules and look up all products in parallel
+        const batchResults = {};
+        const lookupPromises = skus.map(async (entry) => {
+          const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
+          const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
+          const suffixed = applySuffix(rawSku);
+          try {
+            // Search Products module (for Zoho record ID)
+            const prodResult = await zohoApiCall('GET',
+              `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+              env
+            );
+            const records = prodResult?.data || [];
+            const match = records.find(r => r.Product_Code === suffixed);
+            // Get cached price (live KV → static prices.json via Proxy)
+            const cachedPrice = prices[suffixed] || null;
+            batchResults[rawSku] = {
+              suffixed_sku: suffixed,
+              qty,
+              product_id: match?.id || null,
+              product_name: match?.Product_Name || null,
+              list_price: cachedPrice?.list || match?.Unit_Price || null,
+              ecomm_price: cachedPrice?.price || null,
+              discount_pct: cachedPrice?.discount || null,
+              found: !!match
+            };
+          } catch (e) {
+            batchResults[rawSku] = { suffixed_sku: suffixed, qty, error: e.message, found: false };
+          }
+        });
+        await Promise.all(lookupPromises);
+        return { success: true, products: batchResults, count: Object.keys(batchResults).length };
       }
 
       // ── Web Enrichment Tools ──
@@ -3771,6 +3808,29 @@ const CRM_EMAIL_TOOLS = [
         query: { type: 'string', description: 'COQL SELECT query string' }
       },
       required: ['query']
+    }
+  },
+  // Batch Product Lookup (parallel, with KV pricing)
+  {
+    name: 'batch_product_lookup',
+    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically, searches Zoho Products for record IDs, and includes live ecomm pricing from the daily-refreshed price cache. Use this instead of individual WooProducts searches — it\'s faster (parallel) and includes pricing. Returns product_id, list_price, ecomm_price for each SKU.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        skus: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              sku: { type: 'string', description: 'Base SKU without suffix (e.g., MR57, LIC-ENT-1YR)' },
+              qty: { type: 'number', description: 'Quantity (default 1)' }
+            },
+            required: ['sku']
+          },
+          description: 'Array of SKUs to look up. Suffixes are applied automatically.'
+        }
+      },
+      required: ['skus']
     }
   },
   // Web enrichment
@@ -4100,15 +4160,43 @@ When user says "1 year license" or "1Y", use the 1-year term SKU.
 
 ---
 
-## ECOMM PRICING — EVERY QUOTE
+## ZOHO SEARCH TIPS (CRITICAL)
 
-Never create a quote at list price. Apply Stratus ecomm pricing on every line:
-1. Apply the correct SKU suffix (see rules above), then search WooProducts module: criteria (WooProduct_Code:equals:{SUFFIXED_SKU}), fields: WooProduct_Code,Stratus_Price
-2. If WooProducts returns no results, try the Products module: criteria (Product_Code:equals:{SUFFIXED_SKU}), fields: Product_Code,Unit_Price,Product_Name
-3. Set unit_price = Stratus_Price (the Stratus ecomm price from WooProducts). Set Discount = 0. Calculate display percentage = round((1 - Stratus_Price / List_Price) * 100) for the Description only.
-4. Include Description = "Stratus ecomm price ({XX}% off list)" on each line
+When searching Zoho CRM, use the actual field values — NOT record IDs:
+- Deals by account: criteria = (Account_Name:equals:Easy Ice) — use the ACCOUNT NAME string, NOT the Account record ID
+- Deals by owner: criteria = (Owner:equals:2570562000141711002) — use the FULL Owner ID, never truncate
+- Contacts by email: criteria = (Email:equals:john@acme.com)
+- Accounts by name: criteria = (Account_Name:contains:Acme)
 
-Zoho auto-populates List_Price from the Product record. Per line item send: Product_Name.id, Quantity, unit_price (Stratus ecomm price), Discount: 0, Description. Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentage.
+The "contains" operator is more forgiving than "equals". Use "contains" or "starts_with" when you're unsure of the exact name.
+
+For complex queries combining multiple fields, use zoho_coql_query:
+\`\`\`
+SELECT id, Deal_Name, Stage, Amount FROM Deals WHERE Account_Name = 'Easy Ice' AND Owner = 2570562000141711002
+\`\`\`
+
+NEVER pass a record ID into a name/text search field. If you have an Account record with id=12345, and you need its Deals, use zoho_get_related_records with module_name=Accounts, record_id=12345, related_module=Deals — OR search Deals with the Account name string.
+
+---
+
+## PRODUCT LOOKUP & PRICING
+
+Use the **batch_product_lookup** tool for ALL product lookups. It:
+- Applies SKU suffix rules automatically (you just pass the base SKU)
+- Searches Zoho Products in parallel (all SKUs at once, not sequentially)
+- Returns product_id (for quote line items) + list_price + ecomm_price from the live daily-refreshed price cache
+
+**DO NOT search WooProducts individually.** The batch tool is faster and already includes ecomm pricing.
+
+### Quote Creation (List Price Default)
+Create quotes at **list price** by default:
+1. Call batch_product_lookup with all SKUs + quantities in a single call
+2. For each line item: Product_Name.id = product_id, Quantity, unit_price = list_price, Discount: 0
+3. After creating the quote, ask: "Would you like me to apply Stratus ecomm discounts to this quote?"
+4. If user says yes, update each line item with ecomm_price from the batch lookup results. Include Description = "Stratus ecomm price ({XX}% off list)" where XX = round((1 - ecomm_price / list_price) * 100).
+
+Do NOT auto-apply ecomm pricing. Let the user choose.
+Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentage.
 
 ---
 
@@ -4181,14 +4269,15 @@ Extract the primary contact from the email thread:
 Determine the business/organization:
 1. Check the email signature for company name, address, phone
 2. If not clear from the signature, extract the email domain (e.g., user@riverside.k12.wi.us → riverside.k12.wi.us)
-3. Use web_search_domain to look up the domain and extract:
+3. **SEARCH ZOHO CRM FIRST** — check if this Account already exists:
+   - zoho_search_records in Accounts with criteria matching the company name or domain
+   - Also search Contacts for the email address
+4. If Account exists → use existing Account ID (do NOT create duplicate). Pull billing address from the existing record. **DO NOT web search.**
+5. If Account is NOT in CRM → THEN use web_search_domain to look up the domain and extract:
    - Business/organization name
    - Street address, city, state, zip
    - Type of business (school district, healthcare, enterprise, etc.)
-4. Search Zoho CRM to check if this Account already exists:
-   - zoho_search_records in Accounts with criteria matching the company name or domain
-   - Also search Contacts for the email address
-5. If Account exists → use existing Account ID (do NOT create duplicate)
+   Only web search when you need address/business info to CREATE a new Account record.
 6. If Account is new → prepare to create it with all discovered info
 
 ### PHASE 5 — CONFIRMATION GATE (MANDATORY)
@@ -4233,11 +4322,13 @@ After user confirms, execute in this exact order:
    - Owner: Chris Graves (ID: 2570562000141711002)
    - Closing_Date: today + 30 days
 4. Create Quote — link to Deal, include:
-   - Product line items with ecomm pricing (look up WooProducts for Stratus_Price)
+   - Use batch_product_lookup to get all product IDs + prices in one call
+   - Product line items at LIST PRICE (ecomm pricing is applied later if user opts in)
    - Billing address from Account
    - Valid_Till: today + 30 days
 5. Create follow-up Task on the Deal — due in 3 business days
 6. Report all created records with Zoho links
+7. Ask: "Would you like me to apply Stratus ecomm discounts to this quote?"
 
 ### PHASE 7 — OPTIONAL: DRAFT REPLY
 After CRM setup is complete, offer to draft a reply to the original email thread:
@@ -4262,6 +4353,9 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 4. Don't re-ask for information the user already provided. If they said "1 MR44 1 year enterprise license" in a previous message, use that — don't ask what product or what license type.
 5. When creating a quote, look up the Account first to get billing address, then look up or create the Deal, then create the Quote with proper line items. Don't stop mid-workflow.
 6. Always complete the full workflow: Account lookup → Contact lookup → Deal creation/lookup → Quote creation → Follow-up task. Don't stop partway and wait.
+7. **CRM-FIRST, NO UNNECESSARY WEB SEARCH.** When an account name or domain is provided, ALWAYS search Zoho CRM first. If the account exists in CRM, use it directly — do NOT web search the domain. Only use web_search_domain when the account is NOT in CRM and you need address/business info to create a new Account record.
+8. **NEVER STOP MID-WORKFLOW.** After creating a Deal, you MUST immediately continue to create the Quote with product line items. After the Quote, you MUST create a follow-up Task. The workflow is NOT complete until ALL records are created: Contact → Deal → Quote (with line items at list price) → Follow-up Task → ecomm pricing offer. Do NOT end your turn after creating just a Deal or just a Contact. Keep calling tools until every step is done. Only emit a final text summary AFTER all records exist.
+9. **USE batch_product_lookup FOR ALL SKU LOOKUPS.** Never search WooProducts or Products individually. The batch tool handles suffix rules, parallel lookups, and includes live ecomm pricing. One call for all SKUs.
 
 ---
 
@@ -4319,6 +4413,10 @@ function toolProgressMessage(toolName, toolInput) {
     }
     case 'zoho_get_field':
       return `🔍 Validating ${toolInput.field_name || 'field'} picklist values...`;
+    case 'batch_product_lookup': {
+      const skuCount = toolInput.skus?.length || 0;
+      return `📦 Looking up ${skuCount} product${skuCount !== 1 ? 's' : ''} in parallel...`;
+    }
     case 'web_search_domain': {
       return `🌐 Looking up ${toolInput.domain || 'domain'}...`;
     }
@@ -4377,7 +4475,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 
     const requestBody = {
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
+      max_tokens: 4096,
       system: systemPrompt,
       messages
     };
@@ -4389,7 +4487,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     }
 
     const data = await response.json();
-    trackUsage(env, 'claude-haiku-4-5-20251001', data.usage, 'crm-agent-continue').catch(() => {});
+    trackUsage(env, 'claude-sonnet-4-20250514', data.usage, 'crm-agent-continue').catch(() => {});
 
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
@@ -4597,14 +4695,26 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       }
 
       iteration++;
-      console.log(`[GCHAT-AGENT] Iteration ${iteration}/${MAX_TOOL_ITERATIONS}, wall=${Date.now() - _loopStartMs}ms`);
+      const wallMs = Date.now() - _loopStartMs;
+      console.log(`[GCHAT-AGENT] Iteration ${iteration}/${MAX_TOOL_ITERATIONS}, wall=${wallMs}ms`);
+
+      // KV-based debug log for diagnosing stalls
+      if (useTools && env.CONVERSATION_KV) {
+        try {
+          await env.CONVERSATION_KV.put(`agent_log_${_loopStartMs}`, JSON.stringify({
+            iteration, wallMs, msgCount: messages.length,
+            lastMsgRole: messages[messages.length - 1]?.role,
+            ts: new Date().toISOString()
+          }), { expirationTtl: 3600 });
+        } catch (_) {}
+      }
 
       const requestBody = {
         // Sonnet for all operations. Haiku was too unreliable for CRM multi-step
         // workflows (misinterpreted user input, asked for already-provided info,
         // failed to follow through on complex quote creation flows).
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
+        max_tokens: 4096,
         system: systemPrompt,
         messages
       };
@@ -4643,11 +4753,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       }
 
       const data = await response.json();
+      console.log(`[GCHAT-AGENT] Response: stop_reason=${data.stop_reason}, content_blocks=${data.content?.length}, usage=${JSON.stringify(data.usage || {})}`);
 
       // Track API usage
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
-      const usageModel = useTools ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-20250514';
-      trackUsage(env, usageModel, data.usage, usageSource).catch(() => {});
+      trackUsage(env, 'claude-sonnet-4-20250514', data.usage, usageSource).catch(() => {});
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
@@ -4712,9 +4822,25 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         continue; // Loop back for Claude to process tool results
       }
 
+      // Handle max_tokens truncation: Claude ran out of output tokens mid-response.
+      // Add what we have to messages and loop again so Claude can continue.
+      if (data.stop_reason === 'max_tokens' && useTools && iteration < MAX_TOOL_ITERATIONS) {
+        console.log(`[GCHAT-AGENT] max_tokens hit at iteration ${iteration}, continuing...`);
+        messages.push({ role: 'assistant', content: data.content });
+        // Send any partial text as progress
+        const partialText = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
+        if (partialText && progressCallback) {
+          try { progressCallback(partialText).catch(() => {}); } catch (_) {}
+        }
+        // Ask Claude to continue from where it left off
+        messages.push({ role: 'user', content: '[System: Your response was truncated due to length. Continue from where you left off. Do not repeat what you already said.]' });
+        continue;
+      }
+
       // Claude returned a final text response (stop_reason = 'end_turn')
       const textBlocks = data.content.filter(b => b.type === 'text');
       const reply = textBlocks.map(b => b.text).join('\n');
+      console.log(`[GCHAT-AGENT] Final response at iteration ${iteration}, stop_reason=${data.stop_reason}, reply_len=${reply.length}, reply_preview="${reply.substring(0, 150)}"`);
 
       if (personId) {
         await addToHistory(kv, personId, 'user', userMessage);
@@ -4875,6 +5001,51 @@ export default {
           headers: { 'Content-Type': 'application/json' }
         });
       }
+    }
+
+    // ── /_debug-errors: Show recent API errors from KV ──
+    if (request.method === 'GET' && url.pathname === '/_debug-errors') {
+      const apiKey = request.headers.get('X-API-Key') || url.searchParams.get('key');
+      if (apiKey !== env.GMAIL_ADDON_API_KEY) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      const errors = [];
+      // Check for recent api_error entries
+      const kv = env.CONVERSATION_KV;
+      const list = await kv.list({ prefix: 'api_error_', limit: 10 });
+      for (const key of list.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) errors.push({ key: key.name, ...val });
+      }
+      // Check for api_exception entries
+      const exceptions = await kv.list({ prefix: 'api_exception_', limit: 10 });
+      for (const key of exceptions.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) errors.push({ key: key.name, ...val });
+      }
+      // Check for work_error entries
+      const workErrors = await kv.list({ prefix: 'work_error_', limit: 10 });
+      for (const key of workErrors.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) errors.push({ key: key.name, ...val });
+      }
+      // Check for agent_log entries (most recent iteration state)
+      const agentLogs = await kv.list({ prefix: 'agent_log_', limit: 5 });
+      const logs = [];
+      for (const key of agentLogs.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) logs.push({ key: key.name, ...val });
+      }
+      // Check for handoff_alive entries (ctx.waitUntil diagnostic)
+      const aliveEntries = await kv.list({ prefix: 'handoff_alive_', limit: 5 });
+      const alive = [];
+      for (const key of aliveEntries.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) alive.push({ key: key.name, ...val });
+      }
+      return new Response(JSON.stringify({ errors, logs, alive, errorCount: errors.length, logCount: logs.length }, null, 2), {
+        headers: { 'Content-Type': 'application/json' }
+      });
     }
 
     // ── /_prices-status: Check last refresh status ──
@@ -5383,7 +5554,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const mod = validModules.includes(module) ? module : 'Accounts';
 
             const fieldMap = {
-              Accounts: 'id,Account_Name,Phone,Website',
+              Accounts: 'id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code',
               Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
               Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name',
               Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
@@ -6047,7 +6218,20 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const emailBodySnippet = (ec?.body || '').substring(0, 2000);
 
             const compositeMessage =
-              `[Email context: From ${senderName} (${senderEmail}), Subject: "${subject}", Account: ${accountName || 'unknown'}]\n\nUser request: ${handoffText}`;
+              `[HANDOFF FROM GMAIL SIDEBAR — PRE-APPROVED. CRITICAL INSTRUCTIONS:
+1. Execute the FULL workflow autonomously. Do NOT stop for confirmation at any step.
+2. Search Zoho CRM first for the account (do NOT web search if account exists in CRM).
+3. You MUST complete ALL of these steps in a SINGLE turn — do NOT end your turn early:
+   a) Look up Account in Zoho (search CRM, not web)
+   b) Look up or create Contact
+   c) Create Deal (with defaults: Stage=Qualification, Lead_Source=Stratus Referal, Meraki_ISR=Stratus Sales)
+   d) Use batch_product_lookup for ALL SKUs in ONE call (hardware + licenses). This is parallel and includes pricing.
+   e) Create Quote with ALL line items at LIST PRICE (do NOT apply ecomm pricing automatically)
+   f) Create follow-up Task on the Deal (due in 3 business days)
+   g) Ask if user wants ecomm discounts applied
+4. Only emit your final summary text AFTER all steps are complete.
+5. Do NOT stop after creating the Deal — the Quote with line items is the most important part.
+6. Do NOT search WooProducts individually — use batch_product_lookup instead.]\n\n[Email context: From ${senderName} (${senderEmail}), Subject: "${subject}", Account: ${accountName || 'unknown'}]\n\nUser request: ${handoffText}`;
 
             // Seed conversation history with email context
             if (emailBodySnippet) {
@@ -6068,30 +6252,64 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
 
               if (handoffIntent.hasAny && hasCrmCreds) {
-                // Send a "thinking" message immediately, process async
+                // Dedup guard: prevent duplicate dispatches from double-clicks or retries
+                const dedupKey = `handoff_dedup_${normalizedHandoffEmail}_${handoffText.substring(0, 50).replace(/\s/g, '_')}`;
+                const recentHandoff = await env.CONVERSATION_KV.get(dedupKey);
+                if (recentHandoff) {
+                  apiResult = { success: true, preview: '(already processing — duplicate request ignored)', targetSpace: targetSpaceName };
+                  break;
+                }
+                await env.CONVERSATION_KV.put(dedupKey, 'active', { expirationTtl: 60 }); // 60s dedup window
+
+                // ARCHITECTURE: ctx.waitUntil gets killed ~30s after HTTP response is sent
+                // (even on paid plans). To get unlimited wall-clock time, we must NOT
+                // return the HTTP response until CRM work completes. The sidebar will
+                // time out (~55s), but that's fine — it already shows "processing" and
+                // results are delivered via GChat.
+                //
+                // Flow: send "thinking" to GChat → run askClaude synchronously →
+                // send result to GChat → return HTTP response (sidebar may have timed out)
+
                 const thinkingMsg = adaptMarkdownForGChat(
                   `*Processing your request...*\n_Re: ${subject} from ${senderName}_\n\nLooking that up now — full response incoming shortly.`
                 );
                 await sendAsyncGChatMessage(targetSpaceName, thinkingMsg, null, env);
 
-                // Process CRM request via /_work (same pattern as the main GChat handler)
-                // handleCrmRequest doesn't exist as a standalone function — CRM agentic work
-                // is handled by /_work which calls askClaude with tool use enabled.
-                const handoffWorkToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                await env.CONVERSATION_KV.put(`work_${handoffWorkToken}`, JSON.stringify({
-                  text: compositeMessage,
-                  personId: handoffPersonId,
-                  spaceName: targetSpaceName,
-                  ts: new Date().toISOString()
-                }), { expirationTtl: 600 });
-                ctx.waitUntil(
-                  env.SELF.fetch(new Request('https://self/_work', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token: handoffWorkToken })
-                  })).catch(e => console.error(`[HANDOFF] Work dispatch error: ${e.message}`))
-                );
-                handoffReply = '(async — full response incoming in GChat)';
+                const _hStart = Date.now();
+                console.log(`[HANDOFF-SYNC] Starting CRM work for: "${compositeMessage.substring(0, 80)}..."`);
+
+                const progressCb = async (msg) => {
+                  const formatted = adaptMarkdownForGChat(msg);
+                  await sendAsyncGChatMessage(targetSpaceName, formatted, null, env);
+                };
+
+                let result = await askClaude(compositeMessage, handoffPersonId, env, null, true, progressCb, 300000);
+                console.log(`[HANDOFF-SYNC] askClaude completed in ${Date.now() - _hStart}ms`);
+
+                // Handle continuation if needed
+                if (result && result.__continuation) {
+                  console.log(`[HANDOFF-SYNC] Continuation needed at iteration ${result.iteration}`);
+                  const contResult = await askClaudeContinue(
+                    result.messages, result.tools, result.systemPrompt,
+                    result.iteration, env, progressCb, 300000
+                  );
+                  if (typeof contResult === 'string') result = contResult;
+                  else if (contResult?.reply) result = contResult.reply;
+                  else result = 'CRM workflow completed.';
+                }
+
+                let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
+                finalReply = adaptMarkdownForGChat(finalReply);
+                finalReply = truncateGChatReply(finalReply);
+                await sendAsyncGChatMessage(targetSpaceName, finalReply, null, env);
+
+                if (handoffPersonId) {
+                  await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
+                  await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', finalReply);
+                  await env.CONVERSATION_KV.put(`crm_session_${handoffPersonId}`, 'active', { expirationTtl: 1800 });
+                }
+                console.log(`[HANDOFF-SYNC] Completed in ${Date.now() - _hStart}ms total`);
+                handoffReply = finalReply;
               } else {
                 // Quoting / Claude fallback — synchronous
                 const handoffParsed = parseMessage(compositeMessage);
@@ -6677,34 +6895,62 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
 
             if (spaceName && hasAsyncCreds) {
-              console.log(`[GCHAT-ASYNC] Using /_work pattern for CRM query in ${spaceName}`);
+              // ARCHITECTURE: ctx.waitUntil gets killed ~30s after the HTTP response
+              // is returned (CF platform limit). For the GChat webhook, we can't hold
+              // the response open (Google Chat has a 30s sync timeout). Instead:
+              // 1. Return a quick "thinking" response synchronously
+              // 2. Use ctx.waitUntil for the CRM work (best effort, ~30s budget)
+              // 3. If the work finishes in time, great. If not, the agent_log entries
+              //    in KV will show where it stopped.
+              //
+              // For CRM requests that need >30s, use the Gmail sidebar handoff path
+              // which processes SYNCHRONOUSLY (no response until done = unlimited time).
+              const _crmSpaceName = spaceName;
+              const _crmPersonId = personId;
+              const _crmText = text;
+              const _crmKv = kv;
+              ctx.waitUntil((async () => {
+                const _crmStart = Date.now();
+                try {
+                  const progressCb = async (msg) => {
+                    const formatted = adaptMarkdownForGChat(msg);
+                    await sendAsyncGChatMessage(_crmSpaceName, formatted, null, env);
+                  };
 
-              // ARCHITECTURE: ctx.waitUntil() has a hard 30-second limit (all plans).
-              // Instead of doing heavy work in waitUntil, we immediately fire a fetch
-              // to /_work, which processes SYNCHRONOUSLY as a fresh HTTP request with
-              // UNLIMITED wall-clock time. waitUntil only needs to survive long enough
-              // to dispatch the fetch (milliseconds).
-              const workToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                  console.log(`[GCHAT-CRM] Starting CRM work: "${_crmText.substring(0, 80)}..."`);
+                  let result = await askClaude(_crmText, _crmPersonId, env, null, true, progressCb, 300000);
+                  console.log(`[GCHAT-CRM] askClaude completed in ${Date.now() - _crmStart}ms`);
 
-              // Save work request to KV (avoids body size issues with self-fetch)
-              await kv.put(`work_${workToken}`, JSON.stringify({
-                text,
-                personId,
-                spaceName,
-                ts: new Date().toISOString()
-              }), { expirationTtl: 600 });
+                  if (result && result.__continuation) {
+                    const contResult = await askClaudeContinue(
+                      result.messages, result.tools, result.systemPrompt,
+                      result.iteration, env, progressCb, 300000
+                    );
+                    if (typeof contResult === 'string') result = contResult;
+                    else if (contResult?.reply) result = contResult.reply;
+                    else result = 'CRM workflow completed.';
+                  }
 
-              // Fire-and-forget via Service Binding (env.SELF).
-              // Workers can't fetch their own URL (same-zone restriction).
-              // env.SELF.fetch() bypasses this — dispatches a fresh HTTP request
-              // to /_work which processes SYNCHRONOUSLY with unlimited wall time.
-              ctx.waitUntil(
-                env.SELF.fetch(new Request('https://self/_work', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ token: workToken })
-                })).catch(e => console.error(`[GCHAT-ASYNC] Work dispatch error: ${e.message}`))
-              );
+                  let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
+                  finalReply = adaptMarkdownForGChat(finalReply);
+                  finalReply = truncateGChatReply(finalReply);
+                  await sendAsyncGChatMessage(_crmSpaceName, finalReply, null, env);
+
+                  if (_crmPersonId) {
+                    await addToHistory(_crmKv, _crmPersonId, 'user', _crmText);
+                    await addToHistory(_crmKv, _crmPersonId, 'assistant', finalReply);
+                    await _crmKv.put(`crm_session_${_crmPersonId}`, 'active', { expirationTtl: 1800 });
+                  }
+                  console.log(`[GCHAT-CRM] Completed in ${Date.now() - _crmStart}ms total`);
+                } catch (err) {
+                  console.error(`[GCHAT-CRM] Error after ${Date.now() - _crmStart}ms: ${err.message}`);
+                  try {
+                    await sendAsyncGChatMessage(_crmSpaceName,
+                      `Sorry, I ran into an issue processing that CRM request.\n\n_Error: ${err.message.substring(0, 200)}_`,
+                      null, env);
+                  } catch (_) {}
+                }
+              })());
 
               // Return a quick synchronous "thinking" message
               return sendGChatResponse('🔍 Looking that up in the CRM... one moment.', isAddon);
