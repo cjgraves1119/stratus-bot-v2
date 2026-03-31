@@ -385,9 +385,21 @@ async function getHistory(kv, personId) {
 async function addToHistory(kv, personId, role, content) {
   if (!kv) return;
   try {
+    // Strip image data from content before storing — images are large (MB of base64)
+    // and cause API errors when replayed from history. Replace with a text placeholder.
+    let storable = content;
+    if (Array.isArray(content)) {
+      // Content is multimodal (image + text array from vision requests)
+      const textParts = content
+        .filter(c => c.type === 'text')
+        .map(c => c.text);
+      const hasImage = content.some(c => c.type === 'image');
+      storable = (hasImage ? '[User sent an image] ' : '') + textParts.join(' ');
+    }
+
     let data = await kv.get(`conv:${personId}`, 'json');
     if (!data) data = { messages: [] };
-    data.messages.push({ role, content });
+    data.messages.push({ role, content: storable });
     while (data.messages.length > MAX_HISTORY) {
       data.messages.shift();
     }
@@ -3212,8 +3224,34 @@ async function updateGChatMessage(messageName, text, env) {
  * @returns {object|null} - { base64, mediaType } or null
  */
 async function downloadGChatImage(attachment, env) {
+  // Claude only accepts these media types for vision
+  const VALID_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+
+  /**
+   * Normalize a content-type to one Claude accepts.
+   * Google Chat sometimes returns generic types like 'application/octet-stream'.
+   */
+  function normalizeMediaType(raw, fileName) {
+    const ct = (raw || '').split(';')[0].trim().toLowerCase();
+    if (VALID_IMAGE_TYPES.includes(ct)) return ct;
+
+    // Infer from file extension
+    const ext = (fileName || '').split('.').pop().toLowerCase();
+    const extMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+    if (extMap[ext]) return extMap[ext];
+
+    // Infer from attachment's declared contentType (may differ from response header)
+    const attCt = (attachment.contentType || '').split(';')[0].trim().toLowerCase();
+    if (VALID_IMAGE_TYPES.includes(attCt)) return attCt;
+
+    // Default to PNG for screenshots (most common from mobile/desktop)
+    console.warn(`[GCHAT-IMG] Unknown media type "${ct}" (ext="${ext}"), defaulting to image/png`);
+    return 'image/png';
+  }
+
   try {
     const token = await getGoogleChatBotToken(env);
+    const fileName = attachment.name || attachment.contentName || '';
 
     // Google Chat provides attachmentDataRef.resourceName for downloadable attachments
     const resourceName = attachment.attachmentDataRef?.resourceName;
@@ -3226,12 +3264,13 @@ async function downloadGChatImage(attachment, env) {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (!res.ok) return null;
-        const contentType = res.headers.get('content-type') || attachment.contentType || 'image/png';
+        const rawCt = res.headers.get('content-type') || '';
+        const mediaType = normalizeMediaType(rawCt, fileName);
         const arrayBuffer = await res.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);
         let binary = '';
         for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-        return { base64: btoa(binary), mediaType: contentType.split(';')[0].trim() };
+        return { base64: btoa(binary), mediaType };
       }
       return null;
     }
@@ -3246,14 +3285,15 @@ async function downloadGChatImage(attachment, env) {
       return null;
     }
 
-    const contentType = res.headers.get('content-type') || attachment.contentType || 'image/png';
+    const rawCt = res.headers.get('content-type') || '';
+    const mediaType = normalizeMediaType(rawCt, fileName);
     const arrayBuffer = await res.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
 
-    console.log(`[GCHAT-IMG] Downloaded image: ${contentType}, ${bytes.length} bytes`);
-    return { base64: btoa(binary), mediaType: contentType.split(';')[0].trim() };
+    console.log(`[GCHAT-IMG] Downloaded image: ${mediaType} (raw: ${rawCt}), ${bytes.length} bytes`);
+    return { base64: btoa(binary), mediaType };
   } catch (err) {
     console.error(`[GCHAT-IMG] Download error: ${err.message}`);
     return null;

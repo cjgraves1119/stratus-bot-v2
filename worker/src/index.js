@@ -307,9 +307,20 @@ async function getHistory(kv, personId) {
 async function addToHistory(kv, personId, role, content) {
   if (!kv) return;
   try {
+    // Strip image data from content before storing — images are large (MB of base64)
+    // and cause API errors when replayed from history. Replace with a text placeholder.
+    let storable = content;
+    if (Array.isArray(content)) {
+      const textParts = content
+        .filter(c => c.type === 'text')
+        .map(c => c.text);
+      const hasImage = content.some(c => c.type === 'image');
+      storable = (hasImage ? '[User sent an image] ' : '') + textParts.join(' ');
+    }
+
     let data = await kv.get(`conv:${personId}`, 'json');
     if (!data) data = { messages: [] };
-    data.messages.push({ role, content });
+    data.messages.push({ role, content: storable });
     while (data.messages.length > MAX_HISTORY) {
       data.messages.shift();
     }
