@@ -19,6 +19,7 @@
 //   - Rate limiting (protect against runaway API costs)
 // Dashboard: https://dash.cloudflare.com/ec1888c5a0b51dc3eebf6bae13a3922b/ai/ai-gateway/gateways/stratus-ai-bot
 const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
+const ANTHROPIC_API_DIRECT = 'https://api.anthropic.com/v1/messages'; // Fallback when gateway fails
 
 // ─── Data Imports (embedded at build time by wrangler) ──────────────────────
 import pricesData from './data/prices.json';
@@ -4604,20 +4605,37 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 
   async function callAnthropicWithRetry(body, maxRetries = 2) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const response = await fetch(ANTHROPIC_API_URL, {
+      const apiUrl = attempt === maxRetries ? ANTHROPIC_API_DIRECT : ANTHROPIC_API_URL;
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      };
+      if (apiUrl === ANTHROPIC_API_URL) headers['cf-aig-cache-ttl'] = '3600';
+
+      const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'cf-aig-cache-ttl': '3600'  // Cache identical prompts for 1 hour
-        },
+        headers,
         body: JSON.stringify(body)
       });
+
+      // Retry on rate limits
       if ((response.status === 429 || response.status === 529) && attempt < maxRetries) {
         await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt)));
         continue;
       }
+
+      // Detect CF AI Gateway errors (code 2005 = provider failure) and retry direct
+      if (response.status === 400 && apiUrl === ANTHROPIC_API_URL && attempt < maxRetries) {
+        try {
+          const text = await response.clone().text();
+          if (text.includes('"code":2005') || text.includes('Failed to get response from provider')) {
+            console.warn(`[GCHAT-API] Gateway error 2005, retrying direct to Anthropic (attempt ${attempt + 1})`);
+            continue;
+          }
+        } catch (_) {}
+      }
+
       return response;
     }
   }
