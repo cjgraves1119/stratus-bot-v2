@@ -3210,7 +3210,16 @@ async function updateGChatMessage(messageName, text, env) {
   });
   if (!res.ok) {
     const err = await res.text();
-    console.warn(`[GCHAT-ASYNC] Failed to update message: ${res.status} ${err}`);
+    console.warn(`[GCHAT-ASYNC] Failed to update message: ${res.status} ${err.substring(0, 300)} | textLen=${text.length}`);
+    // Store diagnostic in KV for debugging
+    try {
+      if (env.CONVERSATION_KV) {
+        await env.CONVERSATION_KV.put(`update_err_${Date.now()}`, JSON.stringify({
+          status: res.status, error: err.substring(0, 500), textLen: text.length,
+          textPreview: text.substring(0, 200), ts: new Date().toISOString()
+        }), { expirationTtl: 3600 });
+      }
+    } catch (_) {}
   }
   return res.ok;
 }
@@ -7058,7 +7067,13 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             finalReply = adaptMarkdownForGChat(finalReply);
             finalReply = truncateGChatReply(finalReply);
             if (_progressMsgName) {
-              await updateGChatMessage(_progressMsgName, finalReply, env);
+              // Try to update the "Working on it..." message in-place.
+              // If PATCH fails (e.g. reply too large, API error), fall back to a new message.
+              const updated = await updateGChatMessage(_progressMsgName, finalReply, env);
+              if (!updated) {
+                console.warn(`[GCHAT-WORK] updateGChatMessage failed — falling back to new message`);
+                await sendAsyncGChatMessage(spaceName, finalReply, threadName || null, env);
+              }
             } else {
               await sendAsyncGChatMessage(spaceName, finalReply, threadName || null, env);
             }
