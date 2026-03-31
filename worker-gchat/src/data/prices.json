@@ -1440,10 +1440,20 @@
       "price": 87,
       "discount": 0.5672
     },
+    "LIC-SME-1YR": {
+      "list": 40,
+      "price": 28,
+      "discount": 0.3
+    },
     "LIC-SME-3YR": {
       "list": 80,
       "price": 54,
       "discount": 0.325
+    },
+    "LIC-SME-5YR": {
+      "list": 120,
+      "price": 82,
+      "discount": 0.3167
     },
     "LIC-MS210-24P-1YR": {
       "list": 248,
