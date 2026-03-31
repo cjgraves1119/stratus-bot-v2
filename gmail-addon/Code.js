@@ -1140,6 +1140,26 @@ function onCheckReply(e) {
   if (!result.replied) {
     return notify_('No new replies detected in this thread.');
   }
+  // Enrich with existing task info so card can offer extend option
+  try {
+    var crmCtxRaw = PropertiesService.getUserProperties().getProperty('crm_sidebar_ctx');
+    var crmCtx = crmCtxRaw ? JSON.parse(crmCtxRaw) : {};
+    var contactId = (crmCtx.contact && crmCtx.contact.id) ? crmCtx.contact.id : '';
+    var accountId = (crmCtx.account && crmCtx.account.id) ? crmCtx.account.id : '';
+    if (contactId || accountId) {
+      var activities = crmActivities_(contactId, accountId);
+      if (activities && activities.tasks && activities.tasks.length > 0) {
+        // Find first open task
+        for (var ti = 0; ti < activities.tasks.length; ti++) {
+          var t = activities.tasks[ti];
+          if (t.status !== 'Completed') {
+            result.existingTask = { id: t.id, subject: t.subject, dueDate: t.dueDate };
+            break;
+          }
+        }
+      }
+    }
+  } catch (_) { /* proceed without task info */ }
   return buildReplyDetectedCard_(result);
 }
 
@@ -1171,15 +1191,26 @@ function onCreateReplyFollowup(e) {
       });
       return notify_('Task rescheduled to ' + dueDateStr);
     } else {
-      // Create new follow-up task
+      // Create new follow-up task via dedicated create endpoint
       var newSubject = 'Follow up: ' + (subject || 'Email reply');
-      var result = taskAction_('create', '', {
-        subject: newSubject,
-        dueDate: dueDateStr,
-        contactId: contactId,
-        accountId: accountId,
-        description: 'Auto-created after replying to thread: ' + (subject || ''),
-      });
+      var dealId = '';
+      // Try to get most recent deal from CRM context
+      if (accountId) {
+        try {
+          var dealsData = crmDeals_(accountId, '');
+          if (dealsData && dealsData.deals && dealsData.deals.length > 0) {
+            dealId = dealsData.deals[0].id;
+          }
+        } catch (_) { /* proceed without deal */ }
+      }
+      var result = crmCreateTask_(
+        newSubject,
+        dueDateStr,
+        dealId,
+        contactId,
+        'Normal',
+        'Auto-created after replying to thread: ' + (subject || '')
+      );
       return notify_('Follow-up task created for ' + dueDateStr);
     }
   } catch (err) {

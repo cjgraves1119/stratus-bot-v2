@@ -1731,9 +1731,35 @@ function buildReplyDetectedCard_(result) {
       .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
       .setBackgroundColor(CONFIG.STRATUS_BLUE)
   );
+
+  // If there's an existing open task, offer to extend it instead
+  if (result.existingTask && result.existingTask.id) {
+    var extendParams = {};
+    for (var ek in baseParams) extendParams[ek] = baseParams[ek];
+    extendParams.followup_action = 'extend';
+    extendParams.existing_task_id = result.existingTask.id;
+
+    buttons.addButton(
+      CardService.newTextButton()
+        .setText('Extend Task +3 days')
+        .setOnClickAction(
+          CardService.newAction()
+            .setFunctionName('onCreateReplyFollowup')
+            .setParameters(extendParams)
+        )
+    );
+
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        '<i>Existing task: ' + (result.existingTask.subject || '') +
+        ' (due ' + (result.existingTask.dueDate || 'N/A') + ')</i>'
+      )
+    );
+  }
+
   section.addWidget(buttons);
 
-  // Option 2: Dismiss
+  // Dismiss option
   section.addWidget(
     CardService.newTextButton()
       .setText('Dismiss')
