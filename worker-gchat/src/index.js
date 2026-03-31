@@ -7613,50 +7613,31 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                     '🔍 Working on it...', _crmThreadName, env);
                   _progressMsgName = thinkingMsg?.name || null;
 
-                  // Start animated progress indicator (updates every 3 seconds)
+                  // Simple dot-cycling ticker — pure "still alive" signal only.
+                  // Does NOT show agent internals. Updates every 5s.
                   if (_progressMsgName) {
-                    const progressStages = [
-                      '🔍 Working on it.',
-                      '🔍 Working on it..',
-                      '🔍 Working on it...',
-                      '🔎 Searching CRM...',
-                      '🔎 Searching CRM.',
-                      '🔎 Searching CRM..',
-                      '⚙️ Processing results...',
-                      '⚙️ Processing results.',
-                      '⚙️ Processing results..',
-                      '⚙️ Almost there...',
-                      '⚙️ Almost there.',
-                      '⚙️ Almost there..',
-                    ];
-                    let _progressIdx = 0;
+                    const dots = ['.', '..', '...'];
+                    let _dotIdx = 0;
                     _progressInterval = setInterval(async () => {
                       try {
                         const elapsed = Math.floor((Date.now() - _crmStart) / 1000);
-                        const stage = progressStages[Math.min(_progressIdx, progressStages.length - 1)];
-                        const timeNote = elapsed >= 10 ? `\n_${elapsed}s elapsed_` : '';
-                        await updateGChatMessage(_progressMsgName, stage + timeNote, env);
-                        _progressIdx++;
-                      } catch (_) { /* ignore progress update failures */ }
-                    }, 3000);
+                        const dot = dots[_dotIdx % dots.length];
+                        _dotIdx++;
+                        const timeNote = elapsed >= 15 ? ` (${elapsed}s)` : '';
+                        await updateGChatMessage(_progressMsgName, `⏳ Working on it${dot}${timeNote}`, env);
+                      } catch (_) { /* ignore update failures */ }
+                    }, 5000);
                   }
 
-                  const progressCb = async (msg) => {
-                    // When the agent sends a real progress update, show it on the progress message
-                    if (_progressMsgName) {
-                      const formatted = adaptMarkdownForGChat(msg);
-                      await updateGChatMessage(_progressMsgName, '⚙️ ' + formatted, env);
-                    }
-                  };
-
+                  // No progressCb — agent internals stay internal, ticker is the only indicator
                   console.log(`[GCHAT-CRM] Starting CRM work: "${_crmText.substring(0, 80)}..."`);
-                  let result = await askClaude(_crmText, _crmPersonId, env, imageData, true, progressCb, 300000);
+                  let result = await askClaude(_crmText, _crmPersonId, env, imageData, true, null, 300000);
                   console.log(`[GCHAT-CRM] askClaude completed in ${Date.now() - _crmStart}ms`);
 
                   if (result && result.__continuation) {
                     const contResult = await askClaudeContinue(
                       result.messages, result.tools, result.systemPrompt,
-                      result.iteration, env, progressCb, 300000
+                      result.iteration, env, null, 300000
                     );
                     if (typeof contResult === 'string') result = contResult;
                     else if (contResult?.reply) result = contResult.reply;
