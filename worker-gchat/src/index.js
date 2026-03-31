@@ -4066,10 +4066,13 @@ function detectCrmEmailIntent(text) {
   // CRM intents
   const crmPatterns = [
     /\b(create|new|add)\s+(a\s+)?(deal|quote|task|contact|account)/i,
-    /\b(update|edit|change|modify)\s+(the\s+)?(deal|quote|task|contact|account)/i,
-    /\b(search|find|look\s*up|pull\s*up|get|show)\s+(me\s+)?(the\s+)?(deal|quote|task|contact|account|customer|client)/i,
+    /\b(update|edit|change|modify)\s+.{0,40}\b(deal|quote|task|contact|account)/i,
+    /\b(search|find|look\s*up|pull\s*up|get|show)\s+(me\s+)?(the\s+)?.{0,20}\b(deal|quote|task|contact|account|customer|client)/i,
     /\b(close|complete|finish)\s+(the\s+)?(task|deal)/i,
     /\b(what|when|how\s+many|how\s+much|who)\s+.*(deal|quote|customer|account|order|invoice|pipeline)/i,
+    // Quote field updates (Valid Till, dates, amounts, etc.)
+    /\b(valid\s+till|expir|due\s+date|closing\s+date)\b/i,
+    /\b(these|those|the)\s+quotes?\b/i,
     /\bzoho\b/i,
     /\bcrm\b/i,
     /\b(pipeline|forecast|revenue|stage|closed\s+won|qualification)/i,
@@ -7554,6 +7557,14 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         if (!reply) {
           // Check if this is a CRM or email intent — if so, enable tool use
           const intent = detectCrmEmailIntent(text);
+
+          // Image + action verb = almost certainly a CRM request (screenshot of Zoho, quote, etc.)
+          if (imageData && !intent.hasAny && /\b(change|update|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)\b/i.test(text)) {
+            intent.hasAny = true;
+            intent.hasCrm = true;
+            console.log(`[GCHAT-AGENT] Image + action verb detected — forcing CRM routing`);
+          }
+
           const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
           const hasGmailCreds = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_REFRESH_TOKEN);
           const useTools = intent.hasAny && (hasCrmCreds || hasGmailCreds);
