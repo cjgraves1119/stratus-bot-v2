@@ -3944,6 +3944,16 @@ function detectCrmEmailIntent(text) {
     /\bzoho\s+quote\b/i,
     /\bmake\s+(a\s+|the\s+)?(zoho\s+)?quote\b/i,
     /\b(individual|separate)\s+quote\s+for\s+each/i,
+    // Post-workflow retrieval — "show me links", "what did you create", etc.
+    /\b(links?|url|urls)\s+(to|for)\s+(the\s+)?(records?|deal|quote|account|contact)/i,
+    /\bwhat\s+(records?|did\s+you|have\s+you)\s+(just\s+)?(creat|made?|built?|add)/i,
+    /\b(show|give)\s+me\s+the\s+(zoho\s+)?(links?|url|records?)/i,
+    /\b(records?\s+you\s+just\s+creat|things?\s+you\s+just\s+(made|creat|built))/i,
+    /\b(zoho\s+)?(link|url)\s+(for|to)\s+(the\s+)?(deal|quote|account)/i,
+    /\b(most\s+recent|just\s+creat|latest)\s+(records?|deal|quote|account|contact)/i,
+    /\bwhat\s+(was|were)\s+(just\s+)?(creat|made?|built?|add)/i,
+    // Stop-then-ask pattern — user says stop, then asks follow-up
+    /\bstop\b.{0,50}\b(creat|quot|deal|zoho|account)/i,
   ];
 
   // Email intents
@@ -4356,6 +4366,13 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 7. **CRM-FIRST, NO UNNECESSARY WEB SEARCH.** When an account name or domain is provided, ALWAYS search Zoho CRM first. If the account exists in CRM, use it directly — do NOT web search the domain. Only use web_search_domain when the account is NOT in CRM and you need address/business info to create a new Account record.
 8. **NEVER STOP MID-WORKFLOW.** After creating a Deal, you MUST immediately continue to create the Quote with product line items. After the Quote, you MUST create a follow-up Task. The workflow is NOT complete until ALL records are created: Contact → Deal → Quote (with line items at list price) → Follow-up Task → ecomm pricing offer. Do NOT end your turn after creating just a Deal or just a Contact. Keep calling tools until every step is done. Only emit a final text summary AFTER all records exist.
 9. **USE batch_product_lookup FOR ALL SKU LOOKUPS.** Never search WooProducts or Products individually. The batch tool handles suffix rules, parallel lookups, and includes live ecomm pricing. One call for all SKUs.
+10. **RESELLER / VAR PATTERN.** When an email or request says "this is for [Customer Name]", "on behalf of [Customer Name]", or "for my customer [Customer Name]", the sender is a VAR/reseller placing an order for their end customer. In this case:
+    - Look up the SENDER'S domain/email in Zoho — that is the billing Account (e.g. HRTC/Hampton Roads is Eric's account).
+    - Do NOT create a new Zoho Account for the end customer.
+    - Name the deal: "[Sender Account] - [End Customer Name] - [Description]" (e.g. "Hampton Roads - Grand Valley Manufacturing - FIPS Wi-Fi Upgrade").
+    - The Contact should be the sender (Eric Schueler), linked to the sender's Account.
+    - Note the end customer name in the Deal description field.
+11. **ALWAYS END WITH ZOHO LINKS.** Your final summary MUST include the Zoho URL for EVERY record created. Use this format: [Record Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID). Include Deal, Quote, and Task links. Never end without them.
 
 ---
 
@@ -4494,6 +4511,14 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 
     const response = await callAnthropicWithRetry(requestBody);
     if (!response || !response.ok) {
+      const contErrBody = await response?.text().catch(() => '');
+      let contErrParsed = {};
+      try { contErrParsed = JSON.parse(contErrBody); } catch (_) {}
+      const contErrMsg = contErrParsed?.error?.message || '';
+      if (response?.status === 429) return `I'm being rate-limited. Please wait 30 seconds and try again.`;
+      if (response?.status === 400 && contErrMsg.includes('credit balance')) {
+        return `⚠️ The AI service account is out of credits. Please top up the Anthropic API balance at console.anthropic.com, then try again.`;
+      }
       return `Sorry, I couldn't complete that CRM request (API ${response?.status || 'error'}).`;
     }
 
@@ -4771,8 +4796,20 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
             }), { expirationTtl: 7200 });
           }
         } catch (logErr) { /* ignore logging errors */ }
+
+        // Parse error body for specific messages
+        let parsedErr = {};
+        try { parsedErr = JSON.parse(errBody); } catch (_) {}
+        const errMsg = parsedErr?.error?.message || '';
+
         if (response.status === 529) {
           return `The AI service is temporarily overloaded. Please try again in a minute.`;
+        }
+        if (response.status === 429) {
+          return `I'm being rate-limited right now. Please wait 30 seconds and try again.`;
+        }
+        if (response.status === 400 && errMsg.includes('credit balance')) {
+          return `⚠️ The AI service account is out of credits. Please top up the Anthropic API balance at console.anthropic.com, then try again.`;
         }
         return useTools
           ? `Sorry, I couldn't process that CRM/email request (API ${response.status}). Please try again shortly.`
@@ -6244,21 +6281,29 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const accountName  = ec?.accountName || null;
             const emailBodySnippet = (ec?.body || '').substring(0, 2000);
 
+            // Detect reseller/VAR pattern: email says "for [Customer]" or "on behalf of [Customer]"
+            const resellerMatch = handoffText.match(/\b(?:this\s+is\s+for|for\s+(?:my\s+customer|a\s+customer)|on\s+behalf\s+of)\s+([A-Z][a-zA-Z\s&.,'-]{2,50})/i)
+              || (emailBodySnippet.match(/\b(?:this\s+is\s+for|for\s+(?:my\s+customer|a\s+customer)|on\s+behalf\s+of|for\s+a\s+different\s+customer)\s*:?\s*([A-Z][a-zA-Z\s&.,'-]{2,50})/i));
+            const resellerEndCustomer = resellerMatch ? resellerMatch[1].trim() : null;
+            const resellerNote = resellerEndCustomer
+              ? `\n⚠️ RESELLER/VAR PATTERN DETECTED: The email says this is FOR "${resellerEndCustomer}". The SENDER (${senderEmail}) is a reseller — look up THEIR Zoho account by domain. Do NOT create a new account for "${resellerEndCustomer}". Name the deal: "[Sender Account] - ${resellerEndCustomer} - [Description]". Note the end customer in the Deal description.`
+              : '';
+
             const compositeMessage =
               `[HANDOFF FROM GMAIL SIDEBAR — PRE-APPROVED. CRITICAL INSTRUCTIONS:
 1. Execute the FULL workflow autonomously. Do NOT stop for confirmation at any step.
 2. Search Zoho CRM first for the account (do NOT web search if account exists in CRM).
 3. You MUST complete ALL of these steps in a SINGLE turn — do NOT end your turn early:
-   a) Look up Account in Zoho (search CRM, not web)
-   b) Look up or create Contact
+   a) Look up Account in Zoho by sender domain (search CRM, not web)
+   b) Look up or create Contact (linked to sender's account)
    c) Create Deal (with defaults: Stage=Qualification, Lead_Source=Stratus Referal, Meraki_ISR=Stratus Sales)
    d) Use batch_product_lookup for ALL SKUs in ONE call (hardware + licenses). This is parallel and includes pricing.
    e) Create Quote with ALL line items at LIST PRICE (do NOT apply ecomm pricing automatically)
    f) Create follow-up Task on the Deal (due in 3 business days)
    g) Ask if user wants ecomm discounts applied
-4. Only emit your final summary text AFTER all steps are complete.
+4. Only emit your final summary text AFTER all steps are complete. ALWAYS include Zoho links for every created record.
 5. Do NOT stop after creating the Deal — the Quote with line items is the most important part.
-6. Do NOT search WooProducts individually — use batch_product_lookup instead.]\n\n[Email context: From ${senderName} (${senderEmail}), Subject: "${subject}", Account: ${accountName || 'unknown'}]\n\nUser request: ${handoffText}`;
+6. Do NOT search WooProducts individually — use batch_product_lookup instead.${resellerNote}]\n\n[Email context: From ${senderName} (${senderEmail}), Subject: "${subject}", Account: ${accountName || 'unknown'}]\n\nUser request: ${handoffText}`;
 
             // Seed conversation history with email context
             if (emailBodySnippet) {
@@ -6334,6 +6379,16 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                   await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
                   await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', finalReply);
                   await env.CONVERSATION_KV.put(`crm_session_${handoffPersonId}`, 'active', { expirationTtl: 1800 });
+
+                  // Persist the final summary under a stable key so it survives
+                  // a "stop" command clearing the active session. If the user asks
+                  // "what did you just create?" or "show me the links" after stopping,
+                  // the CRM agent can retrieve this without re-running the workflow.
+                  await env.CONVERSATION_KV.put(
+                    `last_crm_result_${handoffPersonId}`,
+                    JSON.stringify({ ts: Date.now(), summary: finalReply.substring(0, 3000) }),
+                    { expirationTtl: 86400 }  // 24-hour TTL
+                  );
                 }
                 console.log(`[HANDOFF-SYNC] Completed in ${Date.now() - _hStart}ms total`);
                 handoffReply = finalReply;
@@ -6797,6 +6852,19 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             await addToHistory(kv, personId, 'user', text);
             await addToHistory(kv, personId, 'assistant', emailReply);
             reply = emailReply;
+          }
+        }
+
+        // Fast-path: "show me links / what did you just create?" — return the saved
+        // last_crm_result without spinning up the full agentic loop.
+        const lastResultPattern = /\b(links?|url|urls|records?)\s*(you\s+)?(just\s+)?(creat|made?|built?)\b|\bwhat\s+(records?|did\s+you|have\s+you)\s+(just\s+)?(creat|made?|built?)|\b(show|give)\s+me\s+the\s+(zoho\s+)?(links?|url|records?)\b|\b(most\s+recent|just\s+creat|latest)\s+(records?|deal|quote|account)\b/i;
+        if (lastResultPattern.test(text) && personId && kv) {
+          const lastResult = await kv.get(`last_crm_result_${personId}`, 'json').catch(() => null);
+          if (lastResult && lastResult.summary) {
+            const age = Math.round((Date.now() - lastResult.ts) / 60000);
+            reply = `Here's what was created ${age < 2 ? 'just now' : `~${age} minutes ago`}:\n\n${lastResult.summary}`;
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', reply);
           }
         }
 
