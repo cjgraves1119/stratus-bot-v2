@@ -5970,7 +5970,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           }
 
           case '/api/register-space': {
-            const { userEmail: regEmail, spaceName: regSpaceName } = body;
+            const { userEmail: regEmail, spaceName: regSpaceName } = apiBody;
             if (!regEmail || !regSpaceName) {
               apiResult = { error: 'userEmail and spaceName are required' };
               break;
@@ -5985,7 +5985,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           }
 
           case '/api/handoff': {
-            const { text: handoffText, emailContext: ec, userEmail: handoffUserEmail, gchatSpaceId: explicitSpaceId } = body;
+            const { text: handoffText, emailContext: ec, userEmail: handoffUserEmail, gchatSpaceId: explicitSpaceId } = apiBody;
             if (!handoffText || !handoffUserEmail) {
               apiResult = { error: 'text and userEmail are required' };
               break;
