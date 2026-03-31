@@ -6407,10 +6407,12 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         const isAddon = !!event.commonEventObject;
 
         // Auto-register DM space for Gmail sidebar handoff
-        if (!isAddon && event.space?.type === 'DM' && event.message?.sender?.email) {
+        const dmSpaceType = event.space?.type || event.message?.space?.type;
+        const dmSpaceNameRaw = event.space?.name || event.message?.space?.name;
+        if (!isAddon && dmSpaceType === 'DM' && event.message?.sender?.email) {
           try {
             const senderEmail = event.message.sender.email.toLowerCase().trim();
-            const dmSpaceName = event.space?.name;
+            const dmSpaceName = dmSpaceNameRaw;
             if (senderEmail && dmSpaceName && env.CONVERSATION_KV) {
               await env.CONVERSATION_KV.put(
                 `gchat_dm_space:${senderEmail}`,
