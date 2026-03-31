@@ -181,6 +181,95 @@ function sendHandoffRequest_(requestText, emailContext) {
   }
 }
 
+// ─────────────────────────────────────────────
+// DIRECT CRM SIDEBAR ENDPOINTS (zero AI cost)
+// ─────────────────────────────────────────────
+
+/**
+ * Look up a contact and linked account by email/domain.
+ */
+function crmContactLookup_(email, domain) {
+  var cacheKey = 'crm_contact_' + (email || domain);
+  var cached = getCached_(cacheKey);
+  if (cached) return cached;
+
+  var result = apiCall_('/api/crm-contact', {
+    email: email || '',
+    domain: domain || '',
+  });
+
+  if (result && result.found) {
+    setCached_(cacheKey, result, CONFIG.CACHE_TTL_SECONDS);
+  }
+  return result;
+}
+
+/**
+ * Get deals for an account.
+ */
+function crmDeals_(accountId, contactEmail) {
+  return apiCall_('/api/crm-deals', {
+    accountId: accountId || '',
+    contactEmail: contactEmail || '',
+  });
+}
+
+/**
+ * Get open tasks (activities) for an account or contact.
+ */
+function crmActivities_(accountId, contactId) {
+  return apiCall_('/api/crm-activities', {
+    accountId: accountId || '',
+    contactId: contactId || '',
+  });
+}
+
+/**
+ * Get quotes for an account or specific deal.
+ */
+function crmQuotes_(accountId, dealId) {
+  return apiCall_('/api/crm-quotes', {
+    accountId: accountId || '',
+    dealId: dealId || '',
+  });
+}
+
+/**
+ * Get recent notes for a contact or account.
+ */
+function crmNotes_(contactId, accountId) {
+  return apiCall_('/api/crm-notes', {
+    contactId: contactId || '',
+    accountId: accountId || '',
+  });
+}
+
+/**
+ * Add a note to a contact or account.
+ */
+function crmAddNote_(parentModule, parentId, title, content) {
+  return apiCall_('/api/crm-add-note', {
+    parentModule: parentModule || 'Contacts',
+    parentId: parentId,
+    title: title || '',
+    content: content,
+  });
+}
+
+/**
+ * Create a new CRM task.
+ */
+function crmCreateTask_(subject, dueDate, dealId, contactId, priority, description) {
+  return apiCall_('/api/crm-create-task', {
+    subject: subject,
+    dueDate: dueDate || '',
+    dealId: dealId || '',
+    contactId: contactId || '',
+    priority: priority || 'Normal',
+    description: description || '',
+  });
+}
+
 /**
  * Register the user's Google Chat DM space with the worker,
  * enabling the sidebar handoff to deliver responses via GChat.

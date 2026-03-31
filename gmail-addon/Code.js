@@ -587,6 +587,210 @@ function onConfirmZohoQuote(e) {
     .build();
 }
 
+// ─────────────────────────────────────────────
+// CRM SIDEBAR HANDLERS (zero AI cost)
+// ─────────────────────────────────────────────
+
+/** Open CRM Contact Details sidebar (entry point) */
+function onCrmContactDetails(e) {
+  var ctx = getEmailContext_();
+  if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
+
+  // Use customer email (thread-aware) over raw sender
+  var lookupEmail = (ctx.isOutbound && ctx.customerEmail) ? ctx.customerEmail : ctx.senderEmail;
+  var lookupDomain = (ctx.isOutbound && ctx.customerDomain) ? ctx.customerDomain : (lookupEmail ? lookupEmail.split('@')[1] : '');
+
+  // Skip generic consumer domains
+  if (/^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac)\./.test(lookupDomain)) {
+    lookupDomain = '';
+  }
+
+  var result;
+  try {
+    result = crmContactLookup_(lookupEmail, lookupDomain);
+  } catch (err) {
+    return buildErrorCard_('CRM lookup failed: ' + err.message);
+  }
+
+  if (!result || !result.found) {
+    return buildErrorCard_('No contact or account found in Zoho CRM for ' + lookupEmail + '. Try searching manually.');
+  }
+
+  // Store CRM context for tab navigation
+  var crmCtx = {
+    contact: result.contact || null,
+    account: result.account || null,
+  };
+  PropertiesService.getUserProperties().setProperty('crm_sidebar_ctx', JSON.stringify(crmCtx));
+
+  // Build card with Info tab
+  var card = buildCrmSidebarCard_(crmCtx, 'info');
+  buildCrmInfoTab_(card, crmCtx.contact, crmCtx.account);
+  addBackToEmailButton_(card);
+  return card.build();
+}
+
+/** Handle CRM tab navigation */
+function onCrmTab(e) {
+  var params = e.commonEventObject.parameters || e.parameters || {};
+  var tab = params.tab || 'info';
+  var contactId = params.contact_id || '';
+  var accountId = params.account_id || '';
+  var contactEmail = params.contact_email || '';
+
+  // Load cached CRM context
+  var crmCtx;
+  try {
+    var raw = PropertiesService.getUserProperties().getProperty('crm_sidebar_ctx');
+    crmCtx = raw ? JSON.parse(raw) : { contact: null, account: null };
+  } catch (_) {
+    crmCtx = { contact: null, account: null };
+  }
+
+  // Override with params if CRM context is stale
+  if (!crmCtx.contact && contactId) crmCtx.contact = { id: contactId, email: contactEmail };
+  if (!crmCtx.account && accountId) crmCtx.account = { id: accountId };
+
+  var tabParams = {
+    contact_id: contactId || (crmCtx.contact ? crmCtx.contact.id : ''),
+    account_id: accountId || (crmCtx.account ? crmCtx.account.id : ''),
+    contact_email: contactEmail || (crmCtx.contact ? crmCtx.contact.email : ''),
+  };
+
+  var card = buildCrmSidebarCard_(crmCtx, tab);
+
+  try {
+    if (tab === 'info') {
+      buildCrmInfoTab_(card, crmCtx.contact, crmCtx.account);
+    } else if (tab === 'deals') {
+      var dealsResult = crmDeals_(tabParams.account_id, tabParams.contact_email);
+      buildCrmDealsTab_(card, dealsResult);
+    } else if (tab === 'activities') {
+      var activitiesResult = crmActivities_(tabParams.account_id, tabParams.contact_id);
+      buildCrmActivitiesTab_(card, activitiesResult, tabParams);
+    } else if (tab === 'quotes') {
+      var quotesResult = crmQuotes_(tabParams.account_id, '');
+      buildCrmQuotesTab_(card, quotesResult);
+    }
+  } catch (err) {
+    card.addSection(
+      CardService.newCardSection().addWidget(
+        CardService.newTextParagraph().setText('<font color="#cc0000">Error loading ' + tab + ': ' + err.message + '</font>')
+      )
+    );
+  }
+
+  addBackToEmailButton_(card);
+  return card.build();
+}
+
+/** Add a note to a CRM record */
+function onCrmAddNote(e) {
+  var params = e.commonEventObject.parameters || e.parameters || {};
+  var parentModule = params.parent_module || 'Contacts';
+  var parentId = params.parent_id || '';
+  var noteContent = e.formInput ? e.formInput.crm_note_content : '';
+
+  if (!parentId || !noteContent || noteContent.trim() === '') {
+    return notify_('Please enter a note first.');
+  }
+
+  var result;
+  try {
+    result = crmAddNote_(parentModule, parentId, '', noteContent.trim());
+  } catch (err) {
+    return notify_('Failed to add note: ' + err.message);
+  }
+
+  if (result && result.success) {
+    return notify_('Note added successfully.');
+  } else {
+    return notify_('Failed: ' + (result ? result.message || result.error : 'Unknown error'));
+  }
+}
+
+/** Show create task form */
+function onCrmShowCreateTask(e) {
+  var params = e.commonEventObject.parameters || e.parameters || {};
+  return buildCrmCreateTaskCard_(params);
+}
+
+/** Create a new CRM task */
+function onCrmCreateTask(e) {
+  var params = e.commonEventObject.parameters || e.parameters || {};
+  var formInput = e.formInput || {};
+  var subject = (formInput.new_task_subject || '').trim();
+  var dueDate = (formInput.new_task_due || '').trim();
+  var priority = formInput.new_task_priority || 'Normal';
+  var description = (formInput.new_task_description || '').trim();
+
+  if (!subject) {
+    return notify_('Please enter a task subject.');
+  }
+
+  var contactId = params.contact_id || '';
+  var accountId = params.account_id || '';
+
+  // If we have accountId but not a deal, we need to find the most recent deal
+  // to attach the task to (for proper account association in Zoho)
+  var dealId = '';
+  if (accountId && !dealId) {
+    try {
+      var dealsResp = crmDeals_(accountId, '');
+      if (dealsResp && dealsResp.deals && dealsResp.deals.length > 0) {
+        // Use the most recent non-closed deal, or the most recent deal
+        for (var i = 0; i < dealsResp.deals.length; i++) {
+          var d = dealsResp.deals[i];
+          if (d.stage !== 'Closed Won' && d.stage !== 'Closed (Lost)') {
+            dealId = d.id;
+            break;
+          }
+        }
+        if (!dealId) dealId = dealsResp.deals[0].id;
+      }
+    } catch (_) { /* proceed without deal */ }
+  }
+
+  var result;
+  try {
+    result = crmCreateTask_(subject, dueDate, dealId, contactId, priority, description);
+  } catch (err) {
+    return buildErrorCard_('Task creation failed: ' + err.message);
+  }
+
+  if (result && result.success) {
+    var card = CardService.newCardBuilder()
+      .setHeader(
+        CardService.newCardHeader()
+          .setTitle('Task Created')
+          .setSubtitle(subject)
+          .setImageStyle(CardService.ImageStyle.CIRCLE)
+          .setImageUrl(CONFIG.ICON_URL)
+      );
+
+    var section = CardService.newCardSection();
+    section.addWidget(
+      CardService.newTextParagraph().setText('Task created successfully.')
+    );
+
+    if (result.zohoUrl) {
+      section.addWidget(
+        CardService.newButtonSet().addButton(
+          CardService.newTextButton()
+            .setText('Open in Zoho')
+            .setOpenLink(CardService.newOpenLink().setUrl(result.zohoUrl))
+        )
+      );
+    }
+
+    card.addSection(section);
+    addBackToEmailButton_(card);
+    return card.build();
+  } else {
+    return buildErrorCard_('Task creation failed: ' + (result ? result.message || result.error : 'Unknown error'));
+  }
+}
+
 /** Navigate back to homepage */
 function onBackToHome(e) {
   return buildHomepageCard_();

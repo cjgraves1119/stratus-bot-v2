@@ -6432,6 +6432,361 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             break;
           }
 
+          // ══════════════════════════════════════════════════════════════
+          // ── Direct Zoho CRM Sidebar Endpoints (zero AI cost) ──
+          // These replace the Zoho for Gmail Chrome Extension.
+          // All endpoints call Zoho REST API directly via zohoApiCall().
+          // ══════════════════════════════════════════════════════════════
+
+          // ── CRM Contact Lookup: Find contact + account by email/domain ──
+          case '/api/crm-contact': {
+            const { email: contactEmail, domain: contactDomain } = apiBody;
+            if (!contactEmail && !contactDomain) {
+              return new Response(JSON.stringify({ error: 'email or domain required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              let contact = null;
+              let account = null;
+
+              // Step 1: Search contact by email
+              if (contactEmail) {
+                const contactResp = await zohoApiCall('GET',
+                  `Contacts/search?email=${encodeURIComponent(contactEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
+                );
+                if (contactResp?.data?.[0]) {
+                  const c = contactResp.data[0];
+                  contact = {
+                    id: c.id,
+                    firstName: c.First_Name || '',
+                    lastName: c.Last_Name || '',
+                    fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
+                    email: c.Email || contactEmail,
+                    phone: c.Phone || '',
+                    mobile: c.Mobile || '',
+                    title: c.Title || '',
+                    accountId: c.Account_Name?.id || null,
+                    accountName: c.Account_Name?.name || '',
+                    address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
+                  };
+                }
+              }
+
+              // Step 2: Find account (from contact link or domain search)
+              const acctId = contact?.accountId;
+              if (acctId) {
+                const acctResp = await zohoApiCall('GET',
+                  `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry,Description`, env
+                );
+                if (acctResp?.data?.[0]) {
+                  const a = acctResp.data[0];
+                  account = {
+                    id: a.id,
+                    name: a.Account_Name || '',
+                    phone: a.Phone || '',
+                    website: a.Website || '',
+                    address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
+                    industry: a.Industry || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                  };
+                }
+              } else if (contactDomain) {
+                // Fallback: search accounts by domain
+                const domainSearch = await zohoApiCall('GET',
+                  `Accounts/search?criteria=((Website:contains:${encodeURIComponent(contactDomain)}))&fields=id,Account_Name,Phone,Website,Billing_City,Billing_State,Industry&per_page=5`, env
+                );
+                if (domainSearch?.data?.[0]) {
+                  const a = domainSearch.data[0];
+                  account = {
+                    id: a.id,
+                    name: a.Account_Name || '',
+                    phone: a.Phone || '',
+                    website: a.Website || '',
+                    address: [a.Billing_City, a.Billing_State].filter(Boolean).join(', '),
+                    industry: a.Industry || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                  };
+                }
+              }
+
+              if (contact) {
+                contact.zohoUrl = `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contact.id}`;
+              }
+
+              apiResult = { contact, account, found: !!(contact || account) };
+            } catch (err) {
+              apiResult = { error: 'Contact lookup failed: ' + err.message, contact: null, account: null, found: false };
+            }
+            break;
+          }
+
+          // ── CRM Deals: Get deals for an account ──
+          case '/api/crm-deals': {
+            const { accountId: dealsAcctId, contactEmail: dealsContactEmail } = apiBody;
+            if (!dealsAcctId && !dealsContactEmail) {
+              return new Response(JSON.stringify({ error: 'accountId or contactEmail required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              let deals = [];
+              let targetAccountId = dealsAcctId;
+
+              // If no accountId, look it up from contact email
+              if (!targetAccountId && dealsContactEmail) {
+                const cResp = await zohoApiCall('GET',
+                  `Contacts/search?email=${encodeURIComponent(dealsContactEmail)}&fields=id,Account_Name`, env
+                );
+                if (cResp?.data?.[0]?.Account_Name?.id) {
+                  targetAccountId = cResp.data[0].Account_Name.id;
+                }
+              }
+
+              if (targetAccountId) {
+                // Use COQL for flexible deal retrieval sorted by Closing_Date desc
+                const coql = `select Deal_Name, Stage, Amount, Closing_Date, Probability, Contact_Name, Owner from Deals where Account_Name.id = '${targetAccountId}' order by Closing_Date desc limit 20`;
+                const dealResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                if (dealResp?.data) {
+                  deals = dealResp.data.map(d => ({
+                    id: d.id,
+                    name: d.Deal_Name || '',
+                    stage: d.Stage || '',
+                    amount: d.Amount || 0,
+                    closingDate: d.Closing_Date || '',
+                    probability: d.Probability || 0,
+                    contactName: d.Contact_Name?.name || '',
+                    ownerName: d.Owner?.name || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Deals/${d.id}`,
+                  }));
+                }
+              }
+
+              apiResult = { deals, accountId: targetAccountId || null };
+            } catch (err) {
+              apiResult = { error: 'Deals lookup failed: ' + err.message, deals: [] };
+            }
+            break;
+          }
+
+          // ── CRM Activities: Get open tasks for a contact/account ──
+          case '/api/crm-activities': {
+            const { accountId: actAcctId, contactId: actContactId } = apiBody;
+            if (!actAcctId && !actContactId) {
+              return new Response(JSON.stringify({ error: 'accountId or contactId required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              let tasks = [];
+
+              // Fetch open tasks via COQL
+              let coql;
+              if (actAcctId) {
+                coql = `select Subject, Status, Due_Date, Priority, Description, What_Id, Who_Id, Owner from Tasks where What_Id.Account_Name.id = '${actAcctId}' and Status not in ('Completed') order by Due_Date asc limit 25`;
+              } else {
+                coql = `select Subject, Status, Due_Date, Priority, Description, What_Id, Who_Id, Owner from Tasks where Who_Id = '${actContactId}' and Status not in ('Completed') order by Due_Date asc limit 25`;
+              }
+
+              const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+              if (taskResp?.data) {
+                tasks = taskResp.data.map(t => ({
+                  id: t.id,
+                  subject: t.Subject || '(no subject)',
+                  status: t.Status || 'Not Started',
+                  dueDate: t.Due_Date || null,
+                  priority: t.Priority || 'Normal',
+                  description: t.Description ? t.Description.substring(0, 200) : '',
+                  dealId: t.What_Id?.id || null,
+                  dealName: t.What_Id?.name || null,
+                  contactId: t.Who_Id?.id || null,
+                  contactName: t.Who_Id?.name || null,
+                  ownerName: t.Owner?.name || '',
+                  zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+                }));
+              }
+
+              // Also fetch recently completed tasks (last 5)
+              let recentCompleted = [];
+              try {
+                const compCoql = actAcctId
+                  ? `select Subject, Status, Due_Date, Modified_Time from Tasks where What_Id.Account_Name.id = '${actAcctId}' and Status = 'Completed' order by Modified_Time desc limit 5`
+                  : `select Subject, Status, Due_Date, Modified_Time from Tasks where Who_Id = '${actContactId}' and Status = 'Completed' order by Modified_Time desc limit 5`;
+                const compResp = await zohoApiCall('POST', 'coql', env, { select_query: compCoql });
+                if (compResp?.data) {
+                  recentCompleted = compResp.data.map(t => ({
+                    id: t.id,
+                    subject: t.Subject || '',
+                    completedDate: t.Modified_Time ? t.Modified_Time.split('T')[0] : '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+                  }));
+                }
+              } catch (_) { /* recent completed is optional */ }
+
+              apiResult = { tasks, recentCompleted };
+            } catch (err) {
+              apiResult = { error: 'Activities lookup failed: ' + err.message, tasks: [], recentCompleted: [] };
+            }
+            break;
+          }
+
+          // ── CRM Quotes: Get quotes for an account's deals ──
+          case '/api/crm-quotes': {
+            const { accountId: quotesAcctId, dealId: quotesDealId } = apiBody;
+            if (!quotesAcctId && !quotesDealId) {
+              return new Response(JSON.stringify({ error: 'accountId or dealId required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              let quotes = [];
+
+              if (quotesDealId) {
+                // Direct: get quotes for a specific deal
+                const qResp = await zohoApiCall('GET',
+                  `Deals/${quotesDealId}/Quotes?fields=id,Subject,Quote_Number,Grand_Total,Stage,Valid_Till,Created_Time&per_page=10`, env
+                );
+                if (qResp?.data) {
+                  quotes = qResp.data.map(q => ({
+                    id: q.id,
+                    subject: q.Subject || '',
+                    quoteNumber: q.Quote_Number || '',
+                    grandTotal: q.Grand_Total || 0,
+                    stage: q.Stage || '',
+                    validTill: q.Valid_Till || '',
+                    createdTime: q.Created_Time ? q.Created_Time.split('T')[0] : '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
+                  }));
+                }
+              } else if (quotesAcctId) {
+                // Get quotes across all account deals via COQL
+                const coql = `select Subject, Quote_Number, Grand_Total, Stage, Valid_Till, Deal_Name, Created_Time from Quotes where Account_Name.id = '${quotesAcctId}' order by Created_Time desc limit 15`;
+                const qResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                if (qResp?.data) {
+                  quotes = qResp.data.map(q => ({
+                    id: q.id,
+                    subject: q.Subject || '',
+                    quoteNumber: q.Quote_Number || '',
+                    grandTotal: q.Grand_Total || 0,
+                    stage: q.Stage || '',
+                    validTill: q.Valid_Till || '',
+                    dealName: q.Deal_Name?.name || '',
+                    createdTime: q.Created_Time ? q.Created_Time.split('T')[0] : '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
+                  }));
+                }
+              }
+
+              apiResult = { quotes };
+            } catch (err) {
+              apiResult = { error: 'Quotes lookup failed: ' + err.message, quotes: [] };
+            }
+            break;
+          }
+
+          // ── CRM Notes: Get recent notes for a contact/account ──
+          case '/api/crm-notes': {
+            const { contactId: notesContactId, accountId: notesAcctId } = apiBody;
+            if (!notesContactId && !notesAcctId) {
+              return new Response(JSON.stringify({ error: 'contactId or accountId required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              let notes = [];
+              const parentModule = notesContactId ? 'Contacts' : 'Accounts';
+              const parentId = notesContactId || notesAcctId;
+
+              const noteResp = await zohoApiCall('GET',
+                `${parentModule}/${parentId}/Notes?fields=id,Note_Title,Note_Content,Created_Time,Owner&per_page=10`, env
+              );
+              if (noteResp?.data) {
+                notes = noteResp.data.map(n => ({
+                  id: n.id,
+                  title: n.Note_Title || '',
+                  content: n.Note_Content ? n.Note_Content.substring(0, 500) : '',
+                  createdTime: n.Created_Time ? n.Created_Time.split('T')[0] : '',
+                  ownerName: n.Owner?.name || '',
+                }));
+              }
+
+              apiResult = { notes };
+            } catch (err) {
+              apiResult = { error: 'Notes lookup failed: ' + err.message, notes: [] };
+            }
+            break;
+          }
+
+          // ── CRM Add Note: Create a note on a contact/account ──
+          case '/api/crm-add-note': {
+            const { parentModule: noteParent, parentId: noteParentId, title: noteTitle, content: noteContent } = apiBody;
+            if (!noteParentId || !noteContent) {
+              return new Response(JSON.stringify({ error: 'parentId and content required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              const mod = noteParent || 'Contacts';
+              const noteResp = await zohoApiCall('POST', `${mod}/${noteParentId}/Notes`, env, {
+                data: [{
+                  Note_Title: noteTitle || '',
+                  Note_Content: noteContent,
+                }]
+              });
+              const parsed = parseZohoResponse(noteResp, 'Note creation');
+              apiResult = { success: parsed.success, noteId: parsed.record_id || null, message: parsed.message };
+            } catch (err) {
+              apiResult = { error: 'Note creation failed: ' + err.message, success: false };
+            }
+            break;
+          }
+
+          // ── CRM Create Task: Create a new task ──
+          case '/api/crm-create-task': {
+            const { subject: newTaskSubject, dueDate: newTaskDue, dealId: newTaskDeal, contactId: newTaskContact, priority: newTaskPriority, description: newTaskDesc } = apiBody;
+            if (!newTaskSubject) {
+              return new Response(JSON.stringify({ error: 'subject required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              function createTaskBizDays(startDate, days) {
+                let d = new Date(startDate);
+                let added = 0;
+                while (added < days) {
+                  d.setDate(d.getDate() + 1);
+                  if (d.getDay() !== 0 && d.getDay() !== 6) added++;
+                }
+                return d.toISOString().split('T')[0];
+              }
+
+              const taskPayload = {
+                data: [{
+                  Subject: newTaskSubject,
+                  Status: 'Not Started',
+                  Due_Date: newTaskDue || createTaskBizDays(new Date(), 3),
+                  Priority: newTaskPriority || 'Normal',
+                  Owner: '2570562000141711002', // Chris Graves
+                }]
+              };
+              if (newTaskDeal) {
+                taskPayload.data[0].What_Id = newTaskDeal;
+                taskPayload.data[0].$se_module = 'Deals';
+              }
+              if (newTaskContact) {
+                taskPayload.data[0].Who_Id = newTaskContact;
+              }
+              if (newTaskDesc) {
+                taskPayload.data[0].Description = newTaskDesc;
+              }
+
+              const createResp = await zohoApiCall('POST', 'Tasks', env, taskPayload);
+              const parsed = parseZohoResponse(createResp, 'Task creation');
+              apiResult = {
+                success: parsed.success,
+                taskId: parsed.record_id || null,
+                message: parsed.message,
+                zohoUrl: parsed.record_id ? `https://crm.zoho.com/crm/org647122552/tab/Tasks/${parsed.record_id}` : null,
+              };
+            } catch (err) {
+              apiResult = { error: 'Task creation failed: ' + err.message, success: false };
+            }
+            break;
+          }
+
           default:
             return new Response(JSON.stringify({ error: 'Unknown endpoint: ' + url.pathname }), {
               status: 404, headers: jsonHeaders
