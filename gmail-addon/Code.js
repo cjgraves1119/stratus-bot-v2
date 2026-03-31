@@ -117,6 +117,8 @@ function onGmailMessage(e) {
     allEmails: Object.keys(allEmails),
     allDomains: Object.keys(allDomains),
     threadContacts: threadContacts,
+    threadMessageCount: messages.length,
+    openedAt: new Date().getTime(),
   };
   PropertiesService.getUserProperties().setProperty(
     'current_email_ctx', JSON.stringify(emailCtx)
@@ -663,10 +665,20 @@ function onCrmContactDetails(e) {
   return card.build();
 }
 
-/** Switch to a different thread contact */
+/** Switch to a different thread contact (via dropdown) */
 function onContactSwitch(e) {
-  var params = e.commonEventObject.parameters || {};
-  var selectedEmail = params.contact_email || '';
+  // Read from dropdown formInputs (SelectionInput)
+  var selectedEmail = '';
+  var fi = e.commonEventObject.formInputs || {};
+  if (fi.contact_selector && fi.contact_selector.stringInputs) {
+    var vals = fi.contact_selector.stringInputs.value || [];
+    if (vals.length > 0) selectedEmail = vals[0];
+  }
+  // Fallback to parameters (for legacy button clicks)
+  if (!selectedEmail) {
+    var params = e.commonEventObject.parameters || {};
+    selectedEmail = params.contact_email || '';
+  }
   if (!selectedEmail) return notify_('No contact selected.');
 
   var domain = selectedEmail.split('@')[1] || '';
@@ -1022,4 +1034,119 @@ function formatDate_(date) {
   var m = String(date.getMonth() + 1).padStart(2, '0');
   var d = String(date.getDate()).padStart(2, '0');
   return y + '-' + m + '-' + d;
+}
+
+// ─────────────────────────────────────────────
+// REPLY DETECTION
+// ─────────────────────────────────────────────
+
+/**
+ * Check if the current thread has new messages since the sidebar loaded.
+ * Returns { replied: true, newCount: N } if new messages from Stratus found.
+ */
+function checkForReply_() {
+  var ctx = getEmailContext_();
+  if (!ctx || !ctx.threadId) return { replied: false };
+
+  var storedCount = ctx.threadMessageCount || 0;
+  if (storedCount === 0) return { replied: false };
+
+  try {
+    var thread = GmailApp.getThreadById(ctx.threadId);
+    if (!thread) return { replied: false };
+    var currentCount = thread.getMessageCount();
+
+    if (currentCount > storedCount) {
+      // Check if any of the new messages are from Stratus (i.e. Chris replied)
+      var msgs = thread.getMessages();
+      var STRATUS_DOMAIN = 'stratusinfosystems.com';
+      var newStratusMessages = [];
+      for (var i = storedCount; i < msgs.length; i++) {
+        var fromEmail = (msgs[i].getFrom() || '').toLowerCase();
+        if (fromEmail.indexOf('@' + STRATUS_DOMAIN) !== -1) {
+          newStratusMessages.push({
+            from: msgs[i].getFrom(),
+            date: msgs[i].getDate(),
+            snippet: (msgs[i].getPlainBody() || '').substring(0, 100),
+          });
+        }
+      }
+
+      if (newStratusMessages.length > 0) {
+        // Update stored count so we don't re-trigger
+        ctx.threadMessageCount = currentCount;
+        PropertiesService.getUserProperties().setProperty(
+          'current_email_ctx', JSON.stringify(ctx)
+        );
+        return {
+          replied: true,
+          newCount: currentCount - storedCount,
+          stratusReplies: newStratusMessages,
+          customerEmail: ctx.customerEmail,
+          customerName: ctx.customerName,
+          subject: ctx.subject,
+          threadId: ctx.threadId,
+        };
+      }
+    }
+    return { replied: false };
+  } catch (err) {
+    return { replied: false };
+  }
+}
+
+/**
+ * Action handler: user clicked "Check for Reply" or triggered by interaction.
+ * Shows reply-detected card with follow-up task options.
+ */
+function onCheckReply(e) {
+  var result = checkForReply_();
+  if (!result.replied) {
+    return notify_('No new replies detected in this thread.');
+  }
+  return buildReplyDetectedCard_(result);
+}
+
+/**
+ * Action handler: Create follow-up task after reply detected.
+ */
+function onCreateReplyFollowup(e) {
+  var params = e.commonEventObject.parameters || {};
+  var action = params.followup_action || 'create'; // 'create' or 'extend'
+  var taskId = params.existing_task_id || '';
+  var customerEmail = params.customer_email || '';
+  var customerName = params.customer_name || '';
+  var subject = params.subject || '';
+
+  var ctx = getEmailContext_();
+  var crmCtxRaw = PropertiesService.getUserProperties().getProperty('crm_sidebar_ctx');
+  var crmCtx = crmCtxRaw ? JSON.parse(crmCtxRaw) : {};
+  var accountId = (crmCtx.account && crmCtx.account.id) ? crmCtx.account.id : '';
+  var contactId = (crmCtx.contact && crmCtx.contact.id) ? crmCtx.contact.id : '';
+
+  var dueDate = addBusinessDays_(new Date(), 3);
+  var dueDateStr = formatDate_(dueDate);
+
+  try {
+    if (action === 'extend' && taskId) {
+      // Push existing task out 3 more business days
+      var result = taskAction_('reschedule', taskId, {
+        newDueDate: dueDateStr,
+      });
+      return notify_('Task rescheduled to ' + dueDateStr);
+    } else {
+      // Create new follow-up task
+      var newSubject = 'Follow up: ' + (subject || 'Email reply');
+      var result = taskAction_('create', '', {
+        subject: newSubject,
+        dueDate: dueDateStr,
+        contactId: contactId,
+        accountId: accountId,
+        description: 'Auto-created after replying to thread: ' + (subject || ''),
+      });
+      return notify_('Follow-up task created for ' + dueDateStr);
+    }
+  } catch (err) {
+    return buildErrorCard_('Failed to create follow-up: ' + err.message);
+  }
 }

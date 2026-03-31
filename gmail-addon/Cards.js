@@ -178,45 +178,52 @@ function buildInstantEmailCard_(subject, sender, emailCtx, crmData) {
 
   if (contacts.length > 0) {
     var contactSection = CardService.newCardSection();
+
+    // Show primary contact prominently
+    var primaryContact = null;
     for (var ci = 0; ci < contacts.length; ci++) {
-      var c = contacts[ci];
-      var isSelected = (c.email.toLowerCase() === primaryEmail.toLowerCase());
-
-      if (isSelected) {
-        var contactWidget = CardService.newDecoratedText()
-          .setText('<b>' + (c.name || c.email) + '</b>')
-          .setBottomLabel(c.email)
-          .setWrapText(true);
-
-        if (crmData && crmData.contact && crmData.contact.zohoUrl) {
-          contactWidget.setButton(
-            CardService.newTextButton()
-              .setText('Zoho')
-              .setOpenLink(CardService.newOpenLink().setUrl(crmData.contact.zohoUrl))
-          );
-        }
-        contactSection.addWidget(contactWidget);
+      if (contacts[ci].email.toLowerCase() === primaryEmail.toLowerCase()) {
+        primaryContact = contacts[ci];
+        break;
       }
     }
+    if (!primaryContact) primaryContact = { email: primaryEmail, name: primaryEmail.split('@')[0] };
 
-    // Show other contacts as switchable buttons if more than 1
+    var contactWidget = CardService.newDecoratedText()
+      .setText('<b>' + (primaryContact.name || primaryContact.email) + '</b>')
+      .setBottomLabel(primaryContact.email)
+      .setWrapText(true);
+
+    if (crmData && crmData.contact && crmData.contact.zohoUrl) {
+      contactWidget.setButton(
+        CardService.newTextButton()
+          .setText('Zoho')
+          .setOpenLink(CardService.newOpenLink().setUrl(crmData.contact.zohoUrl))
+      );
+    }
+    contactSection.addWidget(contactWidget);
+
+    // Dropdown to switch contacts (only if multiple)
     if (contacts.length > 1) {
-      var switchBtns = CardService.newButtonSet();
-      for (var si = 0; si < Math.min(contacts.length, 5); si++) {
-        var sc = contacts[si];
-        if (sc.email.toLowerCase() === primaryEmail.toLowerCase()) continue;
-        switchBtns.addButton(
-          CardService.newTextButton()
-            .setText(sc.name !== sc.email ? sc.name : sc.email.split('@')[0])
-            .setOnClickAction(
-              CardService.newAction()
-                .setFunctionName('onContactSwitch')
-                .setParameters({ contact_email: sc.email })
-            )
+      var contactDropdown = CardService.newSelectionInput()
+        .setFieldName('contact_selector')
+        .setTitle('Switch Contact')
+        .setType(CardService.SelectionInputType.DROPDOWN)
+        .setOnChangeAction(
+          CardService.newAction().setFunctionName('onContactSwitch')
         );
+
+      for (var si = 0; si < Math.min(contacts.length, 10); si++) {
+        var sc = contacts[si];
+        var label = (sc.name && sc.name !== sc.email)
+          ? sc.name + ' (' + sc.email + ')'
+          : sc.email;
+        var isDefault = (sc.email.toLowerCase() === primaryEmail.toLowerCase());
+        contactDropdown.addItem(label, sc.email, isDefault);
       }
-      contactSection.addWidget(switchBtns);
+      contactSection.addWidget(contactDropdown);
     }
+
     card.addSection(contactSection);
   } else {
     var senderSection = CardService.newCardSection();
@@ -381,6 +388,13 @@ function buildInstantEmailCard_(subject, sender, emailCtx, crmData) {
       .setOnClickAction(CardService.newAction().setFunctionName('onCreateZohoQuote'))
   );
   actionsSection.addWidget(actionButtons2);
+
+  // Reply detection button
+  actionsSection.addWidget(
+    CardService.newTextButton()
+      .setText('Check for Reply / Create Follow-up')
+      .setOnClickAction(CardService.newAction().setFunctionName('onCheckReply'))
+  );
 
   card.addSection(actionsSection);
 
@@ -1584,6 +1598,83 @@ function buildQuoteBuilderCard_(prefill) {
   );
 
   card.addSection(section);
+  return card.build();
+}
+
+// REPLY DETECTED CARD
+// ═══════════════════════════════════════════
+
+function buildReplyDetectedCard_(result) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Reply Detected')
+        .setSubtitle(result.newCount + ' new message(s) in thread')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection()
+    .setHeader('You replied to this thread');
+
+  section.addWidget(
+    CardService.newTextParagraph().setText(
+      '<b>Subject:</b> ' + (result.subject || '(no subject)') + '\n' +
+      '<b>Customer:</b> ' + (result.customerName || result.customerEmail || 'Unknown')
+    )
+  );
+
+  if (result.stratusReplies && result.stratusReplies.length > 0) {
+    var reply = result.stratusReplies[result.stratusReplies.length - 1];
+    section.addWidget(
+      CardService.newTextParagraph().setText(
+        '<i>"' + (reply.snippet || '').substring(0, 80) + '..."</i>'
+      )
+    );
+  }
+
+  section.addWidget(
+    CardService.newTextParagraph().setText(
+      '\nWould you like to create a follow-up task?'
+    )
+  );
+
+  var baseParams = {
+    customer_email: result.customerEmail || '',
+    customer_name: result.customerName || '',
+    subject: result.subject || '',
+  };
+
+  // Option 1: Create new follow-up task (3 business days)
+  var createParams = {};
+  for (var k in baseParams) createParams[k] = baseParams[k];
+  createParams.followup_action = 'create';
+
+  var buttons = CardService.newButtonSet();
+  buttons.addButton(
+    CardService.newTextButton()
+      .setText('Create Follow-up (3 days)')
+      .setOnClickAction(
+        CardService.newAction()
+          .setFunctionName('onCreateReplyFollowup')
+          .setParameters(createParams)
+      )
+      .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+      .setBackgroundColor(CONFIG.STRATUS_BLUE)
+  );
+  section.addWidget(buttons);
+
+  // Option 2: Dismiss
+  section.addWidget(
+    CardService.newTextButton()
+      .setText('Dismiss')
+      .setOnClickAction(
+        CardService.newAction().setFunctionName('onBackToEmail')
+      )
+  );
+
+  card.addSection(section);
+  addBackToEmailButton_(card);
   return card.build();
 }
 
