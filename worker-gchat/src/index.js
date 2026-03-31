@@ -6576,47 +6576,94 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
 
             try {
               let tasks = [];
+              const taskFields = 'Subject, Status, Due_Date, Priority, Description, What_Id, Who_Id, Owner';
+              const seenTaskIds = new Set();
 
-              // Fetch open tasks via COQL
-              let coql;
+              const mapTask = (t) => ({
+                id: t.id,
+                subject: t.Subject || '(no subject)',
+                status: t.Status || 'Not Started',
+                dueDate: t.Due_Date || null,
+                priority: t.Priority || 'Normal',
+                description: t.Description ? t.Description.substring(0, 200) : '',
+                dealId: t.What_Id?.id || null,
+                dealName: t.What_Id?.name || null,
+                contactId: t.Who_Id?.id || null,
+                contactName: t.Who_Id?.name || null,
+                ownerName: t.Owner?.name || '',
+                zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+              });
+
+              // Strategy 1: Query by contact (Who_Id) - most reliable, single-level lookup
+              if (actContactId) {
+                try {
+                  const contactCoql = `select ${taskFields} from Tasks where Who_Id = '${actContactId}' and Status not in ('Completed') order by Due_Date asc limit 25`;
+                  const contactResp = await zohoApiCall('POST', 'coql', env, { select_query: contactCoql });
+                  if (contactResp?.data) {
+                    for (const t of contactResp.data) {
+                      if (!seenTaskIds.has(t.id)) {
+                        seenTaskIds.add(t.id);
+                        tasks.push(mapTask(t));
+                      }
+                    }
+                  }
+                } catch (_) { /* contact query failed, continue to deal-based */ }
+              }
+
+              // Strategy 2: Query by deal IDs (for tasks not linked to a contact directly)
               if (actAcctId) {
-                coql = `select Subject, Status, Due_Date, Priority, Description, What_Id, Who_Id, Owner from Tasks where What_Id.Account_Name.id = '${actAcctId}' and Status not in ('Completed') order by Due_Date asc limit 25`;
-              } else {
-                coql = `select Subject, Status, Due_Date, Priority, Description, What_Id, Who_Id, Owner from Tasks where Who_Id = '${actContactId}' and Status not in ('Completed') order by Due_Date asc limit 25`;
+                try {
+                  // First get the account's deal IDs
+                  const dealsCoql = `select id from Deals where Account_Name = '${actAcctId}' and Stage not in ('Closed (Lost)') limit 50`;
+                  const dealsResp = await zohoApiCall('POST', 'coql', env, { select_query: dealsCoql });
+                  if (dealsResp?.data && dealsResp.data.length > 0) {
+                    const dealIds = dealsResp.data.map(d => `'${d.id}'`).join(',');
+                    const dealTaskCoql = `select ${taskFields} from Tasks where What_Id in (${dealIds}) and Status not in ('Completed') order by Due_Date asc limit 25`;
+                    const dealTaskResp = await zohoApiCall('POST', 'coql', env, { select_query: dealTaskCoql });
+                    if (dealTaskResp?.data) {
+                      for (const t of dealTaskResp.data) {
+                        if (!seenTaskIds.has(t.id)) {
+                          seenTaskIds.add(t.id);
+                          tasks.push(mapTask(t));
+                        }
+                      }
+                    }
+                  }
+                } catch (_) { /* deal-based query failed, continue with what we have */ }
               }
 
-              const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
-              if (taskResp?.data) {
-                tasks = taskResp.data.map(t => ({
-                  id: t.id,
-                  subject: t.Subject || '(no subject)',
-                  status: t.Status || 'Not Started',
-                  dueDate: t.Due_Date || null,
-                  priority: t.Priority || 'Normal',
-                  description: t.Description ? t.Description.substring(0, 200) : '',
-                  dealId: t.What_Id?.id || null,
-                  dealName: t.What_Id?.name || null,
-                  contactId: t.Who_Id?.id || null,
-                  contactName: t.Who_Id?.name || null,
-                  ownerName: t.Owner?.name || '',
-                  zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
-                }));
-              }
+              // Sort merged results by due date
+              tasks.sort((a, b) => {
+                if (!a.dueDate) return 1;
+                if (!b.dueDate) return -1;
+                return a.dueDate.localeCompare(b.dueDate);
+              });
 
               // Also fetch recently completed tasks (last 5)
               let recentCompleted = [];
               try {
-                const compCoql = actAcctId
-                  ? `select Subject, Status, Due_Date, Modified_Time from Tasks where What_Id.Account_Name.id = '${actAcctId}' and Status = 'Completed' order by Modified_Time desc limit 5`
-                  : `select Subject, Status, Due_Date, Modified_Time from Tasks where Who_Id = '${actContactId}' and Status = 'Completed' order by Modified_Time desc limit 5`;
-                const compResp = await zohoApiCall('POST', 'coql', env, { select_query: compCoql });
-                if (compResp?.data) {
-                  recentCompleted = compResp.data.map(t => ({
-                    id: t.id,
-                    subject: t.Subject || '',
-                    completedDate: t.Modified_Time ? t.Modified_Time.split('T')[0] : '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
-                  }));
+                let compCoql;
+                if (actContactId) {
+                  compCoql = `select Subject, Status, Due_Date, Modified_Time from Tasks where Who_Id = '${actContactId}' and Status = 'Completed' order by Modified_Time desc limit 5`;
+                } else if (actAcctId) {
+                  // Get deal IDs for account, then completed tasks for those deals
+                  const dealsCoql2 = `select id from Deals where Account_Name = '${actAcctId}' limit 50`;
+                  const dealsResp2 = await zohoApiCall('POST', 'coql', env, { select_query: dealsCoql2 });
+                  if (dealsResp2?.data && dealsResp2.data.length > 0) {
+                    const dealIds2 = dealsResp2.data.map(d => `'${d.id}'`).join(',');
+                    compCoql = `select Subject, Status, Due_Date, Modified_Time from Tasks where What_Id in (${dealIds2}) and Status = 'Completed' order by Modified_Time desc limit 5`;
+                  }
+                }
+                if (compCoql) {
+                  const compResp = await zohoApiCall('POST', 'coql', env, { select_query: compCoql });
+                  if (compResp?.data) {
+                    recentCompleted = compResp.data.map(t => ({
+                      id: t.id,
+                      subject: t.Subject || '',
+                      completedDate: t.Modified_Time ? t.Modified_Time.split('T')[0] : '',
+                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+                    }));
+                  }
                 }
               } catch (_) { /* recent completed is optional */ }
 
