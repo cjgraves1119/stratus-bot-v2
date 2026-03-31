@@ -226,12 +226,27 @@ function onTaskComplete(e) {
   return buildTaskResultCard_(result);
 }
 
-/** Task action: reschedule to +3 business days */
-function onTaskReschedule(e) {
-  var taskId = e.parameters.task_id || '';
+/** Task action: close/complete only (no follow-up) */
+function onTaskCloseOnly(e) {
+  var params = e.commonEventObject.parameters || e.parameters || {};
+  var taskId = params.task_id || '';
   if (!taskId) return notify_('No task ID.');
 
-  // Calculate 3 business days from today
+  var result;
+  try {
+    result = taskAction_('complete', taskId, {});
+  } catch (err) {
+    return buildErrorCard_('Close failed: ' + err.message);
+  }
+
+  return buildTaskResultCard_(result);
+}
+
+/** Task action: reschedule to +3 business days */
+function onTaskReschedule(e) {
+  var taskId = (e.commonEventObject && e.commonEventObject.parameters ? e.commonEventObject.parameters.task_id : '') || (e.parameters ? e.parameters.task_id : '') || '';
+  if (!taskId) return notify_('No task ID.');
+
   var newDate = addBusinessDays_(new Date(), 3);
 
   var result;
@@ -246,13 +261,34 @@ function onTaskReschedule(e) {
   return buildTaskResultCard_(result);
 }
 
-/** Task action: edit with custom subject/date */
+/** Show inline edit form for a task */
+function onTaskShowEdit(e) {
+  var params = e.commonEventObject.parameters || e.parameters || {};
+  return buildTaskEditCard_(params);
+}
+
+/** Task action: save edits (subject and/or date) */
 function onTaskEdit(e) {
-  var taskId = e.parameters.task_id || '';
+  var params = e.commonEventObject.parameters || e.parameters || {};
+  var taskId = params.task_id || '';
   if (!taskId) return notify_('No task ID.');
 
-  var newSubject = e.formInput.edit_subject || '';
-  var newDueDate = e.formInput.edit_date || '';
+  var formInput = e.formInput || {};
+  var newSubject = (formInput.edit_subject || '').trim();
+
+  // Handle DatePicker input
+  var newDueDate = '';
+  var dateInputs = e.commonEventObject ? e.commonEventObject.formInputs : null;
+  if (dateInputs && dateInputs.edit_due_date && dateInputs.edit_due_date.dateInput) {
+    var ms = dateInputs.edit_due_date.dateInput.msSinceEpoch;
+    if (ms) {
+      var d = new Date(parseInt(ms));
+      newDueDate = formatDate_(d);
+    }
+  }
+  if (!newDueDate && formInput.edit_due_date) {
+    newDueDate = (formInput.edit_due_date || '').trim();
+  }
 
   if (!newSubject && !newDueDate) {
     return notify_('Enter a new subject or date.');

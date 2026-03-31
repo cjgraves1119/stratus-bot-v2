@@ -5796,6 +5796,18 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                   break;
                 }
 
+                case 'complete': {
+                  // Just close the task, no successor
+                  const compOnlyResp = await zohoApiCall('PUT', `Tasks/${taskId}`, env, {
+                    data: [{ Status: 'Completed' }]
+                  });
+                  if (compOnlyResp.data && compOnlyResp.data[0] && compOnlyResp.data[0].code !== 'SUCCESS') {
+                    throw new Error('Failed to complete task: ' + (compOnlyResp.data[0].message || 'unknown'));
+                  }
+                  apiResult = { success: true, action: 'complete', taskId };
+                  break;
+                }
+
                 case 'reschedule': {
                   if (!newDueDate) {
                     return new Response(JSON.stringify({ error: 'newDueDate required for reschedule' }), { status: 400, headers: jsonHeaders });

@@ -1600,6 +1600,75 @@ function buildQuoteBuilderCard_(prefill) {
   card.addSection(section);
   return card.build();
 }
+// TASK EDIT CARD
+// ===============================================
+
+function buildTaskEditCard_(params) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Edit Task')
+        .setSubtitle(params.task_subject || '')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection();
+
+  // Editable subject
+  section.addWidget(
+    CardService.newTextInput()
+      .setFieldName('edit_subject')
+      .setTitle('Subject')
+      .setValue(params.task_subject || '')
+      .setMultiline(false)
+  );
+
+  // DatePicker for due date
+  var currentDueMs = null;
+  if (params.task_due_date) {
+    var parts = params.task_due_date.split('-');
+    if (parts.length === 3) {
+      currentDueMs = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2])).getTime();
+    }
+  }
+  if (!currentDueMs) {
+    currentDueMs = addBusinessDays_(new Date(), 3).getTime();
+  }
+
+  section.addWidget(
+    CardService.newDatePicker()
+      .setFieldName('edit_due_date')
+      .setTitle('Due Date')
+      .setValueInMsSinceEpoch(currentDueMs)
+  );
+
+  // Save button
+  var saveParams = {
+    task_id: params.task_id || '',
+    deal_id: params.deal_id || '',
+    contact_id: params.contact_id || '',
+  };
+
+  section.addWidget(
+    CardService.newButtonSet().addButton(
+      CardService.newTextButton()
+        .setText('Save Changes')
+        .setOnClickAction(
+          CardService.newAction()
+            .setFunctionName('onTaskEdit')
+            .setParameters(saveParams)
+        )
+        .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+        .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    )
+  );
+
+  card.addSection(section);
+  addBackToEmailButton_(card);
+  return card.build();
+}
+
 
 // REPLY DETECTED CARD
 // ═══════════════════════════════════════════
@@ -2139,6 +2208,7 @@ function buildCrmTasksTab_(card, activitiesResult, tabParams) {
         deal_id: task.dealId || '',
         contact_id: task.contactId || '',
         task_subject: task.subject || '',
+        task_due_date: task.dueDate || '',
       };
 
       var actionBtns = CardService.newButtonSet();
@@ -2155,14 +2225,26 @@ function buildCrmTasksTab_(card, activitiesResult, tabParams) {
       );
       actionBtns.addButton(
         CardService.newTextButton()
-          .setText('+3d')
+          .setText('Close Task')
           .setOnClickAction(
             CardService.newAction()
-              .setFunctionName('onTaskReschedule')
+              .setFunctionName('onTaskCloseOnly')
               .setParameters(taskActionParams)
           )
       );
       taskSection.addWidget(actionBtns);
+
+      var editBtn = CardService.newButtonSet();
+      editBtn.addButton(
+        CardService.newTextButton()
+          .setText('Edit')
+          .setOnClickAction(
+            CardService.newAction()
+              .setFunctionName('onTaskShowEdit')
+              .setParameters(taskActionParams)
+          )
+      );
+      taskSection.addWidget(editBtn);
 
       card.addSection(taskSection);
     }
