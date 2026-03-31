@@ -52,13 +52,52 @@ function onGmailMessage(e) {
     }
   }
 
+  // Identify the external customer (non-Stratus) from the thread.
+  // When the most recent message is an outbound reply from Chris, the "sender"
+  // is @stratusinfosystems.com — which is wrong for CRM lookups. We walk the
+  // thread to find the actual external contact and use their info instead.
+  var STRATUS_DOMAIN = 'stratusinfosystems.com';
+  var isOutbound = (senderParts.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) !== -1);
+  var customerEmail = '';
+  var customerName = '';
+  var customerDomain = '';
+
+  // Walk thread messages (chronologically) to find the first external sender.
+  for (var k = 0; k < messages.length; k++) {
+    var threadMsg = messages[k];
+    var fromParsed = parseSender_(threadMsg.getFrom() || '');
+    if (fromParsed.email && fromParsed.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) === -1) {
+      customerEmail = fromParsed.email;
+      customerName = fromParsed.name;
+      customerDomain = fromParsed.email.split('@')[1] || '';
+      break;
+    }
+  }
+
+  // If this is an outbound message, use the body of the most recent inbound
+  // message so the AI and CRM agent have the customer's actual content.
+  var bodyToUse = body;
+  if (isOutbound && customerEmail) {
+    for (var k2 = messages.length - 1; k2 >= 0; k2--) {
+      var inboundParsed = parseSender_(messages[k2].getFrom() || '');
+      if (inboundParsed.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) === -1) {
+        bodyToUse = messages[k2].getPlainBody() || body;
+        break;
+      }
+    }
+  }
+
   // Store email context for action handlers (no API call here)
   var emailCtx = {
     messageId: messageId,
     subject: subject,
-    body: body.substring(0, CONFIG.MAX_EMAIL_BODY_CHARS),
+    body: bodyToUse.substring(0, CONFIG.MAX_EMAIL_BODY_CHARS),
     senderEmail: senderParts.email,
     senderName: senderParts.name,
+    customerEmail: customerEmail,
+    customerName: customerName,
+    customerDomain: customerDomain,
+    isOutbound: isOutbound,
     threadId: thread.getId(),
     allEmails: Object.keys(allEmails),
     allDomains: Object.keys(allDomains),
@@ -243,9 +282,13 @@ function onDraftReply(e) {
   var ctx = getEmailContext_();
   if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
 
+  // Use the external customer's info when the open message is outbound.
+  var replyToEmail = (ctx.isOutbound && ctx.customerEmail) ? ctx.customerEmail : ctx.senderEmail;
+  var replyToName  = (ctx.isOutbound && ctx.customerName)  ? ctx.customerName  : ctx.senderName;
+
   var result;
   try {
-    result = draftReply_(ctx.subject, ctx.body, ctx.senderEmail, ctx.senderName, tone, '');
+    result = draftReply_(ctx.subject, ctx.body, replyToEmail, replyToName, tone, '');
   } catch (err) {
     return buildErrorCard_('Draft generation failed: ' + err.message);
   }
@@ -259,9 +302,13 @@ function onDraftReplyCustom(e) {
   var ctx = getEmailContext_();
   if (!ctx) return buildErrorCard_('No email context. Please reopen the email.');
 
+  // Use the external customer's info when the open message is outbound.
+  var replyToEmail = (ctx.isOutbound && ctx.customerEmail) ? ctx.customerEmail : ctx.senderEmail;
+  var replyToName  = (ctx.isOutbound && ctx.customerName)  ? ctx.customerName  : ctx.senderName;
+
   var result;
   try {
-    result = draftReply_(ctx.subject, ctx.body, ctx.senderEmail, ctx.senderName, tone, instructions);
+    result = draftReply_(ctx.subject, ctx.body, replyToEmail, replyToName, tone, instructions);
   } catch (err) {
     return buildErrorCard_('Draft generation failed: ' + err.message);
   }
@@ -345,17 +392,29 @@ function buildEmailContextForHandoff_(e) {
     var raw = PropertiesService.getUserProperties().getProperty('current_email_ctx');
     if (!raw) return null;
     var ctx = JSON.parse(raw);
+
+    // If the currently-open message is an outbound reply (Chris sent it),
+    // use the external customer's email/name for CRM lookups instead of Chris's.
+    // This prevents the bot from creating records under Stratus Information Systems.
+    var contactEmail = (ctx.isOutbound && ctx.customerEmail)
+      ? ctx.customerEmail
+      : (ctx.senderEmail || '');
+    var contactName = (ctx.isOutbound && ctx.customerName)
+      ? ctx.customerName
+      : (ctx.senderName || ctx.senderEmail || '');
+
     var senderDomain = '';
-    if (ctx.senderEmail && ctx.senderEmail.indexOf('@') !== -1) {
-      senderDomain = ctx.senderEmail.split('@')[1] || '';
+    if (contactEmail && contactEmail.indexOf('@') !== -1) {
+      senderDomain = contactEmail.split('@')[1] || '';
     }
     return {
       subject:      ctx.subject      || '(no subject)',
-      senderEmail:  ctx.senderEmail  || '',
-      senderName:   ctx.senderName   || ctx.senderEmail || '',
+      senderEmail:  contactEmail,
+      senderName:   contactName,
       senderDomain: senderDomain,
       body:         (ctx.body || '').substring(0, 2000),
       accountName:  ctx.accountName  || null,
+      isOutbound:   ctx.isOutbound   || false,
     };
   } catch (err) {
     console.error('[HANDOFF] buildEmailContextForHandoff_ error: ' + err.message);
