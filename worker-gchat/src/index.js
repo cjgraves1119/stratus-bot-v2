@@ -6026,7 +6026,10 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
 
             let handoffReply;
             try {
-              const handoffIntent = detectCrmEmailIntent(compositeMessage);
+              // Check handoffText (user's actual request), NOT compositeMessage.
+              // The compositeMessage header always contains "Subject:" which would
+              // trigger the email pattern and cause false CRM routing for pure quoting requests.
+              const handoffIntent = detectCrmEmailIntent(handoffText);
               const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
 
               if (handoffIntent.hasAny && hasCrmCreds) {
@@ -6036,24 +6039,23 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 );
                 await sendAsyncGChatMessage(targetSpaceName, thinkingMsg, null, env);
 
-                // Process CRM request and send full response
-                ctx.waitUntil((async () => {
-                  try {
-                    const crmReply = await handleCrmRequest(compositeMessage, handoffPersonId, env);
-                    if (crmReply) {
-                      await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
-                      await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', crmReply);
-                      const formattedCrmReply = adaptMarkdownForGChat(
-                        truncateGChatReply(`*From Gmail sidebar (Re: ${subject})*\n\n` + crmReply)
-                      );
-                      await sendAsyncGChatMessage(targetSpaceName, formattedCrmReply, null, env);
-                    }
-                  } catch (asyncErr) {
-                    console.error(`[HANDOFF] Async CRM error: ${asyncErr.message}`);
-                    await sendAsyncGChatMessage(targetSpaceName,
-                      `Something went wrong: ${asyncErr.message.substring(0, 200)}`, null, env);
-                  }
-                })());
+                // Process CRM request via /_work (same pattern as the main GChat handler)
+                // handleCrmRequest doesn't exist as a standalone function — CRM agentic work
+                // is handled by /_work which calls askClaude with tool use enabled.
+                const handoffWorkToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                await env.CONVERSATION_KV.put(`work_${handoffWorkToken}`, JSON.stringify({
+                  text: compositeMessage,
+                  personId: handoffPersonId,
+                  spaceName: targetSpaceName,
+                  ts: new Date().toISOString()
+                }), { expirationTtl: 600 });
+                ctx.waitUntil(
+                  env.SELF.fetch(new Request('https://self/_work', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: handoffWorkToken })
+                  })).catch(e => console.error(`[HANDOFF] Work dispatch error: ${e.message}`))
+                );
                 handoffReply = '(async — full response incoming in GChat)';
               } else {
                 // Quoting / Claude fallback — synchronous
