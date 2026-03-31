@@ -6507,65 +6507,28 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 }
                 await env.CONVERSATION_KV.put(dedupKey, 'active', { expirationTtl: 60 }); // 60s dedup window
 
-                // ARCHITECTURE: ctx.waitUntil gets killed ~30s after HTTP response is sent
-                // (even on paid plans). To get unlimited wall-clock time, we must NOT
-                // return the HTTP response until CRM work completes. The sidebar will
-                // time out (~55s), but that's fine — it already shows "processing" and
-                // results are delivered via GChat.
-                //
-                // Flow: send "thinking" to GChat → run askClaude synchronously →
-                // send result to GChat → return HTTP response (sidebar may have timed out)
+                // ARCHITECTURE: Dispatch to /_work via Service Binding for unlimited wall time.
+                // Return 200 immediately so Apps Script never hits the 30s execution limit.
+                // /_work sends "Working on it..." to GChat, dots update via progressCallback,
+                // and the final answer replaces the placeholder when the agentic loop finishes.
+                const workToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                await env.CONVERSATION_KV.put(`work_${workToken}`, JSON.stringify({
+                  text: compositeMessage,
+                  personId: handoffPersonId,
+                  spaceName: targetSpaceName,
+                  threadName: null,
+                  imageData: null
+                }), { expirationTtl: 60 });
 
-                const thinkingMsg = adaptMarkdownForGChat(
-                  `*Processing your request...*\n_Re: ${subject} from ${senderName}_\n\nLooking that up now — full response incoming shortly.`
-                );
-                await sendAsyncGChatMessage(targetSpaceName, thinkingMsg, null, env);
+                // Fire-and-forget via Service Binding — no await, returns immediately
+                ctx.waitUntil(env.SELF.fetch(new Request('https://self/_work', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ token: workToken })
+                })));
 
-                const _hStart = Date.now();
-                console.log(`[HANDOFF-SYNC] Starting CRM work for: "${compositeMessage.substring(0, 80)}..."`);
-
-                const progressCb = async (msg) => {
-                  const formatted = adaptMarkdownForGChat(msg);
-                  await sendAsyncGChatMessage(targetSpaceName, formatted, null, env);
-                };
-
-                let result = await askClaude(compositeMessage, handoffPersonId, env, null, true, progressCb, 300000);
-                console.log(`[HANDOFF-SYNC] askClaude completed in ${Date.now() - _hStart}ms`);
-
-                // Handle continuation if needed
-                if (result && result.__continuation) {
-                  console.log(`[HANDOFF-SYNC] Continuation needed at iteration ${result.iteration}`);
-                  const contResult = await askClaudeContinue(
-                    result.messages, result.tools, result.systemPrompt,
-                    result.iteration, env, progressCb, 300000
-                  );
-                  if (typeof contResult === 'string') result = contResult;
-                  else if (contResult?.reply) result = contResult.reply;
-                  else result = 'CRM workflow completed.';
-                }
-
-                let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
-                finalReply = adaptMarkdownForGChat(finalReply);
-                finalReply = truncateGChatReply(finalReply);
-                await sendAsyncGChatMessage(targetSpaceName, finalReply, null, env);
-
-                if (handoffPersonId) {
-                  await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
-                  await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', finalReply);
-                  await env.CONVERSATION_KV.put(`crm_session_${handoffPersonId}`, 'active', { expirationTtl: 1800 });
-
-                  // Persist the final summary under a stable key so it survives
-                  // a "stop" command clearing the active session. If the user asks
-                  // "what did you just create?" or "show me the links" after stopping,
-                  // the CRM agent can retrieve this without re-running the workflow.
-                  await env.CONVERSATION_KV.put(
-                    `last_crm_result_${handoffPersonId}`,
-                    JSON.stringify({ ts: Date.now(), summary: finalReply.substring(0, 3000) }),
-                    { expirationTtl: 86400 }  // 24-hour TTL
-                  );
-                }
-                console.log(`[HANDOFF-SYNC] Completed in ${Date.now() - _hStart}ms total`);
-                handoffReply = finalReply;
+                console.log(`[HANDOFF] Dispatched CRM work to /_work, token=${workToken}`);
+                handoffReply = 'Processing — check Google Chat for your results.';
               } else {
                 // Quoting / Claude fallback — synchronous
                 const handoffParsed = parseMessage(compositeMessage);
@@ -7039,17 +7002,34 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         await env.CONVERSATION_KV.delete(`work_${token}`);
         const state = JSON.parse(stateJson);
         const kv = env.CONVERSATION_KV;
-        const { text, personId, spaceName } = state;
+        const { text, personId, spaceName, threadName, imageData } = state;
         console.log(`[GCHAT-WORK] Starting CRM work for: "${text.substring(0, 80)}..."`);
 
+        // Send initial "Working on it..." message and record messageName for dot-cycling.
+        // Progress callback patches this message with dots on each tool-call iteration
+        // (no setInterval needed — natural heartbeat from Claude's agentic loop).
+        let _progressMsgName = null;
+        let _dotIdx = 0;
         try {
-          const progressCallback = async (msg) => {
-            const formatted = adaptMarkdownForGChat(msg);
-            await sendAsyncGChatMessage(spaceName, formatted, null, env);
-          };
+          const thinkingMsg = await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', threadName || null, env);
+          _progressMsgName = thinkingMsg?.name || null;
+        } catch (_) { /* proceed without progress message */ }
 
-          // 5-minute safety-net deadline (unlimited wall time available)
-          let result = await askClaude(text, personId, env, null, true, progressCallback, 300000);
+        const progressCallback = _progressMsgName
+          ? async (_msg) => {
+              _dotIdx++;
+              const dot = ['.', '..', '...'][_dotIdx % 3];
+              try { await updateGChatMessage(_progressMsgName, `⏳ Working on it${dot}`, env); } catch (_) {}
+            }
+          : async (msg) => {
+              // Fallback: no messageName, send new messages for each step
+              const formatted = adaptMarkdownForGChat(msg);
+              await sendAsyncGChatMessage(spaceName, formatted, threadName || null, env);
+            };
+
+        try {
+          // 5-minute safety-net deadline (unlimited wall time available in /_work)
+          let result = await askClaude(text, personId, env, imageData || null, true, progressCallback, 300000);
           console.log(`[GCHAT-WORK] askClaude completed in ${Date.now() - _workStart}ms`);
 
           // Handle continuation (safety net for 5-min deadline)
@@ -7059,8 +7039,11 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             await kv.put(`cont_${contToken}`, JSON.stringify({
               ...result,
               spaceName,
+              threadName: threadName || null,
               personId,
               originalText: text,
+              progressMsgName: _progressMsgName,
+              dotIdx: _dotIdx,
               segment: 1
             }), { expirationTtl: 300 });
             // Chain via Service Binding — unlimited wall time
@@ -7070,11 +7053,15 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               body: JSON.stringify({ token: contToken })
             }));
           } else {
-            // Normal completion
+            // Normal completion — update progress message (or send new if no name)
             let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
             finalReply = adaptMarkdownForGChat(finalReply);
             finalReply = truncateGChatReply(finalReply);
-            await sendAsyncGChatMessage(spaceName, finalReply, null, env);
+            if (_progressMsgName) {
+              await updateGChatMessage(_progressMsgName, finalReply, env);
+            } else {
+              await sendAsyncGChatMessage(spaceName, finalReply, threadName || null, env);
+            }
             if (personId) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', finalReply);
@@ -7084,6 +7071,14 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           console.log(`[GCHAT-WORK] Completed in ${Date.now() - _workStart}ms total`);
         } catch (err) {
           console.error(`[GCHAT-WORK] Error: ${err.message}`);
+          const errMsg = `❌ Sorry, I ran into an issue processing that request.\n\n_Error: ${err.message.substring(0, 200)}_`;
+          try {
+            if (_progressMsgName) {
+              await updateGChatMessage(_progressMsgName, errMsg, env);
+            } else {
+              await sendAsyncGChatMessage(spaceName, errMsg, threadName || null, env);
+            }
+          } catch (_) {}
           try {
             await kv.put(`work_error_${Date.now()}`, JSON.stringify({
               error: err.message,
@@ -7091,11 +7086,6 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               ts: new Date().toISOString(),
               elapsed: Date.now() - _workStart
             }), { expirationTtl: 3600 });
-          } catch (_) {}
-          try {
-            await sendAsyncGChatMessage(spaceName,
-              `Sorry, I ran into an issue processing that CRM request. Try again or rephrase your question.\n\n_Error: ${err.message.substring(0, 200)}_`,
-              null, env);
           } catch (_) {}
         }
 
@@ -7120,12 +7110,20 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         const kv = env.CONVERSATION_KV;
         console.log(`[GCHAT-CONTINUE] Resuming from iteration ${state.iteration}, segment ${state.segment || 1}`);
 
-        try {
-          const progressCallback = async (msg) => {
-            const formatted = adaptMarkdownForGChat(msg);
-            await sendAsyncGChatMessage(state.spaceName, formatted, null, env);
-          };
+        const _contProgressMsgName = state.progressMsgName || null;
+        let _contDotIdx = state.dotIdx || 0;
+        const progressCallback = _contProgressMsgName
+          ? async (_msg) => {
+              _contDotIdx++;
+              const dot = ['.', '..', '...'][_contDotIdx % 3];
+              try { await updateGChatMessage(_contProgressMsgName, `⏳ Working on it${dot}`, env); } catch (_) {}
+            }
+          : async (msg) => {
+              const formatted = adaptMarkdownForGChat(msg);
+              await sendAsyncGChatMessage(state.spaceName, formatted, state.threadName || null, env);
+            };
 
+        try {
           // 5-minute deadline as safety net (unlimited wall time available)
           const result = await askClaudeContinue(
             state.messages, state.tools, state.systemPrompt,
@@ -7138,8 +7136,11 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             await kv.put(`cont_${nextToken}`, JSON.stringify({
               ...result,
               spaceName: state.spaceName,
+              threadName: state.threadName || null,
               personId: state.personId,
               originalText: state.originalText,
+              progressMsgName: _contProgressMsgName,
+              dotIdx: _contDotIdx,
               segment: (state.segment || 1) + 1
             }), { expirationTtl: 300 });
             console.log(`[GCHAT-CONTINUE] Chaining to segment ${(state.segment || 1) + 1}`);
@@ -7150,11 +7151,15 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               body: JSON.stringify({ token: nextToken })
             }));
           } else {
-            // Final response
+            // Final response — update progress message or send new
             let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
             finalReply = adaptMarkdownForGChat(finalReply);
             finalReply = truncateGChatReply(finalReply);
-            await sendAsyncGChatMessage(state.spaceName, finalReply, null, env);
+            if (_contProgressMsgName) {
+              await updateGChatMessage(_contProgressMsgName, finalReply, env);
+            } else {
+              await sendAsyncGChatMessage(state.spaceName, finalReply, state.threadName || null, env);
+            }
             if (state.personId) {
               await addToHistory(kv, state.personId, 'user', state.originalText || '');
               await addToHistory(kv, state.personId, 'assistant', finalReply);
@@ -7587,99 +7592,34 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
 
             if (spaceName && hasAsyncCreds) {
-              // ARCHITECTURE: ctx.waitUntil gets killed ~30s after the HTTP response
-              // is returned (CF platform limit). For the GChat webhook, we can't hold
-              // the response open (Google Chat has a 30s sync timeout). Instead:
-              // 1. Return a quick "thinking" response synchronously
-              // 2. Use ctx.waitUntil for the CRM work (best effort, ~30s budget)
-              // 3. Progress indicator: update the thinking message with animated dots
-              //    so the user knows the bot is still working.
-              //
-              // For CRM requests that need >30s, use the Gmail sidebar handoff path
-              // which processes SYNCHRONOUSLY (no response until done = unlimited time).
-              const _crmSpaceName = spaceName;
-              const _crmThreadName = threadName;
-              const _crmPersonId = personId;
-              const _crmText = text;
-              const _crmKv = kv;
-              ctx.waitUntil((async () => {
-                const _crmStart = Date.now();
-                let _progressMsgName = null;
-                let _progressInterval = null;
+              // ARCHITECTURE: Dispatch CRM work to /_work via Service Binding.
+              // /_work runs in its own HTTP request context with unlimited wall time —
+              // no ctx.waitUntil budget limit, no setInterval needed.
+              // Flow: save state to KV → ctx.waitUntil(env.SELF.fetch(/_work)) → return {} immediately.
+              // /_work sends "Working on it..." to GChat, dots update via progressCallback,
+              // final answer replaces the placeholder message when done.
+              const workToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+              const workState = {
+                text,
+                personId,
+                spaceName,
+                threadName: threadName || null,
+                // Include image data if present (stored in KV, not in HTTP body)
+                imageData: imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null
+              };
 
-                try {
-                  // Send initial "thinking" message via REST API so we get the message name back
-                  const thinkingMsg = await sendAsyncGChatMessage(_crmSpaceName,
-                    '🔍 Working on it...', _crmThreadName, env);
-                  _progressMsgName = thinkingMsg?.name || null;
+              try {
+                await kv.put(`work_${workToken}`, JSON.stringify(workState), { expirationTtl: 60 });
+                ctx.waitUntil(env.SELF.fetch(new Request('https://self/_work', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ token: workToken })
+                })));
+              } catch (dispatchErr) {
+                console.error(`[GCHAT-CRM] Failed to dispatch /_work: ${dispatchErr.message}`);
+              }
 
-                  // Simple dot-cycling ticker — pure "still alive" signal only.
-                  // Does NOT show agent internals. Updates every 5s.
-                  if (_progressMsgName) {
-                    const dots = ['.', '..', '...'];
-                    let _dotIdx = 0;
-                    _progressInterval = setInterval(async () => {
-                      try {
-                        const elapsed = Math.floor((Date.now() - _crmStart) / 1000);
-                        const dot = dots[_dotIdx % dots.length];
-                        _dotIdx++;
-                        const timeNote = elapsed >= 15 ? ` (${elapsed}s)` : '';
-                        await updateGChatMessage(_progressMsgName, `⏳ Working on it${dot}${timeNote}`, env);
-                      } catch (_) { /* ignore update failures */ }
-                    }, 5000);
-                  }
-
-                  // No progressCb — agent internals stay internal, ticker is the only indicator
-                  console.log(`[GCHAT-CRM] Starting CRM work: "${_crmText.substring(0, 80)}..."`);
-                  let result = await askClaude(_crmText, _crmPersonId, env, imageData, true, null, 300000);
-                  console.log(`[GCHAT-CRM] askClaude completed in ${Date.now() - _crmStart}ms`);
-
-                  if (result && result.__continuation) {
-                    const contResult = await askClaudeContinue(
-                      result.messages, result.tools, result.systemPrompt,
-                      result.iteration, env, null, 300000
-                    );
-                    if (typeof contResult === 'string') result = contResult;
-                    else if (contResult?.reply) result = contResult.reply;
-                    else result = 'CRM workflow completed.';
-                  }
-
-                  // Stop progress indicator
-                  if (_progressInterval) clearInterval(_progressInterval);
-
-                  let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
-                  finalReply = adaptMarkdownForGChat(finalReply);
-                  finalReply = truncateGChatReply(finalReply);
-
-                  // Update the progress message with the final reply (instead of sending a new message)
-                  if (_progressMsgName) {
-                    await updateGChatMessage(_progressMsgName, finalReply, env);
-                  } else {
-                    await sendAsyncGChatMessage(_crmSpaceName, finalReply, _crmThreadName, env);
-                  }
-
-                  if (_crmPersonId) {
-                    await addToHistory(_crmKv, _crmPersonId, 'user', _crmText);
-                    await addToHistory(_crmKv, _crmPersonId, 'assistant', finalReply);
-                    await _crmKv.put(`crm_session_${_crmPersonId}`, 'active', { expirationTtl: 1800 });
-                  }
-                  console.log(`[GCHAT-CRM] Completed in ${Date.now() - _crmStart}ms total`);
-                } catch (err) {
-                  if (_progressInterval) clearInterval(_progressInterval);
-                  console.error(`[GCHAT-CRM] Error after ${Date.now() - _crmStart}ms: ${err.message}`);
-                  const errMsg = `❌ Sorry, I ran into an issue processing that CRM request.\n\n_Error: ${err.message.substring(0, 200)}_`;
-                  try {
-                    if (_progressMsgName) {
-                      await updateGChatMessage(_progressMsgName, errMsg, env);
-                    } else {
-                      await sendAsyncGChatMessage(_crmSpaceName, errMsg, _crmThreadName, env);
-                    }
-                  } catch (_) {}
-                }
-              })());
-
-              // Return empty response (the progress message is sent async via REST API)
-              // This avoids a duplicate "thinking" message — the progress indicator IS the thinking message.
+              // Return empty response immediately — /_work handles all GChat messages
               return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } });
             }
 
