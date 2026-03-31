@@ -2276,6 +2276,29 @@ function buildCrmTasksTab_(card, activitiesResult, tabParams) {
     }
   }
 
+  // Create Task button when no open tasks but completed tasks exist
+  if (tasks.length === 0 && recentCompleted.length > 0) {
+    var noOpenSection = CardService.newCardSection()
+      .setHeader('Open Tasks (0)');
+    noOpenSection.addWidget(
+      CardService.newTextParagraph().setText('No open tasks.')
+    );
+    noOpenSection.addWidget(
+      CardService.newButtonSet().addButton(
+        CardService.newTextButton()
+          .setText('+ Create Task')
+          .setOnClickAction(
+            CardService.newAction()
+              .setFunctionName('onCrmShowCreateTask')
+              .setParameters({ contact_id: tabParams.contact_id || '', account_id: tabParams.account_id || '' })
+          )
+          .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+          .setBackgroundColor(CONFIG.STRATUS_BLUE)
+      )
+    );
+    card.addSection(noOpenSection);
+  }
+
   // Recently completed
   if (recentCompleted.length > 0) {
     var compSection = CardService.newCardSection()
