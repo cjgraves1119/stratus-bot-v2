@@ -155,7 +155,7 @@ function buildHomepageCard_() {
 // INSTANT EMAIL CARD (no API call â loads instantly)
 // âââââââââââââââââââââââââââââââââââââââââââââ
 
-function buildInstantEmailCard_(subject, sender) {
+function buildInstantEmailCard_(subject, sender, emailCtx, crmData) {
   var card = CardService.newCardBuilder()
     .setHeader(
       CardService.newCardHeader()
@@ -165,22 +165,168 @@ function buildInstantEmailCard_(subject, sender) {
         .setImageUrl(CONFIG.ICON_URL)
     );
 
-  // ââ Sender Info ââ
-  var senderSection = CardService.newCardSection()
-    .setHeader('Sender');
+  // Contact selector (all non-Stratus thread participants)
+  var contacts = (emailCtx && emailCtx.threadContacts) || [];
+  var primaryEmail = '';
+  if (crmData && crmData.contact) {
+    primaryEmail = crmData.contact.email || '';
+  } else if (emailCtx) {
+    primaryEmail = (emailCtx.isOutbound && emailCtx.customerEmail) ? emailCtx.customerEmail : emailCtx.senderEmail;
+  } else {
+    primaryEmail = sender.email;
+  }
 
-  senderSection.addWidget(
-    CardService.newDecoratedText()
-      .setText(sender.name)
-      .setBottomLabel(sender.email)
-      .setWrapText(true)
-  );
+  if (contacts.length > 0) {
+    var contactSection = CardService.newCardSection();
+    for (var ci = 0; ci < contacts.length; ci++) {
+      var c = contacts[ci];
+      var isSelected = (c.email.toLowerCase() === primaryEmail.toLowerCase());
 
-  card.addSection(senderSection);
+      if (isSelected) {
+        var contactWidget = CardService.newDecoratedText()
+          .setText('<b>' + (c.name || c.email) + '</b>')
+          .setBottomLabel(c.email)
+          .setWrapText(true);
 
-  // ââ Quick Quote (always available, no API needed) ââ
+        if (crmData && crmData.contact && crmData.contact.zohoUrl) {
+          contactWidget.setButton(
+            CardService.newTextButton()
+              .setText('Zoho')
+              .setOpenLink(CardService.newOpenLink().setUrl(crmData.contact.zohoUrl))
+          );
+        }
+        contactSection.addWidget(contactWidget);
+      }
+    }
+
+    // Show other contacts as switchable buttons if more than 1
+    if (contacts.length > 1) {
+      var switchBtns = CardService.newButtonSet();
+      for (var si = 0; si < Math.min(contacts.length, 5); si++) {
+        var sc = contacts[si];
+        if (sc.email.toLowerCase() === primaryEmail.toLowerCase()) continue;
+        switchBtns.addButton(
+          CardService.newTextButton()
+            .setText(sc.name !== sc.email ? sc.name : sc.email.split('@')[0])
+            .setOnClickAction(
+              CardService.newAction()
+                .setFunctionName('onContactSwitch')
+                .setParameters({ contact_email: sc.email })
+            )
+        );
+      }
+      contactSection.addWidget(switchBtns);
+    }
+    card.addSection(contactSection);
+  } else {
+    var senderSection = CardService.newCardSection();
+    senderSection.addWidget(
+      CardService.newDecoratedText()
+        .setText(sender.name)
+        .setBottomLabel(sender.email)
+        .setWrapText(true)
+    );
+    card.addSection(senderSection);
+  }
+
+  // CRM Section (Info | Deals | Tasks tabs)
+  if (crmData && crmData.found) {
+    var contact = crmData.contact;
+    var account = crmData.account;
+
+    if (account && account.name) {
+      var acctSection = CardService.newCardSection();
+      var acctWidget = CardService.newDecoratedText()
+        .setTopLabel('Account')
+        .setText(account.name)
+        .setWrapText(true);
+      if (account.zohoUrl) {
+        acctWidget.setButton(
+          CardService.newTextButton()
+            .setText('Open')
+            .setOpenLink(CardService.newOpenLink().setUrl(account.zohoUrl))
+        );
+      }
+      acctSection.addWidget(acctWidget);
+      card.addSection(acctSection);
+    }
+
+    // Tab navigation
+    var tabSection = CardService.newCardSection();
+    var tabParams = {
+      contact_id: contact ? contact.id : '',
+      account_id: account ? account.id : '',
+      contact_email: contact ? contact.email : primaryEmail,
+    };
+
+    var tabs = CardService.newButtonSet();
+    var tabConfig = [
+      { label: 'Info', key: 'info' },
+      { label: 'Deals', key: 'deals' },
+      { label: 'Tasks', key: 'tasks' },
+    ];
+
+    for (var ti = 0; ti < tabConfig.length; ti++) {
+      var tParams = {};
+      for (var key in tabParams) tParams[key] = tabParams[key];
+      tParams.tab = tabConfig[ti].key;
+
+      var tabBtn = CardService.newTextButton()
+        .setText(tabConfig[ti].label)
+        .setOnClickAction(
+          CardService.newAction()
+            .setFunctionName('onCrmTab')
+            .setParameters(tParams)
+        );
+
+      if (tabConfig[ti].key === 'info') {
+        tabBtn.setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+              .setBackgroundColor(CONFIG.STRATUS_BLUE);
+      }
+      tabs.addButton(tabBtn);
+    }
+    tabSection.addWidget(tabs);
+    card.addSection(tabSection);
+
+    // Brief info preview
+    if (contact) {
+      var previewSection = CardService.newCardSection();
+      var previewParts = [];
+      if (contact.title) previewParts.push(contact.title);
+      if (contact.phone) previewParts.push(contact.phone);
+      if (contact.mobile && contact.mobile !== contact.phone) previewParts.push(contact.mobile);
+      if (previewParts.length > 0) {
+        previewSection.addWidget(
+          CardService.newTextParagraph().setText(previewParts.join(' | '))
+        );
+      }
+      card.addSection(previewSection);
+    }
+  } else {
+    var noCrmSection = CardService.newCardSection();
+    noCrmSection.addWidget(
+      CardService.newTextParagraph().setText('<i>No CRM record found for ' + primaryEmail + '</i>')
+    );
+    noCrmSection.addWidget(
+      CardService.newButtonSet().addButton(
+        CardService.newTextButton()
+          .setText('Search CRM')
+          .setOnClickAction(
+            CardService.newAction()
+              .setFunctionName('onCrmContactDetails')
+          )
+          .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+          .setBackgroundColor(CONFIG.STRATUS_DARK)
+      )
+    );
+    card.addSection(noCrmSection);
+  }
+
+  // Quick Quote
   var quoteSection = CardService.newCardSection()
-    .setHeader('Quick Quote');
+    .setHeader('Quick Quote')
+    .setCollapsible(true)
+    .setNumUncollapsibleWidgets(2);
 
   quoteSection.addWidget(
     CardService.newTextInput()
@@ -202,9 +348,11 @@ function buildInstantEmailCard_(subject, sender) {
 
   card.addSection(quoteSection);
 
-  // ââ AI Actions (each triggers its own API call) ââ
+  // AI Tools
   var actionsSection = CardService.newCardSection()
-    .setHeader('AI Tools');
+    .setHeader('AI Tools')
+    .setCollapsible(true)
+    .setNumUncollapsibleWidgets(0);
 
   var actionButtons1 = CardService.newButtonSet();
   actionButtons1.addButton(
@@ -216,62 +364,31 @@ function buildInstantEmailCard_(subject, sender) {
   );
   actionButtons1.addButton(
     CardService.newTextButton()
-      .setText('View Tasks')
-      .setOnClickAction(CardService.newAction().setFunctionName('onViewTasks'))
-      .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
-      .setBackgroundColor(CONFIG.STRATUS_DARK)
+      .setText('Draft Reply')
+      .setOnClickAction(CardService.newAction().setFunctionName('onShowDraftReply'))
   );
   actionsSection.addWidget(actionButtons1);
 
   var actionButtons2 = CardService.newButtonSet();
   actionButtons2.addButton(
     CardService.newTextButton()
-      .setText('Draft Reply')
-      .setOnClickAction(CardService.newAction().setFunctionName('onShowDraftReply'))
-  );
-  actionButtons2.addButton(
-    CardService.newTextButton()
       .setText('Detect SKUs')
       .setOnClickAction(CardService.newAction().setFunctionName('onDetectSkus'))
   );
-  actionsSection.addWidget(actionButtons2);
-
-  // CRM buttons
-  var domain = sender.email.split('@')[1] || sender.email;
-  var crmButtons = CardService.newButtonSet();
-  crmButtons.addButton(
-    CardService.newTextButton()
-      .setText('Contact Details')
-      .setOnClickAction(
-        CardService.newAction().setFunctionName('onCrmContactDetails')
-      )
-      .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
-      .setBackgroundColor(CONFIG.STRATUS_DARK)
-  );
-  crmButtons.addButton(
+  actionButtons2.addButton(
     CardService.newTextButton()
       .setText('Zoho Quote')
       .setOnClickAction(CardService.newAction().setFunctionName('onCreateZohoQuote'))
   );
-  actionsSection.addWidget(crmButtons);
-
-  var crmButtons2 = CardService.newButtonSet();
-  crmButtons2.addButton(
-    CardService.newTextButton()
-      .setText('Search CRM')
-      .setOnClickAction(
-        CardService.newAction()
-          .setFunctionName('onCrmLookup')
-          .setParameters({ query: domain, module: 'Accounts' })
-      )
-  );
-  actionsSection.addWidget(crmButtons2);
+  actionsSection.addWidget(actionButtons2);
 
   card.addSection(actionsSection);
 
-  // ââ Send to Stratus AI (GChat DM handoff) ââ
+  // Send to Stratus AI (GChat DM handoff)
   var handoffSection = CardService.newCardSection()
-    .setHeader('Send to Stratus AI');
+    .setHeader('Send to Stratus AI')
+    .setCollapsible(true)
+    .setNumUncollapsibleWidgets(0);
 
   handoffSection.addWidget(
     CardService.newTextInput()
@@ -284,7 +401,7 @@ function buildInstantEmailCard_(subject, sender) {
   handoffSection.addWidget(
     CardService.newButtonSet().addButton(
       CardService.newTextButton()
-        .setText('Send to Stratus AI â GChat')
+        .setText('Send to Stratus AI \u2192 GChat')
         .setOnClickAction(CardService.newAction().setFunctionName('onSendToStratusAI'))
         .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
         .setBackgroundColor(CONFIG.STRATUS_BLUE)
@@ -1594,8 +1711,8 @@ function buildCrmSidebarCard_(contactData, activeTab) {
   };
 
   var tabs = CardService.newButtonSet();
-  var tabNames = ['Info', 'Deals', 'Activities', 'Quotes'];
-  var tabKeys = ['info', 'deals', 'activities', 'quotes'];
+  var tabNames = ['Info', 'Deals', 'Tasks'];
+  var tabKeys = ['info', 'deals', 'tasks'];
 
   for (var i = 0; i < tabNames.length; i++) {
     var params = {};
@@ -1844,9 +1961,9 @@ function buildCrmDealsTab_(card, dealsResult) {
 }
 
 /**
- * Activities tab: Open tasks with action buttons + recently completed
+ * Tasks tab: Open tasks with action buttons + recently completed
  */
-function buildCrmActivitiesTab_(card, activitiesResult, tabParams) {
+function buildCrmTasksTab_(card, activitiesResult, tabParams) {
   var tasks = (activitiesResult && activitiesResult.tasks) || [];
   var recentCompleted = (activitiesResult && activitiesResult.recentCompleted) || [];
 
@@ -2052,12 +2169,41 @@ function buildCrmCreateTaskCard_(params) {
       .setHint('e.g. Follow up on quote')
   );
 
+  // Default to 3 business days from now
+  var defaultDue = addBusinessDays_(new Date(), 3);
+  var defaultMs = defaultDue.getTime();
+
   section.addWidget(
-    CardService.newTextInput()
+    CardService.newDatePicker()
       .setFieldName('new_task_due')
-      .setTitle('Due Date (YYYY-MM-DD)')
-      .setHint('Leave blank for +3 business days')
+      .setTitle('Due Date')
+      .setValueInMsSinceEpoch(defaultMs)
   );
+
+  // Deal dropdown (populated from account deals)
+  var dealDropdown = CardService.newSelectionInput()
+    .setFieldName('new_task_deal')
+    .setTitle('Associate with Deal')
+    .setType(CardService.SelectionInputType.DROPDOWN)
+    .addItem('Auto-select most recent', '', true);
+
+  var accountId = params.account_id || '';
+  if (accountId) {
+    try {
+      var dealsForDropdown = crmDeals_(accountId, '');
+      if (dealsForDropdown && dealsForDropdown.deals) {
+        for (var di = 0; di < Math.min(dealsForDropdown.deals.length, 15); di++) {
+          var dd = dealsForDropdown.deals[di];
+          dealDropdown.addItem(
+            truncate_(dd.name, 40) + ' (' + (dd.stage || 'N/A') + ')',
+            dd.id,
+            false
+          );
+        }
+      }
+    } catch (_) { /* proceed without deals list */ }
+  }
+  section.addWidget(dealDropdown);
 
   section.addWidget(
     CardService.newSelectionInput()

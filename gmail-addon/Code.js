@@ -52,25 +52,40 @@ function onGmailMessage(e) {
     }
   }
 
-  // Identify the external customer (non-Stratus) from the thread.
-  // When the most recent message is an outbound reply from Chris, the "sender"
-  // is @stratusinfosystems.com — which is wrong for CRM lookups. We walk the
-  // thread to find the actual external contact and use their info instead.
+  // Identify external contacts (non-Stratus) from the entire thread.
+  // Collect ALL unique external contacts from From/To/CC for the contact selector.
   var STRATUS_DOMAIN = 'stratusinfosystems.com';
   var isOutbound = (senderParts.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) !== -1);
   var customerEmail = '';
   var customerName = '';
   var customerDomain = '';
+  var threadContacts = []; // {email, name} for all non-Stratus participants
+  var seenContactEmails = {};
 
-  // Walk thread messages (chronologically) to find the first external sender.
   for (var k = 0; k < messages.length; k++) {
     var threadMsg = messages[k];
-    var fromParsed = parseSender_(threadMsg.getFrom() || '');
-    if (fromParsed.email && fromParsed.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) === -1) {
-      customerEmail = fromParsed.email;
-      customerName = fromParsed.name;
-      customerDomain = fromParsed.email.split('@')[1] || '';
-      break;
+    // Check From, To, CC fields
+    var contactFields = [threadMsg.getFrom() || '', threadMsg.getTo() || '', threadMsg.getCc() || ''];
+    for (var cf = 0; cf < contactFields.length; cf++) {
+      // Split comma-separated addresses
+      var addresses = contactFields[cf].split(',');
+      for (var ca = 0; ca < addresses.length; ca++) {
+        var addr = addresses[ca].trim();
+        if (!addr) continue;
+        var parsed = parseSender_(addr);
+        if (!parsed.email) continue;
+        var lowerEmail = parsed.email.toLowerCase();
+        if (lowerEmail.indexOf('@' + STRATUS_DOMAIN) !== -1) continue;
+        if (seenContactEmails[lowerEmail]) continue;
+        seenContactEmails[lowerEmail] = true;
+        threadContacts.push({ email: parsed.email, name: parsed.name });
+        // Set first external contact as the default customer
+        if (!customerEmail) {
+          customerEmail = parsed.email;
+          customerName = parsed.name;
+          customerDomain = parsed.email.split('@')[1] || '';
+        }
+      }
     }
   }
 
@@ -101,13 +116,31 @@ function onGmailMessage(e) {
     threadId: thread.getId(),
     allEmails: Object.keys(allEmails),
     allDomains: Object.keys(allDomains),
+    threadContacts: threadContacts,
   };
   PropertiesService.getUserProperties().setProperty(
     'current_email_ctx', JSON.stringify(emailCtx)
   );
 
-  // Return instant card — NO API call
-  return buildInstantEmailCard_(subject, senderParts);
+  // Auto-load CRM contact on email open (zero AI cost)
+  var primaryEmail = (isOutbound && customerEmail) ? customerEmail : senderParts.email;
+  var primaryDomain = primaryEmail ? primaryEmail.split('@')[1] || '' : '';
+  var crmData = null;
+
+  // Skip consumer domains
+  if (!/^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac)\./.test(primaryDomain)) {
+    try {
+      crmData = crmContactLookup_(primaryEmail, primaryDomain);
+      if (crmData && crmData.found) {
+        PropertiesService.getUserProperties().setProperty('crm_sidebar_ctx', JSON.stringify({
+          contact: crmData.contact || null,
+          account: crmData.account || null,
+        }));
+      }
+    } catch (_) { /* CRM lookup failure is non-fatal */ }
+  }
+
+  return buildInstantEmailCard_(subject, senderParts, emailCtx, crmData);
 }
 
 // ─────────────────────────────────────────────
@@ -630,6 +663,42 @@ function onCrmContactDetails(e) {
   return card.build();
 }
 
+/** Switch to a different thread contact */
+function onContactSwitch(e) {
+  var params = e.commonEventObject.parameters || {};
+  var selectedEmail = params.contact_email || '';
+  if (!selectedEmail) return notify_('No contact selected.');
+
+  var domain = selectedEmail.split('@')[1] || '';
+
+  // Skip consumer domains
+  if (/^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac)\./.test(domain)) {
+    domain = '';
+  }
+
+  var result;
+  try {
+    result = crmContactLookup_(selectedEmail, domain);
+  } catch (err) {
+    return buildErrorCard_('CRM lookup failed: ' + err.message);
+  }
+
+  if (!result || !result.found) {
+    return buildErrorCard_('No CRM record found for ' + selectedEmail + '.');
+  }
+
+  var crmCtx = {
+    contact: result.contact || null,
+    account: result.account || null,
+  };
+  PropertiesService.getUserProperties().setProperty('crm_sidebar_ctx', JSON.stringify(crmCtx));
+
+  // Rebuild email card with this contact's CRM data
+  var ctx = getEmailContext_();
+  if (!ctx) return buildErrorCard_('No email context.');
+  return buildInstantEmailCard_(ctx.subject, { email: ctx.senderEmail, name: ctx.senderName }, ctx, result);
+}
+
 /** Handle CRM tab navigation */
 function onCrmTab(e) {
   var params = e.commonEventObject.parameters || e.parameters || {};
@@ -665,9 +734,9 @@ function onCrmTab(e) {
     } else if (tab === 'deals') {
       var dealsResult = crmDeals_(tabParams.account_id, tabParams.contact_email);
       buildCrmDealsTab_(card, dealsResult);
-    } else if (tab === 'activities') {
-      var activitiesResult = crmActivities_(tabParams.account_id, tabParams.contact_id);
-      buildCrmActivitiesTab_(card, activitiesResult, tabParams);
+    } else if (tab === 'tasks') {
+      var tasksResult = crmActivities_(tabParams.account_id, tabParams.contact_id);
+      buildCrmTasksTab_(card, tasksResult, tabParams);
     } else if (tab === 'quotes') {
       var quotesResult = crmQuotes_(tabParams.account_id, '');
       buildCrmQuotesTab_(card, quotesResult);
@@ -720,9 +789,22 @@ function onCrmCreateTask(e) {
   var params = e.commonEventObject.parameters || e.parameters || {};
   var formInput = e.formInput || {};
   var subject = (formInput.new_task_subject || '').trim();
-  var dueDate = (formInput.new_task_due || '').trim();
   var priority = formInput.new_task_priority || 'Normal';
   var description = (formInput.new_task_description || '').trim();
+
+  // Handle DatePicker input (returns {msSinceEpoch} object) or text fallback
+  var dueDate = '';
+  var dateInputs = e.commonEventObject ? e.commonEventObject.formInputs : null;
+  if (dateInputs && dateInputs.new_task_due && dateInputs.new_task_due.dateInput) {
+    var ms = dateInputs.new_task_due.dateInput.msSinceEpoch;
+    if (ms) {
+      var d = new Date(parseInt(ms));
+      dueDate = formatDate_(d);
+    }
+  }
+  if (!dueDate && formInput.new_task_due) {
+    dueDate = (formInput.new_task_due || '').trim();
+  }
 
   if (!subject) {
     return notify_('Please enter a task subject.');
@@ -731,18 +813,16 @@ function onCrmCreateTask(e) {
   var contactId = params.contact_id || '';
   var accountId = params.account_id || '';
 
-  // If we have accountId but not a deal, we need to find the most recent deal
-  // to attach the task to (for proper account association in Zoho)
-  var dealId = '';
+  // Use deal from dropdown if provided, otherwise find most recent open deal
+  var dealId = formInput.new_task_deal || '';
   if (accountId && !dealId) {
     try {
       var dealsResp = crmDeals_(accountId, '');
       if (dealsResp && dealsResp.deals && dealsResp.deals.length > 0) {
-        // Use the most recent non-closed deal, or the most recent deal
         for (var i = 0; i < dealsResp.deals.length; i++) {
-          var d = dealsResp.deals[i];
-          if (d.stage !== 'Closed Won' && d.stage !== 'Closed (Lost)') {
-            dealId = d.id;
+          var dd = dealsResp.deals[i];
+          if (dd.stage !== 'Closed Won' && dd.stage !== 'Closed (Lost)') {
+            dealId = dd.id;
             break;
           }
         }
