@@ -3208,15 +3208,26 @@ async function updateGChatMessage(messageName, text, env) {
     },
     body: JSON.stringify({ text })
   });
+  const resBody = await res.text();
   if (!res.ok) {
-    const err = await res.text();
-    console.warn(`[GCHAT-ASYNC] Failed to update message: ${res.status} ${err.substring(0, 300)} | textLen=${text.length}`);
-    // Store diagnostic in KV for debugging
+    console.warn(`[GCHAT-ASYNC] Failed to update message: ${res.status} ${resBody.substring(0, 300)} | textLen=${text.length}`);
     try {
       if (env.CONVERSATION_KV) {
         await env.CONVERSATION_KV.put(`update_err_${Date.now()}`, JSON.stringify({
-          status: res.status, error: err.substring(0, 500), textLen: text.length,
+          status: res.status, error: resBody.substring(0, 500), textLen: text.length,
           textPreview: text.substring(0, 200), ts: new Date().toISOString()
+        }), { expirationTtl: 3600 });
+      }
+    } catch (_) {}
+  } else {
+    // Store success diagnostic to confirm PATCH actually worked
+    try {
+      if (env.CONVERSATION_KV) {
+        const parsed = JSON.parse(resBody);
+        await env.CONVERSATION_KV.put(`debug_update_ok_${Date.now()}`, JSON.stringify({
+          messageName, textLen: text.length, textPreview: text.substring(0, 200),
+          responseTextLen: (parsed.text || '').length, responseTextPreview: (parsed.text || '').substring(0, 200),
+          ts: new Date().toISOString()
         }), { expirationTtl: 3600 });
       }
     } catch (_) {}
@@ -5278,7 +5289,28 @@ export default {
         const val = await kv.get(key.name, 'json');
         if (val) alive.push({ key: key.name, ...val });
       }
-      return new Response(JSON.stringify({ errors, logs, alive, errorCount: errors.length, logCount: logs.length }, null, 2), {
+      // Check for debug_work entries (spaceName diagnostic)
+      const debugWork = await kv.list({ prefix: 'debug_work_', limit: 5 });
+      const workDebug = [];
+      for (const key of debugWork.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) workDebug.push({ key: key.name, ...val });
+      }
+      // Check for debug_init_send_err entries (initial "Working on it" failure)
+      const initErrList = await kv.list({ prefix: 'debug_init_send_err_', limit: 5 });
+      const initErrs = [];
+      for (const key of initErrList.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) initErrs.push({ key: key.name, ...val });
+      }
+      // Check for update_err entries (updateGChatMessage failure)
+      const updateErrList = await kv.list({ prefix: 'update_err_', limit: 5 });
+      const updateErrs = [];
+      for (const key of updateErrList.keys) {
+        const val = await kv.get(key.name, 'json');
+        if (val) updateErrs.push({ key: key.name, ...val });
+      }
+      return new Response(JSON.stringify({ errors, logs, alive, workDebug, initErrs, updateErrs, errorCount: errors.length, logCount: logs.length }, null, 2), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
@@ -7012,7 +7044,10 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         const state = JSON.parse(stateJson);
         const kv = env.CONVERSATION_KV;
         const { text, personId, spaceName, threadName, imageData } = state;
-        console.log(`[GCHAT-WORK] Starting CRM work for: "${text.substring(0, 80)}..."`);
+        console.log(`[GCHAT-WORK] Starting CRM work for: "${text.substring(0, 80)}..." spaceName="${spaceName}"`);
+
+        // Diagnostic: store spaceName for debugging delivery failures
+        try { await kv.put(`debug_work_${Date.now()}`, JSON.stringify({ spaceName, threadName, personId: personId?.substring(0, 30), ts: new Date().toISOString() }), { expirationTtl: 3600 }); } catch (_) {}
 
         // Send initial "Working on it..." message and record messageName for dot-cycling.
         // Progress callback patches this message with dots on each tool-call iteration
@@ -7020,9 +7055,15 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         let _progressMsgName = null;
         let _dotIdx = 0;
         try {
-          const thinkingMsg = await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', threadName || null, env);
+          // Always send top-level (null threadName) so the progress message is visible
+          // at the root of the DM, not hidden inside a collapsed thread.
+          const thinkingMsg = await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', null, env);
           _progressMsgName = thinkingMsg?.name || null;
-        } catch (_) { /* proceed without progress message */ }
+        } catch (initSendErr) {
+          // Store the initial send failure for diagnostics
+          try { await kv.put(`debug_init_send_err_${Date.now()}`, JSON.stringify({ spaceName, error: initSendErr.message?.substring(0, 300), ts: new Date().toISOString() }), { expirationTtl: 3600 }); } catch (_) {}
+          /* proceed without progress message */
+        }
 
         const progressCallback = _progressMsgName
           ? async (_msg) => {
@@ -7033,7 +7074,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           : async (msg) => {
               // Fallback: no messageName, send new messages for each step
               const formatted = adaptMarkdownForGChat(msg);
-              await sendAsyncGChatMessage(spaceName, formatted, threadName || null, env);
+              await sendAsyncGChatMessage(spaceName, formatted, null, env);
             };
 
         try {
@@ -7062,20 +7103,32 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               body: JSON.stringify({ token: contToken })
             }));
           } else {
-            // Normal completion — update progress message (or send new if no name)
+            // Normal completion — PATCH the final reply onto the "Working on it..."
+            // placeholder. In Google Chat DMs, async REST API messages get auto-
+            // threaded under the user's message, making them invisible at the top
+            // level. Since the placeholder is already visible (even if threaded),
+            // updating it in-place ensures the user sees the real response.
+            // Falls back to a new top-level message if PATCH fails.
             let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
             finalReply = adaptMarkdownForGChat(finalReply);
             finalReply = truncateGChatReply(finalReply);
+
+            let delivered = false;
             if (_progressMsgName) {
-              // Try to update the "Working on it..." message in-place.
-              // If PATCH fails (e.g. reply too large, API error), fall back to a new message.
-              const updated = await updateGChatMessage(_progressMsgName, finalReply, env);
-              if (!updated) {
-                console.warn(`[GCHAT-WORK] updateGChatMessage failed — falling back to new message`);
-                await sendAsyncGChatMessage(spaceName, finalReply, threadName || null, env);
+              try {
+                delivered = await updateGChatMessage(_progressMsgName, finalReply, env);
+                if (delivered) {
+                  console.log(`[GCHAT-WORK] Final response PATCH'd onto ${_progressMsgName} (${finalReply.length} chars)`);
+                }
+              } catch (patchErr) {
+                console.warn(`[GCHAT-WORK] PATCH failed: ${patchErr.message} — falling back to new message`);
               }
-            } else {
-              await sendAsyncGChatMessage(spaceName, finalReply, threadName || null, env);
+            }
+
+            // Fallback: if no placeholder existed or PATCH failed, send a new message
+            if (!delivered) {
+              console.log(`[GCHAT-WORK] Sending final response as new top-level message (PATCH ${_progressMsgName ? 'failed' : 'n/a'})`);
+              await sendAsyncGChatMessage(spaceName, finalReply, null, env);
             }
             if (personId) {
               await addToHistory(kv, personId, 'user', text);
@@ -7091,7 +7144,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             if (_progressMsgName) {
               await updateGChatMessage(_progressMsgName, errMsg, env);
             } else {
-              await sendAsyncGChatMessage(spaceName, errMsg, threadName || null, env);
+              await sendAsyncGChatMessage(spaceName, errMsg, null, env);
             }
           } catch (_) {}
           try {
@@ -7170,10 +7223,14 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
             finalReply = adaptMarkdownForGChat(finalReply);
             finalReply = truncateGChatReply(finalReply);
+            let contDelivered = false;
             if (_contProgressMsgName) {
-              await updateGChatMessage(_contProgressMsgName, finalReply, env);
-            } else {
-              await sendAsyncGChatMessage(state.spaceName, finalReply, state.threadName || null, env);
+              try {
+                contDelivered = await updateGChatMessage(_contProgressMsgName, finalReply, env);
+              } catch (_) {}
+            }
+            if (!contDelivered) {
+              await sendAsyncGChatMessage(state.spaceName, finalReply, null, env);
             }
             if (state.personId) {
               await addToHistory(kv, state.personId, 'user', state.originalText || '');
@@ -7511,11 +7568,23 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         // the async CRM handler), keep routing follow-up messages to the CRM agent
         // even without explicit "zoho"/"crm" keywords. This allows multi-turn CRM
         // workflows (ask clarifying questions → user answers → create quote).
+        // IMPORTANT: Do NOT hijack messages that are clearly quoting requests
+        // (e.g. "quote 5 MR44") — those should go through the deterministic engine
+        // even if a CRM session is active.
         if (!isExplicitCrmRequest && personId && kv) {
           const crmSession = await kv.get(`crm_session_${personId}`);
           if (crmSession) {
-            console.log(`[GCHAT] Active CRM session found for ${personId} — routing to CRM agent`);
-            isExplicitCrmRequest = true;
+            // Check if this looks like a quoting request — if so, let it go
+            // through the deterministic quoting engine instead of the CRM agent
+            const looksLikeQuote = /^\s*(quote|q)\s+\d/i.test(text)
+              || /^\s*\d+\s*x?\s+[A-Z]{1,3}[A-Z0-9-]/i.test(text)
+              || /\b(cost|price|pricing|how much)\b/i.test(text);
+            if (looksLikeQuote) {
+              console.log(`[GCHAT] Active CRM session but message looks like a quoting request — letting quoting engine handle it`);
+            } else {
+              console.log(`[GCHAT] Active CRM session found for ${personId} — routing to CRM agent`);
+              isExplicitCrmRequest = true;
+            }
           }
         }
 
@@ -7523,7 +7592,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         // when the PREVIOUS user message was a CRM/email intent. This catches
         // "try again", "confirm status", "go ahead", "yes proceed", etc.
         if (!isExplicitCrmRequest && personId && kv) {
-          const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update|happening)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status|what\s+happened|is\s+it\s+done|are\s+we\s+good|any\s+update|where\s+are\s+we)\s*[.!?]?\s*$/i;
+          const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update|happening)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status|what\s+happened|is\s+it\s+done|are\s+we\s+good|any\s+update|where\s+are\s+we|is\s+(this|it)\s+still\s+(being\s+)?(worked?\s+on|working|processing|running)|still\s+working\s+on\s+(this|it|that))\s*[.!?]?\s*$/i;
           // Also match messages that reference quote/deal creation status
           const crmFollowUpPattern = /\b(status|confirm|progress|update)\b.{0,30}\b(quote|deal|account|contact|task|creation|create)/i;
 
@@ -7583,6 +7652,17 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             intent.hasAny = true;
             intent.hasCrm = true;
             console.log(`[GCHAT-AGENT] Image + action verb detected — forcing CRM routing`);
+          }
+
+          // CRITICAL: If CRM session/follow-up detection already flagged this as a CRM
+          // request (isExplicitCrmRequest=true from lines 7549-7588), force CRM routing
+          // with tools enabled. Without this, generic follow-ups like "is this still
+          // being worked on?" would fail detectCrmEmailIntent() and get dispatched
+          // WITHOUT tools, causing Claude to hallucinate XML tool invocations.
+          if (isExplicitCrmRequest && !intent.hasAny) {
+            intent.hasAny = true;
+            intent.hasCrm = true;
+            console.log(`[GCHAT-AGENT] CRM session/follow-up active — forcing useTools=true despite no CRM keywords in text`);
           }
 
           const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
