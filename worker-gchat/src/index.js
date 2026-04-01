@@ -7065,11 +7065,31 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           /* proceed without progress message */
         }
 
+        // Progress callback: show real-time step updates (tool calls, thinking)
+        // so the user can see exactly what the CRM agent is doing, similar to
+        // watching Claude's tool-use steps in the Claude UI.
+        let _stepLog = [];  // accumulate step descriptions
         const progressCallback = _progressMsgName
-          ? async (_msg) => {
-              _dotIdx++;
-              const dot = ['.', '..', '...'][_dotIdx % 3];
-              try { await updateGChatMessage(_progressMsgName, `⏳ Working on it${dot}`, env); } catch (_) {}
+          ? async (msg) => {
+              // msg comes from toolProgressMessage() — e.g. "🔍 Searching Zoho Accounts..."
+              // Build a running log of steps so the user sees the full workflow
+              if (msg) {
+                // Extract just the tool-progress lines (emoji-prefixed), skip interim text
+                const lines = msg.split('\n').filter(l => /^[🔍📄🔗✏️📦🌐📧✍️📤⚙️]/.test(l.trim()));
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  // Avoid duplicate consecutive steps
+                  if (_stepLog.length === 0 || _stepLog[_stepLog.length - 1] !== trimmed) {
+                    _stepLog.push(trimmed);
+                  }
+                }
+              }
+              // Show the last 5 steps to keep the message concise
+              const recentSteps = _stepLog.slice(-5);
+              const display = recentSteps.length > 0
+                ? `⏳ *Working on it...*\n\n${recentSteps.join('\n')}`
+                : '⏳ Working on it...';
+              try { await updateGChatMessage(_progressMsgName, display, env); } catch (_) {}
             }
           : async (msg) => {
               // Fallback: no messageName, send new messages for each step
@@ -7093,7 +7113,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               personId,
               originalText: text,
               progressMsgName: _progressMsgName,
-              dotIdx: _dotIdx,
+              stepLog: _stepLog,
               segment: 1
             }), { expirationTtl: 300 });
             // Chain via Service Binding — unlimited wall time
@@ -7179,12 +7199,23 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
         console.log(`[GCHAT-CONTINUE] Resuming from iteration ${state.iteration}, segment ${state.segment || 1}`);
 
         const _contProgressMsgName = state.progressMsgName || null;
-        let _contDotIdx = state.dotIdx || 0;
+        let _contStepLog = state.stepLog || [];
         const progressCallback = _contProgressMsgName
-          ? async (_msg) => {
-              _contDotIdx++;
-              const dot = ['.', '..', '...'][_contDotIdx % 3];
-              try { await updateGChatMessage(_contProgressMsgName, `⏳ Working on it${dot}`, env); } catch (_) {}
+          ? async (msg) => {
+              if (msg) {
+                const lines = msg.split('\n').filter(l => /^[🔍📄🔗✏️📦🌐📧✍️📤⚙️]/.test(l.trim()));
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (_contStepLog.length === 0 || _contStepLog[_contStepLog.length - 1] !== trimmed) {
+                    _contStepLog.push(trimmed);
+                  }
+                }
+              }
+              const recentSteps = _contStepLog.slice(-5);
+              const display = recentSteps.length > 0
+                ? `⏳ *Working on it...*\n\n${recentSteps.join('\n')}`
+                : '⏳ Working on it...';
+              try { await updateGChatMessage(_contProgressMsgName, display, env); } catch (_) {}
             }
           : async (msg) => {
               const formatted = adaptMarkdownForGChat(msg);
@@ -7208,7 +7239,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               personId: state.personId,
               originalText: state.originalText,
               progressMsgName: _contProgressMsgName,
-              dotIdx: _contDotIdx,
+              stepLog: _contStepLog,
               segment: (state.segment || 1) + 1
             }), { expirationTtl: 300 });
             console.log(`[GCHAT-CONTINUE] Chaining to segment ${(state.segment || 1) + 1}`);
