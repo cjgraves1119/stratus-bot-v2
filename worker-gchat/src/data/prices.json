@@ -3595,7 +3595,8 @@
     "MA-ANT-DUAL-C1-O": {
       "list": 1086,
       "price": 731,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000125794163"
     },
     "C9300X-12Y-M": {
       "list": 23496,
@@ -3606,87 +3607,104 @@
     "MA-ANT-DUAL-C3-O": {
       "list": 1039,
       "price": 699,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000261763058"
     },
     "MA-MNT-CLG-1-O": {
       "list": 31,
       "price": 21,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000001098885"
     },
     "MA-MNT-MV-10-O": {
       "list": 305,
       "price": 205,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000012504195"
     },
     "MA-MNT-MV-11-O": {
       "list": 121,
       "price": 82,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000034650533"
     },
     "MA-MNT-MV-19-O": {
       "list": 311,
       "price": 209,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743659"
     },
     "MA-MNT-MV-20-O": {
       "list": 305,
       "price": 205,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000012504196"
     },
     "MA-MNT-MV-21-O": {
       "list": 305,
       "price": 205,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000088970090"
     },
     "MA-MNT-MV-29-O": {
       "list": 103,
       "price": 70,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743660"
     },
     "MA-MNT-MV-30-O": {
       "list": 305,
       "price": 205,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000012504197"
     },
     "MA-MNT-MV-31-O": {
       "list": 305,
       "price": 205,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000012504198"
     },
     "MA-MNT-MV-39-O": {
       "list": 103,
       "price": 70,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743661"
     },
     "MA-MNT-MV-40-O": {
       "list": 488,
       "price": 329,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000019405039"
     },
     "MA-MNT-MV-49-O": {
       "list": 415,
       "price": 279,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743662"
     },
     "MA-MNT-MV-59-O": {
       "list": 415,
       "price": 279,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743663"
     },
     "MA-MNT-MV-69-O": {
       "list": 311,
       "price": 209,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743664"
     },
     "MA-MNT-MV-79-O": {
       "list": 363,
       "price": 244,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743665"
     },
     "MA-MNT-MV-89-O": {
       "list": 1350,
       "price": 908,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000320743666"
     },
     "MV52-HW": {
       "list": 3562,
@@ -3709,7 +3727,8 @@
     "MA-PWR-30W-US-O": {
       "list": 35,
       "price": 24,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000000161206"
     },
     "C9200L-STA-KIT-M-O": {
       "list": 1581,
@@ -3768,12 +3787,14 @@
     "MA-PWR-CORD-US-O": {
       "list": 7,
       "price": 5,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000000159955"
     },
     "MA-PWR-MV-LV-O": {
       "list": 305,
       "price": 205,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000010635069"
     },
     "MV84X": {
       "list": 8590,
@@ -4161,7 +4182,8 @@
     "PWR-C5-125WAC-M-O": {
       "list": 1946,
       "price": 1309,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000349456666"
     },
     "MX67-HW": {
       "list": 883,
@@ -4172,7 +4194,8 @@
     "PWR-C5-1KWAC-M-O": {
       "list": 4170,
       "price": 2805,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000349456667"
     },
     "PWR-C5-600WAC-M-O": {
       "list": 2780,
@@ -4189,12 +4212,14 @@
     "STACK-T4-3M-M-O": {
       "list": 417,
       "price": 281,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000349456669"
     },
     "STACK-T4-50CM-O": {
       "list": 139,
       "price": 94,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000211391182"
     },
     "C9300L-48PF-4X-M": {
       "list": 14255,
@@ -4593,77 +4618,92 @@
     "MA-SFP-10GB-ER-O": {
       "list": 12231,
       "price": 8225,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000019405040"
     },
     "MA-SFP-10GB-LR-O": {
       "list": 4886,
       "price": 3286,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000000159964"
     },
     "MA-SFP-10GB-SR-O": {
       "list": 1217,
       "price": 819,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000000159966"
     },
     "MA-SFP-10GB-ZR-O": {
       "list": 19570,
       "price": 13159,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000019405041"
     },
     "MA-SFP-1GB-LX10-O": {
       "list": 1217,
       "price": 819,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000000159967"
     },
     "MA-SFP-1GB-SX-O": {
       "list": 612,
       "price": 412,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000000159968"
     },
     "MA-SFP-1GB-TX-O": {
       "list": 483,
       "price": 325,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000000159969"
     },
     "MA-MNT-MV-18-O": {
       "list": 103,
       "price": 70,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000154200067"
     },
     "MA-MNT-MV-28-O": {
       "list": 259,
       "price": 174,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000125565000"
     },
     "MA-MNT-MV-38-O": {
       "list": 259,
       "price": 174,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000125794164"
     },
     "MA-MNT-MV-48-O": {
       "list": 259,
       "price": 174,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000125564936"
     },
     "MA-MNT-MV-58-O": {
       "list": 155,
       "price": 105,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000125564898"
     },
     "MA-MNT-MV-68-O": {
       "list": 155,
       "price": 105,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000125794165"
     },
     "MA-MNT-MV-78-O": {
       "list": 467,
       "price": 314,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000125564917"
     },
     "MA-MNT-MV-88-O": {
       "list": 259,
       "price": 174,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000154200052"
     },
     "MV53X": {
       "list": 3664,
@@ -4788,7 +4828,8 @@
     "PWR-C1-1900WAC-P-M": {
       "list": 3180,
       "price": 2139,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000372896270"
     },
     "MA-ANT-3-F6": {
       "list": 1796,
@@ -5181,12 +5222,14 @@
     "MA-CBL-100G-1M-O": {
       "list": 245,
       "price": 165,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000012504192"
     },
     "MA-CBL-100G-3M-O": {
       "list": 367,
       "price": 247,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000012504193"
     },
     "MA-CBL-100G-50CM-O": {
       "list": 122,
@@ -5215,12 +5258,14 @@
     "MA-CBL-TA-1M-O": {
       "list": 122,
       "price": 83,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000000161174"
     },
     "MA-CBL-TA-3M-O": {
       "list": 183,
       "price": 124,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000000161175"
     },
     "MA-PWR-640WAC": {
       "list": 1451,
@@ -5464,27 +5509,32 @@
     "MA-PWR-C14-C15-1-O": {
       "list": 31,
       "price": 21,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000179503506"
     },
     "MA-PWR-ETH-O": {
       "list": 182,
       "price": 123,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000080039876"
     },
     "MA-PWR-USB-US-O": {
       "list": 35,
       "price": 24,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000049126054"
     },
     "MA-RCKMNT-KIT-1-O": {
       "list": 2,
       "price": 2,
-      "discount": 39
+      "discount": 39,
+      "zoho_product_id": "2570562000080039875"
     },
     "MA-SFP-10GB-LRM-O": {
       "list": 1217,
       "price": 819,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000000159965"
     },
     "C9200L-48PL-4X-M": {
       "list": 8144,
@@ -5530,22 +5580,26 @@
     "MA-CBL-LEAK-1-O": {
       "list": 57,
       "price": 39,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000043709567"
     },
     "MA-CBL-LEAK-2-O": {
       "list": 57,
       "price": 39,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000125794156"
     },
     "MA-CBL-TEMP-GL-1-O": {
       "list": 78,
       "price": 53,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000065238618"
     },
     "MA-CBL-TEMP-ME-1-O": {
       "list": 78,
       "price": 53,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000065238619"
     },
     "MA-MNT-MR-16": {
       "list": 60,
