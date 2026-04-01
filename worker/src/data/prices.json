@@ -3,12 +3,14 @@
     "LIC-MV-CA7-3Y": {
       "list": 199,
       "price": 134,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000238971640"
     },
     "LIC-VMX-XL-ENT-1Y": {
       "list": 6869,
       "price": 4619,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763097"
     },
     "LIC-MV-CA30-1Y": {
       "list": 221,
@@ -67,7 +69,8 @@
     "LIC-MS22-3YR": {
       "list": 531,
       "price": 357,
-      "discount": 0.3277
+      "discount": 0.3277,
+      "zoho_product_id": "2570562000001259216"
     },
     "LIC-MX80-ENT-1YR": {
       "list": 1050,
@@ -102,7 +105,8 @@
     "LIC-MS22P-5YR": {
       "list": 884,
       "price": 595,
-      "discount": 0.3269
+      "discount": 0.3269,
+      "zoho_product_id": "2570562000001259222"
     },
     "LIC-MS420-48-1YR": {
       "list": 2598,
@@ -203,12 +207,14 @@
     "LIC-MX70-SEC-1YR": {
       "list": 1000,
       "price": 660,
-      "discount": 0.34
+      "discount": 0.34,
+      "zoho_product_id": "2570562000001277750"
     },
     "LIC-MX70-ENT-3YR": {
       "list": 1000,
       "price": 660,
-      "discount": 0.34
+      "discount": 0.34,
+      "zoho_product_id": "2570562000001277748"
     },
     "LIC-MR-UPGR-3Y": {
       "list": 452,
@@ -249,7 +255,8 @@
     "LIC-MS130-48A-5Y": {
       "list": 2243,
       "price": 587,
-      "discount": 0.7383
+      "discount": 0.7383,
+      "zoho_product_id": "2570562000261763045"
     },
     "LIC-MS120-8-5YR": {
       "list": 177,
@@ -338,22 +345,26 @@
     "LIC-MS130-24A-1Y": {
       "list": 346,
       "price": 91,
-      "discount": 0.737
+      "discount": 0.737,
+      "zoho_product_id": "2570562000261763047"
     },
     "LIC-MS130-24A-5Y": {
       "list": 1296,
       "price": 339,
-      "discount": 0.7384
+      "discount": 0.7384,
+      "zoho_product_id": "2570562000261763048"
     },
     "LIC-MS130-48A-1Y": {
       "list": 597,
       "price": 156,
-      "discount": 0.7387
+      "discount": 0.7387,
+      "zoho_product_id": "2570562000261763049"
     },
     "LIC-MS130-CMPTA-5Y": {
       "list": 500,
       "price": 131,
-      "discount": 0.738
+      "discount": 0.738,
+      "zoho_product_id": "2570562000261763050"
     },
     "LIC-C9350-48A-5Y": {
       "list": 9467,
@@ -568,27 +579,32 @@
     "LIC-MS130-24A-3Y": {
       "list": 778,
       "price": 203,
-      "discount": 0.7391
+      "discount": 0.7391,
+      "zoho_product_id": "2570562000261763043"
     },
     "LIC-MS210-24P-3YR": {
       "list": 558,
       "price": 241,
-      "discount": 0.5681
+      "discount": 0.5681,
+      "zoho_product_id": "2570562000001647068"
     },
     "LIC-MS210-48FP-5YR": {
       "list": 1637,
       "price": 706,
-      "discount": 0.5687
+      "discount": 0.5687,
+      "zoho_product_id": "2570562000001647084"
     },
     "LIC-MS210-48FP-3YR": {
       "list": 982,
       "price": 424,
-      "discount": 0.5682
+      "discount": 0.5682,
+      "zoho_product_id": "2570562000001647083"
     },
     "LIC-MS210-24P-5YR": {
       "list": 929,
       "price": 401,
-      "discount": 0.5684
+      "discount": 0.5684,
+      "zoho_product_id": "2570562000001647069"
     },
     "LIC-MS320-48LP-5YR": {
       "list": 1905,
@@ -611,7 +627,8 @@
     "LIC-MS210-48-5YR": {
       "list": 1152,
       "price": 498,
-      "discount": 0.5677
+      "discount": 0.5677,
+      "zoho_product_id": "2570562000001647074"
     },
     "LIC-MS390-24A-5Y": {
       "list": 5935,
@@ -680,7 +697,8 @@
     "LIC-MS42-3YR": {
       "list": 531,
       "price": 357,
-      "discount": 0.3277
+      "discount": 0.3277,
+      "zoho_product_id": "2570562000001259226"
     },
     "LIC-MG21-ENT-5Y": {
       "list": 884,
@@ -703,12 +721,14 @@
     "LIC-MS42P-5YR": {
       "list": 884,
       "price": 595,
-      "discount": 0.3269
+      "discount": 0.3269,
+      "zoho_product_id": "2570562000001259232"
     },
     "LIC-MS22-1YR": {
       "list": 236,
       "price": 159,
-      "discount": 0.3263
+      "discount": 0.3263,
+      "zoho_product_id": "2570562000001259215"
     },
     "LIC-MX60-SEC-1YR": {
       "list": 525,
@@ -731,7 +751,8 @@
     "LIC-MS130-CMPTA-1Y": {
       "list": 135,
       "price": 36,
-      "discount": 0.7333
+      "discount": 0.7333,
+      "zoho_product_id": "2570562000261763044"
     },
     "LIC-MX85-SEC-1Y": {
       "list": 2453,
@@ -742,7 +763,8 @@
     "LIC-MS210-48-3YR": {
       "list": 691,
       "price": 299,
-      "discount": 0.5673
+      "discount": 0.5673,
+      "zoho_product_id": "2570562000001647073"
     },
     "LIC-MS450-12-1YR": {
       "list": 1464,
@@ -885,17 +907,20 @@
     "LIC-MS250-48LP-1YR": {
       "list": 713,
       "price": 349,
-      "discount": 0.5105
+      "discount": 0.5105,
+      "zoho_product_id": "2570562000001094163"
     },
     "LIC-MS250-48FP-5YR": {
       "list": 2905,
       "price": 1420,
-      "discount": 0.5112
+      "discount": 0.5112,
+      "zoho_product_id": "2570562000001094170"
     },
     "LIC-MS225-24-5YR": {
       "list": 1163,
       "price": 502,
-      "discount": 0.5684
+      "discount": 0.5684,
+      "zoho_product_id": "2570562000001094125"
     },
     "LIC-MS225-48FP-3YR": {
       "list": 1299,
@@ -918,12 +943,14 @@
     "LIC-MS225-24-1YR": {
       "list": 310,
       "price": 134,
-      "discount": 0.5677
+      "discount": 0.5677,
+      "zoho_product_id": "2570562000001094123"
     },
     "LIC-MS225-24-3YR": {
       "list": 697,
       "price": 301,
-      "discount": 0.5681
+      "discount": 0.5681,
+      "zoho_product_id": "2570562000001094124"
     },
     "LIC-MS250-24P-3YR": {
       "list": 1089,
@@ -952,7 +979,8 @@
     "LIC-MS225-48-5YR": {
       "list": 1604,
       "price": 692,
-      "discount": 0.5686
+      "discount": 0.5686,
+      "zoho_product_id": "2570562000001094135"
     },
     "LIC-MV-3YR": {
       "list": 752,
@@ -975,12 +1003,14 @@
     "LIC-MS250-48FP-1YR": {
       "list": 775,
       "price": 379,
-      "discount": 0.511
+      "discount": 0.511,
+      "zoho_product_id": "2570562000001094168"
     },
     "LIC-MS250-48FP-3YR": {
       "list": 1743,
       "price": 852,
-      "discount": 0.5112
+      "discount": 0.5112,
+      "zoho_product_id": "2570562000001094169"
     },
     "LIC-MV-5YR": {
       "list": 1253,
@@ -991,7 +1021,8 @@
     "LIC-MS225-48-1YR": {
       "list": 427,
       "price": 185,
-      "discount": 0.5667
+      "discount": 0.5667,
+      "zoho_product_id": "2570562000001094133"
     },
     "LIC-MS250-24P-1YR": {
       "list": 484,
@@ -1062,12 +1093,14 @@
     "LIC-MX-SDW-S-3Y": {
       "list": 1340,
       "price": 901,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763081"
     },
     "LIC-MX-SDW-S-1Y": {
       "list": 595,
       "price": 401,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000261763082"
     },
     "LIC-MX67-ENT-5YR": {
       "list": 1287,
@@ -1090,7 +1123,8 @@
     "LIC-MS42-1YR": {
       "list": 236,
       "price": 159,
-      "discount": 0.3263
+      "discount": 0.3263,
+      "zoho_product_id": "2570562000001259225"
     },
     "LIC-MX80-SEC-5YR": {
       "list": 7872,
@@ -1119,7 +1153,8 @@
     "LIC-MS42P-1YR": {
       "list": 236,
       "price": 159,
-      "discount": 0.3263
+      "discount": 0.3263,
+      "zoho_product_id": "2570562000001259230"
     },
     "LIC-MG21-ENT-1Y": {
       "list": 236,
@@ -1148,7 +1183,8 @@
     "LIC-VMX-L-SEC-1Y": {
       "list": 9812,
       "price": 6599,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000320658338"
     },
     "LIC-MX95-SDW-3Y": {
       "list": 15234,
@@ -1177,12 +1213,14 @@
     "LIC-VMX-L-SEC-3Y": {
       "list": 22077,
       "price": 14846,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000307395172"
     },
     "LIC-VMX-L-SEC-5Y": {
       "list": 36796,
       "price": 24743,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000320658309"
     },
     "LIC-VMXM-SASENT-1Y": {
       "list": 2453,
@@ -1205,7 +1243,8 @@
     "LIC-VMX-M-SEC-5Y": {
       "list": 18394,
       "price": 12369,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000291926204"
     },
     "LIC-VMXS-SASENT-1Y": {
       "list": 491,
@@ -1234,7 +1273,8 @@
     "LIC-MS355-48X2-5YR": {
       "list": 4967,
       "price": 2428,
-      "discount": 0.5112
+      "discount": 0.5112,
+      "zoho_product_id": "2570562000012504178"
     },
     "LIC-C9300-24E-1Y": {
       "list": 749,
@@ -1293,12 +1333,14 @@
     "LIC-MX-SDW-L-1Y": {
       "list": 2129,
       "price": 1432,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000261763051"
     },
     "LIC-MX-SDW-XL-5Y": {
       "list": 46830,
       "price": 21801,
-      "discount": 59
+      "discount": 59,
+      "zoho_product_id": "2570562000261763052"
     },
     "LIC-MX67-SDW-5Y": {
       "list": 3639,
@@ -1375,12 +1417,14 @@
     "LIC-MX-SDW-L-3Y": {
       "list": 4792,
       "price": 3223,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763078"
     },
     "LIC-MX-SDW-XL-3Y": {
       "list": 28098,
       "price": 18894,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000261763079"
     },
     "LIC-MX64W-SDW-5Y": {
       "list": 4414,
@@ -1426,7 +1470,8 @@
     "LIC-MS130-48A-3Y": {
       "list": 1345,
       "price": 352,
-      "discount": 0.7383
+      "discount": 0.7383,
+      "zoho_product_id": "2570562000261763098"
     },
     "LIC-MX67C-ENT-1YR": {
       "list": 417,
@@ -1461,12 +1506,14 @@
     "LIC-MX-SDW-XS-3Y": {
       "list": 1300,
       "price": 874,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763068"
     },
     "LIC-MX-SDW-XS-1Y": {
       "list": 578,
       "price": 389,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000261763069"
     },
     "LIC-MS120-48FP-5YR": {
       "list": 1174,
@@ -1477,12 +1524,14 @@
     "LIC-MS210-48LP-5YR": {
       "list": 1441,
       "price": 622,
-      "discount": 0.5684
+      "discount": 0.5684,
+      "zoho_product_id": "2570562000001647079"
     },
     "LIC-MX-SDW-M-1Y": {
       "list": 1501,
       "price": 1010,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000261763070"
     },
     "LIC-MX250-SDW-5Y": {
       "list": 63472,
@@ -1535,7 +1584,8 @@
     "LIC-VMX-M-SEC-1Y": {
       "list": 4905,
       "price": 3299,
-      "discount": 0.3274
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000291926140"
     },
     "LIC-MX64-SEC-3YR": {
       "list": 1326,
@@ -1636,7 +1686,8 @@
     "LIC-MS210-48-1YR": {
       "list": 307,
       "price": 133,
-      "discount": 0.5668
+      "discount": 0.5668,
+      "zoho_product_id": "2570562000001647072"
     },
     "LIC-MX64-ENT-1YR": {
       "list": 294,
@@ -1689,12 +1740,14 @@
     "LIC-SME-5YR": {
       "list": 120,
       "price": 82,
-      "discount": 0.3167
+      "discount": 0.3167,
+      "zoho_product_id": "2570562000001277655"
     },
     "LIC-MS210-24P-1YR": {
       "list": 248,
       "price": 107,
-      "discount": 0.5685
+      "discount": 0.5685,
+      "zoho_product_id": "2570562000001647067"
     },
     "LIC-MX68-SEC-1YR": {
       "list": 736,
@@ -1711,7 +1764,8 @@
     "LIC-MS210-48LP-1YR": {
       "list": 384,
       "price": 167,
-      "discount": 0.5651
+      "discount": 0.5651,
+      "zoho_product_id": "2570562000001647077"
     },
     "LIC-MX75-ENT-1Y": {
       "list": 833,
@@ -1812,7 +1866,8 @@
     "LIC-MS355-24X-5YR": {
       "list": 2751,
       "price": 1344,
-      "discount": 0.5115
+      "discount": 0.5115,
+      "zoho_product_id": "2570562000012504169"
     },
     "LIC-MS355-48X-5YR": {
       "list": 4520,
@@ -1925,17 +1980,20 @@
     "LIC-MX-SDW-XS-5Y": {
       "list": 2166,
       "price": 1457,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763071"
     },
     "LIC-MX-SDW-M-5Y": {
       "list": 5628,
       "price": 2620,
-      "discount": 60
+      "discount": 60,
+      "zoho_product_id": "2570562000261763072"
     },
     "LIC-MX-SDW-S-5Y": {
       "list": 2233,
       "price": 1040,
-      "discount": 60
+      "discount": 60,
+      "zoho_product_id": "2570562000261763073"
     },
     "LIC-MS125-24P-3Y": {
       "list": 585,
@@ -1964,7 +2022,8 @@
     "LIC-MS130-CMPTA-3Y": {
       "list": 302,
       "price": 79,
-      "discount": 0.7384
+      "discount": 0.7384,
+      "zoho_product_id": "2570562000261763099"
     },
     "LIC-MX67W-SDW-1Y": {
       "list": 1024,
@@ -2065,7 +2124,8 @@
     "LIC-MX-SDW-L-5Y": {
       "list": 7986,
       "price": 3718,
-      "discount": 60
+      "discount": 60,
+      "zoho_product_id": "2570562000261763076"
     },
     "LIC-MX400-ENT-5YR": {
       "list": 29436,
@@ -2076,32 +2136,38 @@
     "LIC-VMX-S-ENT-1Y": {
       "list": 491,
       "price": 331,
-      "discount": 0.3259
+      "discount": 0.3259,
+      "zoho_product_id": "2570562000049126061"
     },
     "LIC-VMX-S-ENT-3Y": {
       "list": 1104,
       "price": 743,
-      "discount": 0.327
+      "discount": 0.327,
+      "zoho_product_id": "2570562000049126058"
     },
     "LIC-VMX-S-ENT-5Y": {
       "list": 1840,
       "price": 1238,
-      "discount": 0.3272
+      "discount": 0.3272,
+      "zoho_product_id": "2570562000049126062"
     },
     "LIC-VMX-M-ENT-1Y": {
       "list": 2453,
       "price": 1649,
-      "discount": 0.3278
+      "discount": 0.3278,
+      "zoho_product_id": "2570562000049126059"
     },
     "LIC-VMX-M-ENT-3Y": {
       "list": 5518,
       "price": 3711,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000049126056"
     },
     "LIC-VMX-M-ENT-5Y": {
       "list": 9197,
       "price": 6185,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000049126055"
     },
     "LIC-MS220-24P-5YR": {
       "list": 707,
@@ -2124,17 +2190,20 @@
     "LIC-VMX-L-ENT-1Y": {
       "list": 4906,
       "price": 3300,
-      "discount": 0.3274
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000049126060"
     },
     "LIC-VMX-L-ENT-3Y": {
       "list": 11038,
       "price": 7423,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000049126057"
     },
     "LIC-VMX-L-ENT-5Y": {
       "list": 18398,
       "price": 12371,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000049126063"
     },
     "LIC-MX95-SEC-3Y": {
       "list": 11038,
@@ -2157,7 +2226,8 @@
     "LIC-MX70-SEC-5YR": {
       "list": 3000,
       "price": 1980,
-      "discount": 0.34
+      "discount": 0.34,
+      "zoho_product_id": "2570562000001277752"
     },
     "LIC-MS420-24-1YR": {
       "list": 1417,
@@ -2174,12 +2244,14 @@
     "LIC-VMX-S-SEC-3Y": {
       "list": 2208,
       "price": 1485,
-      "discount": 0.3274
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000315687807"
     },
     "LIC-VMX-M-SEC-3Y": {
       "list": 11036,
       "price": 7422,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000291926172"
     },
     "LIC-MS420-24-3YR": {
       "list": 3188,
@@ -2190,7 +2262,8 @@
     "LIC-VMX-S-SEC-1Y": {
       "list": 981,
       "price": 661,
-      "discount": 0.3262
+      "discount": 0.3262,
+      "zoho_product_id": "2570562000299359745"
     },
     "LIC-MX67W-ENT-1YR": {
       "list": 368,
@@ -2237,17 +2310,20 @@
     "LIC-MS355-24X2-3YR": {
       "list": 2242,
       "price": 1095,
-      "discount": 0.5116
+      "discount": 0.5116,
+      "zoho_product_id": "2570562000012504171"
     },
     "LIC-VMX-XL-ENT-5Y": {
       "list": 25759,
       "price": 17321,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763095"
     },
     "LIC-VMX-XL-ENT-3Y": {
       "list": 15456,
       "price": 10393,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763096"
     },
     "LIC-MX600-ENT-1YR": {
       "list": 15699,
@@ -2258,17 +2334,20 @@
     "LIC-MS355-24X2-5YR": {
       "list": 3737,
       "price": 1826,
-      "discount": 0.5114
+      "discount": 0.5114,
+      "zoho_product_id": "2570562000012504172"
     },
     "LIC-MS355-24X-3YR": {
       "list": 1651,
       "price": 807,
-      "discount": 0.5112
+      "discount": 0.5112,
+      "zoho_product_id": "2570562000012504168"
     },
     "LIC-MS355-48X2-3YR": {
       "list": 2980,
       "price": 1456,
-      "discount": 0.5114
+      "discount": 0.5114,
+      "zoho_product_id": "2570562000012504177"
     },
     "LIC-MV-CA180-3YR": {
       "list": 3312,
@@ -2327,7 +2406,8 @@
     "LIC-MS42P-3YR": {
       "list": 531,
       "price": 357,
-      "discount": 0.3277
+      "discount": 0.3277,
+      "zoho_product_id": "2570562000001259231"
     },
     "LIC-MS220-8P-3YR": {
       "list": 186,
@@ -2422,7 +2502,8 @@
     "LIC-MX-SDW-XL-1Y": {
       "list": 12488,
       "price": 8397,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000261763093"
     },
     "LIC-MX600-SEC-3YR": {
       "list": 70646,
@@ -2529,12 +2610,14 @@
     "LIC-VMX-S-SEC-5Y": {
       "list": 3681,
       "price": 2476,
-      "discount": 0.3274
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000306558283"
     },
     "LIC-MS350-48LP-1YR": {
       "list": 782,
       "price": 364,
-      "discount": 0.5345
+      "discount": 0.5345,
+      "zoho_product_id": "2570562000001094218"
     },
     "LIC-MX84-ENT-5YR": {
       "list": 3681,
@@ -2545,12 +2628,14 @@
     "LIC-MS350-48LP-5YR": {
       "list": 2931,
       "price": 1366,
-      "discount": 0.5339
+      "discount": 0.5339,
+      "zoho_product_id": "2570562000001094220"
     },
     "LIC-MS350-48LP-3YR": {
       "list": 1759,
       "price": 820,
-      "discount": 0.5338
+      "discount": 0.5338,
+      "zoho_product_id": "2570562000001094219"
     },
     "LIC-MX84-SEC-1YR": {
       "list": 1963,
@@ -2600,12 +2685,14 @@
     "LIC-MS350-24P-5YR": {
       "list": 1769,
       "price": 824,
-      "discount": 0.5342
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000001094205"
     },
     "LIC-MS350-24P-3YR": {
       "list": 1062,
       "price": 494,
-      "discount": 0.5348
+      "discount": 0.5348,
+      "zoho_product_id": "2570562000001094204"
     },
     "LIC-MS350-48FP-5YR": {
       "list": 3187,
@@ -2616,7 +2703,8 @@
     "LIC-MS350-24P-1YR": {
       "list": 472,
       "price": 221,
-      "discount": 0.5318
+      "discount": 0.5318,
+      "zoho_product_id": "2570562000001094203"
     },
     "LIC-MS425-16-5YR": {
       "list": 3654,
@@ -2627,22 +2715,26 @@
     "LIC-MS350-48-3YR": {
       "list": 1506,
       "price": 702,
-      "discount": 0.5339
+      "discount": 0.5339,
+      "zoho_product_id": "2570562000001094214"
     },
     "LIC-MS350-24-5YR": {
       "list": 1535,
       "price": 715,
-      "discount": 0.5342
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000001094200"
     },
     "LIC-MS350-48-1YR": {
       "list": 669,
       "price": 313,
-      "discount": 0.5321
+      "discount": 0.5321,
+      "zoho_product_id": "2570562000001094213"
     },
     "LIC-MS350-48-5YR": {
       "list": 2510,
       "price": 1169,
-      "discount": 0.5343
+      "discount": 0.5343,
+      "zoho_product_id": "2570562000001094215"
     },
     "LIC-MS125-24P-5Y": {
       "list": 974,
@@ -2689,7 +2781,8 @@
     "LIC-MS350-24-3YR": {
       "list": 921,
       "price": 430,
-      "discount": 0.5331
+      "discount": 0.5331,
+      "zoho_product_id": "2570562000001094199"
     },
     "LIC-MX84-SEC-5YR": {
       "list": 7361,
@@ -2730,12 +2823,14 @@
     "LIC-MS210-48LP-3YR": {
       "list": 865,
       "price": 374,
-      "discount": 0.5676
+      "discount": 0.5676,
+      "zoho_product_id": "2570562000001647078"
     },
     "LIC-MS350-24-1YR": {
       "list": 409,
       "price": 191,
-      "discount": 0.533
+      "discount": 0.533,
+      "zoho_product_id": "2570562000001094198"
     },
     "LIC-MX67-SEC-1YR": {
       "list": 686,
@@ -2746,7 +2841,8 @@
     "LIC-MV-CA7-5Y": {
       "list": 331,
       "price": 223,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000248233886"
     },
     "LIC-MS120-48FP-1YR": {
       "list": 313,
@@ -2859,7 +2955,8 @@
     "LIC-MS210-48FP-1YR": {
       "list": 437,
       "price": 189,
-      "discount": 0.5675
+      "discount": 0.5675,
+      "zoho_product_id": "2570562000001647082"
     },
     "LIC-MS125-48FP-5Y": {
       "list": 1682,
@@ -3062,7 +3159,8 @@
     "LIC-CLD-PEER-1YR": {
       "list": 551925,
       "price": 371122,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000017212211"
     },
     "LIC-MS320-48FP-1YR": {
       "list": 555,
@@ -3102,22 +3200,26 @@
     "LIC-MS355-24X-1YR": {
       "list": 734,
       "price": 359,
-      "discount": 0.5109
+      "discount": 0.5109,
+      "zoho_product_id": "2570562000012504167"
     },
     "LIC-MS355-24X2-1YR": {
       "list": 996,
       "price": 487,
-      "discount": 0.511
+      "discount": 0.511,
+      "zoho_product_id": "2570562000012504170"
     },
     "LIC-MS355-48X2-1YR": {
       "list": 1325,
       "price": 647,
-      "discount": 0.5117
+      "discount": 0.5117,
+      "zoho_product_id": "2570562000012504176"
     },
     "LIC-MS22-5YR": {
       "list": 884,
       "price": 595,
-      "discount": 0.3269
+      "discount": 0.3269,
+      "zoho_product_id": "2570562000001259217"
     },
     "LIC-MS220-48FP-3YR": {
       "list": 876,
@@ -3134,7 +3236,8 @@
     "LIC-MS22P-1YR": {
       "list": 236,
       "price": 159,
-      "discount": 0.3263
+      "discount": 0.3263,
+      "zoho_product_id": "2570562000001259220"
     },
     "LIC-MS220-48FP-5YR": {
       "list": 1460,
@@ -3162,7 +3265,8 @@
     "LIC-MS22P-3YR": {
       "list": 531,
       "price": 357,
-      "discount": 0.3277
+      "discount": 0.3277,
+      "zoho_product_id": "2570562000001259221"
     },
     "LIC-Z1-ENT-1YR": {
       "list": 49,
@@ -3173,17 +3277,20 @@
     "LIC-MX70-SEC-3YR": {
       "list": 2000,
       "price": 1320,
-      "discount": 0.34
+      "discount": 0.34,
+      "zoho_product_id": "2570562000001277751"
     },
     "LIC-MS250-48LP-3YR": {
       "list": 1606,
       "price": 785,
-      "discount": 0.5112
+      "discount": 0.5112,
+      "zoho_product_id": "2570562000001094164"
     },
     "LIC-MS225-48-3YR": {
       "list": 962,
       "price": 415,
-      "discount": 0.5686
+      "discount": 0.5686,
+      "zoho_product_id": "2570562000001094134"
     },
     "LIC-MS225-48LP-1YR": {
       "list": 515,
@@ -3242,7 +3349,8 @@
     "LIC-MS250-48LP-5YR": {
       "list": 2675,
       "price": 1308,
-      "discount": 0.511
+      "discount": 0.511,
+      "zoho_product_id": "2570562000001094165"
     },
     "LIC-MS225-24P-1YR": {
       "list": 359,
@@ -3259,7 +3367,8 @@
     "LIC-MS42-5YR": {
       "list": 884,
       "price": 595,
-      "discount": 0.3269
+      "discount": 0.3269,
+      "zoho_product_id": "2570562000001259227"
     },
     "LIC-MX90-ENT-1YR": {
       "list": 2099,
@@ -3420,7 +3529,8 @@
     "CAB-SPWR-150CM-M": {
       "list": 263,
       "price": 177,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000246983834"
     },
     "MA-SFP-10GB-SR": {
       "list": 1217,
@@ -3593,7 +3703,8 @@
     "MV32": {
       "list": 1142,
       "price": 769,
-      "discount": 0.3266
+      "discount": 0.3266,
+      "zoho_product_id": "2570562000016927096"
     },
     "MA-PWR-30W-US-O": {
       "list": 35,
@@ -3603,7 +3714,8 @@
     "C9200L-STA-KIT-M-O": {
       "list": 1581,
       "price": 882,
-      "discount": 52
+      "discount": 52,
+      "zoho_product_id": "2570562000350341016"
     },
     "STACK-T3A-1M-M": {
       "list": 244,
@@ -3620,12 +3732,14 @@
     "MV72": {
       "list": 1558,
       "price": 1048,
-      "discount": 0.3273
+      "discount": 0.3273,
+      "zoho_product_id": "2570562000012504179"
     },
     "MV72X": {
       "list": 1766,
       "price": 1187,
-      "discount": 0.3279
+      "discount": 0.3279,
+      "zoho_product_id": "2570562000029952621"
     },
     "MA-SFP-1GB-TX": {
       "list": 531,
@@ -3648,7 +3762,8 @@
     "Z3C-HW-NA": {
       "list": 1119,
       "price": 753,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000010553312"
     },
     "MA-PWR-CORD-US-O": {
       "list": 7,
@@ -3717,7 +3832,8 @@
     "MS120-48-HW": {
       "list": 3724,
       "price": 1305,
-      "discount": 0.6496
+      "discount": 0.6496,
+      "zoho_product_id": "2570562000001259190"
     },
     "MS210-24-HW": {
       "list": 4326,
@@ -3728,22 +3844,26 @@
     "MS210-24P-HW": {
       "list": 5309,
       "price": 2228,
-      "discount": 0.5803
+      "discount": 0.5803,
+      "zoho_product_id": "2570562000001647058"
     },
     "MS210-48FP-HW": {
       "list": 9516,
       "price": 3993,
-      "discount": 0.5804
+      "discount": 0.5804,
+      "zoho_product_id": "2570562000001647061"
     },
     "MG21-HW-NA": {
       "list": 1119,
       "price": 753,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000025231453"
     },
     "CAB-SPWR-30CM-M": {
       "list": 129,
       "price": 87,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000222867335"
     },
     "STACK-T1-1M-M": {
       "list": 240,
@@ -3760,7 +3880,8 @@
     "PWR-C1-1100WAC-P-M": {
       "list": 2324,
       "price": 1563,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000217133358"
     },
     "C9300-48UN-M": {
       "list": 17967,
@@ -3795,7 +3916,8 @@
     "CW-ANT-O1-NS-00": {
       "list": 260,
       "price": 175,
-      "discount": 0.3269
+      "discount": 0.3269,
+      "zoho_product_id": "2570562000204583072"
     },
     "CW9163E-MR": {
       "list": 2803,
@@ -3818,7 +3940,8 @@
     "C9300X-48HXN-M": {
       "list": 18827,
       "price": 10836,
-      "discount": 0.4244
+      "discount": 0.4244,
+      "zoho_product_id": "2570562000261763083"
     },
     "MT30-HW": {
       "list": 156,
@@ -3901,7 +4024,8 @@
     "MX67C-HW-WW": {
       "list": 1779,
       "price": 931,
-      "discount": 54
+      "discount": 54,
+      "zoho_product_id": "2570562000035721715"
     },
     "MA-PWR-USB-US": {
       "list": 44,
@@ -3924,7 +4048,8 @@
     "MA-MNT-MV-2": {
       "list": 199,
       "price": 131,
-      "discount": 0.3417
+      "discount": 0.3417,
+      "zoho_product_id": "2570562000000161182"
     },
     "MV63M-HW": {
       "list": 1832,
@@ -3953,12 +4078,14 @@
     "MS225-48LP-HW": {
       "list": 8563,
       "price": 3593,
-      "discount": 0.5804
+      "discount": 0.5804,
+      "zoho_product_id": "2570562000000157381"
     },
     "MS250-24P-HW": {
       "list": 8886,
       "price": 3705,
-      "discount": 0.5831
+      "discount": 0.5831,
+      "zoho_product_id": "2570562000000157384"
     },
     "MS225-24P-HW": {
       "list": 6026,
@@ -3993,7 +4120,8 @@
     "MS225-24-HW": {
       "list": 5174,
       "price": 1933,
-      "discount": 0.6264
+      "discount": 0.6264,
+      "zoho_product_id": "2570562000000157379"
     },
     "MA-MNT-MV-3": {
       "list": 199,
@@ -4049,12 +4177,14 @@
     "PWR-C5-600WAC-M-O": {
       "list": 2780,
       "price": 1870,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000389299144"
     },
     "STACK-T4-1M-M-O": {
       "list": 278,
       "price": 187,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000389299184"
     },
     "STACK-T4-3M-M-O": {
       "list": 417,
@@ -4105,7 +4235,8 @@
     "FAN-T2-M": {
       "list": 367,
       "price": 239,
-      "discount": 0.3488
+      "discount": 0.3488,
+      "zoho_product_id": "2570562000261763074"
     },
     "MA-MNT-MR-18": {
       "list": 60,
@@ -4122,7 +4253,8 @@
     "4PT-KIT-T2-M": {
       "list": 273,
       "price": 184,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000285642381"
     },
     "MA-MNT-MR-H3A": {
       "list": 60,
@@ -4199,7 +4331,8 @@
     "PWR-C1-715WAC-P-M": {
       "list": 1529,
       "price": 1028,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000217133404"
     },
     "MA-PWR-CORD-JP": {
       "list": 23,
@@ -4251,7 +4384,8 @@
     "MS125-24P-HW": {
       "list": 4607,
       "price": 1669,
-      "discount": 0.6377
+      "discount": 0.6377,
+      "zoho_product_id": "2570562000019405046"
     },
     "STACK-T3A-50CM-M": {
       "list": 129,
@@ -4321,22 +4455,26 @@
     "CW-INJ-8": {
       "list": 468,
       "price": 315,
-      "discount": 0.3269
+      "discount": 0.3269,
+      "zoho_product_id": "2570562000290749261"
     },
     "LIC-C8455-ENT-5Y": {
       "list": 53021,
       "price": 35653,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878053"
     },
     "LIC-C8455-ENT-3Y": {
       "list": 31813,
       "price": 21392,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878054"
     },
     "LIC-C8455-ENT-1Y": {
       "list": 14139,
       "price": 9508,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000385878055"
     },
     "CW9172H-RTG": {
       "list": 1418,
@@ -4413,7 +4551,8 @@
     "C9300-48P-M": {
       "list": 13242,
       "price": 7383,
-      "discount": 0.4425
+      "discount": 0.4425,
+      "zoho_product_id": "2570562000199758020"
     },
     "C9300-48T-M": {
       "list": 11002,
@@ -4442,7 +4581,8 @@
     "OAD-CNS-MR-WPA": {
       "list": 1,
       "price": 1,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000349456663"
     },
     "MA-CBL-SPWR-150CM": {
       "list": 275,
@@ -4624,7 +4764,8 @@
     "CW-ANT-GPS1-M-00": {
       "list": 364,
       "price": 245,
-      "discount": 0.3269
+      "discount": 0.3269,
+      "zoho_product_id": "2570562000282151125"
     },
     "MA-PWR-150WAC": {
       "list": 428,
@@ -4635,7 +4776,8 @@
     "MS130-8P-I-HW": {
       "list": 1581,
       "price": 918,
-      "discount": 0.4194
+      "discount": 0.4194,
+      "zoho_product_id": "2570562000235367001"
     },
     "MV93-HW": {
       "list": 1832,
@@ -4669,7 +4811,8 @@
     "C9300X-48HX-M": {
       "list": 20635,
       "price": 13876,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000221238429"
     },
     "MA-ANT-3-A6": {
       "list": 243,
@@ -4770,12 +4913,14 @@
     "MX68CW-HW-WW": {
       "list": 2465,
       "price": 1290,
-      "discount": 54
+      "discount": 54,
+      "zoho_product_id": "2570562000019804126"
     },
     "IM-8-CU-1GB": {
       "list": 3999,
       "price": 2639,
-      "discount": 0.3401
+      "discount": 0.3401,
+      "zoho_product_id": "2570562000000159949"
     },
     "MA-QSFP-40G-CSR4": {
       "list": 4028,
@@ -4786,7 +4931,8 @@
     "MS425-16-HW": {
       "list": 19178,
       "price": 12896,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000000157397"
     },
     "MA-CBL-LEAK-2": {
       "list": 57,
@@ -4821,7 +4967,8 @@
     "MA-MNT-ANT-6": {
       "list": 103,
       "price": 66,
-      "discount": 0.3592
+      "discount": 0.3592,
+      "zoho_product_id": "2570562000154200062"
     },
     "MA-CBL-120G-3M": {
       "list": 459,
@@ -4855,7 +5002,8 @@
     "MX100-HW": {
       "list": 6758,
       "price": 4544,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000000159814"
     },
     "Z1-HW-UK": {
       "list": 395,
@@ -4871,7 +5019,8 @@
     "CW9800H1-MCG": {
       "list": 129642,
       "price": 87174,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000326331519"
     },
     "MS450-12-HW": {
       "list": 29464,
@@ -4954,12 +5103,14 @@
     "MS210-48LP-HW": {
       "list": 7210,
       "price": 3025,
-      "discount": 0.5804
+      "discount": 0.5804,
+      "zoho_product_id": "2570562000001647060"
     },
     "MS350-48-HW": {
       "list": 12598,
       "price": 8471,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000000157392"
     },
     "PWR-C5-125WAC-M": {
       "list": 1946,
@@ -4994,7 +5145,8 @@
     "MR52-HW": {
       "list": 1711,
       "price": 1151,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000000161187"
     },
     "MA-CBL-TA-3M": {
       "list": 202,
@@ -5039,7 +5191,8 @@
     "MA-CBL-100G-50CM-O": {
       "list": 122,
       "price": 83,
-      "discount": 41
+      "discount": 41,
+      "zoho_product_id": "2570562000376823002"
     },
     "MS350-48FP-HW": {
       "list": 15937,
@@ -5056,7 +5209,8 @@
     "MS210-48-HW": {
       "list": 5695,
       "price": 2390,
-      "discount": 0.5803
+      "discount": 0.5803,
+      "zoho_product_id": "2570562000001647059"
     },
     "MA-CBL-TA-1M-O": {
       "list": 122,
@@ -5149,12 +5303,14 @@
     "CW-ANT-D1-NS-00": {
       "list": 1428,
       "price": 929,
-      "discount": 0.3494
+      "discount": 0.3494,
+      "zoho_product_id": "2570562000243995311"
     },
     "CW-ANT-GPS2-S-00": {
       "list": 353,
       "price": 238,
-      "discount": 0.3258
+      "discount": 0.3258,
+      "zoho_product_id": "2570562000198467611"
     },
     "MV23M-HW": {
       "list": 2175,
@@ -5363,7 +5519,8 @@
     "MX67C-NA": {
       "list": 1712,
       "price": 896,
-      "discount": 54
+      "discount": 54,
+      "zoho_product_id": "2570562000392754775"
     },
     "MX68CW-NA": {
       "list": 2373,
@@ -5469,7 +5626,8 @@
     "MG21E-HW-NA": {
       "list": 1248,
       "price": 839,
-      "discount": 42
+      "discount": 42,
+      "zoho_product_id": "2570562000025231454"
     },
     "MA-ANT-C1-B": {
       "list": 605,
@@ -5504,7 +5662,8 @@
     "MS390-24UX-HW": {
       "list": 14896,
       "price": 6210,
-      "discount": 0.5831
+      "discount": 0.5831,
+      "zoho_product_id": "2570562000025231484"
     },
     "MA-CBL-120G-50CM": {
       "list": 153,
@@ -5515,12 +5674,14 @@
     "MS390-48UX2-HW": {
       "list": 14310,
       "price": 5966,
-      "discount": 0.5831
+      "discount": 0.5831,
+      "zoho_product_id": "2570562000025231481"
     },
     "CW-ACC-KIT1-00": {
       "list": 156,
       "price": 106,
-      "discount": 0.3205
+      "discount": 0.3205,
+      "zoho_product_id": "2570562000253239869"
     },
     "MA-CBL-TA-1M": {
       "list": 134,
@@ -5531,12 +5692,14 @@
     "MS225-48-HW": {
       "list": 7081,
       "price": 2971,
-      "discount": 0.5804
+      "discount": 0.5804,
+      "zoho_product_id": "2570562000000157380"
     },
     "MS250-48FP-HW": {
       "list": 14830,
       "price": 6153,
-      "discount": 0.5851
+      "discount": 0.5851,
+      "zoho_product_id": "2570562000000157387"
     },
     "MA-SFP-10GB-LR": {
       "list": 4886,
@@ -5655,7 +5818,8 @@
     "MS390-48UX-HW": {
       "list": 14833,
       "price": 6184,
-      "discount": 0.5831
+      "discount": 0.5831,
+      "zoho_product_id": "2570562000025231483"
     },
     "MV93X-HW": {
       "list": 3321,
@@ -5684,7 +5848,8 @@
     "CW9171I-RTG": {
       "list": 918,
       "price": 480,
-      "discount": 0.4771
+      "discount": 0.4771,
+      "zoho_product_id": "2570562000375727016"
     },
     "CW9172I-RTG": {
       "list": 1677,
@@ -5719,197 +5884,236 @@
     "CW9179F": {
       "list": 9756,
       "price": 6561,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000350232263"
     },
     "C8111-G2-MX": {
       "list": 1256,
       "price": 845,
-      "discount": 0.3272
+      "discount": 0.3272,
+      "zoho_product_id": "2570562000384052111"
     },
     "LIC-C8111-ENT-1Y": {
       "list": 558,
       "price": 376,
-      "discount": 0.3262
+      "discount": 0.3262,
+      "zoho_product_id": "2570562000385878069"
     },
     "LIC-C8111-ENT-3Y": {
       "list": 1256,
       "price": 845,
-      "discount": 0.3272
+      "discount": 0.3272,
+      "zoho_product_id": "2570562000385878070"
     },
     "LIC-C8111-ENT-5Y": {
       "list": 2094,
       "price": 1408,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878071"
     },
     "LIC-C8111-SEC-1Y": {
       "list": 1117,
       "price": 752,
-      "discount": 0.3268
+      "discount": 0.3268,
+      "zoho_product_id": "2570562000384071049"
     },
     "LIC-C8111-SEC-3Y": {
       "list": 2513,
       "price": 1690,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000385878079"
     },
     "LIC-C8111-SEC-5Y": {
       "list": 4188,
       "price": 2816,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878080"
     },
     "LIC-C8111-SDW-1Y": {
       "list": 1675,
       "price": 1126,
-      "discount": 0.3278
+      "discount": 0.3278,
+      "zoho_product_id": "2570562000385878074"
     },
     "LIC-C8111-SDW-3Y": {
       "list": 3769,
       "price": 2534,
-      "discount": 0.3277
+      "discount": 0.3277,
+      "zoho_product_id": "2570562000385878075"
     },
     "LIC-C8111-SDW-5Y": {
       "list": 6281,
       "price": 4224,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000385878076"
     },
     "C8455-G2-MX": {
       "list": 44451,
       "price": 29890,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000362899273"
     },
     "LIC-C8455-SEC-1Y": {
       "list": 18380,
       "price": 12360,
-      "discount": 0.3275
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000385878056"
     },
     "LIC-C8455-SEC-3Y": {
       "list": 41357,
       "price": 27809,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878065"
     },
     "LIC-C8455-SEC-5Y": {
       "list": 68927,
       "price": 46348,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878066"
     },
     "LIC-C8455-SDW-1Y": {
       "list": 26753,
       "price": 17990,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878060"
     },
     "LIC-C8455-SDW-3Y": {
       "list": 60179,
       "price": 40466,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878061"
     },
     "LIC-C8455-SDW-5Y": {
       "list": 100299,
       "price": 67443,
-      "discount": 0.3276
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000385878062"
     },
     "LIC-UMB-DNS-ESS-K9-1YR": {
       "list": 62,
       "price": 49,
-      "discount": 0.2097
+      "discount": 0.2097,
+      "zoho_product_id": "2570562000340122857"
     },
     "LIC-UMB-DNS-ESS-K9-3YR": {
       "list": 186,
       "price": 146,
-      "discount": 0.2151
+      "discount": 0.2151,
+      "zoho_product_id": "2570562000340122891"
     },
     "LIC-UMB-DNS-ESS-K9-5YR": {
       "list": 311,
       "price": 243,
-      "discount": 0.2186
+      "discount": 0.2186,
+      "zoho_product_id": "2570562000340122924"
     },
     "LIC-UMB-DNS-ADV-K9-1YR": {
       "list": 93,
       "price": 74,
-      "discount": 0.2043
+      "discount": 0.2043,
+      "zoho_product_id": "2570562000342392023"
     },
     "LIC-UMB-DNS-ADV-K9-3YR": {
       "list": 279,
       "price": 217,
-      "discount": 0.2222
+      "discount": 0.2222,
+      "zoho_product_id": "2570562000342392057"
     },
     "LIC-UMB-DNS-ADV-K9-5YR": {
       "list": 466,
       "price": 364,
-      "discount": 0.2189
+      "discount": 0.2189,
+      "zoho_product_id": "2570562000342392090"
     },
     "LIC-UMB-SIG-ESS-K9-1YR": {
       "list": 130,
       "price": 101,
-      "discount": 0.2231
+      "discount": 0.2231,
+      "zoho_product_id": "2570562000342865075"
     },
     "LIC-UMB-SIG-ESS-K9-3YR": {
       "list": 389,
       "price": 303,
-      "discount": 0.2211
+      "discount": 0.2211,
+      "zoho_product_id": "2570562000342865114"
     },
     "LIC-UMB-SIG-ESS-K9-5YR": {
       "list": 648,
       "price": 506,
-      "discount": 0.2191
+      "discount": 0.2191,
+      "zoho_product_id": "2570562000342865147"
     },
     "LIC-UMB-SIG-ADV-K9-1YR": {
       "list": 199,
       "price": 155,
-      "discount": 0.2211
+      "discount": 0.2211,
+      "zoho_product_id": "2570562000342865227"
     },
     "LIC-UMB-SIG-ADV-K9-3YR": {
       "list": 597,
       "price": 466,
-      "discount": 0.2194
+      "discount": 0.2194,
+      "zoho_product_id": "2570562000342865261"
     },
     "LIC-UMB-SIG-ADV-K9-5YR": {
       "list": 995,
       "price": 776,
-      "discount": 0.2201
+      "discount": 0.2201,
+      "zoho_product_id": "2570562000342865294"
     },
     "LIC-DUO-ESSENTIALS-1YR": {
       "list": 36,
       "price": 34,
-      "discount": 0.0556
+      "discount": 0.0556,
+      "zoho_product_id": "2570562000161188676"
     },
     "LIC-DUO-ESSENTIALS-3YR": {
       "list": 108,
       "price": 101,
-      "discount": 0.0648
+      "discount": 0.0648,
+      "zoho_product_id": "2570562000161188677"
     },
     "LIC-DUO-ESSENTIALS-5YR": {
       "list": 180,
       "price": 168,
-      "discount": 0.0667
+      "discount": 0.0667,
+      "zoho_product_id": "2570562000161188678"
     },
     "LIC-DUO-ADVANTAGE-1YR": {
       "list": 72,
       "price": 68,
-      "discount": 0.0556
+      "discount": 0.0556,
+      "zoho_product_id": "2570562000161188670"
     },
     "LIC-DUO-ADVANTAGE-3YR": {
       "list": 216,
       "price": 201,
-      "discount": 0.0694
+      "discount": 0.0694,
+      "zoho_product_id": "2570562000161188671"
     },
     "LIC-DUO-ADVANTAGE-5YR": {
       "list": 360,
       "price": 336,
-      "discount": 0.0667
+      "discount": 0.0667,
+      "zoho_product_id": "2570562000161188672"
     },
     "LIC-DUO-PREMIER-1YR": {
       "list": 108,
       "price": 101,
-      "discount": 0.0648
+      "discount": 0.0648,
+      "zoho_product_id": "2570562000161188673"
     },
     "LIC-DUO-PREMIER-3YR": {
       "list": 324,
       "price": 302,
-      "discount": 0.0679
+      "discount": 0.0679,
+      "zoho_product_id": "2570562000161188674"
     },
     "LIC-DUO-PREMIER-5YR": {
       "list": 540,
       "price": 503,
-      "discount": 0.0685
+      "discount": 0.0685,
+      "zoho_product_id": "2570562000161188675"
     },
     "AIR-AP-BRACKET-1=": {
       "list": 26,
@@ -5962,7 +6166,8 @@
     "MV2": {
       "list": 519,
       "price": 266,
-      "discount": 0.4875
+      "discount": 0.4875,
+      "zoho_product_id": "2570562000062657390"
     },
     "MX67": {
       "list": 567,
