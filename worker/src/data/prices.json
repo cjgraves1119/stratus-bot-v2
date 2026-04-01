@@ -5209,6 +5209,56 @@
       "list": 810,
       "price": 567.0,
       "discount": 0.3
+    },
+    "LIC-DUO-ACCESS-1YR": {
+      "list": 69,
+      "price": 48.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-ACCESS-3YR": {
+      "list": 204,
+      "price": 143.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-ACCESS-5YR": {
+      "list": 340,
+      "price": 238.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-BEYOND-1YR": {
+      "list": 103,
+      "price": 72.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-BEYOND-3YR": {
+      "list": 306,
+      "price": 214.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-BEYOND-5YR": {
+      "list": 510,
+      "price": 357.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-MFA-1YR": {
+      "list": 34,
+      "price": 24.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-MFA-3YR": {
+      "list": 103,
+      "price": 72.0,
+      "discount": 0.3
+    },
+    "LIC-DUO-MFA-5YR": {
+      "list": 170,
+      "price": 119.0,
+      "discount": 0.3
+    },
+    "LIC-SME-1YR": {
+      "list": 40,
+      "price": 28.0,
+      "discount": 0.3
     }
   },
   "_meta": {
