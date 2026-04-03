@@ -5575,7 +5575,8 @@
     "MX68CW-NA": {
       "list": 2373,
       "price": 1241,
-      "discount": 55
+      "discount": 55,
+      "zoho_product_id": "2570562000010635040"
     },
     "MA-CBL-LEAK-1-O": {
       "list": 57,
@@ -6226,12 +6227,14 @@
     "MX67": {
       "list": 567,
       "price": 397.0,
-      "discount": 0.3
+      "discount": 0.3,
+      "zoho_product_id": "2570562000009234263"
     },
     "MX68": {
       "list": 810,
       "price": 567.0,
-      "discount": 0.3
+      "discount": 0.3,
+      "zoho_product_id": "2570562000010523428"
     }
   },
   "_meta": {
