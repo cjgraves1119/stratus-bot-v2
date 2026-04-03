@@ -34,40 +34,37 @@ function onGmailMessage(e) {
   var from = message.getFrom() || '';
   var senderParts = parseSender_(from);
 
-  // Collect ALL emails and domains from the thread
+  // Single-pass: collect all emails, domains, and external contacts from thread
+  var STRATUS_DOMAIN = 'stratusinfosystems.com';
+  var isOutbound = (senderParts.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) !== -1);
   var thread = message.getThread();
   var messages = thread.getMessages();
   var allEmails = {};
   var allDomains = {};
+  var threadContacts = [];
+  var seenContactEmails = {};
+  var customerEmail = '';
+  var customerName = '';
+  var customerDomain = '';
+  var lastInboundBody = null;
 
   for (var i = 0; i < messages.length; i++) {
     var msg = messages[i];
-    var fields = [msg.getFrom(), msg.getTo(), msg.getCc()].join(', ');
-    var emailMatches = fields.match(/[\w.+-]+@[\w.-]+\.\w+/g) || [];
+    var msgFrom = msg.getFrom() || '';
+    var contactFields = [msgFrom, msg.getTo() || '', msg.getCc() || ''];
+    var combinedFields = contactFields.join(', ');
+
+    // Extract all emails for domain collection
+    var emailMatches = combinedFields.match(/[\w.+-]+@[\w.-]+\.\w+/g) || [];
     for (var j = 0; j < emailMatches.length; j++) {
       var email = emailMatches[j].toLowerCase();
       allEmails[email] = true;
       var domain = email.split('@')[1];
       if (domain) allDomains[domain] = true;
     }
-  }
 
-  // Identify external contacts (non-Stratus) from the entire thread.
-  // Collect ALL unique external contacts from From/To/CC for the contact selector.
-  var STRATUS_DOMAIN = 'stratusinfosystems.com';
-  var isOutbound = (senderParts.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) !== -1);
-  var customerEmail = '';
-  var customerName = '';
-  var customerDomain = '';
-  var threadContacts = []; // {email, name} for all non-Stratus participants
-  var seenContactEmails = {};
-
-  for (var k = 0; k < messages.length; k++) {
-    var threadMsg = messages[k];
-    // Check From, To, CC fields
-    var contactFields = [threadMsg.getFrom() || '', threadMsg.getTo() || '', threadMsg.getCc() || ''];
+    // Extract external contacts with names (for contact selector)
     for (var cf = 0; cf < contactFields.length; cf++) {
-      // Split comma-separated addresses
       var addresses = contactFields[cf].split(',');
       for (var ca = 0; ca < addresses.length; ca++) {
         var addr = addresses[ca].trim();
@@ -79,7 +76,6 @@ function onGmailMessage(e) {
         if (seenContactEmails[lowerEmail]) continue;
         seenContactEmails[lowerEmail] = true;
         threadContacts.push({ email: parsed.email, name: parsed.name });
-        // Set first external contact as the default customer
         if (!customerEmail) {
           customerEmail = parsed.email;
           customerName = parsed.name;
@@ -87,20 +83,17 @@ function onGmailMessage(e) {
         }
       }
     }
-  }
 
-  // If this is an outbound message, use the body of the most recent inbound
-  // message so the AI and CRM agent have the customer's actual content.
-  var bodyToUse = body;
-  if (isOutbound && customerEmail) {
-    for (var k2 = messages.length - 1; k2 >= 0; k2--) {
-      var inboundParsed = parseSender_(messages[k2].getFrom() || '');
-      if (inboundParsed.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) === -1) {
-        bodyToUse = messages[k2].getPlainBody() || body;
-        break;
+    // Track last inbound message body (for outbound emails)
+    if (isOutbound && customerEmail) {
+      var fromParsed = parseSender_(msgFrom);
+      if (fromParsed.email.toLowerCase().indexOf('@' + STRATUS_DOMAIN) === -1) {
+        lastInboundBody = msg.getPlainBody();
       }
     }
   }
+
+  var bodyToUse = (isOutbound && lastInboundBody) ? lastInboundBody : body;
 
   // Store email context for action handlers (no API call here)
   var emailCtx = {

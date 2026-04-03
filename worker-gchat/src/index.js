@@ -3662,30 +3662,47 @@ async function executeToolCall(toolName, toolInput, env) {
         return await zohoApiCall('POST', 'coql', env, { select_query: query });
       }
 
-      // ── Batch Product Lookup ──
+      // ── Batch Product Lookup (optimized: uses embedded product IDs from prices.json) ──
       case 'batch_product_lookup': {
         const { skus } = toolInput;
-        // Apply suffix rules and look up all products in parallel
         const batchResults = {};
+        let cacheHits = 0;
+        let apiLookups = 0;
         const lookupPromises = skus.map(async (entry) => {
           const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
           const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
           const suffixed = applySuffix(rawSku);
+          // Get cached price data (live KV → static prices.json via Proxy)
+          const cachedPrice = prices[suffixed] || null;
+          // If prices.json has zoho_product_id, skip the API call entirely
+          if (cachedPrice?.zoho_product_id) {
+            cacheHits++;
+            batchResults[rawSku] = {
+              suffixed_sku: suffixed,
+              qty,
+              product_id: cachedPrice.zoho_product_id,
+              product_name: suffixed,
+              list_price: cachedPrice.list || null,
+              ecomm_price: cachedPrice.price || null,
+              discount_pct: cachedPrice.discount || null,
+              found: true
+            };
+            return;
+          }
+          // Fallback: API lookup for SKUs without embedded product IDs (~19 legacy SKUs)
+          apiLookups++;
           try {
-            // Search Products module (for Zoho record ID)
             const prodResult = await zohoApiCall('GET',
               `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`,
               env
             );
             const records = prodResult?.data || [];
             const match = records.find(r => r.Product_Code === suffixed);
-            // Get cached price (live KV → static prices.json via Proxy)
-            const cachedPrice = prices[suffixed] || null;
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
               product_id: match?.id || null,
-              product_name: match?.Product_Name || null,
+              product_name: match?.Product_Name || suffixed,
               list_price: cachedPrice?.list || match?.Unit_Price || null,
               ecomm_price: cachedPrice?.price || null,
               discount_pct: cachedPrice?.discount || null,
@@ -3696,7 +3713,8 @@ async function executeToolCall(toolName, toolInput, env) {
           }
         });
         await Promise.all(lookupPromises);
-        return { success: true, products: batchResults, count: Object.keys(batchResults).length };
+        console.log(`[BATCH-LOOKUP] ${cacheHits} cache hits, ${apiLookups} API lookups for ${skus.length} SKUs`);
+        return { success: true, products: batchResults, count: Object.keys(batchResults).length, cacheHits, apiLookups };
       }
 
       // ── Web Enrichment Tools ──
@@ -3975,7 +3993,7 @@ const CRM_EMAIL_TOOLS = [
   // Batch Product Lookup (parallel, with KV pricing)
   {
     name: 'batch_product_lookup',
-    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically, searches Zoho Products for record IDs, and includes live ecomm pricing from the daily-refreshed price cache. Use this instead of individual WooProducts searches — it\'s faster (parallel) and includes pricing. Returns product_id, list_price, ecomm_price for each SKU.',
+    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price for each SKU. Use this for ALL product lookups — never search Products/WooProducts individually.',
     input_schema: {
       type: 'object',
       properties: {
@@ -4358,10 +4376,11 @@ NEVER pass a record ID into a name/text search field. If you have an Account rec
 
 Use the **batch_product_lookup** tool for ALL product lookups. It:
 - Applies SKU suffix rules automatically (you just pass the base SKU)
-- Searches Zoho Products in parallel (all SKUs at once, not sequentially)
-- Returns product_id (for quote line items) + list_price + ecomm_price from the live daily-refreshed price cache
+- Resolves Zoho product IDs instantly from the embedded cache (zero API calls for 98% of SKUs)
+- Returns product_id + list_price + ecomm_price from the daily-refreshed price cache
+- Only falls back to API lookup for ~19 legacy SKUs without cached IDs
 
-**DO NOT search WooProducts individually.** The batch tool is faster and already includes ecomm pricing.
+**DO NOT search WooProducts or Products individually.** The batch tool is faster and already includes pricing + product IDs.
 
 ### Quote Creation (List Price Default)
 Create quotes at **list price** by default:
@@ -4597,7 +4616,7 @@ function toolProgressMessage(toolName, toolInput) {
       return `🔍 Validating ${toolInput.field_name || 'field'} picklist values...`;
     case 'batch_product_lookup': {
       const skuCount = toolInput.skus?.length || 0;
-      return `📦 Looking up ${skuCount} product${skuCount !== 1 ? 's' : ''} in parallel...`;
+      return `📦 Resolving ${skuCount} product${skuCount !== 1 ? 's' : ''} (cached IDs + pricing)...`;
     }
     case 'web_search_domain': {
       return `🌐 Looking up ${toolInput.domain || 'domain'}...`;
@@ -6617,6 +6636,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           // ══════════════════════════════════════════════════════════════
 
           // ── CRM Contact Lookup: Find contact + account by email/domain ──
+          // Optimized: parallel Zoho calls + server-side KV cache (10-min TTL)
           case '/api/crm-contact': {
             const { email: contactEmail, domain: contactDomain } = apiBody;
             if (!contactEmail && !contactDomain) {
@@ -6624,67 +6644,88 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             }
 
             try {
+              // Check KV cache first (10-min TTL)
+              const cacheKey = `crm_contact_${contactEmail || contactDomain}`;
+              if (env.GCHAT_CONVERSATION_KV) {
+                try {
+                  const cached = await env.GCHAT_CONVERSATION_KV.get(cacheKey, 'json');
+                  if (cached) {
+                    console.log(`[CRM-CONTACT] Cache hit for ${contactEmail || contactDomain}`);
+                    apiResult = cached;
+                    break;
+                  }
+                } catch (_) {}
+              }
+
               let contact = null;
               let account = null;
 
-              // Step 1: Search contact by email
-              if (contactEmail) {
-                const contactResp = await zohoApiCall('GET',
-                  `Contacts/search?email=${encodeURIComponent(contactEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
-                );
-                if (contactResp?.data?.[0]) {
-                  const c = contactResp.data[0];
-                  contact = {
-                    id: c.id,
-                    firstName: c.First_Name || '',
-                    lastName: c.Last_Name || '',
-                    fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
-                    email: c.Email || contactEmail,
-                    phone: c.Phone || '',
-                    mobile: c.Mobile || '',
-                    title: c.Title || '',
-                    accountId: c.Account_Name?.id || null,
-                    accountName: c.Account_Name?.name || '',
-                    address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
-                  };
-                }
+              // PARALLEL: Search contact by email AND account by domain simultaneously
+              const contactPromise = contactEmail
+                ? zohoApiCall('GET',
+                    `Contacts/search?email=${encodeURIComponent(contactEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
+                  ).catch(() => null)
+                : Promise.resolve(null);
+
+              const domainPromise = contactDomain
+                ? zohoApiCall('GET',
+                    `Accounts/search?criteria=((Website:contains:${encodeURIComponent(contactDomain)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
+                  ).catch(() => null)
+                : Promise.resolve(null);
+
+              const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
+
+              // Process contact result
+              if (contactResp?.data?.[0]) {
+                const c = contactResp.data[0];
+                contact = {
+                  id: c.id,
+                  firstName: c.First_Name || '',
+                  lastName: c.Last_Name || '',
+                  fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
+                  email: c.Email || contactEmail,
+                  phone: c.Phone || '',
+                  mobile: c.Mobile || '',
+                  title: c.Title || '',
+                  accountId: c.Account_Name?.id || null,
+                  accountName: c.Account_Name?.name || '',
+                  address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
+                };
               }
 
-              // Step 2: Find account (from contact link or domain search)
+              // Resolve account: prefer linked account from contact, fall back to domain search
               const acctId = contact?.accountId;
               if (acctId) {
-                const acctResp = await zohoApiCall('GET',
-                  `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry,Description`, env
-                );
-                if (acctResp?.data?.[0]) {
-                  const a = acctResp.data[0];
-                  account = {
-                    id: a.id,
-                    name: a.Account_Name || '',
-                    phone: a.Phone || '',
-                    website: a.Website || '',
-                    address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
-                    industry: a.Industry || '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
-                  };
-                }
-              } else if (contactDomain) {
-                // Fallback: search accounts by domain
-                const domainSearch = await zohoApiCall('GET',
-                  `Accounts/search?criteria=((Website:contains:${encodeURIComponent(contactDomain)}))&fields=id,Account_Name,Phone,Website,Billing_City,Billing_State,Industry&per_page=5`, env
-                );
-                if (domainSearch?.data?.[0]) {
-                  const a = domainSearch.data[0];
-                  account = {
-                    id: a.id,
-                    name: a.Account_Name || '',
-                    phone: a.Phone || '',
-                    website: a.Website || '',
-                    address: [a.Billing_City, a.Billing_State].filter(Boolean).join(', '),
-                    industry: a.Industry || '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
-                  };
-                }
+                // Contact has linked account — fetch full details
+                try {
+                  const acctResp = await zohoApiCall('GET',
+                    `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry`, env
+                  );
+                  if (acctResp?.data?.[0]) {
+                    const a = acctResp.data[0];
+                    account = {
+                      id: a.id,
+                      name: a.Account_Name || '',
+                      phone: a.Phone || '',
+                      website: a.Website || '',
+                      address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
+                      industry: a.Industry || '',
+                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                    };
+                  }
+                } catch (_) {}
+              } else if (domainResp?.data?.[0]) {
+                // Use the domain search result that ran in parallel
+                const a = domainResp.data[0];
+                account = {
+                  id: a.id,
+                  name: a.Account_Name || '',
+                  phone: a.Phone || '',
+                  website: a.Website || '',
+                  address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
+                  industry: a.Industry || '',
+                  zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                };
               }
 
               if (contact) {
@@ -6692,6 +6733,14 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               }
 
               apiResult = { contact, account, found: !!(contact || account) };
+
+              // Cache result in KV (10-min TTL)
+              if (env.GCHAT_CONVERSATION_KV && apiResult.found) {
+                ctx.waitUntil(
+                  env.GCHAT_CONVERSATION_KV.put(cacheKey, JSON.stringify(apiResult), { expirationTtl: 600 })
+                    .catch(() => {})
+                );
+              }
             } catch (err) {
               apiResult = { error: 'Contact lookup failed: ' + err.message, contact: null, account: null, found: false };
             }
