@@ -5502,9 +5502,10 @@ ${(data.recentRequests || []).map(r => {
               try {
                 const domain = senderEmail.split('@')[1];
                 if (domain && !['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com'].includes(domain.toLowerCase())) {
-                  // Search by website/domain
+                  // Search by website/domain (starts_with works for "easyice.com" matching "https://www.easyice.com")
+                  const domainCore = domain.replace(/^(www\.)/i, '');
                   const acctResp = await zohoApiCall('GET',
-                    `Accounts/search?criteria=(Website:equals:${domain})&fields=id,Account_Name,Phone,Website`, env
+                    `Accounts/search?criteria=(Website:starts_with:${encodeURIComponent(domainCore)})&fields=id,Account_Name,Phone,Website`, env
                   );
                   if (acctResp?.data?.[0]) {
                     crmAccount = acctResp.data[0];
@@ -5872,7 +5873,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               for (const domain of searchDomains) {
                 try {
                   const acctResp = await zohoApiCall('GET',
-                    `Accounts/search?criteria=((Website:contains:${encodeURIComponent(domain)}))&fields=id,Account_Name,Website&per_page=5`, env
+                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domain)}))&fields=id,Account_Name,Website&per_page=5`, env
                   );
                   if (acctResp && acctResp.data) {
                     acctResp.data.forEach(a => {
@@ -6113,7 +6114,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               if (!prevAccountId && !prevIsGeneric && prevDomain) {
                 // Strategy 2: Search accounts by website/domain
                 try {
-                  const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(prevDomain)})&fields=id,Account_Name`, env);
+                  const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:starts_with:${encodeURIComponent(prevDomain)})&fields=id,Account_Name`, env);
                   if (ac?.data?.[0]) { prevAccountId = ac.data[0].id; prevAccountName = ac.data[0].Account_Name; }
                 } catch (e) {}
 
@@ -6141,7 +6142,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 for (const td of usableDomains) {
                   if (prevAccountId) break;
                   try {
-                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(td)})&fields=id,Account_Name`, env);
+                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:starts_with:${encodeURIComponent(td)})&fields=id,Account_Name`, env);
                     if (ac?.data?.[0]) { prevAccountId = ac.data[0].id; prevAccountName = ac.data[0].Account_Name; }
                   } catch (e) {}
                 }
@@ -6251,7 +6252,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                   try {
                     // Strategy 2: Search accounts by website criteria containing domain
                     const acctCriteria = await zohoApiCall('GET',
-                      `Accounts/search?criteria=(Website:contains:${encodeURIComponent(domain)})&fields=id,Account_Name,Website`, env
+                      `Accounts/search?criteria=(Website:starts_with:${encodeURIComponent(domain)})&fields=id,Account_Name,Website`, env
                     );
                     if (acctCriteria?.data && acctCriteria.data.length > 0) {
                       resultAccountId = acctCriteria.data[0].id;
@@ -6294,7 +6295,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 for (const td of usableDomains) {
                   if (resultAccountId) break;
                   try {
-                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:contains:${encodeURIComponent(td)})&fields=id,Account_Name`, env);
+                    const ac = await zohoApiCall('GET', `Accounts/search?criteria=(Website:starts_with:${encodeURIComponent(td)})&fields=id,Account_Name`, env);
                     if (ac?.data?.[0]) { resultAccountId = ac.data[0].id; resultAccountName = ac.data[0].Account_Name; }
                   } catch (e) {}
                 }
@@ -6667,13 +6668,16 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                   ).catch(() => null)
                 : Promise.resolve(null);
 
-              const domainPromise = contactDomain
+              // Strip common prefixes for starts_with matching (easyice.com matches "https://www.easyice.com")
+              const domainCore = contactDomain ? contactDomain.replace(/^(www\.)/i, '') : '';
+              const domainPromise = domainCore
                 ? zohoApiCall('GET',
-                    `Accounts/search?criteria=((Website:contains:${encodeURIComponent(contactDomain)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
+                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domainCore)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
                   ).catch(() => null)
                 : Promise.resolve(null);
 
               const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
+              console.log(`[CRM-CONTACT] contactResp: ${contactResp?.data?.length || 0} results, domainResp: ${domainResp?.data?.length || 0} results`);
 
               // Process contact result
               if (contactResp?.data?.[0]) {
