@@ -4890,6 +4890,78 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 
 ---
 
+## ADMIN ACTION WORKFLOW (Quote-to-PO)
+
+Admin Actions are Zoho CRM automations triggered by writing an action name to the Admin_Action field. Execute these directly via API. NEVER tell the user to click a button or do it manually.
+
+**How to trigger ANY Admin Action:**
+1. Set the Admin_Action field:
+   zoho_update_record(module_name="Quotes", record_id={quote_id}, data={"Admin_Action": "LIVE_CiscoQuote_Deal"})
+2. Wait 5 seconds, then re-fetch the quote record
+3. Check Admin_Action field: when it shows {ACTION_NAME}__Done, it completed successfully
+4. If still blank after 5s, wait another 5s and re-fetch once more
+
+**Admin Action Sequence (Quote-to-PO Flow):**
+
+| Step | Action | Purpose | Verify By |
+|------|--------|---------|-----------|
+| 1 | LIVE_CiscoQuote_Deal | Submit to Cisco CCW, get Deal ID (DID) | CCW_Deal_Number populated |
+| 2 | LIVE_GetQuoteData | Get approved disti pricing from Cisco | Vendor_Lines populated |
+| 3 | LIVE_ConvertQuoteToSO | Convert quote to Purchase Order | New Sales_Orders record linked |
+| 4 | LIVE_SendToEsign | Send PO for customer e-signature | Customer receives ZohoSign email |
+
+**Step 1: LIVE_CiscoQuote_Deal (Generate Deal ID / DID)**
+When user says "create deal id", "generate DID", "submit to CCW", or "get a deal number":
+- Trigger LIVE_CiscoQuote_Deal on the Quote record
+- After success, re-fetch to confirm CCW_Deal_Number is populated (8 digit number)
+- Auto-submit to Velocity Hub: POST https://eo44ez435h7vzp2.m.pipedream.net with body {"deal_id": "<DID>", "country": "United States"}
+- Report: "Deal ID {DID} generated and submitted for approval."
+- Velocity Hub submission is non-blocking. If it fails, report but continue.
+
+**Step 3: LIVE_ConvertQuoteToSO (Create PO)**
+Before running, show validation: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion.
+
+**Step 4: LIVE_SendToEsign**
+CRITICAL: Run on Sales_Orders module (PO record ID), NOT Quotes module.
+1. Search Sales_Orders: criteria=(Deal_Name:equals:{Deal_Id})
+2. Run LIVE_SendToEsign on the PO record: zoho_update_record(module_name="Sales_Orders", record_id={po_id}, data={"Admin_Action": "LIVE_SendToEsign"})
+3. Wait 7s, re-fetch PO to verify
+
+**Delinquency Gate:** After LIVE_ConvertQuoteToSO, if Delinquency_Score is non-green, update Quote Net_Terms="Cash" and re-run LIVE_ConvertQuoteToSO.
+
+---
+
+## URL / ECOMM QUOTE LINK GENERATION
+
+When the user asks for a "URL quote", "ecomm link", "order link", or "shopping cart link" from a Zoho quote:
+1. Read the Quoted_Items from the quote (use CRM context if available)
+2. Build the Stratus ecomm URL: https://stratusinfosystems.com/order/?item={SKU1},{SKU2},{SKU3}&qty={Q1},{Q2},{Q3}
+3. Generate 3 links (1yr, 3yr, 5yr) by swapping license terms:
+   - LIC-ENT-{N}YR for AP licenses
+   - LIC-{model}-SEC-{N}YR for MX security licenses
+   - LIC-{model}-{N}Y for switch licenses (note: Y not YR for switches)
+   - Hardware SKUs stay the same across all 3 links
+4. Present as:
+   *1-Year Co-Term:* {url}
+   *3-Year Co-Term:* {url}
+   *5-Year Co-Term:* {url}
+
+If the quote already has specific license terms, show just that term's link plus offer: "Want me to show 1yr and 5yr options too?"
+
+---
+
+## SPEED RULES (CRITICAL FOR RESPONSIVENESS)
+
+- You have at most 25 seconds total. Each Zoho API call costs ~2-3s. Each of your responses costs ~5-10s.
+- Budget: 2 of your responses + 1-2 Zoho calls MAX for simple lookups.
+- When CRM context is injected (PREVIOUS CRM CONTEXT section), use those IDs directly. DO NOT search again.
+- For quote updates with context: go straight to batch_product_lookup + zoho_update_record. Skip the search.
+- For Admin Actions: trigger immediately on the Quote ID from context. No search needed.
+- Combine multiple pieces of info in a single response rather than doing multiple tool calls to gather them separately.
+- If a task only needs 1 tool call, make that call immediately with your narration in the same turn.
+
+---
+
 ## NARRATE AS YOU WORK (CRITICAL)
 
 The user cannot see your thinking or tool calls — only your text responses. This means you MUST narrate what you're doing and what you find as you go. Include a brief text block BEFORE each tool call explaining what you're about to do and why. After getting results, summarize what you found before moving to the next step.
@@ -5221,7 +5293,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
                 ctxHint += `  - ${li.qty}x ${li.sku} (line_item_id: ${li.id}, product_id: ${li.product_id})\n`;
               }
             }
-            ctxHint += '\nUse these IDs directly instead of searching again. For quote updates, call zoho_get_record on the Quote ID above to get fresh data, then proceed with the update.\n';
+            ctxHint += '\n⚡ SPEED DIRECTIVE: You already have all record IDs. DO NOT call zoho_search_records — go directly to zoho_get_record using the IDs above. For quote updates, call zoho_get_record on the Quote ID to get fresh Quoted_Items, then immediately call zoho_update_record. For Admin Actions (DID, ConvertToSO, SendToEsign), use the Quote ID or Deal ID directly. For URL quote generation, use the line items listed above. Target: 1-2 tool calls max for follow-up requests.\n';
             systemPrompt += ctxHint;
             console.log(`[GCHAT] Injected CRM context: quote=${savedCtx.quote_id}, acct=${savedCtx.account_name}`);
           }
@@ -5323,31 +5395,31 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       }
 
       // Dynamic model selection:
-      // - Sonnet for iterations 1-3: planning, CRM lookup, interpreting results
-      // - Haiku for iteration 4+ when in execution mode: last tool calls were create/update/batch_product_lookup
+      // - Sonnet for iterations 1-2: planning, CRM lookup, interpreting results
+      // - Haiku for iteration 3+ when in execution mode: last tool calls were create/update/batch_product_lookup/send_email
       //   (i.e. Claude is mechanically executing the workflow with no new decision-making needed).
-      //   Haiku is 3x cheaper and faster for these steps. Previously required zero-text response,
-      //   but "narrate as you work" always adds text. Now detects execution by tool type instead.
+      //   Haiku is 3x cheaper and ~2x faster for these steps.
+      // - Also use Haiku for iteration 3+ when CRM context is present (agent already has IDs, just executing).
       // - Always Sonnet for non-CRM (quoting) flows.
       const _lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
       const _lastToolNames = _lastAssistantMsg && Array.isArray(_lastAssistantMsg.content)
         ? _lastAssistantMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
         : [];
-      const _executionTools = new Set(['zoho_create_record', 'zoho_update_record', 'batch_product_lookup']);
+      const _executionTools = new Set(['zoho_create_record', 'zoho_update_record', 'batch_product_lookup', 'send_email', 'zoho_get_record']);
       const _inPureExecMode = useTools
         && _lastToolNames.length > 0
         && _lastToolNames.some(n => _executionTools.has(n));
-      const activeModel = (useTools && iteration > 3 && _inPureExecMode)
+      const activeModel = (useTools && iteration > 2 && _inPureExecMode)
         ? 'claude-haiku-4-5-20251001'
         : 'claude-sonnet-4-20250514';
       if (useTools) {
         console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
 
-      // CRM tool-use iterations: use 4096 tokens to prevent final response truncation.
-      // Truncated responses get saved as complete history and leave crm_session active,
-      // causing the bot to falsely believe it asked an unanswered follow-up question.
-      const maxTok = 4096;
+      // CRM tool-use iterations: use 2048 tokens for mid-loop iterations (tool calls + brief narration),
+      // 4096 for the first 2 iterations (planning/reasoning) and for non-tool-use flows.
+      // Smaller max_tokens = faster API response times during execution steps.
+      const maxTok = (useTools && iteration > 2 && _inPureExecMode) ? 2048 : 4096;
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
@@ -5505,11 +5577,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         // Add tool results to messages
         messages.push({ role: 'user', content: toolResults });
 
-        // Message compaction: when conversation grows beyond 6 messages,
+        // Message compaction: when conversation grows beyond 4 messages,
         // replace older tool_result contents with a brief summary to keep
-        // the Anthropic API payload small (faster calls = more iterations in 30s).
-        if (messages.length > 6) {
-          for (let i = 1; i < messages.length - 4; i++) {
+        // the Anthropic API payload small (faster calls = more iterations within wall clock).
+        if (messages.length > 4) {
+          for (let i = 1; i < messages.length - 2; i++) {
             const msg = messages[i];
             if (msg.role === 'user' && Array.isArray(msg.content)) {
               msg.content = msg.content.map(block => {
