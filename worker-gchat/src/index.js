@@ -4399,13 +4399,18 @@ Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentag
 
 **NEVER infer quote line items from the Subject field.** The Subject/name of a quote does NOT reliably reflect what is actually in it — they frequently mismatch. A quote named "2x MR57 & MS150" may actually contain MR44 and MX67. Always call zoho_get_record on the quote record to read the actual Quoted_Items before reporting or modifying anything.
 
+**ALWAYS use fields parameter for zoho_get_record on Quotes.** Quote records are very large (~12-15K chars). You MUST pass the fields parameter to get a focused response that fits within processing limits:
+- Call: zoho_get_record(module_name="Quotes", record_id="<id>", fields="id,Subject,Quote_Number,Quoted_Items,Account_Name,Deal_Name,Grand_Total,Quote_Stage")
+- This reduces response size from ~12K to ~2.5K chars and prevents stalls.
+- Never call zoho_get_record on a Quote without the fields parameter.
+
 **Quote update workflow:**
-1. Call zoho_get_record on the quote to read actual Quoted_Items (not just Subject)
+1. Call zoho_get_record on the quote WITH fields parameter to read actual Quoted_Items
 2. Identify each line item by Product_Code and its Quantity, unit_price, and Discount
 3. Determine the correct replacement SKUs (e.g., LIC-ENT-1YR -> LIC-ENT-3YR)
 4. Call batch_product_lookup to get product IDs and prices for the new SKUs
 5. Call zoho_update_record with the fully-updated Quoted_Items array
-6. Call zoho_get_record AGAIN after updating to verify the change was applied
+6. Call zoho_get_record AGAIN (with fields parameter) after updating to verify the change was applied
 7. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
 
 **NEVER report a successful update without verifying it.** If step 5 fails or the post-update fetch shows unchanged data, tell the user the update did not apply and why.
