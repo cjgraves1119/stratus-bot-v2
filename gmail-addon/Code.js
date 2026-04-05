@@ -945,22 +945,33 @@ function onCrmCreateTask(e) {
   var contactId = params.contact_id || '';
   var accountId = params.account_id || '';
 
-  // Use deal from dropdown if provided, otherwise find most recent open deal
-  var dealId = formInput.new_task_deal || '';
-  if (accountId && !dealId) {
-    try {
-      var dealsResp = crmDeals_(accountId, '');
-      if (dealsResp && dealsResp.deals && dealsResp.deals.length > 0) {
-        for (var i = 0; i < dealsResp.deals.length; i++) {
-          var dd = dealsResp.deals[i];
-          if (dd.stage !== 'Closed Won' && dd.stage !== 'Closed (Lost)') {
-            dealId = dd.id;
-            break;
+  // Resolve deal association from dropdown selection
+  // 'AUTO' = auto-select most recent open deal, 'NONE' = contact only, anything else = explicit deal ID
+  var rawDealSel = formInput.new_task_deal || 'AUTO';
+  var dealId = '';
+  if (rawDealSel === 'NONE') {
+    // User explicitly chose contact-only — leave dealId empty
+    dealId = '';
+  } else if (rawDealSel === 'AUTO' || rawDealSel === '') {
+    // Auto-select most recent open deal for this account
+    if (accountId) {
+      try {
+        var dealsResp = crmDeals_(accountId, '');
+        if (dealsResp && dealsResp.deals && dealsResp.deals.length > 0) {
+          for (var i = 0; i < dealsResp.deals.length; i++) {
+            var dd = dealsResp.deals[i];
+            if (dd.stage !== 'Closed Won' && dd.stage !== 'Closed (Lost)') {
+              dealId = dd.id;
+              break;
+            }
           }
+          if (!dealId) dealId = dealsResp.deals[0].id;
         }
-        if (!dealId) dealId = dealsResp.deals[0].id;
-      }
-    } catch (_) { /* proceed without deal */ }
+      } catch (_) { /* proceed without deal */ }
+    }
+  } else {
+    // Explicit deal selected from the list
+    dealId = rawDealSel;
   }
 
   var result;

@@ -2559,9 +2559,10 @@ function buildCrmCreateTaskCard_(params) {
   // Deal dropdown (populated from account deals)
   var dealDropdown = CardService.newSelectionInput()
     .setFieldName('new_task_deal')
-    .setTitle('Associate with Deal')
+    .setTitle('Deal Association')
     .setType(CardService.SelectionInputType.DROPDOWN)
-    .addItem('Auto-select most recent', '', true);
+    .addItem('Auto-select most recent', 'AUTO', true)
+    .addItem('No deal — contact only', 'NONE', false);
 
   var accountId = params.account_id || '';
   if (accountId) {
