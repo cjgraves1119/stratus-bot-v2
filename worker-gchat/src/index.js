@@ -4360,7 +4360,7 @@ When searching Zoho CRM, use the actual field values — NOT record IDs:
 - Deals by owner: criteria = (Owner:equals:2570562000141711002) — use the FULL Owner ID, never truncate
 - Contacts by email: criteria = (Email:equals:john@acme.com)
 - Accounts by name: criteria = (Account_Name:contains:Acme)
-- **Quotes by Quote_Number: use zoho_search_records(Quotes, criteria=(Quote_Number:equals:2570562000397037844))** — Quote_Number is a SEPARATE auto-generated field, NOT the same as the internal record `id`. These two values differ and are NOT interchangeable. NEVER call zoho_get_record(Quotes, quoteNumber) using a Quote_Number as the record_id — always use zoho_search_records with (Quote_Number:equals:X) to look up a quote by its number.
+- **Quotes by Quote_Number: use zoho_search_records(Quotes, criteria=(Quote_Number:equals:2570562000397037844))** — Quote_Number is a SEPARATE auto-generated field, NOT the same as the internal record "id". These two values differ and are NOT interchangeable. NEVER call zoho_get_record(Quotes, quoteNumber) using a Quote_Number as the record_id — always use zoho_search_records with (Quote_Number:equals:X) to look up a quote by its number.
 
 The "contains" operator is more forgiving than "equals". Use "contains" or "starts_with" when you're unsure of the exact name.
 
