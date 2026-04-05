@@ -333,19 +333,24 @@ function onCrmSearch(e) {
   return buildCrmResultCard_(result, query.trim(), module);
 }
 
-/** Show Add Contact form (pre-filled from email context) */
+/** Show Add Contact form (pre-filled from email context or passed parameters) */
 function onShowAddContact(e) {
   var ctx = getEmailContext_();
   var crmCtx = null;
   try { crmCtx = JSON.parse(PropertiesService.getUserProperties().getProperty('crm_sidebar_ctx') || 'null'); } catch (_) {}
 
-  // Pre-fill from email context
-  var prefillEmail = '';
-  var prefillName = '';
+  // Check for explicit parameters (passed from not-found card for a specific contact)
+  var params = (e && e.commonEventObject && e.commonEventObject.parameters) || {};
+  var paramEmail = params.prefill_email || '';
+  var paramName = params.prefill_name || '';
+
+  // Explicit params take priority over email context
+  var prefillEmail = paramEmail || '';
+  var prefillName = paramName || '';
   var accountId = '';
   var accountName = '';
 
-  if (ctx) {
+  if (!prefillEmail && ctx) {
     prefillEmail = (ctx.isOutbound && ctx.customerEmail) ? ctx.customerEmail : ctx.senderEmail;
     prefillName = (ctx.isOutbound && ctx.customerName) ? ctx.customerName : ctx.senderName;
   }
@@ -740,7 +745,8 @@ function onCrmContactDetails(e) {
   }
 
   if (!result || !result.found) {
-    return buildErrorCard_('No contact or account found in Zoho CRM for ' + lookupEmail + '. Try searching manually.');
+    var senderName = ctx ? ((ctx.isOutbound && ctx.customerName) ? ctx.customerName : ctx.senderName) : '';
+    return buildCrmNotFoundCard_(lookupEmail, senderName);
   }
 
   // Store CRM context for tab navigation
@@ -788,7 +794,7 @@ function onContactSwitch(e) {
   }
 
   if (!result || !result.found) {
-    return buildErrorCard_('No CRM record found for ' + selectedEmail + '.');
+    return buildCrmNotFoundCard_(selectedEmail, '');
   }
 
   var crmCtx = {

@@ -1895,6 +1895,42 @@ function buildReplyDetectedCard_(result) {
 // ERROR CARD
 // âââââââââââââââââââââââââââââââââââââââââââââ
 
+
+// CRM NOT FOUND CARD
+// -------------------------------------------------
+
+function buildCrmNotFoundCard_(email, displayName) {
+  var label = displayName ? displayName + ' (' + email + ')' : email;
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Stratus AI')
+        .setSubtitle('Not in CRM')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    )
+    .addSection(
+      CardService.newCardSection().addWidget(
+        CardService.newTextParagraph().setText('<i>No CRM record found for ' + label + '</i>')
+      ).addWidget(
+        CardService.newButtonSet().addButton(
+          CardService.newTextButton()
+            .setText('Add Contact to Zoho')
+            .setOnClickAction(
+              CardService.newAction()
+                .setFunctionName('onShowAddContact')
+                .setParameters({ prefill_email: email, prefill_name: displayName || '' })
+            )
+            .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+            .setBackgroundColor(CONFIG.STRATUS_DARK)
+        )
+      )
+    );
+
+  addBackToEmailButton_(card);
+  return card.build();
+}
+
 function buildErrorCard_(message) {
   var card = CardService.newCardBuilder()
     .setHeader(
