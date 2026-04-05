@@ -5202,6 +5202,33 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // Use a minimal system prompt for CRM/email operations to stay under token limits.
       // The full quoting system prompt (~5K tokens) isn't needed for CRM queries.
       systemPrompt = CRM_AGENT_SYSTEM_PROMPT;
+
+      // CRM context injection: if a previous CRM turn saved context (quote ID, account,
+      // line items), inject it so the agent can skip re-searching on follow-up messages.
+      if (personId && kv) {
+        try {
+          const savedCtx = await kv.get(`crm_context_${personId}`, 'json');
+          if (savedCtx) {
+            let ctxHint = '\n\n## PREVIOUS CRM CONTEXT (from your last turn)\n';
+            if (savedCtx.account_name) ctxHint += `Account: ${savedCtx.account_name} (ID: ${savedCtx.account_id})\n`;
+            if (savedCtx.quote_id) ctxHint += `Quote ID: ${savedCtx.quote_id}`;
+            if (savedCtx.quote_number) ctxHint += ` (Quote#: ${savedCtx.quote_number})`;
+            ctxHint += '\n';
+            if (savedCtx.deal_id) ctxHint += `Deal ID: ${savedCtx.deal_id}\n`;
+            if (savedCtx.line_items?.length) {
+              ctxHint += `Line items (${savedCtx.line_items.length} total):\n`;
+              for (const li of savedCtx.line_items) {
+                ctxHint += `  - ${li.qty}x ${li.sku} (line_item_id: ${li.id}, product_id: ${li.product_id})\n`;
+              }
+            }
+            ctxHint += '\nUse these IDs directly instead of searching again. For quote updates, call zoho_get_record on the Quote ID above to get fresh data, then proceed with the update.\n';
+            systemPrompt += ctxHint;
+            console.log(`[GCHAT] Injected CRM context: quote=${savedCtx.quote_id}, acct=${savedCtx.account_name}`);
+          }
+        } catch (ctxErr) {
+          console.error(`[GCHAT] CRM context injection error:`, ctxErr.message);
+        }
+      }
     }
 
     // Agentic loop: Claude may call tools multiple times before returning text.
@@ -5521,6 +5548,62 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       if (personId) {
         await addToHistory(kv, personId, 'user', userMessage);
         await addToHistory(kv, personId, 'assistant', reply);
+
+        // CRM context persistence: extract key record IDs from tool results
+        // so follow-up messages can skip re-searching. Scan messages for Zoho
+        // tool results containing Quote, Deal, or Account data.
+        if (useTools && kv) {
+          try {
+            const crmCtx = {};
+            for (const msg of messages) {
+              if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+              for (const block of msg.content) {
+                if (block.type !== 'tool_result' || !block.content) continue;
+                const raw = typeof block.content === 'string' ? block.content : '';
+                // Extract Quote context
+                if (raw.includes('"Quoted_Items"') || raw.includes('"Quote_Number"')) {
+                  try {
+                    const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
+                    const rec = parsed?.data?.[0] || parsed;
+                    if (rec?.id) {
+                      crmCtx.quote_id = rec.id;
+                      crmCtx.quote_number = rec.Quote_Number || null;
+                      crmCtx.account_name = rec.Account_Name?.name || null;
+                      crmCtx.account_id = rec.Account_Name?.id || null;
+                      crmCtx.deal_id = rec.Deal_Name?.id || null;
+                      // Compact line items: product code + qty + line item ID
+                      if (rec.Quoted_Items) {
+                        crmCtx.line_items = rec.Quoted_Items.map(i => ({
+                          id: i.id,
+                          sku: i.Product_Code || i.Product_Name?.Product_Code || i.Product_Name,
+                          qty: i.Quantity,
+                          product_id: i.product_id || i.Product_Name?.id
+                        }));
+                      }
+                    }
+                  } catch (_) {}
+                }
+                // Extract Account context
+                if (raw.includes('"Account_Name"') && !crmCtx.account_id) {
+                  try {
+                    const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
+                    const rec = parsed?.data?.[0] || parsed;
+                    if (rec?.Account_Name) {
+                      crmCtx.account_name = rec.Account_Name?.name || rec.Account_Name;
+                      crmCtx.account_id = rec.Account_Name?.id || null;
+                    }
+                  } catch (_) {}
+                }
+              }
+            }
+            if (Object.keys(crmCtx).length > 0) {
+              await kv.put(`crm_context_${personId}`, JSON.stringify(crmCtx), { expirationTtl: 900 });
+              console.log(`[GCHAT] Saved CRM context for ${personId}: quote=${crmCtx.quote_id}, acct=${crmCtx.account_name}`);
+            }
+          } catch (ctxErr) {
+            console.error(`[GCHAT] CRM context save error:`, ctxErr.message);
+          }
+        }
       }
 
       return reply;
