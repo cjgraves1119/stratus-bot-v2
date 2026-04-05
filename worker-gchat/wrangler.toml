@@ -45,6 +45,20 @@ id = "af24db17eaa644fe9456e2ae74379766"
 binding = "SELF"
 service = "stratus-ai-bot-gchat"
 
+# ── Cloudflare Queue: CRM work dispatch ─────────────────────────────
+# Webhook handler produces a message → queue consumer processes it in
+# a completely independent execution context (15-min wall-clock limit).
+# This bypasses the 30s ctx.waitUntil wall-clock limit that kills
+# multi-step agentic CRM loops (2-3 Anthropic calls @ 8-12s each).
+[[queues.producers]]
+queue = "stratus-gchat-crm-queue"
+binding = "CRM_QUEUE"
+
+[[queues.consumers]]
+queue = "stratus-gchat-crm-queue"
+max_batch_size = 1
+max_retries = 0
+
 # Daily price refresh from Zoho WooProducts → KV
 # Runs at 11:00 UTC (6:00 AM CT / 5:00 AM CST)
 [triggers]

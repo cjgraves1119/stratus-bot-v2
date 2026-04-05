@@ -8140,6 +8140,19 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
           }
         }
 
+        // Detect existing-quote modification — messages about updating/fixing/cleaning up
+        // an existing quote should route to CRM, not the URL quoting engine, even if
+        // SKUs are present. Without this, "the modea quote has duplicate line items.
+        // update it so it only has: 2x MR44-HW..." gets grabbed by the SKU parser.
+        if (!isExplicitCrmRequest) {
+          const hasQuoteRef = /\b(the\s+\w+\s+quote|this\s+quote|that\s+quote|existing\s+quote|current\s+quote|modea\s+quote|quote\s+has|quote\s+#?\d)\b/i.test(text);
+          const hasModifyIntent = /\b(update|fix|change|remove|duplicate|replace|modify|clean\s*up|correct|swap|switch|convert)\b/i.test(text);
+          if (hasQuoteRef && hasModifyIntent) {
+            console.log(`[GCHAT] Existing quote modification detected — routing to CRM agent`);
+            isExplicitCrmRequest = true;
+          }
+        }
+
         // CRM session continuation: if a CRM conversation is active (flag set by
         // the async CRM handler), keep routing follow-up messages to the CRM agent
         // even without explicit "zoho"/"crm" keywords. This allows multi-turn CRM
