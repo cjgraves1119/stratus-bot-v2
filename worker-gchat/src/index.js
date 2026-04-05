@@ -8262,24 +8262,46 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               //       queue consumer → askClaude with tools → deliver via GChat REST API
               const _imgData = imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null;
 
-              try {
-                await env.CRM_QUEUE.send({
-                  text,
-                  personId,
-                  spaceName,
-                  threadName,
-                  imageData: _imgData
-                });
-                console.log(`[GCHAT-DISPATCH] CRM work queued for: "${text.substring(0, 60)}..."`);
-              } catch (queueErr) {
-                console.error(`[GCHAT-DISPATCH] Queue send failed: ${queueErr.message}`);
-                // Fallback: try to send error message directly
+              // ── Queue dispatch with ctx.waitUntil fallback ──────────────────
+              if (env.CRM_QUEUE) {
                 try {
-                  await sendAsyncGChatMessage(spaceName, `❌ Failed to queue request: ${queueErr.message.substring(0, 100)}`, null, env);
-                } catch (_) {}
+                  await env.CRM_QUEUE.send({
+                    text,
+                    personId,
+                    spaceName,
+                    threadName,
+                    imageData: _imgData
+                  });
+                  console.log(`[GCHAT-DISPATCH] CRM work queued for: "${text.substring(0, 60)}..."`);
+                } catch (queueErr) {
+                  console.error(`[GCHAT-DISPATCH] Queue send failed: ${queueErr.message}`);
+                  // Fallback: try to send error message directly
+                  try {
+                    await sendAsyncGChatMessage(spaceName, `❌ Failed to queue request: ${queueErr.message.substring(0, 100)}`, null, env);
+                  } catch (_) {}
+                }
+              } else {
+                // Queue binding not available (queue not created yet).
+                // Fall back to ctx.waitUntil — has 30s wall-clock limit, so multi-step
+                // CRM loops may timeout, but simple queries will still work.
+                console.warn(`[GCHAT-DISPATCH] CRM_QUEUE binding not available — falling back to ctx.waitUntil`);
+                ctx.waitUntil((async () => {
+                  try {
+                    await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', threadName, env);
+                    const result = await askClaude(text, personId, env, imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null, true);
+                    if (result) {
+                      await sendAsyncGChatMessage(spaceName, result, threadName, env);
+                    }
+                  } catch (fallbackErr) {
+                    console.error(`[GCHAT-DISPATCH] ctx.waitUntil fallback failed: ${fallbackErr.message}`);
+                    try {
+                      await sendAsyncGChatMessage(spaceName, `❌ Request failed (no queue available): ${fallbackErr.message.substring(0, 100)}`, threadName, env);
+                    } catch (_) {}
+                  }
+                })());
               }
 
-              // Return empty response immediately — queue consumer handles everything
+              // Return empty response immediately — queue consumer or ctx.waitUntil handles everything
               return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } });
             }
 
