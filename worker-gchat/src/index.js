@@ -4360,6 +4360,7 @@ When searching Zoho CRM, use the actual field values — NOT record IDs:
 - Deals by owner: criteria = (Owner:equals:2570562000141711002) — use the FULL Owner ID, never truncate
 - Contacts by email: criteria = (Email:equals:john@acme.com)
 - Accounts by name: criteria = (Account_Name:contains:Acme)
+- **Quotes by Quote_Number: use zoho_search_records(Quotes, criteria=(Quote_Number:equals:2570562000397037844))** — Quote_Number is a SEPARATE auto-generated field, NOT the same as the internal record `id`. These two values differ and are NOT interchangeable. NEVER call zoho_get_record(Quotes, quoteNumber) using a Quote_Number as the record_id — always use zoho_search_records with (Quote_Number:equals:X) to look up a quote by its number.
 
 The "contains" operator is more forgiving than "equals". Use "contains" or "starts_with" when you're unsure of the exact name.
 
@@ -4705,10 +4706,10 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
       : 'claude-sonnet-4-20250514';
     console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
-    // CRM continuation: 2048 max tokens (same reasoning as primary loop — reduces per-iteration latency)
+    // CRM continuation: 4096 max tokens — prevent truncated responses being saved as complete history
     const requestBody = {
       model: contModel,
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: systemPrompt,
       messages
     };
@@ -4972,10 +4973,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
 
-      // CRM tool-use iterations: use 2048 tokens max (tool calls + brief narration rarely need more;
-      // reducing from 4096 cuts per-iteration latency significantly since Anthropic holds the
-      // connection open proportionally to max_tokens). Non-CRM quoting stays at 4096 for verbose responses.
-      const maxTok = useTools ? 2048 : 4096;
+      // CRM tool-use iterations: use 4096 tokens to prevent final response truncation.
+      // Truncated responses get saved as complete history and leave crm_session active,
+      // causing the bot to falsely believe it asked an unanswered follow-up question.
+      const maxTok = 4096;
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
@@ -6648,7 +6649,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 // Save conversation history
                 await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
                 await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', finalReply);
-                await env.CONVERSATION_KV.put(`crm_session_${handoffPersonId}`, 'active', { expirationTtl: 1800 });
+                await env.CONVERSATION_KV.put(`crm_session_${handoffPersonId}`, 'active', { expirationTtl: 600 });
 
                 console.log(`[HANDOFF] CRM work completed inline`);
                 handoffReply = 'Processing — check Google Chat for your results.';
@@ -7334,7 +7335,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             if (personId) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', finalReply);
-              await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 1800 });
+              await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 600 });
             }
           }
           console.log(`[GCHAT-WORK] Completed in ${Date.now() - _workStart}ms total`);
@@ -7447,7 +7448,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             if (state.personId) {
               await addToHistory(kv, state.personId, 'user', state.originalText || '');
               await addToHistory(kv, state.personId, 'assistant', finalReply);
-              await kv.put(`crm_session_${state.personId}`, 'active', { expirationTtl: 1800 });
+              await kv.put(`crm_session_${state.personId}`, 'active', { expirationTtl: 600 });
             }
             console.log(`[GCHAT-CONTINUE] Completed successfully`);
           }
@@ -7975,7 +7976,7 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                   if (personId) {
                     await addToHistory(kv, personId, 'user', text);
                     await addToHistory(kv, personId, 'assistant', finalReply);
-                    await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 1800 });
+                    await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 600 });
                   }
                   console.log(`[GCHAT-CRM] Completed in ${Date.now() - _workStart}ms total`);
                 } catch (err) {
