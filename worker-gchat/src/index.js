@@ -4395,6 +4395,21 @@ Create quotes at **list price** by default:
 Do NOT auto-apply ecomm pricing. Let the user choose.
 Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentage.
 
+### Quote Integrity Rules (CRITICAL)
+
+**NEVER infer quote line items from the Subject field.** The Subject/name of a quote does NOT reliably reflect what is actually in it — they frequently mismatch. A quote named "2x MR57 & MS150" may actually contain MR44 and MX67. Always call zoho_get_record on the quote record to read the actual Quoted_Items before reporting or modifying anything.
+
+**Quote update workflow:**
+1. Call zoho_get_record on the quote to read actual Quoted_Items (not just Subject)
+2. Identify each line item by Product_Code and its Quantity, unit_price, and Discount
+3. Determine the correct replacement SKUs (e.g., LIC-ENT-1YR -> LIC-ENT-3YR)
+4. Call batch_product_lookup to get product IDs and prices for the new SKUs
+5. Call zoho_update_record with the fully-updated Quoted_Items array
+6. Call zoho_get_record AGAIN after updating to verify the change was applied
+7. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
+
+**NEVER report a successful update without verifying it.** If step 5 fails or the post-update fetch shows unchanged data, tell the user the update did not apply and why.
+
 ---
 
 ## PICKLIST PROTECTION
@@ -4751,10 +4766,12 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
         console.log(`[GCHAT-CONTINUE] Tool: ${block.name}`);
         const result = await executeToolCall(block.name, block.input, env);
         const resultStr = JSON.stringify(result);
+        // zoho_get_record returns large payloads for Quotes (Quoted_Items); use higher limit
+        const truncLimit = block.name === 'zoho_get_record' ? 8000 : 2000;
         return {
           type: 'tool_result',
           tool_use_id: block.id,
-          content: resultStr.length > 2000 ? resultStr.substring(0, 2000) + '...(truncated)' : resultStr
+          content: resultStr.length > truncLimit ? resultStr.substring(0, truncLimit) + '...(truncated)' : resultStr
         };
       });
 
@@ -5065,12 +5082,14 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           const result = await executeToolCall(block.name, block.input, env);
           const resultStr = JSON.stringify(result);
           console.log(`[GCHAT-AGENT] Tool result (${block.name}): ${resultStr.substring(0, 200)}`);
-          // Aggressive truncation: keep payloads small so subsequent Anthropic calls are fast.
-          // Zoho responses contain many unused fields — 2KB is enough for IDs + key fields.
+          // zoho_get_record returns large payloads for Quotes (Quoted_Items line items).
+          // Use a higher limit so Claude can read all line items without truncation.
+          // Other tools stay at 2000 chars to keep subsequent calls fast.
+          const truncLimit = block.name === 'zoho_get_record' ? 8000 : 2000;
           return {
             type: 'tool_result',
             tool_use_id: block.id,
-            content: resultStr.length > 2000 ? resultStr.substring(0, 2000) + '...(truncated)' : resultStr
+            content: resultStr.length > truncLimit ? resultStr.substring(0, truncLimit) + '...(truncated)' : resultStr
           };
         });
 
