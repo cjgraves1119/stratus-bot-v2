@@ -4370,6 +4370,8 @@ SELECT id, Deal_Name, Stage, Amount FROM Deals WHERE Account_Name = 'Easy Ice' A
 
 NEVER pass a record ID into a name/text search field. If you have an Account record with id=12345, and you need its Deals, use zoho_get_related_records with module_name=Accounts, record_id=12345, related_module=Deals — OR search Deals with the Account name string.
 
+**SEARCH ORDER RULE (CRITICAL FOR SPEED):** When looking up an existing customer, ALWAYS search Accounts FIRST. Do NOT search Deals or run COQL queries before finding the Account. The correct order is: (1) zoho_search_records on Accounts, (2) zoho_search_records on Contacts. You can call both in the SAME iteration as parallel tool calls. Only search Deals if you need to find an existing Deal after the Account is confirmed.
+
 ---
 
 ## PRODUCT LOOKUP & PRICING
@@ -4691,20 +4693,22 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     iteration++;
     console.log(`[GCHAT-CONTINUE] Iteration ${iteration}, wall=${Date.now() - _loopStartMs}ms`);
 
-    // Dynamic model: Haiku for pure execution iterations (5+, no text in last assistant msg)
+    // Dynamic model: Haiku for execution iterations (4+, last tool was create/update/batch_product_lookup)
     const _lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
-    const _isPureExec = _lastMsg
-      && Array.isArray(_lastMsg.content)
-      && _lastMsg.content.length > 0
-      && _lastMsg.content.every(b => b.type === 'tool_use');
-    const contModel = (iteration > 4 && _isPureExec)
+    const _contLastToolNames = _lastMsg && Array.isArray(_lastMsg.content)
+      ? _lastMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
+      : [];
+    const _contExecTools = new Set(['zoho_create_record', 'zoho_update_record', 'batch_product_lookup']);
+    const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.some(n => _contExecTools.has(n));
+    const contModel = (iteration > 3 && _isPureExec)
       ? 'claude-haiku-4-5-20251001'
       : 'claude-sonnet-4-20250514';
-    console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec})`);
+    console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
+    // CRM continuation: 2048 max tokens (same reasoning as primary loop — reduces per-iteration latency)
     const requestBody = {
       model: contModel,
-      max_tokens: 4096,
+      max_tokens: 2048,
       system: systemPrompt,
       messages
     };
@@ -4947,27 +4951,34 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       }
 
       // Dynamic model selection:
-      // - Sonnet for iterations 1-4: planning, CRM lookup, interpreting results, deciding workflow
-      // - Haiku for iteration 5+ ONLY when in "pure execution mode": last Claude response had
-      //   zero text and only tool_use blocks (i.e. Claude is mechanically calling create/update
-      //   tools with no decision-making). Haiku is 3x cheaper and faster for these mechanical steps.
+      // - Sonnet for iterations 1-3: planning, CRM lookup, interpreting results
+      // - Haiku for iteration 4+ when in execution mode: last tool calls were create/update/batch_product_lookup
+      //   (i.e. Claude is mechanically executing the workflow with no new decision-making needed).
+      //   Haiku is 3x cheaper and faster for these steps. Previously required zero-text response,
+      //   but "narrate as you work" always adds text. Now detects execution by tool type instead.
       // - Always Sonnet for non-CRM (quoting) flows.
       const _lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
+      const _lastToolNames = _lastAssistantMsg && Array.isArray(_lastAssistantMsg.content)
+        ? _lastAssistantMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
+        : [];
+      const _executionTools = new Set(['zoho_create_record', 'zoho_update_record', 'batch_product_lookup']);
       const _inPureExecMode = useTools
-        && _lastAssistantMsg
-        && Array.isArray(_lastAssistantMsg.content)
-        && _lastAssistantMsg.content.length > 0
-        && _lastAssistantMsg.content.every(b => b.type === 'tool_use');
-      const activeModel = (useTools && iteration > 4 && _inPureExecMode)
+        && _lastToolNames.length > 0
+        && _lastToolNames.some(n => _executionTools.has(n));
+      const activeModel = (useTools && iteration > 3 && _inPureExecMode)
         ? 'claude-haiku-4-5-20251001'
         : 'claude-sonnet-4-20250514';
       if (useTools) {
-        console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode})`);
+        console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
 
+      // CRM tool-use iterations: use 2048 tokens max (tool calls + brief narration rarely need more;
+      // reducing from 4096 cuts per-iteration latency significantly since Anthropic holds the
+      // connection open proportionally to max_tokens). Non-CRM quoting stays at 4096 for verbose responses.
+      const maxTok = useTools ? 2048 : 4096;
       const requestBody = {
         model: activeModel,
-        max_tokens: 4096,
+        max_tokens: maxTok,
         system: systemPrompt,
         messages
       };
@@ -6527,18 +6538,19 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const compositeMessage =
               `[HANDOFF FROM GMAIL SIDEBAR — PRE-APPROVED. CRITICAL INSTRUCTIONS:
 1. Execute the FULL workflow autonomously. Do NOT stop for confirmation at any step.
-2. Search Zoho CRM first for the account (do NOT web search if account exists in CRM).
-3. You MUST complete ALL of these steps in a SINGLE turn — do NOT end your turn early:
-   a) Look up Account in Zoho by sender domain (search CRM, not web)
-   b) Look up or create Contact (linked to sender's account)
-   c) Create Deal (with defaults: Stage=Qualification, Lead_Source=Stratus Referal, Meraki_ISR=Stratus Sales)
-   d) Use batch_product_lookup for ALL SKUs in ONE call (hardware + licenses). This is parallel and includes pricing.
-   e) Create Quote with ALL line items at LIST PRICE (do NOT apply ecomm pricing automatically)
+2. SPEED RULES: Keep narration to ONE LINE per step (e.g. "Found account: Acme. Creating deal..."). Do NOT write multi-sentence explanations before or after each tool call.
+3. SEARCH ORDER: Search Accounts FIRST by company name (NEVER search Deals or run COQL before finding the Account). Search Accounts + Contacts in the SAME parallel call batch.
+4. You MUST complete ALL of these steps in a SINGLE turn — do NOT end your turn early:
+   a) Search Zoho Accounts by company name (use "contains" operator). In the SAME tool batch, search Contacts by sender email.
+   b) If contact not found, create Contact linked to existing Account.
+   c) Create Deal (defaults: Stage=Qualification, Lead_Source=Stratus Referal, Meraki_ISR=Stratus Sales)
+   d) Call batch_product_lookup ONCE with ALL SKUs (hardware + licenses in one call — parallel, cached IDs)
+   e) Create Quote with ALL line items at LIST PRICE
    f) Create follow-up Task on the Deal (due in 3 business days)
    g) Ask if user wants ecomm discounts applied
-4. Only emit your final summary text AFTER all steps are complete. ALWAYS include Zoho links for every created record.
-5. Do NOT stop after creating the Deal — the Quote with line items is the most important part.
-6. Do NOT search WooProducts individually — use batch_product_lookup instead.${resellerNote}]\n\n[Email context: From ${senderName} (${senderEmail}), Subject: "${subject}", Account: ${accountName || 'unknown'}]\n\nUser request: ${handoffText}`;
+5. Only emit your final summary text AFTER all steps are complete. ALWAYS include Zoho links for every created record.
+6. Do NOT stop after creating the Deal — the Quote with line items is the most important part.
+7. Do NOT search WooProducts individually — use batch_product_lookup instead.${resellerNote}]\n\n[Email context: From ${senderName} (${senderEmail}), Subject: "${subject}", Account: ${accountName || 'unknown'}]\n\nUser request: ${handoffText}`;
 
             // Seed conversation history with email context
             if (emailBodySnippet) {
@@ -6566,29 +6578,79 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                   apiResult = { success: true, preview: '(already processing — duplicate request ignored)', targetSpace: targetSpaceName };
                   break;
                 }
-                await env.CONVERSATION_KV.put(dedupKey, 'active', { expirationTtl: 60 }); // 60s dedup window
+                await env.CONVERSATION_KV.put(dedupKey, 'active', { expirationTtl: 120 }); // 2-min dedup window
 
-                // ARCHITECTURE: Dispatch to /_work via Service Binding for unlimited wall time.
-                // Return 200 immediately so Apps Script never hits the 30s execution limit.
-                // /_work sends "Working on it..." to GChat, dots update via progressCallback,
-                // and the final answer replaces the placeholder when the agentic loop finishes.
-                const workToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                await env.CONVERSATION_KV.put(`work_${workToken}`, JSON.stringify({
-                  text: compositeMessage,
-                  personId: handoffPersonId,
-                  spaceName: targetSpaceName,
-                  threadName: null,
-                  imageData: null
-                }), { expirationTtl: 60 });
+                // ARCHITECTURE: Process CRM work INLINE within this HTTP request.
+                // /api/handoff is a direct HTTP call (not a webhook with a 30s timeout),
+                // so it gets unlimited wall time on Workers Standard plan. The Gmail
+                // Add-on has a 25s deadline but treats timeouts as "pending success" —
+                // the user is told to check GChat. Running inline avoids ctx.waitUntil
+                // which was silently killing the agent after ~30s.
+                console.log(`[HANDOFF] Processing CRM work inline for: "${handoffText.substring(0, 80)}..."`);
 
-                // Fire-and-forget via Service Binding — no await, returns immediately
-                ctx.waitUntil(env.SELF.fetch(new Request('https://self/_work', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ token: workToken })
-                })));
+                // Send "Working on it..." to GChat
+                let _progressMsgName = null;
+                let _stepLog = [];
+                try {
+                  const thinkingMsg = await sendAsyncGChatMessage(targetSpaceName, '⏳ Working on it...', null, env);
+                  _progressMsgName = thinkingMsg?.name || null;
+                } catch (initErr) {
+                  console.warn(`[HANDOFF] Could not send progress message: ${initErr.message}`);
+                }
 
-                console.log(`[HANDOFF] Dispatched CRM work to /_work, token=${workToken}`);
+                // Progress callback for real-time step updates
+                const progressCallback = _progressMsgName
+                  ? async (msg) => {
+                      if (msg) {
+                        const lines = msg.split('\n').filter(l => /^[🔍📄🔗✏️📦🌐📧✍️📤⚙️]/.test(l.trim()));
+                        for (const line of lines) {
+                          const trimmed = line.trim();
+                          if (_stepLog.length === 0 || _stepLog[_stepLog.length - 1] !== trimmed) {
+                            _stepLog.push(trimmed);
+                          }
+                        }
+                      }
+                      const recentSteps = _stepLog.slice(-5);
+                      const display = recentSteps.length > 0
+                        ? `⏳ *Working on it...*\n\n${recentSteps.join('\n')}`
+                        : '⏳ Working on it...';
+                      try { await updateGChatMessage(_progressMsgName, display, env); } catch (_) {}
+                    }
+                  : async () => {};
+
+                // Run the full CRM agentic loop — 5-min deadline (plenty for 15-25 tool calls)
+                let result = await askClaude(compositeMessage, handoffPersonId, env, null, true, progressCallback, 300000);
+
+                // Handle continuation if deadline was hit (unlikely with 5 min)
+                while (result && result.__continuation) {
+                  console.log(`[HANDOFF] Continuation at iteration ${result.iteration}`);
+                  result = await askClaudeContinue(
+                    result.messages, result.tools, result.systemPrompt,
+                    result.iteration, env, progressCallback, 300000
+                  );
+                }
+
+                // Deliver final response
+                let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
+                finalReply = adaptMarkdownForGChat(finalReply);
+                finalReply = truncateGChatReply(finalReply);
+
+                let delivered = false;
+                if (_progressMsgName) {
+                  try {
+                    delivered = await updateGChatMessage(_progressMsgName, finalReply, env);
+                  } catch (_) {}
+                }
+                if (!delivered) {
+                  await sendAsyncGChatMessage(targetSpaceName, finalReply, null, env);
+                }
+
+                // Save conversation history
+                await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'user', compositeMessage);
+                await addToHistory(env.CONVERSATION_KV, handoffPersonId, 'assistant', finalReply);
+                await env.CONVERSATION_KV.put(`crm_session_${handoffPersonId}`, 'active', { expirationTtl: 1800 });
+
+                console.log(`[HANDOFF] CRM work completed inline`);
                 handoffReply = 'Processing — check Google Chat for your results.';
               } else {
                 // Quoting / Claude fallback — synchronous
@@ -7837,34 +7899,105 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
 
             if (spaceName && hasAsyncCreds) {
-              // ARCHITECTURE: Dispatch CRM work to /_work via Service Binding.
-              // /_work runs in its own HTTP request context with unlimited wall time —
-              // no ctx.waitUntil budget limit, no setInterval needed.
-              // Flow: save state to KV → ctx.waitUntil(env.SELF.fetch(/_work)) → return {} immediately.
-              // /_work sends "Working on it..." to GChat, dots update via progressCallback,
-              // final answer replaces the placeholder message when done.
-              const workToken = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-              const workState = {
-                text,
-                personId,
-                spaceName,
-                threadName: threadName || null,
-                // Include image data if present (stored in KV, not in HTTP body)
-                imageData: imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null
-              };
+              // ARCHITECTURE: Run CRM work INLINE via ctx.waitUntil (no Service Binding).
+              // Previous approach used ctx.waitUntil(env.SELF.fetch(/_work)) which was
+              // silently killed after ~30s on Standard plan. Running the work directly
+              // in ctx.waitUntil avoids the Service Binding overhead. On Workers Standard
+              // plan, ctx.waitUntil has no wall-time limit (only 30s CPU limit, and most
+              // time is spent on external fetches which don't count as CPU).
+              const _imgData = imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null;
 
-              try {
-                await kv.put(`work_${workToken}`, JSON.stringify(workState), { expirationTtl: 60 });
-                ctx.waitUntil(env.SELF.fetch(new Request('https://self/_work', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ token: workToken })
-                })));
-              } catch (dispatchErr) {
-                console.error(`[GCHAT-CRM] Failed to dispatch /_work: ${dispatchErr.message}`);
-              }
+              ctx.waitUntil((async () => {
+                const _workStart = Date.now();
+                let _progressMsgName = null;
+                let _stepLog = [];
+                try {
+                  // Send "Working on it..." placeholder
+                  try {
+                    const thinkingMsg = await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', null, env);
+                    _progressMsgName = thinkingMsg?.name || null;
+                  } catch (initErr) {
+                    console.warn(`[GCHAT-CRM] Could not send progress: ${initErr.message}`);
+                  }
 
-              // Return empty response immediately — /_work handles all GChat messages
+                  // Progress callback for real-time step updates
+                  const progressCallback = _progressMsgName
+                    ? async (msg) => {
+                        if (msg) {
+                          const lines = msg.split('\n').filter(l => /^[🔍📄🔗✏️📦🌐📧✍️📤⚙️]/.test(l.trim()));
+                          for (const line of lines) {
+                            const trimmed = line.trim();
+                            if (_stepLog.length === 0 || _stepLog[_stepLog.length - 1] !== trimmed) {
+                              _stepLog.push(trimmed);
+                            }
+                          }
+                        }
+                        const recentSteps = _stepLog.slice(-5);
+                        const display = recentSteps.length > 0
+                          ? `⏳ *Working on it...*\n\n${recentSteps.join('\n')}`
+                          : '⏳ Working on it...';
+                        try { await updateGChatMessage(_progressMsgName, display, env); } catch (_) {}
+                      }
+                    : async () => {};
+
+                  // Run the full CRM agentic loop — 5-min deadline
+                  let result = await askClaude(text, personId, env, _imgData, true, progressCallback, 300000);
+                  console.log(`[GCHAT-CRM] askClaude completed in ${Date.now() - _workStart}ms`);
+
+                  // Handle continuation if 5-min deadline hit
+                  while (result && result.__continuation) {
+                    console.log(`[GCHAT-CRM] Continuation at iteration ${result.iteration}`);
+                    result = await askClaudeContinue(
+                      result.messages, result.tools, result.systemPrompt,
+                      result.iteration, env, progressCallback, 300000
+                    );
+                  }
+
+                  // Deliver final response
+                  let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
+                  finalReply = adaptMarkdownForGChat(finalReply);
+                  finalReply = truncateGChatReply(finalReply);
+
+                  let delivered = false;
+                  if (_progressMsgName) {
+                    try {
+                      delivered = await updateGChatMessage(_progressMsgName, finalReply, env);
+                      if (delivered) console.log(`[GCHAT-CRM] Final PATCH'd (${finalReply.length} chars)`);
+                    } catch (patchErr) {
+                      console.warn(`[GCHAT-CRM] PATCH failed: ${patchErr.message}`);
+                    }
+                  }
+                  if (!delivered) {
+                    await sendAsyncGChatMessage(spaceName, finalReply, null, env);
+                  }
+
+                  // Save conversation history
+                  if (personId) {
+                    await addToHistory(kv, personId, 'user', text);
+                    await addToHistory(kv, personId, 'assistant', finalReply);
+                    await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 1800 });
+                  }
+                  console.log(`[GCHAT-CRM] Completed in ${Date.now() - _workStart}ms total`);
+                } catch (err) {
+                  console.error(`[GCHAT-CRM] Error: ${err.message}`);
+                  const errMsg = `❌ Sorry, I ran into an issue processing that request.\n\n_Error: ${err.message.substring(0, 200)}_`;
+                  try {
+                    if (_progressMsgName) {
+                      await updateGChatMessage(_progressMsgName, errMsg, env);
+                    } else {
+                      await sendAsyncGChatMessage(spaceName, errMsg, null, env);
+                    }
+                  } catch (_) {}
+                  try {
+                    await kv.put(`work_error_${Date.now()}`, JSON.stringify({
+                      error: err.message, stack: (err.stack || '').substring(0, 500),
+                      ts: new Date().toISOString(), elapsed: Date.now() - _workStart
+                    }), { expirationTtl: 3600 });
+                  } catch (_) {}
+                }
+              })());
+
+              // Return empty response immediately — work runs in ctx.waitUntil
               return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } });
             }
 
