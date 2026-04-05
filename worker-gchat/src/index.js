@@ -3657,11 +3657,17 @@ async function executeToolCall(toolName, toolInput, env) {
                   Cisco_Billing_Term: full.Cisco_Billing_Term,
                   Net_Terms: full.Net_Terms,
                   Source: full.Source,
-                  // Admin Action fields — needed for DID generation and quote-to-PO workflow
+                  // Admin Action + quote-to-PO workflow fields
                   CCW_Deal_Number: full.CCW_Deal_Number,
                   Admin_Action: full.Admin_Action,
                   Cisco_Estimate_Status: full.Cisco_Estimate_Status,
                   Cisco_Quote_Status: full.Cisco_Quote_Status,
+                  Delinquency_Score: full.Delinquency_Score,
+                  Owner: full.Owner,
+                  Tax: full.Tax,
+                  Adjustment: full.Adjustment,
+                  Discount: full.Discount,
+                  Modified_Time: full.Modified_Time,
                   // Quoted_Items: slim down each line item to essential fields
                   // NOTE: id + product_id are REQUIRED for updates — Zoho rejects without item IDs
                   // and product_id is needed to build the Product_Name object for unchanged items
