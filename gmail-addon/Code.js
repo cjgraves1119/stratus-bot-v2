@@ -359,6 +359,17 @@ function onShowAddContact(e) {
     accountName = crmCtx.account.name || '';
   }
 
+  // Derive name from email address if name is still empty (e.g. morgan.moran@domain.com -> Morgan Moran)
+  if (!prefillName && prefillEmail) {
+    var localPart = prefillEmail.split('@')[0];
+    var dotParts = localPart.split('.');
+    if (dotParts.length >= 2 && dotParts.every(function(p) { return p.length > 1; })) {
+      prefillName = dotParts.map(function(p) {
+        return p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+      }).join(' ');
+    }
+  }
+
   // Split name into first/last
   var nameParts = (prefillName || '').trim().split(/\s+/);
   var firstName = nameParts[0] || '';
