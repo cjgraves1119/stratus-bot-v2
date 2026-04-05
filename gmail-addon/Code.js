@@ -805,7 +805,18 @@ function onContactSwitch(e) {
   }
 
   if (!result || !result.found) {
-    return buildCrmNotFoundCard_(selectedEmail, '');
+    // Look up display name from thread contacts (already extracted during email load)
+    var notFoundName = '';
+    var ctxForName = getEmailContext_();
+    if (ctxForName && ctxForName.threadContacts) {
+      for (var tci = 0; tci < ctxForName.threadContacts.length; tci++) {
+        if (ctxForName.threadContacts[tci].email.toLowerCase() === selectedEmail.toLowerCase()) {
+          notFoundName = ctxForName.threadContacts[tci].name || '';
+          break;
+        }
+      }
+    }
+    return buildCrmNotFoundCard_(selectedEmail, notFoundName);
   }
 
   var crmCtx = {
