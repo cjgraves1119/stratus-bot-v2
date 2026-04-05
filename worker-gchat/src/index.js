@@ -4892,31 +4892,37 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 
 ## ADMIN ACTION WORKFLOW (Quote-to-PO)
 
-Admin Actions are Zoho CRM automations triggered by writing an action name to the Admin_Action field. Execute these directly via API. NEVER tell the user to click a button or do it manually.
+Admin Actions are Zoho CRM automations triggered by writing an action name to the Admin_Action field. Execute these directly via API. NEVER tell the user to click a button or do it manually. NEVER say "I can't trigger Admin Actions via API."
 
-**How to trigger ANY Admin Action:**
-1. Set the Admin_Action field:
-   zoho_update_record(module_name="Quotes", record_id={quote_id}, data={"Admin_Action": "LIVE_CiscoQuote_Deal"})
-2. Wait 5 seconds, then re-fetch the quote record
-3. Check Admin_Action field: when it shows {ACTION_NAME}__Done, it completed successfully
-4. If still blank after 5s, wait another 5s and re-fetch once more
+**How to trigger ANY Admin Action (2-step process):**
+1. TRIGGER: zoho_update_record(module_name="Quotes", record_id={quote_id}, data={"Admin_Action": "{ACTION_NAME}"})
+2. VERIFY: Immediately call zoho_get_record(module_name="Quotes", record_id={quote_id}) to re-fetch the quote
+   - The automation runs server-side and completes within the update call
+   - Check Admin_Action field: if it shows "{ACTION_NAME}__Done", it succeeded
+   - If Admin_Action is blank or unchanged, re-fetch ONE more time before reporting failure
+
+**CRITICAL: After re-fetching, you MUST read and report the specific verification fields listed below. The data IS in the response — look for it carefully in the JSON.**
 
 **Admin Action Sequence (Quote-to-PO Flow):**
 
-| Step | Action | Purpose | Verify By |
-|------|--------|---------|-----------|
-| 1 | LIVE_CiscoQuote_Deal | Submit to Cisco CCW, get Deal ID (DID) | CCW_Deal_Number populated |
-| 2 | LIVE_GetQuoteData | Get approved disti pricing from Cisco | Vendor_Lines populated |
-| 3 | LIVE_ConvertQuoteToSO | Convert quote to Purchase Order | New Sales_Orders record linked |
-| 4 | LIVE_SendToEsign | Send PO for customer e-signature | Customer receives ZohoSign email |
+| Step | Action | Trigger Phrases | Verify Field |
+|------|--------|----------------|-------------|
+| 1 | LIVE_CiscoQuote_Deal | "create deal id", "generate DID", "submit to CCW" | CCW_Deal_Number (8-digit number) |
+| 2 | LIVE_GetQuoteData | "get quote data", "get disti pricing" | Vendor_Lines populated |
+| 3 | LIVE_ConvertQuoteToSO | "convert to PO", "create purchase order" | Sales_Orders record linked |
+| 4 | LIVE_SendToEsign | "send for signature", "send PO", "esign" | Quote_Stage updates |
 
 **Step 1: LIVE_CiscoQuote_Deal (Generate Deal ID / DID)**
-When user says "create deal id", "generate DID", "submit to CCW", or "get a deal number":
-- Trigger LIVE_CiscoQuote_Deal on the Quote record
-- After success, re-fetch to confirm CCW_Deal_Number is populated (8 digit number)
-- Auto-submit to Velocity Hub: POST https://eo44ez435h7vzp2.m.pipedream.net with body {"deal_id": "<DID>", "country": "United States"}
-- Report: "Deal ID {DID} generated and submitted for approval."
-- Velocity Hub submission is non-blocking. If it fails, report but continue.
+1. TRIGGER: zoho_update_record on Quote with data={"Admin_Action": "LIVE_CiscoQuote_Deal"}
+2. RE-FETCH: zoho_get_record on same Quote ID immediately after
+3. READ THESE FIELDS from the re-fetch response:
+   - CCW_Deal_Number → This IS the Deal ID (DID). It will be an 8-digit number like "83560702"
+   - Cisco_Estimate_Status → Should show "Success.VALID" if it worked
+   - Admin_Action → Should show "LIVE_CiscoQuote_Deal__Done"
+4. REPORT TO USER: "Deal ID {CCW_Deal_Number} generated successfully." Include the actual number.
+5. AUTO-SUBMIT TO VELOCITY HUB (non-blocking, continue even if this fails):
+   - This is a conceptual step — tell the user the DID was generated and you'd submit to Velocity Hub
+   - POST https://eo44ez435h7vzp2.m.pipedream.net with body {"deal_id": "{CCW_Deal_Number}", "country": "United States"}
 
 **Step 3: LIVE_ConvertQuoteToSO (Create PO)**
 Before running, show validation: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion.
@@ -4924,8 +4930,8 @@ Before running, show validation: Net_Terms, Contact, Tax, Grand Total. Net_Terms
 **Step 4: LIVE_SendToEsign**
 CRITICAL: Run on Sales_Orders module (PO record ID), NOT Quotes module.
 1. Search Sales_Orders: criteria=(Deal_Name:equals:{Deal_Id})
-2. Run LIVE_SendToEsign on the PO record: zoho_update_record(module_name="Sales_Orders", record_id={po_id}, data={"Admin_Action": "LIVE_SendToEsign"})
-3. Wait 7s, re-fetch PO to verify
+2. TRIGGER on PO: zoho_update_record(module_name="Sales_Orders", record_id={po_id}, data={"Admin_Action": "LIVE_SendToEsign"})
+3. RE-FETCH PO immediately to verify
 
 **Delinquency Gate:** After LIVE_ConvertQuoteToSO, if Delinquency_Score is non-green, update Quote Net_Terms="Cash" and re-run LIVE_ConvertQuoteToSO.
 
@@ -5287,6 +5293,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
             if (savedCtx.quote_number) ctxHint += ` (Quote#: ${savedCtx.quote_number})`;
             ctxHint += '\n';
             if (savedCtx.deal_id) ctxHint += `Deal ID: ${savedCtx.deal_id}\n`;
+            if (savedCtx.ccw_deal_number) ctxHint += `CCW Deal Number (DID): ${savedCtx.ccw_deal_number}\n`;
             if (savedCtx.line_items?.length) {
               ctxHint += `Line items (${savedCtx.line_items.length} total):\n`;
               for (const li of savedCtx.line_items) {
@@ -5562,8 +5569,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           }
 
           // Higher truncation limit for Quote data (search results now include Quoted_Items via auto-expand)
-          const isQuoteData = (block.name === 'zoho_get_record' && block.input?.module_name === 'Quotes') ||
-                              (block.name === 'zoho_search_records' && block.input?.module_name === 'Quotes');
+          // Also include zoho_update_record on Quotes so Admin Action responses (with CCW_Deal_Number etc.) aren't truncated
+          const isQuoteData = (block.input?.module_name === 'Quotes') &&
+                              ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(block.name);
           const truncLimit = isQuoteData ? 8000 : 2000;
           return {
             type: 'tool_result',
@@ -5632,17 +5640,19 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
               for (const block of msg.content) {
                 if (block.type !== 'tool_result' || !block.content) continue;
                 const raw = typeof block.content === 'string' ? block.content : '';
-                // Extract Quote context
-                if (raw.includes('"Quoted_Items"') || raw.includes('"Quote_Number"')) {
+                // Extract Quote context (from search, get_record, or update_record responses)
+                if (raw.includes('"Quoted_Items"') || raw.includes('"Quote_Number"') || raw.includes('"CCW_Deal_Number"')) {
                   try {
                     const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
                     const rec = parsed?.data?.[0] || parsed;
                     if (rec?.id) {
                       crmCtx.quote_id = rec.id;
-                      crmCtx.quote_number = rec.Quote_Number || null;
-                      crmCtx.account_name = rec.Account_Name?.name || null;
-                      crmCtx.account_id = rec.Account_Name?.id || null;
-                      crmCtx.deal_id = rec.Deal_Name?.id || null;
+                      crmCtx.quote_number = rec.Quote_Number || crmCtx.quote_number || null;
+                      crmCtx.account_name = rec.Account_Name?.name || crmCtx.account_name || null;
+                      crmCtx.account_id = rec.Account_Name?.id || crmCtx.account_id || null;
+                      crmCtx.deal_id = rec.Deal_Name?.id || crmCtx.deal_id || null;
+                      // Capture CCW Deal Number (DID) when present from Admin Action results
+                      if (rec.CCW_Deal_Number) crmCtx.ccw_deal_number = rec.CCW_Deal_Number;
                       // Compact line items: product code + qty + line item ID
                       if (rec.Quoted_Items) {
                         crmCtx.line_items = rec.Quoted_Items.map(i => ({
