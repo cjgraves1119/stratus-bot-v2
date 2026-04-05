@@ -4766,10 +4766,26 @@ Include the item with its existing "id" and the fields to change:
     {"id": "dup2", "_delete": null}
   ]
 
+**LICENSE TERM SWAP (e.g., 3YR → 5YR) — CRITICAL WORKFLOW:**
+When the user asks to change license terms on an existing quote:
+1. Call zoho_get_record on the Quote to get FRESH Quoted_Items with current line item IDs
+2. Call batch_product_lookup for the NEW license SKUs (e.g., LIC-ENT-5YR, LIC-MS150-48-5Y)
+3. Build a SINGLE zoho_update_record call that BOTH deletes the old items AND adds the new ones:
+   Quoted_Items: [
+     {"id": "old_3yr_line_item_id", "_delete": null},
+     {"id": "old_3yr_switch_lic_id", "_delete": null},
+     {"Product_Name": {"id": "new_5yr_product_id"}, "Quantity": 1},
+     {"Product_Name": {"id": "new_5yr_switch_product_id"}, "Quantity": 1}
+   ]
+4. NEVER split deletes and adds into separate update calls — this creates duplicates because adds happen before deletes are processed
+5. Call zoho_get_record AGAIN to verify the result
+6. If duplicates exist, do another update with _delete to clean them up
+
 **NEVER DO (Line Item Updates):**
 - NEVER send Quoted_Items with items you want to keep, expecting Zoho to remove the rest — this ADDS duplicates
 - NEVER assume Quoted_Items in an update replaces the existing list — it is always additive
 - NEVER use zoho_delete_record on Quoted_Items module directly (returns "record not approved")
+- NEVER split a license term swap into two separate update calls (one for add, one for delete) — this ALWAYS creates duplicates
 
 **NEVER report a successful update without verifying it.** If the post-update fetch shows duplicate items, wrong item count, or items that should have been removed, tell the user the update had a problem and describe exactly what happened.
 
@@ -4901,9 +4917,10 @@ After user confirms, execute in this exact order:
    - Product line items at LIST PRICE (ecomm pricing is applied later if user opts in)
    - Billing address from Account
    - Valid_Till: today + 30 days
-5. Create follow-up Task on the Deal — due in 3 business days
-6. Report all created records with Zoho links
-7. Ask: "Would you like me to apply Stratus ecomm discounts to this quote?"
+5. **IMMEDIATELY after creating the quote**, call zoho_get_record on the new Quote ID to fetch the full record with Quoted_Items. This is REQUIRED — the create response only returns the ID, not the full record. The get_record response is what enables follow-up operations (ecomm pricing, license swaps, etc.).
+6. Create follow-up Task on the Deal — due in 3 business days
+7. Report all created records with Zoho links (use data from the get_record in step 5)
+8. Ask: "Would you like me to apply Stratus ecomm discounts to this quote?"
 
 ### PHASE 7 — OPTIONAL: DRAFT REPLY
 After CRM setup is complete, offer to draft a reply to the original email thread:
@@ -5691,6 +5708,27 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
               for (const block of msg.content) {
                 if (block.type !== 'tool_result' || !block.content) continue;
                 const raw = typeof block.content === 'string' ? block.content : '';
+                // Extract Quote context from create_record responses (which lack Quoted_Items)
+                // zoho_create_record returns: {data: [{status: "success", details: {id: "..."}, message: "record added"}]}
+                if (raw.includes('"record added"') && raw.includes('"details"')) {
+                  try {
+                    const parsed = JSON.parse(raw);
+                    const rec = parsed?.data?.[0];
+                    if (rec?.status === 'success' && rec?.details?.id) {
+                      // Check the tool_use block preceding this result to identify the module
+                      const prevIdx = messages.indexOf(msg) - 1;
+                      const prevMsg = prevIdx >= 0 ? messages[prevIdx] : null;
+                      if (prevMsg?.role === 'assistant' && Array.isArray(prevMsg.content)) {
+                        const toolUse = prevMsg.content.find(b => b.type === 'tool_use' && b.id === block.tool_use_id);
+                        if (toolUse?.input?.module_name === 'Quotes') {
+                          crmCtx.quote_id = rec.details.id;
+                        } else if (toolUse?.input?.module_name === 'Deals') {
+                          crmCtx.deal_id = rec.details.id;
+                        }
+                      }
+                    }
+                  } catch (_) {}
+                }
                 // Extract Quote context (from search, get_record, or update_record responses)
                 if (raw.includes('"Quoted_Items"') || raw.includes('"Quote_Number"') || raw.includes('"CCW_Deal_Number"')) {
                   try {
