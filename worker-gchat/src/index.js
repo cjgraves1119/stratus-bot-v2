@@ -3619,7 +3619,11 @@ async function executeToolCall(toolName, toolInput, env) {
 
       case 'zoho_get_record': {
         const { module_name, record_id, fields } = toolInput;
-        const params = fields ? `?fields=${fields}` : '';
+        // Quotes are 12-15K chars — auto-apply focused fields to avoid stalls/truncation.
+        // Claude should also pass fields explicitly per system prompt, but this is the safety net.
+        const QUOTE_FIELDS = 'id,Subject,Quote_Number,Quoted_Items,Account_Name,Deal_Name,Grand_Total,Quote_Stage,Valid_Till,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country';
+        const effectiveFields = fields || (module_name === 'Quotes' ? QUOTE_FIELDS : null);
+        const params = effectiveFields ? `?fields=${effectiveFields}` : '';
         return await zohoApiCall('GET', `${module_name}/${record_id}${params}`, env);
       }
 
