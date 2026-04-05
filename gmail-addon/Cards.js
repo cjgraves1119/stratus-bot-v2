@@ -389,12 +389,19 @@ function buildInstantEmailCard_(subject, sender, emailCtx, crmData) {
   );
   actionsSection.addWidget(actionButtons2);
 
-  // Reply detection button
-  actionsSection.addWidget(
+  // Reply detection + Add Contact buttons
+  var actionButtons3 = CardService.newButtonSet();
+  actionButtons3.addButton(
     CardService.newTextButton()
       .setText('Check for Reply / Create Follow-up')
       .setOnClickAction(CardService.newAction().setFunctionName('onCheckReply'))
   );
+  actionButtons3.addButton(
+    CardService.newTextButton()
+      .setText('Add Contact')
+      .setOnClickAction(CardService.newAction().setFunctionName('onShowAddContact'))
+  );
+  actionsSection.addWidget(actionButtons3);
 
   card.addSection(actionsSection);
 
@@ -1490,6 +1497,117 @@ function buildQuoteResultCard_(result) {
 // âââââââââââââââââââââââââââââââââââââââââââââ
 // CRM RESULT CARD
 // âââââââââââââââââââââââââââââââââââââââââââââ
+
+
+// ADD CONTACT CARD (form)
+
+function buildAddContactCard_(firstName, lastName, email, phone, title, accountId, accountName) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle('Add Contact to Zoho CRM')
+        .setSubtitle(accountName ? 'Account: ' + accountName : 'No account linked')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection();
+
+  section.addWidget(CardService.newTextInput()
+    .setFieldName('contact_first_name')
+    .setTitle('First Name')
+    .setValue(firstName || ''));
+
+  section.addWidget(CardService.newTextInput()
+    .setFieldName('contact_last_name')
+    .setTitle('Last Name *')
+    .setValue(lastName || ''));
+
+  section.addWidget(CardService.newTextInput()
+    .setFieldName('contact_email')
+    .setTitle('Email *')
+    .setValue(email || ''));
+
+  section.addWidget(CardService.newTextInput()
+    .setFieldName('contact_phone')
+    .setTitle('Phone')
+    .setValue(phone || ''));
+
+  section.addWidget(CardService.newTextInput()
+    .setFieldName('contact_title')
+    .setTitle('Title / Role')
+    .setValue(title || ''));
+
+  if (accountName) {
+    section.addWidget(CardService.newDecoratedText()
+      .setText('Linked to: <b>' + accountName + '</b>')
+      .setWrapText(true));
+  }
+
+  var submitAction = CardService.newAction()
+    .setFunctionName('onAddContact')
+    .setParameters({ account_id: accountId || '' });
+
+  section.addWidget(CardService.newTextButton()
+    .setText('Create Contact')
+    .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
+    .setBackgroundColor(CONFIG.STRATUS_BLUE)
+    .setOnClickAction(submitAction));
+
+  section.addWidget(CardService.newTextButton()
+    .setText('< Back')
+    .setOnClickAction(CardService.newAction().setFunctionName('onBackToEmail')));
+
+  card.addSection(section);
+  return CardService.newActionResponseBuilder()
+    .setNavigation(CardService.newNavigation().pushCard(card.build()))
+    .build();
+}
+
+// CONTACT CREATED CARD (result)
+
+function buildContactCreatedCard_(result, isDuplicate) {
+  var card = CardService.newCardBuilder()
+    .setHeader(
+      CardService.newCardHeader()
+        .setTitle(isDuplicate ? 'Contact Already Exists' : 'Contact Created')
+        .setImageStyle(CardService.ImageStyle.CIRCLE)
+        .setImageUrl(CONFIG.ICON_URL)
+    );
+
+  var section = CardService.newCardSection();
+
+  if (isDuplicate) {
+    var existing = result.existingContact || {};
+    section.addWidget(CardService.newDecoratedText()
+      .setText('<b>' + (existing.name || 'Unknown') + '</b>')
+      .setBottomLabel(existing.email || '')
+      .setWrapText(true));
+    if (existing.zohoUrl) {
+      section.addWidget(CardService.newTextButton()
+        .setText('Open in Zoho')
+        .setOpenLink(CardService.newOpenLink().setUrl(existing.zohoUrl)));
+    }
+  } else {
+    section.addWidget(CardService.newDecoratedText()
+      .setText(result.message || 'Contact created successfully')
+      .setWrapText(true));
+    if (result.zohoUrl) {
+      section.addWidget(CardService.newTextButton()
+        .setText('Open in Zoho')
+        .setOpenLink(CardService.newOpenLink().setUrl(result.zohoUrl)));
+    }
+  }
+
+  section.addWidget(CardService.newTextButton()
+    .setText('< Back')
+    .setOnClickAction(CardService.newAction().setFunctionName('onBackToEmail')));
+
+  card.addSection(section);
+  return CardService.newActionResponseBuilder()
+    .setNavigation(CardService.newNavigation().pushCard(card.build()))
+    .build();
+}
 
 function buildCrmResultCard_(result, query, module) {
   var card = CardService.newCardBuilder()

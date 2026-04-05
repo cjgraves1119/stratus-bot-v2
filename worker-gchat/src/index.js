@@ -6677,7 +6677,6 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
                 : Promise.resolve(null);
 
               const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
-              console.log(`[CRM-CONTACT] contactResp: ${contactResp?.data?.length || 0} results, domainResp: ${domainResp?.data?.length || 0} results`);
 
               // Process contact result
               if (contactResp?.data?.[0]) {
@@ -7009,6 +7008,73 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
               apiResult = { success: parsed.success, noteId: parsed.record_id || null, message: parsed.message };
             } catch (err) {
               apiResult = { error: 'Note creation failed: ' + err.message, success: false };
+            }
+            break;
+          }
+
+          // ── CRM Add Contact: Create a new contact, optionally linked to an account ──
+          case '/api/crm-add-contact': {
+            const {
+              firstName: newCtFirst, lastName: newCtLast, email: newCtEmail,
+              phone: newCtPhone, title: newCtTitle, accountId: newCtAcctId,
+              mobile: newCtMobile
+            } = apiBody;
+            if (!newCtLast && !newCtEmail) {
+              return new Response(JSON.stringify({ error: 'lastName or email required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              // Check for duplicate by email first
+              if (newCtEmail) {
+                const dupeCheck = await zohoApiCall('GET',
+                  `Contacts/search?email=${encodeURIComponent(newCtEmail)}&fields=id,Full_Name,Email`, env
+                );
+                if (dupeCheck?.data?.[0]) {
+                  const existing = dupeCheck.data[0];
+                  apiResult = {
+                    success: false,
+                    duplicate: true,
+                    existingContact: {
+                      id: existing.id,
+                      name: existing.Full_Name || '',
+                      email: existing.Email || '',
+                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${existing.id}`,
+                    },
+                    message: `Contact already exists: ${existing.Full_Name || existing.Email}`
+                  };
+                  break;
+                }
+              }
+
+              const contactPayload = {
+                data: [{
+                  First_Name: newCtFirst || '',
+                  Last_Name: newCtLast || newCtEmail.split('@')[0] || 'Unknown',
+                  Email: newCtEmail || '',
+                  Phone: newCtPhone || '',
+                  Mobile: newCtMobile || '',
+                  Title: newCtTitle || '',
+                  Owner: { id: '2570562000141711002' }, // Chris Graves
+                }]
+              };
+              if (newCtAcctId) {
+                contactPayload.data[0].Account_Name = { id: newCtAcctId };
+              }
+
+              const createResp = await zohoApiCall('POST', 'Contacts', env, contactPayload);
+              const parsed = parseZohoResponse(createResp, 'Contact creation');
+              if (parsed.success) {
+                apiResult = {
+                  success: true,
+                  contactId: parsed.record_id,
+                  zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${parsed.record_id}`,
+                  message: `Contact created: ${newCtFirst || ''} ${newCtLast || ''}`.trim()
+                };
+              } else {
+                apiResult = { success: false, error: parsed.message || 'Contact creation failed' };
+              }
+            } catch (err) {
+              apiResult = { error: 'Contact creation failed: ' + err.message, success: false };
             }
             break;
           }

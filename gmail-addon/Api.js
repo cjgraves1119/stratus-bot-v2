@@ -271,6 +271,21 @@ function crmCreateTask_(subject, dueDate, dealId, contactId, priority, descripti
 }
 
 /**
+ * Create a new CRM contact, optionally linked to an account.
+ */
+function crmAddContact_(firstName, lastName, email, phone, title, accountId, mobile) {
+  return apiCall_('/api/crm-add-contact', {
+    firstName: firstName || '',
+    lastName: lastName || '',
+    email: email || '',
+    phone: phone || '',
+    title: title || '',
+    accountId: accountId || '',
+    mobile: mobile || '',
+  });
+}
+
+/**
  * Register the user's Google Chat DM space with the worker,
  * enabling the sidebar handoff to deliver responses via GChat.
  */

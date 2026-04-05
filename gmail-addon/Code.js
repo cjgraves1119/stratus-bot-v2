@@ -333,6 +333,69 @@ function onCrmSearch(e) {
   return buildCrmResultCard_(result, query.trim(), module);
 }
 
+/** Show Add Contact form (pre-filled from email context) */
+function onShowAddContact(e) {
+  var ctx = getEmailContext_();
+  var crmCtx = null;
+  try { crmCtx = JSON.parse(PropertiesService.getUserProperties().getProperty('crm_sidebar_ctx') || 'null'); } catch (_) {}
+
+  // Pre-fill from email context
+  var prefillEmail = '';
+  var prefillName = '';
+  var accountId = '';
+  var accountName = '';
+
+  if (ctx) {
+    prefillEmail = (ctx.isOutbound && ctx.customerEmail) ? ctx.customerEmail : ctx.senderEmail;
+    prefillName = (ctx.isOutbound && ctx.customerName) ? ctx.customerName : ctx.senderName;
+  }
+  if (crmCtx && crmCtx.account) {
+    accountId = crmCtx.account.id || '';
+    accountName = crmCtx.account.name || '';
+  }
+
+  // Split name into first/last
+  var nameParts = (prefillName || '').trim().split(/\s+/);
+  var firstName = nameParts[0] || '';
+  var lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
+
+  return buildAddContactCard_(firstName, lastName, prefillEmail, '', '', accountId, accountName);
+}
+
+/** Submit Add Contact form */
+function onAddContact(e) {
+  var form = e.formInput || {};
+  var firstName = (form.contact_first_name || '').trim();
+  var lastName = (form.contact_last_name || '').trim();
+  var email = (form.contact_email || '').trim();
+  var phone = (form.contact_phone || '').trim();
+  var title = (form.contact_title || '').trim();
+
+  if (!lastName && !email) {
+    return notify_('Last name or email is required.');
+  }
+
+  // Get account ID from parameters (passed from the form card)
+  var accountId = (e.commonEventObject && e.commonEventObject.parameters)
+    ? (e.commonEventObject.parameters.account_id || '')
+    : (e.parameters ? (e.parameters.account_id || '') : '');
+
+  var result;
+  try {
+    result = crmAddContact_(firstName, lastName, email, phone, title, accountId);
+  } catch (err) {
+    return buildErrorCard_('Contact creation failed: ' + err.message);
+  }
+
+  if (result && result.duplicate) {
+    return buildContactCreatedCard_(result, true);
+  }
+  if (result && result.success) {
+    return buildContactCreatedCard_(result, false);
+  }
+  return buildErrorCard_('Contact creation failed: ' + (result ? result.error : 'Unknown error'));
+}
+
 /** Show Draft Reply form (tone selector + instructions) */
 function onShowDraftReply(e) {
   var ctx = getEmailContext_();
