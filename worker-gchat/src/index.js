@@ -6394,7 +6394,8 @@ CRITICAL URL RULES:
             }
 
             // Build real Stratus URLs from suggestedProducts (products Claude recommends)
-            var allQuoteUrls = quoteUrls.slice(); // start with any pre-detected URLs from email content
+            // quoteUrls is only defined if SKUs were detected in the email body — guard against undefined
+            var allQuoteUrls = (quoteUrls || []).slice(); // start with any pre-detected URLs from email content
             if (parsedDraft.suggestedProducts && parsedDraft.suggestedProducts.length > 0) {
               try {
                 var sugSkuText = parsedDraft.suggestedProducts.map(function(p) {
