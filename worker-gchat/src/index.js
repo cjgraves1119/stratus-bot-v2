@@ -3416,7 +3416,8 @@ async function getGmailAccessToken(env) {
 // ─── Zoho CRM API Client ─────────────────────────────────────────────────────
 async function zohoApiCall(method, path, env, body = null) {
   const token = await getZohoAccessToken(env);
-  const url = `https://www.zohoapis.com/crm/v2/${path}`;
+  // v8 (not v2) — v2 omits subform data (Quoted_Items, Invoiced_Items, etc.)
+  const url = `https://www.zohoapis.com/crm/v8/${path}`;
   const opts = {
     method,
     headers: {
@@ -3614,16 +3615,137 @@ async function executeToolCall(toolName, toolInput, env) {
         params.set('fields', fields || defaultFields[module_name] || '');
         if (page) params.set('page', String(page));
         if (per_page) params.set('per_page', String(per_page));
-        return await zohoApiCall('GET', `${module_name}/search?${params}`, env);
+        const searchResult = await zohoApiCall('GET', `${module_name}/search?${params}`, env);
+
+        // AUTO-EXPAND: For Quote searches, automatically fetch full details of the first result
+        // including Quoted_Items (line items). This eliminates the need for a separate get_record
+        // call, reducing agentic loop from 3 iterations to 2.
+        // IMPORTANT: Do NOT use ?fields= parameter — Zoho CRM v2 API strips subform data
+        // (Quoted_Items) when fields are specified. Fetch full record instead.
+        if (module_name === 'Quotes') {
+          try {
+            const parsed = typeof searchResult === 'string' ? JSON.parse(searchResult) : searchResult;
+            if (parsed?.data?.length > 0) {
+              const firstId = parsed.data[0].id;
+              const expanded = await zohoApiCall('GET', `Quotes/${firstId}`, env);
+              const expandedParsed = typeof expanded === 'string' ? JSON.parse(expanded) : expanded;
+              if (expandedParsed?.data?.[0]) {
+                // Extract only the fields Claude needs to keep payload manageable
+                const full = expandedParsed.data[0];
+                const slim = {
+                  id: full.id,
+                  Subject: full.Subject,
+                  Quote_Number: full.Quote_Number,
+                  Account_Name: full.Account_Name,
+                  Deal_Name: full.Deal_Name,
+                  Grand_Total: full.Grand_Total,
+                  Sub_Total: full.Sub_Total,
+                  Quote_Stage: full.Quote_Stage,
+                  Valid_Till: full.Valid_Till,
+                  Created_Time: full.Created_Time,
+                  Contact_Name: full.Contact_Name,
+                  Billing_Street: full.Billing_Street,
+                  Billing_City: full.Billing_City,
+                  Billing_State: full.Billing_State,
+                  Billing_Code: full.Billing_Code,
+                  Billing_Country: full.Billing_Country,
+                  Shipping_Street: full.Shipping_Street,
+                  Shipping_City: full.Shipping_City,
+                  Shipping_State: full.Shipping_State,
+                  Shipping_Code: full.Shipping_Code,
+                  Shipping_Country: full.Shipping_Country,
+                  Cisco_Billing_Term: full.Cisco_Billing_Term,
+                  Net_Terms: full.Net_Terms,
+                  Source: full.Source,
+                  // Quoted_Items: slim down each line item to essential fields
+                  // NOTE: id is REQUIRED for updates — Zoho rejects Quoted_Items updates without item IDs
+                  Quoted_Items: (full.Quoted_Items || []).map(item => ({
+                    id: item.id,
+                    Sequence_Number: item.Sequence_Number,
+                    Description: item.Description,
+                    Product_Code: item.Product_Name?.Product_Code,
+                    Product_Name: item.Product_Name?.name,
+                    Quantity: item.Quantity,
+                    List_Price: item.List_Price,
+                    Discount: item.Discount,
+                    Total: item.Total,
+                    Tax: item.Tax,
+                    Net_Total: item.Net_Total
+                  })),
+                  _auto_expanded: true,
+                  _line_item_count: (full.Quoted_Items || []).length
+                };
+                parsed.data[0] = { ...parsed.data[0], ...slim };
+                return JSON.stringify(parsed);
+              }
+            }
+          } catch (expandErr) {
+            console.log('[GCHAT] Quote auto-expand failed, returning search results only:', expandErr.message);
+          }
+        }
+
+        return searchResult;
       }
 
       case 'zoho_get_record': {
         const { module_name, record_id, fields } = toolInput;
-        // Quotes are 12-15K chars — auto-apply focused fields to avoid stalls/truncation.
-        // Claude should also pass fields explicitly per system prompt, but this is the safety net.
-        const QUOTE_FIELDS = 'id,Subject,Quote_Number,Quoted_Items,Account_Name,Deal_Name,Grand_Total,Quote_Stage,Valid_Till,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country';
-        const effectiveFields = fields || (module_name === 'Quotes' ? QUOTE_FIELDS : null);
-        const params = effectiveFields ? `?fields=${effectiveFields}` : '';
+        // For Quotes: Do NOT use ?fields= parameter — Zoho CRM v2 API strips subform data
+        // (Quoted_Items) when fields are specified. Fetch full record and slim it down.
+        if (module_name === 'Quotes') {
+          const fullResult = await zohoApiCall('GET', `${module_name}/${record_id}`, env);
+          try {
+            const parsed = typeof fullResult === 'string' ? JSON.parse(fullResult) : fullResult;
+            if (parsed?.data?.[0]) {
+              const full = parsed.data[0];
+              parsed.data[0] = {
+                id: full.id,
+                Subject: full.Subject,
+                Quote_Number: full.Quote_Number,
+                Account_Name: full.Account_Name,
+                Deal_Name: full.Deal_Name,
+                Contact_Name: full.Contact_Name,
+                Grand_Total: full.Grand_Total,
+                Sub_Total: full.Sub_Total,
+                Quote_Stage: full.Quote_Stage,
+                Valid_Till: full.Valid_Till,
+                Created_Time: full.Created_Time,
+                Billing_Street: full.Billing_Street,
+                Billing_City: full.Billing_City,
+                Billing_State: full.Billing_State,
+                Billing_Code: full.Billing_Code,
+                Billing_Country: full.Billing_Country,
+                Shipping_Street: full.Shipping_Street,
+                Shipping_City: full.Shipping_City,
+                Shipping_State: full.Shipping_State,
+                Shipping_Code: full.Shipping_Code,
+                Shipping_Country: full.Shipping_Country,
+                Cisco_Billing_Term: full.Cisco_Billing_Term,
+                Net_Terms: full.Net_Terms,
+                Source: full.Source,
+                Quoted_Items: (full.Quoted_Items || []).map(item => ({
+                  Sequence_Number: item.Sequence_Number,
+                  Description: item.Description,
+                  Product_Code: item.Product_Name?.Product_Code,
+                  Product_Name: item.Product_Name?.name,
+                  Quantity: item.Quantity,
+                  List_Price: item.List_Price,
+                  Discount: item.Discount,
+                  Total: item.Total,
+                  Tax: item.Tax,
+                  Net_Total: item.Net_Total,
+                  id: item.id
+                })),
+                _line_item_count: (full.Quoted_Items || []).length
+              };
+              return JSON.stringify(parsed);
+            }
+          } catch (slimErr) {
+            console.log('[GCHAT] Quote slim-down failed, returning full result:', slimErr.message);
+          }
+          return fullResult;
+        }
+        // Non-Quote modules: use fields param if provided
+        const params = fields ? `?fields=${fields}` : '';
         return await zohoApiCall('GET', `${module_name}/${record_id}${params}`, env);
       }
 
@@ -3646,7 +3768,15 @@ async function executeToolCall(toolName, toolInput, env) {
         if (!updateCheck.valid) {
           return { validation_error: true, message: updateCheck.error, action: 'update_blocked' };
         }
+        // Debug: log what we're sending (especially useful for Quoted_Items updates)
+        if (module_name === 'Quotes' && data.Quoted_Items) {
+          console.log(`[GCHAT] Quote update payload — record_id: ${record_id}, item_count: ${data.Quoted_Items.length}`);
+          console.log(`[GCHAT] First item sample:`, JSON.stringify(data.Quoted_Items[0]));
+        }
         const updateResult = await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
+        if (module_name === 'Quotes') {
+          console.log(`[GCHAT] Quote update response:`, JSON.stringify(updateResult)?.substring(0, 500));
+        }
         return parseZohoResponse(updateResult, `${module_name} record update`);
       }
 
@@ -4101,6 +4231,87 @@ const CRM_EMAIL_TOOLS = [
   }
 ];
 
+// ─── Fast Path: Direct Quote Lookup ──────────────────────────────────────────
+// Handles "most recent X quote / line items in X quote" in ~3-5s (2 Zoho API
+// calls) vs the 3-iteration agentic loop which can hit the 30s ctx.waitUntil
+// wall-clock limit. Returns a formatted GChat string or null to fall through.
+async function fastPathQuoteLookup(userMessage, envObj) {
+  const msg = userMessage.toLowerCase();
+
+  // Must be a read request — bail immediately on create/update keywords
+  if (/\b(create|make|build|new\s+quote|add|update|change|modify|set|edit|replace|switch|convert|upgrade)\b/.test(msg)) return null;
+
+  // Must mention "quote" with a lookup indicator
+  if (!/\bquote\b/.test(msg)) return null;
+  if (!/\b(line\s*items?|most\s+recent|latest|last|products?|what|list|show|contents?|what('?s|\s+is|\s+are))\b/.test(msg)) return null;
+
+  // Extract company name
+  let company = null;
+
+  // "most recent {COMPANY} quote" — words between "most recent" and "quote"
+  let m = msg.match(/most\s+recent\s+([\w&'.'-]+(?:\s+[\w&'.'-]+){0,3}?)\s+quote/);
+  if (m) company = m[1].trim();
+
+  // "in the {COMPANY} quote" / "in {COMPANY}'s quote"
+  if (!company) {
+    m = msg.match(/\bin\s+(?:the\s+)?(?:most\s+recent\s+)?([\w&'.'-]+(?:\s+[\w&'.'-]+){0,3}?)(?:'s)?\s+quote/);
+    if (m) company = m[1].trim();
+  }
+
+  // "for {COMPANY}" (e.g. "latest quote for Modea")
+  if (!company) {
+    m = msg.match(/\bfor\s+([\w&'.'-]+(?:\s+[\w&'.'-]+){0,3}?)\b/);
+    if (m && !/^(the|a|an|me|you|us|our|them|this|that)$/i.test(m[1])) company = m[1].trim();
+  }
+
+  // Filter non-company filler words
+  if (!company || company.length < 2) return null;
+  if (/^(the|a|an|my|our|this|that|any|recent|latest|last|most|all|every)$/i.test(company)) return null;
+
+  try {
+    // Step 1: Search Quotes by account name (most recent first)
+    const OWNER = '2570562000141711002';
+    const searchPath = `Quotes/search?criteria=(Account_Name:contains:${encodeURIComponent(company)})and(Owner:equals:${OWNER})&sort_by=Created_Time&sort_order=desc&per_page=3&fields=id,Subject,Quote_Number,Account_Name,Grand_Total,Quote_Stage`;
+    const searchResult = await zohoApiCall('GET', searchPath, envObj);
+    const quotes = searchResult?.data;
+    if (!quotes || quotes.length === 0) return null; // No match — fall through to Claude
+
+    const quoteId = quotes[0].id;
+
+    // Step 2: Get full record with Quoted_Items
+    const FIELDS = 'id,Subject,Quote_Number,Quoted_Items,Account_Name,Grand_Total,Quote_Stage';
+    const detail = await zohoApiCall('GET', `Quotes/${quoteId}?fields=${FIELDS}`, envObj);
+    const q = Array.isArray(detail?.data) ? detail.data[0] : detail?.data;
+    if (!q) return null;
+
+    const items = q.Quoted_Items || [];
+    if (items.length === 0) return null; // No line items — fall through to Claude
+
+    // Format for GChat (* bold, not **)
+    let reply = `*${q.Subject}* (Quote #${q.Quote_Number})\n\n`;
+    reply += `*Line Items:*\n`;
+    for (const item of items) {
+      const code = item.Product_Code || item.product_code || '';
+      const name = item.product_name || item.Product_Name || '';
+      const qty = item.quantity || item.Quantity || 1;
+      const price = item.unit_price || item.Unit_Price || 0;
+      const display = code || name || '(unknown SKU)';
+      reply += `• ${qty}x ${display}`;
+      if (price) reply += ` — $${Number(price).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+      reply += '\n';
+    }
+    if (q.Grand_Total) {
+      reply += `\n*Total:* $${Number(q.Grand_Total).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    }
+    if (q.Quote_Stage) reply += `  |  *Stage:* ${q.Quote_Stage}`;
+    reply += `\n\n[View in Zoho CRM](https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId})`;
+
+    return reply;
+  } catch (_) {
+    return null; // Any error → fall through to full agentic loop
+  }
+}
+
 // ─── CRM/Email Intent Detection ──────────────────────────────────────────────
 function detectCrmEmailIntent(text) {
   const lower = text.toLowerCase();
@@ -4379,7 +4590,22 @@ NEVER pass a record ID into a name/text search field. If you have an Account rec
 
 **SEARCH ORDER RULE (CRITICAL FOR SPEED):** When looking up an existing customer, ALWAYS search Accounts FIRST. Do NOT search Deals or run COQL queries before finding the Account. The correct order is: (1) zoho_search_records on Accounts, (2) zoho_search_records on Contacts. You can call both in the SAME iteration as parallel tool calls. Only search Deals if you need to find an existing Deal after the Account is confirmed.
 
-**QUOTE LOOKUP SHORTCUT (CRITICAL FOR SPEED):** When the user asks about an existing quote ("most recent quote", "line items in the quote", "what's in the quote"), go DIRECTLY to Quotes — do NOT search Accounts or Contacts first. The correct order is: (1) zoho_search_records on Quotes (criteria: "Account_Name:contains:{company}"), sorted by Created_Time descending. This skips 2-3 unnecessary API calls and prevents timeouts. Only look up the Account if you need account-level info beyond the quote itself.
+**QUOTE LOOKUP — SINGLE SEARCH CALL (AUTO-EXPANDED):**
+For ANY request about what's in an existing quote (line items, products, pricing, contents, grand total), use EXACTLY ONE tool call:
+1. Call zoho_search_records(module_name="Quotes", criteria="Account_Name:contains:{COMPANY}", per_page=5)
+2. The system AUTO-EXPANDS the first Quote result with full details including Quoted_Items (line items), Grand_Total, Quote_Stage, etc. You do NOT need a separate zoho_get_record call.
+3. Read the Quoted_Items from the first result (it will have _auto_expanded: true) and report the line items directly.
+
+HARD RULES — violating ANY of these causes a timeout and the user gets no response:
+- NEVER call zoho_get_record after a Quote search **just to read it** — the first result is already expanded with full Quoted_Items including line item id fields
+- EXCEPTION: You MAY (and must) call zoho_get_record AFTER a successful zoho_update_record to verify the update was applied
+- NEVER run zoho_coql_query — it adds an extra API call that causes timeouts
+- NEVER search Accounts or Contacts before looking up a quote
+- NEVER make a second/fallback search if the first zoho_search_records returns results
+- Make ONLY ONE zoho_search_records call, then immediately report the results (or proceed to update)
+- If the first search returns 0 results, only then try ONE alternative company name spelling
+
+**GENERAL SPEED RULE (ALL CRM REQUESTS):** You have at most 25 seconds total. Each Zoho API call costs ~2-3s. Each of your responses costs ~5-10s. Budget: 2 of your responses + 1-2 Zoho calls MAX. If your plan requires more than 2 Zoho calls, simplify it — skip non-essential lookups, use contains searches, and go directly to the module you need.
 
 ---
 
@@ -4407,19 +4633,34 @@ Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentag
 
 **NEVER infer quote line items from the Subject field.** The Subject/name of a quote does NOT reliably reflect what is actually in it — they frequently mismatch. A quote named "2x MR57 & MS150" may actually contain MR44 and MX67. Always call zoho_get_record on the quote record to read the actual Quoted_Items before reporting or modifying anything.
 
-**ALWAYS use fields parameter for zoho_get_record on Quotes.** Quote records are very large (~12-15K chars). You MUST pass the fields parameter to get a focused response that fits within processing limits:
-- Call: zoho_get_record(module_name="Quotes", record_id="<id>", fields="id,Subject,Quote_Number,Quoted_Items,Account_Name,Deal_Name,Grand_Total,Quote_Stage")
-- This reduces response size from ~12K to ~2.5K chars and prevents stalls.
-- Never call zoho_get_record on a Quote without the fields parameter.
+**zoho_get_record on Quotes** — the system automatically fetches the full record and slims it down to essential fields including Quoted_Items with item id values. You may pass a fields parameter but it is ignored for Quotes — the system always returns the full slimmed record to ensure line item IDs are present.
 
 **Quote update workflow:**
-1. Call zoho_get_record on the quote WITH fields parameter to read actual Quoted_Items
+1. Use the auto-expanded quote data from the search result — it already includes "id" per line item. You do NOT need a separate zoho_get_record call before updating.
 2. Identify each line item by Product_Code and its Quantity, unit_price, and Discount
 3. Determine the correct replacement SKUs (e.g., LIC-ENT-1YR -> LIC-ENT-3YR)
 4. Call batch_product_lookup to get product IDs and prices for the new SKUs
-5. Call zoho_update_record with the fully-updated Quoted_Items array
-6. Call zoho_get_record AGAIN (with fields parameter) after updating to verify the change was applied
+5. Call zoho_update_record with the fully-updated Quoted_Items array (see format below)
+6. Call zoho_get_record AGAIN after updating to verify the change was applied
 7. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
+
+**Quoted_Items update payload format (CRITICAL — wrong format = Zoho rejects silently):**
+- Each item you are KEEPING or CHANGING must include "id" field (from the existing line item — provided in the auto-expanded search result)
+- Product_Name must be an OBJECT like {"id": "zoho_product_id"}, NOT a string — use the product_id returned by batch_product_lookup
+- unit_price = the price value (NOT List_Price field name). Discount = percentage (0-100), NOT a dollar amount
+- Omit items you want to REMOVE entirely — Zoho replaces the full Quoted_Items array on update
+
+  Example update payload for Quoted_Items:
+  Quoted_Items: [
+    {
+      "id": "<existing_line_item_id>",
+      "Product_Name": {"id": "<zoho_product_id_from_batch_lookup>"},
+      "Quantity": 1,
+      "unit_price": 820,
+      "Discount": 0,
+      "Description": "optional note"
+    }
+  ]
 
 **NEVER report a successful update without verifying it.** If step 5 fails or the post-update fetch shows unchanged data, tell the user the update did not apply and why.
 
@@ -4906,11 +5147,22 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     }
 
     // Agentic loop: Claude may call tools multiple times before returning text.
-    // Workers Unbound gives unlimited wall clock (30s CPU cap), so we can afford
-    // many iterations. Full quote creation needs 15-25 tool calls.
-    const MAX_TOOL_ITERATIONS = useTools ? 30 : 8;
+    // GChat CRM path runs inside ctx.waitUntil which has a hard 30s wall-clock limit.
+    // Budget: 2-3 Zoho calls (~6-9s) + 2-3 Anthropic calls (~15-20s) = ~25s max.
+    // Cap at 6 iterations for tool-use mode to prevent timeouts.
+    // Quote creation (non-GChat) needs 15-25 tool calls — but that path isn't CRM tool-use.
+    // Queue consumer gives us 15 min wall-clock — no need for aggressive iteration cap.
+    // CRM agentic loops typically need 3-5 iterations (search → get_record → compose).
+    // 15 is generous but safe; each iteration is ~10-15s (Anthropic API + Zoho calls).
+    const MAX_TOOL_ITERATIONS = useTools ? 15 : 8;
     let iteration = 0;
     const _loopStartMs = Date.now();
+
+    // CRM speed optimization: track auto-expanded Quote data to avoid redundant API calls.
+    // When zoho_search_records on Quotes auto-expands the first result (including Quoted_Items),
+    // we cache the expanded data here. If Claude later calls zoho_get_record on the same Quote,
+    // we return the cached data instantly instead of making another API call.
+    const _expandedQuoteCache = {}; // { recordId: expandedDataString }
 
     // Helper: call Anthropic API with retry for 429/529 + model fallback
     async function callAnthropicWithRetry(body, maxRetries = 3) {
@@ -5093,16 +5345,69 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           try { progressCallback(fullProgress).catch(() => {}); } catch (e) { /* ignore */ }
         }
 
-        // Execute tool calls in parallel when multiple are returned
+        // Execute tool calls with CRM speed optimizations:
+        // 1. Dedup: if multiple zoho_search_records target Quotes, only run the first
+        // 2. Cache: auto-expanded Quote data is cached; zoho_get_record on cached Quotes is free
+        // 3. Higher truncation limit for Quote data (Quoted_Items can be large)
+        let _quotesSearchDone = false; // track if we already ran a Quote search this iteration
         const toolPromises = toolBlocks.map(async (block) => {
           console.log(`[GCHAT-AGENT] Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
+
+          // DEDUP: Skip duplicate Quote searches in the same iteration
+          if (block.name === 'zoho_search_records' && block.input?.module_name === 'Quotes') {
+            if (_quotesSearchDone) {
+              console.log(`[GCHAT-AGENT] Skipping duplicate Quotes search (already ran one this iteration)`);
+              return {
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: '{"info":"Duplicate Quotes search skipped — use results from the first search above."}'
+              };
+            }
+            _quotesSearchDone = true;
+          }
+
+          // SKIP: If a Quote search is in this same batch, skip any zoho_get_record on Quotes.
+          // The search auto-expands the first result with full Quoted_Items — no separate get needed.
+          // Also check cross-iteration cache for get_record calls that come in later iterations.
+          if (block.name === 'zoho_get_record' && block.input?.module_name === 'Quotes') {
+            if (_quotesSearchDone) {
+              console.log(`[GCHAT-AGENT] Skipping Quote get_record (search in same batch auto-expands)`);
+              return {
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: '{"info":"Quote details already included in the search results above via auto-expand. Look for the _auto_expanded:true record which contains Quoted_Items, Grand_Total, Quote_Stage, etc."}'
+              };
+            }
+            if (_expandedQuoteCache[block.input?.record_id]) {
+              console.log(`[GCHAT-AGENT] Cache hit for Quote ${block.input.record_id} — skipping API call`);
+              const cached = _expandedQuoteCache[block.input.record_id];
+              return {
+                type: 'tool_result',
+                tool_use_id: block.id,
+                content: cached.length > 8000 ? cached.substring(0, 8000) + '...(truncated)' : cached
+              };
+            }
+          }
+
           const result = await executeToolCall(block.name, block.input, env);
-          const resultStr = JSON.stringify(result);
+          const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           console.log(`[GCHAT-AGENT] Tool result (${block.name}): ${resultStr.substring(0, 200)}`);
-          // zoho_get_record returns large payloads for Quotes (Quoted_Items line items).
-          // Use a higher limit so Claude can read all line items without truncation.
-          // Other tools stay at 2000 chars to keep subsequent calls fast.
-          const truncLimit = block.name === 'zoho_get_record' ? 8000 : 2000;
+
+          // Cache auto-expanded Quote results for future get_record calls
+          if (block.name === 'zoho_search_records' && block.input?.module_name === 'Quotes') {
+            try {
+              const parsed = JSON.parse(resultStr);
+              if (parsed?.data?.[0]?._auto_expanded) {
+                _expandedQuoteCache[parsed.data[0].id] = JSON.stringify({ data: [parsed.data[0]] });
+                console.log(`[GCHAT-AGENT] Cached auto-expanded Quote ${parsed.data[0].id}`);
+              }
+            } catch (_) {}
+          }
+
+          // Higher truncation limit for Quote data (search results now include Quoted_Items via auto-expand)
+          const isQuoteData = (block.name === 'zoho_get_record' && block.input?.module_name === 'Quotes') ||
+                              (block.name === 'zoho_search_records' && block.input?.module_name === 'Quotes');
+          const truncLimit = isQuoteData ? 8000 : 2000;
           return {
             type: 'tool_result',
             tool_use_id: block.id,
@@ -7936,105 +8241,36 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
 
             if (spaceName && hasAsyncCreds) {
-              // ARCHITECTURE: Run CRM work INLINE via ctx.waitUntil (no Service Binding).
-              // Previous approach used ctx.waitUntil(env.SELF.fetch(/_work)) which was
-              // silently killed after ~30s on Standard plan. Running the work directly
-              // in ctx.waitUntil avoids the Service Binding overhead. On Workers Standard
-              // plan, ctx.waitUntil has no wall-time limit (only 30s CPU limit, and most
-              // time is spent on external fetches which don't count as CPU).
+              // ARCHITECTURE: Dispatch CRM work via Cloudflare Queue.
+              //
+              // Why Queue?  → Queue consumers get their own INDEPENDENT execution context
+              //   with up to 15 minutes of wall-clock time. This completely bypasses:
+              //   - ctx.waitUntil 30s wall-clock limit (killed multi-step agentic loops)
+              //   - Service Binding shared-context issue (SB subrequests die with parent)
+              //   - Self-fetch restriction (Workers can't fetch their own URL)
+              //
+              // Flow: webhook → queue.send(payload) → return 200 immediately
+              //       queue consumer → askClaude with tools → deliver via GChat REST API
               const _imgData = imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null;
 
-              ctx.waitUntil((async () => {
-                const _workStart = Date.now();
-                let _progressMsgName = null;
-                let _stepLog = [];
+              try {
+                await env.CRM_QUEUE.send({
+                  text,
+                  personId,
+                  spaceName,
+                  threadName,
+                  imageData: _imgData
+                });
+                console.log(`[GCHAT-DISPATCH] CRM work queued for: "${text.substring(0, 60)}..."`);
+              } catch (queueErr) {
+                console.error(`[GCHAT-DISPATCH] Queue send failed: ${queueErr.message}`);
+                // Fallback: try to send error message directly
                 try {
-                  // Send "Working on it..." placeholder
-                  try {
-                    const thinkingMsg = await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', null, env);
-                    _progressMsgName = thinkingMsg?.name || null;
-                  } catch (initErr) {
-                    console.warn(`[GCHAT-CRM] Could not send progress: ${initErr.message}`);
-                  }
+                  await sendAsyncGChatMessage(spaceName, `❌ Failed to queue request: ${queueErr.message.substring(0, 100)}`, null, env);
+                } catch (_) {}
+              }
 
-                  // Progress callback for real-time step updates
-                  const progressCallback = _progressMsgName
-                    ? async (msg) => {
-                        if (msg) {
-                          const lines = msg.split('\n').filter(l => /^[🔍📄🔗✏️📦🌐📧✍️📤⚙️]/.test(l.trim()));
-                          for (const line of lines) {
-                            const trimmed = line.trim();
-                            if (_stepLog.length === 0 || _stepLog[_stepLog.length - 1] !== trimmed) {
-                              _stepLog.push(trimmed);
-                            }
-                          }
-                        }
-                        const recentSteps = _stepLog.slice(-5);
-                        const display = recentSteps.length > 0
-                          ? `⏳ *Working on it...*\n\n${recentSteps.join('\n')}`
-                          : '⏳ Working on it...';
-                        try { await updateGChatMessage(_progressMsgName, display, env); } catch (_) {}
-                      }
-                    : async () => {};
-
-                  // Run the full CRM agentic loop — 5-min deadline
-                  let result = await askClaude(text, personId, env, _imgData, true, progressCallback, 300000);
-                  console.log(`[GCHAT-CRM] askClaude completed in ${Date.now() - _workStart}ms`);
-
-                  // Handle continuation if 5-min deadline hit
-                  while (result && result.__continuation) {
-                    console.log(`[GCHAT-CRM] Continuation at iteration ${result.iteration}`);
-                    result = await askClaudeContinue(
-                      result.messages, result.tools, result.systemPrompt,
-                      result.iteration, env, progressCallback, 300000
-                    );
-                  }
-
-                  // Deliver final response
-                  let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
-                  finalReply = adaptMarkdownForGChat(finalReply);
-                  finalReply = truncateGChatReply(finalReply);
-
-                  let delivered = false;
-                  if (_progressMsgName) {
-                    try {
-                      delivered = await updateGChatMessage(_progressMsgName, finalReply, env);
-                      if (delivered) console.log(`[GCHAT-CRM] Final PATCH'd (${finalReply.length} chars)`);
-                    } catch (patchErr) {
-                      console.warn(`[GCHAT-CRM] PATCH failed: ${patchErr.message}`);
-                    }
-                  }
-                  if (!delivered) {
-                    await sendAsyncGChatMessage(spaceName, finalReply, null, env);
-                  }
-
-                  // Save conversation history
-                  if (personId) {
-                    await addToHistory(kv, personId, 'user', text);
-                    await addToHistory(kv, personId, 'assistant', finalReply);
-                    await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 600 });
-                  }
-                  console.log(`[GCHAT-CRM] Completed in ${Date.now() - _workStart}ms total`);
-                } catch (err) {
-                  console.error(`[GCHAT-CRM] Error: ${err.message}`);
-                  const errMsg = `❌ Sorry, I ran into an issue processing that request.\n\n_Error: ${err.message.substring(0, 200)}_`;
-                  try {
-                    if (_progressMsgName) {
-                      await updateGChatMessage(_progressMsgName, errMsg, env);
-                    } else {
-                      await sendAsyncGChatMessage(spaceName, errMsg, null, env);
-                    }
-                  } catch (_) {}
-                  try {
-                    await kv.put(`work_error_${Date.now()}`, JSON.stringify({
-                      error: err.message, stack: (err.stack || '').substring(0, 500),
-                      ts: new Date().toISOString(), elapsed: Date.now() - _workStart
-                    }), { expirationTtl: 3600 });
-                  } catch (_) {}
-                }
-              })());
-
-              // Return empty response immediately — work runs in ctx.waitUntil
+              // Return empty response immediately — queue consumer handles everything
               return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' } });
             }
 
@@ -8188,6 +8424,106 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
   // Fetches Stratus_Price for every SKU in the static prices.json,
   // builds an updated price map, and stores it in KV.
   // Runtime reads KV first → falls back to static prices.json.
+  // ── Queue Consumer: CRM work dispatch (independent execution context) ──
+  // Cloudflare Queue consumers get their own execution context with up to
+  // 15 minutes of wall-clock time — no 30s ctx.waitUntil limit.
+  // The webhook handler produces a message with the work payload; this
+  // consumer picks it up and runs the full agentic CRM loop.
+  async queue(batch, env) {
+    for (const msg of batch.messages) {
+      const queueStart = Date.now();
+      const { text, personId, spaceName, threadName, imageData } = msg.body;
+      console.log(`[GCHAT-QUEUE] Processing CRM work for: "${(text || '').substring(0, 80)}..." spaceName="${spaceName}"`);
+
+      if (!spaceName) {
+        console.error('[GCHAT-QUEUE] No spaceName in message — skipping');
+        msg.ack();
+        continue;
+      }
+
+      // Load live prices (same as fetch handler)
+      if (env.CONVERSATION_KV) {
+        await loadLivePrices(env);
+      }
+
+      const kv = env.CONVERSATION_KV;
+
+      // Send initial "Working on it..." message
+      let _progressMsgName = null;
+      let _stepLog = [];
+      try {
+        const thinkingMsg = await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', null, env);
+        _progressMsgName = thinkingMsg?.name || null;
+        console.log(`[GCHAT-QUEUE] Progress message sent: ${_progressMsgName}`);
+      } catch (initSendErr) {
+        console.error(`[GCHAT-QUEUE] Failed to send progress message: ${initSendErr.message}`);
+      }
+
+      // Progress callback: real-time step updates
+      const progressCallback = _progressMsgName
+        ? async (stepMsg) => {
+            if (stepMsg) {
+              const lines = stepMsg.split('\n').filter(l => /^[🔍📄🔗✏️📦🌐📧✍️📤⚙️]/.test(l.trim()));
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (_stepLog.length === 0 || _stepLog[_stepLog.length - 1] !== trimmed) {
+                  _stepLog.push(trimmed);
+                }
+              }
+            }
+            const recentSteps = _stepLog.slice(-5);
+            const display = recentSteps.length > 0
+              ? `⏳ *Working on it...*\n\n${recentSteps.join('\n')}`
+              : '⏳ Working on it...';
+            try { await updateGChatMessage(_progressMsgName, display, env); } catch (_) {}
+          }
+        : async () => {};
+
+      try {
+        // 5-minute safety-net deadline
+        let result = await askClaude(text, personId, env, imageData || null, true, progressCallback, 300000);
+        console.log(`[GCHAT-QUEUE] askClaude completed in ${Date.now() - queueStart}ms`);
+
+        let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
+        finalReply = adaptMarkdownForGChat(finalReply);
+        finalReply = truncateGChatReply(finalReply);
+
+        // Deliver final response
+        let delivered = false;
+        if (_progressMsgName) {
+          try {
+            delivered = await updateGChatMessage(_progressMsgName, finalReply, env);
+            if (delivered) console.log(`[GCHAT-QUEUE] Final response PATCH'd onto ${_progressMsgName}`);
+          } catch (patchErr) {
+            console.warn(`[GCHAT-QUEUE] PATCH failed: ${patchErr.message}`);
+          }
+        }
+        if (!delivered) {
+          await sendAsyncGChatMessage(spaceName, finalReply, null, env);
+        }
+
+        // Update conversation history
+        if (personId) {
+          await addToHistory(kv, personId, 'user', text);
+          await addToHistory(kv, personId, 'assistant', finalReply);
+          await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 600 });
+        }
+        console.log(`[GCHAT-QUEUE] Completed in ${Date.now() - queueStart}ms total`);
+      } catch (err) {
+        console.error(`[GCHAT-QUEUE] Error: ${err.message}`);
+        const errMsg = `❌ Sorry, I ran into an issue processing that request.\n\n_Error: ${err.message.substring(0, 200)}_`;
+        try {
+          if (_progressMsgName) {
+            await updateGChatMessage(_progressMsgName, errMsg, env);
+          } else {
+            await sendAsyncGChatMessage(spaceName, errMsg, null, env);
+          }
+        } catch (_) {}
+      }
+      msg.ack();
+    }
+  },
+
   async scheduled(event, env, ctx) {
     const startTime = Date.now();
     console.log(`[PRICE-CRON] Starting daily price refresh at ${new Date().toISOString()}`);
