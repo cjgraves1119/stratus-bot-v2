@@ -7749,6 +7749,39 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── CCW Lookup: Find a Zoho Quote by CCW Deal Number ──
+          case '/api/ccw-lookup': {
+            const { ccwDealNumber } = apiBody;
+            if (!ccwDealNumber) {
+              return new Response(JSON.stringify({ error: 'ccwDealNumber required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              const coql = `select id, Subject, Quote_Number, Grand_Total, Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where CCW_Deal_Number = '${ccwDealNumber}' limit 1`;
+              const qResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+              if (qResp?.data && qResp.data.length > 0) {
+                const q = qResp.data[0];
+                apiResult = {
+                  found: true,
+                  quote: {
+                    id: q.id,
+                    subject: q.Subject || '',
+                    quoteNumber: q.Quote_Number || '',
+                    grandTotal: q.Grand_Total || 0,
+                    stage: q.Stage || '',
+                    dealName: q.Deal_Name?.name || '',
+                    accountName: q.Account_Name?.name || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
+                  },
+                };
+              } else {
+                apiResult = { found: false };
+              }
+            } catch (err) {
+              apiResult = { error: 'CCW lookup failed: ' + err.message, found: false };
+            }
+            break;
+          }
+
           // ── CRM Notes: Get recent notes for a contact/account ──
           case '/api/crm-notes': {
             const { contactId: notesContactId, accountId: notesAcctId } = apiBody;
