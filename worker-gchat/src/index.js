@@ -3917,6 +3917,28 @@ async function executeToolCall(toolName, toolInput, env) {
         }
       }
 
+      // ── Velocity Hub ──
+      case 'velocity_hub_submit': {
+        const { deal_id, country } = toolInput;
+        if (!/^\d{8}$/.test(deal_id)) {
+          return { error: `Invalid DID format: "${deal_id}". Must be exactly 8 digits.` };
+        }
+        try {
+          const vhResponse = await fetch('https://eo44ez435h7vzp2.m.pipedream.net', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deal_id, country: country || 'United States' })
+          });
+          const vhStatus = vhResponse.status;
+          const vhBody = await vhResponse.text().catch(() => '');
+          console.log(`[GCHAT-AGENT] Velocity Hub submit: DID=${deal_id}, status=${vhStatus}`);
+          return { success: vhStatus >= 200 && vhStatus < 300, status: vhStatus, deal_id, message: `Deal ${deal_id} submitted to Velocity Hub for approval.` };
+        } catch (vhErr) {
+          console.error(`[GCHAT-AGENT] Velocity Hub error:`, vhErr.message);
+          return { success: false, error: vhErr.message, deal_id, message: `Velocity Hub submission failed but DID ${deal_id} was generated successfully. Chris can submit manually later.` };
+        }
+      }
+
       // ── Gmail Tools ──
       case 'gmail_search_messages': {
         const { query, max_results } = toolInput;
@@ -4162,6 +4184,19 @@ const CRM_EMAIL_TOOLS = [
         domain: { type: 'string', description: 'The email domain to look up (e.g., "riverside.k12.wi.us", "acmecorp.com"). Do NOT include "www." or "https://".' }
       },
       required: ['domain']
+    }
+  },
+  // Velocity Hub deal approval submission
+  {
+    name: 'velocity_hub_submit',
+    description: 'Submit a Cisco Deal ID (DID) to Velocity Hub for deal approval. Call this after LIVE_CiscoQuote_Deal generates a CCW_Deal_Number. The DID must be exactly 8 digits.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        deal_id: { type: 'string', description: 'The 8-digit CCW Deal Number (DID) from LIVE_CiscoQuote_Deal' },
+        country: { type: 'string', description: 'Country for deal approval (default: "United States")' }
+      },
+      required: ['deal_id']
     }
   },
   // Gmail
@@ -4920,9 +4955,9 @@ Admin Actions are Zoho CRM automations triggered by writing an action name to th
    - Cisco_Estimate_Status → Should show "Success.VALID" if it worked
    - Admin_Action → Should show "LIVE_CiscoQuote_Deal__Done"
 4. REPORT TO USER: "Deal ID {CCW_Deal_Number} generated successfully." Include the actual number.
-5. AUTO-SUBMIT TO VELOCITY HUB (non-blocking, continue even if this fails):
-   - This is a conceptual step — tell the user the DID was generated and you'd submit to Velocity Hub
-   - POST https://eo44ez435h7vzp2.m.pipedream.net with body {"deal_id": "{CCW_Deal_Number}", "country": "United States"}
+5. AUTO-SUBMIT TO VELOCITY HUB: Call velocity_hub_submit(deal_id="{CCW_Deal_Number}") to submit for deal approval.
+   - This is non-blocking. If it fails, report but continue.
+   - The DID must be exactly 8 digits or the tool will reject it.
 
 **Step 3: LIVE_ConvertQuoteToSO (Create PO)**
 Before running, show validation: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion.
