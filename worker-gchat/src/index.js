@@ -4641,7 +4641,7 @@ Create quotes at **list price** by default:
 4. If user says yes, update each line item with ecomm_price from the batch lookup results. Include Description = "Stratus ecomm price ({XX}% off list)" where XX = round((1 - ecomm_price / list_price) * 100).
 
 Do NOT auto-apply ecomm pricing. Let the user choose.
-Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentage.
+Discount is a DOLLAR AMOUNT, not a percentage. Formula: Discount = (List_Price x Quantity) - Target_Sell_Price. Example: List $201, target $138, Qty 1 = Discount: 63
 
 ### Quote Integrity Rules (CRITICAL)
 
@@ -4651,40 +4651,76 @@ Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentag
 
 **Quote update workflow:**
 1. Use the auto-expanded quote data from the search result — it already includes "id" per line item. You do NOT need a separate zoho_get_record call before updating.
-2. Identify each line item by Product_Code and its Quantity, unit_price, and Discount
-3. Determine the correct replacement SKUs (e.g., LIC-ENT-1YR -> LIC-ENT-3YR)
-4. Call batch_product_lookup to get product IDs and prices for ALL items (both changed AND unchanged) so you have every product_id
-5. Build the COMPLETE Quoted_Items array (see CRITICAL rules below) and call zoho_update_record
-6. Call zoho_get_record AGAIN after updating to VERIFY the change
-7. VERIFICATION CHECK: Compare the post-update line items against what you expected. Check: (a) total item count matches expected count, (b) no duplicate products, (c) replaced items show the new SKU not the old one. If ANY check fails, tell the user exactly what went wrong — do NOT say "updated successfully"
-8. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
+2. Identify each line item by Product_Code, its id, Quantity, unit_price, and Discount
+3. Determine what changes are needed (add, remove, modify items)
+4. For NEW items: call batch_product_lookup to get product IDs and prices
+5. Build the Quoted_Items payload following the ADDITIVE rules below
+6. Call zoho_update_record with the payload
+7. Call zoho_get_record AGAIN after updating to VERIFY the change
+8. VERIFICATION CHECK: Compare the post-update line items against what you expected. Check: (a) total item count matches expected count, (b) no duplicate products, (c) removed items are gone, (d) new/changed items are correct. If ANY check fails, tell the user exactly what went wrong — do NOT say "updated successfully"
+9. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
 
-**Quoted_Items FULL REPLACEMENT RULE (CRITICAL — violating this creates duplicates):**
-Zoho REPLACES the entire Quoted_Items array on every update. It does NOT merge or patch individual items.
+**Quoted_Items ADDITIVE RULE (CRITICAL — misunderstanding this creates duplicates):**
+Zoho Quoted_Items updates are ADDITIVE. When you include Quoted_Items in an update, Zoho ADDS those items to the existing list. It does NOT replace the list.
 This means:
-- You MUST send EVERY line item the quote should have after the update — not just the changed ones
-- Items you want to KEEP UNCHANGED: include them with their original "id" and set Product_Name to {"id": "<product_id>"} using the product_id field from the existing line item data. Keep the original unit_price, Discount, and Quantity
-- Items you want to CHANGE (e.g., swap 1YR license to 3YR): include them with their original "id" but set Product_Name to {"id": "<new_product_id>"} from batch_product_lookup, and set the new unit_price from the lookup results
-- Items you want to REMOVE: simply do not include them in the array
-- If a quote has 8 items and you only want to change 2 of them, you MUST still send all 8 items (6 unchanged + 2 changed)
-- If you send only 2 items, Zoho will DELETE the other 6 — this is wrong and destroys the quote
+- Items you want to KEEP UNCHANGED: do NOT include them in the payload at all. They stay automatically.
+- Items you want to REMOVE: include them with their "id" and "_delete": null
+- Items you want to ADD (new items): include them WITHOUT an "id" field, with Product_Name as an object
+- Items you want to MODIFY (e.g., change quantity on existing item): include them with their existing "id" + updated fields (no _delete)
+- NEVER send all items expecting Zoho to replace the list — this ADDS duplicates of every item you included
 
-**Quoted_Items field format:**
-- "id" = the existing line item ID (REQUIRED for all items being kept or changed)
-- Product_Name = an OBJECT like {"id": "zoho_product_id"} — use product_id from batch_product_lookup. For unchanged items, use the original product data
-- unit_price = the price value (NOT the List_Price field name)
-- Discount = percentage (0-100), NOT a dollar amount
-- Quantity = integer
-
-  Example: Quote has 4 items, changing item #2 from 1YR to 3YR license, keeping all others:
+**How to DELETE line items:**
+Include the line item IDs with "_delete": null in the Quoted_Items array:
   Quoted_Items: [
-    {"id": "item1_id", "Product_Name": {"id": "hw_product_id"}, "Quantity": 1, "unit_price": 820, "Discount": 0},
-    {"id": "item2_id", "Product_Name": {"id": "NEW_3yr_product_id"}, "Quantity": 1, "unit_price": 451, "Discount": 0},
-    {"id": "item3_id", "Product_Name": {"id": "hw2_product_id"}, "Quantity": 1, "unit_price": 850, "Discount": 0},
-    {"id": "item4_id", "Product_Name": {"id": "lic2_product_id"}, "Quantity": 1, "unit_price": 1544, "Discount": 0}
+    {"id": "line_item_id_to_remove", "_delete": null},
+    {"id": "another_id_to_remove", "_delete": null}
   ]
 
-**NEVER report a successful update without verifying it.** If the post-update fetch shows duplicate items, wrong item count, or unchanged SKUs, tell the user the update had a problem and describe exactly what happened.
+**How to ADD new items:**
+Include new items WITHOUT an "id" field:
+  Quoted_Items: [
+    {"Product_Name": {"id": "zoho_product_id"}, "Quantity": 2}
+  ]
+
+**How to REPLACE items (e.g., swap 1YR to 3YR license):**
+This requires BOTH deleting the old item AND adding the new one in the SAME update:
+  Quoted_Items: [
+    {"id": "old_1yr_line_item_id", "_delete": null},
+    {"Product_Name": {"id": "new_3yr_product_id"}, "Quantity": 1}
+  ]
+
+**How to MODIFY an existing item (e.g., change quantity):**
+Include the item with its existing "id" and the fields to change:
+  Quoted_Items: [
+    {"id": "existing_line_item_id", "Quantity": 5}
+  ]
+
+**Quoted_Items field format:**
+- "id" = the existing line item ID (REQUIRED for delete and modify operations)
+- "_delete": null = marks an item for removal (ONLY way to remove items)
+- Product_Name = an OBJECT like {"id": "zoho_product_id"} — required for new items
+- Quantity = integer
+- Discount = DOLLAR AMOUNT (NOT a percentage). Formula: Discount = (List_Price x Quantity) - Target_Sell_Price
+
+  Example: Quote has 4 items. Remove item #2 (1YR license), add a 3YR license, keep items #1/#3/#4 unchanged:
+  Quoted_Items: [
+    {"id": "item2_id_1yr_license", "_delete": null},
+    {"Product_Name": {"id": "new_3yr_product_id"}, "Quantity": 1}
+  ]
+  Items #1, #3, #4 are NOT included because they stay automatically.
+
+  Example: Remove duplicates (items with IDs "dup1" and "dup2"):
+  Quoted_Items: [
+    {"id": "dup1", "_delete": null},
+    {"id": "dup2", "_delete": null}
+  ]
+
+**NEVER DO (Line Item Updates):**
+- NEVER send Quoted_Items with items you want to keep, expecting Zoho to remove the rest — this ADDS duplicates
+- NEVER assume Quoted_Items in an update replaces the existing list — it is always additive
+- NEVER use zoho_delete_record on Quoted_Items module directly (returns "record not approved")
+
+**NEVER report a successful update without verifying it.** If the post-update fetch shows duplicate items, wrong item count, or items that should have been removed, tell the user the update had a problem and describe exactly what happened.
 
 ---
 
