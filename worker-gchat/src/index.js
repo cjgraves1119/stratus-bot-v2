@@ -3657,6 +3657,11 @@ async function executeToolCall(toolName, toolInput, env) {
                   Cisco_Billing_Term: full.Cisco_Billing_Term,
                   Net_Terms: full.Net_Terms,
                   Source: full.Source,
+                  // Admin Action fields — needed for DID generation and quote-to-PO workflow
+                  CCW_Deal_Number: full.CCW_Deal_Number,
+                  Admin_Action: full.Admin_Action,
+                  Cisco_Estimate_Status: full.Cisco_Estimate_Status,
+                  Cisco_Quote_Status: full.Cisco_Quote_Status,
                   // Quoted_Items: slim down each line item to essential fields
                   // NOTE: id + product_id are REQUIRED for updates — Zoho rejects without item IDs
                   // and product_id is needed to build the Product_Name object for unchanged items
@@ -3725,6 +3730,11 @@ async function executeToolCall(toolName, toolInput, env) {
                 Cisco_Billing_Term: full.Cisco_Billing_Term,
                 Net_Terms: full.Net_Terms,
                 Source: full.Source,
+                // Admin Action fields — needed for DID generation and quote-to-PO workflow
+                CCW_Deal_Number: full.CCW_Deal_Number,
+                Admin_Action: full.Admin_Action,
+                Cisco_Estimate_Status: full.Cisco_Estimate_Status,
+                Cisco_Quote_Status: full.Cisco_Quote_Status,
                 Quoted_Items: (full.Quoted_Items || []).map(item => ({
                   id: item.id,
                   product_id: item.Product_Name?.id,
