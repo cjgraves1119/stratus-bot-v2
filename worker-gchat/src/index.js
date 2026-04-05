@@ -4379,6 +4379,8 @@ NEVER pass a record ID into a name/text search field. If you have an Account rec
 
 **SEARCH ORDER RULE (CRITICAL FOR SPEED):** When looking up an existing customer, ALWAYS search Accounts FIRST. Do NOT search Deals or run COQL queries before finding the Account. The correct order is: (1) zoho_search_records on Accounts, (2) zoho_search_records on Contacts. You can call both in the SAME iteration as parallel tool calls. Only search Deals if you need to find an existing Deal after the Account is confirmed.
 
+**QUOTE LOOKUP SHORTCUT (CRITICAL FOR SPEED):** When the user asks about an existing quote ("most recent quote", "line items in the quote", "what's in the quote"), go DIRECTLY to Quotes — do NOT search Accounts or Contacts first. The correct order is: (1) zoho_search_records on Quotes (criteria: "Account_Name:contains:{company}"), sorted by Created_Time descending. This skips 2-3 unnecessary API calls and prevents timeouts. Only look up the Account if you need account-level info beyond the quote itself.
+
 ---
 
 ## PRODUCT LOOKUP & PRICING
@@ -4889,7 +4891,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     } else {
       userContent = userMessage;
     }
-    let messages = [...history, { role: 'user', content: userContent }];
+    // For CRM tool-use, limit history to last 2 messages to keep Anthropic payload small.
+    // Full 10-message history + tool calls + tools schema = 50-65K chars → too slow for ctx.waitUntil 30s wall-clock limit.
+    // 2-message history keeps follow-up context while fitting the full agentic flow in ~15-20s.
+    const effectiveHistory = useTools ? history.slice(-2) : history;
+    let messages = [...effectiveHistory, { role: 'user', content: userContent }];
 
     // Determine if we should include CRM/email tools
     const tools = useTools ? CRM_EMAIL_TOOLS : [];
