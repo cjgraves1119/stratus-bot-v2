@@ -4109,7 +4109,7 @@ function detectCrmEmailIntent(text) {
   const crmPatterns = [
     /\b(create|new|add)\s+(a\s+)?(deal|quote|task|contact|account)/i,
     /\b(update|edit|change|modify)\s+.{0,40}\b(deal|quote|task|contact|account)/i,
-    /\b(search|find|look\s*up|pull\s*up|get|show)\s+(me\s+)?(the\s+)?.{0,20}\b(deal|quote|task|contact|account|customer|client)/i,
+    /\b(search|find|look\s*up|pull\s*up|get|show|list)\s+(me\s+)?(the\s+|all\s+)?.{0,20}\b(deal|quote|task|contact|account|customer|client|line\s*items?)/i,
     /\b(close|complete|finish)\s+(the\s+)?(task|deal)/i,
     /\b(what|when|how\s+many|how\s+much|who)\s+.*(deal|quote|customer|account|order|invoice|pipeline)/i,
     // Quote field updates (Valid Till, dates, amounts, etc.)
@@ -4137,7 +4137,9 @@ function detectCrmEmailIntent(text) {
     /\b(show|give)\s+me\s+the\s+(zoho\s+)?(links?|url|records?)/i,
     /\b(records?\s+you\s+just\s+creat|things?\s+you\s+just\s+(made|creat|built))/i,
     /\b(zoho\s+)?(link|url)\s+(for|to)\s+(the\s+)?(deal|quote|account)/i,
-    /\b(most\s+recent|just\s+creat|latest)\s+(records?|deal|quote|account|contact)/i,
+    /\b(most\s+recent|just\s+creat|latest)\s+.{0,30}\b(records?|deal|quote|account|contact)/i,
+    /\b(line\s*items?|quoted\s*items?|products?\s+in\s+the\s+quote)\b/i,
+    /\b(what('?s|\s+is|\s+are)\s+.{0,30}(in|on)\s+.{0,20}(quote|deal|order))/i,
     /\bwhat\s+(was|were)\s+(just\s+)?(creat|made?|built?|add)/i,
     // Stop-then-ask pattern — user says stop, then asks follow-up
     /\bstop\b.{0,50}\b(creat|quot|deal|zoho|account)/i,
