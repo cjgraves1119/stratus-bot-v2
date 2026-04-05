@@ -4619,6 +4619,15 @@ Use the **batch_product_lookup** tool for ALL product lookups. It:
 
 **DO NOT search WooProducts or Products individually.** The batch tool is faster and already includes pricing + product IDs.
 
+**When batch_product_lookup returns found: false — CRITICAL:**
+- found: false means the SKU is NOT in the local price cache or Zoho Products catalog right now.
+- found: false does NOT mean the SKU is invalid. LIC-ENT-3YR, LIC-ENT-5YR, LIC-MX*-SEC-*YR, etc. are all real Cisco/Meraki SKUs.
+- When found: false for a LIC-* license SKU, search Zoho Products directly BEFORE giving up:
+  zoho_search_records(module_name="Products", criteria="(Product_Code:equals:LIC-ENT-3YR)&fields=id,Product_Code,Product_Name,Unit_Price")
+- If found in Products: use that product ID for the quote line item.
+- Only report "SKU not available" if BOTH batch_product_lookup AND the Products search return nothing.
+- NEVER tell the user a LIC-ENT-*, LIC-MX*, LIC-MS*, LIC-MV*, or LIC-MT* SKU is "invalid" based on found: false alone.
+
 ### Quote Creation (List Price Default)
 Create quotes at **list price** by default:
 1. Call batch_product_lookup with all SKUs + quantities in a single call
