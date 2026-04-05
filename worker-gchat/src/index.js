@@ -6443,11 +6443,23 @@ CRITICAL URL RULES:
               }
             }
 
+            // Inject quote URLs directly into each draft body so they appear
+            // in the card preview and are included when "Create Gmail Draft" is clicked
+            var rawDrafts = parsedDraft.drafts || [parsedDraft.draft || draftText.substring(0, 2000)];
+            var finalDrafts = rawDrafts.map(function(draft) {
+              if (allQuoteUrls.length === 0) return draft;
+              var urlBlock = '\n\nFor your convenience, here' + (allQuoteUrls.length === 1 ? '\'s a quote link' : ' are some quote options') + ':';
+              allQuoteUrls.forEach(function(q) {
+                urlBlock += '\n' + q.label + ': ' + q.url;
+              });
+              return draft + urlBlock;
+            });
+
             apiResult = {
-              drafts: parsedDraft.drafts || [parsedDraft.draft || draftText.substring(0, 2000)]
+              drafts: finalDrafts
             };
             if (allQuoteUrls.length > 0) {
-              apiResult.quoteUrls = allQuoteUrls;
+              apiResult.quoteUrls = allQuoteUrls; // also returned for sidebar display
             }
             break;
           }
