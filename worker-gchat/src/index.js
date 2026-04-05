@@ -6362,9 +6362,15 @@ ${instructions ? 'ADDITIONAL INSTRUCTIONS: ' + instructions : ''}
 
 Return ONLY valid JSON:
 {
-  "drafts": ["draft option 1", "draft option 2"]
+  "drafts": ["draft option 1", "draft option 2"],
+  "suggestedProducts": [{"sku": "MX67", "qty": 1}]
 }
-Provide exactly 2 distinct reply options. Each draft should be the complete email body text only (no subject, no signature). Use \\n for line breaks between paragraphs.`,
+
+CRITICAL URL RULES:
+- Do NOT include any URLs or hyperlinks anywhere in the draft text. Quote links are automatically generated and displayed separately by the sidebar UI.
+- If you are recommending a specific Cisco/Meraki product, list it in "suggestedProducts" using the base SKU without suffixes (e.g. "MX67" not "MX67-HW", "MS130-24P" not "MS130-24P-HW"). Real Stratus quote links will be generated from this field.
+- "suggestedProducts" is optional — omit the field entirely if you are not recommending specific hardware.
+- Provide exactly 2 distinct reply options. Each draft is the complete email body text only (no subject, no signature). Use \\n for line breaks between paragraphs.`,
                 messages: [{
                   role: 'user',
                   content: `Reply to this email:\n\nSubject: ${subject}\nFrom: ${senderName} <${senderEmail}>\n\n${(body || '').substring(0, 6000)}`
@@ -6380,10 +6386,67 @@ Provide exactly 2 distinct reply options. Each draft should be the complete emai
             const draftData = await draftResp.json();
             ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-20250514', draftData.usage, 'addon-draft'));
             const draftText = draftData.content?.[0]?.text || '';
+            var parsedDraft;
             try {
-              apiResult = JSON.parse(draftText.replace(/```json\n?|\n?```/g, '').trim());
+              parsedDraft = JSON.parse(draftText.replace(/```json\n?|\n?```/g, '').trim());
             } catch (_) {
-              apiResult = { drafts: [draftText.substring(0, 2000)] };
+              parsedDraft = { drafts: [draftText.substring(0, 2000)] };
+            }
+
+            // Build real Stratus URLs from suggestedProducts (products Claude recommends)
+            var allQuoteUrls = quoteUrls.slice(); // start with any pre-detected URLs from email content
+            if (parsedDraft.suggestedProducts && parsedDraft.suggestedProducts.length > 0) {
+              try {
+                var sugSkuText = parsedDraft.suggestedProducts.map(function(p) {
+                  return (p.qty || 1) + ' ' + p.sku;
+                }).join(', ');
+                var sugParsed = parseMessage(sugSkuText);
+                if (sugParsed && sugParsed.items && sugParsed.items.length > 0) {
+                  var sugResp = buildQuoteResponse(sugParsed);
+                  var sugText = (sugResp && (sugResp.message || sugResp.text || sugResp.reply)) || '';
+                  var sugUrlRegex = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
+                  var sugUrlMatches = sugText.match(sugUrlRegex) || [];
+                  var sugTermLabels = ['1-Year', '3-Year', '5-Year'];
+                  var sugOptLabel = '';
+                  var sugOptIdx = 0;
+                  var sugLines = sugText.split('\n');
+                  var sugUrlsParsed = [];
+                  for (var sli = 0; sli < sugLines.length; sli++) {
+                    var sLine = sugLines[sli];
+                    var sOptMatch = sLine.match(/\*\*Option \d+[^*]*\*\*/) || sLine.match(/^Option \d+/);
+                    if (sOptMatch) { sugOptLabel = (sOptMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); sugOptIdx = 0; }
+                    var sUrlMatch = sLine.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
+                    if (sUrlMatch) {
+                      var sLabel = sugOptLabel
+                        ? sugOptLabel + ' (' + (sugTermLabels[sugOptIdx] || '') + ')'
+                        : sugTermLabels[sugUrlsParsed.length] || 'Quote ' + (sugUrlsParsed.length + 1);
+                      sugUrlsParsed.push({ url: sUrlMatch[0], label: sLabel.trim() });
+                      sugOptIdx++;
+                    }
+                  }
+                  // Fallback to raw URL array if line-parse found nothing
+                  if (sugUrlsParsed.length === 0 && sugUrlMatches.length > 0) {
+                    sugUrlMatches.forEach(function(u, i) {
+                      sugUrlsParsed.push({ url: u, label: sugTermLabels[i] || 'Quote ' + (i + 1) });
+                    });
+                  }
+                  // Merge, avoiding duplicates
+                  sugUrlsParsed.forEach(function(su) {
+                    if (!allQuoteUrls.some(function(ex) { return ex.url === su.url; })) {
+                      allQuoteUrls.push(su);
+                    }
+                  });
+                }
+              } catch (sugErr) {
+                console.error('[API] suggestedProducts URL build error:', sugErr.message);
+              }
+            }
+
+            apiResult = {
+              drafts: parsedDraft.drafts || [parsedDraft.draft || draftText.substring(0, 2000)]
+            };
+            if (allQuoteUrls.length > 0) {
+              apiResult.quoteUrls = allQuoteUrls;
             }
             break;
           }
