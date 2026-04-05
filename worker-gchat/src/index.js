@@ -8493,9 +8493,13 @@ CRITICAL URL RULES:
           if (crmSession) {
             // Check if this looks like a quoting request — if so, let it go
             // through the deterministic quoting engine instead of the CRM agent
-            const looksLikeQuote = /^\s*(quote|q)\s+\d/i.test(text)
+            // BUT exclude messages about applying/updating ecomm pricing on existing quotes
+            const isCrmPricingAction = /\b(apply|update|set|change|use)\b.{0,20}\b(ecomm|e-comm|discount|stratus\s+pric)/i.test(text);
+            const looksLikeQuote = !isCrmPricingAction && (
+              /^\s*(quote|q)\s+\d/i.test(text)
               || /^\s*\d+\s*x?\s+[A-Z]{1,3}[A-Z0-9-]/i.test(text)
-              || /\b(cost|price|pricing|how much)\b/i.test(text);
+              || /\b(cost|price|pricing|how much)\b/i.test(text)
+            );
             if (looksLikeQuote) {
               console.log(`[GCHAT] Active CRM session but message looks like a quoting request — letting quoting engine handle it`);
             } else {
@@ -8510,10 +8514,11 @@ CRITICAL URL RULES:
         // "try again", "confirm status", "go ahead", "yes proceed", etc.
         if (!isExplicitCrmRequest && personId && kv) {
           const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update|happening)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status|what\s+happened|is\s+it\s+done|are\s+we\s+good|any\s+update|where\s+are\s+we|is\s+(this|it)\s+still\s+(being\s+)?(worked?\s+on|working|processing|running)|still\s+working\s+on\s+(this|it|that))\s*[.!?]?\s*$/i;
-          // Also match messages that reference quote/deal creation status
+          // Also match messages that reference quote/deal creation status or ecomm pricing actions
           const crmFollowUpPattern = /\b(status|confirm|progress|update)\b.{0,30}\b(quote|deal|account|contact|task|creation|create)/i;
+          const crmActionFollowUp = /^\s*(yes|yep|yeah|sure|ok|go\s+ahead)[\s,]*\b(apply|update|set|change|use|add|remove|swap|modify)\b/i;
 
-          if (followUpPattern.test(text) || crmFollowUpPattern.test(text)) {
+          if (followUpPattern.test(text) || crmFollowUpPattern.test(text) || crmActionFollowUp.test(text)) {
             const recentHistory = await getHistory(kv, personId);
             const lastUserMsg = recentHistory.filter(m => m.role === 'user').slice(-2, -1)[0];
             const lastAssistantMsg = recentHistory.filter(m => m.role === 'assistant').pop();
