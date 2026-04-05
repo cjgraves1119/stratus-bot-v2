@@ -3658,15 +3658,18 @@ async function executeToolCall(toolName, toolInput, env) {
                   Net_Terms: full.Net_Terms,
                   Source: full.Source,
                   // Quoted_Items: slim down each line item to essential fields
-                  // NOTE: id is REQUIRED for updates — Zoho rejects Quoted_Items updates without item IDs
+                  // NOTE: id + product_id are REQUIRED for updates — Zoho rejects without item IDs
+                  // and product_id is needed to build the Product_Name object for unchanged items
                   Quoted_Items: (full.Quoted_Items || []).map(item => ({
                     id: item.id,
+                    product_id: item.Product_Name?.id,
                     Sequence_Number: item.Sequence_Number,
                     Description: item.Description,
                     Product_Code: item.Product_Name?.Product_Code,
                     Product_Name: item.Product_Name?.name,
                     Quantity: item.Quantity,
                     List_Price: item.List_Price,
+                    unit_price: item.unit_price,
                     Discount: item.Discount,
                     Total: item.Total,
                     Tax: item.Tax,
@@ -3723,17 +3726,19 @@ async function executeToolCall(toolName, toolInput, env) {
                 Net_Terms: full.Net_Terms,
                 Source: full.Source,
                 Quoted_Items: (full.Quoted_Items || []).map(item => ({
+                  id: item.id,
+                  product_id: item.Product_Name?.id,
                   Sequence_Number: item.Sequence_Number,
                   Description: item.Description,
                   Product_Code: item.Product_Name?.Product_Code,
                   Product_Name: item.Product_Name?.name,
                   Quantity: item.Quantity,
                   List_Price: item.List_Price,
+                  unit_price: item.unit_price,
                   Discount: item.Discount,
                   Total: item.Total,
                   Tax: item.Tax,
-                  Net_Total: item.Net_Total,
-                  id: item.id
+                  Net_Total: item.Net_Total
                 })),
                 _line_item_count: (full.Quoted_Items || []).length
               };
@@ -4648,30 +4653,38 @@ Do NOT send a dollar-amount discount — Zoho interprets Discount as a percentag
 1. Use the auto-expanded quote data from the search result — it already includes "id" per line item. You do NOT need a separate zoho_get_record call before updating.
 2. Identify each line item by Product_Code and its Quantity, unit_price, and Discount
 3. Determine the correct replacement SKUs (e.g., LIC-ENT-1YR -> LIC-ENT-3YR)
-4. Call batch_product_lookup to get product IDs and prices for the new SKUs
-5. Call zoho_update_record with the fully-updated Quoted_Items array (see format below)
-6. Call zoho_get_record AGAIN after updating to verify the change was applied
-7. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
+4. Call batch_product_lookup to get product IDs and prices for ALL items (both changed AND unchanged) so you have every product_id
+5. Build the COMPLETE Quoted_Items array (see CRITICAL rules below) and call zoho_update_record
+6. Call zoho_get_record AGAIN after updating to VERIFY the change
+7. VERIFICATION CHECK: Compare the post-update line items against what you expected. Check: (a) total item count matches expected count, (b) no duplicate products, (c) replaced items show the new SKU not the old one. If ANY check fails, tell the user exactly what went wrong — do NOT say "updated successfully"
+8. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
 
-**Quoted_Items update payload format (CRITICAL — wrong format = Zoho rejects silently):**
-- Each item you are KEEPING or CHANGING must include "id" field (from the existing line item — provided in the auto-expanded search result)
-- Product_Name must be an OBJECT like {"id": "zoho_product_id"}, NOT a string — use the product_id returned by batch_product_lookup
-- unit_price = the price value (NOT List_Price field name). Discount = percentage (0-100), NOT a dollar amount
-- Omit items you want to REMOVE entirely — Zoho replaces the full Quoted_Items array on update
+**Quoted_Items FULL REPLACEMENT RULE (CRITICAL — violating this creates duplicates):**
+Zoho REPLACES the entire Quoted_Items array on every update. It does NOT merge or patch individual items.
+This means:
+- You MUST send EVERY line item the quote should have after the update — not just the changed ones
+- Items you want to KEEP UNCHANGED: include them with their original "id" and set Product_Name to {"id": "<product_id>"} using the product_id field from the existing line item data. Keep the original unit_price, Discount, and Quantity
+- Items you want to CHANGE (e.g., swap 1YR license to 3YR): include them with their original "id" but set Product_Name to {"id": "<new_product_id>"} from batch_product_lookup, and set the new unit_price from the lookup results
+- Items you want to REMOVE: simply do not include them in the array
+- If a quote has 8 items and you only want to change 2 of them, you MUST still send all 8 items (6 unchanged + 2 changed)
+- If you send only 2 items, Zoho will DELETE the other 6 — this is wrong and destroys the quote
 
-  Example update payload for Quoted_Items:
+**Quoted_Items field format:**
+- "id" = the existing line item ID (REQUIRED for all items being kept or changed)
+- Product_Name = an OBJECT like {"id": "zoho_product_id"} — use product_id from batch_product_lookup. For unchanged items, use the original product data
+- unit_price = the price value (NOT the List_Price field name)
+- Discount = percentage (0-100), NOT a dollar amount
+- Quantity = integer
+
+  Example: Quote has 4 items, changing item #2 from 1YR to 3YR license, keeping all others:
   Quoted_Items: [
-    {
-      "id": "<existing_line_item_id>",
-      "Product_Name": {"id": "<zoho_product_id_from_batch_lookup>"},
-      "Quantity": 1,
-      "unit_price": 820,
-      "Discount": 0,
-      "Description": "optional note"
-    }
+    {"id": "item1_id", "Product_Name": {"id": "hw_product_id"}, "Quantity": 1, "unit_price": 820, "Discount": 0},
+    {"id": "item2_id", "Product_Name": {"id": "NEW_3yr_product_id"}, "Quantity": 1, "unit_price": 451, "Discount": 0},
+    {"id": "item3_id", "Product_Name": {"id": "hw2_product_id"}, "Quantity": 1, "unit_price": 850, "Discount": 0},
+    {"id": "item4_id", "Product_Name": {"id": "lic2_product_id"}, "Quantity": 1, "unit_price": 1544, "Discount": 0}
   ]
 
-**NEVER report a successful update without verifying it.** If step 5 fails or the post-update fetch shows unchanged data, tell the user the update did not apply and why.
+**NEVER report a successful update without verifying it.** If the post-update fetch shows duplicate items, wrong item count, or unchanged SKUs, tell the user the update had a problem and describe exactly what happened.
 
 ---
 
