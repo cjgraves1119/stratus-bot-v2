@@ -8305,7 +8305,7 @@ CRITICAL URL RULES:
                 const webordersPromise = (sections.includes('deals') && resolvedAcctId)
                   ? (async () => {
                       try {
-                        const coql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is null order by Created_Time desc limit 15`;
+                        const coql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number, Web_Order_ID from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is null order by Created_Time desc limit 15`;
                         const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
                         return (resp?.data || []).map(so => ({
                           id: so.id,
@@ -8317,6 +8317,7 @@ CRITICAL URL RULES:
                           trackingNumber: so.Disti_Tracking_Number || '',
                           estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
                           vendorSoNumber: so.Vendor_SO_Number || '',
+                          webOrderId: so.Web_Order_ID || '',
                           createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
                           ownerName: so.Owner?.name || '',
                           zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/SalesOrders/${so.id}`,
@@ -8329,7 +8330,7 @@ CRITICAL URL RULES:
                 const dealSosPromise = (sections.includes('deals') && resolvedAcctId)
                   ? (async () => {
                       try {
-                        const coql = `select SO_Number, Deal_Name, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is not null order by Created_Time desc limit 50`;
+                        const coql = `select SO_Number, Deal_Name, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number, Web_Order_ID from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is not null order by Created_Time desc limit 50`;
                         const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
                         return (resp?.data || []).map(so => ({
                           dealId: so.Deal_Name?.id || '',
@@ -8338,6 +8339,7 @@ CRITICAL URL RULES:
                           trackingNumber: so.Disti_Tracking_Number || '',
                           estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
                           vendorSoNumber: so.Vendor_SO_Number || '',
+                          webOrderId: so.Web_Order_ID || '',
                         }));
                       } catch (_) { return []; }
                     })()
@@ -8362,6 +8364,7 @@ CRITICAL URL RULES:
                       deal.trackingNumber = so.trackingNumber;
                       deal.estimatedShipDate = so.estimatedShipDate;
                       deal.vendorSoNumber = so.vendorSoNumber;
+                      deal.webOrderId = so.webOrderId;
                     }
                   }
                 }
@@ -8574,7 +8577,7 @@ CRITICAL URL RULES:
 
                 // Also fetch weborders (Sales_Orders without a Deal linked) for this account
                 try {
-                  const woCoql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is null order by Created_Time desc limit 15`;
+                  const woCoql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number, Web_Order_ID from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is null order by Created_Time desc limit 15`;
                   const woResp = await zohoApiCall('POST', 'coql', env, { select_query: woCoql });
                   if (woResp?.data) {
                     weborders = woResp.data.map(so => ({
@@ -8587,6 +8590,7 @@ CRITICAL URL RULES:
                       trackingNumber: so.Disti_Tracking_Number || '',
                       estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
                       vendorSoNumber: so.Vendor_SO_Number || '',
+                          webOrderId: so.Web_Order_ID || '',
                       createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
                       ownerName: so.Owner?.name || '',
                       zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/SalesOrders/${so.id}`,
@@ -8596,7 +8600,7 @@ CRITICAL URL RULES:
 
                 // Fetch Sales Orders linked to deals (for SO details on Closed Won deals)
                 try {
-                  const soCoql = `select SO_Number, Deal_Name, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is not null order by Created_Time desc limit 50`;
+                  const soCoql = `select SO_Number, Deal_Name, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number, Web_Order_ID from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is not null order by Created_Time desc limit 50`;
                   const soResp = await zohoApiCall('POST', 'coql', env, { select_query: soCoql });
                   if (soResp?.data) {
                     const soByDeal = {};
@@ -8609,6 +8613,7 @@ CRITICAL URL RULES:
                           trackingNumber: so.Disti_Tracking_Number || '',
                           estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
                           vendorSoNumber: so.Vendor_SO_Number || '',
+                          webOrderId: so.Web_Order_ID || '',
                         };
                       }
                     }
