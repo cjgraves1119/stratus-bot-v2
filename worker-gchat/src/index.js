@@ -6359,8 +6359,52 @@ Return ONLY the JSON object, no markdown or extra text.`,
                 quoteContext += '- If recommending an upgrade, provide the hardware upgrade URL.\n';
                 quoteContext += '- Common EOL replacements: MX64->MX67, MX65->MX68, MX84->MX85, MX100->MX105, MS220->MS130, MS225->MS130, MS250->MS150, MS350->MS150.\n';
               }
+
+              // Inject specs.json data for detected products so Claude has accurate product details
+              var specLines = [];
+              for (var si = 0; si < detectedProducts.length; si++) {
+                var specSku = detectedProducts[si].sku;
+                var specEntry = null;
+                // Look up specs in each family
+                for (var family of Object.keys(specs)) {
+                  if (family.startsWith('_')) continue;
+                  if (specs[family][specSku]) {
+                    specEntry = specs[family][specSku];
+                    break;
+                  }
+                }
+                if (specEntry) {
+                  specLines.push(specSku + ': ' + JSON.stringify(specEntry));
+                }
+              }
+              if (specLines.length > 0) {
+                quoteContext += '\nPRODUCT SPECIFICATIONS (use these for accuracy, do NOT guess specs):\n';
+                quoteContext += specLines.join('\n') + '\n';
+              }
             } catch (parseErr) {
               console.error('[API] Draft product detection error:', parseErr.message);
+            }
+
+            // Even if parseMessage didn't find SKUs, scan for product mentions and inject specs
+            if (detectedProducts.length === 0) {
+              try {
+                var emailText = ((subject || '') + ' ' + (body || '')).toUpperCase();
+                var specFallbackLines = [];
+                for (var sfFamily of Object.keys(specs)) {
+                  if (sfFamily.startsWith('_')) continue;
+                  for (var sfModel of Object.keys(specs[sfFamily])) {
+                    if (emailText.includes(sfModel.toUpperCase())) {
+                      specFallbackLines.push(sfModel + ': ' + JSON.stringify(specs[sfFamily][sfModel]));
+                    }
+                  }
+                }
+                if (specFallbackLines.length > 0) {
+                  quoteContext += '\nPRODUCT SPECIFICATIONS (use these for accuracy, do NOT guess specs):\n';
+                  quoteContext += specFallbackLines.join('\n') + '\n';
+                }
+              } catch (specErr) {
+                console.error('[API] Spec fallback scan error:', specErr.message);
+              }
             }
 
             const draftResp = await fetch(ANTHROPIC_API_URL, {
