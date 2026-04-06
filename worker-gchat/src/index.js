@@ -4698,17 +4698,18 @@ Discount is a DOLLAR AMOUNT, not a percentage. Formula: Discount = (List_Price x
 
 **NEVER infer quote line items from the Subject field.** The Subject/name of a quote does NOT reliably reflect what is actually in it — they frequently mismatch. A quote named "2x MR57 & MS150" may actually contain MR44 and MX67. Always call zoho_get_record on the quote record to read the actual Quoted_Items before reporting or modifying anything.
 
+**VERIFY BEFORE CLAIMING (MANDATORY):** NEVER say "ecomm pricing is applied", "discounts are applied", "already done", or any similar claim without first calling zoho_get_record to read the actual current unit_price values. The conversation history does not reflect Zoho's real state. If you haven't called zoho_get_record in this turn, you do not know the current state.
+
 **zoho_get_record on Quotes** — the system automatically fetches the full record and slims it down to essential fields including Quoted_Items with item id values. You may pass a fields parameter but it is ignored for Quotes — the system always returns the full slimmed record to ensure line item IDs are present.
 
-**Quote update workflow:**
-1. Use the auto-expanded quote data from the search result — it already includes "id" per line item. You do NOT need a separate zoho_get_record call before updating.
-2. Identify each line item by Product_Code, its id, Quantity, unit_price, and Discount
-3. Determine what changes are needed (add, remove, modify items)
-4. For NEW items: call batch_product_lookup to get product IDs and prices
-5. Build the Quoted_Items payload following the ADDITIVE rules below
-6. Call zoho_update_record with the payload
-7. Call zoho_get_record AGAIN after updating to VERIFY the change
-8. VERIFICATION CHECK: Compare the post-update line items against what you expected. Check: (a) total item count matches expected count, (b) no duplicate products, (c) removed items are gone, (d) new/changed items are correct. If ANY check fails, tell the user exactly what went wrong — do NOT say "updated successfully"
+**Quote update workflow (ONE-SHOT — do not loop):**
+1. Call zoho_get_record to read current Quoted_Items (required — confirms actual current prices)
+2. Call batch_product_lookup for all SKUs to get ecomm prices
+3. Build the complete Quoted_Items payload for ALL items in a SINGLE update (cover every line item that needs changing)
+4. Call zoho_update_record ONCE with the full payload
+5. Call zoho_get_record ONCE after the update to verify
+6. VERIFICATION CHECK: Compare the post-update line items against what you expected. Check: (a) total item count matches expected count, (b) no duplicate products, (c) removed items are gone, (d) new/changed items are correct. If ANY check fails, tell the user exactly what went wrong — do NOT say "updated successfully"
+7. STOP. Do not loop. Do not call zoho_update_record again unless the user asks for a new change.
 9. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
 
 **Quoted_Items ADDITIVE RULE (CRITICAL — misunderstanding this creates duplicates):**
@@ -5173,13 +5174,14 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     iteration++;
     console.log(`[GCHAT-CONTINUE] Iteration ${iteration}, wall=${Date.now() - _loopStartMs}ms`);
 
-    // Dynamic model: Sonnet for all CRM operations — Haiku only for send_email
-    // (same logic as askClaude; Haiku caused hallucinated quotes/tasks/prices)
+    // Dynamic model: Haiku only for dispatch-only steps (zoho_update_record, send_email)
+    // at iteration 4+. Sonnet for all planning/interpretation steps.
+    // .every() ensures Haiku only fires if ALL last tools were dispatch-only.
     const _lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
     const _contLastToolNames = _lastMsg && Array.isArray(_lastMsg.content)
       ? _lastMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
       : [];
-    const _contExecTools = new Set(['send_email']);
+    const _contExecTools = new Set(['zoho_update_record', 'send_email']);
     const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.every(n => _contExecTools.has(n));
     const contModel = (iteration > 3 && _isPureExec)
       ? 'claude-haiku-4-5-20251001'
@@ -5477,17 +5479,20 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       }
 
       // Dynamic model selection:
-      // - Sonnet for ALL CRM/tool-use iterations. Quote creation, pricing calculation,
-      //   line item construction, task creation, and result verification all require
-      //   reliable reasoning. Haiku caused hallucinated tool calls and wrong prices.
-      // - Haiku ONLY for send_email: the one truly mechanical step where Claude
-      //   is just dispatching a pre-composed message with no reasoning needed.
-      // - Always Sonnet for non-CRM (quoting) flows.
+      // - Sonnet for all planning/interpretation steps: zoho_search_records,
+      //   zoho_get_record, batch_product_lookup, zoho_create_record. These all
+      //   produce data that Claude must reason about to decide next steps.
+      // - Haiku for DISPATCH-ONLY steps at iter 3+: zoho_update_record and
+      //   send_email. After Sonnet has planned the full payload, the act of
+      //   sending the update and checking "Modified: true" is mechanical.
+      //   The NEXT iteration (zoho_get_record verify) will use Sonnet again.
+      // - .every() check ensures Haiku only fires if ALL last tools were dispatch-only.
+      //   If last batch included batch_product_lookup + zoho_update_record, Sonnet runs.
       const _lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
       const _lastToolNames = _lastAssistantMsg && Array.isArray(_lastAssistantMsg.content)
         ? _lastAssistantMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
         : [];
-      const _executionTools = new Set(['send_email']);
+      const _executionTools = new Set(['zoho_update_record', 'send_email']);
       const _inPureExecMode = useTools
         && _lastToolNames.length > 0
         && _lastToolNames.every(n => _executionTools.has(n));
