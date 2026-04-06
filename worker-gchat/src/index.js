@@ -6277,17 +6277,28 @@ Return ONLY the JSON object, no markdown or extra text.`,
             try {
               const emailText = (subject || '') + ' ' + (body || '');
               const parsed = parseMessage(emailText);
+              var validationNotes = [];  // Track disambiguation and validation messages
               if (parsed && parsed.items && parsed.items.length > 0) {
                 for (var pi = 0; pi < parsed.items.length; pi++) {
                   var pItem = parsed.items[pi];
-                  var baseSku = pItem.sku;
+                  var baseSku = pItem.baseSku || pItem.sku;
+
+                  // Run SKU validation to catch partial matches and common mistakes
+                  var skuValidation = validateSku(baseSku);
+                  if (!skuValidation.valid && skuValidation.suggest && skuValidation.suggest.length > 0) {
+                    // SKU needs disambiguation (e.g. MS150-48FP → MS150-48FP-4G / MS150-48FP-4X)
+                    validationNotes.push(baseSku + ' is not a complete SKU. Valid options: ' + skuValidation.suggest.join(', '));
+                  }
+
                   var eolInfo = checkEol(baseSku);
                   detectedProducts.push({
                     sku: baseSku,
                     qty: pItem.qty || 1,
                     isEol: !!eolInfo,
                     replacement: eolInfo ? (Array.isArray(EOL_REPLACEMENTS[baseSku]) ? EOL_REPLACEMENTS[baseSku] : [EOL_REPLACEMENTS[baseSku]]) : null,
-                    eolDate: EOL_DATES[baseSku] || null
+                    eolDate: EOL_DATES[baseSku] || null,
+                    needsDisambiguation: !skuValidation.valid && skuValidation.suggest && skuValidation.suggest.length > 1,
+                    suggestions: skuValidation.suggest || null
                   });
                 }
 
@@ -6329,16 +6340,37 @@ Return ONLY the JSON object, no markdown or extra text.`,
                     quoteUrls.push({ label: 'Hardware Upgrade (1-Year)', url: buildStratusUrl(upgradeItems) });
                   }
                 } else {
-                  // Non-EOL products: standard 1Y/3Y/5Y
+                  // Non-EOL products OR partial matches (variant disambiguation) — use full buildQuoteResponse
                   var builtResp = buildQuoteResponse(parsed);
-                  if (builtResp && builtResp.urls) {
-                    for (var ui = 0; ui < builtResp.urls.length; ui++) {
-                      quoteUrls.push({ label: builtResp.urls[ui].label || ('Option ' + (ui+1)), url: builtResp.urls[ui].url });
+                  var respText = builtResp.message || builtResp.text || '';
+                  // Extract URLs from the response text
+                  var urlRegex2 = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
+                  var extractedUrls = respText.match(urlRegex2) || [];
+                  var termLabels2 = ['1-Year', '3-Year', '5-Year'];
+                  var currentOpt = '';
+                  var optIdx2 = 0;
+                  var respLines = respText.split('\n');
+                  for (var rl = 0; rl < respLines.length; rl++) {
+                    var optMatch2 = respLines[rl].match(/\*\*Option \d+[^*]*\*\*/) || respLines[rl].match(/^Option \d+/);
+                    if (optMatch2) { currentOpt = (optMatch2[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optIdx2 = 0; }
+                    var urlMatch2 = respLines[rl].match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
+                    if (urlMatch2) {
+                      var lbl = currentOpt ? currentOpt + ' (' + (termLabels2[optIdx2] || '') + ')' : termLabels2[quoteUrls.length] || 'Quote ' + (quoteUrls.length + 1);
+                      quoteUrls.push({ label: lbl.trim(), url: urlMatch2[0] });
+                      optIdx2++;
                     }
                   }
                 }
 
                 quoteContext = '\n\nPRODUCT INTELLIGENCE (use this for accurate recommendations):\n';
+                // Include the full deterministic bot response so Claude can reference it
+                if (builtResp) {
+                  var botRespText = builtResp.message || builtResp.text || '';
+                  if (botRespText) {
+                    quoteContext += '\nDETERMINISTIC BOT RESPONSE (use this as the basis for your reply, do NOT contradict it):\n';
+                    quoteContext += botRespText.replace(/\*\*/g, '').substring(0, 2000) + '\n';
+                  }
+                }
                 quoteContext += 'Detected products in email: ' + detectedProducts.map(function(p) {
                   var info = p.sku + ' (qty: ' + p.qty + ')';
                   if (p.isEol) {
@@ -6358,12 +6390,33 @@ Return ONLY the JSON object, no markdown or extra text.`,
                 quoteContext += '- If the customer needs a license renewal for existing hardware, provide the renewal URL.\n';
                 quoteContext += '- If recommending an upgrade, provide the hardware upgrade URL.\n';
                 quoteContext += '- Common EOL replacements: MX64->MX67, MX65->MX68, MX84->MX85, MX100->MX105, MS220->MS130, MS225->MS130, MS250->MS150, MS350->MS150.\n';
+
+                // Add disambiguation notes if any SKUs need clarification
+                if (validationNotes.length > 0) {
+                  quoteContext += '\nSKU DISAMBIGUATION REQUIRED:\n';
+                  for (var vn = 0; vn < validationNotes.length; vn++) {
+                    quoteContext += '- ' + validationNotes[vn] + '\n';
+                  }
+                  quoteContext += '- IMPORTANT: When a SKU has multiple variants (e.g. 4G vs 4X uplinks), you MUST present ALL options to the customer and ask which variant they need. Do NOT just pick one.\n';
+                  quoteContext += '- For MS150/MS450 switches, 4G = 1G uplinks, 4X = 10G uplinks. Present both and explain the difference.\n';
+                  quoteContext += '- Do NOT generate quote URLs for ambiguous SKUs. Ask the customer to clarify first.\n';
+                }
               }
 
-              // Inject specs.json data for detected products so Claude has accurate product details
+              // Inject specs.json data for detected products AND their suggested variants
               var specLines = [];
+              var specSkusToLookup = [];
               for (var si = 0; si < detectedProducts.length; si++) {
-                var specSku = detectedProducts[si].sku;
+                specSkusToLookup.push(detectedProducts[si].sku);
+                // Also look up specs for suggested variants (e.g. MS150-48FP-4G, MS150-48FP-4X)
+                if (detectedProducts[si].suggestions) {
+                  for (var sgi = 0; sgi < detectedProducts[si].suggestions.length; sgi++) {
+                    specSkusToLookup.push(detectedProducts[si].suggestions[sgi]);
+                  }
+                }
+              }
+              for (var sli = 0; sli < specSkusToLookup.length; sli++) {
+                var specSku = specSkusToLookup[sli];
                 var specEntry = null;
                 // Look up specs in each family
                 for (var family of Object.keys(specs)) {
