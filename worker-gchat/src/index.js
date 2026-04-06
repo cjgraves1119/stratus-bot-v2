@@ -7834,7 +7834,9 @@ CRITICAL URL RULES:
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ deal_id, country: country || 'United States' }),
               });
-              const vhData = await vhResp.json();
+              const vhText = await vhResp.text();
+              let vhData;
+              try { vhData = JSON.parse(vhText); } catch (_) { vhData = { success: true, rawResponse: vhText.substring(0, 100) }; }
               apiResult = vhData;
             } catch (err) {
               apiResult = { success: false, error: 'Velocity Hub submission failed: ' + err.message };
@@ -7843,15 +7845,36 @@ CRITICAL URL RULES:
           }
 
           // ── Assign Cisco Rep: Update Deal's Meraki_ISR field ──
+          // Accepts dealId + repId, OR dealId + repEmail (looks up via Meraki_ISRs module)
           case '/api/assign-rep': {
-            const { dealId: arDealId, repId: arRepId, repName: arRepName } = apiBody;
-            if (!arDealId || !arRepId) {
-              return new Response(JSON.stringify({ error: 'dealId and repId required' }), { status: 400, headers: jsonHeaders });
+            const { dealId: arDealId, repId: arRepId, repName: arRepName, repEmail: arRepEmail } = apiBody;
+            if (!arDealId) {
+              return new Response(JSON.stringify({ error: 'dealId required' }), { status: 400, headers: jsonHeaders });
+            }
+            if (!arRepId && !arRepEmail) {
+              return new Response(JSON.stringify({ error: 'repId or repEmail required' }), { status: 400, headers: jsonHeaders });
             }
             try {
+              let finalRepId = arRepId || '';
+              let finalRepName = arRepName || arRepEmail || '';
+
+              // If no repId provided, look up via Meraki_ISRs module by email
+              if (!finalRepId && arRepEmail) {
+                const isrSearch = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(arRepEmail)})&fields=id,Name,Email`, env
+                ).catch(() => null);
+                if (isrSearch?.data && isrSearch.data.length > 0) {
+                  finalRepId = isrSearch.data[0].id;
+                  finalRepName = isrSearch.data[0].Name || finalRepName;
+                } else {
+                  apiResult = { success: false, error: `Rep ${arRepEmail} not found in Meraki_ISRs module` };
+                  break;
+                }
+              }
+
               const updateResp = await zohoApiCall('PUT', `Deals/${arDealId}`, env, {
                 data: [{
-                  Meraki_ISR: { id: arRepId },
+                  Meraki_ISR: { id: finalRepId },
                   Reason: 'Meraki ISR recommended',
                 }],
               });
@@ -7859,9 +7882,9 @@ CRITICAL URL RULES:
               apiResult = {
                 success,
                 dealId: arDealId,
-                repId: arRepId,
-                repName: arRepName || '',
-                message: success ? `Assigned ${arRepName || 'rep'} to deal` : 'Update failed',
+                repId: finalRepId,
+                repName: finalRepName,
+                message: success ? `Assigned ${finalRepName} to deal` : 'Update failed',
               };
             } catch (err) {
               apiResult = { success: false, error: 'Rep assignment failed: ' + err.message };
