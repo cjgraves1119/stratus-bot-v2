@@ -5533,10 +5533,6 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     };
     if (tools.length > 0) {
       requestBody.tools = tools;
-      // Force tool use for early continuation iterations
-      if (iteration <= 4) {
-        requestBody.tool_choice = { type: 'any' };
-      }
     }
 
     const response = await callAnthropicWithRetry(requestBody);
@@ -5858,12 +5854,6 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       };
       if (tools.length > 0) {
         requestBody.tools = tools;
-        // Force tool use for iterations 1-2 to prevent Claude from narrating
-        // without acting. After iteration 2, let Claude decide (it may want
-        // to emit a final text summary with stop_reason=end_turn).
-        if (useTools && iteration <= 2) {
-          requestBody.tool_choice = { type: 'any' };
-        }
       }
 
       const response = await callAnthropicWithRetry(requestBody);
