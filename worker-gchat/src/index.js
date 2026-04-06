@@ -3496,6 +3496,46 @@ const PICKLIST_CORRECTIONS = {
  * Validates picklist values before sending to Zoho.
  * Returns { valid: true } or { valid: false, error: 'message' }
  */
+// ── Server-side discount correction for Quoted_Items ──
+// Prevents Claude from applying hallucinated discount percentages.
+// For each line item with a Product_Name.id, looks up the correct discount_per_unit
+// from prices.json and replaces whatever Claude set. Delete markers (_delete: null)
+// and items without Product_Name are left untouched.
+function correctQuotedItemDiscounts(quotedItems) {
+  if (!Array.isArray(quotedItems)) return;
+  let corrected = 0;
+  for (const item of quotedItems) {
+    // Skip delete markers and modify-only items (no Product_Name = qty change only)
+    if (item._delete !== undefined || !item.Product_Name?.id) continue;
+    const qty = item.Quantity || 1;
+    // Find the SKU in prices.json by zoho_product_id
+    const productId = item.Product_Name.id;
+    let cachedEntry = null;
+    for (const [sku, data] of Object.entries(prices)) {
+      if (data?.zoho_product_id === productId) {
+        cachedEntry = data;
+        break;
+      }
+    }
+    if (cachedEntry?.discount_per_unit) {
+      const correctDiscount = cachedEntry.discount_per_unit * qty;
+      if (item.Discount !== undefined && Math.abs(item.Discount - correctDiscount) > 1) {
+        console.log(`[DISCOUNT-FIX] Product ${productId}: Claude set Discount=${item.Discount}, correcting to ${correctDiscount} (discount_per_unit=${cachedEntry.discount_per_unit} × qty=${qty})`);
+        item.Discount = correctDiscount;
+        corrected++;
+      } else if (item.Discount === undefined) {
+        // Claude didn't set a discount at all — apply ecomm default
+        console.log(`[DISCOUNT-FIX] Product ${productId}: No Discount set, applying ecomm default ${correctDiscount}`);
+        item.Discount = correctDiscount;
+        corrected++;
+      }
+    }
+  }
+  if (corrected > 0) {
+    console.log(`[DISCOUNT-FIX] Corrected ${corrected}/${quotedItems.length} line items`);
+  }
+}
+
 function validateCrmWrite(module_name, data, isCreate = false) {
   const errors = [];
 
@@ -3870,6 +3910,10 @@ async function executeToolCall(toolName, toolInput, env) {
         if (!createCheck.valid) {
           return { validation_error: true, message: createCheck.error, action: 'create_blocked' };
         }
+        // Auto-correct Quoted_Items discounts using prices.json (prevents Claude from applying wrong discounts)
+        if (module_name === 'Quotes' && recordData.Quoted_Items) {
+          correctQuotedItemDiscounts(recordData.Quoted_Items);
+        }
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
         return parseZohoResponse(createResult, `${module_name} record creation`);
       }
@@ -3880,6 +3924,10 @@ async function executeToolCall(toolName, toolInput, env) {
         const updateCheck = validateCrmWrite(module_name, data, false);
         if (!updateCheck.valid) {
           return { validation_error: true, message: updateCheck.error, action: 'update_blocked' };
+        }
+        // Auto-correct Quoted_Items discounts using prices.json (prevents Claude from applying wrong discounts)
+        if (module_name === 'Quotes' && data.Quoted_Items) {
+          correctQuotedItemDiscounts(data.Quoted_Items);
         }
         // Debug: log what we're sending (especially useful for Quoted_Items updates)
         if (module_name === 'Quotes' && data.Quoted_Items) {
