@@ -7126,6 +7126,95 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── Parse Dashboard: Claude vision analysis of license dashboard screenshots ──
+          // Accepts base64 image data (or a public image URL) and returns license analysis + quote URLs.
+          case '/api/parse-dashboard': {
+            const { imageBase64, imageUrl, mediaType: imgMediaType, instructions: dashInstructions } = apiBody;
+            if (!imageBase64 && !imageUrl) {
+              return new Response(JSON.stringify({ error: 'imageBase64 or imageUrl required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              // Resolve image data: either from base64 or fetch from URL
+              let resolvedBase64 = imageBase64;
+              let resolvedMediaType = imgMediaType || 'image/png';
+
+              if (!resolvedBase64 && imageUrl) {
+                // Fetch image from URL (Google Drive sharing links, public URLs, etc.)
+                let fetchUrl = imageUrl;
+
+                // Convert Google Drive sharing links to direct download
+                const driveMatch = imageUrl.match(/drive\.google\.com\/file\/d\/([^/]+)/);
+                if (driveMatch) {
+                  fetchUrl = `https://drive.google.com/uc?export=download&id=${driveMatch[1]}`;
+                }
+
+                const imgResp = await fetch(fetchUrl, { redirect: 'follow' });
+                if (!imgResp.ok) {
+                  apiResult = { error: 'Failed to fetch image from URL (HTTP ' + imgResp.status + '). Make sure the link is publicly accessible.' };
+                  break;
+                }
+                const contentType = imgResp.headers.get('content-type') || 'image/png';
+                resolvedMediaType = contentType.split(';')[0].trim();
+                if (!resolvedMediaType.startsWith('image/')) {
+                  apiResult = { error: 'URL did not return an image. Content-Type: ' + resolvedMediaType };
+                  break;
+                }
+                const imgBuffer = await imgResp.arrayBuffer();
+                // Convert to base64
+                const bytes = new Uint8Array(imgBuffer);
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                resolvedBase64 = btoa(binary);
+              }
+
+              // Size check (Claude max ~20MB base64)
+              if (resolvedBase64.length > 20_000_000) {
+                apiResult = { error: 'Image is too large. Please use an image under 15MB.' };
+                break;
+              }
+
+              const dashPrompt = dashInstructions || 'Analyze this Meraki license dashboard screenshot. Parse all license types, device counts, and expiration dates. Follow the LICENSE DASHBOARD SCREENSHOT HANDLING rules exactly.';
+
+              // Call Claude with vision (reuse existing askClaude)
+              const imageData = { base64: resolvedBase64, mediaType: resolvedMediaType };
+              const claudeResponse = await askClaude(dashPrompt, 'gmail-addon-dashboard', env, imageData);
+
+              // Extract URLs from the response
+              const dashUrlRegex = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
+              const dashUrls = (claudeResponse || '').match(dashUrlRegex) || [];
+
+              // Parse option structure from response
+              const dashQuoteUrls = [];
+              const termLabels = ['1-Year', '3-Year', '5-Year'];
+              let currentOpt = '';
+              let optIdx = 0;
+              const dashLines = (claudeResponse || '').split('\n');
+              for (const line of dashLines) {
+                const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
+                if (optMatch) { currentOpt = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optIdx = 0; }
+                const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
+                if (urlMatch) {
+                  const label = currentOpt
+                    ? `${currentOpt} (${termLabels[optIdx] || ''})`
+                    : termLabels[dashQuoteUrls.length] || 'Quote ' + (dashQuoteUrls.length + 1);
+                  dashQuoteUrls.push({ url: urlMatch[0], label: label.trim() });
+                  optIdx++;
+                }
+              }
+
+              apiResult = {
+                analysis: claudeResponse || 'No analysis generated.',
+                quoteUrls: dashQuoteUrls,
+                rawUrls: dashUrls,
+              };
+            } catch (err) {
+              console.error('[PARSE-DASHBOARD] Error:', err.message);
+              apiResult = { error: 'Dashboard analysis failed: ' + err.message };
+            }
+            break;
+          }
+
           // ── CRM Search: Search Zoho CRM modules ──
           case '/api/crm-search': {
             const { query, module } = apiBody;
