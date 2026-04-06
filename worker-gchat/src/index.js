@@ -6483,6 +6483,17 @@ export default {
       }), { headers: { 'Content-Type': 'application/json' } });
     }
 
+    // ── /_new-skus: Check for newly discovered WooProducts SKUs ──
+    if (request.method === 'GET' && url.pathname === '/_new-skus') {
+      const newSkus = await env.CONVERSATION_KV.get('new_skus_detected', 'json');
+      return new Response(JSON.stringify({
+        hasNewSkus: !!newSkus?.skus?.length,
+        count: newSkus?.skus?.length || 0,
+        detectedAt: newSkus?.detectedAt || null,
+        skus: newSkus?.skus || []
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
     // ── /_admin/usage: API cost tracking dashboard ──
     if (request.method === 'GET' && url.pathname === '/_admin/usage') {
       const apiKey = request.headers.get('X-API-Key') || url.searchParams.get('key');
@@ -10173,19 +10184,34 @@ CRITICAL URL RULES:
       return;
     }
 
+    // ─── Known Product ID exceptions (no Products record in Zoho) ────────
+    const PRODUCT_ID_SKIP_LIST = new Set([
+      'Z1-HW-AU', 'Z1-HW-UK', 'Z4CX', 'Z4X', 'MV22-HW',
+      'LIC-MX50-ENT-1YR', 'LIC-MX50-ENT-3YR', 'LIC-MX50-SEC-1YR', 'LIC-MX50-SEC-3YR',
+      'LIC-VMX-XL-SEC-1Y', 'LIC-VMX-XL-SEC-3Y', 'LIC-VMX-XL-SEC-5Y',
+      'LIC-MX-SDW-M-3Y', 'MA-PWR-CORD-JP', 'MA-PWR-USB-JP', 'MA-PWR300WINDADP-O'
+    ]);
+
     try {
       // Get all SKUs from the static prices.json (bundled at deploy time)
       const staticPrices = pricesData.prices;
       const skuList = Object.keys(staticPrices);
       console.log(`[PRICE-CRON] Refreshing ${skuList.length} SKUs from Zoho WooProducts`);
 
-      // Batch SKUs into groups of 5 for concurrent fetch (respect Zoho rate limits)
+      // ═══════════════════════════════════════════════════════════════════
+      // PHASE 1: Price refresh (update Stratus_Price for all known SKUs)
+      // ═══════════════════════════════════════════════════════════════════
       const BATCH_SIZE = 5;
-      const updatedPrices = { ...staticPrices };
+      // Deep-copy existing entries to preserve all 6 fields
+      const updatedPrices = {};
+      for (const [sku, entry] of Object.entries(staticPrices)) {
+        updatedPrices[sku] = { ...entry };
+      }
       let updated = 0;
       let skipped = 0;
       let errors = 0;
       let outliers = 0;
+      const priceChanges = []; // Track which SKUs had price changes
 
       for (let i = 0; i < skuList.length; i += BATCH_SIZE) {
         const batch = skuList.slice(i, i + BATCH_SIZE);
@@ -10220,7 +10246,7 @@ CRITICAL URL RULES:
           if (error) { errors++; continue; }
           if (price == null || price === 0) { skipped++; continue; }
 
-          const existing = staticPrices[sku];
+          const existing = updatedPrices[sku];
           const listPrice = existing?.list || 0;
 
           // Outlier check: Stratus price should never exceed list price
@@ -10229,30 +10255,271 @@ CRITICAL URL RULES:
             continue; // Keep existing price
           }
 
-          updatedPrices[sku] = {
-            list: listPrice,
-            price: price,
-            discount: listPrice > 0 ? Math.round(((listPrice - price) / listPrice) * 10000) / 10000 : existing?.discount || 0
-          };
+          // Track if price actually changed
+          if (existing?.price !== price) {
+            priceChanges.push({ sku, oldPrice: existing?.price, newPrice: price });
+          }
+
+          // Merge into existing entry — preserve zoho_product_id and all other fields
+          existing.price = price;
+          if (listPrice > 0) {
+            existing.discount = Math.round(((listPrice - price) / listPrice) * 10000) / 10000;
+            existing.discount_per_unit = Math.round((listPrice - price) * 100) / 100;
+            existing.discount_pct = Math.round((1 - price / listPrice) * 100);
+          }
           updated++;
         }
 
-        // Small delay between batches to respect Zoho rate limits (15 req/min for free)
+        // Small delay between batches to respect Zoho rate limits
         if (i + BATCH_SIZE < skuList.length) {
           await new Promise(r => setTimeout(r, 200));
         }
       }
 
-      // Store refreshed prices in KV with 25-hour TTL (covers daily refresh + buffer)
+      console.log(`[PRICE-CRON] Phase 1 complete — updated: ${updated}, skipped: ${skipped}, errors: ${errors}, outliers: ${outliers}, priceChanges: ${priceChanges.length}`);
+
+      // ═══════════════════════════════════════════════════════════════════
+      // PHASE 2: New SKU discovery (paginate WooProducts, find unknowns)
+      // ═══════════════════════════════════════════════════════════════════
+      let newSkus = [];
+      try {
+        console.log('[PRICE-CRON] Phase 2: Scanning WooProducts for new SKUs...');
+        const allWooSkus = {};
+        let page = 1;
+        let hasMore = true;
+        let pageToken = null;
+
+        while (hasMore && page <= 20) { // Safety cap at 20 pages
+          const params = pageToken
+            ? `WooProducts?fields=WooProduct_Code,Stratus_Price&per_page=200&page_token=${pageToken}`
+            : `WooProducts?fields=WooProduct_Code,Stratus_Price&per_page=200&page=${page}`;
+
+          const result = await zohoApiCall('GET', params, env);
+          if (!result?.data?.length) break;
+
+          for (const r of result.data) {
+            const code = r.WooProduct_Code;
+            const price = r.Stratus_Price;
+            if (!code || code.includes('+')) continue; // Skip nulls and bundles
+            if (!allWooSkus[code]) allWooSkus[code] = price;
+          }
+
+          // Check pagination
+          hasMore = result?.info?.more_records === true;
+          pageToken = result?.info?.next_page_token || null;
+          if (page >= 10 && !pageToken) break; // Can't go past page 10 without token
+          page++;
+
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        // Find SKUs in WooProducts but not in prices.json
+        for (const [code, price] of Object.entries(allWooSkus)) {
+          if (!updatedPrices[code] && price && price > 0) {
+            newSkus.push({ sku: code, price });
+          }
+        }
+
+        console.log(`[PRICE-CRON] Phase 2 complete — WooProducts total: ${Object.keys(allWooSkus).length}, new SKUs found: ${newSkus.length}`);
+      } catch (err) {
+        console.error(`[PRICE-CRON] Phase 2 error: ${err.message}`);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // PHASE 3: Product ID check (find missing zoho_product_id values)
+      // ═══════════════════════════════════════════════════════════════════
+      let productIdsAdded = 0;
+      try {
+        const missingIds = Object.entries(updatedPrices)
+          .filter(([sku, v]) => !v.zoho_product_id && !PRODUCT_ID_SKIP_LIST.has(sku))
+          .map(([sku]) => sku);
+
+        if (missingIds.length > 0) {
+          console.log(`[PRICE-CRON] Phase 3: Looking up ${missingIds.length} missing product IDs...`);
+
+          // Batch search Products module (up to 15 OR conditions per call)
+          for (let i = 0; i < missingIds.length; i += 10) {
+            const batch = missingIds.slice(i, i + 10);
+            // Build search codes — strip -O suffix for accessories
+            const searchPairs = batch.map(sku => {
+              const searchCode = sku.endsWith('-O') ? sku.slice(0, -2) : sku;
+              return { originalSku: sku, searchCode };
+            });
+
+            const criteria = searchPairs
+              .map(p => `(Product_Code:equals:${encodeURIComponent(p.searchCode)})`)
+              .join('or');
+
+            try {
+              const result = await zohoApiCall(
+                'GET',
+                `Products/search?criteria=(${criteria})&fields=Product_Code,id`,
+                env
+              );
+
+              if (result?.data?.length) {
+                for (const record of result.data) {
+                  // Match back to original SKU (account for -O suffix stripping)
+                  const pair = searchPairs.find(p => p.searchCode === record.Product_Code);
+                  if (pair && updatedPrices[pair.originalSku]) {
+                    updatedPrices[pair.originalSku].zoho_product_id = record.id;
+                    productIdsAdded++;
+                    console.log(`[PRICE-CRON] Found product ID for ${pair.originalSku}: ${record.id}`);
+                  }
+                }
+              }
+            } catch (err) {
+              console.error(`[PRICE-CRON] Phase 3 batch error: ${err.message}`);
+            }
+
+            await new Promise(r => setTimeout(r, 200));
+          }
+        }
+        console.log(`[PRICE-CRON] Phase 3 complete — product IDs added: ${productIdsAdded}`);
+      } catch (err) {
+        console.error(`[PRICE-CRON] Phase 3 error: ${err.message}`);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // PHASE 4: Write results to KV
+      // ═══════════════════════════════════════════════════════════════════
       const kvPayload = {
         prices: updatedPrices,
         refreshedAt: new Date().toISOString(),
-        stats: { total: skuList.length, updated, skipped, errors, outliers }
+        stats: {
+          total: skuList.length, updated, skipped, errors, outliers,
+          priceChanges: priceChanges.length,
+          newSkusFound: newSkus.length,
+          productIdsAdded
+        }
       };
       await kv.put('prices_live', JSON.stringify(kvPayload), { expirationTtl: 90000 });
 
+      // Store new SKUs separately with 7-day TTL for the /_new-skus endpoint
+      if (newSkus.length > 0) {
+        await kv.put('new_skus_detected', JSON.stringify({
+          skus: newSkus,
+          detectedAt: new Date().toISOString()
+        }), { expirationTtl: 604800 }); // 7 days
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // PHASE 5: GitHub auto-commit (weekly, or when product IDs added)
+      // Commits the KV-refreshed prices back to prices.json in the repo
+      // so the static fallback stays current.
+      // ═══════════════════════════════════════════════════════════════════
+      let githubCommitted = false;
+      const dayOfWeek = new Date().getUTCDay(); // 0=Sun, 1=Mon, ...
+      const shouldCommit = (dayOfWeek === 1) || productIdsAdded > 0; // Mondays or when IDs added
+
+      if (shouldCommit && env.GITHUB_PAT && priceChanges.length > 0) {
+        try {
+          console.log('[PRICE-CRON] Phase 5: Committing updated prices.json to GitHub...');
+          const repo = 'cjgraves1119/stratus-bot-v2';
+          const ghHeaders = {
+            'Authorization': `token ${env.GITHUB_PAT}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'stratus-ai-bot-gchat'
+          };
+
+          // Build the new prices.json content
+          const newPricesJson = JSON.stringify({ prices: updatedPrices }, null, 2);
+          const contentBase64 = btoa(unescape(encodeURIComponent(newPricesJson)));
+
+          // Update both worker files via Git Data API (atomic commit)
+          const filePaths = [
+            'worker/src/data/prices.json',
+            'worker-gchat/src/data/prices.json'
+          ];
+
+          // 1. Get current main branch ref
+          const refRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/main`, { headers: ghHeaders });
+          const refData = await refRes.json();
+          const latestCommitSha = refData?.object?.sha;
+          if (!latestCommitSha) throw new Error('Could not get main branch SHA');
+
+          // 2. Get the tree of the latest commit
+          const commitRes = await fetch(`https://api.github.com/repos/${repo}/git/commits/${latestCommitSha}`, { headers: ghHeaders });
+          const commitData = await commitRes.json();
+          const baseTreeSha = commitData?.tree?.sha;
+
+          // 3. Create a new tree with both files updated
+          const treeRes = await fetch(`https://api.github.com/repos/${repo}/git/trees`, {
+            method: 'POST',
+            headers: ghHeaders,
+            body: JSON.stringify({
+              base_tree: baseTreeSha,
+              tree: filePaths.map(path => ({
+                path,
+                mode: '100644',
+                type: 'blob',
+                content: newPricesJson
+              }))
+            })
+          });
+          const treeData = await treeRes.json();
+          if (!treeData?.sha) throw new Error('Could not create tree');
+
+          // 4. Create the commit
+          const msg = `chore: auto-refresh prices.json — ${priceChanges.length} price changes, ${productIdsAdded} product IDs added\n\nCron-generated commit from GChat worker.\nCo-Authored-By: Stratus AI Bot <bot@stratusinfosystems.com>`;
+          const newCommitRes = await fetch(`https://api.github.com/repos/${repo}/git/commits`, {
+            method: 'POST',
+            headers: ghHeaders,
+            body: JSON.stringify({
+              message: msg,
+              tree: treeData.sha,
+              parents: [latestCommitSha]
+            })
+          });
+          const newCommitData = await newCommitRes.json();
+          if (!newCommitData?.sha) throw new Error('Could not create commit');
+
+          // 5. Update main to point to the new commit
+          const updateRefRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/main`, {
+            method: 'PATCH',
+            headers: ghHeaders,
+            body: JSON.stringify({ sha: newCommitData.sha })
+          });
+          const updateRefData = await updateRefRes.json();
+          githubCommitted = !!updateRefData?.object?.sha;
+
+          console.log(`[PRICE-CRON] Phase 5 complete — committed ${priceChanges.length} price changes to GitHub (SHA: ${newCommitData.sha.slice(0, 7)})`);
+        } catch (err) {
+          console.error(`[PRICE-CRON] Phase 5 GitHub error: ${err.message}`);
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // PHASE 6: Webex notification (if new SKUs detected)
+      // ═══════════════════════════════════════════════════════════════════
+      if (newSkus.length > 0 && env.WEBEX_BOT_TOKEN) {
+        try {
+          const skuListStr = newSkus.map(s => `- \`${s.sku}\` ($${s.price})`).join('\n');
+          const markdown = `**🆕 New WooProducts SKUs Detected**\n\n` +
+            `Found **${newSkus.length}** SKU(s) in WooProducts not in prices.json:\n\n` +
+            `${skuListStr}\n\n` +
+            `Run the **bot-price-refresh** skill to add them.`;
+
+          // Send to Chris's DM room with the bot
+          await fetch('https://webexapis.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${env.WEBEX_BOT_TOKEN}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              roomId: 'Y2lzY29zcGFyazovL3VzL1JPT00vYTNmMTllOTAtMjNjMC0xMWYxLWI5MmMtZDEwOTQxNGE1YTBh',
+              markdown
+            })
+          });
+          console.log(`[PRICE-CRON] Phase 6: Webex notification sent — ${newSkus.length} new SKUs`);
+        } catch (err) {
+          console.error(`[PRICE-CRON] Phase 6 Webex error: ${err.message}`);
+        }
+      }
+
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`[PRICE-CRON] Complete in ${elapsed}s — updated: ${updated}, skipped: ${skipped}, errors: ${errors}, outliers: ${outliers}`);
+      console.log(`[PRICE-CRON] All phases complete in ${elapsed}s — prices: ${updated} updated/${priceChanges.length} changed, newSKUs: ${newSkus.length}, productIDs: ${productIdsAdded}, github: ${githubCommitted ? 'committed' : 'skipped'}`);
 
     } catch (err) {
       console.error(`[PRICE-CRON] Fatal error: ${err.message}`);
