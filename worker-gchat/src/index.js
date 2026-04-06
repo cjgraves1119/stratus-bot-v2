@@ -3966,7 +3966,7 @@ async function executeToolCall(toolName, toolInput, env) {
           count: Object.keys(batchResults).length,
           cacheHits,
           apiLookups,
-          pricing_instruction: 'For Quoted_Items: do NOT set unit_price (Zoho uses the product stored list price). Set Discount = discount_per_unit * Quantity (flat dollar amount off). Set Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)". This ensures Zoho shows the correct discount on each line item.'
+          pricing_instruction: 'For Quoted_Items: set Product_Name.id = product_id, Quantity, Discount = discount_per_unit * Quantity (flat dollar amount off). Do NOT set unit_price or Description — keep line items minimal for speed.'
         };
       }
 
@@ -4102,7 +4102,7 @@ async function executeToolCall(toolName, toolInput, env) {
             total_items: resolvedItems.length,
             cache_hits: cacheHits,
             api_needed: apiNeeded,
-            pricing_instruction: 'For each item in Quoted_Items: set Product_Name.id = product_id, Quantity = qty, Discount = discount_per_unit * qty (flat dollar amount), Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)". Do NOT set unit_price. Items are already in correct hardware→license display order — use this exact order in the Quoted_Items array.'
+            pricing_instruction: 'For each item in Quoted_Items: set Product_Name.id = product_id, Quantity = qty, Discount = discount_per_unit * qty (flat dollar amount). Do NOT set unit_price or Description. Items are already in correct hardware→license display order — use this exact order in the Quoted_Items array.'
           };
         } catch (e) {
           return { success: false, error: `Failed to parse URL: ${e.message}` };
@@ -4384,10 +4384,7 @@ async function executeToolCall(toolName, toolInput, env) {
             return {
               Product_Name: { id: p.product_id },
               Quantity: p.qty,
-              Discount: discountTotal,
-              Description: discountTotal > 0
-                ? `Stratus price $${p.ecomm_price}/unit (${p.discount_pct}% off list)`
-                : 'List price'
+              Discount: discountTotal
             };
           });
 
@@ -5112,10 +5109,12 @@ const CRM_SYSTEM_PROMPT = `
 
 **For other CRM operations:** Call MULTIPLE tools in the SAME response whenever inputs are independent. Never narrate without acting.
 
-**Target iteration counts:**
-- New deal + quote: 2 iterations (1 tool call + 1 summary)
-- Quote modification: 3 iterations (read + update + verify)
+**Target iteration counts (fewer = faster):**
+- New deal + quote: 2 iterations (1 create_deal_and_quote call + 1 summary)
+- URL-to-quote update: 2-3 iterations (parse_quote_url + update + summary)
+- Quote modification: 2-3 iterations (read + update + summary — skip verification unless error)
 - Simple lookup: 1-2 iterations
+- NEVER exceed 4 iterations for any quote operation
 
 ---
 
@@ -5231,9 +5230,7 @@ Every Quote Create call MUST include ALL of these fields:
     {
       "Product_Name": {"id": "{zoho_product_id}"},
       "Quantity": 1,
-      "unit_price": 820,
-      "Discount": 0,
-      "Description": "Stratus ecomm price ({XX}% off list)"
+      "Discount": discount_per_unit * qty
     }
   ]
 }
@@ -5359,7 +5356,7 @@ Use the **batch_product_lookup** tool for ALL product lookups. It:
 When the user pastes a stratusinfosystems.com/order URL and asks to create or update a Zoho quote:
 1. Call **parse_quote_url** with the full URL — it parses SKUs + quantities, resolves product IDs from cache, and returns items in correct hardware→license display order (zero API calls for 98% of SKUs)
 2. Use the returned items array IN ORDER for the Quoted_Items payload — the order ensures each hardware SKU is immediately followed by its associated license
-3. For each item: Product_Name.id = product_id, Quantity = qty, Discount = discount_per_unit * qty, Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
+3. For each item: Product_Name.id = product_id, Quantity = qty, Discount = discount_per_unit * qty. Do NOT set Description or unit_price.
 4. Do NOT search Products or WooProducts individually — parse_quote_url handles everything
 5. Do NOT use starts_with searches to "discover" license SKUs — the URL already contains the exact SKUs
 6. Do NOT reorder the items — the tool already sorted them into hardware→license pairs
@@ -5373,14 +5370,14 @@ When the user pastes a stratusinfosystems.com/order URL and asks to create or up
 - Only report "SKU not available" if BOTH batch_product_lookup AND the Products search return nothing.
 - NEVER tell the user a LIC-ENT-*, LIC-MX*, LIC-MS*, LIC-MV*, or LIC-MT* SKU is "invalid" based on found: false alone.
 
-### Quote Creation & Modification (Ecomm Pricing Default)
+### Quote Creation & Modification (Ecomm Pricing Default — SPEED IS CRITICAL)
 Create and update quotes with **Stratus ecomm pricing applied by default**:
-1. Call batch_product_lookup with all SKUs + quantities in a single call
-2. For each line item: Product_Name.id = product_id, Quantity, Discount = discount_per_unit * Quantity (flat dollar amount), Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
+1. Call batch_product_lookup (or parse_quote_url for URLs) with all SKUs in a SINGLE call
+2. For each line item: Product_Name.id = product_id, Quantity, Discount = discount_per_unit * Quantity (flat dollar amount)
 3. Do NOT set unit_price — Zoho uses the product's stored list price, then subtracts the Discount amount
-4. If ecomm_price is not available for a SKU, fall back to Discount: 0 (list price)
-5. This applies to ALL quote operations: new quotes, adding items, swapping licenses, any modification
-4. Report the quote with ecomm pricing applied: "Quote created with Stratus ecomm pricing applied."
+4. Do NOT set Description — keep payloads minimal for speed. Only add Description if user explicitly asks.
+5. If ecomm_price is not available for a SKU, fall back to Discount: 0 (list price)
+6. This applies to ALL quote operations: new quotes, adding items, swapping licenses, any modification
 
 Ecomm pricing is the DEFAULT. Only use list pricing if the user explicitly asks for "list price" or "no discount".
 Discount is a DOLLAR AMOUNT, not a percentage. Formula: Discount = (List_Price x Quantity) - Target_Sell_Price. Example: List $201, target $138, Qty 1 = Discount: 63
@@ -5389,19 +5386,17 @@ Discount is a DOLLAR AMOUNT, not a percentage. Formula: Discount = (List_Price x
 
 **NEVER infer quote line items from the Subject field.** The Subject/name of a quote does NOT reliably reflect what is actually in it — they frequently mismatch. A quote named "2x MR57 & MS150" may actually contain MR44 and MX67. Always call zoho_get_record on the quote record to read the actual Quoted_Items before reporting or modifying anything.
 
-**VERIFY BEFORE CLAIMING (MANDATORY):** NEVER say "ecomm pricing is applied", "discounts are applied", "already done", or any similar claim without first calling zoho_get_record to read the actual current unit_price values. The conversation history does not reflect Zoho's real state. If you haven't called zoho_get_record in this turn, you do not know the current state.
+**TRUST THE TOOLS:** When batch_product_lookup, parse_quote_url, or create_deal_and_quote return product IDs and pricing, trust those values. Do NOT call zoho_get_record just to verify what you already know from the tool results. Only verify with zoho_get_record if you're reading an EXISTING quote you didn't just create/update, or if an update call returned an error.
 
 **zoho_get_record on Quotes** — the system automatically fetches the full record and slims it down to essential fields including Quoted_Items with item id values. You may pass a fields parameter but it is ignored for Quotes — the system always returns the full slimmed record to ensure line item IDs are present.
 
-**Quote update workflow (ONE-SHOT — do not loop):**
-1. Call zoho_get_record to read current Quoted_Items (required — confirms actual current prices)
-2. Call batch_product_lookup for all NEW/REPLACEMENT SKUs to get ecomm pricing (discount_per_unit, discount_pct, product_id)
-3. Build the complete Quoted_Items payload for ALL items in a SINGLE update. For every new/replacement item, include: Product_Name.id, Quantity, Discount = discount_per_unit * Quantity, Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
+**Quote update workflow (FAST — minimize tool calls):**
+1. If user provides a Stratus URL: call parse_quote_url (gets all product IDs + pricing from cache, zero API calls). If not, call batch_product_lookup for all NEW/REPLACEMENT SKUs.
+2. If the quote has EXISTING items to keep/delete, call zoho_get_record to read current Quoted_Items. If the quote is EMPTY (new/blank), skip this step.
+3. Build Quoted_Items payload: Product_Name.id, Quantity, Discount = discount_per_unit * Quantity. Do NOT set Description or unit_price.
 4. Call zoho_update_record ONCE with the full payload
-5. Call zoho_get_record ONCE after the update to verify
-6. VERIFICATION CHECK: Compare the post-update line items against what you expected. Check: (a) total item count matches expected count, (b) no duplicate products, (c) removed items are gone, (d) new/changed items are correct. If ANY check fails, tell the user exactly what went wrong — do NOT say "updated successfully"
-7. STOP. Do not loop. Do not call zoho_update_record again unless the user asks for a new change.
-9. Report the ACTUAL line items from the post-update fetch, NOT what you planned to set
+5. STOP and report success. Do NOT call zoho_get_record to verify unless something looks wrong. Do not loop.
+6. Steps 1 and 2 can run as PARALLEL tool calls if both are needed (they are independent).
 
 **Quoted_Items ADDITIVE RULE (CRITICAL — misunderstanding this creates duplicates):**
 Zoho Quoted_Items updates are ADDITIVE. When you include Quoted_Items in an update, Zoho ADDS those items to the existing list. It does NOT replace the list.
@@ -5430,7 +5425,7 @@ This requires BOTH deleting the old item AND adding the new one in the SAME upda
 ALWAYS call batch_product_lookup for the new SKU first to get discount_per_unit, then include Discount in the new item:
   Quoted_Items: [
     {"id": "old_1yr_line_item_id", "_delete": null},
-    {"Product_Name": {"id": "new_3yr_product_id"}, "Quantity": 1, "Discount": discount_per_unit * qty, "Description": "Stratus price $X/unit (Y% off list)"}
+    {"Product_Name": {"id": "new_3yr_product_id"}, "Quantity": 1, "Discount": discount_per_unit * qty}
   ]
 
 **How to MODIFY an existing item (e.g., change quantity):**
@@ -5445,9 +5440,9 @@ Include the item with its existing "id" and the fields to change:
 - Product_Name = an OBJECT like {"id": "zoho_product_id"} — required for new items
 - Quantity = integer
 - Discount = DOLLAR AMOUNT (NOT a percentage). Formula: Discount = discount_per_unit * Quantity (from batch_product_lookup)
-- Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
 - Do NOT set unit_price — Zoho pulls the list price from the Product record automatically
-- **ALWAYS include Discount + Description when adding new line items** — including license term swaps. Missing Discount = list price charged
+- Do NOT set Description unless user explicitly asks — keep payloads minimal for speed
+- **ALWAYS include Discount when adding new line items** — including license term swaps. Missing Discount = list price charged
 
   Example: Quote has 4 items. Remove item #2 (1YR license), add a 3YR license, keep items #1/#3/#4 unchanged:
   Quoted_Items: [
@@ -5464,26 +5459,22 @@ Include the item with its existing "id" and the fields to change:
 
 **LICENSE TERM SWAP (e.g., 3YR → 5YR) — CRITICAL WORKFLOW:**
 When the user asks to change license terms on an existing quote:
-1. Call zoho_get_record on the Quote to get FRESH Quoted_Items with current line item IDs
-2. Call batch_product_lookup for the NEW license SKUs (e.g., LIC-ENT-5YR, LIC-MS150-48-5Y) — this returns discount_per_unit and discount_pct
-3. Build a SINGLE zoho_update_record call that BOTH deletes the old items AND adds the new ones WITH ecomm discount:
+1. Call zoho_get_record on the Quote AND batch_product_lookup for new SKUs IN PARALLEL (both are independent)
+2. Build a SINGLE zoho_update_record call that BOTH deletes the old items AND adds the new ones WITH ecomm discount:
    Quoted_Items: [
      {"id": "old_3yr_line_item_id", "_delete": null},
      {"id": "old_3yr_switch_lic_id", "_delete": null},
-     {"Product_Name": {"id": "new_5yr_product_id"}, "Quantity": 1, "Discount": discount_per_unit * 1, "Description": "Stratus price $X/unit (Y% off list)"},
-     {"Product_Name": {"id": "new_5yr_switch_product_id"}, "Quantity": 1, "Discount": discount_per_unit * 1, "Description": "Stratus price $X/unit (Y% off list)"}
+     {"Product_Name": {"id": "new_5yr_product_id"}, "Quantity": 1, "Discount": discount_per_unit * 1},
+     {"Product_Name": {"id": "new_5yr_switch_product_id"}, "Quantity": 1, "Discount": discount_per_unit * 1}
    ]
-4. NEVER split deletes and adds into separate update calls — this creates duplicates because adds happen before deletes are processed
-5. Call zoho_get_record AGAIN to verify the result
-6. If duplicates exist, do another update with _delete to clean them up
+3. NEVER split deletes and adds into separate update calls — this creates duplicates because adds happen before deletes are processed
+4. Report success. Only call zoho_get_record to verify if something looks wrong.
 
 **NEVER DO (Line Item Updates):**
 - NEVER send Quoted_Items with items you want to keep, expecting Zoho to remove the rest — this ADDS duplicates
 - NEVER assume Quoted_Items in an update replaces the existing list — it is always additive
 - NEVER use zoho_delete_record on Quoted_Items module directly (returns "record not approved")
 - NEVER split a license term swap into two separate update calls (one for add, one for delete) — this ALWAYS creates duplicates
-
-**NEVER report a successful update without verifying it.** If the post-update fetch shows duplicate items, wrong item count, or items that should have been removed, tell the user the update had a problem and describe exactly what happened.
 
 ---
 
@@ -5630,6 +5621,7 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 6. **USE create_deal_and_quote FOR NEW DEALS.** Pass ONLY hardware SKUs (e.g., MX68, MS130-12X, MR44) — the tool auto-adds licenses using getLicenseSkus(). Do NOT pass license SKUs. Do NOT call zoho_search_records, batch_product_lookup, or zoho_create_record alongside create_deal_and_quote. Call it ALONE and wait for the result. After it returns, ONLY report the results — no additional tool calls.
 7. **AFTER create_deal_and_quote RETURNS: STOP.** Do NOT call zoho_get_record, zoho_search_records, zoho_update_record, or batch_product_lookup. The tool already verified the quote internally. If it reports missing products, tell the user — do NOT try to fix it with more tool calls.
 8. **USE batch_product_lookup FOR SKU LOOKUPS ON EXISTING QUOTES.** Never search WooProducts or Products individually. The batch tool handles suffix rules, parallel lookups, and includes live ecomm pricing.
+9. **URL-TO-QUOTE FAST PATH.** When the user pastes a stratusinfosystems.com/order URL, call parse_quote_url FIRST — it returns all product IDs, pricing, and items in hardware→license display order from cache (zero API calls). Then go straight to zoho_update_record or zoho_create_record. Do NOT call batch_product_lookup separately — parse_quote_url already does everything.
 10. **RESELLER / VAR PATTERN.** When an email or request says "this is for [Customer Name]", "on behalf of [Customer Name]", or "for my customer [Customer Name]", the sender is a VAR/reseller placing an order for their end customer. In this case:
     - Look up the SENDER'S domain/email in Zoho — that is the billing Account (e.g. HRTC/Hampton Roads is Eric's account).
     - Do NOT create a new Zoho Account for the end customer.
