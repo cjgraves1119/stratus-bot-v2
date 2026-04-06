@@ -5173,13 +5173,14 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     iteration++;
     console.log(`[GCHAT-CONTINUE] Iteration ${iteration}, wall=${Date.now() - _loopStartMs}ms`);
 
-    // Dynamic model: Haiku for execution iterations (4+, last tool was create/update/batch_product_lookup)
+    // Dynamic model: Sonnet for all CRM operations — Haiku only for send_email
+    // (same logic as askClaude; Haiku caused hallucinated quotes/tasks/prices)
     const _lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
     const _contLastToolNames = _lastMsg && Array.isArray(_lastMsg.content)
       ? _lastMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
       : [];
-    const _contExecTools = new Set(['zoho_create_record', 'zoho_update_record', 'batch_product_lookup']);
-    const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.some(n => _contExecTools.has(n));
+    const _contExecTools = new Set(['send_email']);
+    const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.every(n => _contExecTools.has(n));
     const contModel = (iteration > 3 && _isPureExec)
       ? 'claude-haiku-4-5-20251001'
       : 'claude-sonnet-4-20250514';
@@ -5476,20 +5477,20 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       }
 
       // Dynamic model selection:
-      // - Sonnet for iterations 1-2: planning, CRM lookup, interpreting results
-      // - Haiku for iteration 3+ when in execution mode: last tool calls were create/update/batch_product_lookup/send_email
-      //   (i.e. Claude is mechanically executing the workflow with no new decision-making needed).
-      //   Haiku is 3x cheaper and ~2x faster for these steps.
-      // - Also use Haiku for iteration 3+ when CRM context is present (agent already has IDs, just executing).
+      // - Sonnet for ALL CRM/tool-use iterations. Quote creation, pricing calculation,
+      //   line item construction, task creation, and result verification all require
+      //   reliable reasoning. Haiku caused hallucinated tool calls and wrong prices.
+      // - Haiku ONLY for send_email: the one truly mechanical step where Claude
+      //   is just dispatching a pre-composed message with no reasoning needed.
       // - Always Sonnet for non-CRM (quoting) flows.
       const _lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
       const _lastToolNames = _lastAssistantMsg && Array.isArray(_lastAssistantMsg.content)
         ? _lastAssistantMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
         : [];
-      const _executionTools = new Set(['zoho_create_record', 'zoho_update_record', 'batch_product_lookup', 'send_email', 'zoho_get_record']);
+      const _executionTools = new Set(['send_email']);
       const _inPureExecMode = useTools
         && _lastToolNames.length > 0
-        && _lastToolNames.some(n => _executionTools.has(n));
+        && _lastToolNames.every(n => _executionTools.has(n));
       const activeModel = (useTools && iteration > 2 && _inPureExecMode)
         ? 'claude-haiku-4-5-20251001'
         : 'claude-sonnet-4-20250514';
@@ -5497,10 +5498,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
 
-      // CRM tool-use iterations: use 2048 tokens for mid-loop iterations (tool calls + brief narration),
-      // 4096 for the first 2 iterations (planning/reasoning) and for non-tool-use flows.
-      // Smaller max_tokens = faster API response times during execution steps.
-      const maxTok = (useTools && iteration > 2 && _inPureExecMode) ? 2048 : 4096;
+      // Always use 4096 tokens for CRM tool-use — quote/task creation requires full reasoning
+      // at every iteration. 2048 was used for Haiku exec steps but caused truncated responses.
+      // send_email Haiku steps still get 4096 (small overhead, avoids truncation).
+      const maxTok = 4096;
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
