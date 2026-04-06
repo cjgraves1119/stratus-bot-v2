@@ -4684,14 +4684,14 @@ Use the **batch_product_lookup** tool for ALL product lookups. It:
 - Only report "SKU not available" if BOTH batch_product_lookup AND the Products search return nothing.
 - NEVER tell the user a LIC-ENT-*, LIC-MX*, LIC-MS*, LIC-MV*, or LIC-MT* SKU is "invalid" based on found: false alone.
 
-### Quote Creation (List Price Default)
-Create quotes at **list price** by default:
+### Quote Creation (Ecomm Pricing Default)
+Create quotes with **Stratus ecomm pricing applied by default**:
 1. Call batch_product_lookup with all SKUs + quantities in a single call
-2. For each line item: Product_Name.id = product_id, Quantity, unit_price = list_price, Discount: 0
-3. After creating the quote, ask: "Would you like me to apply Stratus ecomm discounts to this quote?"
-4. If user says yes, update each line item with ecomm_price from the batch lookup results. Include Description = "Stratus ecomm price ({XX}% off list)" where XX = round((1 - ecomm_price / list_price) * 100).
+2. For each line item: Product_Name.id = product_id, Quantity, unit_price = ecomm_price (NOT list_price), Discount = 0, Description = "Stratus ecomm price ({XX}% off list)" where XX = round((1 - ecomm_price / list_price) * 100)
+3. If ecomm_price is not available for a SKU, fall back to list_price with Discount: 0
+4. Report the quote with ecomm pricing applied: "Quote created with Stratus ecomm pricing applied."
 
-Do NOT auto-apply ecomm pricing. Let the user choose.
+Ecomm pricing is the DEFAULT. Only use list pricing if the user explicitly asks for "list price" or "no discount".
 Discount is a DOLLAR AMOUNT, not a percentage. Formula: Discount = (List_Price x Quantity) - Target_Sell_Price. Example: List $201, target $138, Qty 1 = Discount: 63
 
 ### Quote Integrity Rules (CRITICAL)
@@ -4914,13 +4914,13 @@ After user confirms, execute in this exact order:
    - Closing_Date: today + 30 days
 4. Create Quote — link to Deal, include:
    - Use batch_product_lookup to get all product IDs + prices in one call
-   - Product line items at LIST PRICE (ecomm pricing is applied later if user opts in)
+   - Product line items at ECOMM PRICE by default (use ecomm_price from batch_product_lookup, Description = "Stratus ecomm price ({XX}% off list)")
+   - If ecomm_price unavailable for a SKU, fall back to list_price with Discount: 0
    - Billing address from Account
    - Valid_Till: today + 30 days
-5. **IMMEDIATELY after creating the quote**, call zoho_get_record on the new Quote ID to fetch the full record with Quoted_Items. This is REQUIRED — the create response only returns the ID, not the full record. The get_record response is what enables follow-up operations (ecomm pricing, license swaps, etc.).
+5. **IMMEDIATELY after creating the quote**, call zoho_get_record on the new Quote ID to fetch the full record with Quoted_Items. This is REQUIRED — the create response only returns the ID, not the full record. The get_record response is what enables follow-up operations (license swaps, etc.).
 6. Create follow-up Task on the Deal — due in 3 business days
-7. Report all created records with Zoho links (use data from the get_record in step 5)
-8. Ask: "Would you like me to apply Stratus ecomm discounts to this quote?"
+7. Report all created records with Zoho links (use data from the get_record in step 5). Include ecomm pricing summary showing each line item price and discount % off list.
 
 ### PHASE 7 — OPTIONAL: DRAFT REPLY
 After CRM setup is complete, offer to draft a reply to the original email thread:
@@ -4946,7 +4946,7 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 5. When creating a quote, look up the Account first to get billing address, then look up or create the Deal, then create the Quote with proper line items. Don't stop mid-workflow.
 6. Always complete the full workflow: Account lookup → Contact lookup → Deal creation/lookup → Quote creation → Follow-up task. Don't stop partway and wait.
 7. **CRM-FIRST, NO UNNECESSARY WEB SEARCH.** When an account name or domain is provided, ALWAYS search Zoho CRM first. If the account exists in CRM, use it directly — do NOT web search the domain. Only use web_search_domain when the account is NOT in CRM and you need address/business info to create a new Account record.
-8. **NEVER STOP MID-WORKFLOW.** After creating a Deal, you MUST immediately continue to create the Quote with product line items. After the Quote, you MUST create a follow-up Task. The workflow is NOT complete until ALL records are created: Contact → Deal → Quote (with line items at list price) → Follow-up Task → ecomm pricing offer. Do NOT end your turn after creating just a Deal or just a Contact. Keep calling tools until every step is done. Only emit a final text summary AFTER all records exist.
+8. **NEVER STOP MID-WORKFLOW.** After creating a Deal, you MUST immediately continue to create the Quote with product line items. After the Quote, you MUST create a follow-up Task. The workflow is NOT complete until ALL records are created: Contact → Deal → Quote (with line items at ecomm price) → Follow-up Task. Do NOT end your turn after creating just a Deal or just a Contact. Keep calling tools until every step is done. Only emit a final text summary AFTER all records exist.
 9. **USE batch_product_lookup FOR ALL SKU LOOKUPS.** Never search WooProducts or Products individually. The batch tool handles suffix rules, parallel lookups, and includes live ecomm pricing. One call for all SKUs.
 10. **RESELLER / VAR PATTERN.** When an email or request says "this is for [Customer Name]", "on behalf of [Customer Name]", or "for my customer [Customer Name]", the sender is a VAR/reseller placing an order for their end customer. In this case:
     - Look up the SENDER'S domain/email in Zoho — that is the billing Account (e.g. HRTC/Hampton Roads is Eric's account).
@@ -4981,15 +4981,21 @@ Admin Actions are Zoho CRM automations triggered by writing an action name to th
 | 4 | LIVE_SendToEsign | "send for signature", "send PO", "esign" | Quote_Stage updates |
 
 **Step 1: LIVE_CiscoQuote_Deal (Generate Deal ID / DID)**
+This is an ASYNCHRONOUS process. The deal ID is generated server-side and may take 30-90 seconds to complete.
+
 1. TRIGGER: zoho_update_record on Quote with data={"Admin_Action": "LIVE_CiscoQuote_Deal"}
 2. RE-FETCH: zoho_get_record on same Quote ID immediately after
-3. READ THESE FIELDS from the re-fetch response:
-   - CCW_Deal_Number → This IS the Deal ID (DID). It will be an 8-digit number like "83560702"
-   - Cisco_Estimate_Status → Should show "Success.VALID" if it worked
-   - Admin_Action → Should show "LIVE_CiscoQuote_Deal__Done"
-4. REPORT TO USER: "Deal ID {CCW_Deal_Number} generated successfully." Include the actual number.
-5. AUTO-SUBMIT TO VELOCITY HUB: Call velocity_hub_submit(deal_id="{CCW_Deal_Number}") to submit for deal approval.
-   - This is non-blocking. If it fails, report but continue.
+3. CHECK CCW_Deal_Number field:
+   - If CCW_Deal_Number is populated (8-digit number) → SUCCESS. Report it and auto-submit to Velocity Hub.
+   - If CCW_Deal_Number is null/empty → The process is still running. This is NORMAL (it takes 30-90 seconds).
+4. IF DEAL ID NOT YET AVAILABLE:
+   - Report to user: "✅ Deal ID submission triggered for [Quote Name]. The process typically takes 30-90 seconds to complete."
+   - Ask: "Would you like me to submit to Velocity Hub for approval expedition once the deal ID is ready?"
+   - When user confirms: RE-FETCH the quote again to get the now-populated CCW_Deal_Number, then call velocity_hub_submit.
+   - If CCW_Deal_Number is STILL null on the second fetch, wait a moment and try ONE more re-fetch before reporting that the user should check Zoho manually.
+5. IF DEAL ID IS IMMEDIATELY AVAILABLE:
+   - Report: "Deal ID {CCW_Deal_Number} generated successfully."
+   - Auto-submit to Velocity Hub: Call velocity_hub_submit(deal_id="{CCW_Deal_Number}")
    - The DID must be exactly 8 digits or the tool will reject it.
 
 **Step 3: LIVE_ConvertQuoteToSO (Create PO)**
@@ -8808,6 +8814,7 @@ CRITICAL URL RULES:
         // even if a CRM session is active.
         if (!isExplicitCrmRequest && personId && kv) {
           const crmSession = await kv.get(`crm_session_${personId}`);
+          console.log(`[GCHAT] CRM session check for ${personId}: ${crmSession ? 'ACTIVE' : 'NOT FOUND'}`);
           if (crmSession) {
             // Check if this looks like a quoting request — if so, let it go
             // through the deterministic quoting engine instead of the CRM agent
@@ -8828,10 +8835,12 @@ CRITICAL URL RULES:
         }
 
         // CRM follow-up detection: route short follow-up messages to CRM agent
-        // when the PREVIOUS user message was a CRM/email intent. This catches
-        // "try again", "confirm status", "go ahead", "yes proceed", etc.
+        // when the PREVIOUS assistant message was CRM-related. This catches
+        // "try again", "confirm status", "go ahead", "yes proceed", "yes", etc.
+        // Also catches bare "yes"/"no" answers to CRM agent questions like
+        // "Would you like me to submit to Velocity Hub?" or "apply ecomm pricing?"
         if (!isExplicitCrmRequest && personId && kv) {
-          const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update|happening)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status|what\s+happened|is\s+it\s+done|are\s+we\s+good|any\s+update|where\s+are\s+we|is\s+(this|it)\s+still\s+(being\s+)?(worked?\s+on|working|processing|running)|still\s+working\s+on\s+(this|it|that))\s*[.!?]?\s*$/i;
+          const followUpPattern = /^\s*(try\s+again|retry|again|try\s+that\s+again|confirm|status|proceed|go\s+ahead|yes|yep|yeah|no|nah|not\s+now|skip|do\s+it|make\s+it|approved?|looks?\s+good|that('?s|\s+is)\s+(correct|right|good)|check\s+(the\s+)?(status|progress)|what('?s|\s+is)\s+(the\s+)?(status|progress|update|happening)|how('?s|\s+is)\s+(it|that)\s+(going|coming|looking)|did\s+(it|that)\s+(work|go\s+through)|confirm\s+the\s+status|what\s+happened|is\s+it\s+done|are\s+we\s+good|any\s+update|where\s+are\s+we|is\s+(this|it)\s+still\s+(being\s+)?(worked?\s+on|working|processing|running)|still\s+working\s+on\s+(this|it|that)|check\s+it\s+again|check\s+again|try\s+again|send\s+(it|the)\s+deal|submit)\s*[.!?]?\s*$/i;
           // Also match messages that reference quote/deal creation status or ecomm pricing actions
           const crmFollowUpPattern = /\b(status|confirm|progress|update)\b.{0,30}\b(quote|deal|account|contact|task|creation|create)/i;
           const crmActionFollowUp = /^\s*(yes|yep|yeah|sure|ok|go\s+ahead)[\s,]*\b(apply|update|set|change|use|add|remove|swap|modify)\b/i;
@@ -8841,9 +8850,12 @@ CRITICAL URL RULES:
             const lastUserMsg = recentHistory.filter(m => m.role === 'user').slice(-2, -1)[0];
             const lastAssistantMsg = recentHistory.filter(m => m.role === 'assistant').pop();
 
-            // Check if previous conversation involved CRM
+            // Check if previous conversation involved CRM — check BOTH the last user
+            // message intent AND the last assistant message content. The assistant
+            // check covers cases where the bot asked a CRM follow-up question (e.g.
+            // "Would you like me to apply ecomm pricing?" or "submit to Velocity Hub?")
             const prevWasCrm = (lastUserMsg && detectCrmEmailIntent(lastUserMsg.content).hasAny)
-              || (lastAssistantMsg && /\b(zoho|crm|account|deal|quote|contact)\b/i.test(lastAssistantMsg.content));
+              || (lastAssistantMsg && /\b(zoho|crm|account|deal|quote|contact|velocity\s*hub|ecomm|deal\s*id|did\s*generated|ccw)/i.test(lastAssistantMsg.content));
 
             if (prevWasCrm) {
               console.log(`[GCHAT] CRM follow-up detected ("${text.substring(0, 40)}...") after CRM conversation — routing to CRM agent`);
