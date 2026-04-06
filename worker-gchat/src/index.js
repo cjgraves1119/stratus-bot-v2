@@ -4095,15 +4095,21 @@ async function executeToolCall(toolName, toolInput, env) {
             country: accountData?.Billing_Country || 'United States'
           };
           const validTill = closingDate;
-          const quotedItems = resolvedProducts.map(p => ({
-            Product_Name: { id: p.product_id },
-            Quantity: p.qty,
-            unit_price: p.unit_price,
-            Discount: 0,
-            Description: p.ecomm_price
-              ? `Stratus ecomm price (${p.discount_pct}% off list)`
-              : 'List price'
-          }));
+          const quotedItems = resolvedProducts.map(p => {
+            const listPrice = p.list_price || 0;
+            const ecommPrice = p.ecomm_price || 0;
+            const discountPerUnit = listPrice > 0 && ecommPrice > 0 ? listPrice - ecommPrice : 0;
+            const discountTotal = Math.round(discountPerUnit * p.qty * 100) / 100;
+            const discountPct = listPrice > 0 && ecommPrice > 0 ? Math.round(discountPerUnit / listPrice * 100) : 0;
+            return {
+              Product_Name: { id: p.product_id },
+              Quantity: p.qty,
+              Discount: discountTotal,
+              Description: ecommPrice > 0
+                ? `Stratus price $${ecommPrice.toLocaleString()}/unit (${discountPct}% off list)`
+                : 'List price'
+            };
+          });
 
           const quoteData = {
             Subject: deal_name || `${account_name} - ${skuSummary}`,
@@ -4184,9 +4190,10 @@ async function executeToolCall(toolName, toolInput, env) {
 
           results.success = true;
           results.wall_ms = Date.now() - _startMs;
-          results.pricing_summary = resolvedProducts.map(p =>
-            `${p.sku} x${p.qty}: $${p.unit_price} (${p.ecomm_price ? p.discount_pct + '% off list $' + p.list_price : 'list price'})`
-          );
+          results.pricing_summary = resolvedProducts.map(p => {
+            const discPct = p.list_price && p.ecomm_price ? Math.round((1 - p.ecomm_price / p.list_price) * 100) : 0;
+            return `${p.sku} x${p.qty}: ecomm $${p.ecomm_price || p.list_price}/unit, list $${p.list_price || 'N/A'} (${discPct}% discount applied)`;
+          });
           if (missingProducts.length > 0) {
             results.missing_products = missingProducts;
             results.note = 'Some products were not found. Mention this to the user but do NOT attempt to fix it with additional tool calls.';
