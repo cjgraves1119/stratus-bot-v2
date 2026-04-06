@@ -1690,7 +1690,10 @@ function parseMessage(text) {
   //   LIC-ENT-3YR,26\nLIC-MS120-8FP-3YR,4\n...
   //   SKU,Count\nLIC-ENT-3YR,26\n...
   //   LIC-ENT-3YR 26\nLIC-MS120-8FP-3YR 4\n...
-  const lines = text.trim().split(/[\n\r]+/).map(l => l.trim()).filter(Boolean);
+  const rawLines = text.trim().split(/[\n\r]+/).map(l => l.trim()).filter(Boolean);
+  // Strip leading bullet markers from all lines: •, -, *, numbered lists (1., 2.), etc.
+  // This ensures bulleted lists (common in Webex/GChat/email pastes) parse correctly.
+  const lines = rawLines.map(l => l.replace(/^[\s•\-\*·▸▹►‣⁃◦]+\s*/, '').replace(/^\d+[.)]\s*/, '').trim()).filter(Boolean);
   // Extract all LIC- entries, skipping headers and non-matching lines
   if (lines.length >= 2) {
     const licItems = [];
