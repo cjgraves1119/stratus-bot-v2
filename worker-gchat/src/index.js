@@ -3605,6 +3605,90 @@ async function executeToolCall(toolName, toolInput, env) {
       // ── Zoho CRM Tools ──
       case 'zoho_search_records': {
         const { module_name, criteria, fields, page, per_page } = toolInput;
+
+        // ── INTERCEPT: Redirect Products module lookups through batch cache ──
+        // When Claude searches Products by Product_Code, resolve from prices.json cache instead.
+        // This eliminates unnecessary Zoho API calls (~2-3s each) for SKUs already in the cache.
+        if (module_name === 'Products' && criteria) {
+          const equalsMatch = criteria.match(/Product_Code:equals:([A-Z0-9\-]+)/i);
+          const startsWithMatch = !equalsMatch && criteria.match(/Product_Code:starts_with:([A-Z0-9\-]+)/i);
+
+          if (equalsMatch) {
+            const sku = equalsMatch[1].toUpperCase();
+            const suffixed = applySuffix(sku);
+            const cached = prices[suffixed] || prices[sku] || null;
+            if (cached?.zoho_product_id) {
+              console.log(`[INTERCEPT] Products search for ${sku} → cache hit (${cached.zoho_product_id})`);
+              return {
+                data: [{
+                  id: cached.zoho_product_id,
+                  Product_Code: suffixed,
+                  Product_Name: suffixed,
+                  Unit_Price: cached.list || null,
+                  _from_cache: true,
+                  ecomm_price: cached.price || null,
+                  discount_per_unit: cached.discount_per_unit || 0,
+                  discount_pct: cached.discount_pct || 0
+                }],
+                info: { count: 1, more_records: false },
+                _cache_note: `Resolved from prices.json cache (zero API calls). Use batch_product_lookup for multiple SKUs.`
+              };
+            }
+            // Not in cache — fall through to normal API search
+            console.log(`[INTERCEPT] Products search for ${sku} → not in cache, falling through to API`);
+          }
+
+          if (startsWithMatch) {
+            const prefix = startsWithMatch[1].toUpperCase();
+            // Find all matching SKUs in cache
+            const matches = Object.entries(prices)
+              .filter(([k, v]) => k.startsWith(prefix) && v?.zoho_product_id)
+              .map(([k, v]) => ({
+                id: v.zoho_product_id,
+                Product_Code: k,
+                Product_Name: k,
+                Unit_Price: v.list || null,
+                _from_cache: true,
+                ecomm_price: v.price || null,
+                discount_per_unit: v.discount_per_unit || 0,
+                discount_pct: v.discount_pct || 0
+              }));
+            if (matches.length > 0) {
+              console.log(`[INTERCEPT] Products starts_with ${prefix} → ${matches.length} cache hits`);
+              return {
+                data: matches,
+                info: { count: matches.length, more_records: false },
+                _cache_note: `Resolved ${matches.length} SKUs from prices.json cache (zero API calls). Use batch_product_lookup for better performance.`
+              };
+            }
+            // No cache hits — fall through to API
+            console.log(`[INTERCEPT] Products starts_with ${prefix} → no cache hits, falling through to API`);
+          }
+        }
+
+        // ── INTERCEPT: Redirect WooProducts lookups through batch cache ──
+        if (module_name === 'WooProducts' && criteria) {
+          const wooMatch = criteria.match(/WooProduct_Code:equals:([A-Z0-9\-]+)/i);
+          if (wooMatch) {
+            const sku = wooMatch[1].toUpperCase();
+            const suffixed = applySuffix(sku);
+            const cached = prices[suffixed] || prices[sku] || null;
+            if (cached?.price) {
+              console.log(`[INTERCEPT] WooProducts search for ${sku} → cache hit (ecomm: $${cached.price})`);
+              return {
+                data: [{
+                  WooProduct_Code: suffixed,
+                  Stratus_Price: cached.price,
+                  Product_Name: suffixed,
+                  _from_cache: true
+                }],
+                info: { count: 1, more_records: false },
+                _cache_note: `Resolved from prices.json cache (zero API calls). Use batch_product_lookup for multiple SKUs.`
+              };
+            }
+          }
+        }
+
         const params = new URLSearchParams();
         if (criteria) params.set('criteria', criteria);
         // Default fields per module to reduce response size (saves 2-3s per iteration)
@@ -3884,6 +3968,145 @@ async function executeToolCall(toolName, toolInput, env) {
           apiLookups,
           pricing_instruction: 'For Quoted_Items: do NOT set unit_price (Zoho uses the product stored list price). Set Discount = discount_per_unit * Quantity (flat dollar amount off). Set Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)". This ensures Zoho shows the correct discount on each line item.'
         };
+      }
+
+      // ── Parse Stratus Quote URL into ordered line items with cached product IDs ──
+      case 'parse_quote_url': {
+        const { url } = toolInput;
+        try {
+          const urlObj = new URL(url);
+          const itemParam = urlObj.searchParams.get('item') || '';
+          const qtyParam = urlObj.searchParams.get('qty') || '';
+          const rawSkus = itemParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+          const rawQtys = qtyParam.split(',').map(s => parseInt(s) || 1);
+
+          if (rawSkus.length === 0) {
+            return { success: false, error: 'No SKUs found in URL. Expected ?item=SKU1,SKU2&qty=1,2 format.' };
+          }
+
+          // Separate hardware and license SKUs
+          const hwItems = [];
+          const licItems = [];
+          for (let i = 0; i < rawSkus.length; i++) {
+            const sku = rawSkus[i];
+            const qty = rawQtys[i] || 1;
+            if (sku.startsWith('LIC-')) {
+              licItems.push({ sku, qty });
+            } else {
+              hwItems.push({ sku, qty });
+            }
+          }
+
+          // Build hardware→license association map
+          // License SKU patterns: LIC-ENT-*, LIC-{MXmodel}-SEC-*, LIC-{MSmodel}-*, LIC-C{model}-*, LIC-MV-*, LIC-MT-*, LIC-MG{model}-*, LIC-Z{model}-*
+          function matchLicenseToHardware(licSku, hwList) {
+            const lic = licSku.toUpperCase();
+            // Enterprise AP license → matches MR* and CW* hardware
+            if (/^LIC-ENT-/.test(lic)) {
+              return hwList.find(h => /^(MR|CW9)\d/.test(h.sku));
+            }
+            // MX security/SDW license → match by MX model number
+            const mxMatch = lic.match(/^LIC-(MX\d+[A-Z]*)-/);
+            if (mxMatch) {
+              const mxModel = mxMatch[1];
+              return hwList.find(h => {
+                const hwBase = h.sku.replace(/-HW(-NA)?$/, '');
+                return hwBase === mxModel;
+              });
+            }
+            // C9300/C9200/C8xxx license → match by model in license SKU
+            const catMatch = lic.match(/^LIC-(C\d+[A-Z]*)-(\d+[A-Z]*)-/);
+            if (catMatch) {
+              const catFamily = catMatch[1]; // e.g., C9300
+              const catPort = catMatch[2];   // e.g., 24E, 48E
+              // Try exact port count match first (24E→24P, 48E→48P)
+              const portNum = catPort.match(/^(\d+)/)?.[1];
+              const exactMatch = hwList.find(h => h.sku.startsWith(catFamily) && h.sku.includes(`-${portNum}`));
+              if (exactMatch) return exactMatch;
+              // Fallback to family match
+              return hwList.find(h => h.sku.startsWith(catFamily));
+            }
+            // MS license
+            const msMatch = lic.match(/^LIC-(MS\d+[A-Z]*)-/);
+            if (msMatch) {
+              const msModel = msMatch[1];
+              return hwList.find(h => h.sku.startsWith(msModel));
+            }
+            // MV/MT/MG/Z license
+            const otherMatch = lic.match(/^LIC-(M[VTG]\d*|Z\d+[A-Z]*)-/);
+            if (otherMatch) {
+              const model = otherMatch[1];
+              return hwList.find(h => h.sku.startsWith(model));
+            }
+            return null;
+          }
+
+          // Build ordered list: hardware → its license(s) → next hardware → its license(s)
+          const orderedItems = [];
+          const usedLicenses = new Set();
+          const hwWithLicenses = hwItems.map(hw => {
+            const matchedLics = licItems.filter((lic, idx) => {
+              if (usedLicenses.has(idx)) return false;
+              const match = matchLicenseToHardware(lic.sku, [hw]);
+              if (match) {
+                usedLicenses.add(idx);
+                return true;
+              }
+              return false;
+            });
+            return { hw, licenses: matchedLics };
+          });
+
+          // Add items in order: hw → license → hw → license...
+          for (const { hw, licenses } of hwWithLicenses) {
+            orderedItems.push({ sku: hw.sku, qty: hw.qty, type: 'hardware' });
+            for (const lic of licenses) {
+              orderedItems.push({ sku: lic.sku, qty: lic.qty, type: 'license' });
+            }
+          }
+          // Append any unmatched licenses at the end
+          for (let i = 0; i < licItems.length; i++) {
+            if (!usedLicenses.has(i)) {
+              orderedItems.push({ sku: licItems[i].sku, qty: licItems[i].qty, type: 'license', unmatched: true });
+            }
+          }
+
+          // Resolve all product IDs from cache
+          let cacheHits = 0;
+          let apiNeeded = 0;
+          const resolvedItems = orderedItems.map(item => {
+            const suffixed = applySuffix(item.sku);
+            const cached = prices[suffixed] || prices[item.sku] || null;
+            if (cached?.zoho_product_id) {
+              cacheHits++;
+              return {
+                ...item,
+                suffixed_sku: suffixed,
+                product_id: cached.zoho_product_id,
+                list_price: cached.list || null,
+                ecomm_price: cached.price || null,
+                discount_per_unit: cached.discount_per_unit || 0,
+                discount_pct: cached.discount_pct || 0,
+                found: true
+              };
+            }
+            apiNeeded++;
+            return { ...item, suffixed_sku: suffixed, found: false };
+          });
+
+          console.log(`[PARSE-URL] ${rawSkus.length} SKUs parsed, ${orderedItems.length} ordered items, ${cacheHits} cache hits, ${apiNeeded} need API`);
+
+          return {
+            success: true,
+            items: resolvedItems,
+            total_items: resolvedItems.length,
+            cache_hits: cacheHits,
+            api_needed: apiNeeded,
+            pricing_instruction: 'For each item in Quoted_Items: set Product_Name.id = product_id, Quantity = qty, Discount = discount_per_unit * qty (flat dollar amount), Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)". Do NOT set unit_price. Items are already in correct hardware→license display order — use this exact order in the Quoted_Items array.'
+          };
+        } catch (e) {
+          return { success: false, error: `Failed to parse URL: ${e.message}` };
+        }
       }
 
       // ── Compound: Create Deal + Quote in One Shot ──
@@ -4471,7 +4694,7 @@ const CRM_EMAIL_TOOLS = [
   // Zoho CRM
   {
     name: 'zoho_search_records',
-    description: 'Search Zoho CRM records in any module (Deals, Quotes, Contacts, Accounts, Tasks, Products, Sales_Orders, Invoices). Uses COQL criteria syntax like (Account_Name:equals:Acme Corp) or (Stage:equals:Qualification). Multiple criteria joined with "and"/"or".',
+    description: 'Search Zoho CRM records in any module (Deals, Quotes, Contacts, Accounts, Tasks, Sales_Orders, Invoices). Uses COQL criteria syntax like (Account_Name:equals:Acme Corp) or (Stage:equals:Qualification). Multiple criteria joined with "and"/"or". WARNING: Do NOT use this for Products or WooProducts lookups — use batch_product_lookup instead (it resolves product IDs from cache with zero API calls). Products searches via this tool are auto-intercepted through the cache anyway.',
     input_schema: {
       type: 'object',
       properties: {
@@ -4580,6 +4803,18 @@ const CRM_EMAIL_TOOLS = [
         }
       },
       required: ['skus']
+    }
+  },
+  // Parse Stratus quote URL into ordered line items
+  {
+    name: 'parse_quote_url',
+    description: 'Parse a stratusinfosystems.com/order URL into ordered Quoted_Items with product IDs and ecomm pricing from cache. Automatically orders items as hardware→license pairs for clean quote display. Use this FIRST when a user pastes a Stratus URL and asks to create or update a Zoho quote. Returns items in correct display order with product_id, discount, and pricing — ready to pass directly into zoho_create_record or zoho_update_record Quoted_Items payload. ZERO API calls for cached SKUs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'The full stratusinfosystems.com/order URL with ?item= and &qty= parameters' }
+      },
+      required: ['url']
     }
   },
   // Compound tool: create deal + quote in one shot
@@ -5118,7 +5353,16 @@ Use the **batch_product_lookup** tool for ALL product lookups. It:
 - Returns product_id + list_price + ecomm_price from the daily-refreshed price cache
 - Only falls back to API lookup for ~19 legacy SKUs without cached IDs
 
-**DO NOT search WooProducts or Products individually.** The batch tool is faster and already includes pricing + product IDs.
+**DO NOT search WooProducts or Products individually.** The batch tool is faster and already includes pricing + product IDs. This applies to ALL scenarios: new quotes, quote updates, URL-parsed SKUs, license lookups — ALWAYS batch_product_lookup, NEVER zoho_search_records on Products.
+
+### URL-to-Quote Workflow (Stratus URL → Zoho Quote)
+When the user pastes a stratusinfosystems.com/order URL and asks to create or update a Zoho quote:
+1. Call **parse_quote_url** with the full URL — it parses SKUs + quantities, resolves product IDs from cache, and returns items in correct hardware→license display order (zero API calls for 98% of SKUs)
+2. Use the returned items array IN ORDER for the Quoted_Items payload — the order ensures each hardware SKU is immediately followed by its associated license
+3. For each item: Product_Name.id = product_id, Quantity = qty, Discount = discount_per_unit * qty, Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
+4. Do NOT search Products or WooProducts individually — parse_quote_url handles everything
+5. Do NOT use starts_with searches to "discover" license SKUs — the URL already contains the exact SKUs
+6. Do NOT reorder the items — the tool already sorted them into hardware→license pairs
 
 **When batch_product_lookup returns found: false — CRITICAL:**
 - found: false means the SKU is NOT in the local price cache or Zoho Products catalog right now.
@@ -5538,6 +5782,8 @@ function toolProgressMessage(toolName, toolInput) {
       const skuCount = toolInput.skus?.length || 0;
       return `📦 Resolving ${skuCount} product${skuCount !== 1 ? 's' : ''} (cached IDs + pricing)...`;
     }
+    case 'parse_quote_url':
+      return `📦 Parsing URL → ordered line items with cached pricing...`;
     case 'create_deal_and_quote': {
       const acct = toolInput.account_name || 'customer';
       const skuCount = toolInput.skus?.length || 0;
