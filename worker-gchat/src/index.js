@@ -3839,6 +3839,8 @@ async function executeToolCall(toolName, toolInput, env) {
             cacheHits++;
             const ecommPrice = cachedPrice.price || null;
             const listPrice = cachedPrice.list || null;
+            const discountPerUnit = listPrice && ecommPrice ? Math.round((listPrice - ecommPrice) * 100) / 100 : 0;
+            const discountPct = listPrice && ecommPrice ? Math.round((1 - ecommPrice / listPrice) * 100) : 0;
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
@@ -3846,8 +3848,8 @@ async function executeToolCall(toolName, toolInput, env) {
               product_name: suffixed,
               list_price: listPrice,
               ecomm_price: ecommPrice,
-              quote_unit_price: ecommPrice || listPrice,
-              discount_pct: cachedPrice.discount || null,
+              discount_per_unit: discountPerUnit,
+              discount_pct: discountPct,
               found: true
             };
             return;
@@ -3863,6 +3865,8 @@ async function executeToolCall(toolName, toolInput, env) {
             const match = records.find(r => r.Product_Code === suffixed);
             const _ecommPrice = cachedPrice?.price || null;
             const _listPrice = cachedPrice?.list || match?.Unit_Price || null;
+            const _discountPerUnit = _listPrice && _ecommPrice ? Math.round((_listPrice - _ecommPrice) * 100) / 100 : 0;
+            const _discountPct = _listPrice && _ecommPrice ? Math.round((1 - _ecommPrice / _listPrice) * 100) : 0;
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
@@ -3870,8 +3874,8 @@ async function executeToolCall(toolName, toolInput, env) {
               product_name: match?.Product_Name || suffixed,
               list_price: _listPrice,
               ecomm_price: _ecommPrice,
-              quote_unit_price: _ecommPrice || _listPrice,
-              discount_pct: cachedPrice?.discount || null,
+              discount_per_unit: _discountPerUnit,
+              discount_pct: _discountPct,
               found: !!match
             };
           } catch (e) {
@@ -3886,7 +3890,7 @@ async function executeToolCall(toolName, toolInput, env) {
           count: Object.keys(batchResults).length,
           cacheHits,
           apiLookups,
-          pricing_instruction: 'USE quote_unit_price for Quoted_Items unit_price. This is the Stratus ecomm price (default). Only use list_price if user explicitly requested list pricing.'
+          pricing_instruction: 'For Quoted_Items: do NOT set unit_price (Zoho uses the product stored list price). Set Discount = discount_per_unit * Quantity (flat dollar amount off). Set Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)". This ensures Zoho shows the correct discount on each line item.'
         };
       }
 
@@ -3975,6 +3979,12 @@ async function executeToolCall(toolName, toolInput, env) {
             return false;
           }
 
+          // Build ordered pairs: hardware → license, hardware → license
+          // For SKUs sharing the same license (e.g., multiple APs), group hardware first then totaled licenses
+          const orderedPairs = []; // [{hw: sku, hwQty, licSku, licQty}]
+          const licenseQtyMap = {}; // licenseSku → total qty (for grouping shared licenses)
+          const licenseToHardware = {}; // licenseSku → [hwSku1, hwSku2, ...]
+
           console.log(`[COMPOUND] Input SKUs: ${JSON.stringify(skus)}`);
           for (const entry of skus) {
             const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
@@ -3998,6 +4008,7 @@ async function executeToolCall(toolName, toolInput, env) {
             // Auto-add matching license using getLicenseSkus
             const licenseOptions = getLicenseSkus(rawSku);
             console.log(`[COMPOUND] getLicenseSkus(${rawSku}): ${licenseOptions ? JSON.stringify(licenseOptions[0]) : 'null'}`);
+            let resolvedLicSku = null;
             if (licenseOptions) {
               const termMap = { '1': '1Y', '3': '3Y', '5': '5Y' };
               const targetTerm = termMap[defaultTerm] || '1Y';
@@ -4009,10 +4020,23 @@ async function executeToolCall(toolName, toolInput, env) {
                     : licenseSku.replace(/YR$/, 'Y');
                   if (!stageProduct(altSku, qty)) {
                     missingProducts.push(licenseSku);
+                  } else {
+                    resolvedLicSku = altSku;
                   }
+                } else {
+                  resolvedLicSku = licenseSku;
                 }
               }
             }
+
+            // Track license grouping
+            if (resolvedLicSku) {
+              const suffixedLic = applySuffix(resolvedLicSku);
+              licenseQtyMap[suffixedLic] = (licenseQtyMap[suffixedLic] || 0) + qty;
+              if (!licenseToHardware[suffixedLic]) licenseToHardware[suffixedLic] = [];
+              licenseToHardware[suffixedLic].push(rawSku);
+            }
+            orderedPairs.push({ hw: applySuffix(rawSku), hwQty: qty, licSku: resolvedLicSku ? applySuffix(resolvedLicSku) : null });
           }
 
           // STEP 3b: Batch-resolve product IDs for staged products
@@ -4055,8 +4079,55 @@ async function executeToolCall(toolName, toolInput, env) {
           results.steps.push(`Resolved ${resolvedProducts.length}/${skus.length} products from cache` +
             (missingProducts.length ? ` (missing: ${missingProducts.join(', ')})` : ''));
 
-          // STEP 4: Build SKU description for deal name
-          const skuSummary = resolvedProducts.map(p => `${p.qty > 1 ? p.qty + 'x ' : ''}${p.sku}`).join(', ');
+          // STEP 3c: Reorder resolved products — hardware then license underneath
+          // For shared licenses (e.g., multiple APs using LIC-ENT-*), list all hardware first, then license with totaled qty
+          const resolvedMap = {};
+          for (const p of resolvedProducts) {
+            resolvedMap[p.sku] = p;
+          }
+          const orderedResolved = [];
+          const addedLicenses = new Set();
+
+          // Check which licenses are shared across multiple hardware SKUs
+          const sharedLicenses = new Set();
+          for (const [licSku, hwList] of Object.entries(licenseToHardware)) {
+            if (hwList.length > 1) sharedLicenses.add(licSku);
+          }
+
+          // First pass: add hardware → unique license pairs
+          for (const pair of orderedPairs) {
+            if (resolvedMap[pair.hw]) {
+              orderedResolved.push(resolvedMap[pair.hw]);
+            }
+            // Add license right after hardware ONLY if it's not shared
+            if (pair.licSku && !sharedLicenses.has(pair.licSku) && !addedLicenses.has(pair.licSku) && resolvedMap[pair.licSku]) {
+              orderedResolved.push(resolvedMap[pair.licSku]);
+              addedLicenses.add(pair.licSku);
+            }
+          }
+
+          // Second pass: add shared licenses at the end with totaled quantities
+          for (const licSku of sharedLicenses) {
+            if (!addedLicenses.has(licSku) && resolvedMap[licSku]) {
+              const totalQty = licenseQtyMap[licSku] || resolvedMap[licSku].qty;
+              orderedResolved.push({ ...resolvedMap[licSku], qty: totalQty });
+              addedLicenses.add(licSku);
+            }
+          }
+
+          // Add any remaining products not yet in the ordered list (explicit license SKUs passed by user)
+          for (const p of resolvedProducts) {
+            if (!orderedResolved.find(o => o.sku === p.sku)) {
+              orderedResolved.push(p);
+            }
+          }
+
+          // Replace resolvedProducts with ordered version
+          resolvedProducts.length = 0;
+          resolvedProducts.push(...orderedResolved);
+
+          // STEP 4: Build SKU description for deal name (hardware only for cleaner name)
+          const skuSummary = orderedPairs.map(p => `${p.hwQty > 1 ? p.hwQty + 'x ' : ''}${p.hw}`).join(', ');
           const closingDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
 
           // STEP 5: Create Deal
@@ -5067,11 +5138,13 @@ Use the **batch_product_lookup** tool for ALL product lookups. It:
 - Only report "SKU not available" if BOTH batch_product_lookup AND the Products search return nothing.
 - NEVER tell the user a LIC-ENT-*, LIC-MX*, LIC-MS*, LIC-MV*, or LIC-MT* SKU is "invalid" based on found: false alone.
 
-### Quote Creation (Ecomm Pricing Default)
-Create quotes with **Stratus ecomm pricing applied by default**:
+### Quote Creation & Modification (Ecomm Pricing Default)
+Create and update quotes with **Stratus ecomm pricing applied by default**:
 1. Call batch_product_lookup with all SKUs + quantities in a single call
-2. For each line item: Product_Name.id = product_id, Quantity, unit_price = ecomm_price (NOT list_price), Discount = 0, Description = "Stratus ecomm price ({XX}% off list)" where XX = round((1 - ecomm_price / list_price) * 100)
-3. If ecomm_price is not available for a SKU, fall back to list_price with Discount: 0
+2. For each line item: Product_Name.id = product_id, Quantity, Discount = discount_per_unit * Quantity (flat dollar amount), Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
+3. Do NOT set unit_price — Zoho uses the product's stored list price, then subtracts the Discount amount
+4. If ecomm_price is not available for a SKU, fall back to Discount: 0 (list price)
+5. This applies to ALL quote operations: new quotes, adding items, swapping licenses, any modification
 4. Report the quote with ecomm pricing applied: "Quote created with Stratus ecomm pricing applied."
 
 Ecomm pricing is the DEFAULT. Only use list pricing if the user explicitly asks for "list price" or "no discount".
@@ -5087,8 +5160,8 @@ Discount is a DOLLAR AMOUNT, not a percentage. Formula: Discount = (List_Price x
 
 **Quote update workflow (ONE-SHOT — do not loop):**
 1. Call zoho_get_record to read current Quoted_Items (required — confirms actual current prices)
-2. Call batch_product_lookup for all SKUs to get ecomm prices
-3. Build the complete Quoted_Items payload for ALL items in a SINGLE update (cover every line item that needs changing)
+2. Call batch_product_lookup for all NEW/REPLACEMENT SKUs to get ecomm pricing (discount_per_unit, discount_pct, product_id)
+3. Build the complete Quoted_Items payload for ALL items in a SINGLE update. For every new/replacement item, include: Product_Name.id, Quantity, Discount = discount_per_unit * Quantity, Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
 4. Call zoho_update_record ONCE with the full payload
 5. Call zoho_get_record ONCE after the update to verify
 6. VERIFICATION CHECK: Compare the post-update line items against what you expected. Check: (a) total item count matches expected count, (b) no duplicate products, (c) removed items are gone, (d) new/changed items are correct. If ANY check fails, tell the user exactly what went wrong — do NOT say "updated successfully"
@@ -5118,10 +5191,11 @@ Include new items WITHOUT an "id" field:
   ]
 
 **How to REPLACE items (e.g., swap 1YR to 3YR license):**
-This requires BOTH deleting the old item AND adding the new one in the SAME update:
+This requires BOTH deleting the old item AND adding the new one in the SAME update.
+ALWAYS call batch_product_lookup for the new SKU first to get discount_per_unit, then include Discount in the new item:
   Quoted_Items: [
     {"id": "old_1yr_line_item_id", "_delete": null},
-    {"Product_Name": {"id": "new_3yr_product_id"}, "Quantity": 1}
+    {"Product_Name": {"id": "new_3yr_product_id"}, "Quantity": 1, "Discount": discount_per_unit * qty, "Description": "Stratus price $X/unit (Y% off list)"}
   ]
 
 **How to MODIFY an existing item (e.g., change quantity):**
@@ -5135,7 +5209,10 @@ Include the item with its existing "id" and the fields to change:
 - "_delete": null = marks an item for removal (ONLY way to remove items)
 - Product_Name = an OBJECT like {"id": "zoho_product_id"} — required for new items
 - Quantity = integer
-- Discount = DOLLAR AMOUNT (NOT a percentage). Formula: Discount = (List_Price x Quantity) - Target_Sell_Price
+- Discount = DOLLAR AMOUNT (NOT a percentage). Formula: Discount = discount_per_unit * Quantity (from batch_product_lookup)
+- Description = "Stratus price $[ecomm_price]/unit ([discount_pct]% off list)"
+- Do NOT set unit_price — Zoho pulls the list price from the Product record automatically
+- **ALWAYS include Discount + Description when adding new line items** — including license term swaps. Missing Discount = list price charged
 
   Example: Quote has 4 items. Remove item #2 (1YR license), add a 3YR license, keep items #1/#3/#4 unchanged:
   Quoted_Items: [
@@ -5153,13 +5230,13 @@ Include the item with its existing "id" and the fields to change:
 **LICENSE TERM SWAP (e.g., 3YR → 5YR) — CRITICAL WORKFLOW:**
 When the user asks to change license terms on an existing quote:
 1. Call zoho_get_record on the Quote to get FRESH Quoted_Items with current line item IDs
-2. Call batch_product_lookup for the NEW license SKUs (e.g., LIC-ENT-5YR, LIC-MS150-48-5Y)
-3. Build a SINGLE zoho_update_record call that BOTH deletes the old items AND adds the new ones:
+2. Call batch_product_lookup for the NEW license SKUs (e.g., LIC-ENT-5YR, LIC-MS150-48-5Y) — this returns discount_per_unit and discount_pct
+3. Build a SINGLE zoho_update_record call that BOTH deletes the old items AND adds the new ones WITH ecomm discount:
    Quoted_Items: [
      {"id": "old_3yr_line_item_id", "_delete": null},
      {"id": "old_3yr_switch_lic_id", "_delete": null},
-     {"Product_Name": {"id": "new_5yr_product_id"}, "Quantity": 1},
-     {"Product_Name": {"id": "new_5yr_switch_product_id"}, "Quantity": 1}
+     {"Product_Name": {"id": "new_5yr_product_id"}, "Quantity": 1, "Discount": discount_per_unit * 1, "Description": "Stratus price $X/unit (Y% off list)"},
+     {"Product_Name": {"id": "new_5yr_switch_product_id"}, "Quantity": 1, "Discount": discount_per_unit * 1, "Description": "Stratus price $X/unit (Y% off list)"}
    ]
 4. NEVER split deletes and adds into separate update calls — this creates duplicates because adds happen before deletes are processed
 5. Call zoho_get_record AGAIN to verify the result
