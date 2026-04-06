@@ -7749,35 +7749,117 @@ CRITICAL URL RULES:
             break;
           }
 
-          // ── CCW Lookup: Find a Zoho Quote by CCW Deal Number ──
+          // ── CCW Lookup: Find a Zoho Quote by CCW Deal Number (with Deal Name fallback) ──
           case '/api/ccw-lookup': {
-            const { ccwDealNumber } = apiBody;
-            if (!ccwDealNumber) {
-              return new Response(JSON.stringify({ error: 'ccwDealNumber required' }), { status: 400, headers: jsonHeaders });
+            const { ccwDealNumber, dealName } = apiBody;
+            if (!ccwDealNumber && !dealName) {
+              return new Response(JSON.stringify({ error: 'ccwDealNumber or dealName required' }), { status: 400, headers: jsonHeaders });
             }
+
+            const mapQuote = (q) => ({
+              id: q.id,
+              subject: q.Subject || '',
+              quoteNumber: q.Quote_Number || '',
+              grandTotal: q.Grand_Total || 0,
+              stage: q.Stage || '',
+              ccwDealNumber: q.CCW_Deal_Number || '',
+              dealId: q.Deal_Name?.id || '',
+              dealName: q.Deal_Name?.name || '',
+              accountName: q.Account_Name?.name || '',
+              zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
+              dealUrl: q.Deal_Name?.id ? `https://crm.zoho.com/crm/org647122552/tab/Potentials/${q.Deal_Name.id}` : '',
+            });
+
             try {
-              const coql = `select id, Subject, Quote_Number, Grand_Total, Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where CCW_Deal_Number = '${ccwDealNumber}' limit 1`;
-              const qResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
-              if (qResp?.data && qResp.data.length > 0) {
-                const q = qResp.data[0];
-                apiResult = {
-                  found: true,
-                  quote: {
-                    id: q.id,
-                    subject: q.Subject || '',
-                    quoteNumber: q.Quote_Number || '',
-                    grandTotal: q.Grand_Total || 0,
-                    stage: q.Stage || '',
-                    dealName: q.Deal_Name?.name || '',
-                    accountName: q.Account_Name?.name || '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
-                  },
-                };
-              } else {
+              let found = false;
+              let matchMethod = '';
+
+              // Primary: search by CCW Deal Number
+              if (ccwDealNumber) {
+                const coql = `select id, Subject, Quote_Number, Grand_Total, Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where CCW_Deal_Number = '${ccwDealNumber}' limit 1`;
+                const qResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                if (qResp?.data && qResp.data.length > 0) {
+                  apiResult = { found: true, matchMethod: 'ccw', quote: mapQuote(qResp.data[0]) };
+                  found = true;
+                }
+              }
+
+              // Fallback: search by Deal Name (fuzzy match on Quote Subject)
+              if (!found && dealName) {
+                // Extract the key account name portion (strip common suffixes like "1 Year License Renewal Updated")
+                const cleanName = dealName.replace(/\s*[-–]\s*$/, '').replace(/\d+\s*(year|yr|month|mo)\s*/gi, '').trim();
+                // Use first 3-4 significant words for COQL like search
+                const words = cleanName.split(/\s+/).filter(w => w.length > 1).slice(0, 4);
+                const searchTerm = words.join(' ');
+
+                if (searchTerm.length >= 3) {
+                  const coql2 = `select id, Subject, Quote_Number, Grand_Total, Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where Subject like '%${searchTerm}%' order by Created_Time desc limit 5`;
+                  const qResp2 = await zohoApiCall('POST', 'coql', env, { select_query: coql2 });
+                  if (qResp2?.data && qResp2.data.length > 0) {
+                    apiResult = {
+                      found: true,
+                      matchMethod: 'dealName',
+                      searchTerm: searchTerm,
+                      quote: mapQuote(qResp2.data[0]),
+                      allQuotes: qResp2.data.map(mapQuote),
+                    };
+                    found = true;
+                  }
+                }
+              }
+
+              if (!found) {
                 apiResult = { found: false };
               }
             } catch (err) {
               apiResult = { error: 'CCW lookup failed: ' + err.message, found: false };
+            }
+            break;
+          }
+
+          // ── Velocity Hub: Proxy deal approval submission to Pipedream webhook ──
+          case '/api/velocity-hub': {
+            const { deal_id, country } = apiBody;
+            if (!deal_id) {
+              return new Response(JSON.stringify({ error: 'deal_id required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              const vhResp = await fetch('https://eo44ez435h7vzp2.m.pipedream.net', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ deal_id, country: country || 'United States' }),
+              });
+              const vhData = await vhResp.json();
+              apiResult = vhData;
+            } catch (err) {
+              apiResult = { success: false, error: 'Velocity Hub submission failed: ' + err.message };
+            }
+            break;
+          }
+
+          // ── Assign Cisco Rep: Update Deal's Meraki_ISR field ──
+          case '/api/assign-rep': {
+            const { dealId: arDealId, repId: arRepId, repName: arRepName } = apiBody;
+            if (!arDealId || !arRepId) {
+              return new Response(JSON.stringify({ error: 'dealId and repId required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              const updateResp = await zohoApiCall('PUT', `Deals/${arDealId}`, env, {
+                data: [{
+                  Meraki_ISR: { id: arRepId },
+                  Reason: 'Meraki ISR recommended',
+                }],
+              });
+              const success = updateResp?.data?.[0]?.code === 'SUCCESS';
+              apiResult = {
+                success,
+                dealId: arDealId,
+                repId: arRepId,
+                repName: arRepName || '',
+                message: success ? `Assigned ${arRepName || 'rep'} to deal` : 'Update failed',
+              };
+            } catch (err) {
+              apiResult = { success: false, error: 'Rep assignment failed: ' + err.message };
             }
             break;
           }
