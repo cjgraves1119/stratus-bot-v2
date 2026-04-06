@@ -3949,45 +3949,73 @@ async function executeToolCall(toolName, toolInput, env) {
             results.records.contact = { id: contactId, url: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contactId}` };
           }
 
-          // STEP 3: Resolve ALL products from cache (ZERO API calls for cached SKUs)
+          // STEP 3: Resolve ALL products from cache using getLicenseSkus for auto-license
+          // Accept hardware SKUs (MX68, MS130-12X) and auto-add matching licenses.
+          // Also accept explicit license SKUs if passed.
           const resolvedProducts = [];
           const missingProducts = [];
-          for (const entry of skus) {
-            const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
-            const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
-            const suffixed = applySuffix(rawSku);
-            const cachedPrice = prices[suffixed] || prices[rawSku] || null;
-            if (cachedPrice?.zoho_product_id) {
-              const ecommPrice = cachedPrice.price || null;
-              const listPrice = cachedPrice.list || null;
+          const defaultTerm = license_term || '1';
+
+          function resolveFromCache(sku) {
+            const suffixed = applySuffix(sku);
+            return prices[suffixed] || prices[sku] || null;
+          }
+
+          function addProduct(sku, qty) {
+            const suffixed = applySuffix(sku);
+            const cached = prices[suffixed] || prices[sku] || null;
+            if (cached?.zoho_product_id) {
+              const ecommPrice = cached.price || null;
+              const listPrice = cached.list || null;
               resolvedProducts.push({
                 sku: suffixed,
                 qty,
-                product_id: cachedPrice.zoho_product_id,
+                product_id: cached.zoho_product_id,
                 unit_price: ecommPrice || listPrice,
                 list_price: listPrice,
                 ecomm_price: ecommPrice,
                 discount_pct: listPrice && ecommPrice ? Math.round((1 - ecommPrice / listPrice) * 100) : 0
               });
-            } else {
-              // API fallback for uncached SKUs
-              try {
-                const prodResult = await zohoApiCall('GET',
-                  `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`, env);
-                const match = prodResult?.data?.find(r => r.Product_Code === suffixed);
-                if (match) {
-                  resolvedProducts.push({
-                    sku: suffixed, qty, product_id: match.id,
-                    unit_price: cachedPrice?.price || match.Unit_Price || 0,
-                    list_price: cachedPrice?.list || match.Unit_Price || 0,
-                    ecomm_price: cachedPrice?.price || null,
-                    discount_pct: 0
-                  });
-                } else {
-                  missingProducts.push(rawSku);
-                }
-              } catch (e) {
+              return true;
+            }
+            return false;
+          }
+
+          for (const entry of skus) {
+            const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
+            const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
+
+            // If it's already a license SKU, just resolve it directly
+            if (rawSku.startsWith('LIC-')) {
+              if (!addProduct(rawSku, qty)) {
                 missingProducts.push(rawSku);
+              }
+              continue;
+            }
+
+            // It's a hardware SKU — add the hardware
+            if (!addProduct(rawSku, qty)) {
+              missingProducts.push(rawSku);
+              continue; // can't add license if hardware not found
+            }
+
+            // Auto-add matching license using getLicenseSkus
+            const licenseOptions = getLicenseSkus(rawSku);
+            if (licenseOptions) {
+              // Find the license matching the requested term
+              const termMap = { '1': '1Y', '3': '3Y', '5': '5Y' };
+              const targetTerm = termMap[defaultTerm] || '1Y';
+              const licenseSku = licenseOptions.find(l => l.term === targetTerm)?.sku;
+              if (licenseSku) {
+                if (!addProduct(licenseSku, qty)) {
+                  // Try alternate suffixes (YR vs Y)
+                  const altSku = licenseSku.endsWith('Y') && !licenseSku.endsWith('YR')
+                    ? licenseSku + 'R'
+                    : licenseSku.replace(/YR$/, 'Y');
+                  if (!addProduct(altSku, qty)) {
+                    missingProducts.push(licenseSku);
+                  }
+                }
               }
             }
           }
@@ -4122,8 +4150,9 @@ async function executeToolCall(toolName, toolInput, env) {
           );
           if (missingProducts.length > 0) {
             results.missing_products = missingProducts;
-            results.note = 'Some products were not found in the catalog. Create them manually or check SKU spelling.';
+            results.note = 'Some products were not found. Mention this to the user but do NOT attempt to fix it with additional tool calls.';
           }
+          results.instruction = 'DONE. Report these results to the user with Zoho links. Do NOT call any more tools — the workflow is complete.';
           return results;
         } catch (e) {
           results.errors.push(`Unexpected error: ${e.message}`);
@@ -4454,7 +4483,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Handles ALL steps internally: finds/creates Account, finds/creates Contact, creates Deal with defaults, resolves ALL product IDs from cache (zero API calls), creates Quote with ecomm-priced line items, creates follow-up Task. Returns all created records with Zoho links. USE THIS instead of manual zoho_create_record sequences for new deals.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Pass ONLY hardware SKUs (e.g., MX68, MS130-12X, MR44) — licenses are auto-added using the correct SKU for each model. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results — do NOT make additional tool calls to modify the quote.',
     input_schema: {
       type: 'object',
       properties: {
@@ -4467,14 +4496,14 @@ const CRM_EMAIL_TOOLS = [
           items: {
             type: 'object',
             properties: {
-              sku: { type: 'string', description: 'Base SKU (e.g., MR44, MX67, LIC-ENT-1YR). Suffixes applied automatically.' },
+              sku: { type: 'string', description: 'HARDWARE SKUs only (e.g., MR44, MX68, MS130-12X). Licenses are auto-added. Do NOT pass license SKUs — they are resolved automatically.' },
               qty: { type: 'number', description: 'Quantity (default 1)' }
             },
             required: ['sku']
           },
-          description: 'Array of hardware + license SKUs with quantities'
+          description: 'Array of HARDWARE SKUs only. Licenses auto-added per model.'
         },
-        license_term: { type: 'string', description: 'Default license term: "1" (1Y/1YR), "3" (3Y/3YR), or "5" (5Y/5YR). Default "1". If user says "3 year", use "3".' },
+        license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
         billing_address: {
           type: 'object',
