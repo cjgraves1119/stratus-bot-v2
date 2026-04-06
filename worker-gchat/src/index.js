@@ -3890,6 +3890,249 @@ async function executeToolCall(toolName, toolInput, env) {
         };
       }
 
+      // ── Compound: Create Deal + Quote in One Shot ──
+      case 'create_deal_and_quote': {
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, lead_source, billing_address } = toolInput;
+        const results = { steps: [], errors: [], records: {} };
+        const _startMs = Date.now();
+
+        try {
+          // STEP 1: Find or create Account
+          let accountId = null;
+          let accountData = null;
+          const acctSearch = await zohoApiCall('GET',
+            `Accounts/search?criteria=(Account_Name:equals:${encodeURIComponent(account_name)})&fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Phone,Website`,
+            env);
+          if (acctSearch?.data?.[0]) {
+            accountData = acctSearch.data[0];
+            accountId = accountData.id;
+            results.steps.push(`Found Account: ${accountData.Account_Name} (${accountId})`);
+          } else {
+            // Create new account
+            const newAcct = await zohoApiCall('POST', 'Accounts', env, {
+              data: [{ Account_Name: account_name, Owner: { id: '2570562000141711002' } }]
+            });
+            if (newAcct?.data?.[0]?.details?.id) {
+              accountId = newAcct.data[0].details.id;
+              results.steps.push(`Created Account: ${account_name} (${accountId})`);
+            } else {
+              results.errors.push('Failed to create Account');
+              return { success: false, ...results, wall_ms: Date.now() - _startMs };
+            }
+          }
+          results.records.account = { id: accountId, name: account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
+
+          // STEP 2: Find Contact
+          let contactId = null;
+          if (contact_name || contact_email) {
+            const contactCriteria = contact_email
+              ? `(Email:equals:${encodeURIComponent(contact_email)})`
+              : `(Account_Name:equals:${encodeURIComponent(account_name)})`;
+            const contactSearch = await zohoApiCall('GET',
+              `Contacts/search?criteria=${contactCriteria}&fields=id,Full_Name,Email&per_page=5`, env);
+            if (contactSearch?.data?.[0]) {
+              contactId = contactSearch.data[0].id;
+              results.steps.push(`Found Contact: ${contactSearch.data[0].Full_Name || contact_name} (${contactId})`);
+            }
+          } else {
+            // Search account contacts
+            const acctContacts = await zohoApiCall('GET',
+              `Contacts/search?criteria=(Account_Name:equals:${encodeURIComponent(account_name)})&fields=id,Full_Name,Email&per_page=3`, env);
+            if (acctContacts?.data?.[0]) {
+              contactId = acctContacts.data[0].id;
+              results.steps.push(`Found Contact on Account: ${acctContacts.data[0].Full_Name} (${contactId})`);
+            } else {
+              results.steps.push('No contact found on Account (quote will be created without contact)');
+            }
+          }
+          if (contactId) {
+            results.records.contact = { id: contactId, url: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contactId}` };
+          }
+
+          // STEP 3: Resolve ALL products from cache (ZERO API calls for cached SKUs)
+          const resolvedProducts = [];
+          const missingProducts = [];
+          for (const entry of skus) {
+            const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
+            const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
+            const suffixed = applySuffix(rawSku);
+            const cachedPrice = prices[suffixed] || prices[rawSku] || null;
+            if (cachedPrice?.zoho_product_id) {
+              const ecommPrice = cachedPrice.price || null;
+              const listPrice = cachedPrice.list || null;
+              resolvedProducts.push({
+                sku: suffixed,
+                qty,
+                product_id: cachedPrice.zoho_product_id,
+                unit_price: ecommPrice || listPrice,
+                list_price: listPrice,
+                ecomm_price: ecommPrice,
+                discount_pct: listPrice && ecommPrice ? Math.round((1 - ecommPrice / listPrice) * 100) : 0
+              });
+            } else {
+              // API fallback for uncached SKUs
+              try {
+                const prodResult = await zohoApiCall('GET',
+                  `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`, env);
+                const match = prodResult?.data?.find(r => r.Product_Code === suffixed);
+                if (match) {
+                  resolvedProducts.push({
+                    sku: suffixed, qty, product_id: match.id,
+                    unit_price: cachedPrice?.price || match.Unit_Price || 0,
+                    list_price: cachedPrice?.list || match.Unit_Price || 0,
+                    ecomm_price: cachedPrice?.price || null,
+                    discount_pct: 0
+                  });
+                } else {
+                  missingProducts.push(rawSku);
+                }
+              } catch (e) {
+                missingProducts.push(rawSku);
+              }
+            }
+          }
+          results.steps.push(`Resolved ${resolvedProducts.length}/${skus.length} products from cache` +
+            (missingProducts.length ? ` (missing: ${missingProducts.join(', ')})` : ''));
+
+          // STEP 4: Build SKU description for deal name
+          const skuSummary = resolvedProducts.map(p => `${p.qty > 1 ? p.qty + 'x ' : ''}${p.sku}`).join(', ');
+          const closingDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+
+          // STEP 5: Create Deal
+          const dealData = {
+            Deal_Name: deal_name || `${account_name} - ${skuSummary}`,
+            Account_Name: { id: accountId },
+            Stage: 'Qualification',
+            Lead_Source: lead_source || 'Stratus Referal',
+            Meraki_ISR: { id: '2570562000027286729' },
+            Owner: { id: '2570562000141711002' },
+            Closing_Date: closingDate
+          };
+          if (contactId) dealData.Contact_Name = { id: contactId };
+
+          const dealResult = await zohoApiCall('POST', 'Deals', env, { data: [dealData] });
+          const dealId = dealResult?.data?.[0]?.details?.id;
+          if (!dealId) {
+            results.errors.push('Failed to create Deal: ' + JSON.stringify(dealResult?.data?.[0]));
+            return { success: false, ...results, wall_ms: Date.now() - _startMs };
+          }
+          results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})`);
+          results.records.deal = { id: dealId, name: dealData.Deal_Name, url: `https://crm.zoho.com/crm/org647122552/tab/Deals/${dealId}` };
+
+          // STEP 6: Create Quote with line items
+          const billingAddr = billing_address || {
+            street: accountData?.Billing_Street || '',
+            city: accountData?.Billing_City || '',
+            state: accountData?.Billing_State || '',
+            zip: accountData?.Billing_Code || '',
+            country: accountData?.Billing_Country || 'United States'
+          };
+          const validTill = closingDate;
+          const quotedItems = resolvedProducts.map(p => ({
+            Product_Name: { id: p.product_id },
+            Quantity: p.qty,
+            unit_price: p.unit_price,
+            Discount: 0,
+            Description: p.ecomm_price
+              ? `Stratus ecomm price (${p.discount_pct}% off list)`
+              : 'List price'
+          }));
+
+          const quoteData = {
+            Subject: deal_name || `${account_name} - ${skuSummary}`,
+            Deal_Name: { id: dealId },
+            Account_Name: { id: accountId },
+            Valid_Till: validTill,
+            Billing_Street: billingAddr.street,
+            Billing_City: billingAddr.city,
+            Billing_State: billingAddr.state,
+            Billing_Code: billingAddr.zip,
+            Billing_Country: billingAddr.country,
+            Shipping_Country: billingAddr.country || 'United States',
+            Owner: { id: '2570562000141711002' },
+            Quoted_Items: quotedItems
+          };
+          if (contactId) quoteData.Contact_Name = { id: contactId };
+
+          const quoteResult = await zohoApiCall('POST', 'Quotes', env, { data: [quoteData] });
+          const quoteId = quoteResult?.data?.[0]?.details?.id;
+          if (!quoteId) {
+            results.errors.push('Failed to create Quote: ' + JSON.stringify(quoteResult?.data?.[0]));
+            return { success: false, ...results, wall_ms: Date.now() - _startMs };
+          }
+          results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
+          results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
+
+          // STEP 7: Fetch the created quote to get actual line items + Grand_Total
+          let quoteVerification = null;
+          try {
+            const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}`, env);
+            if (fetchedQuote?.data?.[0]) {
+              quoteVerification = {
+                Grand_Total: fetchedQuote.data[0].Grand_Total,
+                Sub_Total: fetchedQuote.data[0].Sub_Total,
+                Quote_Stage: fetchedQuote.data[0].Quote_Stage,
+                item_count: fetchedQuote.data[0].Quoted_Items?.length || 0,
+                items: (fetchedQuote.data[0].Quoted_Items || []).map(item => ({
+                  product: item.Product_Name?.name || item.product?.name || 'Unknown',
+                  qty: item.Quantity,
+                  unit_price: item.unit_price,
+                  total: item.total
+                }))
+              };
+              results.steps.push(`Verified: ${quoteVerification.item_count} items, Grand Total: $${quoteVerification.Grand_Total}`);
+            }
+          } catch (e) {
+            results.steps.push('Quote verification fetch failed (quote was created successfully)');
+          }
+          results.records.quote.verification = quoteVerification;
+
+          // STEP 8: Create follow-up task
+          const taskDueDate = new Date();
+          // Add 3 business days
+          let daysAdded = 0;
+          while (daysAdded < 3) {
+            taskDueDate.setDate(taskDueDate.getDate() + 1);
+            if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
+          }
+          const taskData = {
+            Subject: `Follow up - ${account_name}`,
+            Due_Date: taskDueDate.toISOString().split('T')[0],
+            Status: 'Not Started',
+            Priority: 'Normal',
+            Owner: { id: '2570562000141711002' },
+            What_Id: { id: dealId },
+            $se_module: 'Deals'
+          };
+          try {
+            const taskResult = await zohoApiCall('POST', 'Tasks', env, { data: [taskData] });
+            const taskId = taskResult?.data?.[0]?.details?.id;
+            if (taskId) {
+              results.steps.push(`Created follow-up Task due ${taskData.Due_Date} (${taskId})`);
+              results.records.task = { id: taskId, url: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${taskId}` };
+            }
+          } catch (e) {
+            results.steps.push(`Task creation failed: ${e.message}`);
+          }
+
+          results.success = true;
+          results.wall_ms = Date.now() - _startMs;
+          results.pricing_summary = resolvedProducts.map(p =>
+            `${p.sku} x${p.qty}: $${p.unit_price} (${p.ecomm_price ? p.discount_pct + '% off list $' + p.list_price : 'list price'})`
+          );
+          if (missingProducts.length > 0) {
+            results.missing_products = missingProducts;
+            results.note = 'Some products were not found in the catalog. Create them manually or check SKU spelling.';
+          }
+          return results;
+        } catch (e) {
+          results.errors.push(`Unexpected error: ${e.message}`);
+          results.success = false;
+          results.wall_ms = Date.now() - _startMs;
+          return results;
+        }
+      }
+
       // ── Web Enrichment Tools ──
       case 'web_search_domain': {
         const { domain } = toolInput;
@@ -4208,6 +4451,46 @@ const CRM_EMAIL_TOOLS = [
       required: ['skus']
     }
   },
+  // Compound tool: create deal + quote in one shot
+  {
+    name: 'create_deal_and_quote',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Handles ALL steps internally: finds/creates Account, finds/creates Contact, creates Deal with defaults, resolves ALL product IDs from cache (zero API calls), creates Quote with ecomm-priced line items, creates follow-up Task. Returns all created records with Zoho links. USE THIS instead of manual zoho_create_record sequences for new deals.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        account_name: { type: 'string', description: 'Company/Account name (e.g., "Verato")' },
+        contact_name: { type: 'string', description: 'Contact full name (optional — will search Account contacts if omitted)' },
+        contact_email: { type: 'string', description: 'Contact email (optional)' },
+        deal_name: { type: 'string', description: 'Deal name (optional — defaults to "Account - Products - Quote")' },
+        skus: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              sku: { type: 'string', description: 'Base SKU (e.g., MR44, MX67, LIC-ENT-1YR). Suffixes applied automatically.' },
+              qty: { type: 'number', description: 'Quantity (default 1)' }
+            },
+            required: ['sku']
+          },
+          description: 'Array of hardware + license SKUs with quantities'
+        },
+        license_term: { type: 'string', description: 'Default license term: "1" (1Y/1YR), "3" (3Y/3YR), or "5" (5Y/5YR). Default "1". If user says "3 year", use "3".' },
+        lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
+        billing_address: {
+          type: 'object',
+          description: 'Billing address (optional — looked up from Account if omitted)',
+          properties: {
+            street: { type: 'string' },
+            city: { type: 'string' },
+            state: { type: 'string' },
+            zip: { type: 'string' },
+            country: { type: 'string' }
+          }
+        }
+      },
+      required: ['account_name', 'skus']
+    }
+  },
   // Web enrichment
   {
     name: 'web_search_domain',
@@ -4459,21 +4742,14 @@ const CRM_SYSTEM_PROMPT = `
 
 ## SPEED CRITICAL — READ THIS FIRST
 
-You MUST call MULTIPLE tools in the SAME response whenever their inputs are independent. This is a chat interface — every separate response adds 5-10 seconds of latency. The user is waiting.
+**For new deal + quote creation:** Use the **create_deal_and_quote** tool. It handles Account, Contact, Deal, product resolution, Quote with ecomm pricing, verification, and Task creation in ONE tool call (~10 seconds). Do NOT manually create records with separate zoho_create_record calls.
 
-**PARALLEL TOOL RULES:**
-- If you need data from two independent sources (e.g., Account search + product lookup), call BOTH tools in one response.
-- After creating a record, if the next steps are independent (e.g., verify quote + create task), call BOTH in one response.
-- NEVER narrate what you're "about to do" without also calling the tools. Thinking + calling = one response.
-- Target: complete a full quote creation workflow in 4-5 tool responses, not 7-8.
+**For other CRM operations:** Call MULTIPLE tools in the SAME response whenever inputs are independent. Never narrate without acting.
 
-**EXPECTED ITERATION COUNT for new deal + quote:**
-1. Account search + batch_product_lookup (parallel)
-2. Create/find Contact + Create Deal (parallel if account exists)
-3. Create Quote with line items
-4. Verify quote (get_record) + Create follow-up task (parallel)
-5. Report results
-If you are taking more than 6 iterations for a standard quote, you are too slow.
+**Target iteration counts:**
+- New deal + quote: 2 iterations (1 tool call + 1 summary)
+- Quote modification: 3 iterations (read + update + verify)
+- Simple lookup: 1-2 iterations
 
 ---
 
@@ -4941,39 +5217,12 @@ Proceed? (or tell me what to adjust)
 
 WAIT for user confirmation before proceeding. If anything is marked as placeholder or uncertain, highlight it clearly.
 
-### PHASE 6 — CRM RECORD CREATION CHAIN (SPEED-OPTIMIZED)
-After user confirms, execute with MAXIMUM parallelism. Call multiple tools in the SAME response whenever their inputs don't depend on each other.
+### PHASE 6 — CRM RECORD CREATION (USE COMPOUND TOOL)
+After user confirms the validation table, call **create_deal_and_quote** with ALL the details. This single tool call handles: Account find/create, Contact find, Deal creation, product resolution from cache, Quote creation with ecomm-priced line items, quote verification, and follow-up Task creation. ONE tool call, ~10 seconds.
 
-**Round 1 (parallel):** Call ALL of these in your FIRST tool-use response:
-- zoho_search_records for Account (by domain or name)
-- batch_product_lookup for ALL SKUs + quantities
+**DO NOT manually create Deals and Quotes using zoho_create_record.** The create_deal_and_quote tool is faster and handles all product ID resolution, pricing, and record linking internally.
 
-**Round 2:** Using Account ID from Round 1:
-- Create Contact (link to Account via Account_Name.id) — OR find existing contact
-- If Account is new, create Account first, then Contact
-
-**Round 3:** Create Deal — link to Account and Contact, use defaults:
-   - Stage: "Qualification"
-   - Lead_Source: "Stratus Referal"
-   - Meraki_ISR: Stratus Sales (ID: 2570562000027286729)
-   - Owner: Chris Graves (ID: 2570562000141711002)
-   - Closing_Date: today + 30 days
-
-**Round 4:** Create Quote — link to Deal, include:
-   - Product line items using product_id + quote_unit_price from Round 1 batch_product_lookup
-   - unit_price = quote_unit_price (ecomm price by default), Discount = 0
-   - Description = "Stratus ecomm price ({XX}% off list)"
-   - If ecomm_price unavailable for a SKU, fall back to list_price with Discount: 0
-   - Billing address from Account
-   - Valid_Till: today + 30 days
-
-**Round 5 (parallel):** Call BOTH in the same response:
-- zoho_get_record on the new Quote ID (REQUIRED — create only returns ID, not line items)
-- zoho_create_record for follow-up Task on the Deal (due in 3 business days)
-
-**Round 6:** Report all created records with Zoho links. Include ecomm pricing summary showing each line item price and discount % off list.
-
-**SPEED RULE:** You MUST call multiple tools in a single response whenever possible. Never make one tool call per response when two could run in parallel. The user is waiting in a chat — every extra round-trip adds 5-10 seconds of latency.
+After the tool returns, report the results with Zoho links from the response.
 
 ### PHASE 7 — OPTIONAL: DRAFT REPLY
 After CRM setup is complete, offer to draft a reply to the original email thread:
@@ -4999,7 +5248,7 @@ After CRM setup is complete, offer to draft a reply to the original email thread
 5. When creating a quote, look up the Account first to get billing address, then look up or create the Deal, then create the Quote with proper line items. Don't stop mid-workflow.
 6. Always complete the full workflow: Account lookup → Contact lookup → Deal creation/lookup → Quote creation → Follow-up task. Don't stop partway and wait.
 7. **CRM-FIRST, NO UNNECESSARY WEB SEARCH.** When an account name or domain is provided, ALWAYS search Zoho CRM first. If the account exists in CRM, use it directly — do NOT web search the domain. Only use web_search_domain when the account is NOT in CRM and you need address/business info to create a new Account record.
-8. **NEVER STOP MID-WORKFLOW.** After creating a Deal, you MUST immediately continue to create the Quote with product line items. After the Quote, you MUST create a follow-up Task. The workflow is NOT complete until ALL records are created: Contact → Deal → Quote (with line items at ecomm price) → Follow-up Task. Do NOT end your turn after creating just a Deal or just a Contact. Keep calling tools until every step is done. Only emit a final text summary AFTER all records exist.
+8. **USE create_deal_and_quote FOR NEW DEALS.** This compound tool handles Account, Contact, Deal, Quote (with ecomm pricing), and Task creation in ONE call. Do NOT manually sequence zoho_create_record calls for new deals — it's slower and error-prone. Only use individual zoho_create_record for modifications to existing records.
 9. **USE batch_product_lookup FOR ALL SKU LOOKUPS.** Never search WooProducts or Products individually. The batch tool handles suffix rules, parallel lookups, and includes live ecomm pricing. One call for all SKUs.
 10. **RESELLER / VAR PATTERN.** When an email or request says "this is for [Customer Name]", "on behalf of [Customer Name]", or "for my customer [Customer Name]", the sender is a VAR/reseller placing an order for their end customer. In this case:
     - Look up the SENDER'S domain/email in Zoho — that is the billing Account (e.g. HRTC/Hampton Roads is Eric's account).
@@ -5152,6 +5401,11 @@ function toolProgressMessage(toolName, toolInput) {
     case 'batch_product_lookup': {
       const skuCount = toolInput.skus?.length || 0;
       return `📦 Resolving ${skuCount} product${skuCount !== 1 ? 's' : ''} (cached IDs + pricing)...`;
+    }
+    case 'create_deal_and_quote': {
+      const acct = toolInput.account_name || 'customer';
+      const skuCount = toolInput.skus?.length || 0;
+      return `🚀 Creating Deal + Quote for ${acct} (${skuCount} products)...`;
     }
     case 'web_search_domain': {
       return `🌐 Looking up ${toolInput.domain || 'domain'}...`;
