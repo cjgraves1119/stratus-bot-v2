@@ -3961,22 +3961,15 @@ async function executeToolCall(toolName, toolInput, env) {
             return prices[suffixed] || prices[sku] || null;
           }
 
-          function addProduct(sku, qty) {
+          // Collect SKUs needing product IDs, then batch-resolve via API
+          const pendingProducts = []; // {suffixed, qty, cached} waiting for product ID
+
+          function stageProduct(sku, qty) {
             const suffixed = applySuffix(sku);
             const cached = prices[suffixed] || prices[sku] || null;
-            console.log(`[COMPOUND] addProduct: sku=${sku} suffixed=${suffixed} cached=${cached ? 'FOUND(pid:' + cached.zoho_product_id + ',ecomm:' + cached.price + ')' : 'NOT_FOUND'}`);
-            if (cached?.zoho_product_id) {
-              const ecommPrice = cached.price || null;
-              const listPrice = cached.list || null;
-              resolvedProducts.push({
-                sku: suffixed,
-                qty,
-                product_id: cached.zoho_product_id,
-                unit_price: ecommPrice || listPrice,
-                list_price: listPrice,
-                ecomm_price: ecommPrice,
-                discount_pct: listPrice && ecommPrice ? Math.round((1 - ecommPrice / listPrice) * 100) : 0
-              });
+            console.log(`[COMPOUND] stageProduct: sku=${sku} suffixed=${suffixed} hasPid=${!!cached?.zoho_product_id} hasPrice=${!!cached?.price}`);
+            if (cached) {
+              pendingProducts.push({ suffixed, qty, cached, hasPid: !!cached.zoho_product_id });
               return true;
             }
             return false;
@@ -3990,39 +3983,81 @@ async function executeToolCall(toolName, toolInput, env) {
 
             // If it's already a license SKU, just resolve it directly
             if (rawSku.startsWith('LIC-')) {
-              if (!addProduct(rawSku, qty)) {
+              if (!stageProduct(rawSku, qty)) {
                 missingProducts.push(rawSku);
               }
               continue;
             }
 
-            // It's a hardware SKU — add the hardware
-            if (!addProduct(rawSku, qty)) {
+            // It's a hardware SKU — stage the hardware
+            if (!stageProduct(rawSku, qty)) {
               missingProducts.push(rawSku);
-              continue; // can't add license if hardware not found
+              continue;
             }
 
             // Auto-add matching license using getLicenseSkus
             const licenseOptions = getLicenseSkus(rawSku);
             console.log(`[COMPOUND] getLicenseSkus(${rawSku}): ${licenseOptions ? JSON.stringify(licenseOptions[0]) : 'null'}`);
             if (licenseOptions) {
-              // Find the license matching the requested term
               const termMap = { '1': '1Y', '3': '3Y', '5': '5Y' };
               const targetTerm = termMap[defaultTerm] || '1Y';
               const licenseSku = licenseOptions.find(l => l.term === targetTerm)?.sku;
               if (licenseSku) {
-                if (!addProduct(licenseSku, qty)) {
-                  // Try alternate suffixes (YR vs Y)
+                if (!stageProduct(licenseSku, qty)) {
                   const altSku = licenseSku.endsWith('Y') && !licenseSku.endsWith('YR')
                     ? licenseSku + 'R'
                     : licenseSku.replace(/YR$/, 'Y');
-                  if (!addProduct(altSku, qty)) {
+                  if (!stageProduct(altSku, qty)) {
                     missingProducts.push(licenseSku);
                   }
                 }
               }
             }
           }
+
+          // STEP 3b: Batch-resolve product IDs for staged products
+          // Products with cached zoho_product_id are ready. Others need one API call each.
+          // Run all API lookups in parallel for speed.
+          const apiLookupPromises = pendingProducts.map(async (p) => {
+            if (p.hasPid) {
+              // Already have product ID from live KV cache
+              const ecommPrice = p.cached.price || null;
+              const listPrice = p.cached.list || null;
+              resolvedProducts.push({
+                sku: p.suffixed, qty: p.qty,
+                product_id: p.cached.zoho_product_id,
+                unit_price: ecommPrice || listPrice,
+                list_price: listPrice, ecomm_price: ecommPrice,
+                discount_pct: listPrice && ecommPrice ? Math.round((1 - ecommPrice / listPrice) * 100) : 0
+              });
+              return;
+            }
+            // Need to fetch product ID from Zoho Products API
+            console.log(`[COMPOUND] API lookup for ${p.suffixed} (no cached product ID)`);
+            try {
+              const prodResult = await zohoApiCall('GET',
+                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(p.suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`, env);
+              const match = prodResult?.data?.find(r => r.Product_Code === p.suffixed);
+              if (match) {
+                const ecommPrice = p.cached.price || null;
+                const listPrice = p.cached.list || match.Unit_Price || null;
+                resolvedProducts.push({
+                  sku: p.suffixed, qty: p.qty,
+                  product_id: match.id,
+                  unit_price: ecommPrice || listPrice,
+                  list_price: listPrice, ecomm_price: ecommPrice,
+                  discount_pct: listPrice && ecommPrice ? Math.round((1 - ecommPrice / listPrice) * 100) : 0
+                });
+              } else {
+                console.log(`[COMPOUND] API lookup returned no match for ${p.suffixed}`);
+                missingProducts.push(p.suffixed);
+              }
+            } catch (e) {
+              console.log(`[COMPOUND] API lookup error for ${p.suffixed}: ${e.message}`);
+              missingProducts.push(p.suffixed);
+            }
+          });
+          await Promise.all(apiLookupPromises);
           results.steps.push(`Resolved ${resolvedProducts.length}/${skus.length} products from cache` +
             (missingProducts.length ? ` (missing: ${missingProducts.join(', ')})` : ''));
 
