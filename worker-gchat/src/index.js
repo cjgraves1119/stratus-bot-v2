@@ -7878,13 +7878,17 @@ CRITICAL URL RULES:
                   Reason: 'Meraki ISR recommended',
                 }],
               });
-              const success = updateResp?.data?.[0]?.code === 'SUCCESS';
+              const updateRecord = updateResp?.data?.[0];
+              const success = updateRecord?.code === 'SUCCESS';
+              const zohoError = !success ? (updateRecord?.message || updateRecord?.code || JSON.stringify(updateRecord || updateResp).substring(0, 200)) : '';
+              console.log(`[ASSIGN-REP] dealId=${arDealId} repId=${finalRepId} repName=${finalRepName} success=${success} zohoError=${zohoError}`);
               apiResult = {
                 success,
                 dealId: arDealId,
                 repId: finalRepId,
                 repName: finalRepName,
-                message: success ? `Assigned ${finalRepName} to deal` : 'Update failed',
+                message: success ? `Assigned ${finalRepName} to deal` : zohoError || 'Update failed',
+                error: success ? undefined : (zohoError || 'Update failed'),
               };
             } catch (err) {
               apiResult = { success: false, error: 'Rep assignment failed: ' + err.message };
