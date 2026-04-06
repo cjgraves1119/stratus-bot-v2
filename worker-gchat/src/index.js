@@ -8305,7 +8305,7 @@ CRITICAL URL RULES:
                 const webordersPromise = (sections.includes('deals') && resolvedAcctId)
                   ? (async () => {
                       try {
-                        const coql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is null order by Created_Time desc limit 15`;
+                        const coql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is null order by Created_Time desc limit 15`;
                         const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
                         return (resp?.data || []).map(so => ({
                           id: so.id,
@@ -8313,18 +8313,58 @@ CRITICAL URL RULES:
                           soNumber: so.SO_Number || '',
                           grandTotal: so.Grand_Total || 0,
                           status: so.Status || '',
+                          poStatus: so.Client_Send_Status || '',
+                          trackingNumber: so.Disti_Tracking_Number || '',
+                          estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
+                          vendorSoNumber: so.Vendor_SO_Number || '',
                           createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
                           ownerName: so.Owner?.name || '',
-                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${so.id}`,
+                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/SalesOrders/${so.id}`,
+                        }));
+                      } catch (_) { return []; }
+                    })()
+                  : Promise.resolve([]);
+
+                // Sales Orders linked to deals (for SO details on Closed Won deals)
+                const dealSosPromise = (sections.includes('deals') && resolvedAcctId)
+                  ? (async () => {
+                      try {
+                        const coql = `select SO_Number, Deal_Name, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is not null order by Created_Time desc limit 50`;
+                        const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                        return (resp?.data || []).map(so => ({
+                          dealId: so.Deal_Name?.id || '',
+                          soNumber: so.SO_Number || '',
+                          poStatus: so.Client_Send_Status || '',
+                          trackingNumber: so.Disti_Tracking_Number || '',
+                          estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
+                          vendorSoNumber: so.Vendor_SO_Number || '',
                         }));
                       } catch (_) { return []; }
                     })()
                   : Promise.resolve([]);
 
                 // Fire all in parallel
-                const [deals, tasks, recentCompleted, quotes, weborders] = await Promise.all([
-                  dealsPromise, tasksPromise, recentCompPromise, quotesPromise, webordersPromise
+                const [deals, tasks, recentCompleted, quotes, weborders, dealSos] = await Promise.all([
+                  dealsPromise, tasksPromise, recentCompPromise, quotesPromise, webordersPromise, dealSosPromise
                 ]);
+
+                // Merge Sales Order details onto their linked deals
+                if (dealSos.length > 0) {
+                  const soByDeal = {};
+                  for (const so of dealSos) {
+                    if (so.dealId && !soByDeal[so.dealId]) soByDeal[so.dealId] = so;
+                  }
+                  for (const deal of deals) {
+                    const so = soByDeal[deal.id];
+                    if (so) {
+                      deal.soNumber = so.soNumber;
+                      deal.poStatus = so.poStatus;
+                      deal.trackingNumber = so.trackingNumber;
+                      deal.estimatedShipDate = so.estimatedShipDate;
+                      deal.vendorSoNumber = so.vendorSoNumber;
+                    }
+                  }
+                }
 
                 apiResult = { contact, account, deals, tasks, recentCompleted, quotes, weborders, found: !!(contact || account) };
               }
@@ -8534,7 +8574,7 @@ CRITICAL URL RULES:
 
                 // Also fetch weborders (Sales_Orders without a Deal linked) for this account
                 try {
-                  const woCoql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is null order by Created_Time desc limit 15`;
+                  const woCoql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is null order by Created_Time desc limit 15`;
                   const woResp = await zohoApiCall('POST', 'coql', env, { select_query: woCoql });
                   if (woResp?.data) {
                     weborders = woResp.data.map(so => ({
@@ -8543,10 +8583,39 @@ CRITICAL URL RULES:
                       soNumber: so.SO_Number || '',
                       grandTotal: so.Grand_Total || 0,
                       status: so.Status || '',
+                      poStatus: so.Client_Send_Status || '',
+                      trackingNumber: so.Disti_Tracking_Number || '',
+                      estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
+                      vendorSoNumber: so.Vendor_SO_Number || '',
                       createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
                       ownerName: so.Owner?.name || '',
-                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${so.id}`,
+                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/SalesOrders/${so.id}`,
                     }));
+                  }
+                } catch (_) {}
+
+                // Fetch Sales Orders linked to deals (for SO details on Closed Won deals)
+                try {
+                  const soCoql = `select SO_Number, Deal_Name, Client_Send_Status, Disti_Tracking_Number, Disti_Estimated_Ship_Date, Vendor_SO_Number from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is not null order by Created_Time desc limit 50`;
+                  const soResp = await zohoApiCall('POST', 'coql', env, { select_query: soCoql });
+                  if (soResp?.data) {
+                    const soByDeal = {};
+                    for (const so of soResp.data) {
+                      const dId = so.Deal_Name?.id;
+                      if (dId && !soByDeal[dId]) {
+                        soByDeal[dId] = {
+                          soNumber: so.SO_Number || '',
+                          poStatus: so.Client_Send_Status || '',
+                          trackingNumber: so.Disti_Tracking_Number || '',
+                          estimatedShipDate: so.Disti_Estimated_Ship_Date || '',
+                          vendorSoNumber: so.Vendor_SO_Number || '',
+                        };
+                      }
+                    }
+                    for (const deal of deals) {
+                      const so = soByDeal[deal.id];
+                      if (so) Object.assign(deal, so);
+                    }
                   }
                 } catch (_) {}
               }
