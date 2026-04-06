@@ -7550,81 +7550,117 @@ CRITICAL URL RULES:
               let contact = null;
               let account = null;
 
-              // PARALLEL: Search contact by email AND account by domain simultaneously
-              const contactPromise = contactEmail
-                ? zohoApiCall('GET',
-                    `Contacts/search?email=${encodeURIComponent(contactEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
-                  ).catch(() => null)
-                : Promise.resolve(null);
+              // ── Cisco rep detection: search Meraki_ISRs module instead of Contacts ──
+              const isCiscoEmail = contactEmail && contactEmail.toLowerCase().endsWith('@cisco.com');
 
-              // Strip common prefixes for starts_with matching (easyice.com matches "https://www.easyice.com")
-              const domainCore = contactDomain ? contactDomain.replace(/^(www\.)/i, '') : '';
-              const domainPromise = domainCore
-                ? zohoApiCall('GET',
-                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domainCore)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
-                  ).catch(() => null)
-                : Promise.resolve(null);
+              if (isCiscoEmail) {
+                // Search Meraki_ISRs module by email for Cisco reps
+                console.log(`[CRM-CONTACT] Cisco email detected: ${contactEmail} — searching Meraki_ISRs`);
+                const isrResp = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(contactEmail)})&fields=id,Name,Email,Title,Phone`, env
+                ).catch(() => null);
 
-              const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
+                if (isrResp?.data?.[0]) {
+                  const isr = isrResp.data[0];
+                  const nameParts = (isr.Name || '').split(' ');
+                  contact = {
+                    id: isr.id,
+                    firstName: nameParts[0] || '',
+                    lastName: nameParts.slice(1).join(' ') || '',
+                    fullName: isr.Name || '',
+                    email: isr.Email || contactEmail,
+                    phone: isr.Phone || '',
+                    mobile: '',
+                    title: isr.Title || 'Cisco Rep',
+                    accountId: null,
+                    accountName: 'Cisco Systems (Meraki ISR)',
+                    address: '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Meraki_ISRs/${isr.id}`,
+                    isCiscoRep: true,
+                  };
+                }
+                // No account lookup needed for Cisco reps
+                apiResult = { contact, account: null, found: !!contact, isCiscoRep: true };
 
-              // Process contact result
-              if (contactResp?.data?.[0]) {
-                const c = contactResp.data[0];
-                contact = {
-                  id: c.id,
-                  firstName: c.First_Name || '',
-                  lastName: c.Last_Name || '',
-                  fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
-                  email: c.Email || contactEmail,
-                  phone: c.Phone || '',
-                  mobile: c.Mobile || '',
-                  title: c.Title || '',
-                  accountId: c.Account_Name?.id || null,
-                  accountName: c.Account_Name?.name || '',
-                  address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
-                };
+              } else {
+                // Standard flow: search Contacts + Accounts in parallel
+
+                // PARALLEL: Search contact by email AND account by domain simultaneously
+                const contactPromise = contactEmail
+                  ? zohoApiCall('GET',
+                      `Contacts/search?email=${encodeURIComponent(contactEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
+                    ).catch(() => null)
+                  : Promise.resolve(null);
+
+                // Strip common prefixes for starts_with matching (easyice.com matches "https://www.easyice.com")
+                const domainCore = contactDomain ? contactDomain.replace(/^(www\.)/i, '') : '';
+                const domainPromise = domainCore
+                  ? zohoApiCall('GET',
+                      `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domainCore)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
+                    ).catch(() => null)
+                  : Promise.resolve(null);
+
+                const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
+
+                // Process contact result
+                if (contactResp?.data?.[0]) {
+                  const c = contactResp.data[0];
+                  contact = {
+                    id: c.id,
+                    firstName: c.First_Name || '',
+                    lastName: c.Last_Name || '',
+                    fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
+                    email: c.Email || contactEmail,
+                    phone: c.Phone || '',
+                    mobile: c.Mobile || '',
+                    title: c.Title || '',
+                    accountId: c.Account_Name?.id || null,
+                    accountName: c.Account_Name?.name || '',
+                    address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
+                  };
+                }
+
+                // Resolve account: prefer linked account from contact, fall back to domain search
+                const acctId = contact?.accountId;
+                if (acctId) {
+                  // Contact has linked account — fetch full details
+                  try {
+                    const acctResp = await zohoApiCall('GET',
+                      `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry`, env
+                    );
+                    if (acctResp?.data?.[0]) {
+                      const a = acctResp.data[0];
+                      account = {
+                        id: a.id,
+                        name: a.Account_Name || '',
+                        phone: a.Phone || '',
+                        website: a.Website || '',
+                        address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
+                        industry: a.Industry || '',
+                        zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                      };
+                    }
+                  } catch (_) {}
+                } else if (domainResp?.data?.[0]) {
+                  // Use the domain search result that ran in parallel
+                  const a = domainResp.data[0];
+                  account = {
+                    id: a.id,
+                    name: a.Account_Name || '',
+                    phone: a.Phone || '',
+                    website: a.Website || '',
+                    address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
+                    industry: a.Industry || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                  };
+                }
+
+                if (contact) {
+                  contact.zohoUrl = `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contact.id}`;
+                }
+
+                apiResult = { contact, account, found: !!(contact || account) };
               }
-
-              // Resolve account: prefer linked account from contact, fall back to domain search
-              const acctId = contact?.accountId;
-              if (acctId) {
-                // Contact has linked account — fetch full details
-                try {
-                  const acctResp = await zohoApiCall('GET',
-                    `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry`, env
-                  );
-                  if (acctResp?.data?.[0]) {
-                    const a = acctResp.data[0];
-                    account = {
-                      id: a.id,
-                      name: a.Account_Name || '',
-                      phone: a.Phone || '',
-                      website: a.Website || '',
-                      address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
-                      industry: a.Industry || '',
-                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
-                    };
-                  }
-                } catch (_) {}
-              } else if (domainResp?.data?.[0]) {
-                // Use the domain search result that ran in parallel
-                const a = domainResp.data[0];
-                account = {
-                  id: a.id,
-                  name: a.Account_Name || '',
-                  phone: a.Phone || '',
-                  website: a.Website || '',
-                  address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
-                  industry: a.Industry || '',
-                  zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
-                };
-              }
-
-              if (contact) {
-                contact.zohoUrl = `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contact.id}`;
-              }
-
-              apiResult = { contact, account, found: !!(contact || account) };
 
               // Cache result in KV (10-min TTL)
               if (env.GCHAT_CONVERSATION_KV && apiResult.found) {
