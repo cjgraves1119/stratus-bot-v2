@@ -3496,39 +3496,52 @@ const PICKLIST_CORRECTIONS = {
  * Validates picklist values before sending to Zoho.
  * Returns { valid: true } or { valid: false, error: 'message' }
  */
+// ── Reverse lookup: product_id → SKU (built once from static keys, used by discount correction) ──
+// Maps Zoho product IDs to their SKU strings so we can use the Proxy-based `prices[sku]`
+// accessor (which checks live KV prices first, then falls back to static prices.json).
+let _productIdToSku = null;
+function getProductIdToSkuMap() {
+  if (_productIdToSku) return _productIdToSku;
+  _productIdToSku = {};
+  // Use staticPrices (not Proxy) for key enumeration, but we'll look up via Proxy later
+  for (const [sku, data] of Object.entries(staticPrices)) {
+    if (data?.zoho_product_id) {
+      _productIdToSku[data.zoho_product_id] = sku;
+    }
+  }
+  console.log(`[DISCOUNT-FIX] Built product_id→SKU reverse map: ${Object.keys(_productIdToSku).length} entries`);
+  return _productIdToSku;
+}
+
 // ── Server-side discount correction for Quoted_Items ──
 // Prevents Claude from applying hallucinated discount percentages.
 // For each line item with a Product_Name.id, looks up the correct discount_per_unit
-// from prices.json and replaces whatever Claude set. Delete markers (_delete: null)
-// and items without Product_Name are left untouched.
+// from live KV prices (via Proxy) and replaces whatever Claude set. Delete markers
+// (_delete: null) and items without Product_Name are left untouched.
 function correctQuotedItemDiscounts(quotedItems) {
   if (!Array.isArray(quotedItems)) return;
+  const idMap = getProductIdToSkuMap();
   let corrected = 0;
   for (const item of quotedItems) {
     // Skip delete markers and modify-only items (no Product_Name = qty change only)
     if (item._delete !== undefined || !item.Product_Name?.id) continue;
     const qty = item.Quantity || 1;
-    // Find the SKU in prices.json by zoho_product_id
     const productId = item.Product_Name.id;
-    let cachedEntry = null;
-    for (const [sku, data] of Object.entries(prices)) {
-      if (data?.zoho_product_id === productId) {
-        cachedEntry = data;
-        break;
-      }
-    }
-    if (cachedEntry?.discount_per_unit) {
-      const correctDiscount = cachedEntry.discount_per_unit * qty;
-      if (item.Discount !== undefined && Math.abs(item.Discount - correctDiscount) > 1) {
-        console.log(`[DISCOUNT-FIX] Product ${productId}: Claude set Discount=${item.Discount}, correcting to ${correctDiscount} (discount_per_unit=${cachedEntry.discount_per_unit} × qty=${qty})`);
-        item.Discount = correctDiscount;
-        corrected++;
-      } else if (item.Discount === undefined) {
-        // Claude didn't set a discount at all — apply ecomm default
-        console.log(`[DISCOUNT-FIX] Product ${productId}: No Discount set, applying ecomm default ${correctDiscount}`);
-        item.Discount = correctDiscount;
-        corrected++;
-      }
+    // Reverse lookup: product_id → SKU → live price data (via Proxy: KV first, static fallback)
+    const sku = idMap[productId];
+    if (!sku) continue;
+    const liveData = prices[sku]; // Goes through Proxy → checks livePrices (KV) first
+    if (!liveData?.discount_per_unit) continue;
+    const correctDiscount = liveData.discount_per_unit * qty;
+    if (item.Discount !== undefined && Math.abs(item.Discount - correctDiscount) > 1) {
+      console.log(`[DISCOUNT-FIX] ${sku} (${productId}): Claude set Discount=${item.Discount}, correcting to ${correctDiscount} (discount_per_unit=${liveData.discount_per_unit} × qty=${qty})`);
+      item.Discount = correctDiscount;
+      corrected++;
+    } else if (item.Discount === undefined) {
+      // Claude didn't set a discount at all — apply ecomm default
+      console.log(`[DISCOUNT-FIX] ${sku} (${productId}): No Discount set, applying ecomm default ${correctDiscount}`);
+      item.Discount = correctDiscount;
+      corrected++;
     }
   }
   if (corrected > 0) {
