@@ -7983,6 +7983,256 @@ CRITICAL URL RULES:
           // All endpoints call Zoho REST API directly via zohoApiCall().
           // ══════════════════════════════════════════════════════════════
 
+          // ── CRM Full Batch: Contact + Account + Deals + Tasks + Quotes in ONE call ──
+          // Pre-fetches all CRM data for a sender so the sidebar tabs load instantly from cache.
+          // Returns { contact, account, deals, tasks, recentCompleted, quotes, found }.
+          // All Zoho queries run in parallel via Promise.all for ~1s total response time.
+          case '/api/crm-full': {
+            const { email: fullEmail, domain: fullDomain, include: fullInclude } = apiBody;
+            if (!fullEmail && !fullDomain) {
+              return new Response(JSON.stringify({ error: 'email or domain required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            // Default: include everything
+            const sections = fullInclude || ['deals', 'tasks', 'quotes'];
+
+            try {
+              // ── KV cache check (5-min TTL for full batch) ──
+              const fullCacheKey = `crm_full_${fullEmail || fullDomain}`;
+              if (env.GCHAT_CONVERSATION_KV) {
+                try {
+                  const cached = await env.GCHAT_CONVERSATION_KV.get(fullCacheKey, 'json');
+                  if (cached) {
+                    console.log(`[CRM-FULL] Cache hit for ${fullEmail || fullDomain}`);
+                    apiResult = cached;
+                    break;
+                  }
+                } catch (_) {}
+              }
+
+              // ── Phase 1: Contact + Account lookup (reuses /api/crm-contact logic) ──
+              let contact = null;
+              let account = null;
+              const isCiscoEmail = fullEmail && fullEmail.toLowerCase().endsWith('@cisco.com');
+
+              if (isCiscoEmail) {
+                const isrResp = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(fullEmail)})&fields=id,Name,Email,Title,Phone`, env
+                ).catch(() => null);
+                if (isrResp?.data?.[0]) {
+                  const isr = isrResp.data[0];
+                  const nameParts = (isr.Name || '').split(' ');
+                  contact = {
+                    id: isr.id, firstName: nameParts[0] || '', lastName: nameParts.slice(1).join(' ') || '',
+                    fullName: isr.Name || '', email: isr.Email || fullEmail, phone: isr.Phone || '',
+                    mobile: '', title: isr.Title || 'Cisco Rep', accountId: null,
+                    accountName: 'Cisco Systems (Meraki ISR)', address: '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Meraki_ISRs/${isr.id}`,
+                    isCiscoRep: true,
+                  };
+                }
+                // Cisco reps: no account/deals/tasks/quotes
+                apiResult = { contact, account: null, deals: [], tasks: [], recentCompleted: [], quotes: [], found: !!contact, isCiscoRep: true };
+              } else {
+                // Standard contact + account parallel lookup
+                const contactPromise = fullEmail
+                  ? zohoApiCall('GET',
+                      `Contacts/search?email=${encodeURIComponent(fullEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
+                    ).catch(() => null)
+                  : Promise.resolve(null);
+
+                const domainCore = fullDomain ? fullDomain.replace(/^(www\.)/i, '') : '';
+                const domainPromise = domainCore
+                  ? zohoApiCall('GET',
+                      `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domainCore)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
+                    ).catch(() => null)
+                  : Promise.resolve(null);
+
+                const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
+
+                if (contactResp?.data?.[0]) {
+                  const c = contactResp.data[0];
+                  contact = {
+                    id: c.id, firstName: c.First_Name || '', lastName: c.Last_Name || '',
+                    fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
+                    email: c.Email || fullEmail, phone: c.Phone || '', mobile: c.Mobile || '',
+                    title: c.Title || '', accountId: c.Account_Name?.id || null,
+                    accountName: c.Account_Name?.name || '',
+                    address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
+                  };
+                }
+
+                const acctId = contact?.accountId;
+                if (acctId) {
+                  try {
+                    const acctResp = await zohoApiCall('GET',
+                      `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry`, env
+                    );
+                    if (acctResp?.data?.[0]) {
+                      const a = acctResp.data[0];
+                      account = {
+                        id: a.id, name: a.Account_Name || '', phone: a.Phone || '',
+                        website: a.Website || '',
+                        address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
+                        industry: a.Industry || '',
+                        zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                      };
+                    }
+                  } catch (_) {}
+                } else if (domainResp?.data?.[0]) {
+                  const a = domainResp.data[0];
+                  account = {
+                    id: a.id, name: a.Account_Name || '', phone: a.Phone || '',
+                    website: a.Website || '',
+                    address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
+                    industry: a.Industry || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                  };
+                }
+
+                if (contact) {
+                  contact.zohoUrl = `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contact.id}`;
+                }
+
+                // ── Phase 2: Deals + Tasks + Quotes in PARALLEL ──
+                const resolvedAcctId = account?.id || null;
+                const resolvedContactId = contact?.id || null;
+                const resolvedContactEmail = contact?.email || fullEmail || '';
+
+                // Build parallel promises based on requested sections
+                const dealsPromise = (sections.includes('deals') && resolvedAcctId)
+                  ? (async () => {
+                      try {
+                        const coql = `select Deal_Name, Stage, Amount, Closing_Date, Probability, Contact_Name, Owner from Deals where Account_Name.id = '${resolvedAcctId}' order by Closing_Date desc limit 20`;
+                        const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                        return (resp?.data || []).map(d => ({
+                          id: d.id, name: d.Deal_Name || '', stage: d.Stage || '',
+                          amount: d.Amount || 0, closingDate: d.Closing_Date || '',
+                          probability: d.Probability || 0, contactName: d.Contact_Name?.name || '',
+                          ownerName: d.Owner?.name || '',
+                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Deals/${d.id}`,
+                        }));
+                      } catch (_) { return []; }
+                    })()
+                  : Promise.resolve([]);
+
+                const tasksPromise = (sections.includes('tasks') && (resolvedContactId || resolvedAcctId))
+                  ? (async () => {
+                      try {
+                        const taskFields = 'Subject, Status, Due_Date, Priority, Description, What_Id, Who_Id, Owner';
+                        const seenIds = new Set();
+                        let tasks = [];
+                        const mapT = (t) => ({
+                          id: t.id, subject: t.Subject || '(no subject)', status: t.Status || 'Not Started',
+                          dueDate: t.Due_Date || null, priority: t.Priority || 'Normal',
+                          description: t.Description ? t.Description.substring(0, 200) : '',
+                          dealId: t.What_Id?.id || null, dealName: t.What_Id?.name || null,
+                          contactId: t.Who_Id?.id || null, contactName: t.Who_Id?.name || null,
+                          ownerName: t.Owner?.name || '',
+                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+                        });
+
+                        // Contact-based tasks + deal-based tasks in parallel
+                        const contactTaskP = resolvedContactId
+                          ? zohoApiCall('POST', 'coql', env, {
+                              select_query: `select ${taskFields} from Tasks where Who_Id = '${resolvedContactId}' and Status not in ('Completed') order by Due_Date asc limit 25`
+                            }).catch(() => null)
+                          : Promise.resolve(null);
+
+                        const dealTaskP = resolvedAcctId
+                          ? (async () => {
+                              const dResp = await zohoApiCall('POST', 'coql', env, {
+                                select_query: `select id from Deals where Account_Name = '${resolvedAcctId}' and Stage not in ('Closed (Lost)') limit 50`
+                              }).catch(() => null);
+                              if (dResp?.data?.length) {
+                                const dealIds = dResp.data.map(d => `'${d.id}'`).join(',');
+                                return zohoApiCall('POST', 'coql', env, {
+                                  select_query: `select ${taskFields} from Tasks where What_Id in (${dealIds}) and Status not in ('Completed') order by Due_Date asc limit 25`
+                                }).catch(() => null);
+                              }
+                              return null;
+                            })()
+                          : Promise.resolve(null);
+
+                        const [cTaskResp, dTaskResp] = await Promise.all([contactTaskP, dealTaskP]);
+                        for (const resp of [cTaskResp, dTaskResp]) {
+                          if (resp?.data) {
+                            for (const t of resp.data) {
+                              if (!seenIds.has(t.id)) { seenIds.add(t.id); tasks.push(mapT(t)); }
+                            }
+                          }
+                        }
+                        tasks.sort((a, b) => {
+                          if (!a.dueDate) return 1; if (!b.dueDate) return -1;
+                          return a.dueDate.localeCompare(b.dueDate);
+                        });
+                        return tasks;
+                      } catch (_) { return []; }
+                    })()
+                  : Promise.resolve([]);
+
+                const recentCompPromise = (sections.includes('tasks') && (resolvedContactId || resolvedAcctId))
+                  ? (async () => {
+                      try {
+                        let coql;
+                        if (resolvedContactId) {
+                          coql = `select Subject, Status, Due_Date, Modified_Time from Tasks where Who_Id = '${resolvedContactId}' and Status = 'Completed' order by Modified_Time desc limit 5`;
+                        } else if (resolvedAcctId) {
+                          const dResp = await zohoApiCall('POST', 'coql', env, {
+                            select_query: `select id from Deals where Account_Name = '${resolvedAcctId}' limit 50`
+                          }).catch(() => null);
+                          if (dResp?.data?.length) {
+                            const ids = dResp.data.map(d => `'${d.id}'`).join(',');
+                            coql = `select Subject, Status, Due_Date, Modified_Time from Tasks where What_Id in (${ids}) and Status = 'Completed' order by Modified_Time desc limit 5`;
+                          }
+                        }
+                        if (!coql) return [];
+                        const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                        return (resp?.data || []).map(t => ({
+                          id: t.id, subject: t.Subject || '', completedDate: t.Modified_Time ? t.Modified_Time.split('T')[0] : '',
+                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+                        }));
+                      } catch (_) { return []; }
+                    })()
+                  : Promise.resolve([]);
+
+                const quotesPromise = (sections.includes('quotes') && resolvedAcctId)
+                  ? (async () => {
+                      try {
+                        const coql = `select Subject, Quote_Number, Grand_Total, Stage, Valid_Till, Deal_Name, Created_Time from Quotes where Account_Name.id = '${resolvedAcctId}' order by Created_Time desc limit 15`;
+                        const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                        return (resp?.data || []).map(q => ({
+                          id: q.id, subject: q.Subject || '', quoteNumber: q.Quote_Number || '',
+                          grandTotal: q.Grand_Total || 0, stage: q.Stage || '',
+                          validTill: q.Valid_Till || '', dealName: q.Deal_Name?.name || '',
+                          createdTime: q.Created_Time ? q.Created_Time.split('T')[0] : '',
+                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
+                        }));
+                      } catch (_) { return []; }
+                    })()
+                  : Promise.resolve([]);
+
+                // Fire all in parallel
+                const [deals, tasks, recentCompleted, quotes] = await Promise.all([
+                  dealsPromise, tasksPromise, recentCompPromise, quotesPromise
+                ]);
+
+                apiResult = { contact, account, deals, tasks, recentCompleted, quotes, found: !!(contact || account) };
+              }
+
+              // Cache in KV (5-min TTL)
+              if (env.GCHAT_CONVERSATION_KV && apiResult.found) {
+                ctx.waitUntil(
+                  env.GCHAT_CONVERSATION_KV.put(fullCacheKey, JSON.stringify(apiResult), { expirationTtl: 300 })
+                    .catch(() => {})
+                );
+              }
+            } catch (err) {
+              apiResult = { error: 'CRM full lookup failed: ' + err.message, contact: null, account: null, deals: [], tasks: [], recentCompleted: [], quotes: [], found: false };
+            }
+            break;
+          }
+
           // ── CRM Contact Lookup: Find contact + account by email/domain ──
           // Optimized: parallel Zoho calls + server-side KV cache (10-min TTL)
           case '/api/crm-contact': {
