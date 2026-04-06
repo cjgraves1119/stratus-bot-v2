@@ -10490,31 +10490,26 @@ CRITICAL URL RULES:
       }
 
       // ═══════════════════════════════════════════════════════════════════
-      // PHASE 6: Webex notification (if new SKUs detected)
+      // PHASE 6: Google Chat notification (if new SKUs detected)
       // ═══════════════════════════════════════════════════════════════════
-      if (newSkus.length > 0 && env.WEBEX_BOT_TOKEN) {
+      if (newSkus.length > 0 && env.GCP_SERVICE_ACCOUNT_KEY) {
         try {
-          const skuListStr = newSkus.map(s => `- \`${s.sku}\` ($${s.price})`).join('\n');
-          const markdown = `**🆕 New WooProducts SKUs Detected**\n\n` +
-            `Found **${newSkus.length}** SKU(s) in WooProducts not in prices.json:\n\n` +
+          const skuListStr = newSkus.map(s => `• ${s.sku} ($${s.price})`).join('\n');
+          const text = `🆕 New WooProducts SKUs Detected\n\n` +
+            `Found ${newSkus.length} SKU(s) in WooProducts not in prices.json:\n\n` +
             `${skuListStr}\n\n` +
-            `Run the **bot-price-refresh** skill to add them.`;
+            `Run the bot-price-refresh skill to add them.`;
 
-          // Send to Chris's DM room with the bot
-          await fetch('https://webexapis.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${env.WEBEX_BOT_TOKEN}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              roomId: 'Y2lzY29zcGFyazovL3VzL1JPT00vYTNmMTllOTAtMjNjMC0xMWYxLWI5MmMtZDEwOTQxNGE1YTBh',
-              markdown
-            })
-          });
-          console.log(`[PRICE-CRON] Phase 6: Webex notification sent — ${newSkus.length} new SKUs`);
+          // Look up Chris's DM space from KV (auto-registered on first DM)
+          const chrisDmSpace = await kv.get('gchat_dm_space:chrisg@stratusinfosystems.com');
+          if (chrisDmSpace) {
+            await sendAsyncGChatMessage(chrisDmSpace, text, null, env);
+            console.log(`[PRICE-CRON] Phase 6: Google Chat notification sent to ${chrisDmSpace} — ${newSkus.length} new SKUs`);
+          } else {
+            console.log(`[PRICE-CRON] Phase 6: No DM space cached for Chris — skipping notification. DM the bot once to register.`);
+          }
         } catch (err) {
-          console.error(`[PRICE-CRON] Phase 6 Webex error: ${err.message}`);
+          console.error(`[PRICE-CRON] Phase 6 GChat notification error: ${err.message}`);
         }
       }
 
