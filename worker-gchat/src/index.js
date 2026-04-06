@@ -7761,7 +7761,7 @@ CRITICAL URL RULES:
               subject: q.Subject || '',
               quoteNumber: q.Quote_Number || '',
               grandTotal: q.Grand_Total || 0,
-              stage: q.Stage || '',
+              stage: q.Quote_Stage || q.Stage || '',
               ccwDealNumber: q.CCW_Deal_Number || '',
               dealId: q.Deal_Name?.id || '',
               dealName: q.Deal_Name?.name || '',
@@ -7776,7 +7776,7 @@ CRITICAL URL RULES:
 
               // Primary: search by CCW Deal Number
               if (ccwDealNumber) {
-                const coql = `select id, Subject, Quote_Number, Grand_Total, Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where CCW_Deal_Number = '${ccwDealNumber}' limit 1`;
+                const coql = `select id, Subject, Quote_Number, Grand_Total, Quote_Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where CCW_Deal_Number = '${ccwDealNumber}' limit 1`;
                 const qResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
                 if (qResp?.data && qResp.data.length > 0) {
                   apiResult = { found: true, matchMethod: 'ccw', quote: mapQuote(qResp.data[0]) };
@@ -7786,7 +7786,6 @@ CRITICAL URL RULES:
 
               // Fallback: search by Deal Name (fuzzy match on Quote Subject)
               if (!found && dealName) {
-                // Strip numbers, common deal descriptors, and punctuation to isolate company name
                 const DEAL_DESCRIPTORS = /\b(license|renewal|renewed|updated|update|upgrade|refresh|hardware|software|year|yr|month|mo|addon|add-on|modification|mod|replacement|subscription|sub|setup|install|installation|migration|expansion|new|existing|current|pricing|quote|deal|ecomm)\b/gi;
                 const cleanName = dealName
                   .replace(/\d+/g, '')
@@ -7794,16 +7793,12 @@ CRITICAL URL RULES:
                   .replace(/[-–—()]/g, ' ')
                   .replace(/\s+/g, ' ')
                   .trim();
-                // Get distinctive words (2+ chars) — these are likely the company name
                 const words = cleanName.split(/\s+/).filter(w => w.length >= 2);
-                // Search with each word separately via COQL: Subject like '%word1%' and Subject like '%word2%'
-                // Use up to 3 distinctive words for precision without over-filtering
                 const searchWords = words.slice(0, 3);
 
                 if (searchWords.length > 0) {
                   const likeClause = searchWords.map(w => `Subject like '%${w}%'`).join(' and ');
-                  const ownerFilter = `Owner.id = '2570562000141711002'`;
-                  const coql2 = `select id, Subject, Quote_Number, Grand_Total, Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where ${likeClause} and ${ownerFilter} order by Created_Time desc limit 5`;
+                  const coql2 = `select id, Subject, Quote_Number, Grand_Total, Quote_Stage, CCW_Deal_Number, Deal_Name, Account_Name from Quotes where ${likeClause} order by Created_Time desc limit 5`;
                   const qResp2 = await zohoApiCall('POST', 'coql', env, { select_query: coql2 });
                   if (qResp2?.data && qResp2.data.length > 0) {
                     apiResult = {
