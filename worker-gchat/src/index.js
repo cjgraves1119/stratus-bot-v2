@@ -1125,6 +1125,11 @@ async function handleQuoteConfirmation(text, personId, kv) {
   if (lastAssistant.includes('stratusinfosystems.com/order/')) return null;
   // If the last message was offering a datasheet check, don't intercept — let askClaude handle it
   if (/datasheet|check for updates/i.test(lastAssistant)) return null;
+  // CRITICAL: If the last assistant message is from a CRM workflow (contains Zoho URLs,
+  // mentions ecomm/discount, or references Zoho/CRM), NEVER intercept — let the CRM agent
+  // handle the follow-up. Without this, "yes" after a CRM quote creation gets hijacked
+  // into URL quotes because the assistant message mentions SKUs + "Would you like".
+  if (/crm\.zoho\.com|ecomm|discount|zoho|crm\b|deal\s*id|velocity\s*hub/i.test(lastAssistant)) return null;
   if (!/quote|would you like|pricing/i.test(lastAssistant)) return null;
 
   // Extract SKUs from the assistant's response — look for bold product names or SKU patterns
@@ -3832,13 +3837,16 @@ async function executeToolCall(toolName, toolInput, env) {
           // If prices.json has zoho_product_id, skip the API call entirely
           if (cachedPrice?.zoho_product_id) {
             cacheHits++;
+            const ecommPrice = cachedPrice.price || null;
+            const listPrice = cachedPrice.list || null;
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
               product_id: cachedPrice.zoho_product_id,
               product_name: suffixed,
-              list_price: cachedPrice.list || null,
-              ecomm_price: cachedPrice.price || null,
+              list_price: listPrice,
+              ecomm_price: ecommPrice,
+              quote_unit_price: ecommPrice || listPrice,
               discount_pct: cachedPrice.discount || null,
               found: true
             };
@@ -3853,13 +3861,16 @@ async function executeToolCall(toolName, toolInput, env) {
             );
             const records = prodResult?.data || [];
             const match = records.find(r => r.Product_Code === suffixed);
+            const _ecommPrice = cachedPrice?.price || null;
+            const _listPrice = cachedPrice?.list || match?.Unit_Price || null;
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
               product_id: match?.id || null,
               product_name: match?.Product_Name || suffixed,
-              list_price: cachedPrice?.list || match?.Unit_Price || null,
-              ecomm_price: cachedPrice?.price || null,
+              list_price: _listPrice,
+              ecomm_price: _ecommPrice,
+              quote_unit_price: _ecommPrice || _listPrice,
               discount_pct: cachedPrice?.discount || null,
               found: !!match
             };
@@ -3869,7 +3880,14 @@ async function executeToolCall(toolName, toolInput, env) {
         });
         await Promise.all(lookupPromises);
         console.log(`[BATCH-LOOKUP] ${cacheHits} cache hits, ${apiLookups} API lookups for ${skus.length} SKUs`);
-        return { success: true, products: batchResults, count: Object.keys(batchResults).length, cacheHits, apiLookups };
+        return {
+          success: true,
+          products: batchResults,
+          count: Object.keys(batchResults).length,
+          cacheHits,
+          apiLookups,
+          pricing_instruction: 'USE quote_unit_price for Quoted_Items unit_price. This is the Stratus ecomm price (default). Only use list_price if user explicitly requested list pricing.'
+        };
       }
 
       // ── Web Enrichment Tools ──
@@ -4170,7 +4188,7 @@ const CRM_EMAIL_TOOLS = [
   // Batch Product Lookup (parallel, with KV pricing)
   {
     name: 'batch_product_lookup',
-    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price for each SKU. Use this for ALL product lookups — never search Products/WooProducts individually.',
+    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU. IMPORTANT: Use quote_unit_price (ecomm price) for Quoted_Items.unit_price when creating quotes — this is the Stratus default. Use this for ALL product lookups — never search Products/WooProducts individually.',
     input_schema: {
       type: 'object',
       properties: {
@@ -4661,7 +4679,7 @@ HARD RULES — violating ANY of these causes a timeout and the user gets no resp
 - Make ONLY ONE zoho_search_records call, then immediately report the results (or proceed to update)
 - If the first search returns 0 results, only then try ONE alternative company name spelling
 
-**GENERAL SPEED RULE (ALL CRM REQUESTS):** You have at most 25 seconds total. Each Zoho API call costs ~2-3s. Each of your responses costs ~5-10s. Budget: 2 of your responses + 1-2 Zoho calls MAX. If your plan requires more than 2 Zoho calls, simplify it — skip non-essential lookups, use contains searches, and go directly to the module you need.
+**GENERAL SPEED RULE (ALL CRM REQUESTS):** Each Zoho API call costs ~2-3s. Each of your responses costs ~5-10s. ALWAYS call multiple tools in the SAME response when their inputs are independent. Example: searching for an Account and looking up product prices can run in parallel. Similarly, fetching a quote record and creating a task can run in parallel. Never serialize calls that don't depend on each other. Budget thinking time, not tool calls — parallel tool calls are nearly free.
 
 ---
 
@@ -4903,25 +4921,39 @@ Proceed? (or tell me what to adjust)
 
 WAIT for user confirmation before proceeding. If anything is marked as placeholder or uncertain, highlight it clearly.
 
-### PHASE 6 — CRM RECORD CREATION CHAIN
-After user confirms, execute in this exact order:
-1. Create Account (if new) — include name, address, phone, website
-2. Create Contact — link to Account via Account_Name.id
-3. Create Deal — link to Account and Contact, use defaults:
+### PHASE 6 — CRM RECORD CREATION CHAIN (SPEED-OPTIMIZED)
+After user confirms, execute with MAXIMUM parallelism. Call multiple tools in the SAME response whenever their inputs don't depend on each other.
+
+**Round 1 (parallel):** Call ALL of these in your FIRST tool-use response:
+- zoho_search_records for Account (by domain or name)
+- batch_product_lookup for ALL SKUs + quantities
+
+**Round 2:** Using Account ID from Round 1:
+- Create Contact (link to Account via Account_Name.id) — OR find existing contact
+- If Account is new, create Account first, then Contact
+
+**Round 3:** Create Deal — link to Account and Contact, use defaults:
    - Stage: "Qualification"
    - Lead_Source: "Stratus Referal"
    - Meraki_ISR: Stratus Sales (ID: 2570562000027286729)
    - Owner: Chris Graves (ID: 2570562000141711002)
    - Closing_Date: today + 30 days
-4. Create Quote — link to Deal, include:
-   - Use batch_product_lookup to get all product IDs + prices in one call
-   - Product line items at ECOMM PRICE by default (use ecomm_price from batch_product_lookup, Description = "Stratus ecomm price ({XX}% off list)")
+
+**Round 4:** Create Quote — link to Deal, include:
+   - Product line items using product_id + quote_unit_price from Round 1 batch_product_lookup
+   - unit_price = quote_unit_price (ecomm price by default), Discount = 0
+   - Description = "Stratus ecomm price ({XX}% off list)"
    - If ecomm_price unavailable for a SKU, fall back to list_price with Discount: 0
    - Billing address from Account
    - Valid_Till: today + 30 days
-5. **IMMEDIATELY after creating the quote**, call zoho_get_record on the new Quote ID to fetch the full record with Quoted_Items. This is REQUIRED — the create response only returns the ID, not the full record. The get_record response is what enables follow-up operations (license swaps, etc.).
-6. Create follow-up Task on the Deal — due in 3 business days
-7. Report all created records with Zoho links (use data from the get_record in step 5). Include ecomm pricing summary showing each line item price and discount % off list.
+
+**Round 5 (parallel):** Call BOTH in the same response:
+- zoho_get_record on the new Quote ID (REQUIRED — create only returns ID, not line items)
+- zoho_create_record for follow-up Task on the Deal (due in 3 business days)
+
+**Round 6:** Report all created records with Zoho links. Include ecomm pricing summary showing each line item price and discount % off list.
+
+**SPEED RULE:** You MUST call multiple tools in a single response whenever possible. Never make one tool call per response when two could run in parallel. The user is waiting in a chat — every extra round-trip adds 5-10 seconds of latency.
 
 ### PHASE 7 — OPTIONAL: DRAFT REPLY
 After CRM setup is complete, offer to draft a reply to the original email thread:
