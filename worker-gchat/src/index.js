@@ -8121,7 +8121,7 @@ CRITICAL URL RULES:
                   };
                 }
                 // Cisco reps: no account/deals/tasks/quotes
-                apiResult = { contact, account: null, deals: [], tasks: [], recentCompleted: [], quotes: [], found: !!contact, isCiscoRep: true };
+                apiResult = { contact, account: null, deals: [], tasks: [], recentCompleted: [], quotes: [], weborders: [], found: !!contact, isCiscoRep: true };
               } else {
                 // Standard contact + account parallel lookup
                 const contactPromise = fullEmail
@@ -8301,12 +8301,32 @@ CRITICAL URL RULES:
                     })()
                   : Promise.resolve([]);
 
+                // Weborders: Sales_Orders linked to this account that have NO deal associated
+                const webordersPromise = (sections.includes('deals') && resolvedAcctId)
+                  ? (async () => {
+                      try {
+                        const coql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner from Sales_Orders where Account_Name.id = '${resolvedAcctId}' and Deal_Name is null order by Created_Time desc limit 15`;
+                        const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+                        return (resp?.data || []).map(so => ({
+                          id: so.id,
+                          subject: so.Subject || '',
+                          soNumber: so.SO_Number || '',
+                          grandTotal: so.Grand_Total || 0,
+                          status: so.Status || '',
+                          createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
+                          ownerName: so.Owner?.name || '',
+                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${so.id}`,
+                        }));
+                      } catch (_) { return []; }
+                    })()
+                  : Promise.resolve([]);
+
                 // Fire all in parallel
-                const [deals, tasks, recentCompleted, quotes] = await Promise.all([
-                  dealsPromise, tasksPromise, recentCompPromise, quotesPromise
+                const [deals, tasks, recentCompleted, quotes, weborders] = await Promise.all([
+                  dealsPromise, tasksPromise, recentCompPromise, quotesPromise, webordersPromise
                 ]);
 
-                apiResult = { contact, account, deals, tasks, recentCompleted, quotes, found: !!(contact || account) };
+                apiResult = { contact, account, deals, tasks, recentCompleted, quotes, weborders, found: !!(contact || account) };
               }
 
               // Cache in KV (5-min TTL)
@@ -8317,7 +8337,7 @@ CRITICAL URL RULES:
                 );
               }
             } catch (err) {
-              apiResult = { error: 'CRM full lookup failed: ' + err.message, contact: null, account: null, deals: [], tasks: [], recentCompleted: [], quotes: [], found: false };
+              apiResult = { error: 'CRM full lookup failed: ' + err.message, contact: null, account: null, deals: [], tasks: [], recentCompleted: [], quotes: [], weborders: [], found: false };
             }
             break;
           }
@@ -8481,6 +8501,7 @@ CRITICAL URL RULES:
 
             try {
               let deals = [];
+              let weborders = [];
               let targetAccountId = dealsAcctId;
 
               // If no accountId, look it up from contact email
@@ -8510,11 +8531,29 @@ CRITICAL URL RULES:
                     zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Deals/${d.id}`,
                   }));
                 }
+
+                // Also fetch weborders (Sales_Orders without a Deal linked) for this account
+                try {
+                  const woCoql = `select Subject, SO_Number, Grand_Total, Status, Created_Time, Deal_Name, Owner from Sales_Orders where Account_Name.id = '${targetAccountId}' and Deal_Name is null order by Created_Time desc limit 15`;
+                  const woResp = await zohoApiCall('POST', 'coql', env, { select_query: woCoql });
+                  if (woResp?.data) {
+                    weborders = woResp.data.map(so => ({
+                      id: so.id,
+                      subject: so.Subject || '',
+                      soNumber: so.SO_Number || '',
+                      grandTotal: so.Grand_Total || 0,
+                      status: so.Status || '',
+                      createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
+                      ownerName: so.Owner?.name || '',
+                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${so.id}`,
+                    }));
+                  }
+                } catch (_) {}
               }
 
-              apiResult = { deals, accountId: targetAccountId || null };
+              apiResult = { deals, weborders, accountId: targetAccountId || null };
             } catch (err) {
-              apiResult = { error: 'Deals lookup failed: ' + err.message, deals: [] };
+              apiResult = { error: 'Deals lookup failed: ' + err.message, deals: [], weborders: [] };
             }
             break;
           }
