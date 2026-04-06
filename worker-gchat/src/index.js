@@ -4457,6 +4457,26 @@ function detectCrmEmailIntent(text) {
 // ─── CRM System Prompt Extension ─────────────────────────────────────────────
 const CRM_SYSTEM_PROMPT = `
 
+## SPEED CRITICAL — READ THIS FIRST
+
+You MUST call MULTIPLE tools in the SAME response whenever their inputs are independent. This is a chat interface — every separate response adds 5-10 seconds of latency. The user is waiting.
+
+**PARALLEL TOOL RULES:**
+- If you need data from two independent sources (e.g., Account search + product lookup), call BOTH tools in one response.
+- After creating a record, if the next steps are independent (e.g., verify quote + create task), call BOTH in one response.
+- NEVER narrate what you're "about to do" without also calling the tools. Thinking + calling = one response.
+- Target: complete a full quote creation workflow in 4-5 tool responses, not 7-8.
+
+**EXPECTED ITERATION COUNT for new deal + quote:**
+1. Account search + batch_product_lookup (parallel)
+2. Create/find Contact + Create Deal (parallel if account exists)
+3. Create Quote with line items
+4. Verify quote (get_record) + Create follow-up task (parallel)
+5. Report results
+If you are taking more than 6 iterations for a standard quote, you are too slow.
+
+---
+
 ## CRM & EMAIL ASSISTANT MODE
 
 You now have access to Zoho CRM and Gmail tools. Use them to help with CRM and email tasks.
@@ -5220,14 +5240,21 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
       : 'claude-sonnet-4-20250514';
     console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
-    // CRM continuation: 4096 max tokens — prevent truncated responses being saved as complete history
+    // Dynamic max_tokens: 2048 for most iterations, 1024 for pure exec (Haiku dispatch)
+    const contMaxTok = _isPureExec ? 1024 : 2048;
     const requestBody = {
       model: contModel,
-      max_tokens: 4096,
+      max_tokens: contMaxTok,
       system: systemPrompt,
       messages
     };
-    if (tools.length > 0) requestBody.tools = tools;
+    if (tools.length > 0) {
+      requestBody.tools = tools;
+      // Force tool use for early continuation iterations
+      if (iteration <= 4) {
+        requestBody.tool_choice = { type: 'any' };
+      }
+    }
 
     const response = await callAnthropicWithRetry(requestBody);
     if (!response || !response.ok) {
@@ -5535,10 +5562,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
 
-      // Always use 4096 tokens for CRM tool-use — quote/task creation requires full reasoning
-      // at every iteration. 2048 was used for Haiku exec steps but caused truncated responses.
-      // send_email Haiku steps still get 4096 (small overhead, avoids truncation).
-      const maxTok = 4096;
+      // Dynamic max_tokens for speed:
+      // - Iteration 1: 4096 (needs room for initial planning + first tool calls)
+      // - Iteration 2+: 2048 (tool results + next tool calls, no need for verbose narration)
+      // - Haiku exec steps: 1024 (just dispatching update/send, minimal reasoning)
+      const maxTok = _inPureExecMode ? 1024 : (iteration <= 1 ? 4096 : 2048);
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
@@ -5547,6 +5575,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       };
       if (tools.length > 0) {
         requestBody.tools = tools;
+        // Force tool use for iterations 1-2 to prevent Claude from narrating
+        // without acting. After iteration 2, let Claude decide (it may want
+        // to emit a final text summary with stop_reason=end_turn).
+        if (useTools && iteration <= 2) {
+          requestBody.tool_choice = { type: 'any' };
+        }
       }
 
       const response = await callAnthropicWithRetry(requestBody);
