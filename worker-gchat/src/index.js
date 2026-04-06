@@ -3964,6 +3964,7 @@ async function executeToolCall(toolName, toolInput, env) {
           function addProduct(sku, qty) {
             const suffixed = applySuffix(sku);
             const cached = prices[suffixed] || prices[sku] || null;
+            console.log(`[COMPOUND] addProduct: sku=${sku} suffixed=${suffixed} cached=${cached ? 'FOUND(pid:' + cached.zoho_product_id + ',ecomm:' + cached.price + ')' : 'NOT_FOUND'}`);
             if (cached?.zoho_product_id) {
               const ecommPrice = cached.price || null;
               const listPrice = cached.list || null;
@@ -3981,9 +3982,11 @@ async function executeToolCall(toolName, toolInput, env) {
             return false;
           }
 
+          console.log(`[COMPOUND] Input SKUs: ${JSON.stringify(skus)}`);
           for (const entry of skus) {
             const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
             const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
+            console.log(`[COMPOUND] Processing: rawSku=${rawSku} qty=${qty} isLicense=${rawSku.startsWith('LIC-')}`);
 
             // If it's already a license SKU, just resolve it directly
             if (rawSku.startsWith('LIC-')) {
@@ -4001,6 +4004,7 @@ async function executeToolCall(toolName, toolInput, env) {
 
             // Auto-add matching license using getLicenseSkus
             const licenseOptions = getLicenseSkus(rawSku);
+            console.log(`[COMPOUND] getLicenseSkus(${rawSku}): ${licenseOptions ? JSON.stringify(licenseOptions[0]) : 'null'}`);
             if (licenseOptions) {
               // Find the license matching the requested term
               const termMap = { '1': '1Y', '3': '3Y', '5': '5Y' };
