@@ -3837,19 +3837,15 @@ async function executeToolCall(toolName, toolInput, env) {
           // If prices.json has zoho_product_id, skip the API call entirely
           if (cachedPrice?.zoho_product_id) {
             cacheHits++;
-            const ecommPrice = cachedPrice.price || null;
-            const listPrice = cachedPrice.list || null;
-            const discountPerUnit = listPrice && ecommPrice ? Math.round((listPrice - ecommPrice) * 100) / 100 : 0;
-            const discountPct = listPrice && ecommPrice ? Math.round((1 - ecommPrice / listPrice) * 100) : 0;
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
               product_id: cachedPrice.zoho_product_id,
               product_name: suffixed,
-              list_price: listPrice,
-              ecomm_price: ecommPrice,
-              discount_per_unit: discountPerUnit,
-              discount_pct: discountPct,
+              list_price: cachedPrice.list || null,
+              ecomm_price: cachedPrice.price || null,
+              discount_per_unit: cachedPrice.discount_per_unit || 0,
+              discount_pct: cachedPrice.discount_pct || 0,
               found: true
             };
             return;
@@ -3863,19 +3859,15 @@ async function executeToolCall(toolName, toolInput, env) {
             );
             const records = prodResult?.data || [];
             const match = records.find(r => r.Product_Code === suffixed);
-            const _ecommPrice = cachedPrice?.price || null;
-            const _listPrice = cachedPrice?.list || match?.Unit_Price || null;
-            const _discountPerUnit = _listPrice && _ecommPrice ? Math.round((_listPrice - _ecommPrice) * 100) / 100 : 0;
-            const _discountPct = _listPrice && _ecommPrice ? Math.round((1 - _ecommPrice / _listPrice) * 100) : 0;
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
               product_id: match?.id || null,
               product_name: match?.Product_Name || suffixed,
-              list_price: _listPrice,
-              ecomm_price: _ecommPrice,
-              discount_per_unit: _discountPerUnit,
-              discount_pct: _discountPct,
+              list_price: cachedPrice?.list || match?.Unit_Price || null,
+              ecomm_price: cachedPrice?.price || null,
+              discount_per_unit: cachedPrice?.discount_per_unit || 0,
+              discount_pct: cachedPrice?.discount_pct || 0,
               found: !!match
             };
           } catch (e) {
@@ -4044,12 +4036,14 @@ async function executeToolCall(toolName, toolInput, env) {
           // Run all API lookups in parallel for speed.
           const apiLookupPromises = pendingProducts.map(async (p) => {
             if (p.hasPid) {
-              // Already have product ID from live KV cache
+              // Already have product ID from live KV cache — use precalculated discount fields
               resolvedProducts.push({
                 sku: p.suffixed, qty: p.qty,
                 product_id: p.cached.zoho_product_id,
                 list_price: p.cached.list || null,
-                ecomm_price: p.cached.price || null
+                ecomm_price: p.cached.price || null,
+                discount_per_unit: p.cached.discount_per_unit || 0,
+                discount_pct: p.cached.discount_pct || 0
               });
               return;
             }
@@ -4064,7 +4058,9 @@ async function executeToolCall(toolName, toolInput, env) {
                   sku: p.suffixed, qty: p.qty,
                   product_id: match.id,
                   list_price: p.cached.list || match.Unit_Price || null,
-                  ecomm_price: p.cached.price || null
+                  ecomm_price: p.cached.price || null,
+                  discount_per_unit: p.cached.discount_per_unit || 0,
+                  discount_pct: p.cached.discount_pct || 0
                 });
               } else {
                 console.log(`[COMPOUND] API lookup returned no match for ${p.suffixed}`);
@@ -4161,17 +4157,13 @@ async function executeToolCall(toolName, toolInput, env) {
           };
           const validTill = closingDate;
           const quotedItems = resolvedProducts.map(p => {
-            const listPrice = p.list_price || 0;
-            const ecommPrice = p.ecomm_price || 0;
-            const discountPerUnit = listPrice > 0 && ecommPrice > 0 ? listPrice - ecommPrice : 0;
-            const discountTotal = Math.round(discountPerUnit * p.qty * 100) / 100;
-            const discountPct = listPrice > 0 ? Math.round((discountPerUnit / listPrice) * 100) : 0;
+            const discountTotal = Math.round((p.discount_per_unit || 0) * p.qty * 100) / 100;
             return {
               Product_Name: { id: p.product_id },
               Quantity: p.qty,
               Discount: discountTotal,
               Description: discountTotal > 0
-                ? `Stratus price $${ecommPrice}/unit (${discountPct}% off list)`
+                ? `Stratus price $${p.ecomm_price}/unit (${p.discount_pct}% off list)`
                 : 'List price'
             };
           });
@@ -4255,10 +4247,9 @@ async function executeToolCall(toolName, toolInput, env) {
 
           results.success = true;
           results.wall_ms = Date.now() - _startMs;
-          results.pricing_summary = resolvedProducts.map(p => {
-            const discPct = p.list_price && p.ecomm_price ? Math.round((1 - p.ecomm_price / p.list_price) * 100) : 0;
-            return `${p.sku} x${p.qty}: list $${p.list_price}, ecomm $${p.ecomm_price} (${discPct}% off)`;
-          });
+          results.pricing_summary = resolvedProducts.map(p =>
+            `${p.sku} x${p.qty}: list $${p.list_price}, ecomm $${p.ecomm_price} (${p.discount_pct}% off, $${p.discount_per_unit}/unit discount)`
+          );
           if (missingProducts.length > 0) {
             results.missing_products = missingProducts;
             results.note = 'Some products were not found. Mention this to the user but do NOT attempt to fix it with additional tool calls.';
