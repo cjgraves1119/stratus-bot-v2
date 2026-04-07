@@ -134,12 +134,17 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   useEffect(() => {
     if (!data?.contact) return;
     const email = data.contact.email || '';
-    const isCiscoRep = email.includes('@cisco.com') || data.contact.merakiTeam || data.contact.vertical;
+    const isCiscoRep = email.includes('@cisco.com') || safeStr(data.contact.merakiTeam) || safeStr(data.contact.vertical);
     if (isCiscoRep) {
       sendToBackground(MSG.CRM_ISR_DEALS, {
         repEmail: email,
         repName: data.contact.name || `${data.contact.firstName || ''} ${data.contact.lastName || ''}`.trim(),
-      }).then(setIsrDeals).catch(() => setIsrDeals(null));
+      }).then(result => {
+        setIsrDeals(result || { deals: [], found: false });
+      }).catch(err => {
+        console.error('[Stratus AI] ISR deals fetch failed:', err);
+        setIsrDeals({ deals: [], found: false, error: err.message });
+      });
     } else {
       setIsrDeals(null);
     }
@@ -762,6 +767,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 {isCiscoRep && !isrDeals && !loading && (
                   <div style={{ marginTop: 8, fontSize: 12, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
                     Loading ISR deals...
+                  </div>
+                )}
+                {isCiscoRep && isrDeals?.error && (
+                  <div style={{ marginTop: 8, fontSize: 11, color: COLORS.ERROR }}>
+                    ISR deals failed: {isrDeals.error}
                   </div>
                 )}
               </Card>
