@@ -35,13 +35,22 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   const [showAddForm, setShowAddForm] = useState(false);
   const [addFormData, setAddFormData] = useState({ firstName: '', lastName: '', email: '', phone: '', title: '' });
   const [addFormAccountId, setAddFormAccountId] = useState('');
+  const [addFormAccountName, setAddFormAccountName] = useState(''); // display name for selected account
   const [addFormLoading, setAddFormLoading] = useState(false);
   const [addFormError, setAddFormError] = useState(null);
   const [addFormSuccess, setAddFormSuccess] = useState(null);
   const [accountSearchQuery, setAccountSearchQuery] = useState('');
   const [accountSearchResults, setAccountSearchResults] = useState([]);
   const [accountSearchLoading, setAccountSearchLoading] = useState(false);
+  const [domainSuggestions, setDomainSuggestions] = useState([]);
+  const [domainSuggestionsLoading, setDomainSuggestionsLoading] = useState(false);
   const accountSearchTimer = useRef(null);
+
+  // Create Account sub-form state (shown inside Add Contact form)
+  const [showCreateAccount, setShowCreateAccount] = useState(false);
+  const [newAccountData, setNewAccountData] = useState({ name: '', street: '', city: '', state: '', zip: '', website: '' });
+  const [createAccountLoading, setCreateAccountLoading] = useState(false);
+  const [createAccountError, setCreateAccountError] = useState(null);
 
   // Task action state
   const [taskActionLoading, setTaskActionLoading] = useState(null);
@@ -317,21 +326,52 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   function openAddForm() {
     const contact = externalContacts.find(c => c.email?.toLowerCase() === selectedContact?.toLowerCase());
     const nameParts = (contact?.name || '').split(' ');
-    const domain = (selectedContact || '').split('@')[1] || '';
+    const emailForForm = selectedContact || '';
+    const domain = emailForForm.split('@')[1] || '';
+
     setAddFormData({
       firstName: nameParts[0] || '',
       lastName: nameParts.slice(1).join(' ') || '',
-      email: selectedContact || '',
+      email: emailForForm,
       phone: '',
       title: '',
     });
-    // Auto-populate account from existing data
-    setAddFormAccountId(data?.account?.id || '');
-    setAccountSearchQuery(data?.account?.name || domain || '');
-    setAccountSearchResults(data?.account ? [data.account] : []);
+
+    // Pre-select account if CRM already found one
+    if (data?.account?.id) {
+      setAddFormAccountId(data.account.id);
+      setAddFormAccountName(data.account.name || '');
+    } else {
+      setAddFormAccountId('');
+      setAddFormAccountName('');
+    }
+
+    // Reset search state
+    setAccountSearchQuery('');
+    setAccountSearchResults([]);
+    setDomainSuggestions([]);
+    setShowCreateAccount(false);
+    setNewAccountData({
+      name: '',
+      street: '',
+      city: '',
+      state: '',
+      zip: '',
+      website: domain || '',
+    });
+    setCreateAccountError(null);
     setShowAddForm(true);
     setAddFormError(null);
     setAddFormSuccess(null);
+
+    // Auto-load domain suggestions if we don't already have an account
+    if (!data?.account?.id && domain && !CONSUMER_DOMAINS.has(domain)) {
+      setDomainSuggestionsLoading(true);
+      sendToBackground(MSG.CRM_ACCOUNT_SEARCH, { query: '', domain })
+        .then(res => setDomainSuggestions(res?.records || []))
+        .catch(() => {})
+        .finally(() => setDomainSuggestionsLoading(false));
+    }
   }
 
   function handleAccountSearchChange(q, skipSearch = false) {
@@ -347,6 +387,39 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       } catch (_) {}
       setAccountSearchLoading(false);
     }, 300);
+  }
+
+  async function handleCreateAccount() {
+    if (!newAccountData.name.trim()) {
+      setCreateAccountError('Account name is required');
+      return;
+    }
+    setCreateAccountLoading(true);
+    setCreateAccountError(null);
+    try {
+      const result = await sendToBackground(MSG.CRM_CREATE_ACCOUNT, {
+        name: newAccountData.name.trim(),
+        street: newAccountData.street,
+        city: newAccountData.city,
+        state: newAccountData.state,
+        zip: newAccountData.zip,
+        website: newAccountData.website,
+      });
+      if (result?.success && result?.accountId) {
+        setAddFormAccountId(result.accountId);
+        setAddFormAccountName(newAccountData.name.trim());
+        setShowCreateAccount(false);
+        setAccountSearchQuery('');
+        setAccountSearchResults([]);
+        setDomainSuggestions([]);
+      } else {
+        setCreateAccountError(result?.error || 'Failed to create account');
+      }
+    } catch (err) {
+      setCreateAccountError(err.message || 'Failed to create account');
+    } finally {
+      setCreateAccountLoading(false);
+    }
   }
 
   async function handleAddContact(e) {
@@ -534,15 +607,25 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 setFormData={setAddFormData}
                 accountId={addFormAccountId}
                 setAccountId={setAddFormAccountId}
+                accountName={addFormAccountName}
+                setAccountName={setAddFormAccountName}
                 accountSearchQuery={accountSearchQuery}
                 onAccountSearchChange={handleAccountSearchChange}
                 accountSearchResults={accountSearchResults}
                 accountSearchLoading={accountSearchLoading}
+                domainSuggestions={domainSuggestions}
+                domainSuggestionsLoading={domainSuggestionsLoading}
+                showCreateAccount={showCreateAccount}
+                setShowCreateAccount={setShowCreateAccount}
+                newAccountData={newAccountData}
+                setNewAccountData={setNewAccountData}
+                onCreateAccount={handleCreateAccount}
+                createAccountLoading={createAccountLoading}
+                createAccountError={createAccountError}
                 onSubmit={handleAddContact}
-                onCancel={() => setShowAddForm(false)}
+                onCancel={() => { setShowAddForm(false); setShowCreateAccount(false); }}
                 loading={addFormLoading}
                 error={addFormError}
-                accountName={account?.name}
               />
             )}
 
@@ -1015,13 +1098,42 @@ function TaskCard({ task, isLoading, onComplete, onClose, onReschedule, onOpenDe
   );
 }
 
-function AddContactForm({ formData, setFormData, accountId, setAccountId, accountSearchQuery, onAccountSearchChange, accountSearchResults, accountSearchLoading, onSubmit, onCancel, loading, error, accountName }) {
+function AddContactForm({
+  formData, setFormData,
+  accountId, setAccountId, accountName, setAccountName,
+  accountSearchQuery, onAccountSearchChange, accountSearchResults, accountSearchLoading,
+  domainSuggestions, domainSuggestionsLoading,
+  showCreateAccount, setShowCreateAccount,
+  newAccountData, setNewAccountData, onCreateAccount, createAccountLoading, createAccountError,
+  onSubmit, onCancel, loading, error,
+}) {
+  function selectAccount(acct) {
+    setAccountId(acct.id);
+    setAccountName(acct.name || acct.Account_Name || '');
+    onAccountSearchChange('', true); // clear search field, skip new search
+  }
+
+  function clearAccount() {
+    setAccountId('');
+    setAccountName('');
+    onAccountSearchChange('', true);
+    setShowCreateAccount(false);
+  }
+
+  // All candidate accounts for the dropdown: domain suggestions + name search results (deduped)
+  const domainIds = new Set((domainSuggestions || []).map(a => a.id));
+  const nameOnlyResults = (accountSearchResults || []).filter(a => !domainIds.has(a.id));
+  const showDropdown = !accountId && !showCreateAccount && (
+    domainSuggestions.length > 0 || accountSearchResults.length > 0 || domainSuggestionsLoading || accountSearchLoading
+  );
+
   return (
     <Card>
       <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 10 }}>
         Add New Contact
       </div>
       <form onSubmit={onSubmit}>
+        {/* Name */}
         <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
           <input type="text" placeholder="First Name" value={formData.firstName}
             onChange={e => setFormData(p => ({ ...p, firstName: e.target.value }))} required style={inputStyle} />
@@ -1036,63 +1148,146 @@ function AddContactForm({ formData, setFormData, accountId, setAccountId, accoun
           style={{ ...inputStyle, width: '100%', marginBottom: 8, boxSizing: 'border-box' }} />
         <input type="text" placeholder="Phone" value={formData.phone}
           onChange={e => setFormData(p => ({ ...p, phone: e.target.value }))}
-          style={{ ...inputStyle, width: '100%', marginBottom: 8, boxSizing: 'border-box' }} />
+          style={{ ...inputStyle, width: '100%', marginBottom: 12, boxSizing: 'border-box' }} />
 
-        {/* Account Search */}
+        {/* ── Account Assignment ── */}
         <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 4, fontWeight: 500 }}>
-            Account {accountId ? '✓' : '(search to assign)'}
+          <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, marginBottom: 6, textTransform: 'uppercase' }}>
+            Account
           </div>
-          <input
-            type="text"
-            placeholder="Search account by name or domain..."
-            value={accountSearchQuery}
-            onChange={e => onAccountSearchChange(e.target.value)}
-            style={{ ...inputStyle, width: '100%', boxSizing: 'border-box' }}
-          />
-          {accountSearchLoading && (
-            <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, padding: '4px 0' }}>Searching...</div>
-          )}
-          {accountSearchResults.length > 0 && !accountId && (
-            <div style={{ border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, marginTop: 4, maxHeight: 120, overflowY: 'auto', background: 'white' }}>
-              {accountSearchResults.map((acct, i) => (
-                <div key={acct.id || i}
-                  onMouseDown={(e) => {
-                    // onMouseDown fires before onBlur, so we can reliably capture the click
-                    e.preventDefault();
-                    setAccountId(acct.id);
-                    // Set query to account name, skip new search, clear results
-                    onAccountSearchChange(acct.name || '', true);
-                  }}
-                  style={{
-                    padding: '6px 10px', fontSize: 12, cursor: 'pointer',
-                    borderBottom: i < accountSearchResults.length - 1 ? `1px solid ${COLORS.BORDER}` : 'none',
-                    background: 'white',
-                  }}
-                  onMouseEnter={e => e.currentTarget.style.background = '#f1f3f4'}
-                  onMouseLeave={e => e.currentTarget.style.background = 'white'}
-                >
-                  {acct.name} {acct.industry ? <span style={{ color: COLORS.TEXT_SECONDARY, fontSize: 11 }}>({acct.industry})</span> : ''}
-                </div>
-              ))}
-            </div>
-          )}
-          {accountId && (
-            <div style={{ fontSize: 11, color: '#2e7d32', marginTop: 4 }}>
-              ✓ Linked to account
-              <button type="button" onClick={() => { setAccountId(''); onAccountSearchChange(''); }}
-                style={{ marginLeft: 8, background: 'none', border: 'none', color: COLORS.ERROR, cursor: 'pointer', fontSize: 11 }}>
-                Remove
+
+          {/* Selected account pill */}
+          {accountId ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: '#e8f5e9', borderRadius: 6, border: '1px solid #a5d6a7' }}>
+              <span style={{ flex: 1, fontSize: 12, fontWeight: 600, color: '#1b5e20' }}>✓ {accountName || 'Account linked'}</span>
+              <button type="button" onClick={clearAccount}
+                style={{ background: 'none', border: 'none', color: COLORS.ERROR, cursor: 'pointer', fontSize: 11, padding: '0 2px' }}>
+                ✕ Change
               </button>
+            </div>
+          ) : showCreateAccount ? null : (
+            <>
+              {/* Name search input */}
+              <input
+                type="text"
+                placeholder="Search by account name..."
+                value={accountSearchQuery}
+                onChange={e => onAccountSearchChange(e.target.value)}
+                style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 0 }}
+              />
+
+              {/* Dropdown: domain suggestions + name search results */}
+              {showDropdown && (
+                <div style={{ border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, marginTop: 4, background: 'white', boxShadow: '0 2px 8px rgba(0,0,0,0.1)', maxHeight: 200, overflowY: 'auto' }}>
+
+                  {/* Loading indicator */}
+                  {(domainSuggestionsLoading || accountSearchLoading) && (
+                    <div style={{ padding: '6px 10px', fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Searching...</div>
+                  )}
+
+                  {/* Domain matches (shown first) */}
+                  {domainSuggestions.length > 0 && (
+                    <>
+                      <div style={{ padding: '4px 10px', fontSize: 10, color: COLORS.TEXT_SECONDARY, background: '#f8f9fa', borderBottom: `1px solid ${COLORS.BORDER}`, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                        Domain Match
+                      </div>
+                      {domainSuggestions.map((acct, i) => (
+                        <AccountRow key={acct.id || i} acct={acct} onSelect={selectAccount} isDomainMatch />
+                      ))}
+                    </>
+                  )}
+
+                  {/* Name search results */}
+                  {nameOnlyResults.length > 0 && (
+                    <>
+                      {domainSuggestions.length > 0 && (
+                        <div style={{ padding: '4px 10px', fontSize: 10, color: COLORS.TEXT_SECONDARY, background: '#f8f9fa', borderTop: `1px solid ${COLORS.BORDER}`, borderBottom: `1px solid ${COLORS.BORDER}`, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                          Search Results
+                        </div>
+                      )}
+                      {nameOnlyResults.map((acct, i) => (
+                        <AccountRow key={acct.id || i} acct={acct} onSelect={selectAccount} />
+                      ))}
+                    </>
+                  )}
+
+                  {/* Create new account option */}
+                  <div
+                    onMouseDown={(e) => { e.preventDefault(); setShowCreateAccount(true); onAccountSearchChange('', true); }}
+                    style={{
+                      padding: '8px 10px', fontSize: 12, cursor: 'pointer', color: COLORS.STRATUS_BLUE,
+                      borderTop: (domainSuggestions.length > 0 || nameOnlyResults.length > 0) ? `1px solid ${COLORS.BORDER}` : 'none',
+                      fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6,
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.background = '#e3f2fd'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'white'}
+                  >
+                    ➕ Create new account
+                  </div>
+                </div>
+              )}
+
+              {/* "Create new account" button when dropdown isn't open */}
+              {!showDropdown && (
+                <button type="button"
+                  onClick={() => setShowCreateAccount(true)}
+                  style={{
+                    marginTop: 6, background: 'none', border: `1px dashed ${COLORS.STRATUS_BLUE}`,
+                    color: COLORS.STRATUS_BLUE, borderRadius: 6, padding: '5px 10px',
+                    fontSize: 12, cursor: 'pointer', width: '100%',
+                  }}>
+                  ➕ Create new account
+                </button>
+              )}
+            </>
+          )}
+
+          {/* ── Create Account Sub-Form ── */}
+          {showCreateAccount && !accountId && (
+            <div style={{ border: `1px solid ${COLORS.STRATUS_BLUE}44`, borderRadius: 8, padding: 12, background: '#f0f7ff', marginTop: 4 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.STRATUS_BLUE, marginBottom: 8, textTransform: 'uppercase' }}>
+                New Account
+              </div>
+              <input type="text" placeholder="Account Name *" value={newAccountData.name}
+                onChange={e => setNewAccountData(p => ({ ...p, name: e.target.value }))}
+                style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />
+              <input type="text" placeholder="Street Address" value={newAccountData.street}
+                onChange={e => setNewAccountData(p => ({ ...p, street: e.target.value }))}
+                style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />
+              <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                <input type="text" placeholder="City" value={newAccountData.city}
+                  onChange={e => setNewAccountData(p => ({ ...p, city: e.target.value }))}
+                  style={{ ...inputStyle, flex: 2, background: 'white' }} />
+                <input type="text" placeholder="State" value={newAccountData.state}
+                  onChange={e => setNewAccountData(p => ({ ...p, state: e.target.value }))}
+                  style={{ ...inputStyle, flex: 1, background: 'white' }} />
+                <input type="text" placeholder="Zip" value={newAccountData.zip}
+                  onChange={e => setNewAccountData(p => ({ ...p, zip: e.target.value }))}
+                  style={{ ...inputStyle, flex: 1, background: 'white' }} />
+              </div>
+              <input type="text" placeholder="Website (e.g. company.com)" value={newAccountData.website}
+                onChange={e => setNewAccountData(p => ({ ...p, website: e.target.value }))}
+                style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />
+              <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>
+                Owner: <strong>Chris Graves</strong> (default)
+              </div>
+              {createAccountError && (
+                <div style={{ fontSize: 11, color: COLORS.ERROR, marginBottom: 6 }}>{createAccountError}</div>
+              )}
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button type="button" onClick={onCreateAccount} disabled={createAccountLoading}
+                  style={{ flex: 1, padding: '7px', background: COLORS.STRATUS_BLUE, color: 'white', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: createAccountLoading ? 'not-allowed' : 'pointer', opacity: createAccountLoading ? 0.6 : 1 }}>
+                  {createAccountLoading ? 'Creating...' : 'Create Account'}
+                </button>
+                <button type="button" onClick={() => setShowCreateAccount(false)}
+                  style={{ padding: '7px 12px', background: 'white', color: COLORS.TEXT_SECONDARY, border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
         </div>
 
-        {accountName && !accountId && (
-          <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>
-            Current account: <strong>{accountName}</strong>
-          </div>
-        )}
         {error && <div style={{ fontSize: 12, color: COLORS.ERROR, marginBottom: 8 }}>{error}</div>}
         <div style={{ display: 'flex', gap: 8 }}>
           <button type="submit" disabled={loading} style={{
@@ -1111,6 +1306,30 @@ function AddContactForm({ formData, setFormData, accountId, setAccountId, accoun
         </div>
       </form>
     </Card>
+  );
+}
+
+function AccountRow({ acct, onSelect, isDomainMatch }) {
+  const name = acct.name || acct.Account_Name || '';
+  const website = acct.website || acct.Website || '';
+  const city = acct.billingCity || acct.Billing_City || '';
+  const state = acct.billingState || acct.Billing_State || '';
+  const location = [city, state].filter(Boolean).join(', ');
+  return (
+    <div
+      onMouseDown={(e) => { e.preventDefault(); onSelect(acct); }}
+      style={{ padding: '7px 10px', fontSize: 12, cursor: 'pointer', background: 'white', borderBottom: `1px solid ${COLORS.BORDER}` }}
+      onMouseEnter={e => e.currentTarget.style.background = '#f1f3f4'}
+      onMouseLeave={e => e.currentTarget.style.background = 'white'}
+    >
+      <div style={{ fontWeight: 500, color: COLORS.TEXT_PRIMARY }}>{name}</div>
+      <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginTop: 1 }}>
+        {location && <span>{location}</span>}
+        {location && website && <span> · </span>}
+        {website && <span>{website}</span>}
+        {isDomainMatch && <span style={{ marginLeft: 4, color: '#1a73e8', fontSize: 10, fontWeight: 600 }}>● domain</span>}
+      </div>
+    </div>
   );
 }
 

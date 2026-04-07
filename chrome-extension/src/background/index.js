@@ -274,8 +274,13 @@ registerMessageHandlers({
   },
 
   // ── CRM Account Search ──
-  [MSG.CRM_ACCOUNT_SEARCH]: async ({ query }) => {
-    return api.crmAccountSearch(query);
+  [MSG.CRM_ACCOUNT_SEARCH]: async ({ query, domain }) => {
+    return api.crmAccountSearch(query, domain);
+  },
+
+  // ── CRM Create Account ──
+  [MSG.CRM_CREATE_ACCOUNT]: async ({ name, street, city, state, zip, website }) => {
+    return api.crmCreateAccount(name, street, city, state, zip, website);
   },
 
   // ── CRM Create Task ──

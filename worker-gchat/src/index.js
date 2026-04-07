@@ -7341,9 +7341,9 @@ CRITICAL URL RULES:
 
           // ── CRM Search: Search Zoho CRM modules ──
           case '/api/crm-search': {
-            const { query, module } = apiBody;
-            if (!query) {
-              return new Response(JSON.stringify({ error: 'query required' }), { status: 400, headers: jsonHeaders });
+            const { query, module, domain } = apiBody;
+            if (!query && !domain) {
+              return new Response(JSON.stringify({ error: 'query or domain required' }), { status: 400, headers: jsonHeaders });
             }
 
             const validModules = ['Accounts', 'Contacts', 'Deals', 'Quotes'];
@@ -7357,12 +7357,98 @@ CRITICAL URL RULES:
             };
 
             try {
-              const searchResp = await zohoApiCall('GET',
-                `${mod}/search?word=${encodeURIComponent(query)}&fields=${fieldMap[mod]}&per_page=10`, env
-              );
-              apiResult = { records: searchResp?.data || [], module: mod, query };
+              // Domain-based account search: criteria match on Website + word match on domain base name
+              if (domain && mod === 'Accounts') {
+                const results = [];
+                const seen = new Set();
+
+                // 1. Criteria search on Website field (e.g. "lavanture.com")
+                try {
+                  const domainResp = await zohoApiCall('GET',
+                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domain)}))&fields=${fieldMap.Accounts}&per_page=5`, env
+                  );
+                  for (const r of (domainResp?.data || [])) {
+                    if (!seen.has(r.id)) {
+                      results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                        billingStreet: r.Billing_Street, billingCity: r.Billing_City,
+                        billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
+                      seen.add(r.id);
+                    }
+                  }
+                } catch (_) {}
+
+                // 2. Word search on the domain base (strip TLD) — catches "Lavanture Products" from "lavanture.com"
+                const domainBase = domain.split('.')[0] || '';
+                if (domainBase.length >= 3) {
+                  try {
+                    const baseResp = await zohoApiCall('GET',
+                      `Accounts/search?word=${encodeURIComponent(domainBase)}&fields=${fieldMap.Accounts}&per_page=5`, env
+                    );
+                    for (const r of (baseResp?.data || [])) {
+                      if (!seen.has(r.id)) {
+                        results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                          billingStreet: r.Billing_Street, billingCity: r.Billing_City,
+                          billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
+                        seen.add(r.id);
+                      }
+                    }
+                  } catch (_) {}
+                }
+
+                apiResult = { records: results, module: mod, domain, isDomainSearch: true };
+              } else {
+                // Standard word search by name
+                const searchResp = await zohoApiCall('GET',
+                  `${mod}/search?word=${encodeURIComponent(query)}&fields=${fieldMap[mod]}&per_page=10`, env
+                );
+                const rawRecords = searchResp?.data || [];
+                // Normalize accounts to consistent shape
+                const records = mod === 'Accounts'
+                  ? rawRecords.map(r => ({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                      billingStreet: r.Billing_Street, billingCity: r.Billing_City,
+                      billingState: r.Billing_State, billingZip: r.Billing_Code }))
+                  : rawRecords;
+                apiResult = { records, module: mod, query };
+              }
             } catch (crmErr) {
               apiResult = { error: 'CRM search failed: ' + crmErr.message, records: [] };
+            }
+            break;
+          }
+
+          // ── CRM Create Account ──
+          case '/api/crm-create-account': {
+            const { name: newAcctName, street: newAcctStreet, city: newAcctCity, state: newAcctState, zip: newAcctZip, website: newAcctWebsite } = apiBody;
+            if (!newAcctName) {
+              return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              const accountPayload = {
+                data: [{
+                  Account_Name: newAcctName,
+                  Billing_Street: newAcctStreet || '',
+                  Billing_City: newAcctCity || '',
+                  Billing_State: newAcctState || '',
+                  Billing_Code: newAcctZip || '',
+                  Website: newAcctWebsite || '',
+                  Owner: { id: '2570562000141711002' }, // Chris Graves
+                }]
+              };
+              const createResp = await zohoApiCall('POST', 'Accounts', env, accountPayload);
+              const parsed = parseZohoResponse(createResp, 'Account creation');
+              if (parsed.success) {
+                apiResult = {
+                  success: true,
+                  accountId: parsed.record_id,
+                  name: newAcctName,
+                  zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${parsed.record_id}`,
+                  message: `Account created: ${newAcctName}`,
+                };
+              } else {
+                apiResult = { success: false, error: parsed.message || 'Account creation failed' };
+              }
+            } catch (err) {
+              apiResult = { error: 'Account creation failed: ' + err.message, success: false };
             }
             break;
           }

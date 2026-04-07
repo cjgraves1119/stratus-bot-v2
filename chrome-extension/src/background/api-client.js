@@ -281,12 +281,28 @@ export async function crmCreateTask(subject, dueDate, dealId, contactId, priorit
 }
 
 /**
- * Search for CRM accounts by name or domain (for Add Contact form).
+ * Search for CRM accounts by name (for Add Contact form).
+ * Pass `domain` to trigger domain-based criteria matching (Website field + name base word).
  */
-export async function crmAccountSearch(query) {
+export async function crmAccountSearch(query, domain) {
   return apiCall('/api/crm-search', {
     query: query || '',
+    domain: domain || '',
     module: 'Accounts',
+  });
+}
+
+/**
+ * Create a new CRM account.
+ */
+export async function crmCreateAccount(name, street, city, state, zip, website) {
+  return apiCall('/api/crm-create-account', {
+    name: name || '',
+    street: street || '',
+    city: city || '',
+    state: state || '',
+    zip: zip || '',
+    website: website || '',
   });
 }
 

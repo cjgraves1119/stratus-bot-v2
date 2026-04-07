@@ -120,6 +120,15 @@ export const MSG = {
   // Task suggestion
   SUGGEST_TASK_PREVIEW: 'SUGGEST_TASK_PREVIEW',
   SUGGEST_TASK: 'SUGGEST_TASK',
+
+  // CRM account search (for Add Contact form)
+  CRM_ACCOUNT_SEARCH: 'CRM_ACCOUNT_SEARCH',
+
+  // Create CRM account (for Add Contact form)
+  CRM_CREATE_ACCOUNT: 'CRM_CREATE_ACCOUNT',
+
+  // Create CRM task manually
+  CRM_CREATE_TASK: 'CRM_CREATE_TASK',
 };
 
 // Keyboard shortcut command names (match manifest.json)
