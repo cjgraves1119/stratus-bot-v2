@@ -1917,6 +1917,44 @@ function parseMessage(text) {
     };
   }
 
+  // ── Model-agnostic license handler (MR, MV, MT) ──
+  // These families use a single license SKU regardless of specific model.
+  // Intercepts: "4 MR licenses", "quote 10 MV licenses", "5 MT license", etc.
+  const agnosticLicMatch = upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?/i)
+    || upper.match(/(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*[X×]?\s*(\d+)/i)
+    || upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s*(ENT(?:ERPRISE)?)?$/i);
+  if (agnosticLicMatch && !isAdvisory) {
+    const qty = parseInt(agnosticLicMatch[1]) || parseInt(agnosticLicMatch[3]) || 1;
+    const family = (agnosticLicMatch[2] || agnosticLicMatch[1] || '').toUpperCase();
+    let licSkus;
+    if (family === 'MR') {
+      licSkus = [
+        { baseSku: 'LIC-ENT-1YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-ENT-3YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-ENT-5YR', qty, isLicenseOnly: true }
+      ];
+    } else if (family === 'MV') {
+      licSkus = [
+        { baseSku: 'LIC-MV-1YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MV-3YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MV-5YR', qty, isLicenseOnly: true }
+      ];
+    } else if (family === 'MT') {
+      licSkus = [
+        { baseSku: 'LIC-MT-1Y', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MT-3Y', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MT-5Y', qty, isLicenseOnly: true }
+      ];
+    }
+    if (licSkus) {
+      return {
+        items: licSkus,
+        isQuote: true,
+        isDuoUmbrella: true  // reuse same 1Y/3Y/5Y URL output path
+      };
+    }
+  }
+
   const skuPatterns = [
     /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
     /C8[14]\d{2}-G2-MX/gi,
@@ -7152,7 +7190,7 @@ CRITICAL URL RULES:
 
             const parsed = parseMessage(text);
             if (!parsed || !parsed.items || parsed.items.length === 0) {
-              apiResult = { error: 'No valid SKUs detected. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67' };
+              apiResult = { error: 'No valid SKUs detected. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67, or 4 MR licenses' };
               break;
             }
 
