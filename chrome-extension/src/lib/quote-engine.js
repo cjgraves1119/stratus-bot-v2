@@ -18,7 +18,22 @@ import catalog from './auto-catalog.json';
 
 const COMMON_MISTAKES = catalog._COMMON_MISTAKES || {};
 const EOL_REPLACEMENTS = catalog._EOL_REPLACEMENTS || {};
-const EOL_PRODUCTS = new Set(catalog._EOL_PRODUCTS || []);
+
+// _EOL_PRODUCTS can be either a flat array OR a family-keyed object {MR: [...], MX: [...]}
+// Normalize to a flat Set of base SKU strings
+const EOL_PRODUCTS = (() => {
+  const raw = catalog._EOL_PRODUCTS;
+  if (!raw) return new Set();
+  if (Array.isArray(raw)) return new Set(raw.map(s => String(s).toUpperCase()));
+  // Object form: { MR: ["44","46",...], MX: ["67",...] } → expand to "MR44", "MX67", etc.
+  const flat = new Set();
+  for (const [family, variants] of Object.entries(raw)) {
+    if (Array.isArray(variants)) {
+      variants.forEach(v => flat.add((family + v).toUpperCase()));
+    }
+  }
+  return flat;
+})();
 
 // Build VALID_SKUS set from all family arrays in catalog
 const VALID_SKUS = new Set();

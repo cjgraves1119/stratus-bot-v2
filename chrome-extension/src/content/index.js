@@ -681,6 +681,31 @@ function setupEmailHoverPopups() {
 // Compose Toolbar Button
 // ─────────────────────────────────────────────
 
+function getComposeRecipients(composeEl) {
+  // Extract recipient emails from the compose window
+  const recipients = new Set();
+  // Gmail stores To/Cc recipients in chip elements
+  composeEl.querySelectorAll('[data-hovercard-id], [email]').forEach(el => {
+    const email = el.getAttribute('data-hovercard-id') || el.getAttribute('email') || '';
+    if (email && email.includes('@')) recipients.add(email.toLowerCase());
+  });
+  // Also check hidden inputs and aria-label inputs
+  const toInput = composeEl.querySelector('input[aria-label*="To"], textarea[aria-label*="To"]');
+  if (toInput && toInput.value) {
+    toInput.value.split(/[,;]/).forEach(e => {
+      const trimmed = e.trim().replace(/.*<(.+)>/, '$1');
+      if (trimmed.includes('@')) recipients.add(trimmed.toLowerCase());
+    });
+  }
+  return [...recipients].filter(e => !e.includes('@stratusinfosystems.com'));
+}
+
+function getComposeSubject(composeEl) {
+  const subjectInput = composeEl.querySelector('input[aria-label*="Subject"], input[name="subjectbox"]')
+    || document.querySelector('.aoT'); // Gmail subject field
+  return subjectInput?.value || '';
+}
+
 function injectComposeButton(composeEl) {
   // Check if already injected
   if (composeEl.querySelector('.stratus-compose-btn')) return;
@@ -688,6 +713,7 @@ function injectComposeButton(composeEl) {
   const toolbar = composeEl.querySelector('.btC') || composeEl.querySelector('[role="toolbar"]');
   if (!toolbar) return;
 
+  // ── Stratus Quote button (existing) ──
   const btn = document.createElement('div');
   btn.className = 'stratus-compose-btn';
   btn.title = 'Insert Stratus Quote';
@@ -698,16 +724,66 @@ function injectComposeButton(composeEl) {
     font-weight: 700; margin-left: 8px; transition: background 0.2s;
   `;
   btn.textContent = 'S';
-
   btn.addEventListener('mouseenter', () => { btn.style.background = COLORS.STRATUS_DARK; });
   btn.addEventListener('mouseleave', () => { btn.style.background = COLORS.STRATUS_BLUE; });
-
   btn.addEventListener('click', () => {
-    // Open sidebar to quote panel
     sendToBackground(MSG.SIDEBAR_NAVIGATE, { panel: 'quote' }).catch(() => {});
   });
-
   toolbar.appendChild(btn);
+
+  // ── Send + Update Task button ──
+  const sendTaskBtn = document.createElement('div');
+  sendTaskBtn.className = 'stratus-send-task-btn';
+  sendTaskBtn.title = 'Send email and update related Zoho task';
+  sendTaskBtn.style.cssText = `
+    display: inline-flex; align-items: center; gap: 4px; padding: 0 10px;
+    height: 32px; border-radius: 16px; cursor: pointer;
+    background: #1a73a7; color: white; font-size: 11px;
+    font-weight: 600; margin-left: 6px; transition: background 0.2s;
+    white-space: nowrap; border: none;
+  `;
+  sendTaskBtn.innerHTML = '📋 Send + Task';
+  sendTaskBtn.addEventListener('mouseenter', () => { sendTaskBtn.style.background = '#0d4f73'; });
+  sendTaskBtn.addEventListener('mouseleave', () => { sendTaskBtn.style.background = '#1a73a7'; });
+
+  sendTaskBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    // 1. Get recipients before clicking send
+    const recipients = getComposeRecipients(composeEl);
+    const subject = getComposeSubject(composeEl);
+
+    // 2. Find and click Gmail's Send button
+    const sendButton = composeEl.querySelector('[data-tooltip="Send"]')
+      || composeEl.querySelector('.aoO[role="button"]')
+      || composeEl.querySelector('div[aria-label*="Send"]');
+    if (sendButton) {
+      sendButton.click();
+    }
+
+    // 3. After send, check for open tasks for those recipients
+    if (recipients.length === 0) return;
+
+    sendTaskBtn.innerHTML = '⏳ Checking...';
+    sendTaskBtn.style.opacity = '0.7';
+
+    try {
+      await new Promise(r => setTimeout(r, 800)); // Wait for send to complete
+      const result = await sendToBackground(MSG.EMAIL_SENT, {
+        recipients,
+        subject,
+        sentAt: new Date().toISOString(),
+      });
+
+      if (result?.tasksFound > 0) {
+        // Navigate sidebar to tasks tab
+        sendToBackground(MSG.SIDEBAR_NAVIGATE, { panel: 'crm', data: { activeSubTab: 'tasks', highlightReschedule: true } }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('[Stratus] Send+Task error:', err);
+    }
+  });
+
+  toolbar.appendChild(sendTaskBtn);
 }
 
 // ─────────────────────────────────────────────

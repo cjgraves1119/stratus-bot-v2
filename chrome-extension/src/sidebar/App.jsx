@@ -69,15 +69,15 @@ class PanelErrorBoundary extends Component {
 }
 
 const TABS = [
+  { id: 'crm', label: 'Zoho', icon: '🏢' },
   { id: 'email', label: 'Email', icon: '📧' },
-  { id: 'crm', label: 'CRM', icon: '🏢' },
   { id: 'quote', label: 'Quote', icon: '📋' },
   { id: 'chat', label: 'Chat', icon: '💬' },
   { id: 'search', label: 'Search', icon: '🔍' },
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('email');
+  const [activeTab, setActiveTab] = useState('crm');
   const [emailContext, setEmailContext] = useState(null);
   const [crmContext, setCrmContext] = useState(null);
   const [navData, setNavData] = useState(null);
@@ -233,7 +233,7 @@ export default function App() {
         <PanelErrorBoundary activeTab={activeTab}>
           <Suspense fallback={<PanelLoader />}>
             {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} />}
-            {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} />}
+            {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
             {activeTab === 'quote' && <QuotePanel navData={navData} emailContext={emailContext} onNavigate={handleNavigate} />}
             {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} />}
             {activeTab === 'search' && <SearchPanel navData={navData} />}
