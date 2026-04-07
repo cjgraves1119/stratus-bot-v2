@@ -14,6 +14,13 @@ import { MSG, COLORS, CONSUMER_DOMAINS } from '../../lib/constants';
 
 const ZOHO_ORG = 'org647122552';
 
+// Safely convert any Zoho field value (might be a lookup object {name, id}) to a string
+const safeStr = (v) => {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') return v.name || v.Name || '';
+  return String(v);
+};
+
 const SUB_TABS = [
   { id: 'info', label: 'Info' },
   { id: 'deals', label: 'Deals' },
@@ -668,10 +675,10 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                       }}>CISCO REP</span>
                     </div>
                     <div style={{ fontWeight: 700, fontSize: 14, color: COLORS.TEXT_PRIMARY }}>
-                      {contact.fullName || `${contact.firstName || ''} ${contact.lastName || ''}`.trim()}
+                      {safeStr(contact.fullName) || `${safeStr(contact.firstName)} ${safeStr(contact.lastName)}`.trim()}
                     </div>
-                    {contact.title && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>{contact.title}</div>}
-                    <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>{contact.email}</div>
+                    {contact.title && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>{safeStr(contact.title)}</div>}
+                    <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>{safeStr(contact.email)}</div>
                   </div>
                   {(contact.zohoUrl || contact.id) && (
                     <a href={contact.zohoUrl || `https://crm.zoho.com/crm/${ZOHO_ORG}/tab/CustomModule9/${contact.id}`}
@@ -691,27 +698,27 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                       borderRadius: 6, padding: '6px 12px', textAlign: 'center', minWidth: 80,
                     }}>
                       <div style={{ fontSize: 18, fontWeight: 700, color: contact.pointsCurrent >= 100 ? '#2e7d32' : '#e65100' }}>
-                        {contact.pointsCurrent}
+                        {safeStr(contact.pointsCurrent) || contact.pointsCurrent}
                       </div>
                       <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontWeight: 600, textTransform: 'uppercase' }}>Points</div>
                     </div>
                   )}
-                  {contact.merakiTeam && (
+                  {safeStr(contact.merakiTeam) && (
                     <div style={{
                       background: '#e3f2fd', border: '1px solid #90caf9',
                       borderRadius: 6, padding: '6px 12px', flex: 1,
                     }}>
                       <div style={{ fontSize: 10, color: '#1565c0', fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>Team</div>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: '#0d47a1' }}>{contact.merakiTeam}</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: '#0d47a1' }}>{safeStr(contact.merakiTeam)}</div>
                     </div>
                   )}
-                  {contact.vertical && (
+                  {safeStr(contact.vertical) && (
                     <div style={{
                       background: COLORS.BG_SECONDARY, border: `1px solid ${COLORS.BORDER}`,
                       borderRadius: 6, padding: '6px 12px',
                     }}>
                       <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>Vertical</div>
-                      <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{contact.vertical}</div>
+                      <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{safeStr(contact.vertical)}</div>
                     </div>
                   )}
                 </div>

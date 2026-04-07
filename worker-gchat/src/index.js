@@ -7194,56 +7194,72 @@ CRITICAL URL RULES:
               break;
             }
 
-            const quoteResult = buildQuoteResponse(parsed);
-            // Extract URLs from the response (buildQuoteResponse returns { message, needsLlm })
-            const urlRegex = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
-            const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
-            const urls = responseText.match(urlRegex) || [];
+            const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
 
-            const quoteUrls = [];
-            // Parse option headers from response text to get meaningful labels
-            const optionHeaders = responseText.match(/\*\*Option \d[^*]*\*\*/g) || [];
-            const termLabels = ['1-Year', '3-Year', '5-Year'];
-            let currentOption = '';
-            let optionIdx = 0;
-            const lines = responseText.split('\n');
-            const urlLabels = [];
-            for (const line of lines) {
-              const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
-              if (optMatch) { currentOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optionIdx = 0; }
-              const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
-              if (urlMatch) {
-                const label = currentOption
-                  ? `${currentOption} (${termLabels[optionIdx] || ''})`
-                  : termLabels[urlLabels.length] || 'Quote ' + (urlLabels.length + 1);
-                urlLabels.push({ url: urlMatch[0], label: label.trim() });
-                optionIdx++;
+            // Check for EOL warnings and determine if any item is EOL
+            const eolWarnings = [];
+            let hasEol = false;
+            for (const item of parsed.items) {
+              const base = item.baseSku || item.sku;
+              if (isEol(base)) {
+                hasEol = true;
+                const replacement = checkEol(base);
+                eolWarnings.push(base + ' is End-of-Life' + (replacement ? ' → replaced by ' + (Array.isArray(replacement) ? replacement.join(' / ') : replacement) : ''));
               }
             }
-            // Fallback if regex parsing didn't capture structured labels
-            if (urlLabels.length > 0) {
-              urlLabels.forEach(u => quoteUrls.push({ url: u.url, label: u.label, term: '' }));
-            } else {
-              urls.forEach((u, i) => {
-                quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1), term: termLabels[i] || '' });
-              });
-            }
 
-            // Check for EOL warnings
-            const eolWarnings = [];
-            if (parsed.items) {
-              parsed.items.forEach(item => {
-                const base = item.baseSku || item.sku;
-                if (isEol(base)) {
-                  const replacement = checkEol(base);
-                  eolWarnings.push(base + ' is End-of-Life' + (replacement ? ' → replaced by ' + (Array.isArray(replacement) ? replacement.join(' / ') : replacement) : ''));
+            let quoteUrls = [];
+
+            if (hasEol) {
+              // EOL items: fall back to buildQuoteResponse for proper Option 1/2/3 handling
+              const quoteResult = buildQuoteResponse(parsed);
+              const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
+              const termLabels = ['1-Year', '3-Year', '5-Year'];
+              let currentOption = '';
+              let optionIdx = 0;
+              for (const line of responseText.split('\n')) {
+                const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
+                if (optMatch) { currentOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optionIdx = 0; }
+                const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
+                if (urlMatch) {
+                  const label = currentOption
+                    ? `${currentOption} (${termLabels[optionIdx] || ''})`
+                    : termLabels[quoteUrls.length] || 'Quote ' + (quoteUrls.length + 1);
+                  quoteUrls.push({ url: urlMatch[0], label: label.trim() });
+                  optionIdx++;
                 }
-              });
+              }
+              if (quoteUrls.length === 0) {
+                const urls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                urls.forEach((u, i) => quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) }));
+              }
+            } else {
+              // Non-EOL: build ONE combined URL with all hardware + all license terms
+              const urlItems = [];
+              for (const item of parsed.items) {
+                const base = item.baseSku || item.sku;
+                const qty = item.qty || 1;
+                // Hardware (unless licenseOnly)
+                if (!modifiers.licenseOnly && !modifiers.hardwareOnly) {
+                  urlItems.push({ sku: applySuffix(base), qty });
+                }
+                // All license terms (1Y/3Y/5Y) in one URL (unless hardwareOnly)
+                if (!modifiers.hardwareOnly) {
+                  const licSkus = getLicenseSkus(base);
+                  if (licSkus && licSkus.length > 0) {
+                    for (const { sku: licSku } of licSkus) {
+                      urlItems.push({ sku: licSku, qty });
+                    }
+                  }
+                }
+              }
+              if (urlItems.length > 0) {
+                quoteUrls = [{ url: buildStratusUrl(urlItems), label: 'Quote' }];
+              }
             }
 
             apiResult = {
               quoteUrls,
-              responseText: responseText.substring(0, 3000),
               eolWarnings,
               parsedItems: parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })),
             };
@@ -8458,16 +8474,17 @@ CRITICAL URL RULES:
                 if (isrResp?.data?.[0]) {
                   const isr = isrResp.data[0];
                   const nameParts = (isr.Name || '').split(' ');
+                  const _sv = (v) => (v && typeof v === 'object') ? (v.name || v.Name || '') : (v || '');
                   contact = {
                     id: isr.id, firstName: nameParts[0] || '', lastName: nameParts.slice(1).join(' ') || '',
                     fullName: isr.Name || '', email: isr.Email || fullEmail, phone: isr.Phone || '',
-                    mobile: '', title: isr.Title || 'Cisco Rep', accountId: null,
+                    mobile: '', title: _sv(isr.Title) || 'Cisco Rep', accountId: null,
                     accountName: 'Cisco Systems (Meraki ISR)', address: '',
                     zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/CustomModule9/${isr.id}`,
                     isCiscoRep: true,
-                    pointsCurrent: isr.Points_Current || '',
-                    merakiTeam: isr.Meraki_Team || '',
-                    vertical: isr.Vertical || '',
+                    pointsCurrent: typeof isr.Points_Current === 'number' ? isr.Points_Current : (Number(isr.Points_Current) || ''),
+                    merakiTeam: _sv(isr.Meraki_Team),
+                    vertical: _sv(isr.Vertical),
                   };
                 }
                 // Cisco reps: no account/deals/tasks/quotes
@@ -8773,6 +8790,8 @@ CRITICAL URL RULES:
                 if (isrResp?.data?.[0]) {
                   const isr = isrResp.data[0];
                   const nameParts = (isr.Name || '').split(' ');
+                  // Safely extract string values from potentially object-valued Zoho lookup fields
+                  const _strVal = (v) => (v && typeof v === 'object') ? (v.name || v.Name || String(v) || '') : (v || '');
                   contact = {
                     id: isr.id,
                     firstName: nameParts[0] || '',
@@ -8781,15 +8800,15 @@ CRITICAL URL RULES:
                     email: isr.Email || contactEmail,
                     phone: isr.Phone || '',
                     mobile: '',
-                    title: isr.Title || 'Cisco Rep',
+                    title: _strVal(isr.Title) || 'Cisco Rep',
                     accountId: null,
                     accountName: 'Cisco Systems (Meraki ISR)',
                     address: '',
                     zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/CustomModule9/${isr.id}`,
                     isCiscoRep: true,
-                    pointsCurrent: isr.Points_Current || '',
-                    merakiTeam: isr.Meraki_Team || '',
-                    vertical: isr.Vertical || '',
+                    pointsCurrent: typeof isr.Points_Current === 'number' ? isr.Points_Current : (Number(isr.Points_Current) || ''),
+                    merakiTeam: _strVal(isr.Meraki_Team),
+                    vertical: _strVal(isr.Vertical),
                   };
                 }
                 // No account lookup needed for Cisco reps

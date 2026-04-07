@@ -58,7 +58,7 @@ const QUICK_ACTIONS = [
 // Zoho intent detection
 // When user asks to modify a quote/deal, inject enforcement
 // ─────────────────────────────────────────────
-function buildSystemContext(emailContext) {
+function buildSystemContext(emailContext, selectedEmail) {
   let ctx = `You are Stratus AI, a Cisco/Meraki sales assistant embedded in a Chrome extension.
 
 ABSOLUTE CAPABILITY RULE:
@@ -83,14 +83,48 @@ ALWAYS DEFAULT TO ZOHO CRM for:
 - Task creation and management
 - Any mention of quote numbers, deal names, or account names`;
 
-  if (emailContext && emailContext.customerEmail) {
+  // Use selectedEmail override if provided, else fall back to customerEmail
+  const activeEmail = selectedEmail || (emailContext && emailContext.customerEmail);
+  if (emailContext && activeEmail) {
+    // Find matching contact from threadContacts for name lookup
+    const contacts = emailContext.threadContacts || [];
+    const match = contacts.find(c => c.email?.toLowerCase() === activeEmail.toLowerCase());
+    const name = match?.name || (activeEmail === emailContext.customerEmail ? emailContext.customerName : '') || '';
+    const domain = activeEmail.split('@')[1] || emailContext.customerDomain || '';
     ctx += `\n\nActive email context:
-- Customer: ${emailContext.customerName || ''} <${emailContext.customerEmail}>
+- Customer: ${name} <${activeEmail}>
 - Subject: ${emailContext.subject || ''}
-- Domain: ${emailContext.customerDomain || ''}
+- Domain: ${domain}
 - Use this context to pre-fill account/contact when creating quotes or deals`;
   }
   return ctx;
+}
+
+// Build unique participant list for dropdown
+function buildParticipantOptions(emailContext) {
+  if (!emailContext) return [];
+  const seen = new Set();
+  const opts = [];
+
+  const add = (email, name, role) => {
+    if (!email || !email.includes('@')) return;
+    const lower = email.toLowerCase();
+    if (seen.has(lower)) return;
+    seen.add(lower);
+    opts.push({ email: lower, name: name || '', role: role || '' });
+  };
+
+  // Prefer threadContacts (has role info + dedup)
+  if (emailContext.threadContacts && emailContext.threadContacts.length > 0) {
+    emailContext.threadContacts.forEach(c => add(c.email, c.name, c.role));
+  }
+  // Fall back: at least add customerEmail + senderEmail
+  if (emailContext.customerEmail) add(emailContext.customerEmail, emailContext.customerName, 'customer');
+  if (emailContext.senderEmail && emailContext.senderEmail !== emailContext.customerEmail) {
+    add(emailContext.senderEmail, emailContext.senderName, 'sender');
+  }
+
+  return opts;
 }
 
 // ─────────────────────────────────────────────
@@ -100,6 +134,8 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [selectedContextEmail, setSelectedContextEmail] = useState(null);
+  const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
   const messagesEndRef = useRef(null);
   // AbortController ref for stop functionality
   const abortRef = useRef(null);
@@ -109,10 +145,29 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
+  // Reset context selection when email changes
+  useEffect(() => {
+    setSelectedContextEmail(null);
+  }, [emailContext?.customerEmail, emailContext?.subject]);
+
   // Pre-fill from navData
   useEffect(() => {
     if (navData?.prefillText) setInput(navData.prefillText);
   }, [navData]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    if (!contextDropdownOpen) return;
+    const handler = () => setContextDropdownOpen(false);
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [contextDropdownOpen]);
+
+  // Computed participant options for dropdown
+  const participantOptions = buildParticipantOptions(emailContext);
+  const activeContextEmail = selectedContextEmail === '__none__' ? null
+    : (selectedContextEmail || emailContext?.customerEmail || null);
+  const activeContact = participantOptions.find(p => p.email === activeContextEmail);
 
   const handleSendMessage = useCallback(async (overrideText) => {
     const messageText = overrideText || input.trim();
@@ -141,11 +196,18 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
         content: m.content,
       }));
 
+      // Build effective context: if user selected a specific email, override customerEmail
+      const effectiveContext = selectedContextEmail === '__none__'
+        ? null
+        : selectedContextEmail && emailContext
+          ? { ...emailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
+          : emailContext || null;
+
       const response = await sendToBackground(MSG.CHAT_HANDOFF, {
         text: messageText,
-        emailContext: emailContext || null,
+        emailContext: effectiveContext,
         history: historyForApi,
-        systemContext: buildSystemContext(emailContext),
+        systemContext: buildSystemContext(emailContext, selectedContextEmail === '__none__' ? null : selectedContextEmail),
       });
 
       if (thisAbort.aborted) return; // Stopped by user
@@ -221,12 +283,75 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
                 </button>
               ))}
             </div>
-            {emailContext?.customerEmail && (
-              <div style={{
-                marginTop: 12, padding: 8, background: COLORS.BG_SECONDARY,
-                borderRadius: 6, fontSize: 11, color: COLORS.TEXT_SECONDARY,
-              }}>
-                Context: {emailContext.customerName || emailContext.customerEmail}
+            {participantOptions.length > 0 && (
+              <div style={{ marginTop: 12, position: 'relative' }}>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setContextDropdownOpen(v => !v); }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '5px 10px', background: activeContextEmail ? COLORS.STRATUS_LIGHT : COLORS.BG_SECONDARY,
+                    border: `1px solid ${activeContextEmail ? COLORS.STRATUS_BLUE + '55' : COLORS.BORDER}`,
+                    borderRadius: 6, fontSize: 11, color: activeContextEmail ? COLORS.STRATUS_BLUE : COLORS.TEXT_SECONDARY,
+                    cursor: 'pointer', width: '100%', textAlign: 'left',
+                  }}
+                  title="Select which thread participant to use as CRM context"
+                >
+                  <span style={{ opacity: 0.7 }}>Context:</span>
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: activeContextEmail ? 600 : 400 }}>
+                    {activeContextEmail
+                      ? (activeContact?.name || activeContextEmail)
+                      : 'None (no CRM context)'}
+                  </span>
+                  <span style={{ opacity: 0.6, fontSize: 9 }}>▼</span>
+                </button>
+                {contextDropdownOpen && (
+                  <div onClick={(e) => e.stopPropagation()} style={{
+                    position: 'absolute', bottom: '100%', left: 0, right: 0,
+                    background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+                    borderRadius: 6, boxShadow: '0 -4px 12px rgba(0,0,0,0.12)',
+                    zIndex: 999, overflow: 'hidden', marginBottom: 4,
+                  }}>
+                    <div style={{ padding: '4px 0' }}>
+                      {/* No context option */}
+                      <button
+                        onClick={() => { setSelectedContextEmail('__none__'); setContextDropdownOpen(false); }}
+                        style={{
+                          display: 'block', width: '100%', textAlign: 'left',
+                          padding: '6px 12px', background: selectedContextEmail === '__none__' ? COLORS.BG_SECONDARY : 'transparent',
+                          border: 'none', cursor: 'pointer', fontSize: 11, color: COLORS.TEXT_SECONDARY,
+                        }}
+                      >
+                        No context (general chat)
+                      </button>
+                      {/* Participant options */}
+                      {participantOptions.map((p) => (
+                        <button
+                          key={p.email}
+                          onClick={() => { setSelectedContextEmail(p.email); setContextDropdownOpen(false); }}
+                          style={{
+                            display: 'block', width: '100%', textAlign: 'left',
+                            padding: '6px 12px',
+                            background: (selectedContextEmail === p.email || (!selectedContextEmail && p.email === emailContext?.customerEmail)) ? COLORS.STRATUS_LIGHT : 'transparent',
+                            border: 'none', cursor: 'pointer', fontSize: 11,
+                            color: COLORS.TEXT_PRIMARY,
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {p.name || p.email}
+                          </div>
+                          {p.name && (
+                            <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {p.email}
+                            </div>
+                          )}
+                          {p.role && (
+                            <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 10, textTransform: 'capitalize' }}>{p.role}</div>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
