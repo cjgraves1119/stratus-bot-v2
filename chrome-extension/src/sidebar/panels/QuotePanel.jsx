@@ -136,10 +136,20 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
   }
 
   function handleApplySuggestion(suggestion) {
-    // Replace the invalid SKU with the first suggestion in the text
     const replacement = suggestion.suggest[0];
-    const regex = new RegExp(suggestion.input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-    setSkuText(prev => prev.replace(regex, replacement));
+    const escapedInput = suggestion.input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Negative lookahead prevents matching a partial SKU prefix — e.g. "MS150-2"
+    // should NOT match inside "MS150-24". With the fixed parser this shouldn't happen,
+    // but the guard keeps things safe if suggestion.input is ever a truncated token.
+    const regex = new RegExp(escapedInput + '(?![A-Z0-9-])', 'gi');
+    const newText = skuText.replace(regex, replacement);
+    if (newText === skuText) {
+      // Guard: lookahead blocked the match (input was a prefix of a longer token).
+      // Fall back to replacing the whole textarea content with the selected suggestion.
+      setSkuText(replacement);
+    } else {
+      setSkuText(newText);
+    }
     setResult(null);
   }
 

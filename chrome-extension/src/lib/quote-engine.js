@@ -408,8 +408,10 @@ export function parseSkuInput(text) {
   }
 
   // Standard parsing: extract SKUs with quantities from single or comma-separated input
-  // Patterns: "10 MR44", "MR44 x10", "MR44, MR45", "2x MR44 5x MS130-24P"
-  const skuRegex = /(\d+)\s*[xX×]?\s*([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))|([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))\s*[xX×]?\s*(\d+)|([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))/gi;
+  // Patterns: "10 MR44", "MR44 x10", "MR44 x 10", "MR44 10", "2x MR44 5x MS130-24P"
+  // NOTE: SKU-first pattern requires whitespace OR explicit x/× to avoid treating model
+  // digits as quantity (e.g. "MS150-24" must NOT parse as SKU="MS150-2", qty=4)
+  const skuRegex = /(\d+)\s*[xX×]?\s*([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))|([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))(?:\s+[xX×]?\s*|\s*[xX×]\s*)(\d+)|([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))/gi;
 
   const joinedText = lines.join(', ');
   let match;
