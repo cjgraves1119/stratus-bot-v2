@@ -154,11 +154,11 @@ export async function handleContextMenuClick(info, tab) {
 
     case 'stratus-quote-image': {
       try {
-        // Capture the visible tab as base64 screenshot instead of using image URL
-        // (dashboard images behind auth return HTML, not image data)
+        // MUST open side panel FIRST (before any async work) to satisfy user-gesture requirement
+        await chrome.sidePanel.open({ tabId: tab.id });
+        // Now capture the visible tab as base64 screenshot
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
         const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-        await chrome.sidePanel.open({ tabId: tab.id });
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
@@ -197,9 +197,10 @@ export async function handleContextMenuClick(info, tab) {
 
     case 'stratus-capture-screenshot': {
       try {
+        // MUST open side panel FIRST to satisfy user-gesture requirement
+        await chrome.sidePanel.open({ tabId: tab.id });
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
         const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-        await chrome.sidePanel.open({ tabId: tab.id });
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',

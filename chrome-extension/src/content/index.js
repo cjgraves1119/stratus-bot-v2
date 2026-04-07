@@ -34,6 +34,20 @@ async function loadSettings() {
 
 loadSettings();
 
+// Bot/notification emails — exclude from contact extraction (module-scoped for reuse)
+const BOT_EMAILS = new Set([
+  'notifications@mixmax.com',
+  'notificationsapp@cisco.com',
+  'eweichel@cisco.com',
+  'noreply@webex.com',
+  'noreply@google.com',
+  'mailer-daemon@googlemail.com',
+  'mailer-daemon@google.com',
+  'no-reply@accounts.google.com',
+  'no-reply@cisco.com',
+  'donotreply@cisco.com',
+]);
+
 // ─────────────────────────────────────────────
 // Email Detection
 // ─────────────────────────────────────────────
@@ -118,19 +132,7 @@ function extractEmailData() {
     return 'sender';
   }
 
-  // Bot/notification emails — exclude from contact selector (mirrors Add-on BOT_EMAILS)
-  const BOT_EMAILS = new Set([
-    'notifications@mixmax.com',
-    'notificationsapp@cisco.com',
-    'eweichel@cisco.com',
-    'noreply@webex.com',
-    'noreply@google.com',
-    'mailer-daemon@googlemail.com',
-    'mailer-daemon@google.com',
-    'no-reply@accounts.google.com',
-    'no-reply@cisco.com',
-    'donotreply@cisco.com',
-  ]);
+  // BOT_EMAILS is defined at module scope (top of file)
 
   // Track Cisco rep emails on the thread (cisco.com domain, non-bot)
   const ciscoEmails = [];
