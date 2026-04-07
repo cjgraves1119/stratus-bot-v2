@@ -7416,6 +7416,55 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── CRM ISR Deals: Get deals where a Cisco rep is the Meraki ISR ──
+          case '/api/crm-isr-deals': {
+            const { repEmail: isrEmail, repId: isrRepId } = apiBody;
+            if (!isrEmail && !isrRepId) {
+              return new Response(JSON.stringify({ error: 'repEmail or repId required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              let repId = isrRepId || '';
+              let repName = '';
+
+              // Look up rep ID by email if not provided
+              if (!repId && isrEmail) {
+                const repSearch = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(isrEmail)})&fields=id,Name`, env
+                ).catch(() => null);
+                if (repSearch?.data?.[0]) {
+                  repId = repSearch.data[0].id;
+                  repName = repSearch.data[0].Name || '';
+                }
+              }
+
+              if (!repId) {
+                apiResult = { deals: [], found: false, error: 'Rep not found' };
+                break;
+              }
+
+              // Search deals where Meraki_ISR matches this rep's ID
+              const dealsResp = await zohoApiCall('GET',
+                `Deals/search?criteria=(Meraki_ISR:equals:${repId})&fields=id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Lead_Source,Created_Time&per_page=20&sort_by=Closing_Date&sort_order=desc`, env
+              ).catch(() => null);
+
+              const deals = (dealsResp?.data || []).map(d => ({
+                id: d.id,
+                name: d.Deal_Name || '',
+                stage: d.Stage || '',
+                amount: d.Amount || 0,
+                closingDate: d.Closing_Date || '',
+                accountName: d.Account_Name?.name || d.Account_Name || '',
+                leadSource: d.Lead_Source || '',
+                zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Potentials/${d.id}`,
+              }));
+
+              apiResult = { deals, found: deals.length > 0, repId, repName };
+            } catch (isrErr) {
+              apiResult = { deals: [], found: false, error: isrErr.message };
+            }
+            break;
+          }
+
           // ── CRM Create Account ──
           case '/api/crm-create-account': {
             const { name: newAcctName, street: newAcctStreet, city: newAcctCity, state: newAcctState, zip: newAcctZip, website: newAcctWebsite } = apiBody;
@@ -8404,7 +8453,7 @@ CRITICAL URL RULES:
 
               if (isCiscoEmail) {
                 const isrResp = await zohoApiCall('GET',
-                  `CustomModule9/search?criteria=(Email:equals:${encodeURIComponent(fullEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(fullEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
                 if (isrResp?.data?.[0]) {
                   const isr = isrResp.data[0];
@@ -8711,14 +8760,14 @@ CRITICAL URL RULES:
               let contact = null;
               let account = null;
 
-              // ── Cisco rep detection: search CustomModule9 module instead of Contacts ──
+              // ── Cisco rep detection: search Meraki_ISRs module instead of Contacts ──
               const isCiscoEmail = contactEmail && contactEmail.toLowerCase().endsWith('@cisco.com');
 
               if (isCiscoEmail) {
-                // Search CustomModule9 module by email for Cisco reps
-                console.log(`[CRM-CONTACT] Cisco email detected: ${contactEmail} — searching CustomModule9`);
+                // Search Meraki_ISRs module by email for Cisco reps (API name = Meraki_ISRs)
+                console.log(`[CRM-CONTACT] Cisco email detected: ${contactEmail} — searching Meraki_ISRs`);
                 const isrResp = await zohoApiCall('GET',
-                  `CustomModule9/search?criteria=(Email:equals:${encodeURIComponent(contactEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(contactEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
 
                 if (isrResp?.data?.[0]) {
@@ -9205,16 +9254,16 @@ CRITICAL URL RULES:
               let finalRepId = arRepId || '';
               let finalRepName = arRepName || arRepEmail || '';
 
-              // If no repId provided, look up via CustomModule9 module by email
+              // If no repId provided, look up via Meraki_ISRs module by email
               if (!finalRepId && arRepEmail) {
                 const isrSearch = await zohoApiCall('GET',
-                  `CustomModule9/search?criteria=(Email:equals:${encodeURIComponent(arRepEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(arRepEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
                 if (isrSearch?.data && isrSearch.data.length > 0) {
                   finalRepId = isrSearch.data[0].id;
                   finalRepName = isrSearch.data[0].Name || finalRepName;
                 } else {
-                  apiResult = { success: false, error: `Rep ${arRepEmail} not found in CustomModule9 module` };
+                  apiResult = { success: false, error: `Rep ${arRepEmail} not found in Meraki_ISRs module` };
                   break;
                 }
               }

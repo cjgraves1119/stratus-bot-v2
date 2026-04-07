@@ -221,19 +221,19 @@ export async function crmSearch(query, module) {
 
 /**
  * Get deals where a Cisco rep is the Meraki ISR.
+ * Uses dedicated /api/crm-isr-deals endpoint which searches by rep ID.
  */
 export async function crmIsrDeals(repEmail, repName) {
   const cacheKey = `crm_isr_deals_${repEmail || repName}`;
   const cached = await getCached(cacheKey);
   if (cached) return cached;
 
-  const result = await apiCall('/api/crm-search', {
-    query: repEmail || repName,
-    module: 'Deals',
-    field: 'Meraki_ISR',
+  const result = await apiCall('/api/crm-isr-deals', {
+    repEmail: repEmail || '',
+    repName: repName || '',
   });
 
-  if (result) {
+  if (result && result.deals) {
     await setCached(cacheKey, result, CACHE_TTL.CRM_DEALS);
   }
   return result;

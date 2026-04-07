@@ -464,6 +464,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   const isConsumerDomain = selectedContact && CONSUMER_DOMAINS.has(selectedContact.split('@')[1] || '');
   const hasData = data && data.found;
   const { account, contact } = hasData ? data : {};
+  const isCiscoRep = !!(data?.isCiscoRep || contact?.isCiscoRep);
   const taskList = tasks?.tasks || [];
   const dealList = deals?.deals || [];
   const isrDealList = isrDeals?.deals || [];
@@ -579,7 +580,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       {/* ── Sub-Tab Bar ── */}
       <div style={{ display: 'flex', borderBottom: `1px solid ${COLORS.BORDER}`, background: COLORS.BG_PRIMARY }}>
         {SUB_TABS.map((tab) => {
-          const count = tab.id === 'deals' ? (dealList.length + isrDealList.length)
+          const count = tab.id === 'deals'
+            ? (isCiscoRep ? isrDealList.length : dealList.length + isrDealList.length)
             : tab.id === 'tasks' ? taskList.length : null;
           return (
             <button key={tab.id} onClick={() => setActiveSubTab(tab.id)} style={{
@@ -653,7 +655,113 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
               </Card>
             )}
 
-            {contact && (
+            {/* ── Cisco Rep Card ── */}
+            {contact && isCiscoRep && (
+              <Card>
+                {/* Header row */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                      <span style={{
+                        background: '#0056b3', color: 'white', fontSize: 10, fontWeight: 700,
+                        padding: '2px 6px', borderRadius: 4, letterSpacing: '0.5px',
+                      }}>CISCO REP</span>
+                    </div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: COLORS.TEXT_PRIMARY }}>
+                      {contact.fullName || `${contact.firstName || ''} ${contact.lastName || ''}`.trim()}
+                    </div>
+                    {contact.title && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>{contact.title}</div>}
+                    <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>{contact.email}</div>
+                  </div>
+                  {(contact.zohoUrl || contact.id) && (
+                    <a href={contact.zohoUrl || `https://crm.zoho.com/crm/${ZOHO_ORG}/tab/CustomModule9/${contact.id}`}
+                       target="_blank" rel="noopener"
+                       style={{ color: COLORS.STRATUS_BLUE, fontSize: 11, fontWeight: 500, whiteSpace: 'nowrap' }}>
+                      View in Zoho →
+                    </a>
+                  )}
+                </div>
+
+                {/* Stats row — Points + Team */}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {contact.pointsCurrent !== undefined && contact.pointsCurrent !== '' && (
+                    <div style={{
+                      background: contact.pointsCurrent >= 100 ? '#e8f5e9' : '#fff3e0',
+                      border: `1px solid ${contact.pointsCurrent >= 100 ? '#a5d6a7' : '#ffcc80'}`,
+                      borderRadius: 6, padding: '6px 12px', textAlign: 'center', minWidth: 80,
+                    }}>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: contact.pointsCurrent >= 100 ? '#2e7d32' : '#e65100' }}>
+                        {contact.pointsCurrent}
+                      </div>
+                      <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontWeight: 600, textTransform: 'uppercase' }}>Points</div>
+                    </div>
+                  )}
+                  {contact.merakiTeam && (
+                    <div style={{
+                      background: '#e3f2fd', border: '1px solid #90caf9',
+                      borderRadius: 6, padding: '6px 12px', flex: 1,
+                    }}>
+                      <div style={{ fontSize: 10, color: '#1565c0', fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>Team</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: '#0d47a1' }}>{contact.merakiTeam}</div>
+                    </div>
+                  )}
+                  {contact.vertical && (
+                    <div style={{
+                      background: COLORS.BG_SECONDARY, border: `1px solid ${COLORS.BORDER}`,
+                      borderRadius: 6, padding: '6px 12px',
+                    }}>
+                      <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 }}>Vertical</div>
+                      <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{contact.vertical}</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ISR Deals inline preview */}
+                {isrDealList.length > 0 && (
+                  <div style={{ marginTop: 10, borderTop: `1px solid ${COLORS.BORDER}`, paddingTop: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase' }}>
+                        ISR Deals ({isrDealList.length})
+                      </div>
+                      <button onClick={() => setActiveSubTab('deals')}
+                        style={{ background: 'none', border: 'none', color: COLORS.STRATUS_BLUE, fontSize: 11, cursor: 'pointer', padding: 0 }}>
+                        View all →
+                      </button>
+                    </div>
+                    {isrDealList.slice(0, 4).map((deal, i) => (
+                      <div key={deal.id || i} style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '5px 0', borderBottom: i < Math.min(isrDealList.length, 4) - 1 ? `1px solid ${COLORS.BORDER}` : 'none',
+                      }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <a href={deal.zohoUrl} target="_blank" rel="noopener"
+                             style={{ fontSize: 12, fontWeight: 600, color: COLORS.STRATUS_BLUE, textDecoration: 'none',
+                                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>
+                            {deal.name || deal.accountName}
+                          </a>
+                          <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{deal.stage}</div>
+                        </div>
+                        {deal.amount > 0 && (
+                          <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginLeft: 8, whiteSpace: 'nowrap' }}>
+                            ${Number(deal.amount).toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Loading ISR deals */}
+                {isCiscoRep && !isrDeals && !loading && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
+                    Loading ISR deals...
+                  </div>
+                )}
+              </Card>
+            )}
+
+            {/* ── Standard Contact Card (non-Cisco) ── */}
+            {contact && !isCiscoRep && (
               <Card>
                 <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 6 }}>Contact Details</div>
                 <div style={{ fontSize: 13, color: COLORS.TEXT_PRIMARY }}>
@@ -661,7 +769,6 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                   {contact.title && <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 12 }}>{contact.title}</div>}
                   <div style={{ fontSize: 12, marginTop: 4 }}>{contact.email}</div>
                   {contact.phone && <div style={{ fontSize: 12 }}>{contact.phone}</div>}
-                  {contact.merakiTeam && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>Team: {contact.merakiTeam}</div>}
                 </div>
                 <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {(contact.zohoUrl || contact.id) && (
@@ -694,7 +801,83 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         {/* ═══ DEALS TAB ═══ */}
         {activeSubTab === 'deals' && (
           <>
-            {isrDealList.length > 0 && (
+            {/* ISR Deals — shown when viewing a Cisco rep */}
+            {isCiscoRep && (
+              <Card>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: '#0056b3', textTransform: 'uppercase' }}>
+                    ISR Deals {isrDealList.length > 0 ? `(${isrDealList.length})` : ''}
+                  </div>
+                  {contact && (
+                    <span style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>
+                      {contact.fullName || contact.firstName}
+                    </span>
+                  )}
+                </div>
+
+                {!isrDeals && (
+                  <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic', padding: '8px 0' }}>
+                    Loading deals...
+                  </div>
+                )}
+
+                {isrDeals && isrDealList.length === 0 && (
+                  <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, padding: '8px 0' }}>
+                    No active deals found for this rep.
+                  </div>
+                )}
+
+                {isrDealList.map((deal, i) => {
+                  const isOpen = !['Closed Won', 'Closed (Lost)'].includes(deal.stage);
+                  return (
+                    <div key={deal.id || i} style={{
+                      padding: '8px 0',
+                      borderBottom: i < isrDealList.length - 1 ? `1px solid ${COLORS.BORDER}` : 'none',
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <a href={deal.zohoUrl} target="_blank" rel="noopener"
+                             style={{ fontSize: 13, fontWeight: 600, color: COLORS.STRATUS_BLUE,
+                                      textDecoration: 'none', display: 'block',
+                                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {deal.name}
+                          </a>
+                          {deal.accountName && deal.accountName !== deal.name && (
+                            <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginTop: 1 }}>{deal.accountName}</div>
+                          )}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
+                            <span style={{
+                              fontSize: 10, padding: '1px 6px', borderRadius: 3, fontWeight: 600,
+                              background: deal.stage === 'Closed Won' ? '#e8f5e9'
+                                : deal.stage?.includes('Lost') ? '#fce8e6'
+                                : '#e3f2fd',
+                              color: deal.stage === 'Closed Won' ? '#2e7d32'
+                                : deal.stage?.includes('Lost') ? '#c62828'
+                                : '#1565c0',
+                            }}>
+                              {deal.stage}
+                            </span>
+                            {deal.closingDate && (
+                              <span style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY }}>
+                                Close: {deal.closingDate}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        {deal.amount > 0 && (
+                          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.TEXT_PRIMARY, whiteSpace: 'nowrap' }}>
+                            ${Number(deal.amount).toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </Card>
+            )}
+
+            {/* Standard deals for non-Cisco contacts */}
+            {!isCiscoRep && isrDealList.length > 0 && (
               <Card>
                 <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 8 }}>
                   Deals as Meraki ISR ({isrDealList.length})
@@ -738,7 +921,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
               </Card>
             )}
 
-            {dealList.length === 0 && isrDealList.length === 0 && !loading && (
+            {!isCiscoRep && dealList.length === 0 && isrDealList.length === 0 && !loading && (
               <div style={{ textAlign: 'center', color: COLORS.TEXT_SECONDARY, padding: 20, fontSize: 13 }}>
                 No deals found for this account.
               </div>
