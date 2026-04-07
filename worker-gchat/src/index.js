@@ -150,6 +150,71 @@ const EOL_DATES = catalog._EOL_DATES || {};
 const COMMON_MISTAKES = catalog._COMMON_MISTAKES || {};
 const PASSTHROUGH = new Set(catalog._PASSTHROUGH || []);
 
+// ─── Hoisted Constants (compiled once at module load, not per-call) ──────────
+const SPEED_RANK = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+
+// parseMessage regex patterns (avoids recompilation on every message)
+const RE_JUST = /\b(JUST|ONLY)\b/;
+const RE_TERM_1Y = /\b1[\s-]?Y(EAR)?\b/;
+const RE_TERM_3Y = /\b3[\s-]?Y(EAR)?\b/;
+const RE_TERM_5Y = /\b5[\s-]?Y(EAR)?\b/;
+const RE_HW_ONLY = /\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/;
+const RE_HW_ADVISORY = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
+const RE_LIC_ONLY = /\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/;
+const RE_SHOW_PRICING = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/;
+const RE_TIER_SEC = /\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/;
+const RE_TIER_ENT = /\bENT(ERPRISE)?\b/;
+const RE_TIER_SDW = /\b(SD[\s-]?WAN|SDW)\b/;
+const ADVISORY_PATTERNS = [
+  /\bWHAT('?S| IS) THE DIFFERENCE\b/, /\bWHICH (ONE |SHOULD |DO |WOULD )/,
+  /\bDO I NEED\b/, /\bIS .+ COMPATIBLE\b/, /\bCAN I USE\b/,
+  /\bSHOULD I (GET|USE|GO|CHOOSE|PICK)\b/, /\bWHAT (DO YOU|WOULD YOU) (RECOMMEND|SUGGEST)\b/,
+  /\bCOMPARE\b/, /\bTELL ME ABOUT\b/, /\bWHAT('?S| IS) THE BEST\b/,
+  /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/, /\bSPECS?\b/, /\bDIFFERENCE BETWEEN\b/,
+  /\bWHAT SFP\b/, /\bWHICH SFP\b/, /\bWHAT OPTIC\b/, /\bWHICH OPTIC\b/,
+  /\bCONNECT .+ TO\b/, /\bLINK .+ TO\b/, /\bHOOK UP\b/,
+  /\bWHAT (CABLE|STACKING|STACK)\b/, /\bSTACK(ING|ABLE)? (CABLE)?\b/,
+  /\bIS .+ STACKABLE\b/, /\bCAN .+ (BE )?STACK(ED)?\b/,
+  /\bUPLINK MODULE\b/, /\bWHAT MODULE\b/, /\bWHICH MODULE\b/,
+  /\bFIBER (TYPE|OPTIC|CABLE)\b/, /\bDAC\b/, /\bTWINAX\b/,
+  /\bSFP.{0,20}(NEED|REQUIRE|USE|COMPATIBLE)\b/,
+  /\bCOMPATIBLE (SFP|OPTIC|MODULE|TRANSCEIVER)\b/,
+  /\bHOW (DO I |TO )?(CONNECT|LINK|UPLINK)\b/
+];
+const REVISION_PATTERNS = [
+  /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(LICENSE|HARDWARE|HW|AP|SWITCH|MX|MR)/,
+  /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(FROM|THE|THAT|THOSE)/,
+  /\b(ADD|INCLUDE|THROW IN|TACK ON)\b.*\b(MORE|EXTRA|ADDITIONAL|ALSO)\b/,
+  /\b(CHANGE|UPDATE|MODIFY|ADJUST|SWITCH)\b.*(QUANTITY|QTY|COUNT|NUMBER|TERM|LICENSE|TIER)/,
+  /\b(MAKE (IT|THAT|THEM))\b.*(INSTEAD|RATHER)/,
+  /\b(ACTUALLY|NEVER\s?MIND|SCRATCH THAT|WAIT)\b/,
+  /\bINSTEAD OF\b/,
+  /\b(JUST|ONLY)\s+(THE\s+)?(LICENSE|HARDWARE|HW)\b/,
+  /\bSWITCH (TO|IT TO)\b/,
+  /\bBUMP (IT |THAT |THE )?(UP|DOWN|TO)\b/
+];
+const SKU_PATTERN_FACTORIES = [
+  () => /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
+  () => /C8[14]\d{2}-G2-MX/gi,
+  () => /MA-[A-Z0-9-]+/gi,
+  () => /CW9\d{3}[A-Z0-9]*/gi,
+  () => /MS150-[\dA-Z]+-[\dA-Z]+/gi,
+  () => /MS450-\d+/gi,
+  () => /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,
+  () => /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,
+  () => /MX\d+[A-Z]*(?:-NA)?/gi,
+  () => /Z\d+[A-Z]*/gi
+];
+const RE_DUO_1 = /(\d+)\s*[X×]?\s*(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?/i;
+const RE_DUO_2 = /(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?\s*[X×]?\s*(\d+)?/i;
+const RE_UMB_1 = /(\d+)\s*[X×]?\s*(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?/i;
+const RE_UMB_2 = /(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?\s*[X×]?\s*(\d+)?/i;
+const RE_AGNOSTIC_1 = /(\d+)\s*[X×]?\s*(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?/i;
+const RE_AGNOSTIC_2 = /(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*[X×]?\s*(\d+)/i;
+const RE_AGNOSTIC_3 = /(\d+)\s*[X×]?\s*(MR|MV|MT)\s*(ENT(?:ERPRISE)?)?$/i;
+const RE_QTY_BEFORE = /(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/;
+const RE_QTY_AFTER = /^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i;
+
 // ─── Live Datasheet RAG ──────────────────────────────────────────────────────
 const DATASHEET_URLS = {
   MX67: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
@@ -1417,7 +1482,7 @@ function getDeviceUplinkPorts(profileData) {
  * Returns the best matching speed tier or null if no SFP interconnect is possible.
  */
 function findCommonSpeed(portsA, portsB) {
-  const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+  const speedRank = SPEED_RANK;
   const speedsA = new Set(portsA.map(p => p.speed));
   const speedsB = new Set(portsB.map(p => p.speed));
 
@@ -1529,7 +1594,7 @@ function resolveAccessories(deviceA, deviceB) {
     if (mods) {
       const compatMods = mods.modules.filter(m => {
         const modSpeed = m.speed;
-        const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+        const speedRank = SPEED_RANK;
         return (speedRank[modSpeed] || 0) >= (speedRank[bestSpeed] || 0);
       });
       result.modulesNeeded.push({
@@ -1545,7 +1610,7 @@ function resolveAccessories(deviceA, deviceB) {
     if (mods) {
       const compatMods = mods.modules.filter(m => {
         const modSpeed = m.speed;
-        const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
+        const speedRank = SPEED_RANK;
         return (speedRank[modSpeed] || 0) >= (speedRank[bestSpeed] || 0);
       });
       result.modulesNeeded.push({
@@ -1830,55 +1895,36 @@ function parseMessage(text) {
   }
 
   let requestedTerm = null;
-  const hasJust = /\b(JUST|ONLY)\b/.test(upper);
-  if (hasJust) {
-    if (/\b1[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 1;
-    else if (/\b3[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 3;
-    else if (/\b5[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 5;
+  if (RE_JUST.test(upper)) {
+    if (RE_TERM_1Y.test(upper)) requestedTerm = 1;
+    else if (RE_TERM_3Y.test(upper)) requestedTerm = 3;
+    else if (RE_TERM_5Y.test(upper)) requestedTerm = 5;
   }
 
   const modifiers = { hardwareOnly: false, licenseOnly: false };
-  if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper) && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
+  if (RE_HW_ONLY.test(upper) && !RE_HW_ADVISORY.test(upper)) {
     modifiers.hardwareOnly = true;
   }
-  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/.test(upper)) {
+  if (RE_LIC_ONLY.test(upper)) {
     modifiers.licenseOnly = true;
   }
 
-  const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
+  const showPricing = RE_SHOW_PRICING.test(upper);
 
   let requestedTier = null;
-  if (/\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/.test(upper) && !/\bENTERPRISE\b/.test(upper)) {
+  if (RE_TIER_SEC.test(upper) && !RE_TIER_ENT.test(upper)) {
     requestedTier = 'SEC';
-  } else if (/\bENT(ERPRISE)?\b/.test(upper) && !/\bSEC(URITY)?\b/.test(upper)) {
+  } else if (RE_TIER_ENT.test(upper) && !RE_TIER_SEC.test(upper)) {
     requestedTier = 'ENT';
-  } else if (/\b(SD[\s-]?WAN|SDW)\b/.test(upper)) {
+  } else if (RE_TIER_SDW.test(upper)) {
     requestedTier = 'SDW';
   }
 
-  const advisoryPatterns = [
-    /\bWHAT('?S| IS) THE DIFFERENCE\b/, /\bWHICH (ONE |SHOULD |DO |WOULD )/,
-    /\bDO I NEED\b/, /\bIS .+ COMPATIBLE\b/, /\bCAN I USE\b/,
-    /\bSHOULD I (GET|USE|GO|CHOOSE|PICK)\b/, /\bWHAT (DO YOU|WOULD YOU) (RECOMMEND|SUGGEST)\b/,
-    /\bCOMPARE\b/, /\bTELL ME ABOUT\b/, /\bWHAT('?S| IS) THE BEST\b/,
-    /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/, /\bSPECS?\b/, /\bDIFFERENCE BETWEEN\b/,
-    // Accessory/connectivity intent patterns (Phase 2)
-    /\bWHAT SFP\b/, /\bWHICH SFP\b/, /\bWHAT OPTIC\b/, /\bWHICH OPTIC\b/,
-    /\bCONNECT .+ TO\b/, /\bLINK .+ TO\b/, /\bHOOK UP\b/,
-    /\bWHAT (CABLE|STACKING|STACK)\b/, /\bSTACK(ING|ABLE)? (CABLE)?\b/,
-    /\bIS .+ STACKABLE\b/, /\bCAN .+ (BE )?STACK(ED)?\b/,
-    /\bUPLINK MODULE\b/, /\bWHAT MODULE\b/, /\bWHICH MODULE\b/,
-    /\bFIBER (TYPE|OPTIC|CABLE)\b/, /\bDAC\b/, /\bTWINAX\b/,
-    /\bSFP.{0,20}(NEED|REQUIRE|USE|COMPATIBLE)\b/,
-    /\bCOMPATIBLE (SFP|OPTIC|MODULE|TRANSCEIVER)\b/,
-    /\bHOW (DO I |TO )?(CONNECT|LINK|UPLINK)\b/
-  ];
-  const isAdvisory = advisoryPatterns.some(p => p.test(upper));
+  const isAdvisory = ADVISORY_PATTERNS.some(p => p.test(upper));
 
   // ── Duo / Umbrella natural language handler ──
   // These are license-only products (no hardware), so intercept before hardware SKU parsing
-  const duoMatch = upper.match(/(\d+)\s*[X×]?\s*(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?/i)
-    || upper.match(/(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?\s*[X×]?\s*(\d+)?/i);
+  const duoMatch = upper.match(RE_DUO_1) || upper.match(RE_DUO_2);
   if (duoMatch && !isAdvisory) {
     const qty = parseInt(duoMatch[1]) || parseInt(duoMatch[2]) || 1;
     const tierRaw = (duoMatch[2] || duoMatch[1] || '').toUpperCase();
@@ -1898,8 +1944,7 @@ function parseMessage(text) {
     };
   }
 
-  const umbMatch = upper.match(/(\d+)\s*[X×]?\s*(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?/i)
-    || upper.match(/(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?\s*[X×]?\s*(\d+)?/i);
+  const umbMatch = upper.match(RE_UMB_1) || upper.match(RE_UMB_2);
   if (umbMatch && !isAdvisory) {
     const qty = parseInt(umbMatch[1]) || parseInt(umbMatch[3]) || 1;
     const typeRaw = (umbMatch[2] || umbMatch[1] || 'DNS').toUpperCase();
@@ -1920,9 +1965,7 @@ function parseMessage(text) {
   // ── Model-agnostic license handler (MR, MV, MT) ──
   // These families use a single license SKU regardless of specific model.
   // Intercepts: "4 MR licenses", "quote 10 MV licenses", "5 MT license", etc.
-  const agnosticLicMatch = upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?/i)
-    || upper.match(/(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*[X×]?\s*(\d+)/i)
-    || upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s*(ENT(?:ERPRISE)?)?$/i);
+  const agnosticLicMatch = upper.match(RE_AGNOSTIC_1) || upper.match(RE_AGNOSTIC_2) || upper.match(RE_AGNOSTIC_3);
   if (agnosticLicMatch && !isAdvisory) {
     const qty = parseInt(agnosticLicMatch[1]) || parseInt(agnosticLicMatch[3]) || 1;
     const family = (agnosticLicMatch[2] || agnosticLicMatch[1] || '').toUpperCase();
@@ -1955,18 +1998,8 @@ function parseMessage(text) {
     }
   }
 
-  const skuPatterns = [
-    /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
-    /C8[14]\d{2}-G2-MX/gi,
-    /MA-[A-Z0-9-]+/gi,
-    /CW9\d{3}[A-Z0-9]*/gi,
-    /MS150-[\dA-Z]+-[\dA-Z]+/gi,
-    /MS450-\d+/gi,
-    /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,
-    /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,
-    /MX\d+[A-Z]*(?:-NA)?/gi,
-    /Z\d+[A-Z]*/gi
-  ];
+  // Fresh regex instances each call (required because /gi is stateful)
+  const skuPatterns = SKU_PATTERN_FACTORIES.map(f => f());
 
   const rawMatches = [];
   const matched = new Set();
@@ -1987,8 +2020,8 @@ function parseMessage(text) {
       const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
-      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
-      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
+      const beforeQty = before.match(RE_QTY_BEFORE);
+      const afterQty = after.match(RE_QTY_AFTER);
       // For inline format (SKU1 qty1 SKU2 qty2...), prefer afterQty to avoid picking up previous SKU's quantity
       if (afterQty) qty = parseInt(afterQty[1]);
       else if (beforeQty) qty = parseInt(beforeQty[1]);
@@ -2006,19 +2039,7 @@ function parseMessage(text) {
   foundItems.sort((a, b) => a.position - b.position);
   const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
 
-  const revisionPatterns = [
-    /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(LICENSE|HARDWARE|HW|AP|SWITCH|MX|MR)/,
-    /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(FROM|THE|THAT|THOSE)/,
-    /\b(ADD|INCLUDE|THROW IN|TACK ON)\b.*\b(MORE|EXTRA|ADDITIONAL|ALSO)\b/,
-    /\b(CHANGE|UPDATE|MODIFY|ADJUST|SWITCH)\b.*(QUANTITY|QTY|COUNT|NUMBER|TERM|LICENSE|TIER)/,
-    /\b(MAKE (IT|THAT|THEM))\b.*(INSTEAD|RATHER)/,
-    /\b(ACTUALLY|NEVER\s?MIND|SCRATCH THAT|WAIT)\b/,
-    /\bINSTEAD OF\b/,
-    /\b(JUST|ONLY)\s+(THE\s+)?(LICENSE|HARDWARE|HW)\b/,
-    /\bSWITCH (TO|IT TO)\b/,
-    /\bBUMP (IT |THAT |THE )?(UP|DOWN|TO)\b/
-  ];
-  const isRevision = revisionPatterns.some(p => p.test(upper));
+  const isRevision = REVISION_PATTERNS.some(p => p.test(upper));
 
   if (items.length === 0) {
     if (isRevision || isAdvisory) {
