@@ -105,8 +105,21 @@ export const MSG = {
   // Image Analysis
   ANALYZE_IMAGE: 'ANALYZE_IMAGE',
 
+  // CRM Write Operations
+  CRM_ADD_CONTACT: 'CRM_ADD_CONTACT',
+
   // Chat Handoff
   CHAT_HANDOFF: 'CHAT_HANDOFF',
+  CHAT_STOP: 'CHAT_STOP',
+
+  // CCW / Velocity Hub
+  CCW_LOOKUP: 'CCW_LOOKUP',
+  VELOCITY_HUB_SUBMIT: 'VELOCITY_HUB_SUBMIT',
+  ASSIGN_REP: 'ASSIGN_REP',
+
+  // Task suggestion
+  SUGGEST_TASK_PREVIEW: 'SUGGEST_TASK_PREVIEW',
+  SUGGEST_TASK: 'SUGGEST_TASK',
 };
 
 // Keyboard shortcut command names (match manifest.json)

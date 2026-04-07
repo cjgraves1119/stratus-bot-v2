@@ -150,71 +150,6 @@ const EOL_DATES = catalog._EOL_DATES || {};
 const COMMON_MISTAKES = catalog._COMMON_MISTAKES || {};
 const PASSTHROUGH = new Set(catalog._PASSTHROUGH || []);
 
-// ─── Hoisted Constants (compiled once at module load, not per-call) ──────────
-const SPEED_RANK = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
-
-// parseMessage regex patterns (avoids recompilation on every message)
-const RE_JUST = /\b(JUST|ONLY)\b/;
-const RE_TERM_1Y = /\b1[\s-]?Y(EAR)?\b/;
-const RE_TERM_3Y = /\b3[\s-]?Y(EAR)?\b/;
-const RE_TERM_5Y = /\b5[\s-]?Y(EAR)?\b/;
-const RE_HW_ONLY = /\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/;
-const RE_HW_ADVISORY = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
-const RE_LIC_ONLY = /\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/;
-const RE_SHOW_PRICING = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/;
-const RE_TIER_SEC = /\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/;
-const RE_TIER_ENT = /\bENT(ERPRISE)?\b/;
-const RE_TIER_SDW = /\b(SD[\s-]?WAN|SDW)\b/;
-const ADVISORY_PATTERNS = [
-  /\bWHAT('?S| IS) THE DIFFERENCE\b/, /\bWHICH (ONE |SHOULD |DO |WOULD )/,
-  /\bDO I NEED\b/, /\bIS .+ COMPATIBLE\b/, /\bCAN I USE\b/,
-  /\bSHOULD I (GET|USE|GO|CHOOSE|PICK)\b/, /\bWHAT (DO YOU|WOULD YOU) (RECOMMEND|SUGGEST)\b/,
-  /\bCOMPARE\b/, /\bTELL ME ABOUT\b/, /\bWHAT('?S| IS) THE BEST\b/,
-  /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/, /\bSPECS?\b/, /\bDIFFERENCE BETWEEN\b/,
-  /\bWHAT SFP\b/, /\bWHICH SFP\b/, /\bWHAT OPTIC\b/, /\bWHICH OPTIC\b/,
-  /\bCONNECT .+ TO\b/, /\bLINK .+ TO\b/, /\bHOOK UP\b/,
-  /\bWHAT (CABLE|STACKING|STACK)\b/, /\bSTACK(ING|ABLE)? (CABLE)?\b/,
-  /\bIS .+ STACKABLE\b/, /\bCAN .+ (BE )?STACK(ED)?\b/,
-  /\bUPLINK MODULE\b/, /\bWHAT MODULE\b/, /\bWHICH MODULE\b/,
-  /\bFIBER (TYPE|OPTIC|CABLE)\b/, /\bDAC\b/, /\bTWINAX\b/,
-  /\bSFP.{0,20}(NEED|REQUIRE|USE|COMPATIBLE)\b/,
-  /\bCOMPATIBLE (SFP|OPTIC|MODULE|TRANSCEIVER)\b/,
-  /\bHOW (DO I |TO )?(CONNECT|LINK|UPLINK)\b/
-];
-const REVISION_PATTERNS = [
-  /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(LICENSE|HARDWARE|HW|AP|SWITCH|MX|MR)/,
-  /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(FROM|THE|THAT|THOSE)/,
-  /\b(ADD|INCLUDE|THROW IN|TACK ON)\b.*\b(MORE|EXTRA|ADDITIONAL|ALSO)\b/,
-  /\b(CHANGE|UPDATE|MODIFY|ADJUST|SWITCH)\b.*(QUANTITY|QTY|COUNT|NUMBER|TERM|LICENSE|TIER)/,
-  /\b(MAKE (IT|THAT|THEM))\b.*(INSTEAD|RATHER)/,
-  /\b(ACTUALLY|NEVER\s?MIND|SCRATCH THAT|WAIT)\b/,
-  /\bINSTEAD OF\b/,
-  /\b(JUST|ONLY)\s+(THE\s+)?(LICENSE|HARDWARE|HW)\b/,
-  /\bSWITCH (TO|IT TO)\b/,
-  /\bBUMP (IT |THAT |THE )?(UP|DOWN|TO)\b/
-];
-const SKU_PATTERN_FACTORIES = [
-  () => /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
-  () => /C8[14]\d{2}-G2-MX/gi,
-  () => /MA-[A-Z0-9-]+/gi,
-  () => /CW9\d{3}[A-Z0-9]*/gi,
-  () => /MS150-[\dA-Z]+-[\dA-Z]+/gi,
-  () => /MS450-\d+/gi,
-  () => /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,
-  () => /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,
-  () => /MX\d+[A-Z]*(?:-NA)?/gi,
-  () => /Z\d+[A-Z]*/gi
-];
-const RE_DUO_1 = /(\d+)\s*[X×]?\s*(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?/i;
-const RE_DUO_2 = /(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?\s*[X×]?\s*(\d+)?/i;
-const RE_UMB_1 = /(\d+)\s*[X×]?\s*(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?/i;
-const RE_UMB_2 = /(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?\s*[X×]?\s*(\d+)?/i;
-const RE_AGNOSTIC_1 = /(\d+)\s*[X×]?\s*(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?/i;
-const RE_AGNOSTIC_2 = /(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*[X×]?\s*(\d+)/i;
-const RE_AGNOSTIC_3 = /(\d+)\s*[X×]?\s*(MR|MV|MT)\s*(ENT(?:ERPRISE)?)?$/i;
-const RE_QTY_BEFORE = /(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/;
-const RE_QTY_AFTER = /^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i;
-
 // ─── Live Datasheet RAG ──────────────────────────────────────────────────────
 const DATASHEET_URLS = {
   MX67: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX67_and_MX68_Datasheet',
@@ -1482,7 +1417,7 @@ function getDeviceUplinkPorts(profileData) {
  * Returns the best matching speed tier or null if no SFP interconnect is possible.
  */
 function findCommonSpeed(portsA, portsB) {
-  const speedRank = SPEED_RANK;
+  const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
   const speedsA = new Set(portsA.map(p => p.speed));
   const speedsB = new Set(portsB.map(p => p.speed));
 
@@ -1594,7 +1529,7 @@ function resolveAccessories(deviceA, deviceB) {
     if (mods) {
       const compatMods = mods.modules.filter(m => {
         const modSpeed = m.speed;
-        const speedRank = SPEED_RANK;
+        const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
         return (speedRank[modSpeed] || 0) >= (speedRank[bestSpeed] || 0);
       });
       result.modulesNeeded.push({
@@ -1610,7 +1545,7 @@ function resolveAccessories(deviceA, deviceB) {
     if (mods) {
       const compatMods = mods.modules.filter(m => {
         const modSpeed = m.speed;
-        const speedRank = SPEED_RANK;
+        const speedRank = { '100G': 5, '40G': 4, '25G': 3, '10G': 2, '1G': 1 };
         return (speedRank[modSpeed] || 0) >= (speedRank[bestSpeed] || 0);
       });
       result.modulesNeeded.push({
@@ -1895,36 +1830,55 @@ function parseMessage(text) {
   }
 
   let requestedTerm = null;
-  if (RE_JUST.test(upper)) {
-    if (RE_TERM_1Y.test(upper)) requestedTerm = 1;
-    else if (RE_TERM_3Y.test(upper)) requestedTerm = 3;
-    else if (RE_TERM_5Y.test(upper)) requestedTerm = 5;
+  const hasJust = /\b(JUST|ONLY)\b/.test(upper);
+  if (hasJust) {
+    if (/\b1[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 1;
+    else if (/\b3[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 3;
+    else if (/\b5[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 5;
   }
 
   const modifiers = { hardwareOnly: false, licenseOnly: false };
-  if (RE_HW_ONLY.test(upper) && !RE_HW_ADVISORY.test(upper)) {
+  if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper) && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
     modifiers.hardwareOnly = true;
   }
-  if (RE_LIC_ONLY.test(upper)) {
+  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/.test(upper)) {
     modifiers.licenseOnly = true;
   }
 
-  const showPricing = RE_SHOW_PRICING.test(upper);
+  const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
 
   let requestedTier = null;
-  if (RE_TIER_SEC.test(upper) && !RE_TIER_ENT.test(upper)) {
+  if (/\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/.test(upper) && !/\bENTERPRISE\b/.test(upper)) {
     requestedTier = 'SEC';
-  } else if (RE_TIER_ENT.test(upper) && !RE_TIER_SEC.test(upper)) {
+  } else if (/\bENT(ERPRISE)?\b/.test(upper) && !/\bSEC(URITY)?\b/.test(upper)) {
     requestedTier = 'ENT';
-  } else if (RE_TIER_SDW.test(upper)) {
+  } else if (/\b(SD[\s-]?WAN|SDW)\b/.test(upper)) {
     requestedTier = 'SDW';
   }
 
-  const isAdvisory = ADVISORY_PATTERNS.some(p => p.test(upper));
+  const advisoryPatterns = [
+    /\bWHAT('?S| IS) THE DIFFERENCE\b/, /\bWHICH (ONE |SHOULD |DO |WOULD )/,
+    /\bDO I NEED\b/, /\bIS .+ COMPATIBLE\b/, /\bCAN I USE\b/,
+    /\bSHOULD I (GET|USE|GO|CHOOSE|PICK)\b/, /\bWHAT (DO YOU|WOULD YOU) (RECOMMEND|SUGGEST)\b/,
+    /\bCOMPARE\b/, /\bTELL ME ABOUT\b/, /\bWHAT('?S| IS) THE BEST\b/,
+    /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/, /\bSPECS?\b/, /\bDIFFERENCE BETWEEN\b/,
+    // Accessory/connectivity intent patterns (Phase 2)
+    /\bWHAT SFP\b/, /\bWHICH SFP\b/, /\bWHAT OPTIC\b/, /\bWHICH OPTIC\b/,
+    /\bCONNECT .+ TO\b/, /\bLINK .+ TO\b/, /\bHOOK UP\b/,
+    /\bWHAT (CABLE|STACKING|STACK)\b/, /\bSTACK(ING|ABLE)? (CABLE)?\b/,
+    /\bIS .+ STACKABLE\b/, /\bCAN .+ (BE )?STACK(ED)?\b/,
+    /\bUPLINK MODULE\b/, /\bWHAT MODULE\b/, /\bWHICH MODULE\b/,
+    /\bFIBER (TYPE|OPTIC|CABLE)\b/, /\bDAC\b/, /\bTWINAX\b/,
+    /\bSFP.{0,20}(NEED|REQUIRE|USE|COMPATIBLE)\b/,
+    /\bCOMPATIBLE (SFP|OPTIC|MODULE|TRANSCEIVER)\b/,
+    /\bHOW (DO I |TO )?(CONNECT|LINK|UPLINK)\b/
+  ];
+  const isAdvisory = advisoryPatterns.some(p => p.test(upper));
 
   // ── Duo / Umbrella natural language handler ──
   // These are license-only products (no hardware), so intercept before hardware SKU parsing
-  const duoMatch = upper.match(RE_DUO_1) || upper.match(RE_DUO_2);
+  const duoMatch = upper.match(/(\d+)\s*[X×]?\s*(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?/i)
+    || upper.match(/(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?\s*[X×]?\s*(\d+)?/i);
   if (duoMatch && !isAdvisory) {
     const qty = parseInt(duoMatch[1]) || parseInt(duoMatch[2]) || 1;
     const tierRaw = (duoMatch[2] || duoMatch[1] || '').toUpperCase();
@@ -1944,7 +1898,8 @@ function parseMessage(text) {
     };
   }
 
-  const umbMatch = upper.match(RE_UMB_1) || upper.match(RE_UMB_2);
+  const umbMatch = upper.match(/(\d+)\s*[X×]?\s*(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?/i)
+    || upper.match(/(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?\s*[X×]?\s*(\d+)?/i);
   if (umbMatch && !isAdvisory) {
     const qty = parseInt(umbMatch[1]) || parseInt(umbMatch[3]) || 1;
     const typeRaw = (umbMatch[2] || umbMatch[1] || 'DNS').toUpperCase();
@@ -1965,7 +1920,9 @@ function parseMessage(text) {
   // ── Model-agnostic license handler (MR, MV, MT) ──
   // These families use a single license SKU regardless of specific model.
   // Intercepts: "4 MR licenses", "quote 10 MV licenses", "5 MT license", etc.
-  const agnosticLicMatch = upper.match(RE_AGNOSTIC_1) || upper.match(RE_AGNOSTIC_2) || upper.match(RE_AGNOSTIC_3);
+  const agnosticLicMatch = upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?/i)
+    || upper.match(/(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*[X×]?\s*(\d+)/i)
+    || upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s*(ENT(?:ERPRISE)?)?$/i);
   if (agnosticLicMatch && !isAdvisory) {
     const qty = parseInt(agnosticLicMatch[1]) || parseInt(agnosticLicMatch[3]) || 1;
     const family = (agnosticLicMatch[2] || agnosticLicMatch[1] || '').toUpperCase();
@@ -1998,8 +1955,18 @@ function parseMessage(text) {
     }
   }
 
-  // Fresh regex instances each call (required because /gi is stateful)
-  const skuPatterns = SKU_PATTERN_FACTORIES.map(f => f());
+  const skuPatterns = [
+    /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
+    /C8[14]\d{2}-G2-MX/gi,
+    /MA-[A-Z0-9-]+/gi,
+    /CW9\d{3}[A-Z0-9]*/gi,
+    /MS150-[\dA-Z]+-[\dA-Z]+/gi,
+    /MS450-\d+/gi,
+    /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,
+    /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,
+    /MX\d+[A-Z]*(?:-NA)?/gi,
+    /Z\d+[A-Z]*/gi
+  ];
 
   const rawMatches = [];
   const matched = new Set();
@@ -2020,8 +1987,8 @@ function parseMessage(text) {
       const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
-      const beforeQty = before.match(RE_QTY_BEFORE);
-      const afterQty = after.match(RE_QTY_AFTER);
+      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
+      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
       // For inline format (SKU1 qty1 SKU2 qty2...), prefer afterQty to avoid picking up previous SKU's quantity
       if (afterQty) qty = parseInt(afterQty[1]);
       else if (beforeQty) qty = parseInt(beforeQty[1]);
@@ -2039,7 +2006,19 @@ function parseMessage(text) {
   foundItems.sort((a, b) => a.position - b.position);
   const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
 
-  const isRevision = REVISION_PATTERNS.some(p => p.test(upper));
+  const revisionPatterns = [
+    /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(LICENSE|HARDWARE|HW|AP|SWITCH|MX|MR)/,
+    /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(FROM|THE|THAT|THOSE)/,
+    /\b(ADD|INCLUDE|THROW IN|TACK ON)\b.*\b(MORE|EXTRA|ADDITIONAL|ALSO)\b/,
+    /\b(CHANGE|UPDATE|MODIFY|ADJUST|SWITCH)\b.*(QUANTITY|QTY|COUNT|NUMBER|TERM|LICENSE|TIER)/,
+    /\b(MAKE (IT|THAT|THEM))\b.*(INSTEAD|RATHER)/,
+    /\b(ACTUALLY|NEVER\s?MIND|SCRATCH THAT|WAIT)\b/,
+    /\bINSTEAD OF\b/,
+    /\b(JUST|ONLY)\s+(THE\s+)?(LICENSE|HARDWARE|HW)\b/,
+    /\bSWITCH (TO|IT TO)\b/,
+    /\bBUMP (IT |THAT |THE )?(UP|DOWN|TO)\b/
+  ];
+  const isRevision = revisionPatterns.some(p => p.test(upper));
 
   if (items.length === 0) {
     if (isRevision || isAdvisory) {
@@ -7969,6 +7948,94 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── Chat: CRM-aware Claude agent for Chrome Extension sidebar ──
+          // Routes through the same askClaude() tool-use loop as the GChat bot,
+          // giving the extension chat full Zoho CRM capabilities.
+          case '/api/chat': {
+            const { text: chatText, emailContext: chatEc, history: chatHistory, systemContext: chatSystemContext } = apiBody;
+            if (!chatText) {
+              apiResult = { error: 'text is required' };
+              break;
+            }
+
+            try {
+              const chatUserEmail = request.headers.get('x-user-email') || 'chrome-extension-user';
+              const chatPersonId = `ext:${chatUserEmail}`;
+
+              // Seed conversation history from prior chat messages if provided
+              if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
+                // Store the last few messages as history so askClaude can see them
+                for (const msg of chatHistory.slice(-6)) {
+                  await addToHistory(env.CONVERSATION_KV, chatPersonId, msg.role, msg.content);
+                }
+              }
+
+              // Build a context-enriched message
+              let enrichedMessage = chatText;
+              if (chatEc && chatEc.subject) {
+                const ctxParts = [];
+                ctxParts.push(`Subject: "${chatEc.subject}"`);
+                if (chatEc.senderName || chatEc.senderEmail) {
+                  ctxParts.push(`From: ${chatEc.senderName || ''} (${chatEc.senderEmail || ''})`);
+                }
+                if (chatEc.customerEmail) {
+                  ctxParts.push(`Customer: ${chatEc.customerEmail}`);
+                }
+                if (chatEc.customerDomain) {
+                  ctxParts.push(`Domain: ${chatEc.customerDomain}`);
+                }
+                enrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${chatText}`;
+              }
+
+              // Inject systemContext from extension (Zoho execution rules, email context)
+              if (chatSystemContext && chatSystemContext.trim()) {
+                enrichedMessage = `[Extension Instructions]\n${chatSystemContext}\n[End Instructions]\n\n${enrichedMessage}`;
+              }
+
+              // Detect if this is a CRM request that needs tool-use
+              const chatIntent = detectCrmEmailIntent(chatText);
+              const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
+              const useTools = chatIntent.hasAny && hasCrmCreds;
+
+              // Use the same askClaude function as the GChat bot
+              // This gives the extension chat full CRM tool-use capabilities
+              let reply = await askClaude(
+                enrichedMessage,
+                chatPersonId,
+                env,
+                null,       // no image data
+                useTools,   // enable CRM tools if CRM intent detected
+                null,       // no progress callback for direct HTTP response
+                120000      // 2-minute timeout for CRM operations
+              );
+
+              // Handle continuation objects (for very long CRM workflows)
+              while (reply && reply.__continuation) {
+                reply = await askClaudeContinue(
+                  reply.messages, reply.tools, reply.systemPrompt,
+                  reply.iteration, env, null, 120000
+                );
+              }
+
+              const replyText = typeof reply === 'string' ? reply : (reply?.reply || 'No response generated.');
+
+              // Save to history
+              await addToHistory(env.CONVERSATION_KV, chatPersonId, 'user', enrichedMessage);
+              await addToHistory(env.CONVERSATION_KV, chatPersonId, 'assistant', replyText);
+
+              // Set CRM session if tools were used
+              if (useTools) {
+                await env.CONVERSATION_KV.put(`crm_session_${chatPersonId}`, 'active', { expirationTtl: 900 });
+              }
+
+              apiResult = { success: true, reply: replyText, usedTools: useTools };
+            } catch (chatErr) {
+              console.error(`[API/CHAT] Error: ${chatErr.message}`);
+              apiResult = { success: false, error: 'Chat failed: ' + chatErr.message };
+            }
+            break;
+          }
+
           // ── Admin Usage: API cost stats for sidebar dashboard ──
           case '/api/admin-usage': {
             try {
@@ -8251,7 +8318,7 @@ CRITICAL URL RULES:
 
               if (isCiscoEmail) {
                 const isrResp = await zohoApiCall('GET',
-                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(fullEmail)})&fields=id,Name,Email,Title,Phone`, env
+                  `CustomModule9/search?criteria=(Email:equals:${encodeURIComponent(fullEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
                 if (isrResp?.data?.[0]) {
                   const isr = isrResp.data[0];
@@ -8261,8 +8328,11 @@ CRITICAL URL RULES:
                     fullName: isr.Name || '', email: isr.Email || fullEmail, phone: isr.Phone || '',
                     mobile: '', title: isr.Title || 'Cisco Rep', accountId: null,
                     accountName: 'Cisco Systems (Meraki ISR)', address: '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Meraki_ISRs/${isr.id}`,
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/CustomModule9/${isr.id}`,
                     isCiscoRep: true,
+                    pointsCurrent: isr.Points_Current || '',
+                    merakiTeam: isr.Meraki_Team || '',
+                    vertical: isr.Vertical || '',
                   };
                 }
                 // Cisco reps: no account/deals/tasks/quotes
@@ -8555,14 +8625,14 @@ CRITICAL URL RULES:
               let contact = null;
               let account = null;
 
-              // ── Cisco rep detection: search Meraki_ISRs module instead of Contacts ──
+              // ── Cisco rep detection: search CustomModule9 module instead of Contacts ──
               const isCiscoEmail = contactEmail && contactEmail.toLowerCase().endsWith('@cisco.com');
 
               if (isCiscoEmail) {
-                // Search Meraki_ISRs module by email for Cisco reps
-                console.log(`[CRM-CONTACT] Cisco email detected: ${contactEmail} — searching Meraki_ISRs`);
+                // Search CustomModule9 module by email for Cisco reps
+                console.log(`[CRM-CONTACT] Cisco email detected: ${contactEmail} — searching CustomModule9`);
                 const isrResp = await zohoApiCall('GET',
-                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(contactEmail)})&fields=id,Name,Email,Title,Phone`, env
+                  `CustomModule9/search?criteria=(Email:equals:${encodeURIComponent(contactEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
 
                 if (isrResp?.data?.[0]) {
@@ -8580,8 +8650,11 @@ CRITICAL URL RULES:
                     accountId: null,
                     accountName: 'Cisco Systems (Meraki ISR)',
                     address: '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Meraki_ISRs/${isr.id}`,
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/CustomModule9/${isr.id}`,
                     isCiscoRep: true,
+                    pointsCurrent: isr.Points_Current || '',
+                    merakiTeam: isr.Meraki_Team || '',
+                    vertical: isr.Vertical || '',
                   };
                 }
                 // No account lookup needed for Cisco reps
@@ -9046,16 +9119,16 @@ CRITICAL URL RULES:
               let finalRepId = arRepId || '';
               let finalRepName = arRepName || arRepEmail || '';
 
-              // If no repId provided, look up via Meraki_ISRs module by email
+              // If no repId provided, look up via CustomModule9 module by email
               if (!finalRepId && arRepEmail) {
                 const isrSearch = await zohoApiCall('GET',
-                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(arRepEmail)})&fields=id,Name,Email`, env
+                  `CustomModule9/search?criteria=(Email:equals:${encodeURIComponent(arRepEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
                 if (isrSearch?.data && isrSearch.data.length > 0) {
                   finalRepId = isrSearch.data[0].id;
                   finalRepName = isrSearch.data[0].Name || finalRepName;
                 } else {
-                  apiResult = { success: false, error: `Rep ${arRepEmail} not found in Meraki_ISRs module` };
+                  apiResult = { success: false, error: `Rep ${arRepEmail} not found in CustomModule9 module` };
                   break;
                 }
               }

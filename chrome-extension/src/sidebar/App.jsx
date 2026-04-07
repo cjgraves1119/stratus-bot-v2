@@ -2,10 +2,10 @@
  * Stratus AI Chrome Extension — Sidebar App
  *
  * Main sidebar application with tabbed navigation.
- * Panels: Email Analysis, CRM, Quotes, Tasks, Drafts, Search
+ * Panels: Email (with Draft), CRM (with Info/Deals/Tasks), Quote, Chat, Search
  */
 
-import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense, Component } from 'react';
 import { sendToBackground, onMessage } from '../lib/messaging';
 import { MSG, COLORS } from '../lib/constants';
 
@@ -13,8 +13,6 @@ import { MSG, COLORS } from '../lib/constants';
 import EmailPanel from './panels/EmailPanel';
 const CrmPanel = lazy(() => import('./panels/CrmPanel'));
 const QuotePanel = lazy(() => import('./panels/QuotePanel'));
-const TaskPanel = lazy(() => import('./panels/TaskPanel'));
-const DraftPanel = lazy(() => import('./panels/DraftPanel'));
 const ChatPanel = lazy(() => import('./panels/ChatPanel'));
 const SearchPanel = lazy(() => import('./panels/SearchPanel'));
 
@@ -26,12 +24,54 @@ function PanelLoader() {
   );
 }
 
+// Error boundary to catch runtime errors in lazy-loaded panels
+class PanelErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('[Stratus AI] Panel error:', error, info);
+  }
+  componentDidUpdate(prevProps) {
+    if (prevProps.activeTab !== this.props.activeTab && this.state.hasError) {
+      this.setState({ hasError: false, error: null });
+    }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 24, textAlign: 'center' }}>
+          <div style={{ fontSize: 36, marginBottom: 12 }}>⚠️</div>
+          <p style={{ color: COLORS.ERROR, fontSize: 13, marginBottom: 8 }}>
+            Something went wrong loading this panel.
+          </p>
+          <p style={{ color: COLORS.TEXT_SECONDARY, fontSize: 12, marginBottom: 16 }}>
+            {this.state.error?.message || 'Unknown error'}
+          </p>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            style={{
+              padding: '8px 16px', background: COLORS.STRATUS_BLUE, color: 'white',
+              border: 'none', borderRadius: 6, fontSize: 13, cursor: 'pointer',
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const TABS = [
   { id: 'email', label: 'Email', icon: '📧' },
   { id: 'crm', label: 'CRM', icon: '🏢' },
   { id: 'quote', label: 'Quote', icon: '📋' },
-  { id: 'tasks', label: 'Tasks', icon: '✅' },
-  { id: 'draft', label: 'Draft', icon: '✏️' },
   { id: 'chat', label: 'Chat', icon: '💬' },
   { id: 'search', label: 'Search', icon: '🔍' },
 ];
@@ -42,12 +82,32 @@ export default function App() {
   const [crmContext, setCrmContext] = useState(null);
   const [navData, setNavData] = useState(null);
   const [authStatus, setAuthStatus] = useState(null);
+  // Lift chat state here so it persists when switching tabs
+  const [chatMessages, setChatMessages] = useState([]);
 
-  // Load initial state
+  // Load initial state with retry for email context
   useEffect(() => {
-    sendToBackground(MSG.GET_EMAIL_CONTEXT).then((ctx) => {
-      if (ctx && !ctx.empty) setEmailContext(ctx);
-    }).catch(() => {});
+    let retryCount = 0;
+    const maxRetries = 5;
+    const retryDelay = 800;
+
+    function fetchEmailContext() {
+      sendToBackground(MSG.GET_EMAIL_CONTEXT).then((ctx) => {
+        if (ctx && !ctx.empty) {
+          setEmailContext(ctx);
+        } else if (retryCount < maxRetries) {
+          retryCount++;
+          setTimeout(fetchEmailContext, retryDelay);
+        }
+      }).catch(() => {
+        if (retryCount < maxRetries) {
+          retryCount++;
+          setTimeout(fetchEmailContext, retryDelay);
+        }
+      });
+    }
+
+    fetchEmailContext();
 
     sendToBackground(MSG.GET_CRM_CONTEXT).then((ctx) => {
       if (ctx && !ctx.empty) setCrmContext(ctx);
@@ -64,11 +124,14 @@ export default function App() {
     });
   }, []);
 
-  // Listen for navigation requests (from keyboard shortcuts, context menus, etc.)
+  // Listen for navigation requests
   useEffect(() => {
     return onMessage(MSG.SIDEBAR_NAVIGATE, (data) => {
       if (data.panel) {
-        setActiveTab(data.panel);
+        // Map legacy 'tasks'/'draft' routes to new locations
+        const panelMap = { tasks: 'crm', draft: 'email' };
+        const targetPanel = panelMap[data.panel] || data.panel;
+        setActiveTab(targetPanel);
         if (data.data) setNavData(data.data);
         if (data.action) setNavData(prev => ({ ...prev, action: data.action }));
       }
@@ -85,6 +148,13 @@ export default function App() {
   const handleTabChange = useCallback((tabId) => {
     setActiveTab(tabId);
     setNavData(null);
+  }, []);
+
+  const handleNavigate = useCallback((panel, data) => {
+    const panelMap = { tasks: 'crm', draft: 'email' };
+    const targetPanel = panelMap[panel] || panel;
+    setActiveTab(targetPanel);
+    setNavData(data || null);
   }, []);
 
   // Auth check
@@ -160,15 +230,15 @@ export default function App() {
 
       {/* Panel Content */}
       <div style={{ flex: 1, overflow: 'auto' }}>
-        <Suspense fallback={<PanelLoader />}>
-          {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} />}
-          {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} />}
-          {activeTab === 'quote' && <QuotePanel navData={navData} />}
-          {activeTab === 'tasks' && <TaskPanel emailContext={emailContext} crmContext={crmContext} />}
-          {activeTab === 'draft' && <DraftPanel emailContext={emailContext} />}
-          {activeTab === 'chat' && <ChatPanel emailContext={emailContext} />}
-          {activeTab === 'search' && <SearchPanel navData={navData} />}
-        </Suspense>
+        <PanelErrorBoundary activeTab={activeTab}>
+          <Suspense fallback={<PanelLoader />}>
+            {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} />}
+            {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} />}
+            {activeTab === 'quote' && <QuotePanel navData={navData} emailContext={emailContext} onNavigate={handleNavigate} />}
+            {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} />}
+            {activeTab === 'search' && <SearchPanel navData={navData} />}
+          </Suspense>
+        </PanelErrorBoundary>
       </div>
     </div>
   );

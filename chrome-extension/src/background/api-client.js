@@ -318,24 +318,110 @@ export async function detectSkus(text) {
 
 /**
  * Analyze an image for SKUs via Claude vision.
+ * Uses the /api/parse-dashboard endpoint which handles
+ * both imageUrl and imageBase64.
  */
-export async function analyzeImageForSkus(imageUrl) {
-  return apiCall('/api/analyze-image', { imageUrl }, { timeout: 45000 });
+export async function analyzeImageForSkus(imageUrl, imageBase64) {
+  return apiCall('/api/parse-dashboard', {
+    imageUrl: imageUrl || undefined,
+    imageBase64: imageBase64 || undefined,
+    instructions: 'Extract all Cisco/Meraki SKU numbers and their quantities from this image. Return them as a structured list.',
+  }, { timeout: 60000 });
 }
 
 // ─────────────────────────────────────────────
-// Handoff to GChat
+// Chat with CRM Agent
 // ─────────────────────────────────────────────
 
 /**
- * Send a request to the GChat worker for full AI agent processing.
+ * Send a message to the CRM-aware Claude agent.
+ * Routes through the same askClaude() tool-use loop as the GChat bot,
+ * giving the extension chat full Zoho CRM capabilities.
  */
-export async function sendHandoff(requestText, emailContext) {
+export async function chatWithCrm(requestText, emailContext, history, systemContext) {
+  return apiCall('/api/chat', {
+    text: requestText,
+    emailContext,
+    history: history || [],
+    systemContext: systemContext || '',
+  }, { timeout: 130000 }); // 2+ minute timeout for CRM tool-use loops
+}
+
+/**
+ * Legacy handoff to GChat (sends results to Google Chat space).
+ */
+export async function sendHandoff(requestText, emailContext, history) {
   return apiCall('/api/handoff', {
     text: requestText,
     emailContext,
-    userEmail: (await getSettings()).userEmail || 'chrisg@stratusinfosystems.com',
-  }, { timeout: 60000 }); // Longer timeout for handoff
+    history: history || [],
+  }, { timeout: 60000 });
+}
+
+// ─────────────────────────────────────────────
+// CCW / Velocity Hub
+// ─────────────────────────────────────────────
+
+/**
+ * Look up a Zoho Quote by CCW Deal Number, with Deal Name fallback.
+ */
+export async function ccwLookup(ccwDealNumber, dealName) {
+  if (!ccwDealNumber && !dealName) return { found: false };
+  const cacheKey = `ccw_${ccwDealNumber || ''}_${(dealName || '').substring(0, 30)}`;
+  const cached = await getCached(cacheKey);
+  if (cached) return cached;
+  const result = await apiCall('/api/ccw-lookup', {
+    ccwDealNumber: ccwDealNumber || '',
+    dealName: dealName || '',
+  });
+  if (result && result.found) await setCached(cacheKey, result, CACHE_TTL.CRM_CONTACT);
+  return result;
+}
+
+/**
+ * Submit a deal approval to Velocity Hub.
+ */
+export async function velocityHubSubmit(dealId, country) {
+  return apiCall('/api/velocity-hub', {
+    deal_id: dealId,
+    country: country || 'United States',
+  }, { timeout: 30000 });
+}
+
+/**
+ * Assign a Cisco rep to a Deal's Meraki_ISR field.
+ */
+export async function assignCiscoRep(dealId, repEmail, repName) {
+  return apiCall('/api/assign-rep', {
+    dealId,
+    repEmail: repEmail || '',
+    repName: repName || '',
+  });
+}
+
+// ─────────────────────────────────────────────
+// Suggest Task (two-step: preview then confirm)
+// ─────────────────────────────────────────────
+
+/**
+ * Preview a follow-up task (account/contact resolution before creating).
+ */
+export async function suggestTaskPreview(senderEmail, senderName, subject, accountId, threadDomains) {
+  return apiCall('/api/suggest-task-preview', {
+    sender_email: senderEmail || '',
+    sender_name: senderName || '',
+    subject: subject || '',
+    has_account: accountId ? 'true' : 'false',
+    account_id: accountId || '',
+    thread_domains: Array.isArray(threadDomains) ? threadDomains.join(',') : (threadDomains || ''),
+  });
+}
+
+/**
+ * Confirm and create the suggested follow-up task.
+ */
+export async function suggestTask(params) {
+  return apiCall('/api/suggest-task', params);
 }
 
 // ─────────────────────────────────────────────

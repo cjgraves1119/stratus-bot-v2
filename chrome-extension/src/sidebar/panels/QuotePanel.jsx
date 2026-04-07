@@ -1,24 +1,27 @@
 /**
  * Quote Panel
- * Quick quote builder with SKU input, URL generation, and clipboard copy.
+ * Full quoting interface with deterministic engine, SKU validation,
+ * EOL detection, "Send to Zoho" CRM quote creation, and API fallback.
  */
 
 import { useState, useEffect, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
-import { generateLocalQuote } from '../../lib/quote-engine';
+import { generateLocalQuote, validateSku } from '../../lib/quote-engine';
 
-export default function QuotePanel({ navData }) {
+export default function QuotePanel({ navData, emailContext, onNavigate }) {
   const [skuText, setSkuText] = useState('');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [copiedIdx, setCopiedIdx] = useState(null);
   const [analyzingImage, setAnalyzingImage] = useState(false);
   const [imageAnalysis, setImageAnalysis] = useState(null);
+  const [showZohoPrompt, setShowZohoPrompt] = useState(false);
   const inputRef = useRef(null);
 
-  // Pre-fill from navData (context menu, SKU click, keyboard shortcut)
+  // Pre-fill from navData
   useEffect(() => {
     if (navData?.skuText) {
       setSkuText(navData.skuText);
@@ -28,25 +31,40 @@ export default function QuotePanel({ navData }) {
     }
   }, [navData]);
 
-  // Handle image analysis from right-click context menu
+  // Handle image analysis
   useEffect(() => {
-    if (navData?.imageUrl) {
-      handleImageAnalysis(navData.imageUrl);
-    }
+    if (navData?.imageUrl) handleImageAnalysis(navData.imageUrl);
   }, [navData?.imageUrl]);
 
-  async function handleImageAnalysis(imageUrl) {
+  async function handleImageAnalysis(imageUrl, imageBase64) {
     setAnalyzingImage(true);
     setError(null);
     setResult(null);
     setImageAnalysis(null);
-
     try {
-      const res = await sendToBackground(MSG.ANALYZE_IMAGE, { imageUrl });
-      if (res && res.skus && res.skus.length > 0) {
-        const skuString = res.skus.map(s => `${s.qty > 1 ? s.qty + ' ' : ''}${s.sku}`).join('\n');
-        setSkuText(skuString);
-        setImageAnalysis(res);
+      const res = await sendToBackground(MSG.ANALYZE_IMAGE, { imageUrl, imageBase64 });
+
+      if (res && res.quoteUrls && Array.isArray(res.quoteUrls) && res.quoteUrls.length > 0) {
+        // API returned full quote URLs — show them directly
+        setResult({
+          urls: res.quoteUrls.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
+          eolWarnings: [],
+          suggestions: null,
+          parsed: [],
+          source: 'api',
+        });
+        setImageAnalysis({ analysis: res.analysis, hasUrls: true });
+      } else if (res && res.analysis) {
+        // Got analysis text, try to extract SKUs from it
+        const skuRegex = /\b((?:MR|MV|MT|MG|MX|MS|CW|C9|C8|Z|LIC-)[A-Z0-9-]+)\b/gi;
+        const rawMatches = res.analysis.match(skuRegex) || [];
+        const matches = [...new Set(rawMatches.map(s => s.toUpperCase()))];
+        if (matches.length > 0) {
+          setSkuText(matches.join('\n'));
+          setImageAnalysis({ skus: matches, message: `Detected ${matches.length} SKU(s) from image` });
+        } else {
+          setImageAnalysis({ skus: [], message: 'No SKUs detected in this image.', analysis: res.analysis });
+        }
       } else {
         setImageAnalysis({ skus: [], message: 'No SKUs detected in this image.' });
       }
@@ -62,50 +80,115 @@ export default function QuotePanel({ navData }) {
     setLoading(true);
     setError(null);
     setResult(null);
+    setShowZohoPrompt(false);
 
     try {
-      // Try local quote generation first
-      const localResult = generateLocalQuote(skuText.trim());
+      // Try local deterministic engine first
+      let localResult = null;
+      try {
+        localResult = generateLocalQuote(skuText.trim());
+      } catch (localErr) {
+        console.error('[Stratus] Local quote engine error:', localErr);
+        localResult = { needsApi: true };
+      }
 
-      // If local engine handled it without needing API, use that result
-      if (!localResult.needsApi) {
+      if (localResult && !localResult.needsApi) {
+        const rawUrls = localResult.urls;
+        const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
+        const eolArr = Array.isArray(localResult.eolWarnings) ? localResult.eolWarnings : [];
+        const parsedArr = Array.isArray(localResult.parsed) ? localResult.parsed : [];
+        const suggestArr = Array.isArray(localResult.suggestions) ? localResult.suggestions : null;
         setResult({
-          quoteUrls: [{ url: localResult.url, label: 'Local Quote' }],
-          eolWarnings: localResult.eolWarnings || [],
-          parsedItems: localResult.parsed || [],
+          urls: urlsArr,
+          eolWarnings: eolArr,
+          suggestions: suggestArr,
+          parsed: parsedArr,
+          modifiers: localResult.modifiers || {},
           source: 'local',
         });
       } else {
-        // Fall back to API for complex requests
+        // Fall back to API
         const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: skuText.trim() });
-        setResult({
-          ...res,
-          source: 'api',
-        });
+        if (res && (res.quoteUrls || res.urls)) {
+          const rawUrls = res.quoteUrls || res.urls;
+          const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
+          const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
+          const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
+          setResult({
+            urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
+            eolWarnings: eolArr,
+            suggestions: null,
+            parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
+            source: 'api',
+          });
+        } else if (res && res.error) {
+          setError(res.error);
+        } else {
+          setError('No quote generated. Check your SKU input.');
+        }
       }
     } catch (err) {
-      setError(err.message);
+      console.error('[Stratus] Quote generation error:', err);
+      setError(err.message || 'Quote generation failed');
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleCopy(text) {
+  function handleApplySuggestion(suggestion) {
+    // Replace the invalid SKU with the first suggestion in the text
+    const replacement = suggestion.suggest[0];
+    const regex = new RegExp(suggestion.input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    setSkuText(prev => prev.replace(regex, replacement));
+    setResult(null);
+  }
+
+  async function handleCopy(text, idx) {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
     } catch {
-      // Fallback for non-secure contexts
       const textarea = document.createElement('textarea');
       textarea.value = text;
       document.body.appendChild(textarea);
       textarea.select();
       document.execCommand('copy');
       document.body.removeChild(textarea);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
     }
+    setCopiedIdx(idx);
+    setTimeout(() => setCopiedIdx(null), 2000);
+  }
+
+  function handleSendToZoho() {
+    // Build a message with the parsed SKUs for the chat panel to create a Zoho quote
+    const items = result?.parsed?.filter(p => p.validation?.valid !== false) || result?.parsed || [];
+    const skuSummary = items.map(i => `${i.qty || 1}x ${i.baseSku}`).join(', ');
+    const customerName = emailContext?.customerName || emailContext?.senderName || '';
+    const customerDomain = emailContext?.customerDomain || '';
+
+    // Build the CRM request text
+    let requestText = `Create a Zoho CRM quote with: ${skuSummary}`;
+    if (customerName || customerDomain) {
+      requestText += ` for ${customerName || customerDomain}`;
+    }
+
+    // Navigate to chat panel with the pre-filled request
+    if (onNavigate) {
+      onNavigate('chat', { prefillText: requestText });
+    }
+  }
+
+  function handleSendToGChat() {
+    // Open GChat with a pre-composed message for CRM quote creation
+    const items = result?.parsed?.filter(p => p.validation?.valid !== false) || result?.parsed || [];
+    const skuSummary = items.map(i => `${i.qty || 1}x ${i.baseSku}`).join(', ');
+    const customerName = emailContext?.customerName || emailContext?.senderName || '';
+
+    let msg = `Create a quote with ${skuSummary}`;
+    if (customerName) msg += ` for ${customerName}`;
+
+    // Open GChat in new tab with the Stratus AI bot space
+    const gchatUrl = `https://chat.google.com/room/AAAAnp6E_Yw?cls=7`;
+    window.open(gchatUrl, '_blank');
   }
 
   function handleKeyDown(e) {
@@ -123,52 +206,50 @@ export default function QuotePanel({ navData }) {
           padding: 12, background: '#e3f2fd', borderRadius: 8,
           marginBottom: 12, textAlign: 'center', color: '#1565c0', fontSize: 13,
         }}>
-          <div className="spinner" style={{ margin: '0 auto 8px' }} />
           Analyzing image for SKUs...
         </div>
       )}
 
       {imageAnalysis && (
         <div style={{
-          padding: 10, background: imageAnalysis.skus?.length ? '#e8f5e9' : '#fef7e0',
-          borderRadius: 8, marginBottom: 12, fontSize: 12,
+          padding: 10, borderRadius: 8, marginBottom: 12, fontSize: 12,
+          background: imageAnalysis.skus?.length ? '#e8f5e9' : '#fef7e0',
           color: imageAnalysis.skus?.length ? '#2e7d32' : '#e37400',
         }}>
           {imageAnalysis.skus?.length
-            ? `📸 Detected ${imageAnalysis.skus.length} SKU${imageAnalysis.skus.length > 1 ? 's' : ''} from image`
+            ? `Detected ${imageAnalysis.skus.length} SKU${imageAnalysis.skus.length > 1 ? 's' : ''} from image`
             : imageAnalysis.message || 'No SKUs found in image'}
         </div>
       )}
 
       {/* SKU Input */}
-      <div style={{ marginBottom: 12 }}>
-        <textarea
-          ref={inputRef}
-          value={skuText}
-          onChange={(e) => setSkuText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Enter SKUs (e.g., 10 MR44, 5 MS130-24P, 2 MX67)"
-          rows={4}
-          style={{
-            width: '100%', padding: '10px 12px', border: `1px solid ${COLORS.BORDER}`,
-            borderRadius: 8, fontSize: 13, fontFamily: 'inherit', resize: 'vertical',
-            outline: 'none', boxSizing: 'border-box',
-          }}
-        />
-      </div>
+      <textarea
+        ref={inputRef}
+        value={skuText}
+        onChange={(e) => setSkuText(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Enter SKUs (e.g., 10 MR44, 5 MS130-24P, 2 MX67)"
+        rows={4}
+        style={{
+          width: '100%', padding: '10px 12px', border: `1px solid ${COLORS.BORDER}`,
+          borderRadius: 8, fontSize: 13, fontFamily: 'monospace', resize: 'vertical',
+          outline: 'none', boxSizing: 'border-box', marginBottom: 12,
+        }}
+      />
 
       {/* Generate Button */}
       <button
         onClick={handleGenerate}
         disabled={loading || !skuText.trim()}
         style={{
-          width: '100%', padding: '10px 16px', background: loading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+          width: '100%', padding: '10px 16px',
+          background: loading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
           color: 'white', border: 'none', borderRadius: 8, fontSize: 14,
           fontWeight: 600, cursor: loading ? 'default' : 'pointer',
           opacity: loading || !skuText.trim() ? 0.7 : 1,
         }}
       >
-        {loading ? 'Generating...' : 'Generate Quote URL'}
+        {loading ? 'Generating...' : 'Generate Quote'}
       </button>
 
       {/* Error */}
@@ -181,20 +262,53 @@ export default function QuotePanel({ navData }) {
         </div>
       )}
 
+      {/* Validation Suggestions (Did you mean?) */}
+      {result?.suggestions && result.suggestions.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          {result.suggestions.map((s, i) => (
+            <div key={i} style={{
+              padding: 10, background: '#fff3e0', borderRadius: 8,
+              border: '1px solid #ff980033', marginBottom: 8,
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#e65100', marginBottom: 4 }}>
+                {s.isCommonMistake ? '⚠️' : '❓'} {s.input}: {s.reason}
+              </div>
+              {s.suggest && s.suggest.length > 0 && (
+                <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>
+                  <span style={{ color: COLORS.TEXT_SECONDARY }}>Did you mean: </span>
+                  {s.suggest.map((sug, j) => (
+                    <button
+                      key={j}
+                      onClick={() => handleApplySuggestion({ ...s, suggest: [sug] })}
+                      style={{
+                        background: COLORS.STRATUS_LIGHT, color: COLORS.STRATUS_BLUE,
+                        border: `1px solid ${COLORS.STRATUS_BLUE}44`, borderRadius: 4,
+                        padding: '2px 8px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                        marginRight: 4, marginTop: 4,
+                      }}
+                    >
+                      {sug}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Results */}
-      {result && (
+      {result && result.urls && result.urls.length > 0 && (
         <div style={{ marginTop: 16 }}>
           {/* Source Badge */}
-          {result.source && (
-            <div style={{
-              display: 'inline-block', padding: '4px 10px', borderRadius: 4,
-              fontSize: 11, fontWeight: 600, marginBottom: 12,
-              background: result.source === 'local' ? '#e8f5e9' : '#e3f2fd',
-              color: result.source === 'local' ? '#2e7d32' : '#1565c0',
-            }}>
-              {result.source === 'local' ? '⚡ Local' : '🔗 API'}
-            </div>
-          )}
+          <div style={{
+            display: 'inline-block', padding: '4px 10px', borderRadius: 4,
+            fontSize: 11, fontWeight: 600, marginBottom: 12,
+            background: result.source === 'local' ? '#e8f5e9' : '#e3f2fd',
+            color: result.source === 'local' ? '#2e7d32' : '#1565c0',
+          }}>
+            {result.source === 'local' ? '⚡ Deterministic' : '🔗 API'}
+          </div>
 
           {/* EOL Warnings */}
           {result.eolWarnings && result.eolWarnings.length > 0 && (
@@ -206,58 +320,106 @@ export default function QuotePanel({ navData }) {
                 EOL Warnings
               </div>
               {result.eolWarnings.map((w, i) => (
-                <div key={i} style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{w}</div>
+                <div key={i} style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY, padding: '2px 0' }}>
+                  {typeof w === 'string' ? w : `${w.sku} is End-of-Life`}
+                </div>
               ))}
             </div>
           )}
 
           {/* Quote URLs */}
-          {result.quoteUrls && result.quoteUrls.map((url, i) => (
+          {result.urls.map((urlObj, i) => (
             <div key={i} style={{
               background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
               borderRadius: 8, padding: 12, marginBottom: 8,
             }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, marginBottom: 6 }}>
-                {url.label || `Option ${i + 1}`}
+              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 6 }}>
+                {urlObj.label || `Option ${i + 1}`}
               </div>
               <div style={{
                 background: COLORS.BG_SECONDARY, borderRadius: 6, padding: '8px 10px',
-                fontSize: 12, wordBreak: 'break-all', color: COLORS.STRATUS_BLUE, marginBottom: 8,
+                fontSize: 11, wordBreak: 'break-all', color: COLORS.STRATUS_BLUE, marginBottom: 8,
               }}>
-                <a href={url.url || url} target="_blank" rel="noopener" style={{ color: 'inherit', textDecoration: 'none' }}>
-                  {(url.url || url).substring(0, 100)}...
+                <a href={urlObj.url} target="_blank" rel="noopener" style={{ color: 'inherit', textDecoration: 'none' }}>
+                  {urlObj.url.length > 120 ? urlObj.url.substring(0, 120) + '...' : urlObj.url}
                 </a>
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 6 }}>
                 <button
-                  onClick={() => handleCopy(url.url || url)}
+                  onClick={() => handleCopy(urlObj.url, i)}
                   style={{
-                    flex: 1, padding: '6px 12px', background: COLORS.STRATUS_BLUE,
+                    flex: 1, padding: '6px 10px', background: COLORS.STRATUS_BLUE,
                     color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
                     fontWeight: 600, cursor: 'pointer',
                   }}
                 >
-                  {copied ? '✓ Copied!' : 'Copy URL'}
+                  {copiedIdx === i ? '✓ Copied!' : 'Copy'}
                 </button>
                 <a
-                  href={url.url || url}
-                  target="_blank"
-                  rel="noopener"
+                  href={urlObj.url} target="_blank" rel="noopener"
                   style={{
-                    flex: 1, padding: '6px 12px', background: 'transparent',
+                    flex: 1, padding: '6px 10px', background: 'transparent',
                     color: COLORS.STRATUS_BLUE, border: `1px solid ${COLORS.STRATUS_BLUE}`,
                     borderRadius: 6, fontSize: 12, fontWeight: 600, textDecoration: 'none',
                     textAlign: 'center', display: 'inline-block',
                   }}
                 >
-                  Open Quote
+                  Open
                 </a>
               </div>
             </div>
           ))}
 
-          {/* Parsed Items Summary */}
-          {result.parsedItems && result.parsedItems.length > 0 && (
+          {/* Send to Zoho CRM / GChat */}
+          <div style={{
+            marginTop: 8, padding: 12, background: '#f3e5f5', borderRadius: 8,
+            border: '1px solid #ce93d8',
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: '#7b1fa2', marginBottom: 8 }}>
+              Create CRM Quote
+            </div>
+            {!showZohoPrompt ? (
+              <button
+                onClick={() => setShowZohoPrompt(true)}
+                style={{
+                  width: '100%', padding: '8px 12px', background: '#7b1fa2',
+                  color: 'white', border: 'none', borderRadius: 6, fontSize: 13,
+                  fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Send to Zoho CRM
+              </button>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontSize: 12, color: '#4a148c', marginBottom: 4 }}>
+                  Route quote creation through:
+                </div>
+                <button
+                  onClick={handleSendToZoho}
+                  style={{
+                    padding: '8px 12px', background: '#7b1fa2', color: 'white',
+                    border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Extension Chat (recommended)
+                </button>
+                <button
+                  onClick={handleSendToGChat}
+                  style={{
+                    padding: '8px 12px', background: 'transparent', color: '#7b1fa2',
+                    border: '1px solid #7b1fa2', borderRadius: 6, fontSize: 12,
+                    fontWeight: 600, cursor: 'pointer',
+                  }}
+                >
+                  Open Google Chat
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Parsed Items */}
+          {result.parsed && result.parsed.length > 0 && (
             <div style={{
               background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
               borderRadius: 8, padding: 12, marginTop: 8,
@@ -265,11 +427,23 @@ export default function QuotePanel({ navData }) {
               <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, marginBottom: 6 }}>
                 Parsed Items
               </div>
-              {result.parsedItems.map((item, i) => (
-                <div key={i} style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY, padding: '2px 0' }}>
-                  {item.qty}x {item.sku}
-                </div>
-              ))}
+              {result.parsed.map((item, i) => {
+                const v = item.validation;
+                const isValid = !v || v.valid;
+                const isEol = v?.eol;
+                return (
+                  <div key={i} style={{
+                    fontSize: 12, padding: '3px 0', display: 'flex', alignItems: 'center', gap: 6,
+                    color: !isValid ? COLORS.ERROR : isEol ? '#e37400' : COLORS.TEXT_PRIMARY,
+                  }}>
+                    <span style={{ fontWeight: 600 }}>{item.qty || 1}x</span>
+                    <span>{item.baseSku}</span>
+                    {isEol && <span style={{ fontSize: 10, color: '#e37400' }}>(EOL)</span>}
+                    {!isValid && <span style={{ fontSize: 10 }}>✗</span>}
+                    {isValid && !isEol && <span style={{ fontSize: 10, color: '#2e7d32' }}>✓</span>}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -280,9 +454,9 @@ export default function QuotePanel({ navData }) {
         marginTop: 16, padding: 10, background: COLORS.BG_PRIMARY,
         borderRadius: 8, border: `1px solid ${COLORS.BORDER}`,
       }}>
-        <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>
-          <strong>Tips:</strong> Enter one SKU per line or comma-separated.
-          Quantities default to 1. Press Enter to generate.
+        <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, lineHeight: 1.5 }}>
+          <strong>Tips:</strong> Enter SKUs with quantities (10 MR44, 5 MS130-24P).
+          Supports CSV, lists, and natural language. EOL products auto-generate replacement options.
           Use "hardware only" or "license only" modifiers.
         </div>
       </div>

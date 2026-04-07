@@ -45,25 +45,37 @@ loadSettings();
 function extractEmailData() {
   // Strategy 1: URL-based detection
   const hash = window.location.hash;
-  if (!hash || hash === '#inbox' || hash === '#sent') return null;
+  // Gmail thread hashes: #inbox/FMfcg..., #sent/FMfcg..., #label/FMfcg..., etc.
+  const isThreadView = hash && /^#[a-zA-Z0-9_/]+\/[A-Za-z0-9]+/.test(hash);
+  if (!hash || (!isThreadView && !hash.includes('/'))) return null;
 
-  // Strategy 2: Subject line detection
-  const subjectEl = document.querySelector('h2.hP') || document.querySelector('[data-thread-perm-id] h2');
-  if (!subjectEl) return null;
+  // Strategy 2: Subject line detection (try multiple selectors)
+  const subjectEl = document.querySelector('h2.hP')
+    || document.querySelector('[data-thread-perm-id] h2')
+    || document.querySelector('.ha h2')
+    || document.querySelector('[role="main"] h2');
+  if (!subjectEl) {
+    console.log('[Stratus AI] No subject element found. Selectors tried: h2.hP, [data-thread-perm-id] h2, .ha h2, [role="main"] h2');
+    return null;
+  }
 
   const subject = subjectEl.textContent.trim();
 
-  // Strategy 3: Sender info from expanded email header
-  const senderEl = document.querySelector('.gD');
+  // Strategy 3: Sender info from expanded email header (try multiple selectors)
+  const senderEl = document.querySelector('.gD')
+    || document.querySelector('[data-hovercard-id]')
+    || document.querySelector('.go [email]');
   let senderEmail = '';
   let senderName = '';
   if (senderEl) {
-    senderEmail = senderEl.getAttribute('email') || '';
+    senderEmail = senderEl.getAttribute('email') || senderEl.getAttribute('data-hovercard-id') || '';
     senderName = senderEl.getAttribute('name') || senderEl.textContent.trim();
   }
 
-  // Get email body
-  const bodyEl = document.querySelector('.a3s.aiL') || document.querySelector('.ii.gt div');
+  // Get email body (try multiple selectors)
+  const bodyEl = document.querySelector('.a3s.aiL')
+    || document.querySelector('.ii.gt div')
+    || document.querySelector('[data-message-id] .a3s');
   const body = bodyEl ? bodyEl.innerText.substring(0, 8000) : '';
 
   // Collect all participants with role information
@@ -71,6 +83,22 @@ function extractEmailData() {
   const allDomains = new Set();
   const threadContacts = [];
   const contactsByEmail = new Map(); // For deduplication while preserving role
+
+  // ── SCOPED THREAD CONTAINER ──
+  // Gmail wraps the active thread view in a container. We MUST scope all
+  // contact queries to this container, otherwise we pick up email addresses
+  // from the inbox list, other collapsed threads, and workspace notifications.
+  const threadContainer =
+    document.querySelector('[data-thread-perm-id]') ||     // Best: explicit thread wrapper
+    document.querySelector('.nH.if') ||                     // Thread view container
+    document.querySelector('.AO') ||                        // Fallback: main content area
+    document.querySelector('[role="main"]');                 // Last resort
+
+  // If no thread container found, fall back to document but log a warning
+  const scopeEl = threadContainer || document;
+  if (!threadContainer) {
+    console.warn('[Stratus AI] No thread container found — contact extraction may be inaccurate');
+  }
 
   // Helper function to determine role based on DOM context
   function determineRole(element) {
@@ -90,69 +118,96 @@ function extractEmailData() {
     return 'sender';
   }
 
-  // Collect sender from expanded email header (.gD elements)
-  document.querySelectorAll('.gD').forEach((el) => {
+  // Bot/notification emails — exclude from contact selector (mirrors Add-on BOT_EMAILS)
+  const BOT_EMAILS = new Set([
+    'notifications@mixmax.com',
+    'notificationsapp@cisco.com',
+    'eweichel@cisco.com',
+    'noreply@webex.com',
+    'noreply@google.com',
+    'mailer-daemon@googlemail.com',
+    'mailer-daemon@google.com',
+    'no-reply@accounts.google.com',
+    'no-reply@cisco.com',
+    'donotreply@cisco.com',
+  ]);
+
+  // Track Cisco rep emails on the thread (cisco.com domain, non-bot)
+  const ciscoEmails = [];
+
+  // Collect sender from expanded email header (.gD elements) — SCOPED to thread
+  scopeEl.querySelectorAll('.gD').forEach((el) => {
     const email = el.getAttribute('email');
-    if (email && !email.toLowerCase().includes('@stratusinfosystems.com')) {
-      allEmails.add(email.toLowerCase());
-      const domain = email.split('@')[1];
-      if (domain) allDomains.add(domain);
+    if (!email) return;
+    const lower = email.toLowerCase();
+    if (lower.includes('@stratusinfosystems.com')) return;
+    if (BOT_EMAILS.has(lower)) return;
 
-      const name = el.getAttribute('name') || el.textContent.trim();
-      const lowerEmail = email.toLowerCase();
+    allEmails.add(lower);
+    const domain = email.split('@')[1];
+    if (domain) allDomains.add(domain);
 
-      // Deduplicate: if email exists, upgrade role from 'sender' if needed
-      if (!contactsByEmail.has(lowerEmail)) {
-        contactsByEmail.set(lowerEmail, { email, name, role: 'sender' });
-      }
+    const name = el.getAttribute('name') || el.textContent.trim();
+    if (!contactsByEmail.has(lower)) {
+      contactsByEmail.set(lower, { email, name, role: 'sender' });
     }
+    if (domain === 'cisco.com' && !ciscoEmails.includes(lower)) ciscoEmails.push(lower);
   });
 
-  // Collect To/Cc recipients (.g2 elements and [email] attributes)
-  document.querySelectorAll('.g2, [email]').forEach((el) => {
-    const email = el.getAttribute('email');
-    if (email && !email.toLowerCase().includes('@stratusinfosystems.com')) {
-      allEmails.add(email.toLowerCase());
-      const domain = email.split('@')[1];
-      if (domain) allDomains.add(domain);
+  // Collect To/Cc recipients — SCOPED to thread
+  scopeEl.querySelectorAll('.g2, .gD[email], span[email], [data-hovercard-id]').forEach((el) => {
+    const email = el.getAttribute('email') || el.getAttribute('data-hovercard-id') || '';
+    if (!email || !email.includes('@')) return;
+    const lower = email.toLowerCase();
+    if (lower.includes('@stratusinfosystems.com')) return;
+    if (BOT_EMAILS.has(lower)) return;
 
-      const name = el.getAttribute('name') || el.textContent.trim();
-      const role = determineRole(el);
-      const lowerEmail = email.toLowerCase();
+    allEmails.add(lower);
+    const domain = email.split('@')[1];
+    if (domain) allDomains.add(domain);
 
-      // Deduplicate: preserve highest priority role (sender > cc > to)
-      if (!contactsByEmail.has(lowerEmail)) {
-        contactsByEmail.set(lowerEmail, { email, name, role });
-      } else {
-        const existing = contactsByEmail.get(lowerEmail);
-        // Upgrade role priority if needed
-        const roleMap = { sender: 3, cc: 2, to: 1 };
-        if (roleMap[role] > roleMap[existing.role]) {
-          existing.role = role;
-        }
-        // Update name if we have a better one
-        if (name && name.length > existing.name.length) {
-          existing.name = name;
-        }
-      }
+    const name = el.getAttribute('name') || el.textContent.trim();
+    const role = determineRole(el);
+
+    if (!contactsByEmail.has(lower)) {
+      contactsByEmail.set(lower, { email, name, role });
+    } else {
+      const existing = contactsByEmail.get(lower);
+      const roleMap = { sender: 3, cc: 2, to: 1 };
+      if ((roleMap[role] || 0) > (roleMap[existing.role] || 0)) existing.role = role;
+      if (name && name.length > (existing.name || '').length) existing.name = name;
     }
+    if (domain === 'cisco.com' && !ciscoEmails.includes(lower)) ciscoEmails.push(lower);
   });
 
-  // Populate threadContacts array from contactsByEmail Map
-  threadContacts.push(...contactsByEmail.values());
+  // Populate threadContacts — filter consumer domains for CRM lookup
+  for (const contact of contactsByEmail.values()) {
+    threadContacts.push(contact);
+  }
 
   const isOutbound = senderEmail.toLowerCase().includes('@stratusinfosystems.com');
 
-  // Find customer email (first non-Stratus participant)
+  // Find customer email (first non-Stratus, non-consumer-domain participant)
   let customerEmail = '';
   let customerName = '';
   let customerDomain = '';
   for (const contact of threadContacts) {
+    const domain = contact.email.split('@')[1] || '';
     customerEmail = contact.email;
     customerName = contact.name;
-    customerDomain = contact.email.split('@')[1] || '';
+    customerDomain = domain;
     break;
   }
+
+  // CCW Deal ID detection from subject line (Cisco Commerce notification emails)
+  // Subject pattern: "CCW Quote #123456789012345" or "Deal ID: 123456789012345"
+  let ccwDealNumber = null;
+  const ccwSubjectMatch = subject.match(/(?:CCW[^\d]*|Deal\s*(?:ID|Number|#)[:\s#]*|Quote\s*#\s*)(\d{5,20})/i);
+  if (ccwSubjectMatch) ccwDealNumber = ccwSubjectMatch[1];
+
+  // Also check if this is a Cisco Commerce notification email
+  const isCiscoNotification = senderEmail.toLowerCase() === 'notificationsapp@cisco.com'
+    || senderEmail.toLowerCase().includes('@cisco.com');
 
   return {
     subject,
@@ -166,6 +221,9 @@ function extractEmailData() {
     allEmails: [...allEmails],
     allDomains: [...allDomains],
     threadContacts,
+    ciscoEmails,         // Cisco rep emails detected on thread
+    ccwDealNumber,       // CCW Deal ID if detected in subject
+    isCiscoNotification, // True for notificationsapp@cisco.com
     url: window.location.href,
     extractedAt: Date.now(),
   };
@@ -660,16 +718,20 @@ function injectComposeButton(composeEl) {
 let _emailChangeTimer = null;
 let _composeCheckTimer = null;
 
-const observer = new MutationObserver((mutations) => {
-  // Debounced email view change detection (150ms)
-  const subjectEl = document.querySelector('h2.hP');
+function checkForEmailView() {
+  // Strategy 1: Check for subject line (most reliable indicator of email open)
+  const subjectEl = document.querySelector('h2.hP') || document.querySelector('[data-thread-perm-id] h2');
   if (subjectEl) {
     if (_emailChangeTimer) clearTimeout(_emailChangeTimer);
     _emailChangeTimer = setTimeout(() => {
       _emailChangeTimer = null;
       onEmailChanged();
-    }, 150);
+    }, 250); // Slightly longer debounce for reliability
   }
+}
+
+const observer = new MutationObserver((mutations) => {
+  checkForEmailView();
 
   // Debounced compose button injection (300ms)
   if (settings?.enableComposeButton) {
@@ -686,16 +748,29 @@ const observer = new MutationObserver((mutations) => {
   }
 });
 
-// Start observing Gmail DOM
+// Start observing Gmail DOM — observe attributes too for Gmail SPA transitions
 observer.observe(document.body, {
   childList: true,
   subtree: true,
-  attributes: false,
+  attributes: true,
+  attributeFilter: ['class', 'style', 'aria-hidden'],
   characterData: false,
 });
 
 // Initialize email hover popups
 setupEmailHoverPopups();
+
+// Also do an initial check after page settles (Gmail takes a moment to render)
+setTimeout(() => {
+  console.log('[Stratus AI] Initial email check after load');
+  checkForEmailView();
+  setupEmailHoverPopups();
+}, 1500);
+
+// Second delayed check for slower connections
+setTimeout(() => {
+  checkForEmailView();
+}, 3000);
 
 // ─────────────────────────────────────────────
 // Email Sent Detection
@@ -774,7 +849,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Also detect URL hash changes (Gmail navigation)
 let lastHash = window.location.hash;
-setInterval(() => {
+
+function onHashChange() {
   const currentHash = window.location.hash;
   if (currentHash !== lastHash) {
     lastHash = currentHash;
@@ -784,5 +860,21 @@ setInterval(() => {
     document.querySelectorAll('[data-stratus-processed]').forEach(el => {
       el.removeAttribute('data-stratus-processed');
     });
+    document.querySelectorAll('[data-stratus-deals-processed]').forEach(el => {
+      el.removeAttribute('data-stratus-deals-processed');
+    });
+    document.querySelectorAll('[data-stratus-email-hover-processed]').forEach(el => {
+      el.removeAttribute('data-stratus-email-hover-processed');
+    });
+
+    // Check for new email after DOM settles
+    setTimeout(() => {
+      checkForEmailView();
+      setupEmailHoverPopups();
+    }, 500);
   }
-}, 1000);
+}
+
+// Use both hashchange event and polling for maximum reliability
+window.addEventListener('hashchange', onHashChange);
+setInterval(onHashChange, 1000);

@@ -66,11 +66,31 @@ registerMessageHandlers({
   [MSG.EMAIL_CHANGED]: async (payload) => {
     currentEmailContext = payload;
     currentCrmContext = null; // Reset CRM context on new email
+    // Persist to chrome.storage.session for recovery after service worker sleep
+    try {
+      await chrome.storage.session.set({ emailContext: payload });
+    } catch (err) {
+      console.error('[Stratus] Failed to persist email context to session storage:', err);
+    }
     return { success: true };
   },
 
   [MSG.GET_EMAIL_CONTEXT]: async () => {
-    return currentEmailContext || { empty: true };
+    // Return in-memory context if available
+    if (currentEmailContext) {
+      return currentEmailContext;
+    }
+    // Recover from session storage if service worker was asleep
+    try {
+      const stored = await chrome.storage.session.get('emailContext');
+      if (stored && stored.emailContext) {
+        currentEmailContext = stored.emailContext;
+        return currentEmailContext;
+      }
+    } catch (err) {
+      console.error('[Stratus] Failed to retrieve email context from session storage:', err);
+    }
+    return { empty: true };
   },
 
   [MSG.GET_CRM_CONTEXT]: async () => {
@@ -210,14 +230,44 @@ registerMessageHandlers({
     return currentTaskRescheduleContext || { empty: true };
   },
 
-  // ── Image Analysis ──
-  [MSG.ANALYZE_IMAGE]: async ({ imageUrl }) => {
-    return api.analyzeImageForSkus(imageUrl);
+  // ── CRM Write Operations ──
+  [MSG.CRM_ADD_CONTACT]: async ({ firstName, lastName, email, phone, title, accountId, mobile }) => {
+    return api.crmAddContact(firstName, lastName, email, phone, title, accountId, mobile);
   },
 
-  // ── Chat Handoff ──
-  [MSG.CHAT_HANDOFF]: async ({ text, emailContext }) => {
-    return api.sendHandoff(text, emailContext);
+  // ── Image Analysis (screenshot/dashboard parsing) ──
+  [MSG.ANALYZE_IMAGE]: async ({ imageUrl, imageBase64 }) => {
+    return api.analyzeImageForSkus(imageUrl, imageBase64);
+  },
+
+  // ── Chat Handoff (CRM-aware) ──
+  [MSG.CHAT_HANDOFF]: async ({ text, emailContext, history, systemContext }) => {
+    return api.chatWithCrm(text, emailContext, history, systemContext);
+  },
+
+  // ── CCW / Velocity Hub ──
+  [MSG.CCW_LOOKUP]: async ({ ccwDealNumber, dealName }) => {
+    return api.ccwLookup(ccwDealNumber, dealName);
+  },
+
+  [MSG.VELOCITY_HUB_SUBMIT]: async ({ dealId, country }) => {
+    return api.velocityHubSubmit(dealId, country);
+  },
+
+  [MSG.ASSIGN_REP]: async ({ dealId, repEmail, repName }) => {
+    return api.assignCiscoRep(dealId, repEmail, repName);
+  },
+
+  // ── Suggest Task ──
+  [MSG.SUGGEST_TASK_PREVIEW]: async (params) => {
+    return api.suggestTaskPreview(
+      params.senderEmail, params.senderName, params.subject,
+      params.accountId, params.threadDomains
+    );
+  },
+
+  [MSG.SUGGEST_TASK]: async (params) => {
+    return api.suggestTask(params);
   },
 });
 

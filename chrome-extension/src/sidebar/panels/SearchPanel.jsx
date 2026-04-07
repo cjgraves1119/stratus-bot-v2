@@ -1,18 +1,24 @@
 /**
  * Search Panel
- * Search Zoho CRM across modules.
+ * Search Zoho CRM across modules with clickable Zoho links.
  */
 
 import { useState, useEffect, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
 
-const MODULES = [
-  { id: 'Accounts', label: 'Accounts' },
-  { id: 'Contacts', label: 'Contacts' },
-  { id: 'Deals', label: 'Deals' },
-  { id: 'Quotes', label: 'Quotes' },
-];
+const ZOHO_ORG = 'org647122552';
+const MODULE_MAP = {
+  Accounts: { label: 'Accounts', tab: 'Accounts' },
+  Contacts: { label: 'Contacts', tab: 'Contacts' },
+  Deals: { label: 'Deals', tab: 'Potentials' },
+  Quotes: { label: 'Quotes', tab: 'Quotes' },
+};
+
+function buildZohoUrl(moduleId, recordId) {
+  const tab = MODULE_MAP[moduleId]?.tab || moduleId;
+  return `https://crm.zoho.com/crm/${ZOHO_ORG}/tab/${tab}/${recordId}`;
+}
 
 export default function SearchPanel({ navData }) {
   const [query, setQuery] = useState('');
@@ -22,11 +28,12 @@ export default function SearchPanel({ navData }) {
   const [error, setError] = useState(null);
   const inputRef = useRef(null);
 
-  // Pre-fill from navData
   useEffect(() => {
     if (navData?.query) {
       setQuery(navData.query);
-      handleSearch(navData.query, module);
+      const mod = navData.module || module;
+      if (navData.module) setModule(navData.module);
+      handleSearch(navData.query, mod);
     }
   }, [navData]);
 
@@ -41,7 +48,7 @@ export default function SearchPanel({ navData }) {
         query: searchQuery.trim(),
         module: mod || module,
       });
-      setResults(result);
+      setResults({ ...result, searchModule: mod || module });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -51,6 +58,158 @@ export default function SearchPanel({ navData }) {
 
   function handleKeyDown(e) {
     if (e.key === 'Enter') handleSearch();
+  }
+
+  function getFieldValue(obj) {
+    if (obj == null) return null;
+    if (typeof obj === 'string' || typeof obj === 'number') return String(obj);
+    if (typeof obj === 'object' && obj.name) return obj.name;
+    return null;
+  }
+
+  function renderRecord(record, mod, i) {
+    const zohoUrl = buildZohoUrl(mod, record.id);
+
+    switch (mod) {
+      case 'Accounts': {
+        const name = getFieldValue(record.Account_Name) || 'Unnamed Account';
+        const phone = getFieldValue(record.Phone);
+        const website = getFieldValue(record.Website);
+        const city = getFieldValue(record.Billing_City);
+        const state = getFieldValue(record.Billing_State);
+        const location = [city, state].filter(Boolean).join(', ');
+
+        return (
+          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
+            style={{
+              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
+              cursor: 'pointer', transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
+            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE, marginBottom: 2 }}>
+              {name}
+            </div>
+            {phone && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>{phone}</div>}
+            {website && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{website}</div>}
+            {location && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{location}</div>}
+            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
+          </a>
+        );
+      }
+
+      case 'Contacts': {
+        const firstName = getFieldValue(record.First_Name) || '';
+        const lastName = getFieldValue(record.Last_Name) || '';
+        const name = `${firstName} ${lastName}`.trim() || 'Unnamed Contact';
+        const email = getFieldValue(record.Email);
+        const phone = getFieldValue(record.Phone);
+        const account = getFieldValue(record.Account_Name);
+
+        return (
+          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
+            style={{
+              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
+              cursor: 'pointer', transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
+            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{name}</div>
+            {account && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{account}</div>}
+            {email && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{email}</div>}
+            {phone && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{phone}</div>}
+            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
+          </a>
+        );
+      }
+
+      case 'Deals': {
+        const name = getFieldValue(record.Deal_Name) || 'Unnamed Deal';
+        const stage = getFieldValue(record.Stage);
+        const amount = getFieldValue(record.Amount);
+        const account = getFieldValue(record.Account_Name);
+        const closeDate = getFieldValue(record.Closing_Date);
+
+        return (
+          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
+            style={{
+              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
+              cursor: 'pointer', transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
+            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{name}</div>
+            {account && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{account}</div>}
+            <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+              {stage && (
+                <span style={{
+                  fontSize: 11, padding: '2px 6px', borderRadius: 4,
+                  background: stage.includes('Closed') ? '#e8f5e9' : '#e3f2fd',
+                  color: stage.includes('Closed') ? '#2e7d32' : '#1565c0',
+                }}>
+                  {stage}
+                </span>
+              )}
+              {amount && (
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#2e7d32' }}>
+                  ${Number(amount).toLocaleString()}
+                </span>
+              )}
+              {closeDate && (
+                <span style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{closeDate}</span>
+              )}
+            </div>
+            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
+          </a>
+        );
+      }
+
+      case 'Quotes': {
+        const subject = getFieldValue(record.Subject) || 'Unnamed Quote';
+        const quoteNum = getFieldValue(record.Quote_Number);
+        const total = getFieldValue(record.Grand_Total);
+        const deal = getFieldValue(record.Deal_Name);
+        const stage = getFieldValue(record.Stage);
+
+        return (
+          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
+            style={{
+              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
+              cursor: 'pointer', transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
+            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{subject}</div>
+            {quoteNum && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>#{quoteNum}</div>}
+            {deal && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Deal: {deal}</div>}
+            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+              {total && (
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#2e7d32' }}>
+                  ${Number(total).toLocaleString()}
+                </span>
+              )}
+              {stage && (
+                <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, background: '#f5f5f5' }}>
+                  {stage}
+                </span>
+              )}
+            </div>
+            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
+          </a>
+        );
+      }
+
+      default:
+        return null;
+    }
   }
 
   return (
@@ -73,19 +232,19 @@ export default function SearchPanel({ navData }) {
 
       {/* Module Selector */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-        {MODULES.map((m) => (
+        {Object.entries(MODULE_MAP).map(([id, { label }]) => (
           <button
-            key={m.id}
-            onClick={() => { setModule(m.id); if (query) handleSearch(query, m.id); }}
+            key={id}
+            onClick={() => { setModule(id); if (query) handleSearch(query, id); }}
             style={{
               flex: 1, padding: '6px 8px', borderRadius: 6,
-              border: `1px solid ${module === m.id ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
-              background: module === m.id ? COLORS.STRATUS_LIGHT : 'transparent',
-              color: module === m.id ? COLORS.STRATUS_BLUE : COLORS.TEXT_SECONDARY,
-              fontSize: 11, fontWeight: module === m.id ? 600 : 400, cursor: 'pointer',
+              border: `1px solid ${module === id ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
+              background: module === id ? COLORS.STRATUS_LIGHT : 'transparent',
+              color: module === id ? COLORS.STRATUS_BLUE : COLORS.TEXT_SECONDARY,
+              fontSize: 11, fontWeight: module === id ? 600 : 400, cursor: 'pointer',
             }}
           >
-            {m.label}
+            {label}
           </button>
         ))}
       </div>
@@ -113,37 +272,23 @@ export default function SearchPanel({ navData }) {
       {/* Results */}
       {results && (
         <div style={{ marginTop: 12 }}>
+          {results.records && results.records.length > 0 && (
+            <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>
+              {results.records.length} result{results.records.length > 1 ? 's' : ''} in {MODULE_MAP[results.searchModule]?.label || results.searchModule}
+            </div>
+          )}
+
           {(!results.records || results.records.length === 0) ? (
-            <div style={{ textAlign: 'center', color: COLORS.TEXT_SECONDARY, padding: 20 }}>
-              No results found.
+            <div style={{
+              textAlign: 'center', color: COLORS.TEXT_SECONDARY, padding: 20,
+              background: COLORS.BG_PRIMARY, borderRadius: 8, border: `1px solid ${COLORS.BORDER}`,
+            }}>
+              <div style={{ fontSize: 24, marginBottom: 8 }}>🔍</div>
+              <div style={{ fontSize: 13 }}>No results found for "{query}"</div>
+              <div style={{ fontSize: 11, marginTop: 4 }}>Try a different search term or module</div>
             </div>
           ) : (
-            results.records.map((record, i) => (
-              <div key={i} style={{
-                background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-                borderRadius: 8, padding: 12, marginBottom: 8,
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.TEXT_PRIMARY }}>
-                      {record.name || record.Account_Name || record.Deal_Name || record.Subject || record.Full_Name || 'Unnamed'}
-                    </div>
-                    {record.email && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>{record.email}</div>}
-                    {record.stage && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>Stage: {record.stage}</div>}
-                    {record.amount && (
-                      <div style={{ fontSize: 12, color: COLORS.SUCCESS, fontWeight: 600 }}>
-                        ${Number(record.amount).toLocaleString()}
-                      </div>
-                    )}
-                  </div>
-                  {record.zohoUrl && (
-                    <a href={record.zohoUrl} target="_blank" rel="noopener" style={{
-                      color: COLORS.STRATUS_BLUE, fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap',
-                    }}>Zoho →</a>
-                  )}
-                </div>
-              </div>
-            ))
+            results.records.map((record, i) => renderRecord(record, results.searchModule, i))
           )}
         </div>
       )}
