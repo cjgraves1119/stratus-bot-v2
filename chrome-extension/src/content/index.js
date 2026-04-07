@@ -570,6 +570,178 @@ function handleDealIdClick(event) {
 }
 
 // ─────────────────────────────────────────────
+// Contact Chip Hover Popups (Gmail thread headers)
+// Mirrors the Zoho CRM Chrome extension hover behavior.
+// Targets the sender/recipient name chips in email header rows.
+// ─────────────────────────────────────────────
+
+// Cache CRM lookups for the current page session
+const chipCrmCache = new Map();
+
+function buildAvatarColor(email) {
+  // Deterministic color from email
+  const colors = ['#1a73e8','#0077b5','#00a67e','#e37400','#9c27b0','#c62828','#2e7d32'];
+  let hash = 0;
+  for (let i = 0; i < email.length; i++) hash = email.charCodeAt(i) + ((hash << 5) - hash);
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function showContactChipPopup(anchorEl, email) {
+  // Remove any existing chip popup
+  document.querySelector('.stratus-chip-popup')?.remove();
+
+  const rawName = anchorEl.getAttribute('name') || anchorEl.textContent.trim() || '';
+  const displayName = rawName || email.split('@')[0];
+  const domain = email.split('@')[1] || '';
+  const avatarColor = buildAvatarColor(email);
+  const avatarLetter = (displayName[0] || '?').toUpperCase();
+
+  const popup = document.createElement('div');
+  popup.className = 'stratus-chip-popup';
+  popup.style.cssText = `
+    position: fixed; z-index: 2147483646; background: white;
+    border: 1px solid #dadce0; border-radius: 8px;
+    box-shadow: 0 2px 16px rgba(60,64,67,0.2), 0 1px 4px rgba(60,64,67,0.15);
+    font-family: 'Google Sans', -apple-system, sans-serif;
+    width: 248px; overflow: hidden; pointer-events: auto;
+    animation: stratusChipIn 0.15s ease;
+  `;
+
+  popup.innerHTML = `
+    <div style="padding:14px 16px 10px;display:flex;align-items:center;gap:12px;">
+      <div style="
+        width:40px;height:40px;border-radius:50%;flex-shrink:0;
+        background:${avatarColor};color:white;
+        display:flex;align-items:center;justify-content:center;
+        font-size:18px;font-weight:500;
+      ">${avatarLetter}</div>
+      <div style="min-width:0;flex:1;">
+        <div style="font-size:14px;font-weight:500;color:#202124;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${displayName}</div>
+        <div style="font-size:12px;color:#5f6368;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${email}</div>
+      </div>
+    </div>
+    <div class="chip-crm-info" style="padding:0 16px 10px;min-height:20px;font-size:12px;color:#5f6368;">
+      <span class="chip-loading" style="color:#5f6368;">Checking Zoho CRM…</span>
+    </div>
+    <div style="padding:0 12px 12px;">
+      <button class="chip-open-btn" style="
+        width:100%;padding:8px;border:none;border-radius:6px;
+        background:#1a73e8;color:white;font-size:13px;font-weight:500;
+        cursor:pointer;letter-spacing:0.01em;
+      ">Search in Zoho CRM</button>
+    </div>
+  `;
+
+  // Position below anchor, avoid viewport overflow
+  const rect = anchorEl.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - 264));
+  const top = rect.bottom + 4;
+  popup.style.left = left + 'px';
+  popup.style.top = top + 'px';
+  document.body.appendChild(popup);
+
+  // Keep popup open while hovering it or the anchor
+  let leaveTimer = null;
+  function scheduleClose() {
+    leaveTimer = setTimeout(() => popup.remove(), 250);
+  }
+  function cancelClose() {
+    if (leaveTimer) clearTimeout(leaveTimer);
+  }
+  anchorEl.addEventListener('mouseleave', scheduleClose);
+  popup.addEventListener('mouseenter', cancelClose);
+  popup.addEventListener('mouseleave', scheduleClose);
+
+  // "Search in Zoho CRM" / "Open in Stratus AI" button
+  popup.querySelector('.chip-open-btn').addEventListener('click', () => {
+    popup.remove();
+    // Tell background to open the side panel + navigate to CRM tab with this email
+    chrome.runtime.sendMessage({
+      type: MSG.SIDEBAR_NAVIGATE,
+      panel: 'crm',
+      data: { preloadEmail: email },
+      openPanel: true,
+    }, () => {});
+  });
+
+  // CRM lookup (use cache to avoid re-querying same email)
+  const crmInfoEl = popup.querySelector('.chip-crm-info');
+  if (chipCrmCache.has(email)) {
+    renderChipCrmInfo(crmInfoEl, chipCrmCache.get(email), email, domain);
+  } else if (!CONSUMER_DOMAINS.has(domain)) {
+    sendToBackground(MSG.CRM_LOOKUP, { email, domain })
+      .then(result => {
+        chipCrmCache.set(email, result);
+        if (crmInfoEl.parentNode) renderChipCrmInfo(crmInfoEl, result, email, domain);
+      })
+      .catch(() => {
+        if (crmInfoEl.parentNode) crmInfoEl.innerHTML = '';
+      });
+  } else {
+    // Consumer domain — still show the button but no CRM info
+    crmInfoEl.innerHTML = '';
+    popup.querySelector('.chip-open-btn').textContent = 'Look up in Stratus AI';
+  }
+
+  return popup;
+}
+
+function renderChipCrmInfo(el, result, email, domain) {
+  if (!result || !result.found) {
+    el.innerHTML = `<span style="color:#80868b;font-size:11px;">Not in Zoho CRM</span>`;
+    return;
+  }
+  const acc = result.account;
+  const con = result.contact;
+  let html = '';
+  if (acc?.name) {
+    html += `<div style="font-weight:500;color:#202124;margin-bottom:1px;">${acc.name}</div>`;
+  }
+  if (con?.title) {
+    html += `<div style="color:#5f6368;">${con.title}</div>`;
+  }
+  if (con?.phone) {
+    html += `<div style="color:#5f6368;">${con.phone}</div>`;
+  }
+  if (!html) html = `<div style="color:#2e7d32;font-size:11px;">✓ Found in Zoho CRM</div>`;
+  el.innerHTML = html;
+}
+
+function attachChipHover(el) {
+  if (el.dataset.stratusChipAttached) return;
+  const email = el.getAttribute('email') || el.getAttribute('data-hovercard-id') || '';
+  if (!email || !email.includes('@') || !email.includes('.')) return;
+  if (email.toLowerCase().includes('@stratusinfosystems.com')) return;
+  if (BOT_EMAILS.has(email.toLowerCase())) return;
+
+  el.dataset.stratusChipAttached = 'true';
+
+  let hoverTimer = null;
+  el.addEventListener('mouseenter', () => {
+    hoverTimer = setTimeout(() => {
+      showContactChipPopup(el, email.toLowerCase());
+    }, 180); // Short delay — snappy but not jittery
+  });
+  el.addEventListener('mouseleave', () => {
+    if (hoverTimer) clearTimeout(hoverTimer);
+  });
+}
+
+function setupContactChipHovers() {
+  // Gmail chip selectors — sender (.gD), To/Cc recipients (.g2), avatar hover targets
+  const CHIP_SEL = '.gD[email], .g2[email], .go[email], [data-hovercard-id*="@"]';
+
+  // Attach to chips already in DOM
+  document.querySelectorAll(CHIP_SEL).forEach(attachChipHover);
+
+  // Watch for chips added by Gmail's SPA rendering
+  const chipObserver = new MutationObserver(() => {
+    document.querySelectorAll(CHIP_SEL).forEach(attachChipHover);
+  });
+  chipObserver.observe(document.body, { childList: true, subtree: true, attributeFilter: ['email', 'data-hovercard-id'] });
+}
+
+// ─────────────────────────────────────────────
 // Email Address Hover Popups
 // ─────────────────────────────────────────────
 
@@ -999,7 +1171,25 @@ observer.observe(document.body, {
   characterData: false,
 });
 
-// Initialize email hover popups
+// Inject popup animation CSS once
+(function injectPopupStyles() {
+  if (document.getElementById('stratus-chip-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'stratus-chip-styles';
+  style.textContent = `
+    @keyframes stratusChipIn {
+      from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .stratus-chip-popup button.chip-open-btn:hover {
+      background: #1558b0 !important;
+    }
+  `;
+  document.head.appendChild(style);
+})();
+
+// Initialize contact chip hovers + email body hover popups
+setupContactChipHovers();
 setupEmailHoverPopups();
 
 // Also do an initial check after page settles (Gmail takes a moment to render)

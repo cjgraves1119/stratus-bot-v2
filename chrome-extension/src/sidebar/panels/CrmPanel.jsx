@@ -99,9 +99,20 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     if (crmContext && crmContext.found) setData(crmContext);
   }, [crmContext]);
 
-  // Handle navData from sidebar navigation (e.g. "Send + Task" button)
+  // Handle navData from sidebar navigation
   useEffect(() => {
-    if (navData?.activeSubTab) setActiveSubTab(navData.activeSubTab);
+    if (!navData) return;
+    // "Send + Task" button: jump to tasks sub-tab
+    if (navData.activeSubTab) setActiveSubTab(navData.activeSubTab);
+    // Contact chip click: pre-load a specific email
+    if (navData.preloadEmail) {
+      const email = navData.preloadEmail;
+      const domain = email.split('@')[1] || '';
+      setSelectedContact(email);
+      setManualEmail('');
+      setActiveSubTab('info');
+      lookupCrm(email, domain);
+    }
   }, [navData]);
 
   useEffect(() => {

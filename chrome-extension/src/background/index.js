@@ -181,9 +181,12 @@ registerMessageHandlers({
   },
 
   // ── Sidebar Navigation ──
-  [MSG.SIDEBAR_NAVIGATE]: async (payload) => {
-    // This is forwarded to the sidebar via onMessage listeners
-    // The sidebar listens for this directly
+  [MSG.SIDEBAR_NAVIGATE]: async (payload, sender) => {
+    // If openPanel flag is set (e.g. from contact chip click), open the side panel first
+    if (payload.openPanel && sender?.tab?.id) {
+      chrome.sidePanel.open({ tabId: sender.tab.id }).catch(() => {});
+    }
+    // Message is also received by the sidebar's onMessage listener for in-panel navigation
     return { forwarded: true };
   },
 
@@ -268,6 +271,16 @@ registerMessageHandlers({
 
   [MSG.SUGGEST_TASK]: async (params) => {
     return api.suggestTask(params);
+  },
+
+  // ── CRM Account Search ──
+  [MSG.CRM_ACCOUNT_SEARCH]: async ({ query }) => {
+    return api.crmAccountSearch(query);
+  },
+
+  // ── CRM Create Task ──
+  [MSG.CRM_CREATE_TASK]: async ({ subject, dueDate, dealId, contactId, priority, description }) => {
+    return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description);
   },
 });
 
