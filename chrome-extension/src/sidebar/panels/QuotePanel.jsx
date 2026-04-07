@@ -31,10 +31,11 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     }
   }, [navData]);
 
-  // Handle image analysis
+  // Handle image analysis from navData (base64 or URL)
   useEffect(() => {
-    if (navData?.imageUrl) handleImageAnalysis(navData.imageUrl);
-  }, [navData?.imageUrl]);
+    if (navData?.imageBase64) handleImageAnalysis(null, navData.imageBase64);
+    else if (navData?.imageUrl) handleImageAnalysis(navData.imageUrl);
+  }, [navData?.imageUrl, navData?.imageBase64]);
 
   async function handleImageAnalysis(imageUrl, imageBase64) {
     setAnalyzingImage(true);
@@ -138,19 +139,46 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
   function handleApplySuggestion(suggestion) {
     const replacement = suggestion.suggest[0];
     const escapedInput = suggestion.input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Negative lookahead prevents matching a partial SKU prefix — e.g. "MS150-2"
-    // should NOT match inside "MS150-24". With the fixed parser this shouldn't happen,
-    // but the guard keeps things safe if suggestion.input is ever a truncated token.
+    // Replace the invalid SKU with the suggested correction
     const regex = new RegExp(escapedInput + '(?![A-Z0-9-])', 'gi');
     const newText = skuText.replace(regex, replacement);
     if (newText === skuText) {
-      // Guard: lookahead blocked the match (input was a prefix of a longer token).
-      // Fall back to replacing the whole textarea content with the selected suggestion.
+      // Fallback: replace entire text
       setSkuText(replacement);
     } else {
       setSkuText(newText);
     }
     setResult(null);
+  }
+
+  function handleStackSuggestion(suggestion) {
+    // Stack: append the suggested SKU to the current input (for building multi-SKU quotes)
+    const replacement = suggestion.suggest[0];
+    const current = skuText.trim();
+    if (current) {
+      setSkuText(current + ', ' + replacement);
+    } else {
+      setSkuText(replacement);
+    }
+    setResult(null);
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }
+
+  async function handleCaptureScreenshot() {
+    setAnalyzingImage(true);
+    setError(null);
+    setResult(null);
+    setImageAnalysis(null);
+    try {
+      const captureResult = await sendToBackground(MSG.CAPTURE_TAB, {});
+      if (!captureResult || !captureResult.success) {
+        throw new Error(captureResult?.error || 'Screenshot capture failed');
+      }
+      await handleImageAnalysis(null, captureResult.base64);
+    } catch (err) {
+      setError('Screenshot capture failed: ' + err.message);
+      setAnalyzingImage(false);
+    }
   }
 
   async function handleCopy(text, idx) {
@@ -248,19 +276,36 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
       />
 
       {/* Generate Button */}
-      <button
-        onClick={handleGenerate}
-        disabled={loading || !skuText.trim()}
-        style={{
-          width: '100%', padding: '10px 16px',
-          background: loading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
-          color: 'white', border: 'none', borderRadius: 8, fontSize: 14,
-          fontWeight: 600, cursor: loading ? 'default' : 'pointer',
-          opacity: loading || !skuText.trim() ? 0.7 : 1,
-        }}
-      >
-        {loading ? 'Generating...' : 'Generate Quote'}
-      </button>
+      {/* Button Row: Generate + Screenshot */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+        <button
+          onClick={handleGenerate}
+          disabled={loading || !skuText.trim()}
+          style={{
+            flex: 1, padding: '10px 16px',
+            background: loading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+            color: 'white', border: 'none', borderRadius: 8, fontSize: 14,
+            fontWeight: 600, cursor: loading ? 'default' : 'pointer',
+            opacity: loading || !skuText.trim() ? 0.7 : 1,
+          }}
+        >
+          {loading ? 'Generating...' : 'Generate Quote'}
+        </button>
+        <button
+          onClick={handleCaptureScreenshot}
+          disabled={analyzingImage}
+          title="Capture visible tab as screenshot and analyze for SKUs"
+          style={{
+            padding: '10px 14px',
+            background: analyzingImage ? COLORS.TEXT_SECONDARY : '#ff6f00',
+            color: 'white', border: 'none', borderRadius: 8, fontSize: 14,
+            cursor: analyzingImage ? 'default' : 'pointer',
+            opacity: analyzingImage ? 0.7 : 1,
+          }}
+        >
+          {analyzingImage ? '...' : '📷'}
+        </button>
+      </div>
 
       {/* Error */}
       {error && (
@@ -287,18 +332,30 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
                 <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>
                   <span style={{ color: COLORS.TEXT_SECONDARY }}>Did you mean: </span>
                   {s.suggest.map((sug, j) => (
-                    <button
-                      key={j}
-                      onClick={() => handleApplySuggestion({ ...s, suggest: [sug] })}
-                      style={{
-                        background: COLORS.STRATUS_LIGHT, color: COLORS.STRATUS_BLUE,
-                        border: `1px solid ${COLORS.STRATUS_BLUE}44`, borderRadius: 4,
-                        padding: '2px 8px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                        marginRight: 4, marginTop: 4,
-                      }}
-                    >
-                      {sug}
-                    </button>
+                    <span key={j} style={{ display: 'inline-flex', gap: 2, marginRight: 6, marginTop: 4 }}>
+                      <button
+                        onClick={() => handleApplySuggestion({ ...s, suggest: [sug] })}
+                        title="Replace invalid SKU with this"
+                        style={{
+                          background: COLORS.STRATUS_LIGHT, color: COLORS.STRATUS_BLUE,
+                          border: `1px solid ${COLORS.STRATUS_BLUE}44`, borderRadius: '4px 0 0 4px',
+                          padding: '2px 8px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                        }}
+                      >
+                        {sug}
+                      </button>
+                      <button
+                        onClick={() => handleStackSuggestion({ ...s, suggest: [sug] })}
+                        title="Add to quote (stack)"
+                        style={{
+                          background: COLORS.STRATUS_BLUE, color: 'white',
+                          border: `1px solid ${COLORS.STRATUS_BLUE}`, borderRadius: '0 4px 4px 0',
+                          padding: '2px 5px', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                        }}
+                      >
+                        +
+                      </button>
+                    </span>
                   ))}
                 </div>
               )}

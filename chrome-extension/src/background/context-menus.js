@@ -59,6 +59,23 @@ export function setupContextMenus() {
       contexts: ['selection', 'link'],
       documentUrlPatterns: ['https://crm.zoho.com/*'],
     });
+
+    // Right-click on email addresses to look up contact in CRM
+    chrome.contextMenus.create({
+      id: 'stratus-lookup-email',
+      title: 'Look up in Stratus AI',
+      contexts: ['link'],
+      targetUrlPatterns: ['mailto:*'],
+      documentUrlPatterns: ['https://mail.google.com/*'],
+    });
+
+    // Screenshot capture for quoting (works on any page)
+    chrome.contextMenus.create({
+      id: 'stratus-capture-screenshot',
+      title: 'Capture screenshot for quoting',
+      contexts: ['page'],
+      documentUrlPatterns: ['https://*/*'],
+    });
   });
 }
 
@@ -136,18 +153,62 @@ export async function handleContextMenuClick(info, tab) {
     }
 
     case 'stratus-quote-image': {
-      if (!info.srcUrl) return;
       try {
+        // Capture the visible tab as base64 screenshot instead of using image URL
+        // (dashboard images behind auth return HTML, not image data)
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+        const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
         await chrome.sidePanel.open({ tabId: tab.id });
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
             panel: 'quote',
-            data: { imageUrl: info.srcUrl },
+            data: { imageBase64: base64 },
           });
         }, 500);
       } catch (err) {
         console.error('[Stratus] Image quote context menu failed:', err);
+      }
+      break;
+    }
+
+    case 'stratus-lookup-email': {
+      // Right-click on mailto: link → look up contact in CRM sidebar
+      let email = '';
+      if (info.linkUrl && info.linkUrl.startsWith('mailto:')) {
+        email = decodeURIComponent(info.linkUrl.replace('mailto:', '').split('?')[0]);
+      }
+      if (!email || !email.includes('@')) return;
+      try {
+        await chrome.sidePanel.open({ tabId: tab.id });
+        setTimeout(() => {
+          chrome.runtime.sendMessage({
+            type: 'SIDEBAR_NAVIGATE',
+            panel: 'zoho',
+            data: { lookupEmail: email },
+            openPanel: true,
+          });
+        }, 500);
+      } catch (err) {
+        console.error('[Stratus] Email lookup context menu failed:', err);
+      }
+      break;
+    }
+
+    case 'stratus-capture-screenshot': {
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+        const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+        await chrome.sidePanel.open({ tabId: tab.id });
+        setTimeout(() => {
+          chrome.runtime.sendMessage({
+            type: 'SIDEBAR_NAVIGATE',
+            panel: 'quote',
+            data: { imageBase64: base64 },
+          });
+        }, 500);
+      } catch (err) {
+        console.error('[Stratus] Screenshot capture context menu failed:', err);
       }
       break;
     }

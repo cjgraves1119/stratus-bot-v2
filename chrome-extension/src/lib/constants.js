@@ -129,6 +129,9 @@ export const MSG = {
 
   // Create CRM task manually
   CRM_CREATE_TASK: 'CRM_CREATE_TASK',
+
+  // Tab Screenshot Capture
+  CAPTURE_TAB: 'CAPTURE_TAB',
 };
 
 // Keyboard shortcut command names (match manifest.json)

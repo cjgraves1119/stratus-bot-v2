@@ -287,6 +287,21 @@ registerMessageHandlers({
   [MSG.CRM_CREATE_TASK]: async ({ subject, dueDate, dealId, contactId, priority, description }) => {
     return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description);
   },
+
+  // ── Tab Screenshot Capture ──
+  [MSG.CAPTURE_TAB]: async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab) throw new Error('No active tab found');
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      // Strip the data:image/png;base64, prefix to get raw base64
+      const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+      return { success: true, base64, dataUrl };
+    } catch (err) {
+      console.error('[Stratus] Tab capture failed:', err);
+      return { success: false, error: err.message };
+    }
+  },
 });
 
 // ─────────────────────────────────────────────

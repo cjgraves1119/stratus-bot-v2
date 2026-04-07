@@ -339,34 +339,19 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
 }
 
 // ============================================================================
-// PARSING
+// PARSING — Ported from the proven Webex/GChat bot's parseMessage()
+// Uses per-family SKU regex patterns with context-based quantity extraction
 // ============================================================================
 
 export function parseSkuInput(text) {
-  const items = [];
   const upper = text.toUpperCase();
 
-  // Detect modifiers
-  const modifiers = { hardwareOnly: false, licenseOnly: false };
-  if (/\b(HARDWARE\s+ONLY|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|HW\s+ONLY)\b/.test(upper)) {
-    modifiers.hardwareOnly = true;
-  }
-  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSES?)\b/.test(upper)) {
-    modifiers.licenseOnly = true;
-  }
-
-  // Strip command words
-  const cleaned = text
-    .replace(/\b(quote|price|cost|how much|for|please|can you|get me|i need)\b/gi, '')
-    .trim();
-
-  const rawLines = cleaned.split(/[\n\r]+/).map(l => l.trim()).filter(Boolean);
-  // Strip bullet markers
+  // ── Multi-line License SKU Input (CSV/list from dashboard export) ──
+  const rawLines = text.trim().split(/[\n\r]+/).map(l => l.trim()).filter(Boolean);
   const lines = rawLines.map(l =>
     l.replace(/^[\s•\-\*·▸▹►‣⁃◦]+\s*/, '').replace(/^\d+[.)]\s*/, '').trim()
   ).filter(Boolean);
 
-  // Multi-line license list (CSV format)
   if (lines.length >= 2) {
     const licItems = [];
     for (const line of lines) {
@@ -381,12 +366,18 @@ export function parseSkuInput(text) {
         if (singleMatch) licItems.push({ baseSku: singleMatch[1].toUpperCase(), qty: 1 });
       }
     }
-    if (licItems.length >= 2) {
-      return { items: licItems, modifiers: { ...modifiers, licenseOnly: true }, isLicenseList: true };
+    // Dedup
+    const seen = new Set();
+    const deduped = [];
+    for (const item of licItems) {
+      if (!seen.has(item.baseSku)) { seen.add(item.baseSku); deduped.push(item); }
+    }
+    if (deduped.length >= 2) {
+      return { items: deduped, modifiers: { hardwareOnly: false, licenseOnly: true }, isLicenseList: true };
     }
   }
 
-  // Multi-line bare model list
+  // ── Multi-line bare model list ──
   if (lines.length >= 3) {
     const modelPattern = /^\s*((?:MR|MV|MT|MG|MX|CW9|MS|C9|C8|Z)\d[A-Z0-9-]*)\s*$/i;
     const modelLines = lines.filter(l => modelPattern.test(l));
@@ -399,47 +390,115 @@ export function parseSkuInput(text) {
           counts.set(sku, (counts.get(sku) || 0) + 1);
         }
       }
+      const nonModelLines = lines.filter(l => !modelPattern.test(l)).join(' ').toUpperCase();
+      const isLicenseOnly = /\b(LICENSE|RENEWAL|RENEW|LIC)\b/.test(nonModelLines);
       return {
         items: [...counts.entries()].map(([baseSku, qty]) => ({ baseSku, qty })),
-        modifiers,
+        modifiers: { hardwareOnly: false, licenseOnly: isLicenseOnly },
         isModelList: true,
       };
     }
   }
 
-  // Standard parsing: extract SKUs with quantities from single or comma-separated input
-  // Patterns: "10 MR44", "MR44 x10", "MR44 x 10", "MR44 10", "2x MR44 5x MS130-24P"
-  // NOTE: SKU-first pattern requires whitespace OR explicit x/× to avoid treating model
-  // digits as quantity (e.g. "MS150-24" must NOT parse as SKU="MS150-2", qty=4)
-  const skuRegex = /(\d+)\s*[xX×]?\s*([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))|([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))(?:\s+[xX×]?\s*|\s*[xX×]\s*)(\d+)|([A-Z][A-Z0-9](?:[A-Z0-9-]*[A-Z0-9]))/gi;
-
-  const joinedText = lines.join(', ');
-  let match;
-  while ((match = skuRegex.exec(joinedText)) !== null) {
-    let baseSku, qty;
-    if (match[1] && match[2]) {
-      // qty-first: "10 MR44"
-      qty = parseInt(match[1]);
-      baseSku = match[2].toUpperCase();
-    } else if (match[3] && match[4]) {
-      // sku-first: "MR44 x10"
-      baseSku = match[3].toUpperCase();
-      qty = parseInt(match[4]);
-    } else if (match[5]) {
-      // bare SKU
-      baseSku = match[5].toUpperCase();
-      qty = 1;
+  // ── Direct License SKU Input (single line) ──
+  const licDirectMatch = upper.match(/^\s*((?:LIC-[A-Z0-9-]+?)(?:\s+[X×]?\s*(\d+))?)\s*$/);
+  if (licDirectMatch) {
+    const fullInput = licDirectMatch[0].trim();
+    const qtyAfter = fullInput.match(/\s+[X×]?\s*(\d+)\s*$/);
+    let licSku = fullInput;
+    let qty = 1;
+    if (qtyAfter) {
+      qty = parseInt(qtyAfter[1]);
+      licSku = fullInput.slice(0, fullInput.length - qtyAfter[0].length).trim();
     }
-
-    if (baseSku && qty > 0) {
-      // Filter out noise words that look like SKUs
-      if (/^(QUOTE|PRICE|COST|FOR|PLEASE|CAN|YOU|GET|NEED|HARDWARE|LICENSE|ONLY|JUST|THE|WITH)$/.test(baseSku)) continue;
-      // Must look like a product SKU (starts with known prefix or has digits)
-      if (/^(MR|MV|MT|MG|MX|MS|CW|C8|C9|Z\d|LIC-|MA-)/.test(baseSku)) {
-        items.push({ baseSku, qty });
-      }
+    const qtyBefore = upper.match(/^\s*(\d+)\s*[X×]?\s*(LIC-[A-Z0-9-]+)\s*$/);
+    if (qtyBefore) {
+      qty = parseInt(qtyBefore[1]);
+      licSku = qtyBefore[2];
+    }
+    if (licSku.startsWith('LIC-')) {
+      return {
+        items: [{ baseSku: licSku, qty }],
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        isDirectLicense: true,
+      };
     }
   }
+
+  // ── Detect modifiers ──
+  const modifiers = { hardwareOnly: false, licenseOnly: false };
+  if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper)
+      && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
+    modifiers.hardwareOnly = true;
+  }
+  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/.test(upper)) {
+    modifiers.licenseOnly = true;
+  }
+
+  // ── Per-family SKU patterns (from bot's parseMessage) ──
+  // Order matters: longer/more specific patterns first to prevent partial matches
+  const skuPatterns = [
+    /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,  // Catalyst 9000 (C9300-48UXM-M etc)
+    /C8[14]\d{2}-G2-MX/gi,                               // Catalyst 8000
+    /MA-[A-Z0-9-]+/gi,                                    // Accessories
+    /LIC-[A-Z0-9-]+/gi,                                   // License SKUs (direct input in mixed text)
+    /CW9\d{3}[A-Z0-9]*/gi,                               // CW Wi-Fi (CW9166I, CW9172H)
+    /MS150-[\dA-Z]+-[\dA-Z]+/gi,                          // MS150 (MS150-48FP-4G)
+    /MS450-\d+/gi,                                        // MS450
+    /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,               // All MS switches
+    /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,              // MR/MV/MT/MG (MR44, MV72, MT30)
+    /MX\d+[A-Z]*(?:-NA)?/gi,                             // MX series (MX67, MX68C, MX67C-HW-NA)
+    /Z\d+[A-Z]*/gi,                                       // Z-series (Z4, Z4X, Z4CX)
+  ];
+
+  const joinedUpper = lines.join(' ').toUpperCase();
+  const rawMatches = [];
+  const matched = new Set();
+
+  for (const pattern of skuPatterns) {
+    pattern.lastIndex = 0; // Reset regex state
+    let match;
+    while ((match = pattern.exec(joinedUpper)) !== null) {
+      let sku = match[0];
+      const pos = match.index;
+
+      // Strip trailing 'S' (pluralization) if the stripped version is valid but full isn't
+      if (sku.endsWith('S') && sku.length > 3) {
+        const stripped = sku.slice(0, -1);
+        const strippedValid = VALID_SKUS.has(stripped) || detectFamily(stripped) !== null;
+        const fullValid = VALID_SKUS.has(sku);
+        if (strippedValid && !fullValid) sku = stripped;
+      }
+
+      if (matched.has(sku)) continue;
+      matched.add(sku);
+
+      // ── Context-based quantity extraction (from bot) ──
+      // Look at 20 chars before and 15 chars after the match
+      const before = joinedUpper.slice(Math.max(0, pos - 20), pos);
+      const after = joinedUpper.slice(pos + match[0].length, pos + match[0].length + 15);
+      let qty = 1;
+      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
+      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
+      // Prefer afterQty for inline format (SKU1 qty1 SKU2 qty2...)
+      if (afterQty) qty = parseInt(afterQty[1]);
+      else if (beforeQty) qty = parseInt(beforeQty[1]);
+
+      rawMatches.push({ baseSku: sku, qty, position: pos });
+    }
+  }
+
+  // ── Overlap filtering: remove shorter matches contained within longer ones ──
+  const foundItems = rawMatches.filter((item, idx) => {
+    return !rawMatches.some((other, otherIdx) => {
+      if (idx === otherIdx) return false;
+      return other.baseSku.length > item.baseSku.length && other.baseSku.includes(item.baseSku);
+    });
+  });
+
+  // Sort by position in original text
+  foundItems.sort((a, b) => a.position - b.position);
+  const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
 
   return { items, modifiers };
 }
@@ -479,14 +538,31 @@ export function buildStratusUrl(items, modifiers = {}) {
     }
   }
 
-  const skus = Array.from(merged.keys());
-  const qtys = Array.from(merged.values());
-  if (skus.length === 0) return null;
+  if (merged.size === 0) return null;
 
-  const params = new URLSearchParams();
-  params.set('item', skus.join(','));
-  params.set('qty', qtys.join(','));
-  return `https://stratusinfosystems.com/order/?${params.toString()}`;
+  // Sort by product family group — hardware before licenses within each group
+  // (Ported from bot's buildStratusUrl)
+  const _skuSortKey = (sku) => {
+    const u = sku.toUpperCase();
+    const isLicense = u.startsWith('LIC-');
+    let familyOrder;
+    if (/^(MR\d|CW9|LIC-ENT|LIC-CW)/.test(u)) familyOrder = '1-AP';
+    else if (/^(MS\d|LIC-MS)/.test(u)) familyOrder = '2-SW';
+    else if (/^(C9\d|LIC-C9)/.test(u)) familyOrder = '3-CAT';
+    else if (/^(MX\d|LIC-MX|Z\d|LIC-Z)/.test(u)) familyOrder = '4-SEC';
+    else if (/^(MV\d|LIC-MV)/.test(u)) familyOrder = '5-CAM';
+    else if (/^(MT\d|LIC-MT)/.test(u)) familyOrder = '6-SENS';
+    else if (/^(MG\d|LIC-MG)/.test(u)) familyOrder = '7-CELL';
+    else if (/^(MA-SFP|STACK)/.test(u)) familyOrder = '8-ACC';
+    else familyOrder = '9-OTHER';
+    return `${familyOrder}-${isLicense ? '1' : '0'}-${u}`;
+  };
+
+  const sortedSkus = [...merged.keys()].sort((a, b) => _skuSortKey(a).localeCompare(_skuSortKey(b)));
+  const qtys = sortedSkus.map(s => merged.get(s));
+
+  // Manual URL construction — NO URLSearchParams (which encodes commas as %2C)
+  return `https://stratusinfosystems.com/order/?item=${sortedSkus.join(',')}&qty=${qtys.join(',')}`;
 }
 
 // ============================================================================
