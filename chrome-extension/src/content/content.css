@@ -1,0 +1,147 @@
+/* Stratus AI — Content Script Styles (injected into Gmail) */
+
+/* CRM Banner */
+.stratus-crm-banner {
+  animation: stratus-slide-in 0.3s ease-out;
+}
+
+@keyframes stratus-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* SKU Highlighting */
+.stratus-sku-highlight {
+  transition: background 0.15s ease;
+}
+
+.stratus-sku-highlight:hover {
+  background: #c8e6f4 !important;
+  border-color: #1a73a7 !important;
+}
+
+/* SKU Tooltip */
+.stratus-sku-tooltip {
+  animation: stratus-fade-in 0.15s ease-out;
+}
+
+@keyframes stratus-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Compose Toolbar Button */
+.stratus-compose-btn {
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.stratus-compose-btn:hover {
+  transform: scale(1.05);
+}
+
+.stratus-compose-btn:active {
+  transform: scale(0.95);
+}
+
+/* Email Hover Popup */
+.stratus-email-link {
+  cursor: pointer;
+  border-bottom: 1px dotted #1a73a7;
+  transition: background 0.15s ease;
+}
+
+.stratus-email-link:hover {
+  background: #e8f0fe;
+}
+
+.stratus-email-popup {
+  position: fixed;
+  background: white;
+  border: 1px solid #dadce0;
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 10000;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 12px;
+  color: #202124;
+  max-width: 280px;
+  animation: stratus-popup-slide 0.2s ease-out;
+}
+
+@keyframes stratus-popup-slide {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.stratus-email-popup-loading {
+  color: #80868b;
+  text-align: center;
+  padding: 8px 0;
+}
+
+.stratus-email-popup-error {
+  color: #d33b27;
+  padding: 8px 0;
+}
+
+.stratus-email-popup-info {
+  line-height: 1.4;
+}
+
+.stratus-email-popup-info > div {
+  margin-bottom: 4px;
+}
+
+.stratus-email-popup-label {
+  font-weight: 600;
+  color: #5f6368;
+  font-size: 10px;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.stratus-email-popup-value {
+  color: #202124;
+  margin-bottom: 6px;
+}
+
+.stratus-email-popup-link {
+  display: inline-block;
+  color: #1a73a7;
+  text-decoration: none;
+  font-weight: 500;
+  margin-top: 6px;
+  transition: color 0.15s ease;
+}
+
+.stratus-email-popup-link:hover {
+  color: #0d47a1;
+  text-decoration: underline;
+}
+
+/* Deal ID Highlighting */
+.stratus-deal-id-highlight {
+  transition: background 0.15s ease;
+}
+
+.stratus-deal-id-highlight:hover {
+  background: #c8e6c9 !important;
+  border-color: #4caf50 !important;
+}
+
+.stratus-deal-tooltip {
+  animation: stratus-fade-in 0.15s ease-out;
+}
