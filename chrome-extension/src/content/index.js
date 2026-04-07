@@ -135,27 +135,8 @@ function extractEmailData() {
   // Track Cisco rep emails on the thread (cisco.com domain, non-bot)
   const ciscoEmails = [];
 
-  // Collect sender from expanded email header (.gD elements) — SCOPED to thread
-  scopeEl.querySelectorAll('.gD').forEach((el) => {
-    const email = el.getAttribute('email');
-    if (!email) return;
-    const lower = email.toLowerCase();
-    if (lower.includes('@stratusinfosystems.com')) return;
-    if (BOT_EMAILS.has(lower)) return;
-
-    allEmails.add(lower);
-    const domain = email.split('@')[1];
-    if (domain) allDomains.add(domain);
-
-    const name = el.getAttribute('name') || el.textContent.trim();
-    if (!contactsByEmail.has(lower)) {
-      contactsByEmail.set(lower, { email, name, role: 'sender' });
-    }
-    if (domain === 'cisco.com' && !ciscoEmails.includes(lower)) ciscoEmails.push(lower);
-  });
-
-  // Collect To/Cc recipients — SCOPED to thread
-  scopeEl.querySelectorAll('.g2, .gD[email], span[email], [data-hovercard-id]').forEach((el) => {
+  // ── Pass 1: Scoped query within thread container ──
+  function collectFromEl(el, defaultRole = 'sender') {
     const email = el.getAttribute('email') || el.getAttribute('data-hovercard-id') || '';
     if (!email || !email.includes('@')) return;
     const lower = email.toLowerCase();
@@ -167,7 +148,7 @@ function extractEmailData() {
     if (domain) allDomains.add(domain);
 
     const name = el.getAttribute('name') || el.textContent.trim();
-    const role = determineRole(el);
+    const role = el.closest ? (determineRole(el) || defaultRole) : defaultRole;
 
     if (!contactsByEmail.has(lower)) {
       contactsByEmail.set(lower, { email, name, role });
@@ -178,6 +159,52 @@ function extractEmailData() {
       if (name && name.length > (existing.name || '').length) existing.name = name;
     }
     if (domain === 'cisco.com' && !ciscoEmails.includes(lower)) ciscoEmails.push(lower);
+  }
+
+  // Broad set of Gmail email-attribute selectors (covers sender chips, recipient chips,
+  // To/CC labels, hovercard data) — scoped to thread first
+  const EMAIL_SELECTORS = '.gD, .g2, .go, .hb, [email], [data-hovercard-id], .afv [email], .T-I-ax7 [email]';
+  scopeEl.querySelectorAll(EMAIL_SELECTORS).forEach(el => collectFromEl(el, 'sender'));
+
+  // ── Pass 2: Broader document scan as fallback ──
+  // Gmail thread participants in collapsed messages are often outside the scoped container.
+  // Expand by scanning the entire [role="main"] for any element with email attributes.
+  const mainEl = document.querySelector('[role="main"]') || document.body;
+  mainEl.querySelectorAll('[email], [data-hovercard-id]').forEach(el => {
+    const email = el.getAttribute('email') || el.getAttribute('data-hovercard-id') || '';
+    if (!email || !email.includes('@')) return;
+    const lower = email.toLowerCase();
+    // Skip if already captured
+    if (allEmails.has(lower)) return;
+    if (lower.includes('@stratusinfosystems.com')) return;
+    if (BOT_EMAILS.has(lower)) return;
+    // Only include if inside a message view or email header (not inbox row)
+    const isInboxRow = el.closest('.zA') || el.closest('.xT') || el.closest('.yX') || el.closest('.aDP');
+    if (isInboxRow) return;
+    collectFromEl(el, 'cc');
+  });
+
+  // ── Pass 3: Look for reply/forward headers in email body ──
+  // Gmail often includes "From: Name <email@domain.com>" lines in quoted replies
+  document.querySelectorAll('.a3s.aiL, .gs .a3s').forEach(bodyEl => {
+    const text = bodyEl.innerText || bodyEl.textContent || '';
+    // Match "From: Name <email>" or "To: Name <email>" patterns in quoted text
+    const headerPattern = /(?:From|To|Cc|Reply-To):.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
+    let m;
+    while ((m = headerPattern.exec(text)) !== null) {
+      const email = m[1].toLowerCase();
+      if (allEmails.has(email)) continue;
+      if (email.includes('@stratusinfosystems.com')) continue;
+      if (BOT_EMAILS.has(email)) continue;
+      const domain = email.split('@')[1] || '';
+      if (!domain) continue;
+      allEmails.add(email);
+      allDomains.add(domain);
+      if (!contactsByEmail.has(email)) {
+        contactsByEmail.set(email, { email, name: email.split('@')[0], role: 'cc' });
+      }
+      if (domain === 'cisco.com' && !ciscoEmails.includes(email)) ciscoEmails.push(email);
+    }
   });
 
   // Populate threadContacts — filter consumer domains for CRM lookup
@@ -748,42 +775,181 @@ function injectComposeButton(composeEl) {
 
   sendTaskBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    // 1. Get recipients before clicking send
+    // 1. Capture compose data BEFORE sending
     const recipients = getComposeRecipients(composeEl);
     const subject = getComposeSubject(composeEl);
 
-    // 2. Find and click Gmail's Send button
+    // 2. Click Gmail's native Send button
     const sendButton = composeEl.querySelector('[data-tooltip="Send"]')
       || composeEl.querySelector('.aoO[role="button"]')
-      || composeEl.querySelector('div[aria-label*="Send"]');
-    if (sendButton) {
-      sendButton.click();
-    }
+      || composeEl.querySelector('div[aria-label*="Send"]')
+      || composeEl.querySelector('[aria-label="Send ‪(Ctrl-Enter)‬"]');
+    if (sendButton) sendButton.click();
 
-    // 3. After send, check for open tasks for those recipients
-    if (recipients.length === 0) return;
-
-    sendTaskBtn.innerHTML = '⏳ Checking...';
-    sendTaskBtn.style.opacity = '0.7';
+    // 3. Show task confirmation popup (don't need recipients for this — check tasks for current thread)
+    await new Promise(r => setTimeout(r, 1200)); // Let send complete
 
     try {
-      await new Promise(r => setTimeout(r, 800)); // Wait for send to complete
-      const result = await sendToBackground(MSG.EMAIL_SENT, {
-        recipients,
-        subject,
-        sentAt: new Date().toISOString(),
+      const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
+        domains: recipients.map(r => r.split('@')[1]).filter(Boolean),
+        emails: recipients,
       });
-
-      if (result?.tasksFound > 0) {
-        // Navigate sidebar to tasks tab
-        sendToBackground(MSG.SIDEBAR_NAVIGATE, { panel: 'crm', data: { activeSubTab: 'tasks', highlightReschedule: true } }).catch(() => {});
+      const tasks = taskResult?.tasks || [];
+      if (tasks.length > 0) {
+        showSendTaskPopup(tasks, recipients, subject);
       }
     } catch (err) {
-      console.warn('[Stratus] Send+Task error:', err);
+      console.warn('[Stratus] Send+Task check error:', err);
     }
   });
 
   toolbar.appendChild(sendTaskBtn);
+}
+
+// ─────────────────────────────────────────────
+// Send + Task Confirmation Popup
+// ─────────────────────────────────────────────
+
+function showSendTaskPopup(tasks, recipients, subject) {
+  // Remove any existing popup
+  document.querySelector('.stratus-send-task-popup')?.remove();
+
+  const task = tasks[0]; // Focus on the most relevant task
+  const popup = document.createElement('div');
+  popup.className = 'stratus-send-task-popup';
+
+  const dueDate = task.dueDate || '';
+  const isOverdue = dueDate && new Date(dueDate) < new Date();
+  const dealInfo = task.dealName ? `<div style="font-size:11px;color:#5f6368;margin-top:2px;">Deal: ${task.dealName}</div>` : '';
+  const otherCount = tasks.length > 1 ? `<div style="font-size:11px;color:#5f6368;margin-top:4px;">+ ${tasks.length - 1} other task${tasks.length > 1 ? 's' : ''}</div>` : '';
+
+  popup.style.cssText = `
+    position: fixed; bottom: 24px; right: 24px; z-index: 99999;
+    background: white; border-radius: 12px; padding: 16px 18px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.18), 0 1px 6px rgba(0,0,0,0.1);
+    font-family: -apple-system, BlinkMacSystemFont, 'Google Sans', sans-serif;
+    max-width: 320px; min-width: 280px; border: 1px solid #e0e0e0;
+    animation: stratusSlideIn 0.25s ease;
+  `;
+
+  // Inject keyframe if needed
+  if (!document.querySelector('#stratus-popup-style')) {
+    const style = document.createElement('style');
+    style.id = 'stratus-popup-style';
+    style.textContent = `
+      @keyframes stratusSlideIn {
+        from { opacity: 0; transform: translateY(16px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  popup.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a1a;">📋 Email Sent — Update Task?</div>
+      <button class="stp-close" style="background:none;border:none;cursor:pointer;color:#5f6368;font-size:18px;padding:0 2px;line-height:1;">×</button>
+    </div>
+    <div style="background:#f8f9fa;border-radius:8px;padding:10px 12px;margin-bottom:12px;">
+      <div style="font-size:13px;font-weight:600;color:#1a1a1a;">${task.subject || 'Follow-up Task'}</div>
+      <div style="font-size:11px;color:${isOverdue ? '#d93025' : '#5f6368'};margin-top:2px;">
+        Due: ${dueDate || 'No date'}${isOverdue ? ' ⚠️ Overdue' : ''}
+      </div>
+      ${dealInfo}
+      ${otherCount}
+    </div>
+    <div style="display:flex;flex-direction:column;gap:7px;">
+      <button class="stp-complete" style="
+        padding:9px 14px;background:#1a73e8;color:white;border:none;border-radius:8px;
+        font-size:12px;font-weight:600;cursor:pointer;text-align:left;
+      ">✓ Complete + Add Follow-Up (3 days)</button>
+      <button class="stp-extend" style="
+        padding:9px 14px;background:transparent;color:#1a73e8;
+        border:1px solid #1a73e8;border-radius:8px;font-size:12px;
+        font-weight:600;cursor:pointer;text-align:left;
+      ">📅 Extend Due Date +3 Days</button>
+      <button class="stp-dismiss" style="
+        padding:7px 14px;background:transparent;color:#5f6368;
+        border:1px solid #e0e0e0;border-radius:8px;font-size:12px;
+        cursor:pointer;text-align:left;
+      ">Dismiss</button>
+    </div>
+    <div class="stp-status" style="margin-top:10px;font-size:11px;color:#5f6368;display:none;"></div>
+  `;
+
+  document.body.appendChild(popup);
+
+  // Auto-dismiss after 30 seconds
+  const autoDismiss = setTimeout(() => popup.remove(), 30000);
+
+  function setStatus(msg, isError = false) {
+    const el = popup.querySelector('.stp-status');
+    el.textContent = msg;
+    el.style.color = isError ? '#d93025' : '#137333';
+    el.style.display = 'block';
+  }
+
+  function disableButtons() {
+    popup.querySelectorAll('button:not(.stp-close)').forEach(b => {
+      b.disabled = true;
+      b.style.opacity = '0.5';
+    });
+  }
+
+  popup.querySelector('.stp-close').addEventListener('click', () => {
+    clearTimeout(autoDismiss);
+    popup.remove();
+  });
+
+  popup.querySelector('.stp-dismiss').addEventListener('click', () => {
+    clearTimeout(autoDismiss);
+    popup.remove();
+  });
+
+  popup.querySelector('.stp-complete').addEventListener('click', async () => {
+    disableButtons();
+    setStatus('Completing task...');
+    try {
+      await sendToBackground(MSG.TASK_ACTION, {
+        action: 'complete_and_followup',
+        taskId: task.id,
+        dealId: task.dealId || '',
+        contactId: task.contactId || '',
+        newSubject: `Follow up: ${task.subject}`,
+      });
+      setStatus('✓ Task completed. Follow-up created.');
+      setTimeout(() => { clearTimeout(autoDismiss); popup.remove(); }, 2500);
+    } catch (err) {
+      setStatus('Error: ' + err.message, true);
+    }
+  });
+
+  popup.querySelector('.stp-extend').addEventListener('click', async () => {
+    disableButtons();
+    setStatus('Rescheduling...');
+    try {
+      const newDate = addDays(3);
+      await sendToBackground(MSG.TASK_ACTION, {
+        action: 'reschedule',
+        taskId: task.id,
+        newDueDate: newDate,
+      });
+      setStatus(`✓ Due date moved to ${newDate}`);
+      setTimeout(() => { clearTimeout(autoDismiss); popup.remove(); }, 2500);
+    } catch (err) {
+      setStatus('Error: ' + err.message, true);
+    }
+  });
+}
+
+function addDays(days) {
+  let d = new Date();
+  let added = 0;
+  while (added < days) {
+    d.setDate(d.getDate() + 1);
+    if (d.getDay() !== 0 && d.getDay() !== 6) added++;
+  }
+  return d.toISOString().split('T')[0];
 }
 
 // ─────────────────────────────────────────────

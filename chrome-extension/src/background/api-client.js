@@ -280,6 +280,16 @@ export async function crmCreateTask(subject, dueDate, dealId, contactId, priorit
   });
 }
 
+/**
+ * Search for CRM accounts by name or domain (for Add Contact form).
+ */
+export async function crmAccountSearch(query) {
+  return apiCall('/api/crm-search', {
+    query: query || '',
+    module: 'Accounts',
+  });
+}
+
 // ─────────────────────────────────────────────
 // Tasks
 // ─────────────────────────────────────────────
@@ -407,13 +417,14 @@ export async function assignCiscoRep(dealId, repEmail, repName) {
  * Preview a follow-up task (account/contact resolution before creating).
  */
 export async function suggestTaskPreview(senderEmail, senderName, subject, accountId, threadDomains) {
+  // Backend expects camelCase field names
   return apiCall('/api/suggest-task-preview', {
-    sender_email: senderEmail || '',
-    sender_name: senderName || '',
+    senderEmail: senderEmail || '',
+    senderName: senderName || '',
     subject: subject || '',
-    has_account: accountId ? 'true' : 'false',
-    account_id: accountId || '',
-    thread_domains: Array.isArray(threadDomains) ? threadDomains.join(',') : (threadDomains || ''),
+    hasAccount: accountId ? true : false,
+    accountId: accountId || '',
+    threadDomains: Array.isArray(threadDomains) ? threadDomains : [],
   });
 }
 

@@ -62,7 +62,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   // Deal-level Velocity Hub / rep assignment state
   const [dealActions, setDealActions] = useState({}); // keyed by dealId
 
-  // Build contact options
+  // Build contact options — include ALL participants regardless of domain
+  // (user should be able to select any participant to look up)
   const threadContacts = emailContext?.threadContacts || [];
   const allEmails = emailContext?.allEmails || [];
   const contactOptions = [...threadContacts];
@@ -73,6 +74,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       existingEmails.add(email.toLowerCase());
     }
   });
+  // Filter to external (non-Stratus) but keep ALL domains including consumer
   const externalContacts = contactOptions.filter(
     c => !c.email?.toLowerCase().includes('@stratusinfosystems.com')
   );
@@ -85,9 +87,10 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     const domain = email ? email.split('@')[1] : '';
     setSelectedContact(email || '');
     setManualEmail('');
+    // Auto-lookup only for business domains — consumer domains need manual action
     if (!domain || CONSUMER_DOMAINS.has(domain)) {
       setData(null); setDeals(null); setTasks(null);
-      return;
+      return; // Dropdown still shows (user can click a different participant or use manual search)
     }
     lookupCrm(email, domain);
   }, [emailContext?.senderEmail, emailContext?.customerEmail]);
@@ -153,6 +156,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setAddFormSuccess(null);
     if (!email) return;
     const domain = email.split('@')[1] || '';
+    // Always look up when user explicitly selects — even consumer domains may have Zoho records
     lookupCrm(email, domain);
   }
 
@@ -226,9 +230,19 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setSuggestPreview(null);
     setSuggestResult(null);
     try {
+      // Use the best available customer email — never send Stratus's own email
+      const customerEmail = selectedContact
+        || data?.contact?.email
+        || emailContext?.customerEmail
+        || (emailContext?.senderEmail?.includes('@stratusinfosystems.com') ? '' : emailContext?.senderEmail)
+        || '';
+      const customerName = data?.contact?.name
+        || emailContext?.customerName
+        || emailContext?.senderName
+        || '';
       const preview = await sendToBackground(MSG.SUGGEST_TASK_PREVIEW, {
-        senderEmail: emailContext?.senderEmail || selectedContact || '',
-        senderName: emailContext?.senderName || '',
+        senderEmail: customerEmail,
+        senderName: customerName,
         subject: emailContext?.subject || '',
         accountId: data?.account?.id || '',
         threadDomains: emailContext?.allDomains || [],
