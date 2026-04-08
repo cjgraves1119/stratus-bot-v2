@@ -3038,12 +3038,18 @@ function handleQuoteUrlTool(params) {
     if (!license_only && !hardware_only) {
       // Hardware + license
       items.push({ sku: applySuffix(model), qty });
-      const licSkus = getLicenseSkus(model, term);
-      for (const lic of licSkus) items.push({ sku: lic, qty });
+      const licSkus = getLicenseSkus(model, null); // null = use default tier (SEC/ENT per family)
+      if (licSkus) {
+        const licEntry = licSkus.find(l => l.term === `${term}Y`);
+        if (licEntry) items.push({ sku: licEntry.sku, qty });
+      }
     } else if (license_only) {
       // License only (non-EOL device, customer owns hardware)
-      const licSkus = getLicenseSkus(model, term);
-      for (const lic of licSkus) items.push({ sku: lic, qty });
+      const licSkus = getLicenseSkus(model, null); // null = use default tier
+      if (licSkus) {
+        const licEntry = licSkus.find(l => l.term === `${term}Y`);
+        if (licEntry) items.push({ sku: licEntry.sku, qty });
+      }
     } else {
       // Hardware only
       items.push({ sku: applySuffix(model), qty });
