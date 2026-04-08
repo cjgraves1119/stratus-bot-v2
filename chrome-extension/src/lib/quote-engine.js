@@ -500,6 +500,36 @@ export function parseSkuInput(text) {
   foundItems.sort((a, b) => a.position - b.position);
   const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
 
+  // ── Model-agnostic family detection ──
+  // If no items found but text contains bare family names (MR, MV, MX, etc.),
+  // return empty items with suggestions for popular models
+  if (items.length === 0) {
+    const FAMILY_SUGGESTIONS = {
+      'MR': ['MR44', 'MR46', 'MR57', 'MR28', 'MR36'],
+      'MV': ['MV13', 'MV22X', 'MV32', 'MV52', 'MV72X'],
+      'MX': ['MX67', 'MX67W', 'MX68', 'MX75', 'MX85'],
+      'MT': ['MT10', 'MT12', 'MT14', 'MT15', 'MT20'],
+      'MG': ['MG41', 'MG41E', 'MG52', 'MG52E'],
+      'MS': ['MS130-24P', 'MS130-48P', 'MS150-48FP-4G', 'MS150-24P-4X'],
+      'CW': ['CW9172I', 'CW9166I', 'CW9174I', 'CW9176I', 'CW9178I'],
+    };
+    const familyMatch = upper.match(/\b(MR|MV|MX|MT|MG|MS|CW)\b/);
+    if (familyMatch) {
+      const family = familyMatch[1];
+      const suggestions = FAMILY_SUGGESTIONS[family];
+      if (suggestions) {
+        // Extract quantity if present (e.g., "10 MR" or "quote 5 MV")
+        const qtyMatch = upper.match(/(\d+)\s*[X×]?\s*(?:MR|MV|MX|MT|MG|MS|CW)\b/);
+        const qty = qtyMatch ? parseInt(qtyMatch[1]) : 1;
+        return {
+          items: [],
+          modifiers,
+          familySuggestions: { family, suggestions, qty },
+        };
+      }
+    }
+  }
+
   return { items, modifiers };
 }
 
@@ -511,6 +541,7 @@ export function buildStratusUrl(items, modifiers = {}) {
   if (!items || items.length === 0) return null;
 
   const merged = new Map();
+  const term = modifiers.term || null; // Optional: '1', '3', or '5' for single-term URLs
 
   for (const item of items) {
     const { baseSku, qty } = item;
@@ -524,9 +555,9 @@ export function buildStratusUrl(items, modifiers = {}) {
       merged.set(hwSku, (merged.get(hwSku) || 0) + qty);
     }
 
-    // Licenses
+    // Licenses — single term if specified, all terms otherwise
     if (!modifiers.hardwareOnly && !isLic) {
-      const licSkus = getLicenseSkus(baseSku);
+      const licSkus = getLicenseSkus(baseSku, term);
       for (const licSku of licSkus) {
         merged.set(licSku, (merged.get(licSku) || 0) + qty);
       }
@@ -579,6 +610,24 @@ export function generateLocalQuote(text) {
     const { items, modifiers } = parsed;
 
     if (!items || items.length === 0) {
+      // Check for model-agnostic family suggestions (e.g., "quote MR" → suggest MR44, MR46, etc.)
+      if (parsed.familySuggestions) {
+        const fs = parsed.familySuggestions;
+        return {
+          urls: [],
+          needsApi: false,
+          error: null,
+          parsed: [],
+          suggestions: [{
+            input: fs.family,
+            reason: `Which ${fs.family} model do you need?`,
+            suggest: fs.suggestions,
+            isCommonMistake: false,
+            qty: fs.qty,
+          }],
+          eolWarnings: [],
+        };
+      }
       return { url: null, needsApi: true, error: 'No valid SKUs found in input' };
     }
 
@@ -637,57 +686,55 @@ export function generateLocalQuote(text) {
     const nonEolItems = validItems.filter(item => !isEol(item.baseSku));
     const eolItems = validItems.filter(item => isEol(item.baseSku));
 
+    // Term labels for per-term URL generation (matches bot behavior)
+    const termLabels = { '1': '1-Year Co-Term', '3': '3-Year Co-Term', '5': '5-Year Co-Term' };
+    const terms = ['1', '3', '5'];
+
     if (hasEol && eolItems.length > 0) {
-      // Option 1: Renew existing licenses (license only for EOL hardware)
-      const option1Items = [
-        ...eolItems.map(item => ({ ...item })), // license-only for EOL
-        ...nonEolItems.map(item => ({ ...item })),
+      // Option 1: Renew existing licenses (per-term URLs)
+      const opt1Items = [
+        ...eolItems.map(item => ({ baseSku: item.baseSku, qty: item.qty })),
+        ...nonEolItems.map(item => ({ baseSku: item.baseSku, qty: item.qty })),
       ];
-      const option1Url = buildStratusUrl(
-        eolItems.map(item => ({ baseSku: item.baseSku, qty: item.qty })),
-        { licenseOnly: true }
-      );
-      if (option1Url) {
-        // If there are non-EOL items too, combine
-        let fullOption1 = option1Url;
-        if (nonEolItems.length > 0) {
-          const nonEolUrl = buildStratusUrl(nonEolItems, modifiers);
-          // Merge URLs: just use the license-only for EOL + full for non-EOL
-          fullOption1 = option1Url; // Simplified - just EOL licenses
-        }
-        urls.push({ url: fullOption1, label: 'Option 1: Renew Existing Licenses' });
+      for (const term of terms) {
+        const url = buildStratusUrl(opt1Items, { ...modifiers, licenseOnly: true, term });
+        if (url) urls.push({ url, label: `Option 1: Renew Existing (${termLabels[term]})` });
       }
 
       if (hasDualUplink) {
-        // Option 2: Hardware Refresh, 1G Uplink
+        // Option 2: Hardware Refresh, 1G Uplink (per-term URLs)
         const opt2Items = [];
         for (const item of eolItems) {
           const replacement = checkEol(item.baseSku);
           if (Array.isArray(replacement)) {
-            opt2Items.push({ baseSku: replacement[0], qty: item.qty }); // 4G variant
+            opt2Items.push({ baseSku: replacement[0], qty: item.qty });
           } else if (replacement) {
             opt2Items.push({ baseSku: replacement, qty: item.qty });
           }
         }
         opt2Items.push(...nonEolItems);
-        const opt2Url = buildStratusUrl(opt2Items, modifiers);
-        if (opt2Url) urls.push({ url: opt2Url, label: 'Option 2: Hardware Refresh, 1G Uplink' });
+        for (const term of terms) {
+          const url = buildStratusUrl(opt2Items, { ...modifiers, term });
+          if (url) urls.push({ url, label: `Option 2: 1G Refresh (${termLabels[term]})` });
+        }
 
-        // Option 3: Hardware Refresh, 10G Uplink
+        // Option 3: Hardware Refresh, 10G Uplink (per-term URLs)
         const opt3Items = [];
         for (const item of eolItems) {
           const replacement = checkEol(item.baseSku);
           if (Array.isArray(replacement)) {
-            opt3Items.push({ baseSku: replacement[1], qty: item.qty }); // 4X variant
+            opt3Items.push({ baseSku: replacement[1], qty: item.qty });
           } else if (replacement) {
             opt3Items.push({ baseSku: replacement, qty: item.qty });
           }
         }
         opt3Items.push(...nonEolItems);
-        const opt3Url = buildStratusUrl(opt3Items, modifiers);
-        if (opt3Url) urls.push({ url: opt3Url, label: 'Option 3: Hardware Refresh, 10G Uplink' });
+        for (const term of terms) {
+          const url = buildStratusUrl(opt3Items, { ...modifiers, term });
+          if (url) urls.push({ url, label: `Option 3: 10G Refresh (${termLabels[term]})` });
+        }
       } else {
-        // Option 2: Hardware Refresh (single replacement, no dual uplink)
+        // Option 2: Hardware Refresh (per-term URLs)
         const opt2Items = [];
         for (const item of eolItems) {
           const replacement = checkEol(item.baseSku);
@@ -697,13 +744,23 @@ export function generateLocalQuote(text) {
           }
         }
         opt2Items.push(...nonEolItems);
-        const opt2Url = buildStratusUrl(opt2Items, modifiers);
-        if (opt2Url) urls.push({ url: opt2Url, label: 'Option 2: Hardware Refresh' });
+        for (const term of terms) {
+          const url = buildStratusUrl(opt2Items, { ...modifiers, term });
+          if (url) urls.push({ url, label: `Option 2: Hardware Refresh (${termLabels[term]})` });
+        }
       }
     } else {
-      // No EOL - just generate the standard URL
-      const url = buildStratusUrl(validItems, modifiers);
-      if (url) urls.push({ url, label: 'Quote' });
+      // No EOL — generate 3 separate per-term URLs (matches bot behavior)
+      if (modifiers.hardwareOnly) {
+        // Hardware only = single URL, no license terms
+        const url = buildStratusUrl(validItems, modifiers);
+        if (url) urls.push({ url, label: 'Hardware Only' });
+      } else {
+        for (const term of terms) {
+          const url = buildStratusUrl(validItems, { ...modifiers, term });
+          if (url) urls.push({ url, label: termLabels[term] });
+        }
+      }
     }
 
     // Format EOL warnings as strings

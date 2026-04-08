@@ -57,14 +57,16 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         setImageAnalysis({ analysis: res.analysis, hasUrls: true });
       } else if (res && res.analysis) {
         // Got analysis text, try to extract SKUs from it
-        const skuRegex = /\b((?:MR|MV|MT|MG|MX|MS|CW|C9|C8|Z|LIC-)[A-Z0-9-]+)\b/gi;
+        // Filter out license SKUs (LIC-*) — image parsing should only extract hardware models
+        const skuRegex = /\b((?:MR|MV|MT|MG|MX|MS|CW|C9|C8|Z)[A-Z0-9-]+)\b/gi;
         const rawMatches = res.analysis.match(skuRegex) || [];
-        const matches = [...new Set(rawMatches.map(s => s.toUpperCase()))];
+        const matches = [...new Set(rawMatches.map(s => s.toUpperCase()))]
+          .filter(s => !s.startsWith('LIC-')); // Exclude license keys from hardware detection
         if (matches.length > 0) {
           setSkuText(matches.join('\n'));
-          setImageAnalysis({ skus: matches, message: `Detected ${matches.length} SKU(s) from image` });
+          setImageAnalysis({ skus: matches, message: `Detected ${matches.length} hardware SKU(s) from image` });
         } else {
-          setImageAnalysis({ skus: [], message: 'No SKUs detected in this image.', analysis: res.analysis });
+          setImageAnalysis({ skus: [], message: 'No hardware SKUs detected in this image.', analysis: res.analysis });
         }
       } else {
         setImageAnalysis({ skus: [], message: 'No SKUs detected in this image.' });
@@ -141,14 +143,70 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     const escapedInput = suggestion.input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // Replace the invalid SKU with the suggested correction
     const regex = new RegExp(escapedInput + '(?![A-Z0-9-])', 'gi');
-    const newText = skuText.replace(regex, replacement);
+    let newText = skuText.replace(regex, replacement);
     if (newText === skuText) {
       // Fallback: replace entire text
-      setSkuText(replacement);
-    } else {
-      setSkuText(newText);
+      newText = replacement;
     }
+    setSkuText(newText);
     setResult(null);
+    // Auto-generate quote after applying suggestion
+    setTimeout(() => {
+      handleGenerateWithText(newText);
+    }, 50);
+  }
+
+  async function handleGenerateWithText(text) {
+    if (!text || !text.trim()) return;
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setShowZohoPrompt(false);
+    try {
+      let localResult = null;
+      try {
+        localResult = generateLocalQuote(text.trim());
+      } catch (localErr) {
+        console.error('[Stratus] Local quote engine error:', localErr);
+        localResult = { needsApi: true };
+      }
+      if (localResult && !localResult.needsApi) {
+        const rawUrls = localResult.urls;
+        const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
+        const eolArr = Array.isArray(localResult.eolWarnings) ? localResult.eolWarnings : [];
+        const parsedArr = Array.isArray(localResult.parsed) ? localResult.parsed : [];
+        const suggestArr = Array.isArray(localResult.suggestions) ? localResult.suggestions : null;
+        setResult({
+          urls: urlsArr,
+          eolWarnings: eolArr,
+          suggestions: suggestArr,
+          parsed: parsedArr,
+          modifiers: localResult.modifiers || {},
+          source: 'local',
+        });
+      } else {
+        const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: text.trim() });
+        if (res && (res.quoteUrls || res.urls)) {
+          const rawUrls = res.quoteUrls || res.urls;
+          const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
+          const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
+          const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
+          setResult({
+            urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
+            eolWarnings: eolArr,
+            suggestions: null,
+            parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
+            source: 'api',
+          });
+        } else if (res && res.error) {
+          setError(res.error);
+        }
+      }
+    } catch (err) {
+      setError(err.message || 'Quote generation failed');
+    } finally {
+      setLoading(false);
+    }
   }
 
   function handleStackSuggestion(suggestion) {

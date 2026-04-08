@@ -161,16 +161,34 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       const result = await sendToBackground(MSG.CRM_LOOKUP, { email, domain });
       setData(result);
       if (result?.account?.id) {
-        const [dealResult, taskResult] = await Promise.all([
+        // Build task query params — guard against empty domains/emails
+        const taskDomains = emailContext?.allDomains || (domain ? [domain] : []);
+        const taskEmails = emailContext?.allEmails || (email ? [email] : []);
+        const hasTaskParams = taskDomains.length > 0 || taskEmails.length > 0;
+
+        const promises = [
           sendToBackground(MSG.CRM_DEALS, {
             accountId: result.account.id,
             contactEmail: email,
           }).catch(() => null),
-          sendToBackground(MSG.FETCH_TASKS, {
-            domains: emailContext?.allDomains || (domain ? [domain] : []),
-            emails: emailContext?.allEmails || (email ? [email] : []),
-          }).catch(() => null),
-        ]);
+        ];
+
+        // Only fetch tasks if we have domains or emails to query
+        if (hasTaskParams) {
+          promises.push(
+            sendToBackground(MSG.FETCH_TASKS, {
+              domains: taskDomains,
+              emails: taskEmails,
+            }).catch((err) => {
+              console.warn('[Stratus] Task fetch failed:', err?.message || err);
+              return { tasks: [], error: err?.message };
+            })
+          );
+        } else {
+          promises.push(Promise.resolve({ tasks: [], message: 'No email context for task lookup' }));
+        }
+
+        const [dealResult, taskResult] = await Promise.all(promises);
         setDeals(dealResult);
         setTasks(taskResult);
       }

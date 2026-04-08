@@ -2891,7 +2891,16 @@ If ANY EOL products were found, ALWAYS include a refresh section without being a
 
 3-Year Co-Term: {URL with replacement hardware SKUs (-HW suffix) + ALL license SKUs including non-EOL ones}
 
-CRITICAL DEDUP RULE: When multiple EOL models share the same replacement SKU, COMBINE their quantities into a single URL entry. Example: MS120-8FP ×26 + MS220-8P ×6 both map to MS130-8P → use MS130-8P-HW ×32 (NOT two separate MS130-8P-HW entries). Always sum quantities before building the URL.
+CRITICAL AGGREGATION RULES FOR REFRESH URLs — follow ALL three rules:
+
+RULE 1 — DEDUP REPLACEMENTS: When multiple EOL models map to the SAME replacement SKU, SUM their quantities into ONE URL entry.
+Example: MX60W ×1 + MX64W ×1 both map to MX67W → MX67W-HW ×2, LIC-MX67W-SEC-3YR ×2 (NOT two separate entries).
+Example: MS120-8FP ×26 + MS220-8P ×6 both map to MS130-8P → MS130-8P-HW ×32.
+
+RULE 2 — EXISTING DEVICE LICENSE CARRY-FORWARD: When an EOL model's replacement matches a device the customer ALREADY HAS (non-EOL), the refresh URL must include licenses for BOTH the replacement AND the existing device, but hardware ONLY for the replacement (the customer already owns the existing hardware).
+Example: Z1 ×1 (EOL → Z4) + existing Z4 ×1 (non-EOL) → Z4-HW ×1 (only the Z1 replacement), LIC-Z4-SEC-3Y ×2 (one for the Z1→Z4 replacement + one for the existing Z4).
+
+RULE 3 — BUILD A RUNNING TALLY: Before constructing ANY refresh URL, build a tally of every SKU and its total quantity across all devices (EOL replacements + non-EOL carry-forwards). Hardware for non-EOL devices is EXCLUDED (they already own it). Licenses for non-EOL devices ARE included. Then construct ONE URL from the final tally. Never build the URL device-by-device.
 
 The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Only show 3-Year for dashboard screenshot responses unless user specifies otherwise.
 
@@ -7210,52 +7219,28 @@ CRITICAL URL RULES:
 
             let quoteUrls = [];
 
-            if (hasEol) {
-              // EOL items: fall back to buildQuoteResponse for proper Option 1/2/3 handling
-              const quoteResult = buildQuoteResponse(parsed);
-              const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
-              const termLabels = ['1-Year', '3-Year', '5-Year'];
-              let currentOption = '';
-              let optionIdx = 0;
-              for (const line of responseText.split('\n')) {
-                const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
-                if (optMatch) { currentOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optionIdx = 0; }
-                const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
-                if (urlMatch) {
-                  const label = currentOption
-                    ? `${currentOption} (${termLabels[optionIdx] || ''})`
-                    : termLabels[quoteUrls.length] || 'Quote ' + (quoteUrls.length + 1);
-                  quoteUrls.push({ url: urlMatch[0], label: label.trim() });
-                  optionIdx++;
-                }
+            // Route ALL quotes through buildQuoteResponse for consistent 3-URL per-term output
+            // This matches the Webex bot and GChat bot main message handler behavior
+            const quoteResult = buildQuoteResponse(parsed);
+            const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
+            const termLabels = ['1-Year', '3-Year', '5-Year'];
+            let currentOption = '';
+            let optionIdx = 0;
+            for (const line of responseText.split('\n')) {
+              const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
+              if (optMatch) { currentOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optionIdx = 0; }
+              const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
+              if (urlMatch) {
+                const label = currentOption
+                  ? `${currentOption} (${termLabels[optionIdx] || ''})`
+                  : termLabels[quoteUrls.length] || 'Quote ' + (quoteUrls.length + 1);
+                quoteUrls.push({ url: urlMatch[0], label: label.trim() });
+                optionIdx++;
               }
-              if (quoteUrls.length === 0) {
-                const urls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
-                urls.forEach((u, i) => quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) }));
-              }
-            } else {
-              // Non-EOL: build ONE combined URL with all hardware + all license terms
-              const urlItems = [];
-              for (const item of parsed.items) {
-                const base = item.baseSku || item.sku;
-                const qty = item.qty || 1;
-                // Hardware (unless licenseOnly)
-                if (!modifiers.licenseOnly && !modifiers.hardwareOnly) {
-                  urlItems.push({ sku: applySuffix(base), qty });
-                }
-                // All license terms (1Y/3Y/5Y) in one URL (unless hardwareOnly)
-                if (!modifiers.hardwareOnly) {
-                  const licSkus = getLicenseSkus(base);
-                  if (licSkus && licSkus.length > 0) {
-                    for (const { sku: licSku } of licSkus) {
-                      urlItems.push({ sku: licSku, qty });
-                    }
-                  }
-                }
-              }
-              if (urlItems.length > 0) {
-                quoteUrls = [{ url: buildStratusUrl(urlItems), label: 'Quote' }];
-              }
+            }
+            if (quoteUrls.length === 0) {
+              const urls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+              urls.forEach((u, i) => quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) }));
             }
 
             apiResult = {

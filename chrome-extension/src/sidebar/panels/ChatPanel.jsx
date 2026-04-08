@@ -8,6 +8,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { sendToBackground, onMessage } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
+import { generateLocalQuote } from '../../lib/quote-engine';
 
 // ─────────────────────────────────────────────
 // Markdown renderer
@@ -191,6 +192,44 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     const thisAbort = abortRef.current;
 
     try {
+      // ── Deterministic quoting intercept ──
+      // Detect if the user is asking for a URL quote (not a Zoho CRM quote)
+      // Route through local deterministic engine for instant results
+      const isQuoteIntent = /^\s*(quote|price|cost|order|get me|give me|generate)\s/i.test(messageText) &&
+        /\b(MR|MS|MX|MV|MT|MG|CW|C9|C8|Z\d|LIC-)\w*/i.test(messageText) &&
+        !/\b(zoho|crm|deal|account)\b/i.test(messageText);
+      const isDirectSku = /^\s*\d+\s*(x\s*)?(MR|MS|MX|MV|MT|MG|CW|C9|Z\d)/i.test(messageText);
+
+      if (isQuoteIntent || isDirectSku) {
+        try {
+          const localResult = generateLocalQuote(messageText.trim());
+          if (localResult && !localResult.needsApi && localResult.urls && localResult.urls.length > 0) {
+            // Build a formatted reply from the deterministic result
+            let replyText = '**⚡ Deterministic Quote:**\n\n';
+            if (localResult.eolWarnings && localResult.eolWarnings.length > 0) {
+              replyText += '**EOL Warnings:**\n';
+              for (const w of localResult.eolWarnings) replyText += `• ${w}\n`;
+              replyText += '\n';
+            }
+            for (const urlObj of localResult.urls) {
+              replyText += `**${urlObj.label}:**\n[${urlObj.url.length > 80 ? urlObj.url.substring(0, 80) + '...' : urlObj.url}](${urlObj.url})\n\n`;
+            }
+            const assistantMsg = {
+              id: Date.now() + 1,
+              role: 'assistant',
+              content: replyText.trim(),
+              usedTools: false,
+              timestamp: new Date().toISOString(),
+            };
+            onMessagesChange([...updatedMessages, assistantMsg]);
+            setLoading(false);
+            return;
+          }
+        } catch (quoteErr) {
+          console.warn('[Stratus] Local quote intercept failed, falling back to API:', quoteErr);
+        }
+      }
+
       const historyForApi = (messages || []).slice(-10).map(m => ({
         role: m.role,
         content: m.content,
