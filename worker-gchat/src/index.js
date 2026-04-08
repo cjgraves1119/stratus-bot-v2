@@ -5870,7 +5870,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 // ─── Quote URL Tool (deterministic URL builder for Claude vision path) ───────
 const QUOTE_URL_TOOL = {
   name: 'build_quote_url',
-  description: 'Build a Stratus order URL from a structured device list. ALWAYS use this tool for URL generation — never manually construct URLs. Pass devices in the order they should appear. The tool handles SKU suffixes, license mapping, dedup, and URL formatting.',
+  description: 'Build a Stratus order URL from a structured device list. ALWAYS use this tool for URL generation — never manually construct URLs. Pass devices in the order they should appear. The tool handles SKU suffixes, license mapping, dedup, and URL formatting. IMPORTANT for refresh quotes with Rule 2 carry-forward: when an EOL replacement matches a device the customer already owns, pass ONE entry with qty = total license count AND hardware_qty = replacement-only count (e.g., Z1→Z4 + existing Z4 = {model:"Z4", qty:2, hardware_qty:1}).',
   input_schema: {
     type: 'object',
     properties: {
@@ -5881,7 +5881,8 @@ const QUOTE_URL_TOOL = {
           type: 'object',
           properties: {
             model: { type: 'string', description: 'Base model without suffix (e.g., MX67, MS130-8P, Z4, MR44). For MR enterprise licenses without specific model, use "MR-ENT".' },
-            qty: { type: 'integer', description: 'Quantity of this device' },
+            qty: { type: 'integer', description: 'Quantity of this device (used for BOTH hardware and licenses unless hardware_qty overrides hardware count).' },
+            hardware_qty: { type: 'integer', description: 'Override hardware quantity when it differs from license qty. Use for Rule 2 carry-forward: EOL replacement + existing device → hardware_qty = replacement count, qty = total licenses. Example: Z1×1 (EOL→Z4) + existing Z4×1 → {model:"Z4", qty:2, hardware_qty:1}. Omit to use qty for both.' },
             license_only: { type: 'boolean', description: 'True if customer already owns hardware (non-EOL). Only license, no hardware SKU.' }
           },
           required: ['model', 'qty']
@@ -5903,6 +5904,10 @@ function handleQuoteUrlTool(params) {
     const model = String(device.model || '').trim();
     const qty = parseInt(device.qty, 10) || 1;
     const license_only = !!device.license_only;
+    // hardware_qty overrides qty for hardware SKUs only (Rule 2 carry-forward).
+    // When an EOL replacement matches an existing device, hardware_qty = replacement count,
+    // qty = total license count. Example: Z1→Z4 + existing Z4 → hardware_qty:1, qty:2.
+    const hwQty = device.hardware_qty != null ? parseInt(device.hardware_qty, 10) : qty;
 
     if (!model) continue;
 
@@ -5914,14 +5919,16 @@ function handleQuoteUrlTool(params) {
     }
 
     if (!license_only && !hardware_only) {
-      items.push({ sku: applySuffix(model), qty });
+      // Hardware + license (hwQty may differ from qty for carry-forward scenarios)
+      if (hwQty > 0) items.push({ sku: applySuffix(model), qty: hwQty });
       const licSkus = getLicenseSkus(model, term);
       for (const lic of licSkus) items.push({ sku: lic, qty });
     } else if (license_only) {
       const licSkus = getLicenseSkus(model, term);
       for (const lic of licSkus) items.push({ sku: lic, qty });
     } else {
-      items.push({ sku: applySuffix(model), qty });
+      // Hardware only
+      items.push({ sku: applySuffix(model), qty: hwQty });
     }
   }
 
@@ -6061,9 +6068,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
     // Non-CRM (quoting) path: accumulate text across tool-use iterations so dashboard
     // screenshot responses don't lose analysis text when Claude emits text + tool_use blocks.
-    // Also inject tool-generated URLs directly to guarantee they appear in output.
+    // Tool URLs are tracked separately and only injected as fallback if Claude omits them.
     let accumulatedText = '';
-    const injectedUrls = []; // Track URLs we inject so we can deduplicate from Claude's final text
+    const toolUrls = []; // URLs from build_quote_url results (deferred injection, not eager)
 
     // CRM speed optimization: track auto-expanded Quote data to avoid redundant API calls.
     // When zoho_search_records on Quotes auto-expands the first result (including Quoted_Items),
@@ -7368,15 +7375,44 @@ CRITICAL URL RULES:
               break;
             }
 
+            // ── SKU Validation with suggestions ──
+            const suggestions = [];
+            const validItems = [];
+            const parsedWithValidation = [];
+            for (const item of parsed.items) {
+              const base = item.baseSku || item.sku;
+              const validation = validateSku(base);
+              parsedWithValidation.push({ sku: base, qty: item.qty, validation });
+              if (!validation.valid) {
+                suggestions.push({
+                  input: base,
+                  reason: validation.reason || `${base} is not a recognized SKU`,
+                  suggest: validation.suggest || [],
+                  isCommonMistake: !!validation.isCommonMistake,
+                });
+              } else {
+                validItems.push(item);
+              }
+            }
+
+            // If ALL items are invalid, return suggestions only (no URLs)
+            if (validItems.length === 0 && suggestions.length > 0) {
+              apiResult = {
+                quoteUrls: [],
+                eolWarnings: [],
+                parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                suggestions,
+              };
+              break;
+            }
+
             const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
 
-            // Check for EOL warnings and determine if any item is EOL
+            // Check for EOL warnings
             const eolWarnings = [];
-            let hasEol = false;
             for (const item of parsed.items) {
               const base = item.baseSku || item.sku;
               if (isEol(base)) {
-                hasEol = true;
                 const replacement = checkEol(base);
                 eolWarnings.push(base + ' is End-of-Life' + (replacement ? ' → replaced by ' + (Array.isArray(replacement) ? replacement.join(' / ') : replacement) : ''));
               }
@@ -7384,9 +7420,12 @@ CRITICAL URL RULES:
 
             let quoteUrls = [];
 
-            // Route ALL quotes through buildQuoteResponse for consistent 3-URL per-term output
-            // This matches the Webex bot and GChat bot main message handler behavior
-            const quoteResult = buildQuoteResponse(parsed);
+            // Route through buildQuoteResponse for consistent output
+            // Use validItems only if some were invalid, otherwise use all parsed items
+            const itemsForQuote = suggestions.length > 0
+              ? { ...parsed, items: validItems }
+              : parsed;
+            const quoteResult = buildQuoteResponse(itemsForQuote);
             const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
             const termLabels = ['1-Year', '3-Year', '5-Year'];
             let currentOption = '';
@@ -7411,7 +7450,8 @@ CRITICAL URL RULES:
             apiResult = {
               quoteUrls,
               eolWarnings,
-              parsedItems: parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })),
+              parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+              ...(suggestions.length > 0 ? { suggestions } : {}),
             };
             break;
           }
