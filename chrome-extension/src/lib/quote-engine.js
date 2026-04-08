@@ -293,49 +293,140 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
   const upper = baseSku.toUpperCase();
   const terms = requestedTerm ? [String(requestedTerm)] : ['1', '3', '5'];
 
-  let termSuffix = 'Y'; // Newer products
-
-  // Older product families use YR
-  if (
-    /^MR(12|16|18|24|26|30|32|33|34|42|52|53|56|62|66|72|74|84)/.test(upper) ||
-    /^MX(60|64|65|80|84|100|400|600|67W)/.test(upper) ||
-    /^MV(12|21|22|32|52|72)/.test(upper) ||
-    /^MG(21)/.test(upper) ||
-    /^Z[0-3]/.test(upper) ||
-    /^MS(12|21|22|25|31|32|35)/.test(upper)
-  ) {
-    termSuffix = 'YR';
+  // ── MR Access Points & CW Wi-Fi — LIC-ENT ──
+  if (/^MR\d/.test(upper) || /^CW9\d/.test(upper)) {
+    // CW9800 Wireless Controller has no standard license
+    if (/^CW9800/.test(upper)) return [];
+    return terms.map(t => `LIC-ENT-${t}YR`);
   }
 
-  const skus = [];
-
-  // Catalyst C8/C9
-  if (/^C[89]\d+/.test(upper)) {
-    for (const term of terms) skus.push(`LIC-C9-${term}Y`);
-    return skus;
+  // ── MX Cellular (-NA suffix on base) ──
+  const mxNaMatch = upper.match(/^MX(\d+C[W]?)-NA$/);
+  if (mxNaMatch) {
+    const model = mxNaMatch[1];
+    const numMatch = model.match(/^(\d+)/);
+    const modelNum = numMatch ? parseInt(numMatch[1]) : 0;
+    const suffix = modelNum >= 75 ? 'Y' : 'YR';
+    return terms.map(t => `LIC-MX${model}-SEC-${t}${suffix}`);
   }
 
-  // MS130 specific licenses
-  if (/^MS130/.test(upper)) {
-    for (const term of terms) skus.push(`LIC-MS130-${term}Y`);
-    return skus;
+  // ── MX Security Appliances — LIC-MX{model}-SEC ──
+  const mxMatch = upper.match(/^MX(\d+(?:CW?|W)?)/);
+  if (mxMatch) {
+    const model = mxMatch[1];
+    const numMatch = model.match(/^(\d+)/);
+    const modelNum = numMatch ? parseInt(numMatch[1]) : 0;
+    const newerModels = [75, 85, 95, 105];
+    const suffix = newerModels.includes(modelNum) ? 'Y' : 'YR';
+    return terms.map(t => `LIC-MX${model}-SEC-${t}${suffix}`);
   }
 
-  // MS150 specific licenses
-  if (/^MS150/.test(upper)) {
-    for (const term of terms) skus.push(`LIC-MS150-${term}Y`);
-    return skus;
+  // ── Z-series Teleworker Gateways ──
+  const zMatch = upper.match(/^Z(\d+)(C)?(X)?$/);
+  if (zMatch) {
+    const zNum = zMatch[1];
+    const hasC = !!zMatch[2];
+    const licModel = `Z${zNum}${hasC ? 'C' : ''}`;
+    if (zNum === '1' || zNum === '3') {
+      return terms.map(t => `LIC-${licModel}-ENT-${t}YR`);
+    }
+    return terms.map(t => `LIC-${licModel}-SEC-${t}Y`);
   }
 
-  // MS450 specific licenses
-  if (/^MS450/.test(upper)) {
-    for (const term of terms) skus.push(`LIC-MS450-${term}Y`);
-    return skus;
+  // ── MG Cellular Gateways — LIC-MG{model}-ENT ──
+  const mgMatch = upper.match(/^MG(\d+)/);
+  if (mgMatch) {
+    const model = mgMatch[1];
+    return terms.map(t => `LIC-MG${model}-ENT-${t}Y`);
   }
 
-  // All others use LIC-ENT-
-  for (const term of terms) skus.push(`LIC-ENT-${term}${termSuffix}`);
-  return skus;
+  // ── MV Cameras — LIC-MV-{term}YR ──
+  if (/^MV\d/.test(upper)) {
+    return terms.map(t => `LIC-MV-${t}YR`);
+  }
+
+  // ── MT Sensors — per-model license ──
+  const mtMatch = upper.match(/^MT(\d+)/);
+  if (mtMatch) {
+    const model = mtMatch[1];
+    return terms.map(t => `LIC-MT${model}-${t}Y`);
+  }
+
+  // ── MS130R (compact ruggedized) — LIC-MS130-CMPT ──
+  if (/^MS130R-/.test(upper)) {
+    return terms.map(t => `LIC-MS130-CMPT-${t}Y`);
+  }
+
+  // ── MS130-8P, MS130-12P (small form factor) — LIC-MS130-CMPT ──
+  if (/^MS130-(8|12)/.test(upper)) {
+    return terms.map(t => `LIC-MS130-CMPT-${t}Y`);
+  }
+
+  // ── MS130-24/48 — LIC-MS130-{portCount} ──
+  const ms130Match = upper.match(/^MS130-(24|48)/);
+  if (ms130Match) {
+    return terms.map(t => `LIC-MS130-${ms130Match[1]}-${t}Y`);
+  }
+
+  // ── MS150 — LIC-MS150-{portCount} ──
+  const ms150Match = upper.match(/^MS150-(24|48)/);
+  if (ms150Match) {
+    return terms.map(t => `LIC-MS150-${ms150Match[1]}-${t}Y`);
+  }
+
+  // ── MS125 — LIC-MS125-{variant} ──
+  const ms125Match = upper.match(/^MS125-(.+)/);
+  if (ms125Match) {
+    return terms.map(t => `LIC-MS125-${ms125Match[1]}-${t}Y`);
+  }
+
+  // ── MS390 — LIC-MS390-{portCount}E ──
+  const ms390Match = upper.match(/^MS390-(\d+)/);
+  if (ms390Match) {
+    return terms.map(t => `LIC-MS390-${ms390Match[1]}E-${t}Y`);
+  }
+
+  // ── MS450 — LIC-MS450-{portCount} ──
+  const ms450Match = upper.match(/^MS450-(\d+)/);
+  if (ms450Match) {
+    return terms.map(t => `LIC-MS450-${ms450Match[1]}-${t}YR`);
+  }
+
+  // ── Legacy MS (MS210, MS220, MS225, MS250, MS350, MS410, MS425) — LIC-{model}-{port}-{term}YR ──
+  const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
+  if (legacyMsMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
+    const model = legacyMsMatch[1];
+    let port = legacyMsMatch[2];
+    if (model === 'MS350' && port === '48X') port = '48';
+    return terms.map(t => `LIC-${model}-${port}-${t}YR`);
+  }
+
+  // ── Catalyst M-series (C9200L, C9300, C9300X, C9300L, C9350) ──
+  const catMatch = upper.match(/^(C9\d{3}[LX]?)-(\d+)/);
+  if (catMatch) {
+    let family = catMatch[1];
+    let portCount = catMatch[2];
+    // C9300X and C9300L use C9300 licenses
+    if (family === 'C9300X' || family === 'C9300L') family = 'C9300';
+    // C9300X-12Y uses 24-port license
+    if (catMatch[1] === 'C9300X' && portCount === '12') portCount = '24';
+    const tier = 'E';
+    if (family === 'C9350') {
+      // C9350 has only 3Y and 5Y
+      const c9350terms = terms.filter(t => t !== '1');
+      return c9350terms.map(t => `LIC-${family}-${portCount}${tier}-${t}Y`);
+    }
+    return terms.map(t => `LIC-${family}-${portCount}${tier}-${t}Y`);
+  }
+
+  // ── C8111 / C8455 Secure Routers ──
+  const c8Match = upper.match(/^C(8111|8455)/);
+  if (c8Match) {
+    return terms.map(t => `LIC-C${c8Match[1]}-ENT-${t}Y`);
+  }
+
+  // No license mapping found
+  return [];
 }
 
 // ============================================================================
@@ -571,29 +662,13 @@ export function buildStratusUrl(items, modifiers = {}) {
 
   if (merged.size === 0) return null;
 
-  // Sort by product family group — hardware before licenses within each group
-  // (Ported from bot's buildStratusUrl)
-  const _skuSortKey = (sku) => {
-    const u = sku.toUpperCase();
-    const isLicense = u.startsWith('LIC-');
-    let familyOrder;
-    if (/^(MR\d|CW9|LIC-ENT|LIC-CW)/.test(u)) familyOrder = '1-AP';
-    else if (/^(MS\d|LIC-MS)/.test(u)) familyOrder = '2-SW';
-    else if (/^(C9\d|LIC-C9)/.test(u)) familyOrder = '3-CAT';
-    else if (/^(MX\d|LIC-MX|Z\d|LIC-Z)/.test(u)) familyOrder = '4-SEC';
-    else if (/^(MV\d|LIC-MV)/.test(u)) familyOrder = '5-CAM';
-    else if (/^(MT\d|LIC-MT)/.test(u)) familyOrder = '6-SENS';
-    else if (/^(MG\d|LIC-MG)/.test(u)) familyOrder = '7-CELL';
-    else if (/^(MA-SFP|STACK)/.test(u)) familyOrder = '8-ACC';
-    else familyOrder = '9-OTHER';
-    return `${familyOrder}-${isLicense ? '1' : '0'}-${u}`;
-  };
-
-  const sortedSkus = [...merged.keys()].sort((a, b) => _skuSortKey(a).localeCompare(_skuSortKey(b)));
-  const qtys = sortedSkus.map(s => merged.get(s));
+  // Preserve insertion order (= request order). Hardware is pushed before its
+  // license in every call site, so each device's HW+LIC stay grouped naturally.
+  const orderedSkus = [...merged.keys()];
+  const qtys = orderedSkus.map(s => merged.get(s));
 
   // Manual URL construction — NO URLSearchParams (which encodes commas as %2C)
-  return `https://stratusinfosystems.com/order/?item=${sortedSkus.join(',')}&qty=${qtys.join(',')}`;
+  return `https://stratusinfosystems.com/order/?item=${orderedSkus.join(',')}&qty=${qtys.join(',')}`;
 }
 
 // ============================================================================

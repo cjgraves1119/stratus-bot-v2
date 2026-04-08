@@ -8,7 +8,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { sendToBackground, onMessage } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
-import { generateLocalQuote } from '../../lib/quote-engine';
+// Quote generation routed through worker API (same engine as Webex/GChat bots)
 
 // ─────────────────────────────────────────────
 // Markdown renderer
@@ -198,7 +198,7 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     try {
       // ── Deterministic quoting intercept ──
       // Detect if the user is asking for a URL quote (not a Zoho CRM quote)
-      // Route through local deterministic engine for instant results
+      // Route through worker API — same parseMessage + buildQuoteResponse as Webex/GChat bots
       const isQuoteIntent = /^\s*(quote|price|cost|order|get me|give me|generate)\s/i.test(messageText) &&
         /\b(MR|MS|MX|MV|MT|MG|CW|C9|C8|Z\d|LIC-)\w*/i.test(messageText) &&
         !/\b(zoho|crm|deal|account)\b/i.test(messageText);
@@ -206,31 +206,36 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
 
       if (isQuoteIntent || isDirectSku) {
         try {
-          const localResult = generateLocalQuote(messageText.trim());
-          if (localResult && !localResult.needsApi && localResult.urls && localResult.urls.length > 0) {
-            // Build a formatted reply from the deterministic result
-            let replyText = '**⚡ Deterministic Quote:**\n\n';
-            if (localResult.eolWarnings && localResult.eolWarnings.length > 0) {
-              replyText += '**EOL Warnings:**\n';
-              for (const w of localResult.eolWarnings) replyText += `• ${w}\n`;
-              replyText += '\n';
+          const apiResult = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: messageText.trim() });
+          if (apiResult && (apiResult.quoteUrls || apiResult.urls)) {
+            const rawUrls = apiResult.quoteUrls || apiResult.urls;
+            const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
+            const eolArr = Array.isArray(apiResult.eolWarnings) ? apiResult.eolWarnings : [];
+            if (urlsArr.length > 0) {
+              let replyText = '**⚡ Deterministic Quote:**\n\n';
+              if (eolArr.length > 0) {
+                replyText += '**EOL Warnings:**\n';
+                for (const w of eolArr) replyText += `• ${w}\n`;
+                replyText += '\n';
+              }
+              for (const urlObj of urlsArr) {
+                const u = (typeof urlObj === 'object') ? urlObj : { url: String(urlObj), label: 'Quote' };
+                replyText += `**${u.label}:**\n[${u.url.length > 80 ? u.url.substring(0, 80) + '...' : u.url}](${u.url})\n\n`;
+              }
+              const assistantMsg = {
+                id: Date.now() + 1,
+                role: 'assistant',
+                content: replyText.trim(),
+                usedTools: false,
+                timestamp: new Date().toISOString(),
+              };
+              onMessagesChange([...updatedMessages, assistantMsg]);
+              setLoading(false);
+              return;
             }
-            for (const urlObj of localResult.urls) {
-              replyText += `**${urlObj.label}:**\n[${urlObj.url.length > 80 ? urlObj.url.substring(0, 80) + '...' : urlObj.url}](${urlObj.url})\n\n`;
-            }
-            const assistantMsg = {
-              id: Date.now() + 1,
-              role: 'assistant',
-              content: replyText.trim(),
-              usedTools: false,
-              timestamp: new Date().toISOString(),
-            };
-            onMessagesChange([...updatedMessages, assistantMsg]);
-            setLoading(false);
-            return;
           }
         } catch (quoteErr) {
-          console.warn('[Stratus] Local quote intercept failed, falling back to API:', quoteErr);
+          console.warn('[Stratus] Quote API intercept failed, falling back to chat:', quoteErr);
         }
       }
 

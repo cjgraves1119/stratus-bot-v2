@@ -7,7 +7,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
-import { generateLocalQuote, validateSku } from '../../lib/quote-engine';
 
 export default function QuotePanel({ navData, emailContext, onNavigate }) {
   const [skuText, setSkuText] = useState('');
@@ -90,49 +89,25 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setShowZohoPrompt(false);
 
     try {
-      // Try local deterministic engine first
-      let localResult = null;
-      try {
-        localResult = generateLocalQuote(skuText.trim());
-      } catch (localErr) {
-        console.error('[Stratus] Local quote engine error:', localErr);
-        localResult = { needsApi: true };
-      }
-
-      if (localResult && !localResult.needsApi) {
-        const rawUrls = localResult.urls;
+      // Route ALL quotes through the worker API — uses the exact same
+      // parseMessage + buildQuoteResponse as Webex and GChat bots
+      const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: skuText.trim() });
+      if (res && (res.quoteUrls || res.urls)) {
+        const rawUrls = res.quoteUrls || res.urls;
         const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
-        const eolArr = Array.isArray(localResult.eolWarnings) ? localResult.eolWarnings : [];
-        const parsedArr = Array.isArray(localResult.parsed) ? localResult.parsed : [];
-        const suggestArr = Array.isArray(localResult.suggestions) ? localResult.suggestions : null;
+        const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
+        const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
         setResult({
-          urls: urlsArr,
+          urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
           eolWarnings: eolArr,
-          suggestions: suggestArr,
-          parsed: parsedArr,
-          modifiers: localResult.modifiers || {},
-          source: 'local',
+          suggestions: null,
+          parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
+          source: 'api',
         });
+      } else if (res && res.error) {
+        setError(res.error);
       } else {
-        // Fall back to API
-        const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: skuText.trim() });
-        if (res && (res.quoteUrls || res.urls)) {
-          const rawUrls = res.quoteUrls || res.urls;
-          const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
-          const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
-          const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
-          setResult({
-            urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
-            eolWarnings: eolArr,
-            suggestions: null,
-            parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
-            source: 'api',
-          });
-        } else if (res && res.error) {
-          setError(res.error);
-        } else {
-          setError('No quote generated. Check your SKU input.');
-        }
+        setError('No quote generated. Check your SKU input.');
       }
     } catch (err) {
       console.error('[Stratus] Quote generation error:', err);
@@ -170,44 +145,21 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setResult(null);
     setShowZohoPrompt(false);
     try {
-      let localResult = null;
-      try {
-        localResult = generateLocalQuote(text.trim());
-      } catch (localErr) {
-        console.error('[Stratus] Local quote engine error:', localErr);
-        localResult = { needsApi: true };
-      }
-      if (localResult && !localResult.needsApi) {
-        const rawUrls = localResult.urls;
+      const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: text.trim() });
+      if (res && (res.quoteUrls || res.urls)) {
+        const rawUrls = res.quoteUrls || res.urls;
         const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
-        const eolArr = Array.isArray(localResult.eolWarnings) ? localResult.eolWarnings : [];
-        const parsedArr = Array.isArray(localResult.parsed) ? localResult.parsed : [];
-        const suggestArr = Array.isArray(localResult.suggestions) ? localResult.suggestions : null;
+        const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
+        const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
         setResult({
-          urls: urlsArr,
+          urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
           eolWarnings: eolArr,
-          suggestions: suggestArr,
-          parsed: parsedArr,
-          modifiers: localResult.modifiers || {},
-          source: 'local',
+          suggestions: null,
+          parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
+          source: 'api',
         });
-      } else {
-        const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: text.trim() });
-        if (res && (res.quoteUrls || res.urls)) {
-          const rawUrls = res.quoteUrls || res.urls;
-          const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
-          const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
-          const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
-          setResult({
-            urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
-            eolWarnings: eolArr,
-            suggestions: null,
-            parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
-            source: 'api',
-          });
-        } else if (res && res.error) {
-          setError(res.error);
-        }
+      } else if (res && res.error) {
+        setError(res.error);
       }
     } catch (err) {
       setError(err.message || 'Quote generation failed');
@@ -436,10 +388,10 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
           <div style={{
             display: 'inline-block', padding: '4px 10px', borderRadius: 4,
             fontSize: 11, fontWeight: 600, marginBottom: 12,
-            background: result.source === 'local' ? '#e8f5e9' : '#e3f2fd',
-            color: result.source === 'local' ? '#2e7d32' : '#1565c0',
+            background: '#e8f5e9',
+            color: '#2e7d32',
           }}>
-            {result.source === 'local' ? '⚡ Deterministic' : '🔗 API'}
+            ⚡ Deterministic
           </div>
 
           {/* EOL Warnings */}
