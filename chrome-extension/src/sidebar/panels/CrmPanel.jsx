@@ -160,36 +160,36 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     try {
       const result = await sendToBackground(MSG.CRM_LOOKUP, { email, domain });
       setData(result);
-      if (result?.account?.id) {
-        // Build task query params — guard against empty domains/emails
+
+      // Fire task/deal fetches whenever we have an account OR a contact (covers Cisco reps who have contact.id but no account.id)
+      if (result?.account?.id || result?.contact?.id) {
+        const accountId = result?.account?.id || '';
+        const contactId = result?.contact?.id || '';
+
+        // Build fallback domain/email params (used only if IDs are unavailable)
         const taskDomains = emailContext?.allDomains || (domain ? [domain] : []);
         const taskEmails = emailContext?.allEmails || (email ? [email] : []);
-        const hasTaskParams = taskDomains.length > 0 || taskEmails.length > 0;
 
         const promises = [
-          sendToBackground(MSG.CRM_DEALS, {
-            accountId: result.account.id,
-            contactEmail: email,
-          }).catch(() => null),
+          // Deals — only meaningful for accounts, not Cisco rep contacts
+          accountId
+            ? sendToBackground(MSG.CRM_DEALS, { accountId, contactEmail: email }).catch(() => null)
+            : Promise.resolve(null),
+
+          // Tasks — pass IDs directly so the worker skips unreliable domain resolution
+          sendToBackground(MSG.FETCH_TASKS, {
+            domains: taskDomains,
+            emails: taskEmails,
+            accountId,
+            contactId,
+          }).catch((err) => {
+            console.warn('[Stratus] Task fetch failed:', err?.message || err);
+            return { tasks: [], error: err?.message };
+          }),
         ];
 
-        // Only fetch tasks if we have domains or emails to query
-        if (hasTaskParams) {
-          promises.push(
-            sendToBackground(MSG.FETCH_TASKS, {
-              domains: taskDomains,
-              emails: taskEmails,
-            }).catch((err) => {
-              console.warn('[Stratus] Task fetch failed:', err?.message || err);
-              return { tasks: [], error: err?.message };
-            })
-          );
-        } else {
-          promises.push(Promise.resolve({ tasks: [], message: 'No email context for task lookup' }));
-        }
-
         const [dealResult, taskResult] = await Promise.all(promises);
-        setDeals(dealResult);
+        if (accountId) setDeals(dealResult);
         setTasks(taskResult);
       }
     } catch (err) {
@@ -229,6 +229,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
           domains: emailContext?.allDomains || [],
           emails: emailContext?.allEmails || [],
+          accountId: data?.account?.id || '',
+          contactId: data?.contact?.id || '',
         }).catch(() => null);
         if (taskResult) setTasks(taskResult);
       }
@@ -262,6 +264,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
           domains: emailContext?.allDomains || [],
           emails: emailContext?.allEmails || [],
+          accountId: data?.account?.id || '',
+          contactId: data?.contact?.id || '',
         }).catch(() => null);
         if (taskResult) setTasks(taskResult);
       } else {
@@ -322,6 +326,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
         domains: emailContext?.allDomains || [],
         emails: emailContext?.allEmails || [],
+        accountId: data?.account?.id || '',
+        contactId: data?.contact?.id || '',
       }).catch(() => null);
       if (taskResult) setTasks(taskResult);
     } catch (err) {
@@ -995,6 +1001,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                     const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
                       domains: emailContext?.allDomains || [],
                       emails: emailContext?.allEmails || [],
+                      accountId: data?.account?.id || '',
+                      contactId: data?.contact?.id || '',
                     }).catch(() => null);
                     if (taskResult) setTasks(taskResult);
                   }}

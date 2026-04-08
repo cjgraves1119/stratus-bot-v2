@@ -311,12 +311,15 @@ export async function crmCreateAccount(name, street, city, state, zip, website) 
 // ─────────────────────────────────────────────
 
 /**
- * Fetch open tasks for given domains/emails.
+ * Fetch open tasks for given domains/emails, or directly by accountId/contactId.
+ * When accountId/contactId are provided, domain resolution is bypassed for reliability.
  */
-export async function fetchTasks(domains, emails) {
+export async function fetchTasks(domains, emails, accountId, contactId) {
   return apiCall('/api/tasks', {
     domains: domains || [],
     emails: emails || [],
+    accountId: accountId || '',
+    contactId: contactId || '',
   });
 }
 

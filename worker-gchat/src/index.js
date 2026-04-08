@@ -7670,46 +7670,109 @@ CRITICAL URL RULES:
             break;
           }
 
-          // ── Tasks: Fetch open Zoho tasks for account domains ──
+          // ── Tasks: Fetch open Zoho tasks for account/contact (by ID or domain/email fallback) ──
           case '/api/tasks': {
-            const { domains, emails } = apiBody;
-            if ((!domains || domains.length === 0) && (!emails || emails.length === 0)) {
-              return new Response(JSON.stringify({ error: 'domains or emails required' }), { status: 400, headers: jsonHeaders });
+            const { domains, emails, accountId: directAccountId, contactId: directContactId } = apiBody;
+
+            // Require at least one lookup parameter
+            if (!directAccountId && !directContactId && (!domains || domains.length === 0) && (!emails || emails.length === 0)) {
+              return new Response(JSON.stringify({ error: 'accountId, contactId, domains, or emails required' }), { status: 400, headers: jsonHeaders });
             }
 
             try {
-              // Step 1: Find accounts by domain match
+              const taskFields = 'Subject, Status, Due_Date, Description, What_Id, Who_Id, Owner';
+              const seenIds = new Set();
+              let allTasks = [];
+
+              const mapTask = (t, acctId, acctName) => ({
+                id: t.id,
+                subject: t.Subject || '(no subject)',
+                status: t.Status || 'Not Started',
+                dueDate: t.Due_Date || null,
+                description: t.Description ? t.Description.substring(0, 200) : '',
+                dealId: t.What_Id ? t.What_Id.id : null,
+                dealName: t.What_Id ? t.What_Id.name : null,
+                contactId: t.Who_Id ? t.Who_Id.id : null,
+                contactName: t.Who_Id ? t.Who_Id.name : null,
+                ownerId: t.Owner ? t.Owner.id : null,
+                ownerName: t.Owner ? t.Owner.name : null,
+                accountId: acctId || null,
+                accountName: acctName || null,
+                zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+              });
+
+              // ── Fast path: accountId/contactId provided directly — skip domain resolution ──
+              if (directAccountId || directContactId) {
+                // Strategy 1: Contact-linked tasks (Who_Id match) — covers standalone tasks + rep tasks
+                if (directContactId) {
+                  try {
+                    const contactCoql = `select ${taskFields} from Tasks where Who_Id = '${directContactId}' and Status not in ('Completed') order by Due_Date asc limit 25`;
+                    const resp = await zohoApiCall('POST', 'coql', env, { select_query: contactCoql });
+                    if (resp?.data) {
+                      for (const t of resp.data) {
+                        if (!seenIds.has(t.id)) { seenIds.add(t.id); allTasks.push(mapTask(t, directAccountId, null)); }
+                      }
+                    }
+                  } catch (_) { /* contact query failed, continue */ }
+                }
+
+                // Strategy 2: Deal-linked tasks for account (What_Id in deal IDs for account)
+                if (directAccountId) {
+                  try {
+                    const dealsCoql = `select id from Deals where Account_Name = '${directAccountId}' and Stage not in ('Closed (Lost)') limit 50`;
+                    const dealsResp = await zohoApiCall('POST', 'coql', env, { select_query: dealsCoql });
+                    if (dealsResp?.data && dealsResp.data.length > 0) {
+                      const dealIds = dealsResp.data.map(d => `'${d.id}'`).join(',');
+                      const dealTaskCoql = `select ${taskFields} from Tasks where What_Id in (${dealIds}) and Status not in ('Completed') order by Due_Date asc limit 50`;
+                      const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: dealTaskCoql });
+                      if (taskResp?.data) {
+                        for (const t of taskResp.data) {
+                          if (!seenIds.has(t.id)) { seenIds.add(t.id); allTasks.push(mapTask(t, directAccountId, null)); }
+                        }
+                      }
+                    }
+                  } catch (_) { /* deal-based query failed */ }
+                }
+
+                allTasks.sort((a, b) => {
+                  if (!a.dueDate && !b.dueDate) return 0;
+                  if (!a.dueDate) return 1; if (!b.dueDate) return -1;
+                  return new Date(a.dueDate) - new Date(b.dueDate);
+                });
+                apiResult = { tasks: allTasks };
+                break;
+              }
+
+              // ── Fallback path: domain/email resolution (used when IDs not available) ──
               const searchDomains = (domains || []).filter(d => d && !d.match(/gmail\.com|yahoo\.com|hotmail\.com|outlook\.com|aol\.com|icloud\.com|protonmail\.com|live\.com|msn\.com|me\.com|mac\.com|comcast\.\w+|att\.\w+|verizon\.\w+|stratusinfosystems\.com/i));
               let accounts = [];
 
               for (const domain of searchDomains) {
                 try {
+                  // Try both bare domain and https://www. prefix to handle varying Website field formats
+                  const criteria = `((Website:starts_with:${encodeURIComponent(domain)}))`;
                   const acctResp = await zohoApiCall('GET',
-                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domain)}))&fields=id,Account_Name,Website&per_page=5`, env
+                    `Accounts/search?criteria=${criteria}&fields=id,Account_Name,Website&per_page=5`, env
                   );
-                  if (acctResp && acctResp.data) {
+                  if (acctResp?.data) {
                     acctResp.data.forEach(a => {
-                      if (!accounts.find(existing => existing.id === a.id)) {
-                        accounts.push({ id: a.id, name: a.Account_Name, website: a.Website });
-                      }
+                      if (!accounts.find(e => e.id === a.id)) accounts.push({ id: a.id, name: a.Account_Name, website: a.Website });
                     });
                   }
                 } catch (_) { /* skip failed domain lookups */ }
               }
 
-              // Step 2: If no accounts found via domain, try contact email lookup
+              // If no accounts found via domain, try contact email lookup
               if (accounts.length === 0 && emails && emails.length > 0) {
                 for (const email of emails.slice(0, 5)) {
                   try {
                     const contactResp = await zohoApiCall('GET',
                       `Contacts/search?email=${encodeURIComponent(email)}&fields=id,Account_Name&per_page=3`, env
                     );
-                    if (contactResp && contactResp.data) {
+                    if (contactResp?.data) {
                       contactResp.data.forEach(c => {
-                        if (c.Account_Name && c.Account_Name.id) {
-                          if (!accounts.find(existing => existing.id === c.Account_Name.id)) {
-                            accounts.push({ id: c.Account_Name.id, name: c.Account_Name.name || 'Unknown' });
-                          }
+                        if (c.Account_Name?.id && !accounts.find(e => e.id === c.Account_Name.id)) {
+                          accounts.push({ id: c.Account_Name.id, name: c.Account_Name.name || 'Unknown' });
                         }
                       });
                     }
@@ -7722,41 +7785,29 @@ CRITICAL URL RULES:
                 break;
               }
 
-              // Step 3: Fetch open tasks for all found accounts via COQL
-              let allTasks = [];
+              // Fetch open tasks for each found account via deal-linked COQL
               for (const acct of accounts.slice(0, 5)) {
                 try {
-                  const coqlQuery = `select Subject, Status, Due_Date, Description, What_Id, Who_Id, Owner from Tasks where What_Id.Account_Name.id = '${acct.id}' and Status not in ('Completed') limit 50`;
-                  const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: coqlQuery });
-                  if (taskResp && taskResp.data) {
-                    taskResp.data.forEach(t => {
-                      allTasks.push({
-                        id: t.id,
-                        subject: t.Subject || '(no subject)',
-                        status: t.Status || 'Not Started',
-                        dueDate: t.Due_Date || null,
-                        description: t.Description ? t.Description.substring(0, 200) : '',
-                        dealId: t.What_Id ? t.What_Id.id : null,
-                        dealName: t.What_Id ? t.What_Id.name : null,
-                        contactId: t.Who_Id ? t.Who_Id.id : null,
-                        contactName: t.Who_Id ? t.Who_Id.name : null,
-                        ownerId: t.Owner ? t.Owner.id : null,
-                        ownerName: t.Owner ? t.Owner.name : null,
-                        accountId: acct.id,
-                        accountName: acct.name,
-                      });
-                    });
+                  const dealsCoql = `select id from Deals where Account_Name = '${acct.id}' and Stage not in ('Closed (Lost)') limit 50`;
+                  const dealsResp = await zohoApiCall('POST', 'coql', env, { select_query: dealsCoql });
+                  if (dealsResp?.data && dealsResp.data.length > 0) {
+                    const dealIds = dealsResp.data.map(d => `'${d.id}'`).join(',');
+                    const dealTaskCoql = `select ${taskFields} from Tasks where What_Id in (${dealIds}) and Status not in ('Completed') order by Due_Date asc limit 50`;
+                    const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: dealTaskCoql });
+                    if (taskResp?.data) {
+                      for (const t of taskResp.data) {
+                        if (!seenIds.has(t.id)) { seenIds.add(t.id); allTasks.push(mapTask(t, acct.id, acct.name)); }
+                      }
+                    }
                   }
                 } catch (tErr) {
                   console.error(`[API/tasks] COQL error for account ${acct.id}: ${tErr.message}`);
                 }
               }
 
-              // Sort by due date (soonest first, nulls last)
               allTasks.sort((a, b) => {
                 if (!a.dueDate && !b.dueDate) return 0;
-                if (!a.dueDate) return 1;
-                if (!b.dueDate) return -1;
+                if (!a.dueDate) return 1; if (!b.dueDate) return -1;
                 return new Date(a.dueDate) - new Date(b.dueDate);
               });
 

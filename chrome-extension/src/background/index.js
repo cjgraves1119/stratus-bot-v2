@@ -147,8 +147,8 @@ registerMessageHandlers({
   },
 
   // ── Tasks ──
-  [MSG.FETCH_TASKS]: async ({ domains, emails }) => {
-    return api.fetchTasks(domains, emails);
+  [MSG.FETCH_TASKS]: async ({ domains, emails, accountId, contactId }) => {
+    return api.fetchTasks(domains, emails, accountId, contactId);
   },
 
   [MSG.TASK_ACTION]: async ({ action, taskId, ...options }) => {
