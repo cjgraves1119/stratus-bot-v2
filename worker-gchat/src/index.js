@@ -6426,12 +6426,27 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       if (!useTools && accumulatedText) {
         // Non-CRM path with tool-use: combine accumulated text + final response, dedup URLs
         let finalText = textBlocks.map(b => b.text).join('\n');
-        // Deduplicate: if Claude repeated a URL we already injected, strip the duplicate line
-        for (const url of injectedUrls) {
-          const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+
+        // If Claude's final text already contains ALL injected URLs, it produced a complete,
+        // correctly-ordered response (e.g. dashboard template: License Analysis → EOL Devices
+        // → Option 1 URL → Option 2 URL). Use it directly and discard the injected fallbacks —
+        // otherwise injected URLs appear at top and Option headers are left blank at bottom.
+        const allUrlsInFinalText = injectedUrls.length > 0 &&
+          injectedUrls.every(url => finalText.includes(url));
+
+        if (allUrlsInFinalText) {
+          // Claude's final text is complete and correctly ordered — use it exclusively
+          accumulatedText = '';
+        } else {
+          // Claude's final text is missing some URLs — keep injected fallbacks and
+          // strip only URL-containing lines from Claude's text to avoid duplicates
+          for (const url of injectedUrls) {
+            const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+          }
+          finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
         }
-        finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
+
         if (finalText) accumulatedText += finalText;
         reply = accumulatedText.trim() || 'Sorry, I could not generate a response.';
       } else {
@@ -7584,15 +7599,15 @@ CRITICAL URL RULES:
             break;
           }
 
-          // ── CRM ISR Deals: Get deals where a Cisco rep is the Meraki ISR ──
+          // ── CRM ISR Deals: Get ALL deals (current + past) where a Cisco rep is the Meraki ISR ──
           case '/api/crm-isr-deals': {
-            const { repEmail: isrEmail, repId: isrRepId } = apiBody;
-            if (!isrEmail && !isrRepId) {
-              return new Response(JSON.stringify({ error: 'repEmail or repId required' }), { status: 400, headers: jsonHeaders });
+            const { repEmail: isrEmail, repId: isrRepId, repName: isrRepName } = apiBody;
+            if (!isrEmail && !isrRepId && !isrRepName) {
+              return new Response(JSON.stringify({ error: 'repEmail, repId, or repName required' }), { status: 400, headers: jsonHeaders });
             }
             try {
               let repId = isrRepId || '';
-              let repName = '';
+              let repName = isrRepName || '';
 
               // Look up rep ID by email if not provided
               if (!repId && isrEmail) {
@@ -7601,19 +7616,29 @@ CRITICAL URL RULES:
                 ).catch(() => null);
                 if (repSearch?.data?.[0]) {
                   repId = repSearch.data[0].id;
-                  repName = repSearch.data[0].Name || '';
+                  repName = repName || repSearch.data[0].Name || '';
+                }
+              }
+
+              // Fallback: search by name if email lookup failed
+              if (!repId && repName) {
+                const nameSearch = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?word=${encodeURIComponent(repName)}&fields=id,Name,Email`, env
+                ).catch(() => null);
+                if (nameSearch?.data?.[0]) {
+                  repId = nameSearch.data[0].id;
                 }
               }
 
               if (!repId) {
-                apiResult = { deals: [], found: false, error: 'Rep not found' };
+                apiResult = { deals: [], found: false, error: 'Rep not found in Meraki ISRs module' };
                 break;
               }
 
-              // Search deals where Meraki_ISR matches this rep's ID
-              const dealsResp = await zohoApiCall('GET',
-                `Deals/search?criteria=(Meraki_ISR:equals:${repId})&fields=id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Lead_Source,Created_Time&per_page=20&sort_by=Closing_Date&sort_order=desc`, env
-              ).catch(() => null);
+              // Use COQL to fetch ALL deals where Meraki_ISR = repId (current + past, all stages)
+              const dealFields = 'Deal_Name, Stage, Amount, Closing_Date, Account_Name, Lead_Source, Created_Time';
+              const coqlQuery = `select ${dealFields} from Deals where Meraki_ISR = '${repId}' order by Closing_Date desc limit 100`;
+              const dealsResp = await zohoApiCall('POST', 'coql', env, { select_query: coqlQuery }).catch(() => null);
 
               const deals = (dealsResp?.data || []).map(d => ({
                 id: d.id,
@@ -7623,6 +7648,7 @@ CRITICAL URL RULES:
                 closingDate: d.Closing_Date || '',
                 accountName: d.Account_Name?.name || d.Account_Name || '',
                 leadSource: d.Lead_Source || '',
+                createdTime: d.Created_Time || '',
                 zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Potentials/${d.id}`,
               }));
 

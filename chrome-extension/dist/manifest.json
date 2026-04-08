@@ -1,0 +1,111 @@
+{
+  "manifest_version": 3,
+  "name": "Stratus AI",
+  "version": "1.9.2",
+  "description": "Cisco/Meraki sales assistant for Gmail — CRM integration, quoting, email analysis, and task management.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+
+  "permissions": [
+    "activeTab",
+    "storage",
+    "notifications",
+    "contextMenus",
+    "clipboardWrite",
+    "alarms",
+    "sidePanel",
+    "identity",
+    "tabs"
+  ],
+
+  "host_permissions": [
+    "<all_urls>",
+    "https://mail.google.com/*",
+    "https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev/*",
+    "https://accounts.zoho.com/*",
+    "https://www.zohoapis.com/*",
+    "https://crm.zoho.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background.bundle.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["content.bundle.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://crm.zoho.com/*"],
+      "js": ["zoho-content.bundle.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "side_panel": {
+    "default_path": "sidebar.html"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    },
+    "default_title": "Stratus AI"
+  },
+
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+
+  "commands": {
+    "open-sidebar": {
+      "suggested_key": {
+        "default": "Alt+S"
+      },
+      "description": "Open Stratus AI sidebar"
+    },
+    "quick-quote": {
+      "suggested_key": {
+        "default": "Alt+Q"
+      },
+      "description": "Quick Quote"
+    },
+    "crm-lookup": {
+      "suggested_key": {
+        "default": "Alt+C"
+      },
+      "description": "CRM lookup for current email"
+    },
+    "analyze-email": {
+      "suggested_key": {
+        "default": "Alt+A"
+      },
+      "description": "AI analysis of current email"
+    }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*", "sidebar.html"],
+      "matches": ["https://mail.google.com/*"]
+    }
+  ],
+
+  "update_url": "https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml",
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

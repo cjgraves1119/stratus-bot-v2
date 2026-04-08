@@ -261,6 +261,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         setCreateTaskSuccess('Task created' + (result.zohoUrl ? '' : ''));
         setCreateTaskData({ subject: '', dueDate: '', priority: 'Normal', description: '' });
         setShowCreateTask(false);
+        // Brief delay for Zoho COQL index to catch up, then refresh
+        await new Promise(r => setTimeout(r, 1200));
         const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
           domains: emailContext?.allDomains || [],
           emails: emailContext?.allEmails || [],
@@ -323,6 +325,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       });
       setSuggestResult(result);
       setSuggestPreview(null);
+      // Brief delay for Zoho COQL index to catch up, then refresh
+      await new Promise(r => setTimeout(r, 1200));
       const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
         domains: emailContext?.allDomains || [],
         emails: emailContext?.allEmails || [],
@@ -1135,6 +1139,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                   newDueDate: addBusinessDays(new Date(), 3),
                 })}
                 onOpenDeal={task.dealId ? () => window.open(`https://crm.zoho.com/crm/${ZOHO_ORG}/tab/Potentials/${task.dealId}`, '_blank') : null}
+                onEdit={async (taskId, updates) => {
+                  await handleTaskAction('edit', taskId, updates);
+                }}
               />
             ))}
           </>
@@ -1289,37 +1296,90 @@ function WeborderRow({ wo, isLast }) {
   );
 }
 
-function TaskCard({ task, isLoading, onComplete, onClose, onReschedule, onOpenDeal }) {
+function TaskCard({ task, isLoading, onComplete, onClose, onReschedule, onOpenDeal, onEdit }) {
+  const [editing, setEditing] = useState(false);
+  const [editSubject, setEditSubject] = useState(task.subject || '');
+  const [editDueDate, setEditDueDate] = useState(task.dueDate || '');
+  const [saving, setSaving] = useState(false);
+
   const isOverdue = task.dueDate && new Date(task.dueDate) < new Date();
+  const hasChanges = editSubject !== (task.subject || '') || editDueDate !== (task.dueDate || '');
+
+  async function handleSave() {
+    if (!hasChanges) { setEditing(false); return; }
+    setSaving(true);
+    try {
+      await onEdit(task.id, {
+        ...(editSubject !== task.subject ? { newSubject: editSubject } : {}),
+        ...(editDueDate !== task.dueDate ? { newDueDate: editDueDate } : {}),
+      });
+      setEditing(false);
+    } catch (_) {}
+    setSaving(false);
+  }
+
   return (
     <div style={{
       background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
       borderRadius: 8, padding: 12, marginBottom: 8,
       borderLeft: `3px solid ${isOverdue ? COLORS.ERROR : COLORS.STRATUS_BLUE}`,
     }}>
-      <div style={{ fontWeight: 500, fontSize: 13, color: COLORS.TEXT_PRIMARY, marginBottom: 4 }}>
-        {task.subject}
-      </div>
-      <div style={{ fontSize: 12, color: isOverdue ? COLORS.ERROR : COLORS.TEXT_SECONDARY, marginBottom: 2 }}>
-        Due: {task.dueDate || 'No date'} {isOverdue ? '(Overdue)' : ''}
-      </div>
-      {task.dealName && (
-        <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 2 }}>Deal: {task.dealName}</div>
+      {editing ? (
+        <>
+          <input type="text" value={editSubject} onChange={e => setEditSubject(e.target.value)}
+            style={{ width: '100%', boxSizing: 'border-box', padding: '6px 8px', fontSize: 12, fontWeight: 500,
+              borderRadius: 4, border: `1px solid ${COLORS.STRATUS_BLUE}`, outline: 'none',
+              color: COLORS.TEXT_PRIMARY, fontFamily: 'inherit', marginBottom: 6 }} />
+          <input type="date" value={editDueDate} onChange={e => setEditDueDate(e.target.value)}
+            style={{ padding: '5px 8px', fontSize: 12, borderRadius: 4,
+              border: `1px solid ${COLORS.BORDER}`, outline: 'none',
+              color: COLORS.TEXT_PRIMARY, fontFamily: 'inherit', marginBottom: 6 }} />
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <SmallButton onClick={handleSave} disabled={saving || !hasChanges} color={COLORS.STRATUS_BLUE}>
+              {saving ? 'Saving...' : 'Save'}
+            </SmallButton>
+            <SmallButton onClick={() => { setEditing(false); setEditSubject(task.subject || ''); setEditDueDate(task.dueDate || ''); }} disabled={saving} color={COLORS.TEXT_SECONDARY}>
+              Cancel
+            </SmallButton>
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div style={{ fontWeight: 500, fontSize: 13, color: COLORS.TEXT_PRIMARY, marginBottom: 4, flex: 1 }}>
+              {task.subject}
+            </div>
+            <button onClick={() => setEditing(true)} title="Edit task" style={{
+              background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px',
+              fontSize: 13, color: COLORS.TEXT_SECONDARY, flexShrink: 0,
+            }}>✏️</button>
+          </div>
+          <div style={{ fontSize: 12, color: isOverdue ? COLORS.ERROR : COLORS.TEXT_SECONDARY, marginBottom: 2 }}>
+            Due: {task.dueDate || 'No date'} {isOverdue ? '(Overdue)' : ''}
+          </div>
+          {task.dealName && (
+            <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 2 }}>Deal: {task.dealName}</div>
+          )}
+          {task.zohoUrl && (
+            <a href={task.zohoUrl} target="_blank" rel="noopener"
+              style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, fontWeight: 500, textDecoration: 'none' }}>View in Zoho →</a>
+          )}
+          <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+            <SmallButton onClick={onComplete} disabled={isLoading} color={COLORS.SUCCESS || '#2e7d32'}>
+              Complete + Follow Up
+            </SmallButton>
+            <SmallButton onClick={onClose} disabled={isLoading} color={COLORS.TEXT_SECONDARY}>
+              Close Task
+            </SmallButton>
+            <SmallButton onClick={onReschedule} disabled={isLoading} color={COLORS.WARNING || '#e37400'}>
+              +3 Days
+            </SmallButton>
+            {onOpenDeal && (
+              <SmallButton onClick={onOpenDeal} disabled={false} color={COLORS.STRATUS_BLUE}>Open Deal</SmallButton>
+            )}
+          </div>
+        </>
       )}
-      <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-        <SmallButton onClick={onComplete} disabled={isLoading} color={COLORS.SUCCESS || '#2e7d32'}>
-          Complete + Follow Up
-        </SmallButton>
-        <SmallButton onClick={onClose} disabled={isLoading} color={COLORS.TEXT_SECONDARY}>
-          Close Task
-        </SmallButton>
-        <SmallButton onClick={onReschedule} disabled={isLoading} color={COLORS.WARNING || '#e37400'}>
-          +3 Days
-        </SmallButton>
-        {onOpenDeal && (
-          <SmallButton onClick={onOpenDeal} disabled={false} color={COLORS.STRATUS_BLUE}>Open Deal</SmallButton>
-        )}
-      </div>
     </div>
   );
 }
