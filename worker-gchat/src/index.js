@@ -2899,17 +2899,17 @@ RULE 1 — DEDUP REPLACEMENTS: When multiple EOL models map to the SAME replacem
 Example: MX60W ×1 + MX64W ×1 both map to MX67W → MX67W-HW ×2, LIC-MX67W-SEC-3YR ×2 (NOT two separate entries).
 Example: MS120-8FP ×26 + MS220-8P ×6 both map to MS130-8P → MS130-8P-HW ×32.
 
-RULE 2 — EXISTING DEVICE LICENSE CARRY-FORWARD: When an EOL model's replacement matches a device the customer ALREADY HAS (non-EOL), the refresh URL must include licenses for BOTH the replacement AND the existing device, but hardware ONLY for the replacement (the customer already owns the existing hardware).
-Example: Z1 ×1 (EOL → Z4) + existing Z4 ×1 (non-EOL) → Z4-HW ×1 (only the Z1 replacement), LIC-Z4-SEC-3Y ×2 (one for the Z1→Z4 replacement + one for the existing Z4).
+RULE 2 — EXISTING DEVICE LICENSE CARRY-FORWARD: When an EOL model's replacement matches a device the customer ALREADY HAS (non-EOL), the refresh URL must include licenses for BOTH the replacement AND the existing device, but hardware ONLY for the replacement (the customer already owns the existing hardware). In build_quote_url, use hardware_qty to specify the replacement-only hardware count while qty covers total licenses.
+Example: Z1 ×1 (EOL → Z4) + existing Z4 ×1 (non-EOL) → pass {model:"Z4", qty:2, hardware_qty:1} → Z4-HW ×1 (only the Z1 replacement), LIC-Z4-SEC-3Y ×2 (one for the Z1→Z4 replacement + one for the existing Z4).
 
 RULE 3 — BUILD A RUNNING TALLY: Before constructing ANY refresh URL, build a tally of every SKU and its total quantity across all devices (EOL replacements + non-EOL carry-forwards). Hardware for non-EOL devices is EXCLUDED (they already own it). Licenses for non-EOL devices ARE included. Then construct ONE URL from the final tally. Never build the URL device-by-device.
 
 RULE 4 — ORDERED HARDWARE+LICENSE GROUPING: Maintain the exact device order from the screenshot or request. For each device, place its hardware SKU immediately followed by its license SKU(s) — NEVER group all hardware first then all licenses. When multiple EOL models merge into one replacement (Rule 1), place the merged entry at the position of the FIRST contributing device. Non-EOL devices appear at their original position with license-only (no hardware).
 Example from a license dashboard (top to bottom): MG51, MR Enterprise ×2, MS220-8P ×2, MX60, MX60W, MX64W, MX65, MX65W, MX75, Z1, Z4
 Correct URL order: MG52-HW,LIC-MG52-ENT-3Y(×1), LIC-ENT-3YR(×2), MS130-8P-HW,LIC-MS130-CMPT-3Y(×2), MX67-HW,LIC-MX67-SEC-3YR(×1), MX67W-HW(×2),LIC-MX67W-SEC-3YR(×2), MX68-HW,LIC-MX68-SEC-3YR(×1), MX68W-HW,LIC-MX68W-SEC-3YR(×1), LIC-MX75-SEC-3Y(×1), Z4-HW(×1),LIC-Z4-SEC-3Y(×2)
-Note: MX67W appears once at MX60W's position (first device mapping to MX67W). MX75 = license-only (non-EOL). Z4-HW ×1 (only Z1 replacement) but LIC-Z4-SEC-3Y ×2 (Rule 2: Z1→Z4 + existing Z4).
+Note: MX67W appears once at MX60W's position (first device mapping to MX67W). MX75 = license-only (non-EOL). Z4-HW ×1 (only Z1 replacement) but LIC-Z4-SEC-3Y ×2 (Rule 2: Z1→Z4 + existing Z4). The Z4 entry uses hardware_qty:1 and qty:2.
 
-MANDATORY: Use the build_quote_url tool for ALL URL generation. NEVER manually type out URLs. Pass your parsed device list to the tool and it will handle suffixes, license mapping, dedup, and URL construction. For generic MR Enterprise licenses (no specific AP model), use model "MR-ENT". Call the tool once per URL you need (e.g., once for Option 1 renewal, once for Option 2 refresh).
+MANDATORY: Use the build_quote_url tool for ALL URL generation. NEVER manually type out URLs. Pass your parsed device list to the tool and it will handle suffixes, license mapping, dedup, and URL construction. For generic MR Enterprise licenses (no specific AP model), use model "MR-ENT". Call the tool once per URL you need (e.g., once for Option 1 renewal, once for Option 2 refresh). Use hardware_qty when a replacement model matches an existing device (Rule 2).
 
 The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Only show 3-Year for dashboard screenshot responses unless user specifies otherwise.
 
@@ -6328,12 +6328,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           if (block.name === 'build_quote_url') {
             const quoteResult = handleQuoteUrlTool(block.input);
             console.log(`[GCHAT-AGENT] build_quote_url → ${quoteResult.url?.substring(0, 80)}...`);
-            // Non-CRM path: inject the URL directly into accumulated text so it's guaranteed
-            // to appear in output even if Claude doesn't repeat it in its follow-up text.
+            // Non-CRM path: track the URL for deferred fallback injection (don't inject yet).
+            // Only inject at the end if Claude's combined text doesn't include the URL.
             if (!useTools && quoteResult.url) {
-              const label = quoteResult.label || 'Quote URL';
-              accumulatedText += `**${label}:** ${quoteResult.url}\n\n`;
-              injectedUrls.push(quoteResult.url);
+              toolUrls.push({ url: quoteResult.url, label: quoteResult.label || 'Quote URL' });
             }
             return {
               type: 'tool_result',
@@ -6414,31 +6412,24 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       let reply;
 
       if (!useTools && accumulatedText) {
-        // Non-CRM path with tool-use: combine accumulated text + final response, dedup URLs
+        // Non-CRM path with tool-use: combine accumulated text + final response
         let finalText = textBlocks.map(b => b.text).join('\n');
+        if (finalText) accumulatedText += finalText;
 
-        // If Claude's final text already contains ALL injected URLs, it produced a complete,
-        // correctly-ordered response (e.g. dashboard template: License Analysis → EOL Devices
-        // → Option 1 URL → Option 2 URL). Use it directly and discard the injected fallbacks —
-        // otherwise injected URLs appear at top and Option headers are left blank at bottom.
-        const allUrlsInFinalText = injectedUrls.length > 0 &&
-          injectedUrls.every(url => finalText.includes(url));
-
-        if (allUrlsInFinalText) {
-          // Claude's final text is complete and correctly ordered — use it exclusively
-          accumulatedText = '';
-        } else {
-          // Claude's final text is missing some URLs — keep injected fallbacks and
-          // strip only URL-containing lines from Claude's text to avoid duplicates
-          for (const url of injectedUrls) {
-            const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+        // Deferred URL injection: only inject tool-generated URLs that Claude's combined
+        // text (intermediate + final) doesn't already contain. This prevents duplicates
+        // regardless of whether Claude placed URLs in intermediate or final iterations.
+        if (toolUrls.length > 0) {
+          const missingUrls = toolUrls.filter(({ url }) => !accumulatedText.includes(url));
+          if (missingUrls.length > 0) {
+            const fallbackBlock = missingUrls.map(({ url, label }) =>
+              `**${label}:** ${url}`
+            ).join('\n\n');
+            accumulatedText = fallbackBlock + '\n\n' + accumulatedText;
           }
-          finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
         }
 
-        if (finalText) accumulatedText += finalText;
-        reply = accumulatedText.trim() || 'Sorry, I could not generate a response.';
+        reply = accumulatedText.replace(/\n{3,}/g, '\n\n').trim() || 'Sorry, I could not generate a response.';
       } else {
         // CRM path or no tool-use: use final text as-is
         reply = textBlocks.map(b => b.text).join('\n');
