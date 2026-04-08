@@ -2907,6 +2907,8 @@ Example from a license dashboard (top to bottom): MG51, MR Enterprise ×2, MS220
 Correct URL order: MG52-HW,LIC-MG52-ENT-3Y(×1), LIC-ENT-3YR(×2), MS130-8P-HW,LIC-MS130-CMPT-3Y(×2), MX67-HW,LIC-MX67-SEC-3YR(×1), MX67W-HW(×2),LIC-MX67W-SEC-3YR(×2), MX68-HW,LIC-MX68-SEC-3YR(×1), MX68W-HW,LIC-MX68W-SEC-3YR(×1), LIC-MX75-SEC-3Y(×1), Z4-HW(×1),LIC-Z4-SEC-3Y(×2)
 Note: MX67W appears once at MX60W's position (first device mapping to MX67W). MX75 = license-only (non-EOL). Z4-HW ×1 (only Z1 replacement) but LIC-Z4-SEC-3Y ×2 (Rule 2: Z1→Z4 + existing Z4).
 
+MANDATORY: Use the build_quote_url tool for ALL URL generation. NEVER manually type out URLs. Pass your parsed device list to the tool and it will handle suffixes, license mapping, dedup, and URL construction. For generic MR Enterprise licenses (no specific AP model), use model "MR-ENT". Call the tool once per URL you need (e.g., once for Option 1 renewal, once for Option 2 refresh).
+
 The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Only show 3-Year for dashboard screenshot responses unless user specifies otherwise.
 
 ## REFRESH / UPGRADE / HARDWARE UPGRADE SEMANTICS
@@ -5842,6 +5844,64 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
   return { reply: 'I ran into a complex operation that required too many steps. Could you break it into smaller pieces?' };
 }
 
+// ─── Quote URL Tool (deterministic URL builder for Claude vision path) ───────
+const QUOTE_URL_TOOL = {
+  name: 'build_quote_url',
+  description: 'Build a Stratus order URL from a structured device list. ALWAYS use this tool for URL generation — never manually construct URLs. Pass devices in the order they should appear. The tool handles SKU suffixes, license mapping, dedup, and URL formatting.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      devices: {
+        type: 'array',
+        description: 'Ordered list of devices. Each device becomes hardware+license or license-only in the URL.',
+        items: {
+          type: 'object',
+          properties: {
+            model: { type: 'string', description: 'Base model without suffix (e.g., MX67, MS130-8P, Z4, MR44). For MR enterprise licenses without specific model, use "MR-ENT".' },
+            qty: { type: 'integer', description: 'Quantity of this device' },
+            license_only: { type: 'boolean', description: 'True if customer already owns hardware (non-EOL). Only license, no hardware SKU.' }
+          },
+          required: ['model', 'qty']
+        }
+      },
+      term: { type: 'string', enum: ['1', '3', '5'], description: 'License term in years. Default: 3.' },
+      label: { type: 'string', description: 'Label for this URL (e.g., "Option 1 — Renew As-Is 3-Year", "Option 2 — Hardware Refresh 3-Year")' },
+      hardware_only: { type: 'boolean', description: 'If true, output only hardware SKUs with no licenses.' }
+    },
+    required: ['devices']
+  }
+};
+
+function handleQuoteUrlTool(params) {
+  const { devices, term = '3', label, hardware_only = false } = params;
+  const items = [];
+
+  for (const device of devices) {
+    const { model, qty, license_only = false } = device;
+
+    // Special case: MR-ENT = generic MR Enterprise license (no hardware model)
+    if (model === 'MR-ENT' || model === 'MR_ENT') {
+      const termSuffix = term === '1' ? '1YR' : term === '5' ? '5YR' : '3YR';
+      items.push({ sku: `LIC-ENT-${termSuffix}`, qty });
+      continue;
+    }
+
+    if (!license_only && !hardware_only) {
+      items.push({ sku: applySuffix(model), qty });
+      const licSkus = getLicenseSkus(model, term);
+      for (const lic of licSkus) items.push({ sku: lic, qty });
+    } else if (license_only) {
+      const licSkus = getLicenseSkus(model, term);
+      for (const lic of licSkus) items.push({ sku: lic, qty });
+    } else {
+      items.push({ sku: applySuffix(model), qty });
+    }
+  }
+
+  const url = buildStratusUrl(items);
+  return { url, label: label || `${term}-Year Co-Term`, items_count: items.length };
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
@@ -5924,7 +5984,8 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     let messages = [...effectiveHistory, { role: 'user', content: userContent }];
 
     // Determine if we should include CRM/email tools
-    const tools = useTools ? CRM_EMAIL_TOOLS : [];
+    // Always include QUOTE_URL_TOOL for deterministic URL generation (even non-CRM path)
+    const tools = useTools ? CRM_EMAIL_TOOLS : [QUOTE_URL_TOOL];
     if (useTools) {
       // Build system prompt dynamically — conditionally loads EMAIL INTAKE and ADMIN ACTION
       // sections only when relevant intent is detected, saving ~2K tokens on standard requests.
@@ -6204,6 +6265,17 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
                 content: cached.length > 8000 ? cached.substring(0, 8000) + '...(truncated)' : cached
               };
             }
+          }
+
+          // Handle build_quote_url locally (deterministic, no external API call)
+          if (block.name === 'build_quote_url') {
+            const quoteResult = handleQuoteUrlTool(block.input);
+            console.log(`[GCHAT-AGENT] build_quote_url → ${quoteResult.url?.substring(0, 80)}...`);
+            return {
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: JSON.stringify(quoteResult)
+            };
           }
 
           const result = await executeToolCall(block.name, block.input, env);

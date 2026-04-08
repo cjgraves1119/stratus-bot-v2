@@ -2878,6 +2878,8 @@ Example from a license dashboard (top to bottom): MG51, MR Enterprise ×2, MS220
 Correct URL order: MG52-HW,LIC-MG52-ENT-3Y(×1), LIC-ENT-3YR(×2), MS130-8P-HW,LIC-MS130-CMPT-3Y(×2), MX67-HW,LIC-MX67-SEC-3YR(×1), MX67W-HW(×2),LIC-MX67W-SEC-3YR(×2), MX68-HW,LIC-MX68-SEC-3YR(×1), MX68W-HW,LIC-MX68W-SEC-3YR(×1), LIC-MX75-SEC-3Y(×1), Z4-HW(×1),LIC-Z4-SEC-3Y(×2)
 Note: MX67W appears once at MX60W's position (first device mapping to MX67W). MX75 = license-only (non-EOL). Z4-HW ×1 (only Z1 replacement) but LIC-Z4-SEC-3Y ×2 (Rule 2: Z1→Z4 + existing Z4).
 
+MANDATORY: Use the build_quote_url tool for ALL URL generation. NEVER manually type out URLs. Pass your parsed device list to the tool and it will handle suffixes, license mapping, dedup, and URL construction. For generic MR Enterprise licenses (no specific AP model), use model "MR-ENT". Call the tool once per URL you need (e.g., once for Option 1 renewal, once for Option 2 refresh).
+
 The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Only show 3-Year for dashboard screenshot responses unless user specifies otherwise.
 
 ## REFRESH / UPGRADE / HARDWARE UPGRADE SEMANTICS
@@ -2924,6 +2926,67 @@ When asked about SFPs, stacking cables, uplink modules, or how to connect two de
 - Include quote URLs for recommended accessories whenever possible.`;
 
 // ─── Claude API (direct fetch, no SDK) ───────────────────────────────────────
+// ─── Quote URL Tool (deterministic URL builder for Claude vision path) ───────
+const QUOTE_URL_TOOL = {
+  name: 'build_quote_url',
+  description: 'Build a Stratus order URL from a structured device list. ALWAYS use this tool for URL generation — never manually construct URLs. Pass devices in the order they should appear. The tool handles SKU suffixes, license mapping, dedup, and URL formatting.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      devices: {
+        type: 'array',
+        description: 'Ordered list of devices. Each device becomes hardware+license or license-only in the URL.',
+        items: {
+          type: 'object',
+          properties: {
+            model: { type: 'string', description: 'Base model without suffix (e.g., MX67, MS130-8P, Z4, MR44). For MR enterprise licenses without specific model, use "MR-ENT".' },
+            qty: { type: 'integer', description: 'Quantity of this device' },
+            license_only: { type: 'boolean', description: 'True if customer already owns hardware (non-EOL). Only license, no hardware SKU.' }
+          },
+          required: ['model', 'qty']
+        }
+      },
+      term: { type: 'string', enum: ['1', '3', '5'], description: 'License term in years. Default: 3.' },
+      label: { type: 'string', description: 'Label for this URL (e.g., "Option 1 — Renew As-Is 3-Year", "Option 2 — Hardware Refresh 3-Year")' },
+      hardware_only: { type: 'boolean', description: 'If true, output only hardware SKUs with no licenses.' }
+    },
+    required: ['devices']
+  }
+};
+
+function handleQuoteUrlTool(params) {
+  const { devices, term = '3', label, hardware_only = false } = params;
+  const items = [];
+
+  for (const device of devices) {
+    const { model, qty, license_only = false } = device;
+
+    // Special case: MR-ENT = generic MR Enterprise license (no hardware model)
+    if (model === 'MR-ENT' || model === 'MR_ENT') {
+      const termSuffix = term === '1' ? '1YR' : term === '5' ? '5YR' : '3YR';
+      items.push({ sku: `LIC-ENT-${termSuffix}`, qty });
+      continue;
+    }
+
+    if (!license_only && !hardware_only) {
+      // Hardware + license
+      items.push({ sku: applySuffix(model), qty });
+      const licSkus = getLicenseSkus(model, term);
+      for (const lic of licSkus) items.push({ sku: lic, qty });
+    } else if (license_only) {
+      // License only (non-EOL device, customer owns hardware)
+      const licSkus = getLicenseSkus(model, term);
+      for (const lic of licSkus) items.push({ sku: lic, qty });
+    } else {
+      // Hardware only
+      items.push({ sku: applySuffix(model), qty });
+    }
+  }
+
+  const url = buildStratusUrl(items);
+  return { url, label: label || `${term}-Year Co-Term`, items_count: items.length };
+}
+
 async function askClaude(userMessage, personId, env, imageData = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
@@ -3001,20 +3064,23 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     }
     const messages = [...history, { role: 'user', content: userContent }];
 
+    // Include quote URL tool for all requests (lightweight, only called when Claude needs URLs)
+    const apiBody = {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages,
+      tools: [QUOTE_URL_TOOL]
+    };
+
     const response = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'cf-aig-cache-ttl': '3600'  // Cache identical prompts for 1 hour
+        'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages
-      })
+      body: JSON.stringify(apiBody)
     });
 
     if (!response.ok) {
@@ -3023,8 +3089,56 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44".`;
     }
 
-    const data = await response.json();
-    const reply = data.content[0].text;
+    let data = await response.json();
+
+    // Tool-use loop: handle build_quote_url calls (max 8 iterations for multi-URL responses)
+    let toolIterations = 0;
+    while (data.stop_reason === 'tool_use' && toolIterations < 8) {
+      toolIterations++;
+      const toolUseBlocks = data.content.filter(b => b.type === 'tool_use');
+      if (toolUseBlocks.length === 0) break;
+
+      // Process all tool calls in this response
+      const toolResults = [];
+      for (const toolUse of toolUseBlocks) {
+        if (toolUse.name === 'build_quote_url') {
+          const result = handleQuoteUrlTool(toolUse.input);
+          console.log(`[WEBEX] Tool call: build_quote_url → ${result.url?.substring(0, 80)}...`);
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(result)
+          });
+        } else {
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify({ error: 'Unknown tool' }),
+            is_error: true
+          });
+        }
+      }
+
+      // Send tool results back to Claude
+      messages.push({ role: 'assistant', content: data.content });
+      messages.push({ role: 'user', content: toolResults });
+
+      const nextResponse = await fetch(ANTHROPIC_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({ ...apiBody, messages })
+      });
+
+      if (!nextResponse.ok) break;
+      data = await nextResponse.json();
+    }
+
+    const textBlock = data.content?.find(b => b.type === 'text');
+    const reply = textBlock?.text || 'Sorry, I could not generate a response.';
 
     if (personId) {
       await addToHistory(kv, personId, 'user', userMessage);
