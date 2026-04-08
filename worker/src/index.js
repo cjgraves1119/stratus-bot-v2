@@ -2900,14 +2900,35 @@ When the user says "hardware only" or "hardware" (without asking about specs/inf
 Z4 and Z4C default to SEC (Advanced Security) licensing unless the user explicitly requests ENT (Enterprise).
 
 ## OUTPUT RULES
-- For dashboard screenshots: show ONLY the 3-Year URL for all options. Never show 1-Year or 5-Year for dashboard analysis unless user explicitly requests it.
 - For regular SKU quotes: always show 1-Year, 3-Year, and 5-Year URLs unless user says "just" or "only" with one term.
 - URL-only output by default for simple quotes
-- For dashboard screenshots, ALWAYS use the standardized format above
 - Keep responses concise but complete — never skip EOL products
 - NEVER use bullet points (•) before URLs. Just put the URL on its own line after the term label.
 - Use bullet points (•) only for License Analysis sections, never for URLs
 - NEVER include EOS dates, End-of-Support dates, or lifecycle dates in responses unless the user explicitly asks for EOL dates
+
+## MANDATORY DASHBOARD SCREENSHOT TEMPLATE
+When analyzing a Meraki license dashboard screenshot, you MUST follow this EXACT template. Do NOT deviate, do NOT add extra sections, do NOT skip sections. Show ONLY 3-Year URLs. Use build_quote_url for EVERY URL.
+
+**License Analysis:**
+• [Model]: [qty] licensed = [qty] active ✓ (or note discrepancies)
+• ... (list ALL devices from screenshot in order, skip MT with 0 devices)
+
+**EOL Devices:**
+• [Model] (EOL) → [Replacement]
+• ... (list ALL EOL devices)
+
+**Option 1 — Renew As-Is (License Only):**
+[Call build_quote_url with ALL devices as license_only=true, term="3". Include every device from the screenshot that has active devices. Use the ORIGINAL model names (not replacements). Skip MT with 0 devices.]
+
+3-Year Co-Term: [URL from tool]
+
+**Option 2 — Hardware Refresh:**
+[Call build_quote_url with: EOL devices mapped to their replacements (license_only=false), non-EOL devices as license_only=true, term="3". Apply Rules 1-4 for dedup, carry-forward, tally, and ordering.]
+
+3-Year Co-Term: [URL from tool]
+
+CRITICAL: You MUST call build_quote_url TWICE — once for Option 1, once for Option 2. NEVER manually construct URLs. Complete BOTH options in a single response. Do NOT stop after the analysis or after Option 1.
 
 ## ACCESSORY & CONNECTIVITY GUIDANCE
 When asked about SFPs, stacking cables, uplink modules, or how to connect two devices:
@@ -3072,7 +3093,7 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     // Image analysis + tool-use needs more tokens than text-only (2048 for tool calls)
     const apiBody = {
       model: 'claude-sonnet-4-20250514',
-      max_tokens: imageData ? 2048 : 1024,
+      max_tokens: imageData ? 4096 : 1024,
       system: systemPrompt,
       messages,
       tools: [QUOTE_URL_TOOL]
@@ -3107,8 +3128,15 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       const toolResults = [];
       for (const toolUse of toolUseBlocks) {
         if (toolUse.name === 'build_quote_url') {
-          const result = handleQuoteUrlTool(toolUse.input);
-          console.log(`[WEBEX] Tool call: build_quote_url → ${result.url?.substring(0, 80)}...`);
+          let result;
+          try {
+            console.log(`[WEBEX] Tool input: ${JSON.stringify(toolUse.input).substring(0, 500)}`);
+            result = handleQuoteUrlTool(toolUse.input);
+            console.log(`[WEBEX] Tool call: build_quote_url → ${result.url?.substring(0, 80)}...`);
+          } catch (toolErr) {
+            console.error(`[WEBEX] Tool error: ${toolErr.message}`, toolErr.stack);
+            result = { error: toolErr.message, url: null };
+          }
           toolResults.push({
             type: 'tool_result',
             tool_use_id: toolUse.id,
