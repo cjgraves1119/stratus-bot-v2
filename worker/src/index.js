@@ -376,14 +376,37 @@ async function downloadWebexFile(fileUrl, token) {
 }
 
 async function sendMessage(roomId, markdown, token) {
-  await fetch('https://webexapis.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ roomId, markdown })
-  });
+  // Webex has a ~7439 char limit for markdown messages.
+  // If the message exceeds this, split into chunks at line boundaries.
+  const MAX_LEN = 7000; // Leave margin for safety
+  if (markdown.length <= MAX_LEN) {
+    await fetch('https://webexapis.com/v1/messages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId, markdown })
+    });
+    return;
+  }
+
+  // Split long messages at double-newline (paragraph) boundaries
+  const chunks = [];
+  let remaining = markdown;
+  while (remaining.length > MAX_LEN) {
+    let splitIdx = remaining.lastIndexOf('\n\n', MAX_LEN);
+    if (splitIdx < MAX_LEN * 0.3) splitIdx = remaining.lastIndexOf('\n', MAX_LEN);
+    if (splitIdx < MAX_LEN * 0.3) splitIdx = MAX_LEN; // Hard split as last resort
+    chunks.push(remaining.substring(0, splitIdx).trim());
+    remaining = remaining.substring(splitIdx).trim();
+  }
+  if (remaining) chunks.push(remaining);
+
+  for (const chunk of chunks) {
+    await fetch('https://webexapis.com/v1/messages', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId, markdown: chunk })
+    });
+  }
 }
 
 // ─── SKU Suffix Rules ────────────────────────────────────────────────────────
@@ -3213,6 +3236,21 @@ export default {
 
           const token = env.WEBEX_BOT_TOKEN;
           const kv = env.CONVERSATION_KV;
+
+          // ── Webhook dedup: prevent duplicate processing of the same message ──
+          // Webex can deliver webhook events multiple times. Use KV to track
+          // processed message IDs with a 5-minute TTL.
+          const msgId = event.data?.id;
+          if (msgId && kv) {
+            const dedupKey = `dedup_${msgId}`;
+            const already = await kv.get(dedupKey);
+            if (already) {
+              console.log(`[WEBEX] Dedup: skipping already-processed message ${msgId}`);
+              return;
+            }
+            await kv.put(dedupKey, '1', { expirationTtl: 300 }); // 5-min TTL
+          }
+
           const botId = await getBotPersonId(token);
           const personId = event.data.personId;
           if (personId === botId) return;
