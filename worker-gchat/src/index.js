@@ -7356,16 +7356,132 @@ CRITICAL URL RULES:
             break;
           }
 
-          // ── Quote: Generate Stratus URL quote from SKU text ──
+          // ── Quote: Full hybrid quoting engine — identical handler chain to Webex/GChat bot ──
+          // Supports: EOL date lookups, quote confirmations, deterministic pricing,
+          // SKU quotes with validation/suggestions, Claude AI fallback for advisory,
+          // and conversation history for multi-turn interactions.
           case '/api/quote': {
-            const { text } = apiBody;
+            const { text, personId: reqPersonId } = apiBody;
             if (!text) {
               return new Response(JSON.stringify({ error: 'text required' }), { status: 400, headers: jsonHeaders });
             }
 
+            // Conversation history: use provided personId or generate ephemeral one
+            const quotePersonId = reqPersonId || ('chrome-ext-' + Date.now());
+            const kv = env.CONVERSATION_KV;
+
+            // Store user message in conversation history
+            await addToHistory(kv, quotePersonId, 'user', text);
+
+            // Helper: extract URLs + labels from a buildQuoteResponse message string
+            function extractQuoteUrls(responseText) {
+              const urls = [];
+              const tLabels = ['1-Year', '3-Year', '5-Year'];
+              let curOption = '';
+              let oIdx = 0;
+              for (const line of responseText.split('\n')) {
+                const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
+                if (optMatch) { curOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); oIdx = 0; }
+                const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
+                if (urlMatch) {
+                  const label = curOption
+                    ? `${curOption} (${tLabels[oIdx] || ''})`
+                    : tLabels[urls.length] || 'Quote ' + (urls.length + 1);
+                  urls.push({ url: urlMatch[0], label: label.trim() });
+                  oIdx++;
+                }
+              }
+              if (urls.length === 0) {
+                const rawUrls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                rawUrls.forEach((u, i) => urls.push({ url: u, label: tLabels[i] || 'Quote ' + (i + 1) }));
+              }
+              return urls;
+            }
+
+            // Helper: store assistant response and return apiResult
+            async function finalizeQuoteResponse(result, assistantText) {
+              if (assistantText) {
+                await addToHistory(kv, quotePersonId, 'assistant', assistantText);
+              }
+              return result;
+            }
+
+            // ────────────────────────────────────────────
+            // STEP 1: EOL Date Lookup (deterministic)
+            // Same as Webex bot: "when does MR44 go EOL?"
+            // ────────────────────────────────────────────
+            const eolDateReply = handleEolDateRequest(text);
+            if (eolDateReply) {
+              apiResult = await finalizeQuoteResponse({
+                quoteUrls: [],
+                eolWarnings: [],
+                parsedItems: [],
+                eolDateResponse: eolDateReply,
+                handlerType: 'eol-date',
+              }, eolDateReply);
+              break;
+            }
+
+            // ────────────────────────────────────────────
+            // STEP 2: Quote Confirmation (deterministic)
+            // Same as Webex bot: user says "yes" after advisory
+            // ────────────────────────────────────────────
+            const quoteConfirmReply = await handleQuoteConfirmation(text, quotePersonId, kv);
+            if (quoteConfirmReply) {
+              const confirmUrls = extractQuoteUrls(quoteConfirmReply);
+              apiResult = await finalizeQuoteResponse({
+                quoteUrls: confirmUrls,
+                eolWarnings: [],
+                parsedItems: [],
+                handlerType: 'quote-confirmation',
+              }, quoteConfirmReply);
+              break;
+            }
+
+            // ────────────────────────────────────────────
+            // STEP 3: Deterministic Pricing Calculator
+            // Same as Webex bot: "cost of option 2", "price of MR44"
+            // ────────────────────────────────────────────
+            const pricingReply = await handlePricingRequest(text, quotePersonId, kv);
+            if (pricingReply) {
+              apiResult = await finalizeQuoteResponse({
+                quoteUrls: [],
+                eolWarnings: [],
+                parsedItems: [],
+                pricingResponse: pricingReply,
+                handlerType: 'pricing',
+              }, pricingReply);
+              break;
+            }
+
+            // ────────────────────────────────────────────
+            // STEP 4: Parse SKUs and generate quote
+            // ────────────────────────────────────────────
             const parsed = parseMessage(text);
             if (!parsed || !parsed.items || parsed.items.length === 0) {
-              apiResult = { error: 'No valid SKUs detected. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67, or 4 MR licenses' };
+              // No SKUs detected — fall through to Claude (same as Webex bot)
+              // Handles technical questions, product comparisons, advisory, etc.
+              try {
+                const claudeReply = await askClaude(
+                  text,
+                  quotePersonId,
+                  env,
+                  null,   // no image
+                  false,  // no tools
+                );
+                const claudeUrls = (claudeReply || '').match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                const termLabels = ['1-Year', '3-Year', '5-Year'];
+                apiResult = await finalizeQuoteResponse({
+                  quoteUrls: claudeUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
+                  eolWarnings: [],
+                  parsedItems: [],
+                  claudeResponse: claudeReply || '',
+                  handlerType: 'claude-fallback',
+                }, claudeReply);
+              } catch (claudeErr) {
+                console.error('[API/quote] Claude fallback error:', claudeErr);
+                apiResult = { error: 'No valid SKUs detected and AI fallback failed. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67' };
+              }
               break;
             }
 
@@ -7396,11 +7512,10 @@ CRITICAL URL RULES:
                 eolWarnings: [],
                 parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
                 suggestions,
+                handlerType: 'suggestions-only',
               };
               break;
             }
-
-            const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
 
             // Check for EOL warnings
             const eolWarnings = [];
@@ -7412,39 +7527,52 @@ CRITICAL URL RULES:
               }
             }
 
-            let quoteUrls = [];
-
             // Route through buildQuoteResponse for consistent output
-            // Use validItems only if some were invalid, otherwise use all parsed items
             const itemsForQuote = suggestions.length > 0
               ? { ...parsed, items: validItems }
               : parsed;
             const quoteResult = buildQuoteResponse(itemsForQuote);
-            const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
-            const termLabels = ['1-Year', '3-Year', '5-Year'];
-            let currentOption = '';
-            let optionIdx = 0;
-            for (const line of responseText.split('\n')) {
-              const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
-              if (optMatch) { currentOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optionIdx = 0; }
-              const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
-              if (urlMatch) {
-                const label = currentOption
-                  ? `${currentOption} (${termLabels[optionIdx] || ''})`
-                  : termLabels[quoteUrls.length] || 'Quote ' + (quoteUrls.length + 1);
-                quoteUrls.push({ url: urlMatch[0], label: label.trim() });
-                optionIdx++;
+
+            // If buildQuoteResponse says it needs LLM (advisory, revision, etc.),
+            // fall through to Claude — identical to Webex bot behavior
+            if (quoteResult.needsLlm) {
+              try {
+                const claudeReply = await askClaude(
+                  text,
+                  quotePersonId,
+                  env,
+                  null,
+                  false,
+                );
+                const claudeUrls = (claudeReply || '').match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                const termLabels = ['1-Year', '3-Year', '5-Year'];
+                apiResult = await finalizeQuoteResponse({
+                  quoteUrls: claudeUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
+                  eolWarnings,
+                  parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                  claudeResponse: claudeReply || '',
+                  handlerType: 'claude-advisory',
+                  ...(suggestions.length > 0 ? { suggestions } : {}),
+                }, claudeReply);
+              } catch (claudeErr) {
+                console.error('[API/quote] Claude fallback error:', claudeErr);
+                apiResult = { error: 'AI response failed. Please try again.' };
               }
+              break;
             }
-            if (quoteUrls.length === 0) {
-              const urls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
-              urls.forEach((u, i) => quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) }));
-            }
+
+            // ── Deterministic quote — extract URLs from buildQuoteResponse output ──
+            const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
+            const quoteUrls = extractQuoteUrls(responseText);
+
+            // Store the full deterministic response in history so pricing follow-ups work
+            await addToHistory(kv, quotePersonId, 'assistant', responseText);
 
             apiResult = {
               quoteUrls,
               eolWarnings,
               parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+              handlerType: 'deterministic',
               ...(suggestions.length > 0 ? { suggestions } : {}),
             };
             break;

@@ -132,8 +132,8 @@ registerMessageHandlers({
   },
 
   // ── Quoting ──
-  [MSG.GENERATE_QUOTE]: async ({ skuText }) => {
-    return api.generateQuote(skuText);
+  [MSG.GENERATE_QUOTE]: async ({ skuText, personId }) => {
+    return api.generateQuote(skuText, personId);
   },
 
   // ── Draft Reply ──

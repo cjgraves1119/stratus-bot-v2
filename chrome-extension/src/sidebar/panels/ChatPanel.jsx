@@ -206,7 +206,7 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
 
       if (isQuoteIntent || isDirectSku) {
         try {
-          const apiResult = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: messageText.trim() });
+          const apiResult = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: messageText.trim(), personId: 'chrome-ext-chat-' + Date.now() });
           if (apiResult && (apiResult.quoteUrls || apiResult.urls)) {
             const rawUrls = apiResult.quoteUrls || apiResult.urls;
             const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);

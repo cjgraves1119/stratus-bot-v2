@@ -21,6 +21,9 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
   const inputRef = useRef(null);
   const lastRequestRef = useRef(0); // Rate-limit: min 1s between requests
 
+  // Persistent personId for conversation history (enables pricing follow-ups, revisions, confirmations)
+  const personIdRef = useRef('chrome-ext-quote-' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now()));
+
   // Pre-fill from navData
   useEffect(() => {
     if (navData?.skuText) {
@@ -89,9 +92,12 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setShowZohoPrompt(false);
 
     try {
-      // Route ALL quotes through the worker API — uses the exact same
-      // parseMessage + buildQuoteResponse as Webex and GChat bots
-      const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: skuText.trim() });
+      // Route ALL requests through the worker API — uses the exact same
+      // handler chain as Webex and GChat bots: EOL dates → confirmations → pricing → SKU quotes → Claude
+      const res = await sendToBackground(MSG.GENERATE_QUOTE, {
+        skuText: skuText.trim(),
+        personId: personIdRef.current,
+      });
       if (res) {
         const rawUrls = res.quoteUrls || res.urls || [];
         const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
@@ -99,13 +105,38 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
         const suggestArr = Array.isArray(res.suggestions) ? res.suggestions : null;
 
-        if (urlsArr.length > 0 || (suggestArr && suggestArr.length > 0)) {
+        // Handle all response types from the full handler chain
+        if (res.pricingResponse) {
+          // Deterministic pricing calculator response
+          setResult({
+            urls: [],
+            eolWarnings: [],
+            suggestions: null,
+            parsed: [],
+            pricingResponse: res.pricingResponse,
+            handlerType: 'pricing',
+            source: 'pricing',
+          });
+        } else if (res.eolDateResponse) {
+          // EOL date lookup response
+          setResult({
+            urls: [],
+            eolWarnings: [],
+            suggestions: null,
+            parsed: [],
+            eolDateResponse: res.eolDateResponse,
+            handlerType: 'eol-date',
+            source: 'eol-date',
+          });
+        } else if (urlsArr.length > 0 || (suggestArr && suggestArr.length > 0) || res.claudeResponse) {
           setResult({
             urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
             eolWarnings: eolArr,
             suggestions: suggestArr,
             parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
-            source: 'api',
+            claudeResponse: res.claudeResponse || null,
+            handlerType: res.handlerType || 'deterministic',
+            source: res.claudeResponse && urlsArr.length === 0 ? 'claude' : 'api',
           });
         } else if (res.error) {
           setError(res.error);
@@ -151,20 +182,27 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setResult(null);
     setShowZohoPrompt(false);
     try {
-      const res = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: text.trim() });
+      const res = await sendToBackground(MSG.GENERATE_QUOTE, {
+        skuText: text.trim(),
+        personId: personIdRef.current,
+      });
       if (res) {
         const rawUrls = res.quoteUrls || res.urls || [];
         const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
         const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
         const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
         const suggestArr = Array.isArray(res.suggestions) ? res.suggestions : null;
-        if (urlsArr.length > 0 || (suggestArr && suggestArr.length > 0)) {
+        if (urlsArr.length > 0 || (suggestArr && suggestArr.length > 0) || res.claudeResponse || res.pricingResponse || res.eolDateResponse) {
           setResult({
             urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
             eolWarnings: eolArr,
             suggestions: suggestArr,
             parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
-            source: 'api',
+            claudeResponse: res.claudeResponse || null,
+            pricingResponse: res.pricingResponse || null,
+            eolDateResponse: res.eolDateResponse || null,
+            handlerType: res.handlerType || 'deterministic',
+            source: res.pricingResponse ? 'pricing' : res.eolDateResponse ? 'eol-date' : res.claudeResponse ? 'claude' : 'api',
           });
         } else if (res.error) {
           setError(res.error);
@@ -390,6 +428,105 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         </div>
       )}
 
+      {/* Pricing Response (deterministic calculator) */}
+      {result && result.pricingResponse && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{
+            display: 'inline-block', padding: '4px 10px', borderRadius: 4,
+            fontSize: 11, fontWeight: 600, marginBottom: 12,
+            background: '#e8f5e9', color: '#2e7d32',
+          }}>
+            💰 Pricing Calculator
+          </div>
+          <div style={{
+            background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+            borderRadius: 8, padding: 12, fontSize: 13, lineHeight: 1.6,
+            color: COLORS.TEXT_PRIMARY, whiteSpace: 'pre-wrap', fontFamily: 'monospace',
+          }}>
+            {result.pricingResponse.split('\n').map((line, i) => {
+              const isBold = line.startsWith('**') || line.includes('**');
+              const cleaned = line.replace(/\*\*/g, '');
+              const isTotal = /total|cart/i.test(cleaned);
+              return (
+                <div key={i} style={{
+                  fontWeight: (isBold || isTotal) ? 700 : 400,
+                  borderTop: isTotal ? `1px solid ${COLORS.BORDER}` : 'none',
+                  paddingTop: isTotal ? 6 : 0,
+                  marginTop: isTotal ? 6 : 0,
+                }}>
+                  {cleaned}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* EOL Date Response */}
+      {result && result.eolDateResponse && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{
+            display: 'inline-block', padding: '4px 10px', borderRadius: 4,
+            fontSize: 11, fontWeight: 600, marginBottom: 12,
+            background: '#fef7e0', color: '#e37400',
+          }}>
+            📅 EOL Date Lookup
+          </div>
+          <div style={{
+            background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+            borderRadius: 8, padding: 12, fontSize: 13, lineHeight: 1.6,
+            color: COLORS.TEXT_PRIMARY, whiteSpace: 'pre-wrap',
+          }}>
+            {result.eolDateResponse.split('\n').map((line, i) => {
+              const cleaned = line.replace(/\*\*/g, '');
+              const isBold = line.startsWith('**') || line.includes('**');
+              return (
+                <div key={i} style={{ fontWeight: isBold ? 700 : 400 }}>
+                  {cleaned}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Claude AI Response (technical questions, advisory) */}
+      {result && result.claudeResponse && (!result.urls || result.urls.length === 0) && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{
+            display: 'inline-block', padding: '4px 10px', borderRadius: 4,
+            fontSize: 11, fontWeight: 600, marginBottom: 12,
+            background: '#e3f2fd', color: '#1565c0',
+          }}>
+            🤖 AI Response
+          </div>
+          <div style={{
+            background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+            borderRadius: 8, padding: 12, fontSize: 13, lineHeight: 1.6,
+            color: COLORS.TEXT_PRIMARY, whiteSpace: 'pre-wrap',
+          }}>
+            {result.claudeResponse.split('\n').map((line, i) => {
+              // Basic markdown: bold, links, URLs
+              const parts = [];
+              let remaining = line;
+              // Bold
+              remaining = remaining.replace(/\*\*([^*]+)\*\*/g, (_, t) => `<b>${t}</b>`);
+              // Inline URLs
+              const urlRegex = /(https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+)/g;
+              let match, lastIdx = 0;
+              const lineElements = [];
+              while ((match = urlRegex.exec(remaining)) !== null) {
+                if (match.index > lastIdx) lineElements.push(<span key={`t${i}-${lastIdx}`} dangerouslySetInnerHTML={{ __html: remaining.substring(lastIdx, match.index) }} />);
+                lineElements.push(<a key={`u${i}-${match.index}`} href={match[1]} target="_blank" rel="noopener" style={{ color: COLORS.STRATUS_BLUE, wordBreak: 'break-all' }}>{match[1].length > 60 ? match[1].substring(0, 60) + '...' : match[1]}</a>);
+                lastIdx = match.index + match[0].length;
+              }
+              if (lastIdx < remaining.length) lineElements.push(<span key={`e${i}`} dangerouslySetInnerHTML={{ __html: remaining.substring(lastIdx) }} />);
+              return <div key={i}>{lineElements.length > 0 ? lineElements : <span dangerouslySetInnerHTML={{ __html: remaining }} />}</div>;
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Results */}
       {result && result.urls && result.urls.length > 0 && (
         <div style={{ marginTop: 16 }}>
@@ -550,7 +687,8 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, lineHeight: 1.5 }}>
           <strong>Tips:</strong> Enter SKUs with quantities (10 MR44, 5 MS130-24P).
           Supports CSV, lists, and natural language. EOL products auto-generate replacement options.
-          Use "hardware only" or "license only" modifiers.
+          Use "hardware only" or "license only" modifiers. Ask "cost of option 2" for pricing.
+          Try "when does MR44 go EOL?" or "MR46 vs MR44" for technical questions.
         </div>
       </div>
     </div>
