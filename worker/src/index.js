@@ -3153,9 +3153,20 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     }
 
     // Tool-use loop: handle build_quote_url calls (max 8 iterations for multi-URL responses)
+    // Accumulate text from ALL iterations — Claude emits analysis text alongside tool calls,
+    // and we need to capture it all (not just the final iteration's text).
+    let accumulatedText = '';
     let toolIterations = 0;
     while (data.stop_reason === 'tool_use' && toolIterations < 8) {
       toolIterations++;
+
+      // Capture text blocks from this iteration BEFORE processing tools
+      for (const block of data.content) {
+        if (block.type === 'text' && block.text) {
+          accumulatedText += block.text + '\n\n';
+        }
+      }
+
       const toolUseBlocks = data.content.filter(b => b.type === 'tool_use');
       if (toolUseBlocks.length === 0) break;
 
@@ -3205,8 +3216,10 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       data = await nextResponse.json();
     }
 
-    const textBlock = data.content?.find(b => b.type === 'text');
-    const reply = textBlock?.text || 'Sorry, I could not generate a response.';
+    // Capture text from the final response too
+    const finalTextBlock = data.content?.find(b => b.type === 'text');
+    if (finalTextBlock?.text) accumulatedText += finalTextBlock.text;
+    const reply = accumulatedText.trim() || 'Sorry, I could not generate a response.';
 
     if (personId) {
       await addToHistory(kv, personId, 'user', userMessage);
