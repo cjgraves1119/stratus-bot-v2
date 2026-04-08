@@ -685,28 +685,11 @@ function buildStratusUrl(items) {
     merged.set(sku, (merged.get(sku) || 0) + qty);
   }
 
-  // Sort by product family group, hardware before licenses within each group
-  const _skuSortKey = (sku) => {
-    const upper = sku.toUpperCase();
-    const isLicense = upper.startsWith('LIC-');
-    // Determine product family for grouping order
-    let familyOrder;
-    if (/^(MR\d|CW9|LIC-ENT|LIC-CW)/.test(upper)) familyOrder = '1-AP';
-    else if (/^(MS\d|LIC-MS)/.test(upper)) familyOrder = '2-SW';
-    else if (/^(C9\d|LIC-C9)/.test(upper)) familyOrder = '3-CAT';
-    else if (/^(MX\d|LIC-MX|Z\d|LIC-Z)/.test(upper)) familyOrder = '4-SEC';
-    else if (/^(MV\d|LIC-MV)/.test(upper)) familyOrder = '5-CAM';
-    else if (/^(MT\d|LIC-MT)/.test(upper)) familyOrder = '6-SENS';
-    else if (/^(MG\d|LIC-MG)/.test(upper)) familyOrder = '7-CELL';
-    else if (/^(MA-SFP|STACK)/.test(upper)) familyOrder = '8-ACC';
-    else familyOrder = '9-OTHER';
-    // Within group: hardware (0) before licenses (1), then alphabetical
-    return `${familyOrder}-${isLicense ? '1' : '0'}-${upper}`;
-  };
-
-  const sortedSkus = [...merged.keys()].sort((a, b) => _skuSortKey(a).localeCompare(_skuSortKey(b)));
-  const qtys = sortedSkus.map(s => merged.get(s));
-  return `https://stratusinfosystems.com/order/?item=${sortedSkus.join(',')}&qty=${qtys.join(',')}`;
+  // Preserve insertion order (= request order). Hardware is pushed before its
+  // license in every call site, so each device's HW+LIC stay grouped naturally.
+  const orderedSkus = [...merged.keys()];
+  const qtys = orderedSkus.map(s => merged.get(s));
+  return `https://stratusinfosystems.com/order/?item=${orderedSkus.join(',')}&qty=${qtys.join(',')}`;
 }
 
 // ─── EOL Check ───────────────────────────────────────────────────────────────
