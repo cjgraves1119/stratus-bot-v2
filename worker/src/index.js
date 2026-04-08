@@ -1843,6 +1843,11 @@ function parseMessage(text) {
   if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/.test(upper)) {
     modifiers.licenseOnly = true;
   }
+  // "licenses for [SKU]" or "renewal [SKU]" implies license-only (renewal scenario)
+  // But NOT "MX67 with 3 year license" — that's hardware + license
+  if (!modifiers.licenseOnly && /\b(LICENSE[S]?\s+FOR\s+(AN?\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d|RENEWAL[S]?\s+(OF\s+|FOR\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d)/.test(upper)) {
+    modifiers.licenseOnly = true;
+  }
 
   const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
 

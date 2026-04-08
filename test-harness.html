@@ -1,0 +1,1359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stratus AI Extension Test Harness</title>
+  <style>
+    :root {
+      --stratus-blue: #1a73a7;
+      --stratus-dark: #0d4f73;
+      --stratus-light: #e8f4f8;
+      --success: #34a853;
+      --warning: #fbbc04;
+      --error: #ea4335;
+      --text-primary: #202124;
+      --text-secondary: #5f6368;
+      --border: #dadce0;
+      --bg-primary: #ffffff;
+      --bg-secondary: #f8f9fa;
+      --bg-hover: #f1f3f4;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f0f2f5;
+      color: var(--text-primary);
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ── Layout ── */
+    .sidebar {
+      width: 400px;
+      min-width: 360px;
+      max-width: 480px;
+      background: var(--bg-primary);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      resize: horizontal;
+      overflow: hidden;
+    }
+
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 20px;
+      overflow-y: auto;
+    }
+
+    /* ── Header ── */
+    .header {
+      padding: 12px 16px;
+      background: var(--stratus-blue);
+      color: white;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .header h1 {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .header .badge {
+      font-size: 10px;
+      background: rgba(255,255,255,0.2);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    /* ── Tabs ── */
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .tab-bar button {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      background: none;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+
+    .tab-bar button.active {
+      color: var(--stratus-blue);
+      border-bottom-color: var(--stratus-blue);
+      font-weight: 600;
+    }
+
+    .tab-bar button:hover:not(.active) {
+      background: var(--bg-hover);
+    }
+
+    /* ── Panel Content ── */
+    .panel {
+      display: none;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .panel.active {
+      display: flex;
+    }
+
+    /* ── Quote Panel ── */
+    .quote-panel {
+      padding: 16px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .quote-panel textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: monospace;
+      resize: vertical;
+      outline: none;
+      margin-bottom: 12px;
+    }
+
+    .quote-panel textarea:focus {
+      border-color: var(--stratus-blue);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .btn-primary {
+      flex: 1;
+      padding: 10px 16px;
+      background: var(--stratus-blue);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.7;
+      cursor: default;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--stratus-dark);
+    }
+
+    /* ── Response Cards ── */
+    .error-box {
+      padding: 12px;
+      background: #fce8e6;
+      border-radius: 8px;
+      color: var(--error);
+      font-size: 13px;
+      margin-top: 12px;
+    }
+
+    .suggestion-card {
+      padding: 10px;
+      background: #fff3e0;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 152, 0, 0.2);
+      margin-bottom: 8px;
+    }
+
+    .suggestion-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: #e65100;
+      margin-bottom: 4px;
+    }
+
+    .suggestion-body {
+      font-size: 12px;
+      color: var(--text-primary);
+    }
+
+    .suggestion-btn {
+      background: var(--stratus-light);
+      color: var(--stratus-blue);
+      border: 1px solid rgba(26, 115, 167, 0.27);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-right: 6px;
+      margin-top: 4px;
+    }
+
+    .suggestion-btn:hover {
+      background: var(--stratus-blue);
+      color: white;
+    }
+
+    .handler-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    .badge-pricing { background: #e8f5e9; color: #2e7d32; }
+    .badge-eol { background: #fef7e0; color: #e37400; }
+    .badge-ai { background: #e3f2fd; color: #1565c0; }
+    .badge-deterministic { background: #e8f5e9; color: #2e7d32; }
+
+    .response-box {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-primary);
+      white-space: pre-wrap;
+    }
+
+    .response-box.mono {
+      font-family: monospace;
+    }
+
+    .response-box .line-bold {
+      font-weight: 700;
+    }
+
+    .response-box .line-total {
+      font-weight: 700;
+      border-top: 1px solid var(--border);
+      padding-top: 6px;
+      margin-top: 6px;
+    }
+
+    .eol-warning {
+      padding: 10px;
+      background: #fef7e0;
+      border-radius: 8px;
+      border: 1px solid rgba(251, 188, 4, 0.2);
+      margin-bottom: 12px;
+    }
+
+    .eol-warning-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: #e37400;
+      margin-bottom: 4px;
+    }
+
+    .eol-warning-item {
+      font-size: 12px;
+      color: var(--text-primary);
+      padding: 2px 0;
+    }
+
+    .url-card {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 8px;
+    }
+
+    .url-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+
+    .url-display {
+      background: var(--bg-secondary);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 11px;
+      word-break: break-all;
+      margin-bottom: 8px;
+    }
+
+    .url-display a {
+      color: var(--stratus-blue);
+      text-decoration: none;
+    }
+
+    .url-display a:hover {
+      text-decoration: underline;
+    }
+
+    .url-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .url-actions button, .url-actions a {
+      flex: 1;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    .btn-copy {
+      background: var(--stratus-blue);
+      color: white;
+      border: none;
+    }
+
+    .btn-open {
+      background: transparent;
+      color: var(--stratus-blue);
+      border: 1px solid var(--stratus-blue);
+    }
+
+    /* ── Chat Panel ── */
+    .chat-panel {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .chat-empty {
+      text-align: center;
+      color: var(--text-secondary);
+      padding: 16px;
+    }
+
+    .chat-empty .emoji {
+      font-size: 28px;
+      margin-bottom: 8px;
+    }
+
+    .chat-empty p {
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
+
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: center;
+    }
+
+    .quick-btn {
+      padding: 6px 12px;
+      background: var(--stratus-light);
+      color: var(--stratus-blue);
+      border: 1px solid rgba(26, 115, 167, 0.2);
+      border-radius: 16px;
+      font-size: 11px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    .quick-btn:hover {
+      background: var(--stratus-blue);
+      color: white;
+    }
+
+    .msg-bubble {
+      max-width: 90%;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+      word-wrap: break-word;
+    }
+
+    .msg-user {
+      align-self: flex-end;
+      background: var(--stratus-blue);
+      color: white;
+    }
+
+    .msg-assistant {
+      align-self: flex-start;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+    }
+
+    .msg-tool-indicator {
+      font-size: 10px;
+      color: #7b1fa2;
+      margin-top: 4px;
+    }
+
+    .chat-loading {
+      align-self: flex-start;
+      padding: 10px 14px;
+      background: var(--bg-secondary);
+      border-radius: 8px;
+      color: var(--text-secondary);
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .chat-input-area {
+      border-top: 1px solid var(--border);
+      padding: 10px 16px;
+      background: var(--bg-primary);
+    }
+
+    .chat-input-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .chat-input-row textarea {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+      resize: none;
+      height: 40px;
+      outline: none;
+    }
+
+    .chat-input-row textarea:focus {
+      border-color: var(--stratus-blue);
+    }
+
+    .chat-top-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .chat-top-actions span {
+      font-size: 10px;
+      color: var(--text-secondary);
+    }
+
+    .btn-stop {
+      background: #fce8e6;
+      border: 1px solid rgba(234, 67, 53, 0.27);
+      color: var(--error);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .btn-new-chat {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    /* ── Log Panel (right side) ── */
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .log-header h2 {
+      font-size: 16px;
+      color: var(--text-primary);
+    }
+
+    .log-clear {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--text-secondary);
+    }
+
+    .log-entries {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .log-entry {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
+
+    .log-entry-header {
+      padding: 8px 12px;
+      background: var(--bg-secondary);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .log-entry-header:hover {
+      background: var(--bg-hover);
+    }
+
+    .log-method {
+      font-weight: 700;
+      color: var(--stratus-blue);
+    }
+
+    .log-status-ok { color: var(--success); font-weight: 600; }
+    .log-status-err { color: var(--error); font-weight: 600; }
+
+    .log-entry-body {
+      display: none;
+      padding: 8px 12px;
+      font-size: 11px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      max-height: 300px;
+      overflow-y: auto;
+      background: #fafafa;
+      border-top: 1px solid var(--border);
+    }
+
+    .log-entry-body.open {
+      display: block;
+    }
+
+    .log-timing {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    /* ── Config Banner ── */
+    .config-banner {
+      padding: 8px 16px;
+      background: #fff3e0;
+      border-bottom: 1px solid #ffe0b2;
+      font-size: 11px;
+      color: #e65100;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .config-banner input {
+      flex: 1;
+      padding: 4px 8px;
+      border: 1px solid #ffe0b2;
+      border-radius: 4px;
+      font-size: 11px;
+      font-family: monospace;
+    }
+
+    .config-banner button {
+      padding: 4px 12px;
+      background: #e65100;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    /* ── Tips ── */
+    .tips-box {
+      margin-top: 16px;
+      padding: 10px;
+      background: var(--bg-primary);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    .tips-box .tips-text {
+      font-size: 11px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    /* ── Parsed Items ── */
+    .parsed-items {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 8px;
+    }
+
+    .parsed-items-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    .parsed-item {
+      font-size: 12px;
+      padding: 3px 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .parsed-item .qty { font-weight: 600; }
+    .parsed-item .valid { color: var(--success); font-size: 10px; }
+    .parsed-item .eol { color: #e37400; font-size: 10px; }
+    .parsed-item .invalid { color: var(--error); font-size: 10px; }
+
+    /* ── Responsive ── */
+    @media (max-width: 800px) {
+      body { flex-direction: column; }
+      .sidebar { width: 100%; min-width: 100%; max-width: 100%; height: 60vh; resize: vertical; }
+      .main-content { height: 40vh; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════ SIDEBAR (Extension Replica) ═══════════════════ -->
+<div class="sidebar">
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <h1>Stratus AI</h1>
+    </div>
+    <span class="badge">TEST HARNESS</span>
+  </div>
+
+  <!-- Config Banner -->
+  <div class="config-banner" id="configBanner">
+    <span>API Key:</span>
+    <input type="password" id="apiKeyInput" placeholder="Enter API key..." />
+    <button onclick="saveApiKey()">Save</button>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tab-bar">
+    <button class="active" onclick="switchTab('quote', this)">Quote</button>
+    <button onclick="switchTab('chat', this)">Chat</button>
+  </div>
+
+  <!-- ── Quote Panel ── -->
+  <div class="panel active" id="quotePanel">
+    <div class="quote-panel">
+      <textarea id="quoteInput" rows="4" placeholder="Enter SKUs (e.g., 10 MR44, 5 MS130-24P, 2 MX67)&#10;Or ask: &quot;when does MR44 go EOL?&quot;, &quot;cost of option 2&quot;, &quot;whats a good firewall for 30 people?&quot;"></textarea>
+      <div class="btn-row">
+        <button class="btn-primary" id="quoteBtn" onclick="handleQuote()">Generate Quote</button>
+      </div>
+
+      <div id="quoteError"></div>
+      <div id="quoteSuggestions"></div>
+      <div id="quoteResults"></div>
+
+      <div class="tips-box">
+        <div class="tips-text">
+          <strong>Tips:</strong> Enter SKUs with quantities (10 MR44, 5 MS130-24P).
+          Supports CSV, lists, and natural language. EOL products auto-generate replacement options.
+          Use "hardware only" or "license only" modifiers. Ask "cost of option 2" for pricing.
+          Try "when does MR44 go EOL?" or "MR46 vs MR44" for technical questions.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Chat Panel ── -->
+  <div class="panel" id="chatPanel">
+    <div class="chat-panel">
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-empty" id="chatEmpty">
+          <div class="emoji">&#128172;</div>
+          <p>Chat with Stratus AI. Full Zoho CRM access — create deals, quotes, look up accounts, manage tasks.</p>
+          <div class="quick-actions">
+            <button class="quick-btn" onclick="sendChat('Show my most recent quotes in Zoho')">Recent Quotes</button>
+            <button class="quick-btn" onclick="sendChat('Show my open deals in Zoho CRM')">Open Deals</button>
+            <button class="quick-btn" onclick="sendChat('Help me create a quote in Zoho CRM')">Create Quote</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div class="chat-top-actions">
+          <span id="chatMsgCount"></span>
+          <div style="display:flex;gap:6px;">
+            <button class="btn-stop" id="chatStopBtn" onclick="stopChat()" style="display:none;">&#9209; Stop</button>
+            <button class="btn-new-chat" onclick="newChat()">&#128260; New Chat</button>
+          </div>
+        </div>
+        <div class="chat-input-row">
+          <textarea id="chatInput" placeholder="Ask about CRM, quotes, accounts..." onkeydown="chatKeyDown(event)"></textarea>
+          <button class="btn-primary" style="flex:none;padding:8px 16px;" id="chatSendBtn" onclick="sendChat()">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════ MAIN: API Log ═══════════════════ -->
+<div class="main-content">
+  <div class="log-header">
+    <h2>API Request Log</h2>
+    <button class="log-clear" onclick="clearLog()">Clear</button>
+  </div>
+  <div class="log-entries" id="logEntries">
+    <div style="text-align:center;color:var(--text-secondary);padding:40px;font-size:13px;">
+      API requests will appear here as you interact with the extension panels.
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════
+// Configuration
+// ═══════════════════════════════════════════════
+
+const API_BASE = 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev';
+let API_KEY = localStorage.getItem('stratus_test_api_key') || '';
+
+// Persistent personId for quote panel conversation history
+const quotePersonId = 'test-harness-quote-' + Date.now();
+const chatPersonId = 'test-harness-chat-' + Date.now();
+
+// Chat state
+let chatMessages = [];
+let chatLoading = false;
+let chatAborted = false;
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+  if (API_KEY) {
+    document.getElementById('apiKeyInput').value = API_KEY;
+    document.getElementById('configBanner').style.background = '#e8f5e9';
+    document.getElementById('configBanner').querySelector('span').textContent = 'API Key: ✓ configured';
+  }
+  document.getElementById('quoteInput').focus();
+});
+
+function saveApiKey() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  if (key) {
+    API_KEY = key;
+    localStorage.setItem('stratus_test_api_key', key);
+    document.getElementById('configBanner').style.background = '#e8f5e9';
+    document.getElementById('configBanner').querySelector('span').textContent = 'API Key: ✓ saved';
+  }
+}
+
+// ═══════════════════════════════════════════════
+// Tab Switching
+// ═══════════════════════════════════════════════
+
+function switchTab(tab, btn) {
+  document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(tab + 'Panel').classList.add('active');
+  if (tab === 'chat') document.getElementById('chatInput').focus();
+  else document.getElementById('quoteInput').focus();
+}
+
+// ═══════════════════════════════════════════════
+// API Call Wrapper (with logging)
+// ═══════════════════════════════════════════════
+
+let logCounter = 0;
+
+async function apiCall(endpoint, payload, timeout = 30000) {
+  if (!API_KEY) {
+    throw new Error('API key not configured. Enter it in the banner above.');
+  }
+
+  const logId = ++logCounter;
+  const startTime = performance.now();
+
+  addLogEntry(logId, 'POST', endpoint, payload, 'pending');
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(API_BASE + endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': API_KEY,
+        'X-User-Email': 'chrisg@stratusinfosystems.com',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+    const elapsed = Math.round(performance.now() - startTime);
+
+    if (response.status === 401) {
+      updateLogEntry(logId, 401, { error: 'Invalid API key' }, elapsed);
+      throw new Error('Invalid API key. Check your settings.');
+    }
+
+    const data = await response.json();
+    updateLogEntry(logId, response.status, data, elapsed);
+    return data;
+
+  } catch (err) {
+    clearTimeout(timer);
+    const elapsed = Math.round(performance.now() - startTime);
+    if (err.name === 'AbortError') {
+      updateLogEntry(logId, 'TIMEOUT', { error: `Timed out after ${timeout/1000}s` }, elapsed);
+      throw new Error(`Request timed out after ${timeout/1000}s.`);
+    }
+    updateLogEntry(logId, 'ERROR', { error: err.message }, elapsed);
+    throw err;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// Quote Panel
+// ═══════════════════════════════════════════════
+
+async function handleQuote() {
+  const text = document.getElementById('quoteInput').value.trim();
+  if (!text) return;
+
+  const btn = document.getElementById('quoteBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  document.getElementById('quoteError').innerHTML = '';
+  document.getElementById('quoteSuggestions').innerHTML = '';
+  document.getElementById('quoteResults').innerHTML = '';
+
+  try {
+    const res = await apiCall('/api/quote', { text, personId: quotePersonId }, 60000);
+    renderQuoteResult(res);
+  } catch (err) {
+    document.getElementById('quoteError').innerHTML =
+      `<div class="error-box">${escapeHtml(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate Quote';
+  }
+}
+
+function renderQuoteResult(res) {
+  if (!res) return;
+
+  const suggestEl = document.getElementById('quoteSuggestions');
+  const resultEl = document.getElementById('quoteResults');
+  const errorEl = document.getElementById('quoteError');
+
+  // Error
+  if (res.error && !res.quoteUrls && !res.suggestions && !res.pricingResponse && !res.eolDateResponse && !res.claudeResponse) {
+    errorEl.innerHTML = `<div class="error-box">${escapeHtml(res.error)}</div>`;
+    return;
+  }
+
+  // Suggestions
+  const suggestions = Array.isArray(res.suggestions) ? res.suggestions : [];
+  if (suggestions.length > 0) {
+    suggestEl.innerHTML = '<div style="margin-top:12px;">' + suggestions.map((s, i) => `
+      <div class="suggestion-card">
+        <div class="suggestion-title">
+          ${s.isCommonMistake ? '&#9888;&#65039;' : '&#10067;'} ${escapeHtml(s.input)}: ${escapeHtml(s.reason)}
+        </div>
+        ${s.suggest && s.suggest.length > 0 ? `
+          <div class="suggestion-body">
+            <span style="color:var(--text-secondary);">Did you mean: </span>
+            ${s.suggest.map(sug => `<button class="suggestion-btn" onclick="applySuggestion('${escapeHtml(s.input)}','${escapeHtml(sug)}')">${escapeHtml(sug)}</button>`).join('')}
+          </div>
+        ` : ''}
+      </div>
+    `).join('') + '</div>';
+  }
+
+  let html = '';
+
+  // Pricing response
+  if (res.pricingResponse) {
+    html += `
+      <div style="margin-top:16px;">
+        <div class="handler-badge badge-pricing">&#128176; Pricing Calculator</div>
+        <div class="response-box mono">
+          ${renderPricingLines(res.pricingResponse)}
+        </div>
+      </div>`;
+  }
+
+  // EOL date response
+  if (res.eolDateResponse) {
+    html += `
+      <div style="margin-top:16px;">
+        <div class="handler-badge badge-eol">&#128197; EOL Date Lookup</div>
+        <div class="response-box">
+          ${renderMarkdownLines(res.eolDateResponse)}
+        </div>
+      </div>`;
+  }
+
+  // Claude AI response (no URLs)
+  if (res.claudeResponse && !(res.quoteUrls && res.quoteUrls.length > 0)) {
+    html += `
+      <div style="margin-top:16px;">
+        <div class="handler-badge badge-ai">&#129302; AI Response</div>
+        <div class="response-box">
+          ${renderMarkdownLines(res.claudeResponse)}
+        </div>
+      </div>`;
+  }
+
+  // Quote URLs
+  const urls = res.quoteUrls || res.urls || [];
+  const urlsArr = Array.isArray(urls) ? urls : (urls ? [urls] : []);
+  if (urlsArr.length > 0) {
+    html += '<div style="margin-top:16px;">';
+    html += '<div class="handler-badge badge-deterministic">&#9889; Deterministic</div>';
+
+    // EOL warnings
+    const eolWarnings = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
+    if (eolWarnings.length > 0) {
+      html += `<div class="eol-warning">
+        <div class="eol-warning-title">EOL Warnings</div>
+        ${eolWarnings.map(w => `<div class="eol-warning-item">${escapeHtml(typeof w === 'string' ? w : w.sku + ' is End-of-Life')}</div>`).join('')}
+      </div>`;
+    }
+
+    // URL cards
+    for (let i = 0; i < urlsArr.length; i++) {
+      const u = (typeof urlsArr[i] === 'object') ? urlsArr[i] : { url: String(urlsArr[i]), label: 'Quote' };
+      html += `
+        <div class="url-card">
+          <div class="url-label">${escapeHtml(u.label || 'Option ' + (i+1))}</div>
+          <div class="url-display">
+            <a href="${escapeHtml(u.url)}" target="_blank" rel="noopener">
+              ${escapeHtml(u.url.length > 120 ? u.url.substring(0, 120) + '...' : u.url)}
+            </a>
+          </div>
+          <div class="url-actions">
+            <button class="btn-copy" onclick="copyText('${escapeAttr(u.url)}', this)">Copy</button>
+            <a class="btn-open" href="${escapeHtml(u.url)}" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>`;
+    }
+
+    // Parsed items
+    const parsed = Array.isArray(res.parsedItems) ? res.parsedItems : [];
+    if (parsed.length > 0) {
+      html += `<div class="parsed-items">
+        <div class="parsed-items-title">Parsed Items</div>
+        ${parsed.map(p => {
+          const sku = p.sku || p.baseSku || '';
+          const qty = p.qty || 1;
+          return `<div class="parsed-item">
+            <span class="qty">${qty}x</span>
+            <span>${escapeHtml(sku)}</span>
+            <span class="valid">&#10003;</span>
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+
+    html += '</div>';
+  }
+
+  // No results at all
+  if (!html && suggestions.length === 0 && !res.error) {
+    errorEl.innerHTML = '<div class="error-box">No quote generated. Check your SKU input.</div>';
+  }
+
+  resultEl.innerHTML = html;
+}
+
+function applySuggestion(original, replacement) {
+  const input = document.getElementById('quoteInput');
+  const regex = new RegExp(original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  let newText = input.value.replace(regex, replacement);
+  if (newText === input.value) newText = replacement;
+  input.value = newText;
+  document.getElementById('quoteSuggestions').innerHTML = '';
+  document.getElementById('quoteResults').innerHTML = '';
+  handleQuote();
+}
+
+// Handle Enter in quote input
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('quoteInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleQuote();
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════
+// Chat Panel
+// ═══════════════════════════════════════════════
+
+async function sendChat(overrideText) {
+  const text = overrideText || document.getElementById('chatInput').value.trim();
+  if (!text || chatLoading) return;
+
+  // Add user message
+  chatMessages.push({ id: Date.now(), role: 'user', content: text });
+  if (!overrideText) document.getElementById('chatInput').value = '';
+  chatLoading = true;
+  chatAborted = false;
+  renderChatMessages();
+
+  try {
+    // Quote intercept: detect SKU-like content
+    const isQuoteIntent = /^\s*(quote|price|cost|order|get me|give me|generate)\s/i.test(text) &&
+      /\b(MR|MS|MX|MV|MT|MG|CW|C9|C8|Z\d|LIC-)\w*/i.test(text) &&
+      !/\b(zoho|crm|deal|account)\b/i.test(text);
+    const isDirectSku = /^\s*\d+\s*(x\s*)?(MR|MS|MX|MV|MT|MG|CW|C9|Z\d)/i.test(text);
+
+    if (isQuoteIntent || isDirectSku) {
+      try {
+        const apiResult = await apiCall('/api/quote', { text, personId: chatPersonId }, 60000);
+        if (apiResult && !chatAborted) {
+          const replyText = buildChatQuoteReply(apiResult);
+          if (replyText) {
+            chatMessages.push({ id: Date.now() + 1, role: 'assistant', content: replyText });
+            chatLoading = false;
+            renderChatMessages();
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('Quote intercept failed, falling through to chat:', e);
+      }
+    }
+
+    // Chat API
+    const history = chatMessages.slice(-10).map(m => ({ role: m.role, content: m.content }));
+    const systemContext = `You are Stratus AI, a Cisco/Meraki sales assistant. You have full Zoho CRM access.
+ZOHO EXECUTION RULES: All quote/deal operations go through Zoho CRM by default.
+ALWAYS DEFAULT TO ZOHO CRM for quote creation, deal updates, account lookups, task management.`;
+
+    const response = await apiCall('/api/chat', {
+      text,
+      history,
+      systemContext,
+    }, 130000);
+
+    if (chatAborted) return;
+
+    if (response && response.success && response.reply) {
+      chatMessages.push({
+        id: Date.now() + 1,
+        role: 'assistant',
+        content: response.reply,
+        usedTools: response.usedTools || false,
+      });
+    } else if (response && response.error) {
+      chatMessages.push({ id: Date.now() + 1, role: 'assistant', content: '**Error:** ' + response.error });
+    } else {
+      chatMessages.push({ id: Date.now() + 1, role: 'assistant', content: 'No response from Claude.' });
+    }
+  } catch (err) {
+    if (!chatAborted) {
+      chatMessages.push({ id: Date.now() + 1, role: 'assistant', content: '**Error:** ' + err.message });
+    }
+  } finally {
+    chatLoading = false;
+    renderChatMessages();
+  }
+}
+
+function buildChatQuoteReply(apiResult) {
+  const rawUrls = apiResult.quoteUrls || apiResult.urls || [];
+  const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
+  const eolArr = Array.isArray(apiResult.eolWarnings) ? apiResult.eolWarnings : [];
+  const suggestArr = Array.isArray(apiResult.suggestions) ? apiResult.suggestions : [];
+
+  let replyText = '';
+
+  if (suggestArr.length > 0) {
+    replyText += '**&#9888;&#65039; SKU Validation Issues:**\n\n';
+    for (const s of suggestArr) {
+      replyText += `- **${s.input}**: ${s.reason}`;
+      if (s.suggest && s.suggest.length > 0) replyText += ` → Did you mean: ${s.suggest.join(', ')}?`;
+      replyText += '\n';
+    }
+    replyText += '\nPlease correct the SKUs and try again.\n';
+  }
+
+  if (apiResult.pricingResponse) replyText += '**&#128176; Pricing:**\n\n' + apiResult.pricingResponse;
+  if (apiResult.eolDateResponse) replyText += apiResult.eolDateResponse;
+  if (apiResult.claudeResponse) replyText += apiResult.claudeResponse;
+
+  if (urlsArr.length > 0) {
+    if (replyText) replyText += '\n\n';
+    replyText += '**&#9889; Deterministic Quote:**\n\n';
+    if (eolArr.length > 0) {
+      replyText += '**EOL Warnings:**\n';
+      for (const w of eolArr) replyText += `- ${typeof w === 'string' ? w : w.sku + ' is EOL'}\n`;
+      replyText += '\n';
+    }
+    for (const urlObj of urlsArr) {
+      const u = (typeof urlObj === 'object') ? urlObj : { url: String(urlObj), label: 'Quote' };
+      replyText += `**${u.label}:**\n${u.url}\n\n`;
+    }
+  }
+
+  return replyText.trim() || null;
+}
+
+function renderChatMessages() {
+  const container = document.getElementById('chatMessages');
+  const emptyEl = document.getElementById('chatEmpty');
+  const countEl = document.getElementById('chatMsgCount');
+  const stopBtn = document.getElementById('chatStopBtn');
+
+  if (chatMessages.length === 0 && !chatLoading) {
+    emptyEl.style.display = '';
+    countEl.textContent = '';
+  } else {
+    emptyEl.style.display = 'none';
+    countEl.textContent = chatMessages.length + ' message' + (chatMessages.length !== 1 ? 's' : '');
+  }
+
+  stopBtn.style.display = chatLoading ? '' : 'none';
+
+  // Build HTML for messages
+  let html = '';
+  if (chatMessages.length === 0 && !chatLoading) {
+    // Empty state is shown via emptyEl
+  } else {
+    for (const msg of chatMessages) {
+      if (msg.role === 'user') {
+        html += `<div class="msg-bubble msg-user">${escapeHtml(msg.content)}</div>`;
+      } else {
+        html += `<div class="msg-bubble msg-assistant">${renderMarkdownInline(msg.content)}`;
+        if (msg.usedTools) html += '<div class="msg-tool-indicator">Used CRM tools</div>';
+        html += '</div>';
+      }
+    }
+  }
+
+  if (chatLoading) {
+    html += `<div class="chat-loading">
+      <span>&#9679;&#9679;&#9679;</span>
+      <span style="font-size:11px;">Working...</span>
+      <button class="btn-stop" onclick="stopChat()">Stop</button>
+    </div>`;
+  }
+
+  // Preserve empty element, replace the rest
+  const allChildren = [...container.children].filter(c => c.id !== 'chatEmpty');
+  allChildren.forEach(c => c.remove());
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  while (wrapper.firstChild) container.appendChild(wrapper.firstChild);
+
+  // Auto-scroll
+  container.scrollTop = container.scrollHeight;
+}
+
+function stopChat() {
+  chatAborted = true;
+  chatLoading = false;
+  renderChatMessages();
+}
+
+function newChat() {
+  chatAborted = true;
+  chatLoading = false;
+  chatMessages = [];
+  document.getElementById('chatInput').value = '';
+  renderChatMessages();
+}
+
+function chatKeyDown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+}
+
+// ═══════════════════════════════════════════════
+// API Log
+// ═══════════════════════════════════════════════
+
+function addLogEntry(id, method, endpoint, payload, status) {
+  const container = document.getElementById('logEntries');
+  // Remove placeholder
+  if (logCounter === 1) container.innerHTML = '';
+
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.id = 'log-' + id;
+  entry.innerHTML = `
+    <div class="log-entry-header" onclick="toggleLog(${id})">
+      <div>
+        <span class="log-method">${method}</span>
+        <span>${escapeHtml(endpoint)}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span class="log-timing" id="log-time-${id}">...</span>
+        <span id="log-status-${id}" style="color:var(--text-secondary);">&#8987;</span>
+      </div>
+    </div>
+    <div class="log-entry-body" id="log-body-${id}">
+      <div style="margin-bottom:8px;color:var(--stratus-blue);font-weight:600;">Request:</div>
+      <div>${JSON.stringify(payload, null, 2)}</div>
+      <div style="margin-top:12px;margin-bottom:8px;color:var(--stratus-blue);font-weight:600;">Response:</div>
+      <div id="log-response-${id}">Waiting...</div>
+    </div>
+  `;
+
+  container.insertBefore(entry, container.firstChild);
+}
+
+function updateLogEntry(id, status, data, elapsed) {
+  const statusEl = document.getElementById('log-status-' + id);
+  const timeEl = document.getElementById('log-time-' + id);
+  const responseEl = document.getElementById('log-response-' + id);
+
+  if (statusEl) {
+    if (status >= 200 && status < 300) {
+      statusEl.className = 'log-status-ok';
+      statusEl.textContent = status;
+    } else {
+      statusEl.className = 'log-status-err';
+      statusEl.textContent = status;
+    }
+  }
+  if (timeEl) timeEl.textContent = elapsed + 'ms';
+  if (responseEl) {
+    const jsonStr = JSON.stringify(data, null, 2);
+    // Truncate very long responses for display
+    responseEl.textContent = jsonStr.length > 5000 ? jsonStr.substring(0, 5000) + '\n\n... (truncated)' : jsonStr;
+  }
+}
+
+function toggleLog(id) {
+  const body = document.getElementById('log-body-' + id);
+  if (body) body.classList.toggle('open');
+}
+
+function clearLog() {
+  logCounter = 0;
+  document.getElementById('logEntries').innerHTML =
+    '<div style="text-align:center;color:var(--text-secondary);padding:40px;font-size:13px;">API requests will appear here as you interact with the extension panels.</div>';
+}
+
+// ═══════════════════════════════════════════════
+// Rendering Helpers
+// ═══════════════════════════════════════════════
+
+function renderPricingLines(text) {
+  return text.split('\n').map(line => {
+    const cleaned = line.replace(/\*\*/g, '');
+    const isBold = line.includes('**');
+    const isTotal = /total|cart/i.test(cleaned);
+    const cls = isTotal ? 'line-total' : isBold ? 'line-bold' : '';
+    return `<div class="${cls}">${escapeHtml(cleaned)}</div>`;
+  }).join('');
+}
+
+function renderMarkdownLines(text) {
+  return text.split('\n').map(line => {
+    let html = escapeHtml(line);
+    // Bold
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // URLs
+    html = html.replace(/(https:\/\/stratusinfosystems\.com\/order\/[^\s)<]+)/g,
+      '<a href="$1" target="_blank" rel="noopener" style="color:var(--stratus-blue);word-break:break-all;">$1</a>');
+    return `<div>${html || '&nbsp;'}</div>`;
+  }).join('');
+}
+
+function renderMarkdownInline(text) {
+  if (!text) return '';
+  return text.split('\n').map(line => {
+    let html = escapeHtml(line);
+    // Bold
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Links [text](url)
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener" style="color:var(--stratus-blue);text-decoration:underline;word-break:break-all;">$1</a>');
+    // Bare URLs
+    html = html.replace(/(https:\/\/stratusinfosystems\.com\/order\/[^\s)<]+)/g,
+      '<a href="$1" target="_blank" rel="noopener" style="color:var(--stratus-blue);word-break:break-all;">$1</a>');
+    return `<div style="min-height:${line.trim() === '' ? '8px' : 'auto'}">${html}</div>`;
+  }).join('');
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function escapeAttr(str) {
+  return String(str).replace(/'/g, "\\'").replace(/"/g, '\\"');
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => btn.textContent = orig, 2000);
+  }).catch(() => {
+    // Fallback
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => btn.textContent = orig, 2000);
+  });
+}
+</script>
+
+</body>
+</html>

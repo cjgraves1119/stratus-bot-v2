@@ -207,12 +207,46 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
       if (isQuoteIntent || isDirectSku) {
         try {
           const apiResult = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: messageText.trim(), personId: 'chrome-ext-chat-' + Date.now() });
-          if (apiResult && (apiResult.quoteUrls || apiResult.urls)) {
-            const rawUrls = apiResult.quoteUrls || apiResult.urls;
+          if (apiResult) {
+            const rawUrls = apiResult.quoteUrls || apiResult.urls || [];
             const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
             const eolArr = Array.isArray(apiResult.eolWarnings) ? apiResult.eolWarnings : [];
+            const suggestArr = Array.isArray(apiResult.suggestions) ? apiResult.suggestions : [];
+
+            let replyText = '';
+
+            // Suggestions (invalid/incomplete SKUs)
+            if (suggestArr.length > 0) {
+              replyText += '**⚠️ SKU Validation Issues:**\n\n';
+              for (const s of suggestArr) {
+                replyText += `• **${s.input}**: ${s.reason}`;
+                if (s.suggest && s.suggest.length > 0) {
+                  replyText += ` → Did you mean: ${s.suggest.join(', ')}?`;
+                }
+                replyText += '\n';
+              }
+              replyText += '\nPlease correct the SKUs and try again.\n';
+            }
+
+            // Pricing response
+            if (apiResult.pricingResponse) {
+              replyText += '**💰 Pricing:**\n\n' + apiResult.pricingResponse;
+            }
+
+            // EOL date response
+            if (apiResult.eolDateResponse) {
+              replyText += apiResult.eolDateResponse;
+            }
+
+            // Claude advisory response
+            if (apiResult.claudeResponse) {
+              replyText += apiResult.claudeResponse;
+            }
+
+            // Quote URLs
             if (urlsArr.length > 0) {
-              let replyText = '**⚡ Deterministic Quote:**\n\n';
+              if (replyText) replyText += '\n\n';
+              replyText += '**⚡ Deterministic Quote:**\n\n';
               if (eolArr.length > 0) {
                 replyText += '**EOL Warnings:**\n';
                 for (const w of eolArr) replyText += `• ${w}\n`;
@@ -222,6 +256,9 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
                 const u = (typeof urlObj === 'object') ? urlObj : { url: String(urlObj), label: 'Quote' };
                 replyText += `**${u.label}:**\n[${u.url.length > 80 ? u.url.substring(0, 80) + '...' : u.url}](${u.url})\n\n`;
               }
+            }
+
+            if (replyText.trim()) {
               const assistantMsg = {
                 id: Date.now() + 1,
                 role: 'assistant',

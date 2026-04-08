@@ -1849,6 +1849,11 @@ function parseMessage(text) {
   if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/.test(upper)) {
     modifiers.licenseOnly = true;
   }
+  // "licenses for [SKU]" or "renewal [SKU]" implies license-only (renewal scenario)
+  // But NOT "MX67 with 3 year license" — that's hardware + license
+  if (!modifiers.licenseOnly && /\b(LICENSE[S]?\s+FOR\s+(AN?\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d|RENEWAL[S]?\s+(OF\s+|FOR\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d)/.test(upper)) {
+    modifiers.licenseOnly = true;
+  }
 
   const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
 
@@ -5924,10 +5929,10 @@ function handleQuoteUrlTool(params) {
     if (!license_only && !hardware_only) {
       // Hardware + license (hwQty may differ from qty for carry-forward scenarios)
       if (hwQty > 0) items.push({ sku: applySuffix(model), qty: hwQty });
-      const licSkus = getLicenseSkus(model, term);
+      const licSkus = getLicenseSkus(model, term) || [];
       for (const lic of licSkus) items.push({ sku: lic, qty });
     } else if (license_only) {
-      const licSkus = getLicenseSkus(model, term);
+      const licSkus = getLicenseSkus(model, term) || [];
       for (const lic of licSkus) items.push({ sku: lic, qty });
     } else {
       // Hardware only
@@ -7455,12 +7460,64 @@ CRITICAL URL RULES:
             }
 
             // ────────────────────────────────────────────
-            // STEP 4: Parse SKUs and generate quote
+            // STEP 4: Pre-validate ALL SKU-like tokens from raw text
+            // Catches SKUs that parseMessage might silently drop (e.g., "MS225", "MS130" without variant)
             // ────────────────────────────────────────────
+            const rawSkuTokens = [...new Set(
+              (text.toUpperCase().match(/\b((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/gi) || [])
+                .map(s => s.toUpperCase())
+                .filter(s => !s.startsWith('LIC-'))
+            )];
+
             const parsed = parseMessage(text);
-            if (!parsed || !parsed.items || parsed.items.length === 0) {
-              // No SKUs detected — fall through to Claude (same as Webex bot)
-              // Handles technical questions, product comparisons, advisory, etc.
+            const parsedSkuSet = new Set(
+              (parsed?.items || []).map(i => (i.baseSku || i.sku || '').toUpperCase())
+            );
+
+            // Find SKU-like tokens that parseMessage dropped (couldn't resolve to a valid item)
+            const droppedTokens = rawSkuTokens.filter(t => !parsedSkuSet.has(t));
+
+            // Validate ALL tokens: both parsed items and dropped tokens
+            const suggestions = [];
+            const validItems = [];
+            const parsedWithValidation = [];
+
+            // Validate parsed items first
+            for (const item of (parsed?.items || [])) {
+              const base = item.baseSku || item.sku;
+              const validation = validateSku(base);
+              parsedWithValidation.push({ sku: base, qty: item.qty, validation });
+              if (!validation.valid) {
+                suggestions.push({
+                  input: base,
+                  reason: validation.reason || `${base} is not a recognized SKU`,
+                  suggest: validation.suggest || [],
+                  isCommonMistake: !!validation.isCommonMistake,
+                });
+              } else {
+                validItems.push(item);
+              }
+            }
+
+            // Validate dropped tokens — these were in the text but parseMessage couldn't handle them
+            for (const token of droppedTokens) {
+              const validation = validateSku(token);
+              parsedWithValidation.push({ sku: token, qty: 1, validation });
+              if (!validation.valid) {
+                suggestions.push({
+                  input: token,
+                  reason: validation.reason || `${token} is not a recognized SKU — did you mean a specific variant?`,
+                  suggest: validation.suggest || [],
+                  isCommonMistake: !!validation.isCommonMistake,
+                  wasDropped: true,
+                });
+              }
+              // If dropped token IS valid/EOL, parseMessage should have caught it — don't add to validItems
+              // since parseMessage already extracted what it could
+            }
+
+            // If no parsed items AND no SKU-like tokens at all → Claude fallback (technical question)
+            if ((!parsed || !parsed.items || parsed.items.length === 0) && rawSkuTokens.length === 0) {
               try {
                 const claudeReply = await askClaude(
                   text,
@@ -7485,28 +7542,9 @@ CRITICAL URL RULES:
               break;
             }
 
-            // ── SKU Validation with suggestions ──
-            const suggestions = [];
-            const validItems = [];
-            const parsedWithValidation = [];
-            for (const item of parsed.items) {
-              const base = item.baseSku || item.sku;
-              const validation = validateSku(base);
-              parsedWithValidation.push({ sku: base, qty: item.qty, validation });
-              if (!validation.valid) {
-                suggestions.push({
-                  input: base,
-                  reason: validation.reason || `${base} is not a recognized SKU`,
-                  suggest: validation.suggest || [],
-                  isCommonMistake: !!validation.isCommonMistake,
-                });
-              } else {
-                validItems.push(item);
-              }
-            }
-
-            // If ALL items are invalid, return suggestions only (no URLs)
-            if (validItems.length === 0 && suggestions.length > 0) {
+            // If ANY suggestions exist (invalid or unrecognized SKUs), BLOCK quote output
+            // User must resolve all SKU issues before we generate URLs
+            if (suggestions.length > 0) {
               apiResult = {
                 quoteUrls: [],
                 eolWarnings: [],
@@ -7516,6 +7554,35 @@ CRITICAL URL RULES:
               };
               break;
             }
+
+            // If parseMessage found no items but raw tokens were all valid/EOL,
+            // fall through to Claude for guidance (e.g., "MS225" alone — EOL family)
+            if (validItems.length === 0) {
+              try {
+                const claudeReply = await askClaude(
+                  text,
+                  quotePersonId,
+                  env,
+                  null,
+                  false,
+                );
+                const claudeUrls = (claudeReply || '').match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                const termLabels = ['1-Year', '3-Year', '5-Year'];
+                apiResult = await finalizeQuoteResponse({
+                  quoteUrls: claudeUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
+                  eolWarnings: [],
+                  parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                  claudeResponse: claudeReply || '',
+                  handlerType: 'claude-fallback',
+                }, claudeReply);
+              } catch (claudeErr) {
+                console.error('[API/quote] Claude fallback error:', claudeErr);
+                apiResult = { error: 'AI response failed. Please try again.' };
+              }
+              break;
+            }
+
+            // ── All SKUs validated — proceed with quote generation ──
 
             // Check for EOL warnings
             const eolWarnings = [];
@@ -7528,10 +7595,7 @@ CRITICAL URL RULES:
             }
 
             // Route through buildQuoteResponse for consistent output
-            const itemsForQuote = suggestions.length > 0
-              ? { ...parsed, items: validItems }
-              : parsed;
-            const quoteResult = buildQuoteResponse(itemsForQuote);
+            const quoteResult = buildQuoteResponse(parsed);
 
             // If buildQuoteResponse says it needs LLM (advisory, revision, etc.),
             // fall through to Claude — identical to Webex bot behavior
@@ -7552,7 +7616,6 @@ CRITICAL URL RULES:
                   parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
                   claudeResponse: claudeReply || '',
                   handlerType: 'claude-advisory',
-                  ...(suggestions.length > 0 ? { suggestions } : {}),
                 }, claudeReply);
               } catch (claudeErr) {
                 console.error('[API/quote] Claude fallback error:', claudeErr);
@@ -7573,7 +7636,6 @@ CRITICAL URL RULES:
               eolWarnings,
               parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
               handlerType: 'deterministic',
-              ...(suggestions.length > 0 ? { suggestions } : {}),
             };
             break;
           }
