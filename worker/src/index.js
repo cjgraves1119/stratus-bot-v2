@@ -3140,6 +3140,18 @@ async function askClaude(userMessage, personId, env, imageData = null) {
 
     let data = await response.json();
 
+    // Strip base64 image from messages after first API call to save tokens on tool-use round-trips.
+    // Claude already analyzed the image; resending it wastes ~100K+ tokens per iteration.
+    if (imageData && data.stop_reason === 'tool_use') {
+      for (const msg of messages) {
+        if (msg.role === 'user' && Array.isArray(msg.content)) {
+          msg.content = msg.content.map(block =>
+            block.type === 'image' ? { type: 'text', text: '[Image already analyzed in first turn]' } : block
+          );
+        }
+      }
+    }
+
     // Tool-use loop: handle build_quote_url calls (max 8 iterations for multi-URL responses)
     let toolIterations = 0;
     while (data.stop_reason === 'tool_use' && toolIterations < 8) {
