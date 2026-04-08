@@ -2955,11 +2955,15 @@ const QUOTE_URL_TOOL = {
 };
 
 function handleQuoteUrlTool(params) {
-  const { devices, term = '3', label, hardware_only = false } = params;
+  const { devices = [], term = '3', label, hardware_only = false } = params;
   const items = [];
 
   for (const device of devices) {
-    const { model, qty, license_only = false } = device;
+    const model = String(device.model || '').trim();
+    const qty = parseInt(device.qty, 10) || 1;
+    const license_only = !!device.license_only;
+
+    if (!model) continue;
 
     // Special case: MR-ENT = generic MR Enterprise license (no hardware model)
     if (model === 'MR-ENT' || model === 'MR_ENT') {
@@ -3065,9 +3069,10 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     const messages = [...history, { role: 'user', content: userContent }];
 
     // Include quote URL tool for all requests (lightweight, only called when Claude needs URLs)
+    // Image analysis + tool-use needs more tokens than text-only (2048 for tool calls)
     const apiBody = {
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
+      max_tokens: imageData ? 2048 : 1024,
       system: systemPrompt,
       messages,
       tools: [QUOTE_URL_TOOL]
@@ -3147,7 +3152,7 @@ async function askClaude(userMessage, personId, env, imageData = null) {
 
     return reply;
   } catch (err) {
-    console.error('Claude API error:', err.message);
+    console.error('Claude API error:', err.message, err.stack);
     return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44" or "5 MS150-48LP-4G".`;
   }
 }

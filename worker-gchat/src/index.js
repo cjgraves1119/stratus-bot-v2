@@ -5873,11 +5873,15 @@ const QUOTE_URL_TOOL = {
 };
 
 function handleQuoteUrlTool(params) {
-  const { devices, term = '3', label, hardware_only = false } = params;
+  const { devices = [], term = '3', label, hardware_only = false } = params;
   const items = [];
 
   for (const device of devices) {
-    const { model, qty, license_only = false } = device;
+    const model = String(device.model || '').trim();
+    const qty = parseInt(device.qty, 10) || 1;
+    const license_only = !!device.license_only;
+
+    if (!model) continue;
 
     // Special case: MR-ENT = generic MR Enterprise license (no hardware model)
     if (model === 'MR-ENT' || model === 'MR_ENT') {
