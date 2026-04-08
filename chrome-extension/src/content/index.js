@@ -736,9 +736,14 @@ function setupContactChipHovers() {
   // Attach to chips already in DOM
   document.querySelectorAll(CHIP_SEL).forEach(attachChipHover);
 
-  // Watch for chips added by Gmail's SPA rendering
+  // Watch for chips added by Gmail's SPA rendering (debounced 200ms)
+  let _chipTimer = null;
   const chipObserver = new MutationObserver(() => {
-    document.querySelectorAll(CHIP_SEL).forEach(attachChipHover);
+    if (_chipTimer) clearTimeout(_chipTimer);
+    _chipTimer = setTimeout(() => {
+      _chipTimer = null;
+      document.querySelectorAll(CHIP_SEL).forEach(attachChipHover);
+    }, 200);
   });
   chipObserver.observe(document.body, { childList: true, subtree: true, attributeFilter: ['email', 'data-hovercard-id'] });
 }

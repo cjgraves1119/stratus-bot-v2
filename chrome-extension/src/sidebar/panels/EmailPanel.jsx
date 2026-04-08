@@ -3,7 +3,7 @@
  * AI email analysis + Draft Reply + CCW/Velocity Hub + Cisco Rep Assignment
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
 
@@ -58,9 +58,13 @@ function DraftSection({ emailContext }) {
   const [drafts, setDrafts] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const lastRequestRef = useRef(0);
 
   async function handleGenerate() {
     if (!emailContext) return;
+    const now = Date.now();
+    if (now - lastRequestRef.current < 1000) return; // Rate-limit: 1 request/sec
+    lastRequestRef.current = now;
     setLoading(true);
     setError(null);
     try {

@@ -3,7 +3,7 @@
  * AI-generated reply drafts with tone selection and custom instructions.
  */
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
 
@@ -20,9 +20,13 @@ export default function DraftPanel({ emailContext }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(null);
+  const lastRequestRef = useRef(0);
 
   async function handleGenerate() {
     if (!emailContext) return;
+    const now = Date.now();
+    if (now - lastRequestRef.current < 1000) return; // Rate-limit: 1 request/sec
+    lastRequestRef.current = now;
     setLoading(true);
     setError(null);
     setDrafts(null);

@@ -140,6 +140,7 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
   const messagesEndRef = useRef(null);
   // AbortController ref for stop functionality
   const abortRef = useRef(null);
+  const lastSendRef = useRef(0); // Rate-limit: min 1s between sends
 
   // Auto-scroll
   useEffect(() => {
@@ -173,6 +174,9 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
   const handleSendMessage = useCallback(async (overrideText) => {
     const messageText = overrideText || input.trim();
     if (!messageText || loading) return;
+    const now = Date.now();
+    if (now - lastSendRef.current < 1000) return; // Rate-limit: 1 send/sec
+    lastSendRef.current = now;
 
     const userMsg = {
       id: Date.now(),

@@ -20,6 +20,7 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
   const [imageAnalysis, setImageAnalysis] = useState(null);
   const [showZohoPrompt, setShowZohoPrompt] = useState(false);
   const inputRef = useRef(null);
+  const lastRequestRef = useRef(0); // Rate-limit: min 1s between requests
 
   // Pre-fill from navData
   useEffect(() => {
@@ -80,6 +81,9 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
 
   async function handleGenerate() {
     if (!skuText.trim()) return;
+    const now = Date.now();
+    if (now - lastRequestRef.current < 1000) return; // Rate-limit: 1 request/sec
+    lastRequestRef.current = now;
     setLoading(true);
     setError(null);
     setResult(null);
@@ -158,6 +162,9 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
 
   async function handleGenerateWithText(text) {
     if (!text || !text.trim()) return;
+    const now = Date.now();
+    if (now - lastRequestRef.current < 1000) return; // Rate-limit: 1 request/sec
+    lastRequestRef.current = now;
     setLoading(true);
     setError(null);
     setResult(null);
