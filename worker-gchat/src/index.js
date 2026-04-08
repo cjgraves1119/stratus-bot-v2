@@ -437,6 +437,25 @@ function applySuffix(sku) {
 
 // ─── License SKU Rules ───────────────────────────────────────────────────────
 function getLicenseSkus(baseSku, requestedTier) {
+  const raw = _getLicenseSkusRaw(baseSku, requestedTier);
+  if (!raw || raw.length === 0) return null;
+
+  // Validate every generated license SKU exists in prices.json.
+  // Regex-based generation can produce fictitious SKUs for invalid models
+  // (e.g. MX44 → LIC-MX44-SEC-3YR which doesn't exist).
+  const validated = raw.filter(entry => entry.sku in prices);
+  if (validated.length === 0) {
+    console.warn(`[LICENSE] All generated SKUs invalid for ${baseSku}: ${raw.map(e => e.sku).join(', ')}`);
+    return null;
+  }
+  if (validated.length < raw.length) {
+    const dropped = raw.filter(e => !(e.sku in prices)).map(e => e.sku);
+    console.warn(`[LICENSE] Dropped invalid SKUs for ${baseSku}: ${dropped.join(', ')}`);
+  }
+  return validated;
+}
+
+function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
   // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers

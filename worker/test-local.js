@@ -17,6 +17,10 @@ const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
 const EOL_REPLACEMENTS = catalog._EOL_REPLACEMENTS || {};
 const PRICES = catalog.prices || {};
 
+// Load prices.json for getLicenseSkus validation wrapper (mirrors the `prices` Proxy in index.js)
+const _pricesJson = require('./src/data/prices.json');
+const prices = _pricesJson.prices || {};
+
 // ─── Sync Verification ──────────────────────────────────────────────────────
 // Extracts a function body from source code and returns a normalized hash.
 // This catches drift between test-local.js and index.js.
@@ -110,6 +114,25 @@ function applySuffix(sku) {
 }
 
 function getLicenseSkus(baseSku, requestedTier) {
+  const raw = _getLicenseSkusRaw(baseSku, requestedTier);
+  if (!raw || raw.length === 0) return null;
+
+  // Validate every generated license SKU exists in prices.json.
+  // Regex-based generation can produce fictitious SKUs for invalid models
+  // (e.g. MX44 → LIC-MX44-SEC-3YR which doesn't exist).
+  const validated = raw.filter(entry => entry.sku in prices);
+  if (validated.length === 0) {
+    console.warn(`[LICENSE] All generated SKUs invalid for ${baseSku}: ${raw.map(e => e.sku).join(', ')}`);
+    return null;
+  }
+  if (validated.length < raw.length) {
+    const dropped = raw.filter(e => !(e.sku in prices)).map(e => e.sku);
+    console.warn(`[LICENSE] Dropped invalid SKUs for ${baseSku}: ${dropped.join(', ')}`);
+  }
+  return validated;
+}
+
+function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
   // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers
@@ -157,7 +180,6 @@ function getLicenseSkus(baseSku, requestedTier) {
     const tier = requestedTier || 'SEC';
     const numMatch = model.match(/^(\d+)/);
     const modelNum = numMatch ? parseInt(numMatch[1]) : 0;
-    // Only MX75, MX85, MX95, MX105 use -Y for ENT/SEC. All others use -YR.
     const newerModels = [75, 85, 95, 105];
     const isNewer = newerModels.includes(modelNum);
     const suffix = isNewer ? 'Y' : 'YR';
@@ -191,8 +213,6 @@ function getLicenseSkus(baseSku, requestedTier) {
 
   const mgMatch = upper.match(/^MG(\d+)/);
   if (mgMatch) {
-    // MG21E uses same license as MG21, MG51E uses MG51, etc.
-    // License SKUs never include the E suffix
     const model = mgMatch[1];
     return [
       { term: '1Y', sku: `LIC-MG${model}-ENT-1Y` },
@@ -264,14 +284,11 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // MS450: Falls through to legacy MS handler below (LIC-MS450-{port}-{term}YR)
-
   // Legacy MS switches (MS210, MS220, MS225, MS250, MS350, MS410, MS425) — LIC-{model}-{port}-{term}YR
   const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
   if (legacyMsMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
     const model = legacyMsMatch[1];
     let port = legacyMsMatch[2];
-    // MS350-48X uses the 48-port license (no X)
     if (model === 'MS350' && port === '48X') port = '48';
     return [
       { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
@@ -280,33 +297,20 @@ function getLicenseSkus(baseSku, requestedTier) {
     ];
   }
 
-  // Catalyst M-series: C9200L, C9300, C9350 — LIC-{family}-{portCount}{A|E}-{term}
-  // C9300-48UXM-M → LIC-C9300-48E-1Y, C9200L-24P-4G-M → LIC-C9200L-24E-1Y
-  // C9300X and C9300L have no license SKUs in prices, they use C9300 licenses
-  // C9300X-12Y uses the 24-port license (LIC-C9300-24E)
-  // C9350 has only 3Y and 5Y (no 1Y)
+  // Catalyst M-series: C9200L, C9300, C9350
   const catMatch = upper.match(/^(C9\d{3}[LX]?)-(\d+)/);
   if (catMatch) {
     let family = catMatch[1];
     let portCount = catMatch[2];
     const tier = (requestedTier === 'A') ? 'A' : 'E';
-
-    // C9300X and C9300L map to C9300 license SKUs
-    if (family === 'C9300X' || family === 'C9300L') {
-      family = 'C9300';
-    }
-
-    // C9300X-12Y uses the 24-port license
+    if (family === 'C9300X' || family === 'C9300L') family = 'C9300';
     if (portCount === '12') portCount = '24';
-
-    // C9350 has no 1Y option
     if (family === 'C9350') {
       return [
         { term: '3Y', sku: `LIC-C9350-${portCount}${tier}-3Y` },
         { term: '5Y', sku: `LIC-C9350-${portCount}${tier}-5Y` }
       ];
     }
-
     return [
       { term: '1Y', sku: `LIC-${family}-${portCount}${tier}-1Y` },
       { term: '3Y', sku: `LIC-${family}-${portCount}${tier}-3Y` },
@@ -331,7 +335,6 @@ function getLicenseSkus(baseSku, requestedTier) {
       { term: '5Y', sku: 'LIC-MT-5Y' }
     ];
   }
-
 
   return null;
 }
