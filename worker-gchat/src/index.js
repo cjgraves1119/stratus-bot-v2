@@ -813,27 +813,30 @@ function fixCommonMistake(sku) {
 
   // Prefix match: check if input extends a common mistake key
   // e.g., "MS150-48P-4X" starts with mistake key "MS150-48P"
-  for (const [key, val] of Object.entries(COMMON_MISTAKES)) {
-    if (upper.startsWith(key + '-') && val.suggest && val.suggest.length > 0) {
-      const suffix = upper.slice(key.length).toUpperCase(); // e.g., "-4X"
+  // BUT skip if the input itself is already a valid SKU (e.g. MS150-24P-4G)
+  if (!VALID_SKUS.has(upper) && !isEol(upper)) {
+    for (const [key, val] of Object.entries(COMMON_MISTAKES)) {
+      if (upper.startsWith(key + '-') && val.suggest && val.suggest.length > 0) {
+        const suffix = upper.slice(key.length).toUpperCase(); // e.g., "-4X"
 
-      // Strategy 1: Append suffix to suggestions and check validity
-      const appended = val.suggest
-        .map(s => s + suffix)
-        .filter(s => VALID_SKUS.has(s.toUpperCase()) || isEol(s));
-      if (appended.length > 0) {
-        return { error: val.error, suggest: appended };
+        // Strategy 1: Append suffix to suggestions and check validity
+        const appended = val.suggest
+          .map(s => s + suffix)
+          .filter(s => VALID_SKUS.has(s.toUpperCase()) || isEol(s));
+        if (appended.length > 0) {
+          return { error: val.error, suggest: appended };
+        }
+
+        // Strategy 2: Filter suggestions that already end with the same suffix
+        // (handles cases where suggestions already include uplink variants)
+        const filtered = val.suggest.filter(s => s.toUpperCase().endsWith(suffix));
+        if (filtered.length > 0) {
+          return { error: val.error, suggest: filtered };
+        }
+
+        // Fallback: return all original suggestions
+        return { error: val.error, suggest: val.suggest };
       }
-
-      // Strategy 2: Filter suggestions that already end with the same suffix
-      // (handles cases where suggestions already include uplink variants)
-      const filtered = val.suggest.filter(s => s.toUpperCase().endsWith(suffix));
-      if (filtered.length > 0) {
-        return { error: val.error, suggest: filtered };
-      }
-
-      // Fallback: return all original suggestions
-      return { error: val.error, suggest: val.suggest };
     }
   }
 
