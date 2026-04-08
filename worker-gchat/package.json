@@ -1,9 +1,0 @@
-{
-  "name": "stratus-ai-bot-gchat",
-  "version": "1.0.0",
-  "description": "Stratus AI Google Chat Bot - Cisco/Meraki quoting assistant",
-  "private": true,
-  "devDependencies": {
-    "wrangler": "^3.0.0"
-  }
-}

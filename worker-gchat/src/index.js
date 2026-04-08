@@ -437,6 +437,25 @@ function applySuffix(sku) {
 
 // ─── License SKU Rules ───────────────────────────────────────────────────────
 function getLicenseSkus(baseSku, requestedTier) {
+  const raw = _getLicenseSkusRaw(baseSku, requestedTier);
+  if (!raw || raw.length === 0) return null;
+
+  // Validate every generated license SKU exists in prices.json.
+  // Regex-based generation can produce fictitious SKUs for invalid models
+  // (e.g. MX44 → LIC-MX44-SEC-3YR which doesn't exist).
+  const validated = raw.filter(entry => entry.sku in prices);
+  if (validated.length === 0) {
+    console.warn(`[LICENSE] All generated SKUs invalid for ${baseSku}: ${raw.map(e => e.sku).join(', ')}`);
+    return null;
+  }
+  if (validated.length < raw.length) {
+    const dropped = raw.filter(e => !(e.sku in prices)).map(e => e.sku);
+    console.warn(`[LICENSE] Dropped invalid SKUs for ${baseSku}: ${dropped.join(', ')}`);
+  }
+  return validated;
+}
+
+function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
   // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers
@@ -1917,6 +1936,44 @@ function parseMessage(text) {
     };
   }
 
+  // ── Model-agnostic license handler (MR, MV, MT) ──
+  // These families use a single license SKU regardless of specific model.
+  // Intercepts: "4 MR licenses", "quote 10 MV licenses", "5 MT license", etc.
+  const agnosticLicMatch = upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?/i)
+    || upper.match(/(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*[X×]?\s*(\d+)/i)
+    || upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s*(ENT(?:ERPRISE)?)?$/i);
+  if (agnosticLicMatch && !isAdvisory) {
+    const qty = parseInt(agnosticLicMatch[1]) || parseInt(agnosticLicMatch[3]) || 1;
+    const family = (agnosticLicMatch[2] || agnosticLicMatch[1] || '').toUpperCase();
+    let licSkus;
+    if (family === 'MR') {
+      licSkus = [
+        { baseSku: 'LIC-ENT-1YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-ENT-3YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-ENT-5YR', qty, isLicenseOnly: true }
+      ];
+    } else if (family === 'MV') {
+      licSkus = [
+        { baseSku: 'LIC-MV-1YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MV-3YR', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MV-5YR', qty, isLicenseOnly: true }
+      ];
+    } else if (family === 'MT') {
+      licSkus = [
+        { baseSku: 'LIC-MT-1Y', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MT-3Y', qty, isLicenseOnly: true },
+        { baseSku: 'LIC-MT-5Y', qty, isLicenseOnly: true }
+      ];
+    }
+    if (licSkus) {
+      return {
+        items: licSkus,
+        isQuote: true,
+        isDuoUmbrella: true  // reuse same 1Y/3Y/5Y URL output path
+      };
+    }
+  }
+
   const skuPatterns = [
     /C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?/gi,
     /C8[14]\d{2}-G2-MX/gi,
@@ -2853,7 +2910,23 @@ If ANY EOL products were found, ALWAYS include a refresh section without being a
 
 3-Year Co-Term: {URL with replacement hardware SKUs (-HW suffix) + ALL license SKUs including non-EOL ones}
 
-CRITICAL DEDUP RULE: When multiple EOL models share the same replacement SKU, COMBINE their quantities into a single URL entry. Example: MS120-8FP ×26 + MS220-8P ×6 both map to MS130-8P → use MS130-8P-HW ×32 (NOT two separate MS130-8P-HW entries). Always sum quantities before building the URL.
+CRITICAL AGGREGATION RULES FOR REFRESH URLs — follow ALL three rules:
+
+RULE 1 — DEDUP REPLACEMENTS: When multiple EOL models map to the SAME replacement SKU, SUM their quantities into ONE URL entry.
+Example: MX60W ×1 + MX64W ×1 both map to MX67W → MX67W-HW ×2, LIC-MX67W-SEC-3YR ×2 (NOT two separate entries).
+Example: MS120-8FP ×26 + MS220-8P ×6 both map to MS130-8P → MS130-8P-HW ×32.
+
+RULE 2 — EXISTING DEVICE LICENSE CARRY-FORWARD: When an EOL model's replacement matches a device the customer ALREADY HAS (non-EOL), the refresh URL must include licenses for BOTH the replacement AND the existing device, but hardware ONLY for the replacement (the customer already owns the existing hardware).
+Example: Z1 ×1 (EOL → Z4) + existing Z4 ×1 (non-EOL) → Z4-HW ×1 (only the Z1 replacement), LIC-Z4-SEC-3Y ×2 (one for the Z1→Z4 replacement + one for the existing Z4).
+
+RULE 3 — BUILD A RUNNING TALLY: Before constructing ANY refresh URL, build a tally of every SKU and its total quantity across all devices (EOL replacements + non-EOL carry-forwards). Hardware for non-EOL devices is EXCLUDED (they already own it). Licenses for non-EOL devices ARE included. Then construct ONE URL from the final tally. Never build the URL device-by-device.
+
+RULE 4 — ORDERED HARDWARE+LICENSE GROUPING: Maintain the exact device order from the screenshot or request. For each device, place its hardware SKU immediately followed by its license SKU(s) — NEVER group all hardware first then all licenses. When multiple EOL models merge into one replacement (Rule 1), place the merged entry at the position of the FIRST contributing device. Non-EOL devices appear at their original position with license-only (no hardware).
+Example from a license dashboard (top to bottom): MG51, MR Enterprise ×2, MS220-8P ×2, MX60, MX60W, MX64W, MX65, MX65W, MX75, Z1, Z4
+Correct URL order: MG52-HW,LIC-MG52-ENT-3Y(×1), LIC-ENT-3YR(×2), MS130-8P-HW,LIC-MS130-CMPT-3Y(×2), MX67-HW,LIC-MX67-SEC-3YR(×1), MX67W-HW(×2),LIC-MX67W-SEC-3YR(×2), MX68-HW,LIC-MX68-SEC-3YR(×1), MX68W-HW,LIC-MX68W-SEC-3YR(×1), LIC-MX75-SEC-3Y(×1), Z4-HW(×1),LIC-Z4-SEC-3Y(×2)
+Note: MX67W appears once at MX60W's position (first device mapping to MX67W). MX75 = license-only (non-EOL). Z4-HW ×1 (only Z1 replacement) but LIC-Z4-SEC-3Y ×2 (Rule 2: Z1→Z4 + existing Z4).
+
+MANDATORY: Use the build_quote_url tool for ALL URL generation. NEVER manually type out URLs. Pass your parsed device list to the tool and it will handle suffixes, license mapping, dedup, and URL construction. For generic MR Enterprise licenses (no specific AP model), use model "MR-ENT". Call the tool once per URL you need (e.g., once for Option 1 renewal, once for Option 2 refresh).
 
 The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Only show 3-Year for dashboard screenshot responses unless user specifies otherwise.
 
@@ -2875,14 +2948,35 @@ When the user says "hardware only" or "hardware" (without asking about specs/inf
 Z4 and Z4C default to SEC (Advanced Security) licensing unless the user explicitly requests ENT (Enterprise).
 
 ## OUTPUT RULES
-- For dashboard screenshots: show ONLY the 3-Year URL for all options. Never show 1-Year or 5-Year for dashboard analysis unless user explicitly requests it.
 - For regular SKU quotes: always show 1-Year, 3-Year, and 5-Year URLs unless user says "just" or "only" with one term.
 - URL-only output by default for simple quotes
-- For dashboard screenshots, ALWAYS use the standardized format above
 - Keep responses concise but complete — never skip EOL products
 - NEVER use bullet points (•) before URLs. Just put the URL on its own line after the term label.
 - Use bullet points (•) only for License Analysis sections, never for URLs
 - NEVER include EOS dates, End-of-Support dates, or lifecycle dates in responses unless the user explicitly asks for EOL dates
+
+## MANDATORY DASHBOARD SCREENSHOT TEMPLATE
+When analyzing a Meraki license dashboard screenshot, you MUST follow this EXACT template. Do NOT deviate, do NOT add extra sections, do NOT skip sections. Show ONLY 3-Year URLs. Use build_quote_url for EVERY URL.
+
+**License Analysis:**
+• [Model]: [qty] licensed = [qty] active ✓ (or note discrepancies)
+• ... (list ALL devices from screenshot in order, skip MT with 0 devices)
+
+**EOL Devices:**
+• [Model] (EOL) → [Replacement]
+• ... (list ALL EOL devices)
+
+**Option 1 — Renew As-Is (License Only):**
+[Call build_quote_url with ALL devices as license_only=true, term="3". Include every device from the screenshot that has active devices. Use the ORIGINAL model names (not replacements). Skip MT with 0 devices.]
+
+3-Year Co-Term: [URL from tool]
+
+**Option 2 — Hardware Refresh:**
+[Call build_quote_url with: EOL devices mapped to their replacements (license_only=false), non-EOL devices as license_only=true, term="3". Apply Rules 1-4 for dedup, carry-forward, tally, and ordering.]
+
+3-Year Co-Term: [URL from tool]
+
+CRITICAL: You MUST call build_quote_url TWICE — once for Option 1, once for Option 2. NEVER manually construct URLs. Complete BOTH options in a single response. Do NOT stop after the analysis or after Option 1.
 
 ## ACCESSORY & CONNECTIVITY GUIDANCE
 When asked about SFPs, stacking cables, uplink modules, or how to connect two devices:
@@ -5790,6 +5884,68 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
   return { reply: 'I ran into a complex operation that required too many steps. Could you break it into smaller pieces?' };
 }
 
+// ─── Quote URL Tool (deterministic URL builder for Claude vision path) ───────
+const QUOTE_URL_TOOL = {
+  name: 'build_quote_url',
+  description: 'Build a Stratus order URL from a structured device list. ALWAYS use this tool for URL generation — never manually construct URLs. Pass devices in the order they should appear. The tool handles SKU suffixes, license mapping, dedup, and URL formatting.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      devices: {
+        type: 'array',
+        description: 'Ordered list of devices. Each device becomes hardware+license or license-only in the URL.',
+        items: {
+          type: 'object',
+          properties: {
+            model: { type: 'string', description: 'Base model without suffix (e.g., MX67, MS130-8P, Z4, MR44). For MR enterprise licenses without specific model, use "MR-ENT".' },
+            qty: { type: 'integer', description: 'Quantity of this device' },
+            license_only: { type: 'boolean', description: 'True if customer already owns hardware (non-EOL). Only license, no hardware SKU.' }
+          },
+          required: ['model', 'qty']
+        }
+      },
+      term: { type: 'string', enum: ['1', '3', '5'], description: 'License term in years. Default: 3.' },
+      label: { type: 'string', description: 'Label for this URL (e.g., "Option 1 — Renew As-Is 3-Year", "Option 2 — Hardware Refresh 3-Year")' },
+      hardware_only: { type: 'boolean', description: 'If true, output only hardware SKUs with no licenses.' }
+    },
+    required: ['devices']
+  }
+};
+
+function handleQuoteUrlTool(params) {
+  const { devices = [], term = '3', label, hardware_only = false } = params;
+  const items = [];
+
+  for (const device of devices) {
+    const model = String(device.model || '').trim();
+    const qty = parseInt(device.qty, 10) || 1;
+    const license_only = !!device.license_only;
+
+    if (!model) continue;
+
+    // Special case: MR-ENT = generic MR Enterprise license (no hardware model)
+    if (model === 'MR-ENT' || model === 'MR_ENT') {
+      const termSuffix = term === '1' ? '1YR' : term === '5' ? '5YR' : '3YR';
+      items.push({ sku: `LIC-ENT-${termSuffix}`, qty });
+      continue;
+    }
+
+    if (!license_only && !hardware_only) {
+      items.push({ sku: applySuffix(model), qty });
+      const licSkus = getLicenseSkus(model, term);
+      for (const lic of licSkus) items.push({ sku: lic, qty });
+    } else if (license_only) {
+      const licSkus = getLicenseSkus(model, term);
+      for (const lic of licSkus) items.push({ sku: lic, qty });
+    } else {
+      items.push({ sku: applySuffix(model), qty });
+    }
+  }
+
+  const url = buildStratusUrl(items);
+  return { url, label: label || `${term}-Year Co-Term`, items_count: items.length };
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
@@ -5872,7 +6028,8 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     let messages = [...effectiveHistory, { role: 'user', content: userContent }];
 
     // Determine if we should include CRM/email tools
-    const tools = useTools ? CRM_EMAIL_TOOLS : [];
+    // Always include QUOTE_URL_TOOL for deterministic URL generation (even non-CRM path)
+    const tools = useTools ? CRM_EMAIL_TOOLS : [QUOTE_URL_TOOL];
     if (useTools) {
       // Build system prompt dynamically — conditionally loads EMAIL INTAKE and ADMIN ACTION
       // sections only when relevant intent is detected, saving ~2K tokens on standard requests.
@@ -5918,6 +6075,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     const MAX_TOOL_ITERATIONS = useTools ? 15 : 8;
     let iteration = 0;
     const _loopStartMs = Date.now();
+
+    // Non-CRM (quoting) path: accumulate text across tool-use iterations so dashboard
+    // screenshot responses don't lose analysis text when Claude emits text + tool_use blocks.
+    // Also inject tool-generated URLs directly to guarantee they appear in output.
+    let accumulatedText = '';
+    const injectedUrls = []; // Track URLs we inject so we can deduplicate from Claude's final text
 
     // CRM speed optimization: track auto-expanded Quote data to avoid redundant API calls.
     // When zoho_search_records on Quotes auto-expands the first result (including Quoted_Items),
@@ -6091,6 +6254,18 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       if (data.stop_reason === 'tool_use') {
         console.log(`[GCHAT-AGENT] Tool use iteration ${iteration}`);
 
+        // Non-CRM path: strip base64 images after first iteration to save tokens.
+        // Claude already analyzed the image; resending it wastes ~100K+ tokens per iteration.
+        if (!useTools && iteration === 1) {
+          for (const msg of messages) {
+            if (msg.role === 'user' && Array.isArray(msg.content)) {
+              msg.content = msg.content.map(block =>
+                block.type === 'image' ? { type: 'text', text: '[Image already analyzed in first turn]' } : block
+              );
+            }
+          }
+        }
+
         // Add Claude's response (with tool_use blocks) to messages
         messages.push({ role: 'assistant', content: data.content });
 
@@ -6100,6 +6275,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           .filter(b => b.type === 'text' && b.text.trim().length > 0)
           .map(b => b.text.trim())
           .join('\n');
+
+        // Non-CRM path: accumulate interim text across iterations
+        if (!useTools && interimText) {
+          accumulatedText += interimText + '\n\n';
+        }
 
         const toolBlocks = data.content.filter(b => b.type === 'tool_use');
 
@@ -6152,6 +6332,24 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
                 content: cached.length > 8000 ? cached.substring(0, 8000) + '...(truncated)' : cached
               };
             }
+          }
+
+          // Handle build_quote_url locally (deterministic, no external API call)
+          if (block.name === 'build_quote_url') {
+            const quoteResult = handleQuoteUrlTool(block.input);
+            console.log(`[GCHAT-AGENT] build_quote_url → ${quoteResult.url?.substring(0, 80)}...`);
+            // Non-CRM path: inject the URL directly into accumulated text so it's guaranteed
+            // to appear in output even if Claude doesn't repeat it in its follow-up text.
+            if (!useTools && quoteResult.url) {
+              const label = quoteResult.label || 'Quote URL';
+              accumulatedText += `**${label}:** ${quoteResult.url}\n\n`;
+              injectedUrls.push(quoteResult.url);
+            }
+            return {
+              type: 'tool_result',
+              tool_use_id: block.id,
+              content: JSON.stringify(quoteResult)
+            };
           }
 
           const result = await executeToolCall(block.name, block.input, env);
@@ -6223,7 +6421,23 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       // Claude returned a final text response (stop_reason = 'end_turn')
       const textBlocks = data.content.filter(b => b.type === 'text');
-      const reply = textBlocks.map(b => b.text).join('\n');
+      let reply;
+
+      if (!useTools && accumulatedText) {
+        // Non-CRM path with tool-use: combine accumulated text + final response, dedup URLs
+        let finalText = textBlocks.map(b => b.text).join('\n');
+        // Deduplicate: if Claude repeated a URL we already injected, strip the duplicate line
+        for (const url of injectedUrls) {
+          const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+        }
+        finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
+        if (finalText) accumulatedText += finalText;
+        reply = accumulatedText.trim() || 'Sorry, I could not generate a response.';
+      } else {
+        // CRM path or no tool-use: use final text as-is
+        reply = textBlocks.map(b => b.text).join('\n');
+      }
       console.log(`[GCHAT-AGENT] Final response at iteration ${iteration}, stop_reason=${data.stop_reason}, reply_len=${reply.length}, reply_preview="${reply.substring(0, 150)}"`);
 
       if (personId) {
@@ -7152,60 +7366,52 @@ CRITICAL URL RULES:
 
             const parsed = parseMessage(text);
             if (!parsed || !parsed.items || parsed.items.length === 0) {
-              apiResult = { error: 'No valid SKUs detected. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67' };
+              apiResult = { error: 'No valid SKUs detected. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67, or 4 MR licenses' };
               break;
             }
 
-            const quoteResult = buildQuoteResponse(parsed);
-            // Extract URLs from the response (buildQuoteResponse returns { message, needsLlm })
-            const urlRegex = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
-            const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
-            const urls = responseText.match(urlRegex) || [];
+            const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
 
-            const quoteUrls = [];
-            // Parse option headers from response text to get meaningful labels
-            const optionHeaders = responseText.match(/\*\*Option \d[^*]*\*\*/g) || [];
+            // Check for EOL warnings and determine if any item is EOL
+            const eolWarnings = [];
+            let hasEol = false;
+            for (const item of parsed.items) {
+              const base = item.baseSku || item.sku;
+              if (isEol(base)) {
+                hasEol = true;
+                const replacement = checkEol(base);
+                eolWarnings.push(base + ' is End-of-Life' + (replacement ? ' → replaced by ' + (Array.isArray(replacement) ? replacement.join(' / ') : replacement) : ''));
+              }
+            }
+
+            let quoteUrls = [];
+
+            // Route ALL quotes through buildQuoteResponse for consistent 3-URL per-term output
+            // This matches the Webex bot and GChat bot main message handler behavior
+            const quoteResult = buildQuoteResponse(parsed);
+            const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
             const termLabels = ['1-Year', '3-Year', '5-Year'];
             let currentOption = '';
             let optionIdx = 0;
-            const lines = responseText.split('\n');
-            const urlLabels = [];
-            for (const line of lines) {
+            for (const line of responseText.split('\n')) {
               const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
               if (optMatch) { currentOption = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optionIdx = 0; }
               const urlMatch = line.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/);
               if (urlMatch) {
                 const label = currentOption
                   ? `${currentOption} (${termLabels[optionIdx] || ''})`
-                  : termLabels[urlLabels.length] || 'Quote ' + (urlLabels.length + 1);
-                urlLabels.push({ url: urlMatch[0], label: label.trim() });
+                  : termLabels[quoteUrls.length] || 'Quote ' + (quoteUrls.length + 1);
+                quoteUrls.push({ url: urlMatch[0], label: label.trim() });
                 optionIdx++;
               }
             }
-            // Fallback if regex parsing didn't capture structured labels
-            if (urlLabels.length > 0) {
-              urlLabels.forEach(u => quoteUrls.push({ url: u.url, label: u.label, term: '' }));
-            } else {
-              urls.forEach((u, i) => {
-                quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1), term: termLabels[i] || '' });
-              });
-            }
-
-            // Check for EOL warnings
-            const eolWarnings = [];
-            if (parsed.items) {
-              parsed.items.forEach(item => {
-                const base = item.baseSku || item.sku;
-                if (isEol(base)) {
-                  const replacement = checkEol(base);
-                  eolWarnings.push(base + ' is End-of-Life' + (replacement ? ' → replaced by ' + (Array.isArray(replacement) ? replacement.join(' / ') : replacement) : ''));
-                }
-              });
+            if (quoteUrls.length === 0) {
+              const urls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+              urls.forEach((u, i) => quoteUrls.push({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) }));
             }
 
             apiResult = {
               quoteUrls,
-              responseText: responseText.substring(0, 3000),
               eolWarnings,
               parsedItems: parsed.items.map(i => ({ sku: i.baseSku || i.sku, qty: i.qty })),
             };
@@ -7303,9 +7509,9 @@ CRITICAL URL RULES:
 
           // ── CRM Search: Search Zoho CRM modules ──
           case '/api/crm-search': {
-            const { query, module } = apiBody;
-            if (!query) {
-              return new Response(JSON.stringify({ error: 'query required' }), { status: 400, headers: jsonHeaders });
+            const { query, module, domain } = apiBody;
+            if (!query && !domain) {
+              return new Response(JSON.stringify({ error: 'query or domain required' }), { status: 400, headers: jsonHeaders });
             }
 
             const validModules = ['Accounts', 'Contacts', 'Deals', 'Quotes'];
@@ -7319,56 +7525,254 @@ CRITICAL URL RULES:
             };
 
             try {
-              const searchResp = await zohoApiCall('GET',
-                `${mod}/search?word=${encodeURIComponent(query)}&fields=${fieldMap[mod]}&per_page=10`, env
-              );
-              apiResult = { records: searchResp?.data || [], module: mod, query };
+              // Domain-based account search: criteria match on Website + word match on domain base name
+              if (domain && mod === 'Accounts') {
+                const results = [];
+                const seen = new Set();
+
+                // 1. Criteria search on Website field (e.g. "lavanture.com")
+                try {
+                  const domainResp = await zohoApiCall('GET',
+                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domain)}))&fields=${fieldMap.Accounts}&per_page=5`, env
+                  );
+                  for (const r of (domainResp?.data || [])) {
+                    if (!seen.has(r.id)) {
+                      results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                        billingStreet: r.Billing_Street, billingCity: r.Billing_City,
+                        billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
+                      seen.add(r.id);
+                    }
+                  }
+                } catch (_) {}
+
+                // 2. Word search on the domain base (strip TLD) — catches "Lavanture Products" from "lavanture.com"
+                const domainBase = domain.split('.')[0] || '';
+                if (domainBase.length >= 3) {
+                  try {
+                    const baseResp = await zohoApiCall('GET',
+                      `Accounts/search?word=${encodeURIComponent(domainBase)}&fields=${fieldMap.Accounts}&per_page=5`, env
+                    );
+                    for (const r of (baseResp?.data || [])) {
+                      if (!seen.has(r.id)) {
+                        results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                          billingStreet: r.Billing_Street, billingCity: r.Billing_City,
+                          billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
+                        seen.add(r.id);
+                      }
+                    }
+                  } catch (_) {}
+                }
+
+                apiResult = { records: results, module: mod, domain, isDomainSearch: true };
+              } else {
+                // Standard word search by name
+                const searchResp = await zohoApiCall('GET',
+                  `${mod}/search?word=${encodeURIComponent(query)}&fields=${fieldMap[mod]}&per_page=10`, env
+                );
+                const rawRecords = searchResp?.data || [];
+                // Normalize accounts to consistent shape
+                const records = mod === 'Accounts'
+                  ? rawRecords.map(r => ({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                      billingStreet: r.Billing_Street, billingCity: r.Billing_City,
+                      billingState: r.Billing_State, billingZip: r.Billing_Code }))
+                  : rawRecords;
+                apiResult = { records, module: mod, query };
+              }
             } catch (crmErr) {
               apiResult = { error: 'CRM search failed: ' + crmErr.message, records: [] };
             }
             break;
           }
 
-          // ── Tasks: Fetch open Zoho tasks for account domains ──
+          // ── CRM ISR Deals: Get deals where a Cisco rep is the Meraki ISR ──
+          case '/api/crm-isr-deals': {
+            const { repEmail: isrEmail, repId: isrRepId } = apiBody;
+            if (!isrEmail && !isrRepId) {
+              return new Response(JSON.stringify({ error: 'repEmail or repId required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              let repId = isrRepId || '';
+              let repName = '';
+
+              // Look up rep ID by email if not provided
+              if (!repId && isrEmail) {
+                const repSearch = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(isrEmail)})&fields=id,Name`, env
+                ).catch(() => null);
+                if (repSearch?.data?.[0]) {
+                  repId = repSearch.data[0].id;
+                  repName = repSearch.data[0].Name || '';
+                }
+              }
+
+              if (!repId) {
+                apiResult = { deals: [], found: false, error: 'Rep not found' };
+                break;
+              }
+
+              // Search deals where Meraki_ISR matches this rep's ID
+              const dealsResp = await zohoApiCall('GET',
+                `Deals/search?criteria=(Meraki_ISR:equals:${repId})&fields=id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Lead_Source,Created_Time&per_page=20&sort_by=Closing_Date&sort_order=desc`, env
+              ).catch(() => null);
+
+              const deals = (dealsResp?.data || []).map(d => ({
+                id: d.id,
+                name: d.Deal_Name || '',
+                stage: d.Stage || '',
+                amount: d.Amount || 0,
+                closingDate: d.Closing_Date || '',
+                accountName: d.Account_Name?.name || d.Account_Name || '',
+                leadSource: d.Lead_Source || '',
+                zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Potentials/${d.id}`,
+              }));
+
+              apiResult = { deals, found: deals.length > 0, repId, repName };
+            } catch (isrErr) {
+              apiResult = { deals: [], found: false, error: isrErr.message };
+            }
+            break;
+          }
+
+          // ── CRM Create Account ──
+          case '/api/crm-create-account': {
+            const { name: newAcctName, street: newAcctStreet, city: newAcctCity, state: newAcctState, zip: newAcctZip, website: newAcctWebsite } = apiBody;
+            if (!newAcctName) {
+              return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              const accountPayload = {
+                data: [{
+                  Account_Name: newAcctName,
+                  Billing_Street: newAcctStreet || '',
+                  Billing_City: newAcctCity || '',
+                  Billing_State: newAcctState || '',
+                  Billing_Code: newAcctZip || '',
+                  Website: newAcctWebsite || '',
+                  Owner: { id: '2570562000141711002' }, // Chris Graves
+                }]
+              };
+              const createResp = await zohoApiCall('POST', 'Accounts', env, accountPayload);
+              const parsed = parseZohoResponse(createResp, 'Account creation');
+              if (parsed.success) {
+                apiResult = {
+                  success: true,
+                  accountId: parsed.record_id,
+                  name: newAcctName,
+                  zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${parsed.record_id}`,
+                  message: `Account created: ${newAcctName}`,
+                };
+              } else {
+                apiResult = { success: false, error: parsed.message || 'Account creation failed' };
+              }
+            } catch (err) {
+              apiResult = { error: 'Account creation failed: ' + err.message, success: false };
+            }
+            break;
+          }
+
+          // ── Tasks: Fetch open Zoho tasks for account/contact (by ID or domain/email fallback) ──
           case '/api/tasks': {
-            const { domains, emails } = apiBody;
-            if ((!domains || domains.length === 0) && (!emails || emails.length === 0)) {
-              return new Response(JSON.stringify({ error: 'domains or emails required' }), { status: 400, headers: jsonHeaders });
+            const { domains, emails, accountId: directAccountId, contactId: directContactId } = apiBody;
+
+            // Require at least one lookup parameter
+            if (!directAccountId && !directContactId && (!domains || domains.length === 0) && (!emails || emails.length === 0)) {
+              return new Response(JSON.stringify({ error: 'accountId, contactId, domains, or emails required' }), { status: 400, headers: jsonHeaders });
             }
 
             try {
-              // Step 1: Find accounts by domain match
+              const taskFields = 'Subject, Status, Due_Date, Description, What_Id, Who_Id, Owner';
+              const seenIds = new Set();
+              let allTasks = [];
+
+              const mapTask = (t, acctId, acctName) => ({
+                id: t.id,
+                subject: t.Subject || '(no subject)',
+                status: t.Status || 'Not Started',
+                dueDate: t.Due_Date || null,
+                description: t.Description ? t.Description.substring(0, 200) : '',
+                dealId: t.What_Id ? t.What_Id.id : null,
+                dealName: t.What_Id ? t.What_Id.name : null,
+                contactId: t.Who_Id ? t.Who_Id.id : null,
+                contactName: t.Who_Id ? t.Who_Id.name : null,
+                ownerId: t.Owner ? t.Owner.id : null,
+                ownerName: t.Owner ? t.Owner.name : null,
+                accountId: acctId || null,
+                accountName: acctName || null,
+                zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${t.id}`,
+              });
+
+              // ── Fast path: accountId/contactId provided directly — skip domain resolution ──
+              if (directAccountId || directContactId) {
+                // Strategy 1: Contact-linked tasks (Who_Id match) — covers standalone tasks + rep tasks
+                if (directContactId) {
+                  try {
+                    const contactCoql = `select ${taskFields} from Tasks where Who_Id = '${directContactId}' and Status not in ('Completed') order by Due_Date asc limit 25`;
+                    const resp = await zohoApiCall('POST', 'coql', env, { select_query: contactCoql });
+                    if (resp?.data) {
+                      for (const t of resp.data) {
+                        if (!seenIds.has(t.id)) { seenIds.add(t.id); allTasks.push(mapTask(t, directAccountId, null)); }
+                      }
+                    }
+                  } catch (_) { /* contact query failed, continue */ }
+                }
+
+                // Strategy 2: Deal-linked tasks for account (What_Id in deal IDs for account)
+                if (directAccountId) {
+                  try {
+                    const dealsCoql = `select id from Deals where Account_Name = '${directAccountId}' and Stage not in ('Closed (Lost)') limit 50`;
+                    const dealsResp = await zohoApiCall('POST', 'coql', env, { select_query: dealsCoql });
+                    if (dealsResp?.data && dealsResp.data.length > 0) {
+                      const dealIds = dealsResp.data.map(d => `'${d.id}'`).join(',');
+                      const dealTaskCoql = `select ${taskFields} from Tasks where What_Id in (${dealIds}) and Status not in ('Completed') order by Due_Date asc limit 50`;
+                      const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: dealTaskCoql });
+                      if (taskResp?.data) {
+                        for (const t of taskResp.data) {
+                          if (!seenIds.has(t.id)) { seenIds.add(t.id); allTasks.push(mapTask(t, directAccountId, null)); }
+                        }
+                      }
+                    }
+                  } catch (_) { /* deal-based query failed */ }
+                }
+
+                allTasks.sort((a, b) => {
+                  if (!a.dueDate && !b.dueDate) return 0;
+                  if (!a.dueDate) return 1; if (!b.dueDate) return -1;
+                  return new Date(a.dueDate) - new Date(b.dueDate);
+                });
+                apiResult = { tasks: allTasks };
+                break;
+              }
+
+              // ── Fallback path: domain/email resolution (used when IDs not available) ──
               const searchDomains = (domains || []).filter(d => d && !d.match(/gmail\.com|yahoo\.com|hotmail\.com|outlook\.com|aol\.com|icloud\.com|protonmail\.com|live\.com|msn\.com|me\.com|mac\.com|comcast\.\w+|att\.\w+|verizon\.\w+|stratusinfosystems\.com/i));
               let accounts = [];
 
               for (const domain of searchDomains) {
                 try {
+                  // Try both bare domain and https://www. prefix to handle varying Website field formats
+                  const criteria = `((Website:starts_with:${encodeURIComponent(domain)}))`;
                   const acctResp = await zohoApiCall('GET',
-                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domain)}))&fields=id,Account_Name,Website&per_page=5`, env
+                    `Accounts/search?criteria=${criteria}&fields=id,Account_Name,Website&per_page=5`, env
                   );
-                  if (acctResp && acctResp.data) {
+                  if (acctResp?.data) {
                     acctResp.data.forEach(a => {
-                      if (!accounts.find(existing => existing.id === a.id)) {
-                        accounts.push({ id: a.id, name: a.Account_Name, website: a.Website });
-                      }
+                      if (!accounts.find(e => e.id === a.id)) accounts.push({ id: a.id, name: a.Account_Name, website: a.Website });
                     });
                   }
                 } catch (_) { /* skip failed domain lookups */ }
               }
 
-              // Step 2: If no accounts found via domain, try contact email lookup
+              // If no accounts found via domain, try contact email lookup
               if (accounts.length === 0 && emails && emails.length > 0) {
                 for (const email of emails.slice(0, 5)) {
                   try {
                     const contactResp = await zohoApiCall('GET',
                       `Contacts/search?email=${encodeURIComponent(email)}&fields=id,Account_Name&per_page=3`, env
                     );
-                    if (contactResp && contactResp.data) {
+                    if (contactResp?.data) {
                       contactResp.data.forEach(c => {
-                        if (c.Account_Name && c.Account_Name.id) {
-                          if (!accounts.find(existing => existing.id === c.Account_Name.id)) {
-                            accounts.push({ id: c.Account_Name.id, name: c.Account_Name.name || 'Unknown' });
-                          }
+                        if (c.Account_Name?.id && !accounts.find(e => e.id === c.Account_Name.id)) {
+                          accounts.push({ id: c.Account_Name.id, name: c.Account_Name.name || 'Unknown' });
                         }
                       });
                     }
@@ -7381,41 +7785,29 @@ CRITICAL URL RULES:
                 break;
               }
 
-              // Step 3: Fetch open tasks for all found accounts via COQL
-              let allTasks = [];
+              // Fetch open tasks for each found account via deal-linked COQL
               for (const acct of accounts.slice(0, 5)) {
                 try {
-                  const coqlQuery = `select Subject, Status, Due_Date, Description, What_Id, Who_Id, Owner from Tasks where What_Id.Account_Name.id = '${acct.id}' and Status not in ('Completed') limit 50`;
-                  const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: coqlQuery });
-                  if (taskResp && taskResp.data) {
-                    taskResp.data.forEach(t => {
-                      allTasks.push({
-                        id: t.id,
-                        subject: t.Subject || '(no subject)',
-                        status: t.Status || 'Not Started',
-                        dueDate: t.Due_Date || null,
-                        description: t.Description ? t.Description.substring(0, 200) : '',
-                        dealId: t.What_Id ? t.What_Id.id : null,
-                        dealName: t.What_Id ? t.What_Id.name : null,
-                        contactId: t.Who_Id ? t.Who_Id.id : null,
-                        contactName: t.Who_Id ? t.Who_Id.name : null,
-                        ownerId: t.Owner ? t.Owner.id : null,
-                        ownerName: t.Owner ? t.Owner.name : null,
-                        accountId: acct.id,
-                        accountName: acct.name,
-                      });
-                    });
+                  const dealsCoql = `select id from Deals where Account_Name = '${acct.id}' and Stage not in ('Closed (Lost)') limit 50`;
+                  const dealsResp = await zohoApiCall('POST', 'coql', env, { select_query: dealsCoql });
+                  if (dealsResp?.data && dealsResp.data.length > 0) {
+                    const dealIds = dealsResp.data.map(d => `'${d.id}'`).join(',');
+                    const dealTaskCoql = `select ${taskFields} from Tasks where What_Id in (${dealIds}) and Status not in ('Completed') order by Due_Date asc limit 50`;
+                    const taskResp = await zohoApiCall('POST', 'coql', env, { select_query: dealTaskCoql });
+                    if (taskResp?.data) {
+                      for (const t of taskResp.data) {
+                        if (!seenIds.has(t.id)) { seenIds.add(t.id); allTasks.push(mapTask(t, acct.id, acct.name)); }
+                      }
+                    }
                   }
                 } catch (tErr) {
                   console.error(`[API/tasks] COQL error for account ${acct.id}: ${tErr.message}`);
                 }
               }
 
-              // Sort by due date (soonest first, nulls last)
               allTasks.sort((a, b) => {
                 if (!a.dueDate && !b.dueDate) return 0;
-                if (!a.dueDate) return 1;
-                if (!b.dueDate) return -1;
+                if (!a.dueDate) return 1; if (!b.dueDate) return -1;
                 return new Date(a.dueDate) - new Date(b.dueDate);
               });
 
@@ -7910,6 +8302,94 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── Chat: CRM-aware Claude agent for Chrome Extension sidebar ──
+          // Routes through the same askClaude() tool-use loop as the GChat bot,
+          // giving the extension chat full Zoho CRM capabilities.
+          case '/api/chat': {
+            const { text: chatText, emailContext: chatEc, history: chatHistory, systemContext: chatSystemContext } = apiBody;
+            if (!chatText) {
+              apiResult = { error: 'text is required' };
+              break;
+            }
+
+            try {
+              const chatUserEmail = request.headers.get('x-user-email') || 'chrome-extension-user';
+              const chatPersonId = `ext:${chatUserEmail}`;
+
+              // Seed conversation history from prior chat messages if provided
+              if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
+                // Store the last few messages as history so askClaude can see them
+                for (const msg of chatHistory.slice(-6)) {
+                  await addToHistory(env.CONVERSATION_KV, chatPersonId, msg.role, msg.content);
+                }
+              }
+
+              // Build a context-enriched message
+              let enrichedMessage = chatText;
+              if (chatEc && chatEc.subject) {
+                const ctxParts = [];
+                ctxParts.push(`Subject: "${chatEc.subject}"`);
+                if (chatEc.senderName || chatEc.senderEmail) {
+                  ctxParts.push(`From: ${chatEc.senderName || ''} (${chatEc.senderEmail || ''})`);
+                }
+                if (chatEc.customerEmail) {
+                  ctxParts.push(`Customer: ${chatEc.customerEmail}`);
+                }
+                if (chatEc.customerDomain) {
+                  ctxParts.push(`Domain: ${chatEc.customerDomain}`);
+                }
+                enrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${chatText}`;
+              }
+
+              // Inject systemContext from extension (Zoho execution rules, email context)
+              if (chatSystemContext && chatSystemContext.trim()) {
+                enrichedMessage = `[Extension Instructions]\n${chatSystemContext}\n[End Instructions]\n\n${enrichedMessage}`;
+              }
+
+              // Detect if this is a CRM request that needs tool-use
+              const chatIntent = detectCrmEmailIntent(chatText);
+              const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
+              const useTools = chatIntent.hasAny && hasCrmCreds;
+
+              // Use the same askClaude function as the GChat bot
+              // This gives the extension chat full CRM tool-use capabilities
+              let reply = await askClaude(
+                enrichedMessage,
+                chatPersonId,
+                env,
+                null,       // no image data
+                useTools,   // enable CRM tools if CRM intent detected
+                null,       // no progress callback for direct HTTP response
+                120000      // 2-minute timeout for CRM operations
+              );
+
+              // Handle continuation objects (for very long CRM workflows)
+              while (reply && reply.__continuation) {
+                reply = await askClaudeContinue(
+                  reply.messages, reply.tools, reply.systemPrompt,
+                  reply.iteration, env, null, 120000
+                );
+              }
+
+              const replyText = typeof reply === 'string' ? reply : (reply?.reply || 'No response generated.');
+
+              // Save to history
+              await addToHistory(env.CONVERSATION_KV, chatPersonId, 'user', enrichedMessage);
+              await addToHistory(env.CONVERSATION_KV, chatPersonId, 'assistant', replyText);
+
+              // Set CRM session if tools were used
+              if (useTools) {
+                await env.CONVERSATION_KV.put(`crm_session_${chatPersonId}`, 'active', { expirationTtl: 900 });
+              }
+
+              apiResult = { success: true, reply: replyText, usedTools: useTools };
+            } catch (chatErr) {
+              console.error(`[API/CHAT] Error: ${chatErr.message}`);
+              apiResult = { success: false, error: 'Chat failed: ' + chatErr.message };
+            }
+            break;
+          }
+
           // ── Admin Usage: API cost stats for sidebar dashboard ──
           case '/api/admin-usage': {
             try {
@@ -8192,18 +8672,22 @@ CRITICAL URL RULES:
 
               if (isCiscoEmail) {
                 const isrResp = await zohoApiCall('GET',
-                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(fullEmail)})&fields=id,Name,Email,Title,Phone`, env
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(fullEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
                 if (isrResp?.data?.[0]) {
                   const isr = isrResp.data[0];
                   const nameParts = (isr.Name || '').split(' ');
+                  const _sv = (v) => (v && typeof v === 'object') ? (v.name || v.Name || '') : (v || '');
                   contact = {
                     id: isr.id, firstName: nameParts[0] || '', lastName: nameParts.slice(1).join(' ') || '',
                     fullName: isr.Name || '', email: isr.Email || fullEmail, phone: isr.Phone || '',
-                    mobile: '', title: isr.Title || 'Cisco Rep', accountId: null,
+                    mobile: '', title: _sv(isr.Title) || 'Cisco Rep', accountId: null,
                     accountName: 'Cisco Systems (Meraki ISR)', address: '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Meraki_ISRs/${isr.id}`,
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/CustomModule9/${isr.id}`,
                     isCiscoRep: true,
+                    pointsCurrent: typeof isr.Points_Current === 'number' ? isr.Points_Current : (Number(isr.Points_Current) || ''),
+                    merakiTeam: _sv(isr.Meraki_Team),
+                    vertical: _sv(isr.Vertical),
                   };
                 }
                 // Cisco reps: no account/deals/tasks/quotes
@@ -8500,15 +8984,17 @@ CRITICAL URL RULES:
               const isCiscoEmail = contactEmail && contactEmail.toLowerCase().endsWith('@cisco.com');
 
               if (isCiscoEmail) {
-                // Search Meraki_ISRs module by email for Cisco reps
+                // Search Meraki_ISRs module by email for Cisco reps (API name = Meraki_ISRs)
                 console.log(`[CRM-CONTACT] Cisco email detected: ${contactEmail} — searching Meraki_ISRs`);
                 const isrResp = await zohoApiCall('GET',
-                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(contactEmail)})&fields=id,Name,Email,Title,Phone`, env
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(contactEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
 
                 if (isrResp?.data?.[0]) {
                   const isr = isrResp.data[0];
                   const nameParts = (isr.Name || '').split(' ');
+                  // Safely extract string values from potentially object-valued Zoho lookup fields
+                  const _strVal = (v) => (v && typeof v === 'object') ? (v.name || v.Name || String(v) || '') : (v || '');
                   contact = {
                     id: isr.id,
                     firstName: nameParts[0] || '',
@@ -8517,12 +9003,15 @@ CRITICAL URL RULES:
                     email: isr.Email || contactEmail,
                     phone: isr.Phone || '',
                     mobile: '',
-                    title: isr.Title || 'Cisco Rep',
+                    title: _strVal(isr.Title) || 'Cisco Rep',
                     accountId: null,
                     accountName: 'Cisco Systems (Meraki ISR)',
                     address: '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Meraki_ISRs/${isr.id}`,
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/CustomModule9/${isr.id}`,
                     isCiscoRep: true,
+                    pointsCurrent: typeof isr.Points_Current === 'number' ? isr.Points_Current : (Number(isr.Points_Current) || ''),
+                    merakiTeam: _strVal(isr.Meraki_Team),
+                    vertical: _strVal(isr.Vertical),
                   };
                 }
                 // No account lookup needed for Cisco reps
@@ -8990,7 +9479,7 @@ CRITICAL URL RULES:
               // If no repId provided, look up via Meraki_ISRs module by email
               if (!finalRepId && arRepEmail) {
                 const isrSearch = await zohoApiCall('GET',
-                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(arRepEmail)})&fields=id,Name,Email`, env
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(arRepEmail)})&fields=id,Name,Email,Title,Phone,Points_Current,Meraki_Team,Vertical`, env
                 ).catch(() => null);
                 if (isrSearch?.data && isrSearch.data.length > 0) {
                   finalRepId = isrSearch.data[0].id;
