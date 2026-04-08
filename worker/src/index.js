@@ -3153,10 +3153,12 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     }
 
     // Tool-use loop: handle build_quote_url calls (max 8 iterations for multi-URL responses)
-    // Accumulate text from ALL iterations — Claude emits analysis text alongside tool calls,
-    // and we need to capture it all (not just the final iteration's text).
+    // Strategy: accumulate Claude's text AND inject tool-generated URLs directly.
+    // This guarantees URLs appear even if Claude doesn't repeat them in its follow-up text.
     let accumulatedText = '';
     let toolIterations = 0;
+    const injectedUrls = []; // Track URLs we inject so we can deduplicate from Claude's final text
+
     while (data.stop_reason === 'tool_use' && toolIterations < 8) {
       toolIterations++;
 
@@ -3188,6 +3190,14 @@ async function askClaude(userMessage, personId, env, imageData = null) {
             tool_use_id: toolUse.id,
             content: JSON.stringify(result)
           });
+
+          // Inject the URL directly into accumulated text so it's guaranteed to appear.
+          // Claude may or may not repeat it in its follow-up — we deduplicate later.
+          if (result.url) {
+            const label = result.label || 'Quote URL';
+            accumulatedText += `**${label}:** ${result.url}\n\n`;
+            injectedUrls.push(result.url);
+          }
         } else {
           toolResults.push({
             type: 'tool_result',
@@ -3216,9 +3226,20 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       data = await nextResponse.json();
     }
 
-    // Capture text from the final response too
+    // Capture text from the final response (Claude's wrap-up after all tool calls)
     const finalTextBlock = data.content?.find(b => b.type === 'text');
-    if (finalTextBlock?.text) accumulatedText += finalTextBlock.text;
+    if (finalTextBlock?.text) {
+      let finalText = finalTextBlock.text;
+      // Deduplicate: if Claude repeated a URL we already injected, strip the duplicate line
+      for (const url of injectedUrls) {
+        // Remove lines that are just the URL or a markdown link containing the URL
+        // but only if the URL was already injected above
+        const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+      }
+      finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
+      if (finalText) accumulatedText += finalText;
+    }
     const reply = accumulatedText.trim() || 'Sorry, I could not generate a response.';
 
     if (personId) {

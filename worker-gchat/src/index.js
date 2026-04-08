@@ -6057,6 +6057,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     let iteration = 0;
     const _loopStartMs = Date.now();
 
+    // Non-CRM (quoting) path: accumulate text across tool-use iterations so dashboard
+    // screenshot responses don't lose analysis text when Claude emits text + tool_use blocks.
+    // Also inject tool-generated URLs directly to guarantee they appear in output.
+    let accumulatedText = '';
+    const injectedUrls = []; // Track URLs we inject so we can deduplicate from Claude's final text
+
     // CRM speed optimization: track auto-expanded Quote data to avoid redundant API calls.
     // When zoho_search_records on Quotes auto-expands the first result (including Quoted_Items),
     // we cache the expanded data here. If Claude later calls zoho_get_record on the same Quote,
@@ -6229,6 +6235,18 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       if (data.stop_reason === 'tool_use') {
         console.log(`[GCHAT-AGENT] Tool use iteration ${iteration}`);
 
+        // Non-CRM path: strip base64 images after first iteration to save tokens.
+        // Claude already analyzed the image; resending it wastes ~100K+ tokens per iteration.
+        if (!useTools && iteration === 1) {
+          for (const msg of messages) {
+            if (msg.role === 'user' && Array.isArray(msg.content)) {
+              msg.content = msg.content.map(block =>
+                block.type === 'image' ? { type: 'text', text: '[Image already analyzed in first turn]' } : block
+              );
+            }
+          }
+        }
+
         // Add Claude's response (with tool_use blocks) to messages
         messages.push({ role: 'assistant', content: data.content });
 
@@ -6238,6 +6256,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           .filter(b => b.type === 'text' && b.text.trim().length > 0)
           .map(b => b.text.trim())
           .join('\n');
+
+        // Non-CRM path: accumulate interim text across iterations
+        if (!useTools && interimText) {
+          accumulatedText += interimText + '\n\n';
+        }
 
         const toolBlocks = data.content.filter(b => b.type === 'tool_use');
 
@@ -6296,6 +6319,13 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           if (block.name === 'build_quote_url') {
             const quoteResult = handleQuoteUrlTool(block.input);
             console.log(`[GCHAT-AGENT] build_quote_url → ${quoteResult.url?.substring(0, 80)}...`);
+            // Non-CRM path: inject the URL directly into accumulated text so it's guaranteed
+            // to appear in output even if Claude doesn't repeat it in its follow-up text.
+            if (!useTools && quoteResult.url) {
+              const label = quoteResult.label || 'Quote URL';
+              accumulatedText += `**${label}:** ${quoteResult.url}\n\n`;
+              injectedUrls.push(quoteResult.url);
+            }
             return {
               type: 'tool_result',
               tool_use_id: block.id,
@@ -6372,7 +6402,23 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       // Claude returned a final text response (stop_reason = 'end_turn')
       const textBlocks = data.content.filter(b => b.type === 'text');
-      const reply = textBlocks.map(b => b.text).join('\n');
+      let reply;
+
+      if (!useTools && accumulatedText) {
+        // Non-CRM path with tool-use: combine accumulated text + final response, dedup URLs
+        let finalText = textBlocks.map(b => b.text).join('\n');
+        // Deduplicate: if Claude repeated a URL we already injected, strip the duplicate line
+        for (const url of injectedUrls) {
+          const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+        }
+        finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
+        if (finalText) accumulatedText += finalText;
+        reply = accumulatedText.trim() || 'Sorry, I could not generate a response.';
+      } else {
+        // CRM path or no tool-use: use final text as-is
+        reply = textBlocks.map(b => b.text).join('\n');
+      }
       console.log(`[GCHAT-AGENT] Final response at iteration ${iteration}, stop_reason=${data.stop_reason}, reply_len=${reply.length}, reply_preview="${reply.substring(0, 150)}"`);
 
       if (personId) {
