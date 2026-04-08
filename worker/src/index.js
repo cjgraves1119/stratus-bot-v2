@@ -3238,14 +3238,29 @@ async function askClaude(userMessage, personId, env, imageData = null) {
     const finalTextBlock = data.content?.find(b => b.type === 'text');
     if (finalTextBlock?.text) {
       let finalText = finalTextBlock.text;
-      // Deduplicate: if Claude repeated a URL we already injected, strip the duplicate line
-      for (const url of injectedUrls) {
-        // Remove lines that are just the URL or a markdown link containing the URL
-        // but only if the URL was already injected above
-        const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+
+      // If Claude's final text already contains ALL injected URLs, it means Claude
+      // produced a complete, properly-formatted response (e.g. dashboard template with
+      // License Analysis → EOL Devices → Option 1 URL → Option 2 URL in the right order).
+      // In that case, discard the injected fallbacks and use Claude's text directly —
+      // otherwise the injected URLs appear at the TOP and the Option headers are left
+      // blank at the bottom after dedup strips the URL lines.
+      const allUrlsInFinalText = injectedUrls.length > 0 &&
+        injectedUrls.every(url => finalText.includes(url));
+
+      if (allUrlsInFinalText) {
+        // Claude's final text is complete and correctly ordered — use it exclusively
+        accumulatedText = '';
+      } else {
+        // Claude's final text is missing some URLs — keep the injected fallbacks and
+        // strip only the URL-containing lines from Claude's text to avoid duplicates
+        for (const url of injectedUrls) {
+          const urlEscaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          finalText = finalText.replace(new RegExp(`^.*${urlEscaped}.*$`, 'gm'), '');
+        }
+        finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
       }
-      finalText = finalText.replace(/\n{3,}/g, '\n\n').trim();
+
       if (finalText) accumulatedText += finalText;
     }
     const reply = accumulatedText.trim() || 'Sorry, I could not generate a response.';
