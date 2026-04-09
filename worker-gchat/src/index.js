@@ -8587,7 +8587,7 @@ CRITICAL URL RULES:
 
           // ── Suggest Task: Auto-create lead/contact + follow-up task ──
           case '/api/suggest-task': {
-            const { senderEmail, senderName, subject: taskSubject, hasAccount, accountId, createContact: shouldCreateContact } = apiBody;
+            const { senderEmail, senderName, subject: taskSubject, hasAccount, accountId, dealId: suggestDealId, createContact: shouldCreateContact } = apiBody;
             if (!senderEmail) {
               return new Response(JSON.stringify({ error: 'senderEmail required' }), { status: 400, headers: jsonHeaders });
             }
@@ -8770,7 +8770,11 @@ CRITICAL URL RULES:
               if (contactId) {
                 taskPayload.data[0].Who_Id = contactId;
               }
-              if (resultAccountId) {
+              // Link to deal if provided, otherwise link to account
+              if (suggestDealId) {
+                taskPayload.data[0].What_Id = suggestDealId;
+                taskPayload.data[0].$se_module = 'Deals';
+              } else if (resultAccountId) {
                 taskPayload.data[0].What_Id = resultAccountId;
                 taskPayload.data[0].$se_module = 'Accounts';
               }

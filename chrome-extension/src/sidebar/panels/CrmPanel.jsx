@@ -73,6 +73,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestPreview, setSuggestPreview] = useState(null);
   const [suggestEditSubject, setSuggestEditSubject] = useState('');
+  const [suggestDealId, setSuggestDealId] = useState(''); // '' = account only, dealId = link to deal
   const [suggestConfirmLoading, setSuggestConfirmLoading] = useState(false);
   const [suggestResult, setSuggestResult] = useState(null);
 
@@ -306,6 +307,13 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       });
       setSuggestPreview(preview);
       setSuggestEditSubject(preview.subject || `Follow up with ${preview.contactName || preview.senderName || preview.senderEmail || 'contact'}`);
+      // Auto-select first open deal (non-Closed) if available
+      const allDeals = [...(deals?.deals || []), ...(isrDeals?.deals || [])];
+      const openDeals = allDeals.filter(d => {
+        const st = (typeof (d.stage || d.Stage) === 'object' ? (d.stage || d.Stage)?.name : (d.stage || d.Stage)) || '';
+        return !st.toLowerCase().includes('closed');
+      });
+      setSuggestDealId(openDeals.length > 0 ? (openDeals[0].id || '') : '');
     } catch (err) {
       setSuggestResult({ error: err.message });
     } finally {
@@ -324,6 +332,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         hasAccount: !!suggestPreview.accountId,
         accountId: suggestPreview.accountId || data?.account?.id || '',
         contact_id: suggestPreview.contact_id || suggestPreview.contactId || data?.contact?.id || '',
+        dealId: suggestDealId || '',
         priority: suggestPreview.priority || 'Normal',
         description: suggestPreview.description || '',
       });
@@ -1093,6 +1102,48 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                   onFocus={(e) => e.target.style.borderColor = '#2e7d32'}
                   onBlur={(e) => e.target.style.borderColor = '#a5d6a7'}
                 />
+                {/* Deal selector */}
+                {(() => {
+                  const allDeals = [...(dealList || []), ...(isrDealList || [])];
+                  // Deduplicate by id
+                  const seen = new Set();
+                  const uniqueDeals = allDeals.filter(d => {
+                    if (!d.id || seen.has(d.id)) return false;
+                    seen.add(d.id);
+                    return true;
+                  });
+                  return (
+                    <div style={{ marginBottom: 6 }}>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: '#2e7d32', marginBottom: 3, textTransform: 'uppercase' }}>
+                        Link to Deal
+                      </div>
+                      <select
+                        value={suggestDealId}
+                        onChange={(e) => setSuggestDealId(e.target.value)}
+                        style={{
+                          width: '100%', padding: '5px 8px', fontSize: 12,
+                          borderRadius: 4, border: '1px solid #a5d6a7',
+                          background: 'white', color: COLORS.TEXT_PRIMARY,
+                          cursor: 'pointer', boxSizing: 'border-box',
+                        }}
+                      >
+                        <option value="">None (Account only)</option>
+                        {uniqueDeals.map(deal => {
+                          const name = typeof (deal.name || deal.Deal_Name) === 'object'
+                            ? (deal.name || deal.Deal_Name)?.name : (deal.name || deal.Deal_Name);
+                          const stage = typeof (deal.stage || deal.Stage) === 'object'
+                            ? (deal.stage || deal.Stage)?.name : (deal.stage || deal.Stage);
+                          return (
+                            <option key={deal.id} value={deal.id}>
+                              {name || 'Unnamed Deal'}{stage ? ` (${stage})` : ''}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+                  );
+                })()}
+
                 {suggestPreview.description && (
                   <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 4 }}>{suggestPreview.description}</div>
                 )}
