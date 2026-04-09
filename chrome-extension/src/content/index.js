@@ -1205,8 +1205,8 @@ function injectComposeButton(composeEl) {
         if (tasks.length > 0) {
           showSendTaskPopup(tasks, recipients, subject);
         } else {
-          // Show a brief "no tasks" confirmation so user knows it worked
-          showSendConfirmation('Email sent! No open Zoho tasks found for ' + (recipients[0] || 'this contact') + '.');
+          // No open tasks — prompt to create one with contact selector
+          showCreateTaskPrompt(recipients, subject);
         }
       } catch (taskErr) {
         console.warn('[Stratus] Task fetch error:', taskErr);
@@ -1539,6 +1539,172 @@ function addDays(days) {
     if (d.getDay() !== 0 && d.getDay() !== 6) added++;
   }
   return d.toISOString().split('T')[0];
+}
+
+// ─────────────────────────────────────────────
+// No Tasks Found — Prompt to Create One
+// ─────────────────────────────────────────────
+
+function showCreateTaskPrompt(recipients, subject) {
+  // Remove any existing popup/toast
+  document.querySelector('.stratus-send-task-popup')?.remove();
+  document.querySelector('.stratus-send-confirm')?.remove();
+
+  const popup = document.createElement('div');
+  popup.className = 'stratus-send-task-popup';
+
+  popup.style.cssText = `
+    position: fixed; bottom: 24px; right: 24px; z-index: 99999;
+    background: white; border-radius: 12px; padding: 16px 18px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.18), 0 1px 6px rgba(0,0,0,0.1);
+    font-family: -apple-system, BlinkMacSystemFont, 'Google Sans', sans-serif;
+    max-width: 340px; min-width: 280px; border: 1px solid #e0e0e0;
+    animation: stratusSlideIn 0.25s ease;
+  `;
+
+  // Inject keyframe if needed
+  if (!document.querySelector('#stratus-popup-style')) {
+    const style = document.createElement('style');
+    style.id = 'stratus-popup-style';
+    style.textContent = `@keyframes stratusSlideIn { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }`;
+    document.head.appendChild(style);
+  }
+
+  const defaultDue = addDays(3);
+  const taskSubject = subject ? `Follow up: ${subject}` : 'Follow up';
+
+  // Build contact selector HTML if multiple recipients
+  let contactSelectorHTML = '';
+  if (recipients.length > 1) {
+    const options = recipients.map((r, i) =>
+      `<label style="display:flex;align-items:center;gap:6px;padding:4px 0;cursor:pointer;">
+        <input type="radio" name="stratus-task-contact" value="${r}" ${i === 0 ? 'checked' : ''} style="margin:0;accent-color:#1a73e8;" />
+        <span style="font-size:12px;color:#1a1a1a;">${r}</span>
+      </label>`
+    ).join('');
+    contactSelectorHTML = `
+      <div style="margin-bottom:10px;">
+        <div style="font-size:11px;font-weight:600;color:#5f6368;margin-bottom:4px;">Create task under:</div>
+        <div style="background:#f8f9fa;border-radius:6px;padding:6px 10px;max-height:100px;overflow-y:auto;">
+          ${options}
+        </div>
+      </div>
+    `;
+  } else if (recipients.length === 1) {
+    contactSelectorHTML = `
+      <div style="font-size:12px;color:#5f6368;margin-bottom:10px;">
+        Contact: <strong style="color:#1a1a1a;">${recipients[0]}</strong>
+        <input type="hidden" name="stratus-task-contact" value="${recipients[0]}" />
+      </div>
+    `;
+  }
+
+  popup.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a1a;">✅ Email Sent — Create Task?</div>
+      <button class="stp-close" style="background:none;border:none;cursor:pointer;color:#5f6368;font-size:18px;padding:0 2px;line-height:1;">×</button>
+    </div>
+    <div style="font-size:12px;color:#5f6368;margin-bottom:10px;">
+      No open Zoho tasks found for ${recipients.length > 1 ? 'these recipients' : (recipients[0] || 'this contact')}.
+      Would you like to create a follow-up?
+    </div>
+    ${contactSelectorHTML}
+    <div style="margin-bottom:10px;">
+      <div style="font-size:11px;font-weight:600;color:#5f6368;margin-bottom:3px;">Task subject:</div>
+      <input type="text" class="stp-subject" value="${taskSubject.replace(/"/g, '&quot;')}" style="
+        width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #dadce0;border-radius:6px;
+        font-size:12px;font-family:inherit;color:#1a1a1a;outline:none;
+      " />
+    </div>
+    <div style="margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:600;color:#5f6368;margin-bottom:3px;">Due date:</div>
+      <input type="date" class="stp-due" value="${defaultDue}" style="
+        width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #dadce0;border-radius:6px;
+        font-size:12px;font-family:inherit;color:#1a1a1a;outline:none;
+      " />
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="stp-create" style="
+        flex:1;padding:9px 14px;background:#1a73e8;color:white;border:none;border-radius:8px;
+        font-size:12px;font-weight:600;cursor:pointer;
+      ">📋 Create Task</button>
+      <button class="stp-dismiss" style="
+        padding:9px 14px;background:transparent;color:#5f6368;
+        border:1px solid #e0e0e0;border-radius:8px;font-size:12px;cursor:pointer;
+      ">No Thanks</button>
+    </div>
+    <div class="stp-status" style="margin-top:10px;font-size:11px;color:#5f6368;display:none;"></div>
+  `;
+
+  document.body.appendChild(popup);
+
+  // Auto-dismiss after 30 seconds
+  const autoDismiss = setTimeout(() => popup.remove(), 30000);
+
+  function setStatus(msg, isError = false) {
+    const el = popup.querySelector('.stp-status');
+    el.textContent = msg;
+    el.style.color = isError ? '#d93025' : '#137333';
+    el.style.display = 'block';
+  }
+
+  function disableButtons() {
+    popup.querySelectorAll('button:not(.stp-close)').forEach(b => {
+      b.disabled = true;
+      b.style.opacity = '0.5';
+    });
+    popup.querySelectorAll('input').forEach(i => { i.disabled = true; i.style.opacity = '0.7'; });
+  }
+
+  popup.querySelector('.stp-close').addEventListener('click', () => {
+    clearTimeout(autoDismiss);
+    popup.remove();
+  });
+
+  popup.querySelector('.stp-dismiss').addEventListener('click', () => {
+    clearTimeout(autoDismiss);
+    popup.remove();
+  });
+
+  popup.querySelector('.stp-create').addEventListener('click', async () => {
+    disableButtons();
+    setStatus('Creating task...');
+    try {
+      const selectedContact = popup.querySelector('input[name="stratus-task-contact"]:checked')?.value
+        || popup.querySelector('input[name="stratus-task-contact"]')?.value
+        || recipients[0] || '';
+      const taskSub = popup.querySelector('.stp-subject')?.value || taskSubject;
+      const dueDate = popup.querySelector('.stp-due')?.value || defaultDue;
+
+      // Look up contact in CRM by email to get contactId
+      let contactId = '';
+      if (selectedContact) {
+        try {
+          const searchResult = await sendToBackground(MSG.CRM_SEARCH, {
+            query: selectedContact,
+            module: 'Contacts',
+          });
+          const contacts = searchResult?.records || searchResult?.results || [];
+          if (contacts.length > 0) {
+            contactId = contacts[0].id || contacts[0].Id || '';
+          }
+        } catch { /* proceed without contactId */ }
+      }
+
+      await sendToBackground(MSG.CRM_CREATE_TASK, {
+        subject: taskSub,
+        dueDate: dueDate,
+        contactId: contactId,
+        priority: 'Normal',
+        description: `Auto-created from Send+Task after email to ${selectedContact || recipients.join(', ')}`,
+      });
+
+      setStatus('✓ Task created!');
+      setTimeout(() => { clearTimeout(autoDismiss); popup.remove(); }, 2500);
+    } catch (err) {
+      setStatus('Error: ' + (err.message || 'Could not create task'), true);
+    }
+  });
 }
 
 // ─────────────────────────────────────────────
