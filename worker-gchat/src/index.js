@@ -8209,6 +8209,59 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── Enrich Company: Use Claude to derive company info from a domain ──
+          case '/api/enrich-company': {
+            const { domain: enrichDomain } = apiBody;
+            if (!enrichDomain) {
+              return new Response(JSON.stringify({ error: 'domain required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              const enrichResp = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-api-key': env.ANTHROPIC_API_KEY,
+                  'anthropic-version': '2023-06-01',
+                },
+                body: JSON.stringify({
+                  model: 'claude-haiku-4-5-20251001',
+                  max_tokens: 300,
+                  system: `You are a company research assistant. Given an email domain, return the company's official name and headquarters address. Return ONLY a raw JSON object (no markdown, no code fences, no commentary). If you cannot determine a field, use an empty string. Format:
+{"name":"Company Name","street":"123 Main St","city":"City","state":"ST","zip":"12345","website":"domain.com","phone":""}
+Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Global Security Inc."). For state, use the 2-letter abbreviation. Only include information you are confident about.`,
+                  messages: [{ role: 'user', content: `Company domain: ${enrichDomain}` }]
+                })
+              });
+              if (!enrichResp.ok) {
+                apiResult = { error: 'Enrichment API error: ' + enrichResp.status };
+                break;
+              }
+              const enrichData = await enrichResp.json();
+              ctx.waitUntil(trackUsage(env, 'claude-haiku-4-5-20251001', enrichData.usage, 'addon-enrich'));
+              const enrichText = enrichData.content?.[0]?.text || '';
+              var enrichParsed;
+              try {
+                enrichParsed = JSON.parse(enrichText.replace(/```json\n?|\n?```/g, '').trim());
+              } catch (_) {
+                // Try extracting JSON from mixed text
+                var enrichJsonMatch = enrichText.match(/\{[\s\S]*"name"\s*:[\s\S]*\}/);
+                enrichParsed = enrichJsonMatch ? JSON.parse(enrichJsonMatch[0]) : {};
+              }
+              apiResult = {
+                name: enrichParsed.name || '',
+                street: enrichParsed.street || '',
+                city: enrichParsed.city || '',
+                state: enrichParsed.state || '',
+                zip: enrichParsed.zip || '',
+                website: enrichParsed.website || enrichDomain,
+                phone: enrichParsed.phone || '',
+              };
+            } catch (err) {
+              apiResult = { error: 'Enrichment failed: ' + err.message };
+            }
+            break;
+          }
+
           // ── Tasks: Fetch open Zoho tasks for account/contact (by ID or domain/email fallback) ──
           case '/api/tasks': {
             const { domains, emails, accountId: directAccountId, contactId: directContactId } = apiBody;

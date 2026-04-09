@@ -283,6 +283,11 @@ registerMessageHandlers({
     return api.crmCreateAccount(name, street, city, state, zip, website);
   },
 
+  // ── Enrich Company (domain → company info) ──
+  [MSG.ENRICH_COMPANY]: async ({ domain }) => {
+    return api.enrichCompany(domain);
+  },
+
   // ── CRM Create Task ──
   [MSG.CRM_CREATE_TASK]: async ({ subject, dueDate, dealId, contactId, priority, description }) => {
     return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description);

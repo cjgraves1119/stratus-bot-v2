@@ -58,6 +58,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   const [newAccountData, setNewAccountData] = useState({ name: '', street: '', city: '', state: '', zip: '', website: '' });
   const [createAccountLoading, setCreateAccountLoading] = useState(false);
   const [createAccountError, setCreateAccountError] = useState(null);
+  const [enrichLoading, setEnrichLoading] = useState(false);
 
   // Task action state
   const [taskActionLoading, setTaskActionLoading] = useState(null);
@@ -421,7 +422,30 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     if (!data?.account?.id && domain && !CONSUMER_DOMAINS.has(domain)) {
       setDomainSuggestionsLoading(true);
       sendToBackground(MSG.CRM_ACCOUNT_SEARCH, { query: '', domain })
-        .then(res => setDomainSuggestions(res?.records || []))
+        .then(res => {
+          const found = res?.records || [];
+          setDomainSuggestions(found);
+          // If no CRM accounts found for this domain, auto-enrich from web
+          if (found.length === 0) {
+            setEnrichLoading(true);
+            setShowCreateAccount(true); // Auto-open create account form
+            sendToBackground(MSG.ENRICH_COMPANY, { domain })
+              .then(enriched => {
+                if (enriched && !enriched.error) {
+                  setNewAccountData(prev => ({
+                    name: enriched.name || prev.name,
+                    street: enriched.street || prev.street,
+                    city: enriched.city || prev.city,
+                    state: enriched.state || prev.state,
+                    zip: enriched.zip || prev.zip,
+                    website: enriched.website || domain,
+                  }));
+                }
+              })
+              .catch(() => {})
+              .finally(() => setEnrichLoading(false));
+          }
+        })
         .catch(() => {})
         .finally(() => setDomainSuggestionsLoading(false));
     }
@@ -677,6 +701,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 onCreateAccount={handleCreateAccount}
                 createAccountLoading={createAccountLoading}
                 createAccountError={createAccountError}
+                enrichLoading={enrichLoading}
                 onSubmit={handleAddContact}
                 onCancel={() => { setShowAddForm(false); setShowCreateAccount(false); }}
                 loading={addFormLoading}
@@ -1456,6 +1481,7 @@ function AddContactForm({
   domainSuggestions, domainSuggestionsLoading,
   showCreateAccount, setShowCreateAccount,
   newAccountData, setNewAccountData, onCreateAccount, createAccountLoading, createAccountError,
+  enrichLoading,
   onSubmit, onCancel, loading, error,
 }) {
   function selectAccount(acct) {
@@ -1596,8 +1622,15 @@ function AddContactForm({
           {/* ── Create Account Sub-Form ── */}
           {showCreateAccount && !accountId && (
             <div style={{ border: `1px solid ${COLORS.STRATUS_BLUE}44`, borderRadius: 8, padding: 12, background: '#f0f7ff', marginTop: 4 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.STRATUS_BLUE, marginBottom: 8, textTransform: 'uppercase' }}>
-                New Account
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.STRATUS_BLUE, textTransform: 'uppercase' }}>
+                  New Account
+                </div>
+                {enrichLoading && (
+                  <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
+                    Looking up company info…
+                  </div>
+                )}
               </div>
               <input type="text" placeholder="Account Name *" value={newAccountData.name}
                 onChange={e => setNewAccountData(p => ({ ...p, name: e.target.value }))}

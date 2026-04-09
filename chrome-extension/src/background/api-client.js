@@ -294,6 +294,13 @@ export async function crmAccountSearch(query, domain) {
 }
 
 /**
+ * Enrich company info from domain (Claude-powered lookup).
+ */
+export async function enrichCompany(domain) {
+  return apiCall('/api/enrich-company', { domain: domain || '' });
+}
+
+/**
  * Create a new CRM account.
  */
 export async function crmCreateAccount(name, street, city, state, zip, website) {

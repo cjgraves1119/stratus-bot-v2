@@ -127,6 +127,9 @@ export const MSG = {
   // Create CRM account (for Add Contact form)
   CRM_CREATE_ACCOUNT: 'CRM_CREATE_ACCOUNT',
 
+  // Enrich company info from domain (for Add Contact → New Account)
+  ENRICH_COMPANY: 'ENRICH_COMPANY',
+
   // Create CRM task manually
   CRM_CREATE_TASK: 'CRM_CREATE_TASK',
 
