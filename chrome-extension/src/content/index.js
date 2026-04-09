@@ -935,6 +935,184 @@ function getComposeSubject(composeEl) {
   return subjectInput?.value || '';
 }
 
+/**
+ * Extract the original/quoted email from a Gmail compose window.
+ * Gmail wraps the quoted text in a div.gmail_quote inside the compose body.
+ * Also extracts sender info from the "On [date], [name] <email> wrote:" line.
+ */
+function getComposeQuotedEmail(composeEl) {
+  const bodyEl = composeEl.querySelector('[role="textbox"][aria-label*="Body"], div[aria-label*="Message Body"], .Am.Al.editable');
+  if (!bodyEl) return { body: '', senderEmail: '', senderName: '' };
+
+  // Try gmail_quote first (standard reply format)
+  const quoteEl = bodyEl.querySelector('.gmail_quote');
+  let quotedBody = '';
+  let senderEmail = '';
+  let senderName = '';
+
+  if (quoteEl) {
+    quotedBody = quoteEl.innerText.substring(0, 8000);
+    // Parse "On Mon, Apr 7, 2026 at 10:30 AM Sharon Halnyj <shalnyj@fitzfinishing.com> wrote:"
+    const quoteHeader = quoteEl.previousElementSibling?.textContent || quoteEl.textContent.split('\n')[0] || '';
+    const wroteMatch = quoteHeader.match(/([^<]+)<([^>]+)>\s*wrote/i);
+    if (wroteMatch) {
+      senderName = wroteMatch[1].trim().replace(/^.*?,\s*/, '').replace(/\s+at\s+.*/, '').trim();
+      senderEmail = wroteMatch[2].trim();
+    }
+  }
+
+  // Fallback: if no gmail_quote, look for the "--- Forwarded message ---" or "------" separator
+  if (!quotedBody) {
+    const fullText = bodyEl.innerText || '';
+    const separators = [
+      /^-+\s*Forwarded message\s*-+$/m,
+      /^On\s.+wrote:$/m,
+      /^>{1,}/m,
+    ];
+    for (const sep of separators) {
+      const match = fullText.match(sep);
+      if (match) {
+        quotedBody = fullText.substring(match.index).substring(0, 8000);
+        break;
+      }
+    }
+  }
+
+  // If we still don't have sender info, try the compose recipients (they ARE the original sender in a reply)
+  if (!senderEmail) {
+    const recipients = getComposeRecipients(composeEl);
+    if (recipients.length > 0) senderEmail = recipients[0];
+  }
+
+  // Try to get sender name from recipient chip
+  if (!senderName && senderEmail) {
+    const chipEl = composeEl.querySelector(`span[email="${senderEmail}"]`);
+    if (chipEl) {
+      senderName = chipEl.getAttribute('name') || chipEl.textContent.trim();
+    }
+  }
+
+  return { body: quotedBody, senderEmail, senderName };
+}
+
+/**
+ * Show inline draft reply popup attached to a compose window.
+ * Self-contained — no sidebar dependency.
+ */
+function showComposeDraftPopup(composeEl, drafts, subject) {
+  // Remove existing popup
+  document.querySelector('.stratus-draft-popup')?.remove();
+
+  const popup = document.createElement('div');
+  popup.className = 'stratus-draft-popup';
+  popup.style.cssText = `
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 99999; background: white; border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.25), 0 2px 8px rgba(0,0,0,0.1);
+    font-family: -apple-system, BlinkMacSystemFont, 'Google Sans', sans-serif;
+    max-width: 540px; width: 90vw; max-height: 80vh; overflow-y: auto;
+    border: 1px solid #e0e0e0; animation: stratusSlideIn 0.2s ease;
+  `;
+
+  // Inject keyframe if needed
+  if (!document.querySelector('#stratus-popup-style')) {
+    const style = document.createElement('style');
+    style.id = 'stratus-popup-style';
+    style.textContent = '@keyframes stratusSlideIn { from { opacity:0; transform:translate(-50%,-50%) translateY(16px); } to { opacity:1; transform:translate(-50%,-50%) translateY(0); } }';
+    document.head.appendChild(style);
+  }
+
+  // Header
+  const header = document.createElement('div');
+  header.style.cssText = `
+    display: flex; align-items: center; gap: 10px; padding: 16px 20px;
+    border-bottom: 1px solid #e8e8e8; background: #f8f9fa; border-radius: 12px 12px 0 0;
+  `;
+  header.innerHTML = `
+    <div style="width:36px;height:36px;border-radius:50%;background:${COLORS.STRATUS_BLUE};display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:16px;">S</div>
+    <div>
+      <div style="font-weight:600;font-size:14px;color:#202124;">Choose a Draft</div>
+      <div style="font-size:12px;color:#5f6368;">Select the reply you prefer</div>
+    </div>
+    <div style="margin-left:auto;cursor:pointer;font-size:20px;color:#5f6368;padding:4px 8px;" class="stp-close">✕</div>
+  `;
+  popup.appendChild(header);
+
+  // Draft options
+  drafts.forEach((draft, i) => {
+    const draftBody = typeof draft === 'string' ? draft : (draft.body || draft.text || '');
+    const section = document.createElement('div');
+    section.style.cssText = `padding: 16px 20px; ${i > 0 ? 'border-top: 1px solid #e8e8e8;' : ''}`;
+
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size: 12px; color: #5f6368; margin-bottom: 8px; font-weight: 500;';
+    label.textContent = `Option ${i + 1}`;
+    section.appendChild(label);
+
+    const preview = document.createElement('div');
+    preview.style.cssText = 'font-size: 13px; color: #202124; line-height: 1.5; margin-bottom: 10px; white-space: pre-wrap;';
+    preview.textContent = draftBody.length > 400 ? draftBody.substring(0, 400) + '…' : draftBody;
+    section.appendChild(preview);
+
+    const useBtn = document.createElement('button');
+    useBtn.style.cssText = `
+      padding: 8px 16px; background: ${COLORS.STRATUS_BLUE}; color: white;
+      border: none; border-radius: 8px; font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: background 0.2s;
+    `;
+    useBtn.textContent = `Use Option ${i + 1}`;
+    useBtn.addEventListener('mouseenter', () => { useBtn.style.background = COLORS.STRATUS_DARK; });
+    useBtn.addEventListener('mouseleave', () => { useBtn.style.background = COLORS.STRATUS_BLUE; });
+    useBtn.addEventListener('click', () => {
+      // Insert draft into compose body
+      const bodyInput = composeEl.querySelector('[role="textbox"][aria-label*="Body"], div[aria-label*="Message Body"], .Am.Al.editable');
+      if (bodyInput) {
+        // Preserve the quoted email — insert draft BEFORE the quote
+        const quoteEl = bodyInput.querySelector('.gmail_quote');
+        if (quoteEl) {
+          const draftNode = document.createElement('div');
+          draftNode.innerHTML = draftBody.replace(/\n/g, '<br>');
+          draftNode.innerHTML += '<br>';
+          bodyInput.insertBefore(draftNode, quoteEl);
+        } else {
+          // No quote — just set the body
+          bodyInput.innerHTML = draftBody.replace(/\n/g, '<br>') + (bodyInput.innerHTML || '');
+        }
+        bodyInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      popup.remove();
+      overlay.remove();
+    });
+    section.appendChild(useBtn);
+    popup.appendChild(section);
+  });
+
+  // Back/close button
+  const footer = document.createElement('div');
+  footer.style.cssText = 'padding: 12px 20px; border-top: 1px solid #e8e8e8; text-align: center;';
+  const backBtn = document.createElement('button');
+  backBtn.style.cssText = `
+    padding: 8px 20px; background: transparent; border: 1px solid #dadce0;
+    border-radius: 8px; font-size: 12px; cursor: pointer; color: ${COLORS.STRATUS_BLUE};
+    font-weight: 500;
+  `;
+  backBtn.textContent = '← Back';
+  backBtn.addEventListener('click', () => { popup.remove(); overlay.remove(); });
+  footer.appendChild(backBtn);
+  popup.appendChild(footer);
+
+  // Overlay
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.3);z-index:99998;';
+  overlay.addEventListener('click', () => { popup.remove(); overlay.remove(); });
+
+  // Close button handler
+  popup.querySelector('.stp-close').addEventListener('click', () => { popup.remove(); overlay.remove(); });
+
+  document.body.appendChild(overlay);
+  document.body.appendChild(popup);
+}
+
 function injectComposeButton(composeEl) {
   // Check if already injected
   if (composeEl.querySelector('.stratus-compose-btn')) return;
@@ -1058,10 +1236,10 @@ function injectComposeButton(composeEl) {
     }, 3000);
   });
 
-  // ── Stratus AI button (opens sidebar with current email context) ──
+  // ── Stratus AI button (self-contained draft reply, no sidebar dependency) ──
   const btn = document.createElement('div');
   btn.className = 'stratus-compose-btn';
-  btn.title = 'Open Stratus AI sidebar';
+  btn.title = 'Generate AI Draft Reply';
   btn.style.cssText = `
     display: inline-flex; align-items: center; justify-content: center;
     width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
@@ -1070,37 +1248,68 @@ function injectComposeButton(composeEl) {
     position: relative; z-index: 10;
   `;
   btn.textContent = 'S';
-  btn.addEventListener('mouseenter', () => { btn.style.background = COLORS.STRATUS_DARK; });
-  btn.addEventListener('mouseleave', () => { btn.style.background = COLORS.STRATUS_BLUE; });
+  btn.addEventListener('mouseenter', () => { if (!btn._busy) btn.style.background = COLORS.STRATUS_DARK; });
+  btn.addEventListener('mouseleave', () => { if (!btn._busy) btn.style.background = COLORS.STRATUS_BLUE; });
   btn.addEventListener('click', async () => {
-    // Force re-extract email data from the current thread to refresh sidebar context.
-    // When compose is open, the email observer may not have re-fired, leaving stale context.
+    if (btn._busy) return;
+    btn._busy = true;
+    btn.textContent = '…';
+    btn.style.background = COLORS.STRATUS_DARK;
+    btn.style.cursor = 'default';
+
     try {
-      const freshData = extractEmailData();
-      if (freshData) {
-        // Clear the dedup hash so EMAIL_CHANGED fires even if same thread
-        lastEmailHash = '';
-        await sendToBackground(MSG.EMAIL_CHANGED, freshData).catch(() => {});
+      // Extract email context directly from the compose window
+      const subject = getComposeSubject(composeEl);
+      const { body, senderEmail, senderName } = getComposeQuotedEmail(composeEl);
+
+      if (!senderEmail && !body) {
+        // Fallback: try extracting from the thread behind the compose
+        const threadData = extractEmailData();
+        if (threadData) {
+          const result = await sendToBackground(MSG.DRAFT_REPLY, {
+            subject: threadData.subject || subject,
+            body: threadData.body || '',
+            senderEmail: threadData.customerEmail || threadData.senderEmail || '',
+            senderName: threadData.senderName || '',
+            tone: 'warm',
+            instructions: '',
+          });
+          if (result?.drafts?.length) {
+            showComposeDraftPopup(composeEl, result.drafts, subject);
+          } else {
+            showSendConfirmation('Could not generate drafts. Try the sidebar instead.');
+          }
+          return;
+        }
+        showSendConfirmation('No email context found. Open an email thread and reply to use this feature.');
+        return;
       }
-    } catch { /* extraction failure is non-fatal */ }
 
-    // Short delay to let sidebar process the updated email context
-    await new Promise(r => setTimeout(r, 200));
-
-    // Open sidebar + navigate to email panel for draft reply
-    try {
-      await sendToBackground(MSG.SIDEBAR_NAVIGATE, {
-        panel: 'email',
-        openPanel: true,
+      // Call draft reply API directly (bypasses sidebar entirely)
+      const result = await sendToBackground(MSG.DRAFT_REPLY, {
+        subject,
+        body,
+        senderEmail,
+        senderName,
+        tone: 'warm',
+        instructions: '',
       });
-    } catch {
-      try {
-        await chrome.runtime.sendMessage({
-          type: MSG.SIDEBAR_NAVIGATE,
-          panel: 'email',
-          openPanel: true,
-        });
-      } catch { /* sidebar may not be ready */ }
+
+      if (result?.drafts?.length) {
+        showComposeDraftPopup(composeEl, result.drafts, subject);
+      } else if (result?.draft) {
+        showComposeDraftPopup(composeEl, [result.draft], subject);
+      } else {
+        showSendConfirmation('No drafts generated. Check the email context and try again.');
+      }
+    } catch (err) {
+      console.error('[Stratus] Draft reply error:', err);
+      showSendConfirmation('Draft failed: ' + (err.message || 'connection error'));
+    } finally {
+      btn.textContent = 'S';
+      btn.style.background = COLORS.STRATUS_BLUE;
+      btn.style.cursor = 'pointer';
+      btn._busy = false;
     }
   });
 
