@@ -946,43 +946,152 @@ function injectComposeButton(composeEl) {
     height: 32px; border-radius: 16px; cursor: pointer;
     background: #1a73a7; color: white; font-size: 11px;
     font-weight: 600; margin-left: 6px; transition: background 0.2s;
-    white-space: nowrap; border: none;
+    white-space: nowrap; border: none; position: relative; z-index: 10;
+    user-select: none; -webkit-user-select: none;
   `;
   sendTaskBtn.innerHTML = '📋 Send + Task';
-  sendTaskBtn.addEventListener('mouseenter', () => { sendTaskBtn.style.background = '#0d4f73'; });
-  sendTaskBtn.addEventListener('mouseleave', () => { sendTaskBtn.style.background = '#1a73a7'; });
+  sendTaskBtn.addEventListener('mouseenter', () => { if (!sendTaskBtn._busy) sendTaskBtn.style.background = '#0d4f73'; });
+  sendTaskBtn.addEventListener('mouseleave', () => { if (!sendTaskBtn._busy) sendTaskBtn.style.background = '#1a73a7'; });
 
   sendTaskBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    // 1. Capture compose data BEFORE sending
-    const recipients = getComposeRecipients(composeEl);
-    const subject = getComposeSubject(composeEl);
+    e.preventDefault();
 
-    // 2. Click Gmail's native Send button
-    const sendButton = composeEl.querySelector('[data-tooltip="Send"]')
-      || composeEl.querySelector('.aoO[role="button"]')
-      || composeEl.querySelector('div[aria-label*="Send"]')
-      || composeEl.querySelector('[aria-label="Send ‪(Ctrl-Enter)‬"]');
-    if (sendButton) sendButton.click();
+    // Prevent double-clicks
+    if (sendTaskBtn._busy) return;
+    sendTaskBtn._busy = true;
 
-    // 3. Show task confirmation popup (don't need recipients for this — check tasks for current thread)
-    await new Promise(r => setTimeout(r, 1200)); // Let send complete
+    // ── Immediate visual feedback ──
+    const originalHTML = sendTaskBtn.innerHTML;
+    sendTaskBtn.innerHTML = '⏳ Sending...';
+    sendTaskBtn.style.background = '#0d4f73';
+    sendTaskBtn.style.pointerEvents = 'none';
 
     try {
-      const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
-        domains: recipients.map(r => r.split('@')[1]).filter(Boolean),
-        emails: recipients,
-      });
-      const tasks = taskResult?.tasks || [];
-      if (tasks.length > 0) {
-        showSendTaskPopup(tasks, recipients, subject);
+      // 1. Wake up background service worker with a ping first
+      try {
+        await sendToBackground(MSG.GET_SETTINGS);
+      } catch {
+        // If background is dormant, try to open sidebar to wake it up
+        console.log('[Stratus] Background unreachable, attempting sidebar open to wake service worker...');
+        try {
+          await chrome.runtime.sendMessage({ type: MSG.SIDEBAR_NAVIGATE, panel: 'zoho', openPanel: true });
+          await new Promise(r => setTimeout(r, 500)); // Give sidebar time to initialize
+        } catch (sidebarErr) {
+          console.warn('[Stratus] Could not wake service worker:', sidebarErr);
+        }
       }
-    } catch (err) {
-      console.warn('[Stratus] Send+Task check error:', err);
+
+      // 2. Capture compose data BEFORE sending
+      const recipients = getComposeRecipients(composeEl);
+      const subject = getComposeSubject(composeEl);
+
+      // 3. Click Gmail's native Send button (expanded selector list for Gmail DOM variations)
+      const sendButton = composeEl.querySelector('[data-tooltip="Send"]')
+        || composeEl.querySelector('[data-tooltip="Send ‪(⌘Enter)‬"]')
+        || composeEl.querySelector('[data-tooltip="Send ‪(Ctrl-Enter)‬"]')
+        || composeEl.querySelector('.aoO[role="button"]')
+        || composeEl.querySelector('div[aria-label="Send"]')
+        || composeEl.querySelector('div[aria-label*="Send "]')
+        || composeEl.querySelector('.T-I.J-J5-Ji.aoO.T-I-atl.L3')
+        || composeEl.querySelector('[aria-label="Send ‪(Ctrl-Enter)‬"]');
+
+      if (sendButton) {
+        sendButton.click();
+      } else {
+        // Fallback: use keyboard shortcut Ctrl+Enter / Cmd+Enter to send
+        console.warn('[Stratus] Send button not found, attempting keyboard shortcut');
+        const composeBody = composeEl.querySelector('[role="textbox"][aria-label*="Body"], div[aria-label*="Message Body"]');
+        if (composeBody) {
+          composeBody.focus();
+          composeBody.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, metaKey: true, bubbles: true }));
+        }
+      }
+
+      sendTaskBtn.innerHTML = '✓ Sent! Checking tasks...';
+
+      // 4. Wait for send to complete, then check for related tasks
+      await new Promise(r => setTimeout(r, 1500));
+
+      try {
+        const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
+          domains: recipients.map(r => r.split('@')[1]).filter(Boolean),
+          emails: recipients,
+        });
+        const tasks = taskResult?.tasks || [];
+        if (tasks.length > 0) {
+          showSendTaskPopup(tasks, recipients, subject);
+        } else {
+          // Show a brief "no tasks" confirmation so user knows it worked
+          showSendConfirmation('Email sent! No open Zoho tasks found for ' + (recipients[0] || 'this contact') + '.');
+        }
+      } catch (taskErr) {
+        console.warn('[Stratus] Task fetch error:', taskErr);
+        showSendConfirmation('Email sent! Could not check tasks: ' + (taskErr.message || 'connection error'));
+      }
+    } catch (outerErr) {
+      console.error('[Stratus] Send+Task error:', outerErr);
+      sendTaskBtn.innerHTML = '❌ Error';
+      sendTaskBtn.style.background = '#d93025';
+      setTimeout(() => {
+        sendTaskBtn.innerHTML = originalHTML;
+        sendTaskBtn.style.background = '#1a73a7';
+        sendTaskBtn.style.pointerEvents = '';
+        sendTaskBtn._busy = false;
+      }, 2000);
+      return;
     }
+
+    // Reset button state after a delay (compose may already be gone)
+    setTimeout(() => {
+      try {
+        sendTaskBtn.innerHTML = originalHTML;
+        sendTaskBtn.style.background = '#1a73a7';
+        sendTaskBtn.style.pointerEvents = '';
+        sendTaskBtn._busy = false;
+      } catch { /* compose already removed from DOM */ }
+    }, 3000);
   });
 
   toolbar.appendChild(sendTaskBtn);
+}
+
+// ─────────────────────────────────────────────
+// Brief confirmation toast (email sent, no tasks found)
+// ─────────────────────────────────────────────
+
+function showSendConfirmation(message) {
+  // Remove any existing popup/toast
+  document.querySelector('.stratus-send-task-popup')?.remove();
+  document.querySelector('.stratus-send-confirm')?.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'stratus-send-confirm';
+  toast.style.cssText = `
+    position: fixed; bottom: 24px; right: 24px; z-index: 99999;
+    background: white; border-radius: 12px; padding: 14px 18px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.18), 0 1px 6px rgba(0,0,0,0.1);
+    font-family: -apple-system, BlinkMacSystemFont, 'Google Sans', sans-serif;
+    max-width: 320px; min-width: 240px; border: 1px solid #e0e0e0;
+    animation: stratusSlideIn 0.25s ease;
+  `;
+
+  // Inject keyframe if needed
+  if (!document.querySelector('#stratus-popup-style')) {
+    const style = document.createElement('style');
+    style.id = 'stratus-popup-style';
+    style.textContent = `@keyframes stratusSlideIn { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }`;
+    document.head.appendChild(style);
+  }
+
+  toast.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:18px;">✅</span>
+      <span style="font-size:13px;color:#1a1a1a;">${message}</span>
+    </div>
+  `;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 5000);
 }
 
 // ─────────────────────────────────────────────
