@@ -8777,6 +8777,29 @@ CRITICAL URL RULES:
                 // Skip invalid SKUs (false positives like "Z3IOQXQ")
               }
             }
+            // Also check directLicenseList for LIC-* SKUs parsed from CSV/prose
+            if (parsed && parsed.directLicenseList && parsed.directLicenseList.length > 0) {
+              for (const lic of parsed.directLicenseList) {
+                // Avoid duplicates (in case items already captured it)
+                if (!skus.some(s => s.sku === lic.sku)) {
+                  skus.push({ sku: lic.sku, qty: lic.qty });
+                }
+              }
+            }
+            // Fallback: regex scan for LIC-* patterns not caught by parser
+            if (skus.length === 0 || !skus.some(s => s.sku.startsWith('LIC-'))) {
+              const licRegex = /\b(LIC-[A-Z0-9]+-[A-Z0-9-]+)\b/gi;
+              let licMatch;
+              while ((licMatch = licRegex.exec(text)) !== null) {
+                const foundLic = licMatch[1].toUpperCase();
+                if (!skus.some(s => s.sku === foundLic)) {
+                  // Try to find qty near the license mention
+                  const nearby = text.substring(Math.max(0, licMatch.index - 20), licMatch.index + licMatch[0].length + 20);
+                  const qtyMatch = nearby.match(/(\d+)\s*(?:x\s*)?(?:LIC-|$)/i) || nearby.match(/(?:qty|quantity|x)\s*(\d+)/i);
+                  skus.push({ sku: foundLic, qty: qtyMatch ? parseInt(qtyMatch[1]) : 1 });
+                }
+              }
+            }
             apiResult = { skus };
             break;
           }
