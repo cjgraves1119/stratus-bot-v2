@@ -7742,15 +7742,19 @@ CRITICAL URL RULES:
                   null,   // no image
                   false,  // no tools
                 );
-                const claudeUrls = (claudeReply || '').match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                const sanitizedFallback = (claudeReply || '').replace(/\[object Object\]/g, '');
+                const claudeUrls = sanitizedFallback.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                const cleanFallbackUrls = claudeUrls
+                  .map(u => u.replace(/,{2,}/g, ',').replace(/,&/g, '&').replace(/item=,/g, 'item=').replace(/,$/g, ''))
+                  .filter(u => u.includes('item=') && !u.includes('item=&'));
                 const termLabels = ['1-Year', '3-Year', '5-Year'];
                 apiResult = await finalizeQuoteResponse({
-                  quoteUrls: claudeUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
+                  quoteUrls: cleanFallbackUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
                   eolWarnings: [],
                   parsedItems: [],
-                  claudeResponse: claudeReply || '',
+                  claudeResponse: sanitizedFallback,
                   handlerType: 'claude-fallback',
-                }, claudeReply);
+                }, sanitizedFallback);
               } catch (claudeErr) {
                 console.error('[API/quote] Claude fallback error:', claudeErr);
                 apiResult = { error: 'No valid SKUs detected and AI fallback failed. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67' };
@@ -7775,22 +7779,32 @@ CRITICAL URL RULES:
             // fall through to Claude for guidance (e.g., "MS225" alone — EOL family)
             if (validItems.length === 0) {
               try {
+                // Build item context so Claude knows what was parsed (prevents [object Object] hallucination)
+                const fbItemContext = (parsedWithValidation || []).map(i => `${i.qty}x ${i.sku}`).join(', ');
+                let fbPrompt = text;
+                if (fbItemContext) fbPrompt += `\n\n(Parsed items: ${fbItemContext})`;
                 const claudeReply = await askClaude(
-                  text,
+                  fbPrompt,
                   quotePersonId,
                   env,
                   null,
                   false,
                 );
-                const claudeUrls = (claudeReply || '').match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                // Sanitize: strip [object Object] from Claude's response (hallucination safety net)
+                const sanitizedFb = (claudeReply || '').replace(/\[object Object\]/g, '');
+                const claudeUrls = sanitizedFb.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                // Clean up URL artifacts from sanitization (trailing commas, empty items)
+                const cleanFbUrls = claudeUrls
+                  .map(u => u.replace(/,{2,}/g, ',').replace(/,&/g, '&').replace(/item=,/g, 'item=').replace(/,$/g, ''))
+                  .filter(u => u.includes('item=') && !u.includes('item=&'));
                 const termLabels = ['1-Year', '3-Year', '5-Year'];
                 apiResult = await finalizeQuoteResponse({
-                  quoteUrls: claudeUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
+                  quoteUrls: cleanFbUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
                   eolWarnings: [],
                   parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
-                  claudeResponse: claudeReply || '',
+                  claudeResponse: sanitizedFb,
                   handlerType: 'claude-fallback',
-                }, claudeReply);
+                }, sanitizedFb);
               } catch (claudeErr) {
                 console.error('[API/quote] Claude fallback error:', claudeErr);
                 apiResult = { error: 'AI response failed. Please try again.' };
@@ -7817,22 +7831,38 @@ CRITICAL URL RULES:
             // fall through to Claude — identical to Webex bot behavior
             if (quoteResult.needsLlm) {
               try {
+                // Build item context string so Claude knows exactly what was parsed
+                // This prevents [object Object] in Claude's URL generation
+                const itemContext = (parsed?.items || []).map(i => {
+                  const sku = i.baseSku || i.sku || '';
+                  return `${i.qty}x ${sku}`;
+                }).join(', ');
+                const errorContext = (quoteResult.errors || []).join('; ');
+                let claudePrompt = text;
+                if (itemContext) claudePrompt += `\n\n(Parsed items: ${itemContext})`;
+                if (errorContext) claudePrompt += `\n(SKU issues: ${errorContext})`;
                 const claudeReply = await askClaude(
-                  text,
+                  claudePrompt,
                   quotePersonId,
                   env,
                   null,
                   false,
                 );
-                const claudeUrls = (claudeReply || '').match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                // Sanitize: strip [object Object] from Claude's response (hallucination safety net)
+                const sanitizedReply = (claudeReply || '').replace(/\[object Object\]/g, '');
+                const claudeUrls = sanitizedReply.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                // Clean up URL artifacts from sanitization (trailing commas, empty items)
+                const cleanUrls = claudeUrls
+                  .map(u => u.replace(/,{2,}/g, ',').replace(/,&/g, '&').replace(/item=,/g, 'item=').replace(/,$/g, ''))
+                  .filter(u => u.includes('item=') && !u.includes('item=&'));
                 const termLabels = ['1-Year', '3-Year', '5-Year'];
                 apiResult = await finalizeQuoteResponse({
-                  quoteUrls: claudeUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
+                  quoteUrls: cleanUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
                   eolWarnings,
                   parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
-                  claudeResponse: claudeReply || '',
+                  claudeResponse: sanitizedReply,
                   handlerType: 'claude-advisory',
-                }, claudeReply);
+                }, sanitizedReply);
               } catch (claudeErr) {
                 console.error('[API/quote] Claude fallback error:', claudeErr);
                 apiResult = { error: 'AI response failed. Please try again.' };
