@@ -888,14 +888,27 @@ function setupEmailHoverPopups() {
 // ─────────────────────────────────────────────
 
 function getComposeRecipients(composeEl) {
-  // Extract recipient emails from the compose window
+  // Extract recipient emails from the compose To/Cc/Bcc fields ONLY (not thread body)
   const recipients = new Set();
-  // Gmail stores To/Cc recipients in chip elements
-  composeEl.querySelectorAll('[data-hovercard-id], [email]').forEach(el => {
-    const email = el.getAttribute('data-hovercard-id') || el.getAttribute('email') || '';
-    if (email && email.includes('@')) recipients.add(email.toLowerCase());
+
+  // Priority 1: Gmail compose chip elements with [email] attribute in To/Cc/Bcc containers
+  // These are the actual recipient chips, not thread participant hover cards
+  const chipSelectors = [
+    'div[name="to"] span[email]',
+    'div[name="cc"] span[email]',
+    'div[name="bcc"] span[email]',
+    '.aoD span[email]',            // Reply-to chip container
+    '.GG span[email]',             // Compose To field chips
+    '.wO span[email]',             // Another To field variant
+  ];
+  chipSelectors.forEach(sel => {
+    composeEl.querySelectorAll(sel).forEach(el => {
+      const email = el.getAttribute('email') || '';
+      if (email && email.includes('@')) recipients.add(email.toLowerCase());
+    });
   });
-  // Also check hidden inputs and aria-label inputs
+
+  // Priority 2: Hidden/text inputs for To/Cc/Bcc
   const toInput = composeEl.querySelector('input[aria-label*="To"], textarea[aria-label*="To"]');
   if (toInput && toInput.value) {
     toInput.value.split(/[,;]/).forEach(e => {
@@ -903,6 +916,16 @@ function getComposeRecipients(composeEl) {
       if (trimmed.includes('@')) recipients.add(trimmed.toLowerCase());
     });
   }
+
+  // Priority 3: Fallback to broader [data-hovercard-id] only if nothing found above
+  // (avoids picking up thread participants like mixmax, automated senders, etc.)
+  if (recipients.size === 0) {
+    composeEl.querySelectorAll('[data-hovercard-id], [email]').forEach(el => {
+      const email = el.getAttribute('data-hovercard-id') || el.getAttribute('email') || '';
+      if (email && email.includes('@')) recipients.add(email.toLowerCase());
+    });
+  }
+
   return [...recipients].filter(e => !e.includes('@stratusinfosystems.com'));
 }
 
@@ -928,6 +951,7 @@ function injectComposeButton(composeEl) {
     width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
     background: ${COLORS.STRATUS_BLUE}; color: white; font-size: 14px;
     font-weight: 700; margin-left: 8px; transition: background 0.2s;
+    position: relative; z-index: 10;
   `;
   btn.textContent = 'S';
   btn.addEventListener('mouseenter', () => { btn.style.background = COLORS.STRATUS_DARK; });
