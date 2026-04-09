@@ -1752,8 +1752,55 @@ function getAccessoriesContext(userMessage) {
   return context;
 }
 
+// ─── Word-to-Number Conversion ──────────────────────────────────────────────
+// Converts written-out English numbers to digits so "two MR44" → "2 MR44".
+// Handles: one–twenty, tens (thirty–ninety), compounds (twenty-five / twenty five),
+// "a dozen", "half dozen", "hundred", and "a couple [of]".
+const WORD_NUMBERS = {
+  ZERO: 0, ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5, SIX: 6, SEVEN: 7,
+  EIGHT: 8, NINE: 9, TEN: 10, ELEVEN: 11, TWELVE: 12, THIRTEEN: 13,
+  FOURTEEN: 14, FIFTEEN: 15, SIXTEEN: 16, SEVENTEEN: 17, EIGHTEEN: 18,
+  NINETEEN: 19, TWENTY: 20, THIRTY: 30, FORTY: 40, FIFTY: 50, SIXTY: 60,
+  SEVENTY: 70, EIGHTY: 80, NINETY: 90, HUNDRED: 100
+};
+
+function convertWordNumbers(text) {
+  let result = text;
+
+  // "a dozen" / "half dozen" / "half a dozen" → 12 / 6
+  result = result.replace(/\bhalf\s+(?:a\s+)?dozen\b/gi, '6');
+  result = result.replace(/\ba\s+dozen\b/gi, '12');
+  result = result.replace(/\bdozen\b/gi, '12');
+
+  // "a couple of" / "a couple" → 2
+  result = result.replace(/\ba\s+couple\s+(?:of\s+)?/gi, '2 ');
+  result = result.replace(/\ba\s+couple\b/gi, '2');
+
+  // Compound tens: "twenty-five", "twenty five", "thirty two", etc.
+  // Must run BEFORE simple word replacement to avoid partial matches
+  const tens = 'TWENTY|THIRTY|FORTY|FIFTY|SIXTY|SEVENTY|EIGHTY|NINETY';
+  const ones = 'ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE';
+  const compoundRe = new RegExp(`\\b(${tens})[\\s-]+(${ones})\\b`, 'gi');
+  result = result.replace(compoundRe, (_, t, o) => {
+    return String(WORD_NUMBERS[t.toUpperCase()] + WORD_NUMBERS[o.toUpperCase()]);
+  });
+
+  // Simple single-word numbers (one through ninety, hundred)
+  // Use word boundary to avoid replacing inside other words ("fortune", "bone", etc.)
+  const allWords = Object.keys(WORD_NUMBERS).join('|');
+  const simpleRe = new RegExp(`\\b(${allWords})\\b`, 'gi');
+  result = result.replace(simpleRe, (m) => {
+    const val = WORD_NUMBERS[m.toUpperCase()];
+    return val !== undefined ? String(val) : m;
+  });
+
+  return result;
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
+  // Pre-process: convert written-out numbers to digits
+  text = convertWordNumbers(text);
   const upper = text.toUpperCase();
 
   // Multi-line License SKU Input (CSV/list from dashboard export)
