@@ -7667,19 +7667,29 @@ CRITICAL URL RULES:
             const parsedWithValidation = [];
 
             // Validate parsed items first
+            // Skip validation for license SKUs (LIC-*) and passthrough items —
+            // parseMessage already validated these when constructing the items.
+            // validateSku only knows hardware models, not license SKU patterns.
             for (const item of (parsed?.items || [])) {
               const base = item.baseSku || item.sku;
-              const validation = validateSku(base);
-              parsedWithValidation.push({ sku: base, qty: item.qty, validation });
-              if (!validation.valid) {
-                suggestions.push({
-                  input: base,
-                  reason: validation.reason || `${base} is not a recognized SKU`,
-                  suggest: validation.suggest || [],
-                  isCommonMistake: !!validation.isCommonMistake,
-                });
-              } else {
+              const upper = (base || '').toUpperCase();
+              if (upper.startsWith('LIC-') || PASSTHROUGH.has(upper)) {
+                // License/passthrough SKUs are valid by definition if parseMessage returned them
+                parsedWithValidation.push({ sku: base, qty: item.qty, validation: { valid: true } });
                 validItems.push(item);
+              } else {
+                const validation = validateSku(base);
+                parsedWithValidation.push({ sku: base, qty: item.qty, validation });
+                if (!validation.valid) {
+                  suggestions.push({
+                    input: base,
+                    reason: validation.reason || `${base} is not a recognized SKU`,
+                    suggest: validation.suggest || [],
+                    isCommonMistake: !!validation.isCommonMistake,
+                  });
+                } else {
+                  validItems.push(item);
+                }
               }
             }
 
