@@ -1891,18 +1891,32 @@ function parseMessage(text) {
   ];
   const isAdvisory = advisoryPatterns.some(p => p.test(upper));
 
-  // ── Duo / Umbrella natural language handler ──
-  // These are license-only products (no hardware), so intercept before hardware SKU parsing
+  // ── Duo natural language handler ──
+  // License-only product (no hardware). If tier is specified, return URLs directly.
+  // If tier is NOT specified, prompt the user to choose (Essentials/Advantage/Premier).
   const duoMatch = upper.match(/(\d+)\s*[X×]?\s*(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?/i)
     || upper.match(/(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?\s*[X×]?\s*(\d+)?/i);
   if (duoMatch && !isAdvisory) {
     const qty = parseInt(duoMatch[1]) || parseInt(duoMatch[2]) || 1;
     const tierRaw = (duoMatch[2] || duoMatch[1] || '').toUpperCase();
-    let tier = 'ESSENTIALS';
+    let tier = null;
     if (/ADVANTAGE/.test(tierRaw)) tier = 'ADVANTAGE';
     else if (/PREMIER/.test(tierRaw)) tier = 'PREMIER';
     else if (/ESSENTIAL/.test(tierRaw)) tier = 'ESSENTIALS';
-    else if (!/\d/.test(tierRaw) && tierRaw) tier = tierRaw.replace(/S$/, '') === 'ESSENTIAL' ? 'ESSENTIALS' : tierRaw;
+
+    if (!tier) {
+      // No tier specified — prompt user to choose
+      return {
+        items: [],
+        isQuote: false,
+        isClarification: true,
+        clarificationMessage: `Which Cisco Duo tier do you need? (qty: ${qty})\n\n` +
+          `• **Essentials** — MFA, passwordless, device trust\n` +
+          `• **Advantage** — Essentials + adaptive policies, VPN-less remote access\n` +
+          `• **Premier** — Advantage + full SSO, Duo Trust Monitor\n\n` +
+          `Just reply with the tier name (e.g. "Duo Advantage") or "Duo Essentials ${qty}".`
+      };
+    }
     return {
       items: [
         { baseSku: `LIC-DUO-${tier}-1YR`, qty, isLicenseOnly: true },
@@ -1910,16 +1924,39 @@ function parseMessage(text) {
         { baseSku: `LIC-DUO-${tier}-5YR`, qty, isLicenseOnly: true }
       ],
       isQuote: true,
-      isDuoUmbrella: true
+      isTermOptionQuote: true
     };
   }
 
+  // ── Umbrella natural language handler ──
+  // License-only product. If type+tier specified, return URLs directly.
+  // If missing, prompt user to choose type (DNS/SIG) and tier (Essentials/Advantage).
   const umbMatch = upper.match(/(\d+)\s*[X×]?\s*(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?/i)
     || upper.match(/(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?\s*[X×]?\s*(\d+)?/i);
   if (umbMatch && !isAdvisory) {
     const qty = parseInt(umbMatch[1]) || parseInt(umbMatch[3]) || 1;
-    const typeRaw = (umbMatch[2] || umbMatch[1] || 'DNS').toUpperCase();
-    const tierRaw = (umbMatch[3] || umbMatch[2] || 'ESS').toUpperCase();
+    const typeRaw = (umbMatch[2] || umbMatch[1] || '').toUpperCase();
+    const tierRaw = (umbMatch[3] || umbMatch[2] || '').toUpperCase();
+    const hasType = /DNS|SIG/.test(typeRaw);
+    const hasTier = /ESS|ADV/.test(tierRaw);
+
+    if (!hasType || !hasTier) {
+      // Missing type and/or tier — prompt user
+      let prompt = `Which Umbrella package do you need? (qty: ${qty})\n\n`;
+      if (!hasType) {
+        prompt += `**Type:**\n• **DNS Security** — DNS-layer protection\n• **SIG** (Secure Internet Gateway) — full web proxy + DNS\n\n`;
+      }
+      if (!hasTier) {
+        prompt += `**Tier:**\n• **Essentials** — core protection\n• **Advantage** — Essentials + advanced features\n\n`;
+      }
+      prompt += `Reply with the full package, e.g. "Umbrella DNS Essentials ${qty}" or "Umbrella SIG Advantage".`;
+      return {
+        items: [],
+        isQuote: false,
+        isClarification: true,
+        clarificationMessage: prompt
+      };
+    }
     const type = /SIG/.test(typeRaw) ? 'SIG' : 'DNS';
     const tier = /ADV/.test(tierRaw) ? 'ADV' : 'ESS';
     return {
@@ -1929,7 +1966,7 @@ function parseMessage(text) {
         { baseSku: `LIC-UMB-${type}-${tier}-K9-5YR`, qty, isLicenseOnly: true }
       ],
       isQuote: true,
-      isDuoUmbrella: true
+      isTermOptionQuote: true
     };
   }
 
@@ -1994,7 +2031,7 @@ function parseMessage(text) {
       return {
         items: licSkus,
         isQuote: true,
-        isDuoUmbrella: true  // reuse same 1Y/3Y/5Y URL output path
+        isTermOptionQuote: true  // reuse same 1Y/3Y/5Y URL output path
       };
     }
   }
@@ -2119,7 +2156,7 @@ function buildQuoteResponse(parsed) {
   };
 
   // Duo / Umbrella license-only products — return 1Y/3Y/5Y URLs directly
-  if (parsed.isDuoUmbrella && parsed.items) {
+  if (parsed.isTermOptionQuote && parsed.items) {
     const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
     for (const item of parsed.items) {
       const termMatch = item.baseSku.match(/(\d)YR?$/i);
@@ -7562,6 +7599,19 @@ CRITICAL URL RULES:
             )];
 
             const parsed = parseMessage(text);
+
+            // Clarification prompts (e.g. "which Duo tier?") — return as clarification response
+            if (parsed && parsed.isClarification && parsed.clarificationMessage) {
+              apiResult = {
+                quoteUrls: [],
+                eolWarnings: [],
+                parsedItems: [],
+                clarification: parsed.clarificationMessage,
+                handlerType: 'clarification',
+              };
+              break;
+            }
+
             const parsedSkuSet = new Set(
               (parsed?.items || []).map(i => (i.baseSku || i.sku || '').toUpperCase())
             );
@@ -10726,12 +10776,18 @@ CRITICAL URL RULES:
         if (!reply && !isExplicitCrmRequest) {
           const parsed = parseMessage(text);
           if (parsed) {
-            const result = buildQuoteResponse(parsed);
-            if (!result.needsLlm && result.message) {
+            // Clarification prompts (e.g. "which Duo tier?") — send directly
+            if (parsed.isClarification && parsed.clarificationMessage) {
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', parsed.clarificationMessage);
+              reply = parsed.clarificationMessage;
+            }
+            const result = !reply ? buildQuoteResponse(parsed) : null;
+            if (result && !result.needsLlm && result.message) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', result.message);
               reply = result.message;
-            } else if (result.revision) {
+            } else if (result && result.revision) {
               const history = await getHistory(kv, personId);
               if (history.length > 0) {
                 reply = await askClaude(
@@ -10741,7 +10797,7 @@ CRITICAL URL RULES:
               } else {
                 reply = 'I don\'t have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"';
               }
-            } else if (result.errors && result.errors.length > 0) {
+            } else if (result && result.errors && result.errors.length > 0) {
               const errorContext = result.errors.join('\n');
               reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
             }
@@ -10928,13 +10984,20 @@ CRITICAL URL RULES:
           // Try deterministic engine
           const parsed = parseMessage(text);
           if (parsed) {
-            const result = buildQuoteResponse(parsed);
+            // Clarification prompts (e.g. "which Duo tier?") — send directly, skip buildQuoteResponse
+            if (parsed.isClarification && parsed.clarificationMessage) {
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', parsed.clarificationMessage);
+              reply = parsed.clarificationMessage;
+            }
 
-            if (!result.needsLlm && result.message) {
+            const result = !reply ? buildQuoteResponse(parsed) : null;
+
+            if (result && !result.needsLlm && result.message) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', result.message);
               reply = result.message;
-            } else if (result.revision) {
+            } else if (result && result.revision) {
               const history = await getHistory(kv, personId);
               if (history.length > 0) {
                 reply = await askClaude(
@@ -10944,7 +11007,7 @@ CRITICAL URL RULES:
               } else {
                 reply = `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`;
               }
-            } else if (result.errors && result.errors.length > 0) {
+            } else if (result && result.errors && result.errors.length > 0) {
               const errorContext = result.errors.join('\n');
               reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
             }
