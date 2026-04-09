@@ -11338,6 +11338,7 @@ CRITICAL URL RULES:
       // PHASE 2: New SKU discovery (paginate WooProducts, find unknowns)
       // ═══════════════════════════════════════════════════════════════════
       let newSkus = [];
+      let filteredOut = 0;
       try {
         console.log('[PRICE-CRON] Phase 2: Scanning WooProducts for new SKUs...');
         const allWooSkus = {};
@@ -11370,13 +11371,64 @@ CRITICAL URL RULES:
         }
 
         // Find SKUs in WooProducts but not in prices.json
+        // Filter out EOL products, legacy/renamed SKUs, and discontinued items
+        // so the notification only surfaces genuinely new, sellable products.
+        const EOL_HW_PREFIXES = [
+          'MS120-', 'MS125-', 'MS210-', 'MS220-', 'MS225-', 'MS250-', 'MS320-',
+          'MS350-', 'MS355-', 'MS390-', 'MS410-', 'MS420-', 'MS425-',
+          'MR12', 'MR16', 'MR18', 'MR24', 'MR26', 'MR32', 'MR33', 'MR34',
+          'MR42', 'MR52', 'MR53', 'MR56', 'MR62', 'MR66', 'MR72', 'MR74',
+          'MR84', 'MR20', 'MR30H', 'MR70',
+          'MV12', 'MV22', 'MV32', 'MV52', 'MV72',
+          'MX60', 'MX64', 'MX65', 'MX80', 'MX84', 'MX100', 'MX400', 'MX600',
+          'Z1-', 'Z3-', 'Z3C',
+          'MG21',
+        ];
+        const LEGACY_SKU_PREFIXES = [
+          // Renamed Duo tiers (MFA→Essentials, Access→Advantage, Beyond→Premier)
+          'LIC-DUO-MFA', 'LIC-DUO-ACCESS', 'LIC-DUO-BEYOND',
+          // Discontinued accessories and legacy interface modules
+          'PWR-MS420', 'IM-2-SFP', 'IM-8-SFP',
+          // Legacy vMX size tiers (replaced by S/M/L/XL naming)
+          'LIC-VMX100',
+          // Legacy Meraki Insight sizing
+          'LIC-MI-XS', 'LIC-MI-S-', 'LIC-MI-M-', 'LIC-MI-L-', 'LIC-MI-XL',
+          // Legacy GR (Go Router)
+          'GR10-', 'GR60-', 'LIC-GR-', 'GA-',
+          // Legacy Meraki Cloud (MC) phone
+          'LIC-MC-',
+          // Legacy Lobby Ambassador licensing
+          'LIC-L-AC-',
+          // Discontinued MA- accessories/mounts already in prices.json or obsolete
+          'MA-MNT-MR-', 'MA-MNT-MV-', 'MA-INJ-4', 'MA-INJ-5', 'MA-PWR-18W',
+          'MA-SFP-1GB-LX100', 'MA-MOD-4X10G',
+          // Legacy vMX Enterprise sizing
+          'LIC-VMX-ENT-S', 'LIC-VMX-ENT-M',
+          // Legacy MX70
+          'LIC-MX70',
+        ];
+
+        const isEolOrLegacy = (sku) => {
+          const upper = sku.toUpperCase();
+          if (EOL_HW_PREFIXES.some(p => upper.startsWith(p))) return true;
+          if (LEGACY_SKU_PREFIXES.some(p => upper.startsWith(p))) return true;
+          // Check auto-catalog EOL replacements
+          const base = upper.replace(/-HW(-NA)?$/, '');
+          if (catalogData._EOL_REPLACEMENTS && catalogData._EOL_REPLACEMENTS[base]) return true;
+          return false;
+        };
+
         for (const [code, price] of Object.entries(allWooSkus)) {
           if (!updatedPrices[code] && price && price > 0) {
-            newSkus.push({ sku: code, price });
+            if (isEolOrLegacy(code)) {
+              filteredOut++;
+            } else {
+              newSkus.push({ sku: code, price });
+            }
           }
         }
 
-        console.log(`[PRICE-CRON] Phase 2 complete — WooProducts total: ${Object.keys(allWooSkus).length}, new SKUs found: ${newSkus.length}`);
+        console.log(`[PRICE-CRON] Phase 2 complete — WooProducts total: ${Object.keys(allWooSkus).length}, new SKUs found: ${newSkus.length}, EOL/legacy filtered: ${filteredOut}`);
       } catch (err) {
         console.error(`[PRICE-CRON] Phase 2 error: ${err.message}`);
       }
@@ -11546,21 +11598,48 @@ CRITICAL URL RULES:
       }
 
       // ═══════════════════════════════════════════════════════════════════
-      // PHASE 6: Google Chat notification (if new SKUs detected)
+      // PHASE 6: Google Chat notification (new SKUs or significant price changes)
+      // Only notifies for genuinely actionable items (EOL/legacy already filtered)
       // ═══════════════════════════════════════════════════════════════════
-      if (newSkus.length > 0 && env.GCP_SERVICE_ACCOUNT_KEY) {
+      const hasNewSkus = newSkus.length > 0;
+      // Significant price changes: >5% change in either direction
+      const significantChanges = priceChanges.filter(c => {
+        if (!c.oldPrice || c.oldPrice === 0) return false;
+        const pctChange = Math.abs((c.newPrice - c.oldPrice) / c.oldPrice) * 100;
+        return pctChange >= 5;
+      });
+      const hasSignificantChanges = significantChanges.length > 0;
+
+      if ((hasNewSkus || hasSignificantChanges) && env.GCP_SERVICE_ACCOUNT_KEY) {
         try {
-          const skuListStr = newSkus.map(s => `• ${s.sku} ($${s.price})`).join('\n');
-          const text = `🆕 New WooProducts SKUs Detected\n\n` +
-            `Found ${newSkus.length} SKU(s) in WooProducts not in prices.json:\n\n` +
-            `${skuListStr}\n\n` +
-            `Run the bot-price-refresh skill to add them.`;
+          const parts = [];
+          parts.push(`📊 *Daily Price Refresh Summary*`);
+          parts.push(`Updated ${updated} of ${skuList.length} SKUs${filteredOut > 0 ? ` (${filteredOut} EOL/legacy filtered)` : ''}`);
+
+          if (hasNewSkus) {
+            const skuListStr = newSkus.map(s => `• ${s.sku} ($${s.price})`).join('\n');
+            parts.push(`\n🆕 *${newSkus.length} New SKU(s) Detected:*\n${skuListStr}\nRun the bot-price-refresh skill to add them.`);
+          }
+
+          if (hasSignificantChanges) {
+            const changeListStr = significantChanges.slice(0, 20).map(c => {
+              const pct = ((c.newPrice - c.oldPrice) / c.oldPrice * 100).toFixed(1);
+              const arrow = c.newPrice > c.oldPrice ? '📈' : '📉';
+              return `• ${c.sku}: $${c.oldPrice} → $${c.newPrice} (${pct > 0 ? '+' : ''}${pct}%) ${arrow}`;
+            }).join('\n');
+            parts.push(`\n💰 *${significantChanges.length} Significant Price Change(s) (>5%):*\n${changeListStr}`);
+            if (significantChanges.length > 20) {
+              parts.push(`_(${significantChanges.length - 20} more not shown)_`);
+            }
+          }
+
+          const text = parts.join('\n');
 
           // Look up Chris's DM space from KV (auto-registered on first DM)
           const chrisDmSpace = await kv.get('gchat_dm_space:chrisg@stratusinfosystems.com');
           if (chrisDmSpace) {
             await sendAsyncGChatMessage(chrisDmSpace, text, null, env);
-            console.log(`[PRICE-CRON] Phase 6: Google Chat notification sent to ${chrisDmSpace} — ${newSkus.length} new SKUs`);
+            console.log(`[PRICE-CRON] Phase 6: Google Chat notification sent — ${newSkus.length} new SKUs, ${significantChanges.length} price changes`);
           } else {
             console.log(`[PRICE-CRON] Phase 6: No DM space cached for Chris — skipping notification. DM the bot once to register.`);
           }
