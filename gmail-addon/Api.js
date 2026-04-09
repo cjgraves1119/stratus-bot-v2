@@ -271,6 +271,32 @@ function crmCreateTask_(subject, dueDate, dealId, contactId, priority, descripti
 }
 
 /**
+ * Detect account info from email signature + domain web lookup.
+ */
+function detectAccount_(emailBody, senderDomain, senderEmail, senderName) {
+  return apiCall_('/api/detect-account', {
+    emailBody: (emailBody || '').substring(0, CONFIG.MAX_EMAIL_BODY_CHARS),
+    senderDomain: senderDomain || '',
+    senderEmail: senderEmail || '',
+    senderName: senderName || '',
+  });
+}
+
+/**
+ * Create a new CRM account.
+ */
+function crmCreateAccount_(name, street, city, state, zip, website) {
+  return apiCall_('/api/crm-create-account', {
+    name: name || '',
+    street: street || '',
+    city: city || '',
+    state: state || '',
+    zip: zip || '',
+    website: website || '',
+  });
+}
+
+/**
  * Create a new CRM contact, optionally linked to an account.
  */
 function crmAddContact_(firstName, lastName, email, phone, title, accountId, mobile) {

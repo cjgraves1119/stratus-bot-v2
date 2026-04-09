@@ -375,7 +375,48 @@ function onShowAddContact(e) {
   var firstName = nameParts[0] || '';
   var lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
 
-  return buildAddContactCard_(firstName, lastName, prefillEmail, '', '', accountId, accountName);
+  // ─── Account Auto-Detection ───
+  // If no account is linked, try to detect account info from email signature + domain
+  var acctSuggestion = null;
+  if (!accountId && prefillEmail) {
+    var domain = prefillEmail.split('@')[1] || '';
+    // Skip free email providers
+    var freeProviders = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com', 'mail.com', 'protonmail.com', 'live.com', 'msn.com', 'comcast.net', 'att.net', 'verizon.net', 'sbcglobal.net', 'cox.net', 'charter.net'];
+    if (domain && freeProviders.indexOf(domain.toLowerCase()) === -1) {
+      try {
+        var emailBody = '';
+        if (ctx && ctx.body) {
+          emailBody = ctx.body;
+        } else {
+          // Try to get body from the current email
+          try {
+            var accessToken = e.gmail ? e.gmail.accessToken : null;
+            var messageId = (e.gmail && e.gmail.messageId) ? e.gmail.messageId : null;
+            if (accessToken && messageId) {
+              GmailApp.setCurrentMessageAccessToken(accessToken);
+              var msg = GmailApp.getMessageById(messageId);
+              if (msg) emailBody = msg.getPlainBody() || '';
+            }
+          } catch (_) {}
+        }
+
+        var detectResult = detectAccount_(emailBody, domain, prefillEmail, prefillName);
+        if (detectResult) {
+          if (detectResult.existingAccount) {
+            // Account already exists in Zoho — link to it
+            accountId = detectResult.existingAccount.id;
+            accountName = detectResult.existingAccount.name;
+          } else if (detectResult.suggestion && detectResult.suggestion.name) {
+            acctSuggestion = detectResult.suggestion;
+          }
+        }
+      } catch (err) {
+        console.log('Account detection failed (non-fatal): ' + err.message);
+      }
+    }
+  }
+
+  return buildAddContactCard_(firstName, lastName, prefillEmail, '', '', accountId, accountName, acctSuggestion);
 }
 
 /** Submit Add Contact form */
@@ -392,9 +433,35 @@ function onAddContact(e) {
   }
 
   // Get account ID from parameters (passed from the form card)
-  var accountId = (e.commonEventObject && e.commonEventObject.parameters)
-    ? (e.commonEventObject.parameters.account_id || '')
-    : (e.parameters ? (e.parameters.account_id || '') : '');
+  var params = (e.commonEventObject && e.commonEventObject.parameters) || (e.parameters || {});
+  var accountId = params.account_id || '';
+
+  // ─── Account Creation (if suggestion provided and toggled on) ───
+  var createAccount = (form.create_account_toggle || '') === 'true';
+  var acctName = (form.acct_name || '').trim();
+  if (createAccount && acctName && !accountId) {
+    var acctStreet = (form.acct_street || '').trim();
+    var acctCity = (form.acct_city || '').trim();
+    var acctState = (form.acct_state || '').trim();
+    var acctZip = (form.acct_zip || '').trim();
+    var acctWebsite = (form.acct_website || '').trim();
+
+    try {
+      var acctResult = crmCreateAccount_(acctName, acctStreet, acctCity, acctState, acctZip, acctWebsite);
+      if (acctResult && acctResult.success) {
+        accountId = acctResult.accountId;
+      } else {
+        return buildErrorCard_('Account creation failed: ' + ((acctResult && acctResult.error) || 'Unknown error') + '. Contact was not created.');
+      }
+    } catch (acctErr) {
+      return buildErrorCard_('Account creation failed: ' + acctErr.message + '. Contact was not created.');
+    }
+  }
+
+  // ─── ENFORCE: Contact must be linked to an account ───
+  if (!accountId) {
+    return notify_('An account is required before creating a contact. Please fill in the Account Name or toggle on "Create this account in Zoho".');
+  }
 
   var result;
   try {
@@ -407,6 +474,11 @@ function onAddContact(e) {
     return buildContactCreatedCard_(result, true);
   }
   if (result && result.success) {
+    // If we also created an account, include that info
+    if (createAccount && acctName) {
+      result.accountCreated = true;
+      result.accountName = acctName;
+    }
     return buildContactCreatedCard_(result, false);
   }
   return buildErrorCard_('Contact creation failed: ' + (result ? result.error : 'Unknown error'));

@@ -10118,6 +10118,195 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── Detect Account: Extract company info from email signature + domain lookup ──
+          case '/api/detect-account': {
+            const { emailBody: detectBody, senderDomain: detectDomain, senderEmail: detectEmail, senderName: detectSenderName } = apiBody;
+            if (!detectDomain && !detectBody) {
+              return new Response(JSON.stringify({ error: 'emailBody or senderDomain required' }), { status: 400, headers: jsonHeaders });
+            }
+
+            try {
+              const accountSuggestion = { name: '', street: '', city: '', state: '', zip: '', website: '', phone: '', confidence: 'none', source: '' };
+
+              // ─── Phase 1: Parse email signature ───
+              // Look for a signature block in the last ~2000 chars of the email body
+              const sigBlock = (detectBody || '').slice(-2000);
+
+              // Company name patterns (after common name lines, before address)
+              // Try to find structured signature with pipes, dashes, or line breaks
+              const sigPatterns = {
+                // Phone: various formats
+                phone: sigBlock.match(/(?:(?:phone|tel|office|direct|cell|mobile|ph?)[\s.:]*)?(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/i),
+                // Address: street number + street name + optional suite
+                address: sigBlock.match(/(\d{1,6}\s+(?:[A-Z][a-z]+\.?\s*){1,4}(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Rd|Road|Ln|Lane|Way|Ct|Court|Pkwy|Parkway|Pl|Place|Cir|Circle|Hwy|Highway|Ter(?:race)?|Loop|Trail|Pike|Run|Path)[.,]?\s*(?:(?:Ste|Suite|Apt|Unit|Bldg|Building|Floor|Fl|#)\s*[\w-]+)?)/i),
+                // City, State ZIP
+                cityStateZip: sigBlock.match(/([A-Z][a-z]+(?:\s[A-Z][a-z]+)*),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/),
+                // Website
+                website: sigBlock.match(/(?:https?:\/\/)?(?:www\.)?([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:com|net|org|edu|gov|io|co|us|biz|info)(?:\.[a-z]{2})?)/i),
+              };
+
+              // Extract phone
+              if (sigPatterns.phone) {
+                accountSuggestion.phone = sigPatterns.phone[0].replace(/^(?:phone|tel|office|direct|cell|mobile|ph?)[\s.:]*/i, '').trim();
+              }
+
+              // Extract address
+              if (sigPatterns.address) {
+                accountSuggestion.street = sigPatterns.address[1].trim();
+              }
+
+              // Extract city/state/zip
+              if (sigPatterns.cityStateZip) {
+                accountSuggestion.city = sigPatterns.cityStateZip[1].trim();
+                accountSuggestion.state = sigPatterns.cityStateZip[2].trim();
+                accountSuggestion.zip = sigPatterns.cityStateZip[3].trim();
+              }
+
+              // Extract website from signature or fall back to domain
+              if (sigPatterns.website) {
+                accountSuggestion.website = sigPatterns.website[0].replace(/^https?:\/\//, '').replace(/^www\./, '');
+              } else if (detectDomain) {
+                accountSuggestion.website = detectDomain;
+              }
+
+              // ─── Phase 2: Use Claude to extract company name from signature ───
+              // Claude is better at identifying the company name from unstructured signature text
+              // Also does a web search if signature parsing got nothing useful
+              const hasAddressInfo = accountSuggestion.street || accountSuggestion.city;
+              const sigLast500 = (detectBody || '').slice(-1500);
+              const needsWebLookup = !hasAddressInfo && detectDomain;
+
+              const claudePrompt = needsWebLookup
+                ? `Extract the company/organization name and mailing address for the domain "${detectDomain}".
+
+First check this email signature for clues:
+---
+${sigLast500}
+---
+
+If the signature doesn't have enough info, search the web for "${detectDomain}" to find the company name and address.
+
+The sender's name is: ${detectSenderName || 'unknown'}
+The sender's email is: ${detectEmail || 'unknown'}
+
+Return ONLY a JSON object (no markdown, no explanation):
+{"name": "Company Name", "street": "123 Main St", "city": "City", "state": "XX", "zip": "12345", "phone": "555-555-5555", "website": "${detectDomain || ''}", "confidence": "high|medium|low"}`
+                : `Extract the company/organization name from this email signature. The sender is ${detectSenderName || 'unknown'} at ${detectEmail || detectDomain || 'unknown domain'}.
+
+Signature block:
+---
+${sigLast500}
+---
+
+Return ONLY a JSON object (no markdown, no explanation):
+{"name": "Company Name", "confidence": "high|medium|low"}`;
+
+              // Use Claude with web search tool if we need a lookup
+              const claudeMessages = [{ role: 'user', content: claudePrompt }];
+              const claudeTools = needsWebLookup ? [{
+                type: 'web_search_20250305',
+                name: 'web_search',
+                max_uses: 3,
+              }] : undefined;
+
+              const claudeBody = {
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 500,
+                messages: claudeMessages,
+              };
+              if (claudeTools) claudeBody.tools = claudeTools;
+
+              const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-api-key': env.ANTHROPIC_API_KEY,
+                  'anthropic-version': '2023-06-01',
+                },
+                body: JSON.stringify(claudeBody),
+              });
+
+              if (claudeResp.ok) {
+                const claudeData = await claudeResp.json();
+                // Extract text content from response (may have multiple content blocks with web search)
+                let textContent = '';
+                for (const block of (claudeData.content || [])) {
+                  if (block.type === 'text') textContent += block.text;
+                }
+
+                // Parse JSON from Claude's response
+                const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  try {
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    if (parsed.name) accountSuggestion.name = parsed.name;
+                    if (parsed.street && !accountSuggestion.street) accountSuggestion.street = parsed.street;
+                    if (parsed.city && !accountSuggestion.city) accountSuggestion.city = parsed.city;
+                    if (parsed.state && !accountSuggestion.state) accountSuggestion.state = parsed.state;
+                    if (parsed.zip && !accountSuggestion.zip) accountSuggestion.zip = parsed.zip;
+                    if (parsed.phone && !accountSuggestion.phone) accountSuggestion.phone = parsed.phone;
+                    if (parsed.website && !accountSuggestion.website) accountSuggestion.website = parsed.website;
+                    if (parsed.confidence) accountSuggestion.confidence = parsed.confidence;
+                    accountSuggestion.source = needsWebLookup ? 'web_search' : 'signature';
+                  } catch (_) { /* JSON parse failed, keep regex results */ }
+                }
+              }
+
+              // ─── Phase 3: Check if account already exists in Zoho ───
+              let existingAccount = null;
+              if (accountSuggestion.name) {
+                try {
+                  const acctSearch = await zohoApiCall('GET',
+                    `Accounts/search?criteria=(Account_Name:equals:${encodeURIComponent(accountSuggestion.name)})&fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Website`, env
+                  );
+                  if (acctSearch?.data?.[0]) {
+                    existingAccount = {
+                      id: acctSearch.data[0].id,
+                      name: acctSearch.data[0].Account_Name,
+                      street: acctSearch.data[0].Billing_Street || '',
+                      city: acctSearch.data[0].Billing_City || '',
+                      state: acctSearch.data[0].Billing_State || '',
+                      zip: acctSearch.data[0].Billing_Code || '',
+                      website: acctSearch.data[0].Website || '',
+                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${acctSearch.data[0].id}`,
+                    };
+                  }
+                } catch (_) { /* search failed, continue with suggestion */ }
+
+                // Also try domain-based search if exact name didn't match
+                if (!existingAccount && detectDomain) {
+                  try {
+                    const domainSearch = await zohoApiCall('GET',
+                      `Accounts/search?criteria=(Website:contains:${encodeURIComponent(detectDomain)})&fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Website`, env
+                    );
+                    if (domainSearch?.data?.[0]) {
+                      existingAccount = {
+                        id: domainSearch.data[0].id,
+                        name: domainSearch.data[0].Account_Name,
+                        street: domainSearch.data[0].Billing_Street || '',
+                        city: domainSearch.data[0].Billing_City || '',
+                        state: domainSearch.data[0].Billing_State || '',
+                        zip: domainSearch.data[0].Billing_Code || '',
+                        website: domainSearch.data[0].Website || '',
+                        zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${domainSearch.data[0].id}`,
+                      };
+                    }
+                  } catch (_) { /* domain search failed */ }
+                }
+              }
+
+              apiResult = {
+                suggestion: accountSuggestion,
+                existingAccount: existingAccount,
+                domain: detectDomain || '',
+              };
+            } catch (err) {
+              console.error('[detect-account] Error:', err);
+              apiResult = { error: 'Account detection failed: ' + err.message, suggestion: null };
+            }
+            break;
+          }
+
           // ── CRM Create Task: Create a new task ──
           case '/api/crm-create-task': {
             const { subject: newTaskSubject, dueDate: newTaskDue, dealId: newTaskDeal, contactId: newTaskContact, priority: newTaskPriority, description: newTaskDesc } = apiBody;

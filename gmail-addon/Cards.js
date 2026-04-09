@@ -1501,17 +1501,26 @@ function buildQuoteResultCard_(result) {
 
 // ADD CONTACT CARD (form)
 
-function buildAddContactCard_(firstName, lastName, email, phone, title, accountId, accountName) {
+function buildAddContactCard_(firstName, lastName, email, phone, title, accountId, accountName, acctSuggestion) {
+  var hasAccount = !!(accountId && accountName);
+  var hasSuggestion = !!(acctSuggestion && acctSuggestion.name && !hasAccount);
+
+  var subtitle = hasAccount
+    ? 'Account: ' + accountName
+    : (hasSuggestion ? 'Account detected' : 'No account linked');
+
   var card = CardService.newCardBuilder()
     .setHeader(
       CardService.newCardHeader()
         .setTitle('Add Contact to Zoho CRM')
-        .setSubtitle(accountName ? 'Account: ' + accountName : 'No account linked')
+        .setSubtitle(subtitle)
         .setImageStyle(CardService.ImageStyle.CIRCLE)
         .setImageUrl(CONFIG.ICON_URL)
     );
 
-  var section = CardService.newCardSection();
+  // ─── Contact Fields Section ───
+  var section = CardService.newCardSection()
+    .setHeader('Contact Details');
 
   section.addWidget(CardService.newTextInput()
     .setFieldName('contact_first_name')
@@ -1538,27 +1547,172 @@ function buildAddContactCard_(firstName, lastName, email, phone, title, accountI
     .setTitle('Title / Role')
     .setValue(title || ''));
 
-  if (accountName) {
+  if (hasAccount) {
     section.addWidget(CardService.newDecoratedText()
       .setText('Linked to: <b>' + accountName + '</b>')
       .setWrapText(true));
   }
 
+  card.addSection(section);
+
+  // ─── Account Suggestion Section (only if no existing account) ───
+  if (hasSuggestion) {
+    var acctSection = CardService.newCardSection()
+      .setHeader('Account Detected')
+      .setCollapsible(false);
+
+    var confLabel = acctSuggestion.confidence === 'high' ? 'High confidence'
+      : acctSuggestion.confidence === 'medium' ? 'Medium confidence' : 'Low confidence';
+    var sourceLabel = acctSuggestion.source === 'web_search' ? 'via web lookup' : 'from email signature';
+
+    acctSection.addWidget(CardService.newDecoratedText()
+      .setTopLabel(confLabel + ' ' + sourceLabel)
+      .setText('<b>' + acctSuggestion.name + '</b>')
+      .setWrapText(true));
+
+    // Toggle to create account
+    acctSection.addWidget(CardService.newDecoratedText()
+      .setText('Create this account in Zoho')
+      .setSwitchControl(
+        CardService.newSwitch()
+          .setFieldName('create_account_toggle')
+          .setValue('true')
+          .setSelected(true)
+          .setControlType(CardService.SwitchControlType.SWITCH)
+      ));
+
+    // Editable account fields (pre-filled from detection)
+    acctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_name')
+      .setTitle('Account Name')
+      .setValue(acctSuggestion.name || ''));
+
+    if (acctSuggestion.street || acctSuggestion.city) {
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_street')
+        .setTitle('Street')
+        .setValue(acctSuggestion.street || ''));
+
+      var cityStateZip = [];
+      if (acctSuggestion.city) cityStateZip.push(acctSuggestion.city);
+      if (acctSuggestion.state) cityStateZip.push(acctSuggestion.state);
+      if (acctSuggestion.zip) cityStateZip.push(acctSuggestion.zip);
+
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_city')
+        .setTitle('City')
+        .setValue(acctSuggestion.city || ''));
+
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_state')
+        .setTitle('State')
+        .setValue(acctSuggestion.state || ''));
+
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_zip')
+        .setTitle('ZIP')
+        .setValue(acctSuggestion.zip || ''));
+    } else {
+      // Still show empty address fields so user can fill them in
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_street')
+        .setTitle('Street')
+        .setValue(''));
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_city')
+        .setTitle('City')
+        .setValue(''));
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_state')
+        .setTitle('State')
+        .setValue(''));
+      acctSection.addWidget(CardService.newTextInput()
+        .setFieldName('acct_zip')
+        .setTitle('ZIP')
+        .setValue(''));
+    }
+
+    acctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_website')
+      .setTitle('Website')
+      .setValue(acctSuggestion.website || ''));
+
+    card.addSection(acctSection);
+  }
+
+  // ─── Manual Account Entry (no suggestion, no existing account) ───
+  if (!hasSuggestion && !hasAccount) {
+    var manualAcctSection = CardService.newCardSection()
+      .setHeader('New Account (Required)');
+
+    manualAcctSection.addWidget(CardService.newTextParagraph()
+      .setText('<i>A contact must belong to an account. Enter the account details below.</i>'));
+
+    // Hidden toggle always on for manual entry
+    manualAcctSection.addWidget(CardService.newDecoratedText()
+      .setText('Create account in Zoho')
+      .setSwitchControl(
+        CardService.newSwitch()
+          .setFieldName('create_account_toggle')
+          .setValue('true')
+          .setSelected(true)
+          .setControlType(CardService.SwitchControlType.SWITCH)
+      ));
+
+    manualAcctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_name')
+      .setTitle('Account Name *')
+      .setValue(''));
+
+    manualAcctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_street')
+      .setTitle('Street')
+      .setValue(''));
+
+    manualAcctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_city')
+      .setTitle('City')
+      .setValue(''));
+
+    manualAcctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_state')
+      .setTitle('State')
+      .setValue(''));
+
+    manualAcctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_zip')
+      .setTitle('ZIP')
+      .setValue(''));
+
+    manualAcctSection.addWidget(CardService.newTextInput()
+      .setFieldName('acct_website')
+      .setTitle('Website')
+      .setValue(email ? email.split('@')[1] || '' : ''));
+
+    card.addSection(manualAcctSection);
+  }
+
+  // ─── Action Buttons ───
+  var btnSection = CardService.newCardSection();
+
   var submitAction = CardService.newAction()
     .setFunctionName('onAddContact')
     .setParameters({ account_id: accountId || '' });
 
-  section.addWidget(CardService.newTextButton()
-    .setText('Create Contact')
+  var btnLabel = (hasSuggestion || !hasAccount) ? 'Create Account + Contact' : 'Create Contact';
+
+  btnSection.addWidget(CardService.newTextButton()
+    .setText(btnLabel)
     .setTextButtonStyle(CardService.TextButtonStyle.FILLED)
     .setBackgroundColor(CONFIG.STRATUS_BLUE)
     .setOnClickAction(submitAction));
 
-  section.addWidget(CardService.newTextButton()
+  btnSection.addWidget(CardService.newTextButton()
     .setText('< Back')
     .setOnClickAction(CardService.newAction().setFunctionName('onBackToEmail')));
 
-  card.addSection(section);
+  card.addSection(btnSection);
+
   return CardService.newActionResponseBuilder()
     .setNavigation(CardService.newNavigation().pushCard(card.build()))
     .build();
@@ -1589,12 +1743,19 @@ function buildContactCreatedCard_(result, isDuplicate) {
         .setOpenLink(CardService.newOpenLink().setUrl(existing.zohoUrl)));
     }
   } else {
+    // Show account creation info if applicable
+    if (result.accountCreated && result.accountName) {
+      section.addWidget(CardService.newDecoratedText()
+        .setTopLabel('Account Created')
+        .setText('<b>' + result.accountName + '</b>')
+        .setWrapText(true));
+    }
     section.addWidget(CardService.newDecoratedText()
       .setText(result.message || 'Contact created successfully')
       .setWrapText(true));
     if (result.zohoUrl) {
       section.addWidget(CardService.newTextButton()
-        .setText('Open in Zoho')
+        .setText('Open Contact in Zoho')
         .setOpenLink(CardService.newOpenLink().setUrl(result.zohoUrl)));
     }
   }
