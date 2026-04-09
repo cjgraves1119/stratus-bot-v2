@@ -8065,105 +8065,105 @@
       "discount_pct": 33
     },
     "LIC-UMB-DNS-ESS-K9-1YR": {
-      "list": 62,
+      "list": 62.1,
       "price": 49,
-      "discount": 0.2097,
+      "discount": 13.1,
       "zoho_product_id": "2570562000340122857",
-      "discount_per_unit": 13,
+      "discount_per_unit": 13.1,
       "discount_pct": 21
     },
     "LIC-UMB-DNS-ESS-K9-3YR": {
-      "list": 186,
+      "list": 186.3,
       "price": 146,
-      "discount": 0.2151,
+      "discount": 40.3,
       "zoho_product_id": "2570562000340122891",
-      "discount_per_unit": 40,
+      "discount_per_unit": 40.3,
       "discount_pct": 22
     },
     "LIC-UMB-DNS-ESS-K9-5YR": {
-      "list": 311,
+      "list": 310.5,
       "price": 243,
-      "discount": 0.2186,
+      "discount": 67.5,
       "zoho_product_id": "2570562000340122924",
-      "discount_per_unit": 68,
+      "discount_per_unit": 67.5,
       "discount_pct": 22
     },
     "LIC-UMB-DNS-ADV-K9-1YR": {
-      "list": 93,
+      "list": 93.15,
       "price": 74,
-      "discount": 0.2043,
+      "discount": 19.15,
       "zoho_product_id": "2570562000342392023",
-      "discount_per_unit": 19,
-      "discount_pct": 20
+      "discount_per_unit": 19.15,
+      "discount_pct": 21
     },
     "LIC-UMB-DNS-ADV-K9-3YR": {
-      "list": 279,
+      "list": 279.45,
       "price": 217,
-      "discount": 0.2222,
+      "discount": 62.45,
       "zoho_product_id": "2570562000342392057",
-      "discount_per_unit": 62,
+      "discount_per_unit": 62.45,
       "discount_pct": 22
     },
     "LIC-UMB-DNS-ADV-K9-5YR": {
-      "list": 466,
+      "list": 465.75,
       "price": 364,
-      "discount": 0.2189,
+      "discount": 101.75,
       "zoho_product_id": "2570562000342392090",
-      "discount_per_unit": 102,
+      "discount_per_unit": 101.75,
       "discount_pct": 22
     },
     "LIC-UMB-SIG-ESS-K9-1YR": {
-      "list": 130,
+      "list": 129.6,
       "price": 101,
-      "discount": 0.2231,
+      "discount": 28.6,
       "zoho_product_id": "2570562000342865075",
-      "discount_per_unit": 29,
+      "discount_per_unit": 28.6,
       "discount_pct": 22
     },
     "LIC-UMB-SIG-ESS-K9-3YR": {
-      "list": 389,
+      "list": 388.8,
       "price": 303,
-      "discount": 0.2211,
+      "discount": 85.8,
       "zoho_product_id": "2570562000342865114",
-      "discount_per_unit": 86,
+      "discount_per_unit": 85.8,
       "discount_pct": 22
     },
     "LIC-UMB-SIG-ESS-K9-5YR": {
       "list": 648,
       "price": 506,
-      "discount": 0.2191,
+      "discount": 142,
       "zoho_product_id": "2570562000342865147",
       "discount_per_unit": 142,
       "discount_pct": 22
     },
     "LIC-UMB-SIG-ADV-K9-1YR": {
-      "list": 199,
+      "list": 198.96,
       "price": 155,
-      "discount": 0.2211,
+      "discount": 43.96,
       "zoho_product_id": "2570562000342865227",
-      "discount_per_unit": 44,
+      "discount_per_unit": 43.96,
       "discount_pct": 22
     },
     "LIC-UMB-SIG-ADV-K9-3YR": {
-      "list": 597,
+      "list": 596.88,
       "price": 466,
-      "discount": 0.2194,
+      "discount": 130.88,
       "zoho_product_id": "2570562000342865261",
-      "discount_per_unit": 131,
+      "discount_per_unit": 130.88,
       "discount_pct": 22
     },
     "LIC-UMB-SIG-ADV-K9-5YR": {
-      "list": 995,
+      "list": 994.8,
       "price": 776,
-      "discount": 0.2201,
+      "discount": 218.8,
       "zoho_product_id": "2570562000342865294",
-      "discount_per_unit": 219,
+      "discount_per_unit": 218.8,
       "discount_pct": 22
     },
     "LIC-DUO-ESSENTIALS-1YR": {
       "list": 36,
       "price": 34,
-      "discount": 0.0556,
+      "discount": 2,
       "zoho_product_id": "2570562000161188676",
       "discount_per_unit": 2,
       "discount_pct": 6
@@ -8171,7 +8171,7 @@
     "LIC-DUO-ESSENTIALS-3YR": {
       "list": 108,
       "price": 101,
-      "discount": 0.0648,
+      "discount": 7,
       "zoho_product_id": "2570562000161188677",
       "discount_per_unit": 7,
       "discount_pct": 6
@@ -8179,7 +8179,7 @@
     "LIC-DUO-ESSENTIALS-5YR": {
       "list": 180,
       "price": 168,
-      "discount": 0.0667,
+      "discount": 12,
       "zoho_product_id": "2570562000161188678",
       "discount_per_unit": 12,
       "discount_pct": 7
@@ -8187,7 +8187,7 @@
     "LIC-DUO-ADVANTAGE-1YR": {
       "list": 72,
       "price": 68,
-      "discount": 0.0556,
+      "discount": 4,
       "zoho_product_id": "2570562000161188670",
       "discount_per_unit": 4,
       "discount_pct": 6
@@ -8195,7 +8195,7 @@
     "LIC-DUO-ADVANTAGE-3YR": {
       "list": 216,
       "price": 201,
-      "discount": 0.0694,
+      "discount": 15,
       "zoho_product_id": "2570562000161188671",
       "discount_per_unit": 15,
       "discount_pct": 7
@@ -8203,7 +8203,7 @@
     "LIC-DUO-ADVANTAGE-5YR": {
       "list": 360,
       "price": 336,
-      "discount": 0.0667,
+      "discount": 24,
       "zoho_product_id": "2570562000161188672",
       "discount_per_unit": 24,
       "discount_pct": 7
@@ -8211,7 +8211,7 @@
     "LIC-DUO-PREMIER-1YR": {
       "list": 108,
       "price": 101,
-      "discount": 0.0648,
+      "discount": 7,
       "zoho_product_id": "2570562000161188673",
       "discount_per_unit": 7,
       "discount_pct": 6
@@ -8219,7 +8219,7 @@
     "LIC-DUO-PREMIER-3YR": {
       "list": 324,
       "price": 302,
-      "discount": 0.0679,
+      "discount": 22,
       "zoho_product_id": "2570562000161188674",
       "discount_per_unit": 22,
       "discount_pct": 7
@@ -8227,7 +8227,7 @@
     "LIC-DUO-PREMIER-5YR": {
       "list": 540,
       "price": 503,
-      "discount": 0.0685,
+      "discount": 37,
       "zoho_product_id": "2570562000161188675",
       "discount_per_unit": 37,
       "discount_pct": 7

@@ -1176,6 +1176,49 @@ async function handlePricingRequest(text, personId, kv) {
   const pricingIntent = /\b(COSTS?|PRICES?|PRICING|HOW MUCH|TOTAL|WHAT DOES .* COSTS?|WHAT IS THE COSTS?|WHAT('S| IS) THE PRICES?|CART TOTAL|BREAKDOWN|ESTIMATE|INCLUDE\s+(COST|COSTS|PRICE|PRICES|PRICING)|WITH\s+(COST|COSTS|PRICE|PRICES|PRICING))\b/i.test(text);
   if (!pricingIntent) return null;
 
+  // Pattern 0: Duo / Umbrella natural language pricing (e.g. "cost of Duo Advantage", "price of 10 Umbrella DNS Essentials")
+  const isDuoPricing = /\b(?:DUO|CISCO\s*DUO)\b/i.test(upper);
+  const isUmbPricing = /\bUMBRELLA\b/i.test(upper);
+  if (isDuoPricing || isUmbPricing) {
+    // Extract quantity (default 1)
+    const qtyMatch = upper.match(/\b(\d+)\b/);
+    const qty = qtyMatch ? parseInt(qtyMatch[1]) : 1;
+
+    if (isDuoPricing) {
+      let duoTier = null;
+      if (/ADVANTAGE/i.test(upper)) duoTier = 'ADVANTAGE';
+      else if (/PREMIER/i.test(upper)) duoTier = 'PREMIER';
+      else if (/ESSENTIAL/i.test(upper)) duoTier = 'ESSENTIALS';
+      if (duoTier) {
+        const skus = [`LIC-DUO-${duoTier}-1YR`, `LIC-DUO-${duoTier}-3YR`, `LIC-DUO-${duoTier}-5YR`];
+        const qtys = [qty, qty, qty];
+        const label = `Cisco Duo ${duoTier.charAt(0) + duoTier.slice(1).toLowerCase()} — ${qty} license${qty > 1 ? 's' : ''}`;
+        const resp = formatPricingResponse(label, skus, qtys);
+        if (resp) return resp;
+      }
+    }
+
+    if (isUmbPricing) {
+      const isDns = /\bDNS\b/i.test(upper);
+      const isSig = /\b(SIG|SECURE\s*INTERNET\s*GATEWAY)\b/i.test(upper);
+      const isEss = /\bESS/i.test(upper);
+      const isAdv = /\bADV/i.test(upper);
+
+      let umbType = isDns ? 'DNS' : isSig ? 'SIG' : null;
+      let umbTier = isEss ? 'ESS' : isAdv ? 'ADV' : null;
+
+      if (umbType && umbTier) {
+        const skus = [`LIC-UMB-${umbType}-${umbTier}-K9-1YR`, `LIC-UMB-${umbType}-${umbTier}-K9-3YR`, `LIC-UMB-${umbType}-${umbTier}-K9-5YR`];
+        const qtys = [qty, qty, qty];
+        const typeLabel = umbType === 'DNS' ? 'DNS Security' : 'Secure Internet Gateway';
+        const tierLabel = umbTier === 'ESS' ? 'Essentials' : 'Advantage';
+        const label = `Cisco Umbrella ${typeLabel} ${tierLabel} — ${qty} license${qty > 1 ? 's' : ''}`;
+        const resp = formatPricingResponse(label, skus, qtys);
+        if (resp) return resp;
+      }
+    }
+  }
+
   // Pattern 1: Direct SKU pricing request like "cost of 2x MS150-48FP-4X" or "price of MR44"
   const directSkuMatch = text.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for))?\s+(\d+)\s*x?\s+([A-Z0-9][-A-Z0-9]+)/i);
   const singleSkuMatch = !directSkuMatch && text.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for|is|does))?\s+(?:an?\s+)?([A-Z0-9][-A-Z0-9]+)/i);
@@ -1894,34 +1937,33 @@ function parseMessage(text) {
   // ── Duo natural language handler ──
   // License-only product (no hardware). If tier is specified, return URLs directly.
   // If tier is NOT specified, prompt the user to choose (Essentials/Advantage/Premier).
-  const duoMatch = upper.match(/(\d+)\s*[X×]?\s*(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?/i)
-    || upper.match(/(?:DUO|CISCO\s*DUO)\s*(ESSENTIALS?|ADVANTAGE|PREMIER)?\s*[X×]?\s*(\d+)?/i);
-  if (duoMatch && !isAdvisory) {
-    const qty = parseInt(duoMatch[1]) || parseInt(duoMatch[2]) || 1;
-    const tierRaw = (duoMatch[2] || duoMatch[1] || '').toUpperCase();
-    let tier = null;
-    if (/ADVANTAGE/.test(tierRaw)) tier = 'ADVANTAGE';
-    else if (/PREMIER/.test(tierRaw)) tier = 'PREMIER';
-    else if (/ESSENTIAL/.test(tierRaw)) tier = 'ESSENTIALS';
+  const isDuo = /\b(?:DUO|CISCO\s*DUO)\b/i.test(upper);
+  if (isDuo && !isAdvisory) {
+    // Extract tier and qty with explicit checks (avoids regex group-shifting bugs)
+    let duoTier = null;
+    if (/ADVANTAGE/i.test(upper)) duoTier = 'ADVANTAGE';
+    else if (/PREMIER/i.test(upper)) duoTier = 'PREMIER';
+    else if (/ESSENTIAL/i.test(upper)) duoTier = 'ESSENTIALS';
+    const duoQtyMatch = upper.match(/\b(\d+)\b/);
+    const duoQty = duoQtyMatch ? parseInt(duoQtyMatch[1]) : 1;
 
-    if (!tier) {
-      // No tier specified — prompt user to choose
+    if (!duoTier) {
       return {
         items: [],
         isQuote: false,
         isClarification: true,
-        clarificationMessage: `Which Cisco Duo tier do you need? (qty: ${qty})\n\n` +
+        clarificationMessage: `Which Cisco Duo tier do you need? (qty: ${duoQty})\n\n` +
           `• **Essentials** — MFA, passwordless, device trust\n` +
           `• **Advantage** — Essentials + adaptive policies, VPN-less remote access\n` +
           `• **Premier** — Advantage + full SSO, Duo Trust Monitor\n\n` +
-          `Just reply with the tier name (e.g. "Duo Advantage") or "Duo Essentials ${qty}".`
+          `Just reply with the tier name (e.g. "Duo Advantage") or "Duo Essentials ${duoQty}".`
       };
     }
     return {
       items: [
-        { baseSku: `LIC-DUO-${tier}-1YR`, qty, isLicenseOnly: true },
-        { baseSku: `LIC-DUO-${tier}-3YR`, qty, isLicenseOnly: true },
-        { baseSku: `LIC-DUO-${tier}-5YR`, qty, isLicenseOnly: true }
+        { baseSku: `LIC-DUO-${duoTier}-1YR`, qty: duoQty, isLicenseOnly: true },
+        { baseSku: `LIC-DUO-${duoTier}-3YR`, qty: duoQty, isLicenseOnly: true },
+        { baseSku: `LIC-DUO-${duoTier}-5YR`, qty: duoQty, isLicenseOnly: true }
       ],
       isQuote: true,
       isTermOptionQuote: true
@@ -1931,25 +1973,27 @@ function parseMessage(text) {
   // ── Umbrella natural language handler ──
   // License-only product. If type+tier specified, return URLs directly.
   // If missing, prompt user to choose type (DNS/SIG) and tier (Essentials/Advantage).
-  const umbMatch = upper.match(/(\d+)\s*[X×]?\s*(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?/i)
-    || upper.match(/(?:UMBRELLA|UMB)\s*(DNS|SIG(?:NATURE)?)?[- ]*(ESS(?:ENTIALS?)?|ADV(?:ANCED)?)?\s*[X×]?\s*(\d+)?/i);
-  if (umbMatch && !isAdvisory) {
-    const qty = parseInt(umbMatch[1]) || parseInt(umbMatch[3]) || 1;
-    const typeRaw = (umbMatch[2] || umbMatch[1] || '').toUpperCase();
-    const tierRaw = (umbMatch[3] || umbMatch[2] || '').toUpperCase();
-    const hasType = /DNS|SIG/.test(typeRaw);
-    const hasTier = /ESS|ADV/.test(tierRaw);
+  const isUmb = /\b(?:UMBRELLA|UMB)\b/i.test(upper);
+  if (isUmb && !isAdvisory) {
+    // Extract type, tier, qty with explicit checks
+    let umbType = null;
+    if (/\bSIG\b/i.test(upper)) umbType = 'SIG';
+    else if (/\bDNS\b/i.test(upper)) umbType = 'DNS';
+    let umbTier = null;
+    if (/ADV(?:ANCED)?/i.test(upper)) umbTier = 'ADV';
+    else if (/ESS(?:ENTIALS?)?/i.test(upper)) umbTier = 'ESS';
+    const umbQtyMatch = upper.match(/\b(\d+)\b/);
+    const umbQty = umbQtyMatch ? parseInt(umbQtyMatch[1]) : 1;
 
-    if (!hasType || !hasTier) {
-      // Missing type and/or tier — prompt user
-      let prompt = `Which Umbrella package do you need? (qty: ${qty})\n\n`;
-      if (!hasType) {
+    if (!umbType || !umbTier) {
+      let prompt = `Which Umbrella package do you need? (qty: ${umbQty})\n\n`;
+      if (!umbType) {
         prompt += `**Type:**\n• **DNS Security** — DNS-layer protection\n• **SIG** (Secure Internet Gateway) — full web proxy + DNS\n\n`;
       }
-      if (!hasTier) {
+      if (!umbTier) {
         prompt += `**Tier:**\n• **Essentials** — core protection\n• **Advantage** — Essentials + advanced features\n\n`;
       }
-      prompt += `Reply with the full package, e.g. "Umbrella DNS Essentials ${qty}" or "Umbrella SIG Advantage".`;
+      prompt += `Reply with the full package, e.g. "Umbrella DNS Essentials ${umbQty}" or "Umbrella SIG Advantage".`;
       return {
         items: [],
         isQuote: false,
@@ -1957,13 +2001,11 @@ function parseMessage(text) {
         clarificationMessage: prompt
       };
     }
-    const type = /SIG/.test(typeRaw) ? 'SIG' : 'DNS';
-    const tier = /ADV/.test(tierRaw) ? 'ADV' : 'ESS';
     return {
       items: [
-        { baseSku: `LIC-UMB-${type}-${tier}-K9-1YR`, qty, isLicenseOnly: true },
-        { baseSku: `LIC-UMB-${type}-${tier}-K9-3YR`, qty, isLicenseOnly: true },
-        { baseSku: `LIC-UMB-${type}-${tier}-K9-5YR`, qty, isLicenseOnly: true }
+        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-1YR`, qty: umbQty, isLicenseOnly: true },
+        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-3YR`, qty: umbQty, isLicenseOnly: true },
+        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-5YR`, qty: umbQty, isLicenseOnly: true }
       ],
       isQuote: true,
       isTermOptionQuote: true
@@ -10773,6 +10815,17 @@ CRITICAL URL RULES:
           }
         }
 
+        // Deterministic pricing calculator (runs BEFORE parseMessage so pricing
+        // requests for Duo/Umbrella/etc. don't get intercepted by quoting handlers)
+        if (!reply && !isExplicitCrmRequest) {
+          const pricingReply = await handlePricingRequest(text, personId, kv);
+          if (pricingReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', pricingReply);
+            reply = pricingReply;
+          }
+        }
+
         if (!reply && !isExplicitCrmRequest) {
           const parsed = parseMessage(text);
           if (parsed) {
@@ -10802,12 +10855,6 @@ CRITICAL URL RULES:
               reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
             }
           }
-        }
-
-        // Option 4: Deterministic pricing calculator (skip for explicit CRM requests)
-        if (!reply && !isExplicitCrmRequest) {
-          const pricingReply = await handlePricingRequest(text, personId, kv);
-          if (pricingReply) reply = pricingReply;
         }
 
         if (!reply) {
@@ -10980,6 +11027,17 @@ CRITICAL URL RULES:
           }
         }
 
+        // Deterministic pricing calculator (runs BEFORE parseMessage so pricing
+        // requests for Duo/Umbrella/etc. don't get intercepted by quoting handlers)
+        if (!reply) {
+          const pricingReply = await handlePricingRequest(text, personId, kv);
+          if (pricingReply) {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', pricingReply);
+            reply = pricingReply;
+          }
+        }
+
         if (!reply) {
           // Try deterministic engine
           const parsed = parseMessage(text);
@@ -11012,12 +11070,6 @@ CRITICAL URL RULES:
               reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
             }
           }
-        }
-
-        // Option 4: Deterministic pricing calculator
-        if (!reply) {
-          const pricingReply = await handlePricingRequest(text, personId, kv);
-          if (pricingReply) reply = pricingReply;
         }
 
         if (!reply) {
@@ -11178,11 +11230,22 @@ CRITICAL URL RULES:
     }
 
     // ─── Known Product ID exceptions (no Products record in Zoho) ────────
+    // Duo/Umbrella WooProducts have null WooProduct_Code so cron can't match them.
+    // Static prices in prices.json are authoritative for these stable per-user licenses.
     const PRODUCT_ID_SKIP_LIST = new Set([
       'Z1-HW-AU', 'Z1-HW-UK', 'Z4CX', 'Z4X', 'MV22-HW',
       'LIC-MX50-ENT-1YR', 'LIC-MX50-ENT-3YR', 'LIC-MX50-SEC-1YR', 'LIC-MX50-SEC-3YR',
       'LIC-VMX-XL-SEC-1Y', 'LIC-VMX-XL-SEC-3Y', 'LIC-VMX-XL-SEC-5Y',
-      'LIC-MX-SDW-M-3Y', 'MA-PWR-CORD-JP', 'MA-PWR-USB-JP', 'MA-PWR300WINDADP-O'
+      'LIC-MX-SDW-M-3Y', 'MA-PWR-CORD-JP', 'MA-PWR-USB-JP', 'MA-PWR300WINDADP-O',
+      // Duo licenses (WooProducts have null WooProduct_Code — name-based only)
+      'LIC-DUO-ESSENTIALS-1YR', 'LIC-DUO-ESSENTIALS-3YR', 'LIC-DUO-ESSENTIALS-5YR',
+      'LIC-DUO-ADVANTAGE-1YR', 'LIC-DUO-ADVANTAGE-3YR', 'LIC-DUO-ADVANTAGE-5YR',
+      'LIC-DUO-PREMIER-1YR', 'LIC-DUO-PREMIER-3YR', 'LIC-DUO-PREMIER-5YR',
+      // Umbrella licenses (WooProducts have null WooProduct_Code — name-based only)
+      'LIC-UMB-DNS-ESS-K9-1YR', 'LIC-UMB-DNS-ESS-K9-3YR', 'LIC-UMB-DNS-ESS-K9-5YR',
+      'LIC-UMB-DNS-ADV-K9-1YR', 'LIC-UMB-DNS-ADV-K9-3YR', 'LIC-UMB-DNS-ADV-K9-5YR',
+      'LIC-UMB-SIG-ESS-K9-1YR', 'LIC-UMB-SIG-ESS-K9-3YR', 'LIC-UMB-SIG-ESS-K9-5YR',
+      'LIC-UMB-SIG-ADV-K9-1YR', 'LIC-UMB-SIG-ADV-K9-3YR', 'LIC-UMB-SIG-ADV-K9-5YR',
     ]);
 
     try {
