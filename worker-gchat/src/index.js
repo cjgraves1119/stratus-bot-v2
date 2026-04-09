@@ -1779,10 +1779,14 @@ function parseMessage(text) {
       const csvMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*[,\s]\s*(\d+)\s*$/i);
       // Match: qty x LIC-xxx or qty LIC-xxx (quantity-first format)
       const qtyFirstMatch = !csvMatch && line.match(/^\s*(\d+)\s*[xX×]?\s*(LIC-[A-Z0-9-]+)\s*$/i);
+      // Match: LIC-xxx x qty (SKU-first with x separator, e.g. "LIC-ENT-1YR x5")
+      const skuXqtyMatch = !csvMatch && !qtyFirstMatch && line.match(/^\s*(LIC-[A-Z0-9-]+)\s*[xX×]\s*(\d+)\s*$/i);
       if (csvMatch) {
         licItems.push({ sku: csvMatch[1].toUpperCase(), qty: parseInt(csvMatch[2]) });
       } else if (qtyFirstMatch) {
         licItems.push({ sku: qtyFirstMatch[2].toUpperCase(), qty: parseInt(qtyFirstMatch[1]) });
+      } else if (skuXqtyMatch) {
+        licItems.push({ sku: skuXqtyMatch[1].toUpperCase(), qty: parseInt(skuXqtyMatch[2]) });
       } else {
         const singleMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*$/i);
         if (singleMatch) {
@@ -7710,8 +7714,26 @@ CRITICAL URL RULES:
               // since parseMessage already extracted what it could
             }
 
+            // Direct license list (multi-line LIC- CSV/list) — route through buildQuoteResponse deterministically
+            // parseMessage sets items=[] but directLicenseList=[...] for these inputs
+            if (parsed && parsed.directLicenseList && parsed.directLicenseList.length > 0) {
+              const quoteResult = buildQuoteResponse(parsed);
+              if (!quoteResult.needsLlm && quoteResult.message) {
+                const responseText = quoteResult.message;
+                const quoteUrls = extractQuoteUrls(responseText);
+                await addToHistory(kv, quotePersonId, 'assistant', responseText);
+                apiResult = {
+                  quoteUrls,
+                  eolWarnings: [],
+                  parsedItems: parsed.directLicenseList.map(p => ({ sku: p.sku, qty: p.qty })),
+                  handlerType: 'deterministic',
+                };
+                break;
+              }
+            }
+
             // If no parsed items AND no SKU-like tokens at all → Claude fallback (technical question)
-            if ((!parsed || !parsed.items || parsed.items.length === 0) && rawSkuTokens.length === 0) {
+            if ((!parsed || !parsed.items || parsed.items.length === 0) && rawSkuTokens.length === 0 && (!parsed || !parsed.directLicenseList || parsed.directLicenseList.length === 0)) {
               try {
                 const claudeReply = await askClaude(
                   text,
