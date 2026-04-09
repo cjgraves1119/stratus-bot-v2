@@ -1854,6 +1854,12 @@ function parseMessage(text) {
   if (!modifiers.licenseOnly && /\b(LICENSE[S]?\s+FOR\s+(AN?\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d|RENEWAL[S]?\s+(OF\s+|FOR\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d)/.test(upper)) {
     modifiers.licenseOnly = true;
   }
+  // "[SKU] license" or "[SKU] renewal" at end of short input (e.g. "mr44 license", "5 MR44 renewal")
+  // Also matches family-only like "mr license". Requires ^ anchor to avoid matching full sentences.
+  // But NOT "[SKU] with X year license" (hardware + license)
+  if (!modifiers.licenseOnly && /^(QUOTE\s+)?(\d+\s+)?(MR|MS|MX|MV|MT|MG|CW|Z)\d*[A-Z0-9-]*\s+(LICENSE[S]?|RENEWAL[S]?)\s*$/i.test(upper.trim()) && !/\bWITH\b/.test(upper)) {
+    modifiers.licenseOnly = true;
+  }
 
   const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
 
