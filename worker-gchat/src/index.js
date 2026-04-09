@@ -5583,6 +5583,27 @@ If the quote already has specific license terms, show just that term's link plus
 - Combine multiple pieces of info in a single response rather than doing multiple tool calls to gather them separately.
 - If a task only needs 1 tool call, make that call immediately with your narration in the same turn.
 
+## PARALLEL TOOL CALLS — MAXIMIZE SPEED
+
+Issue MULTIPLE tool_use blocks in a SINGLE response whenever the calls are independent:
+
+**ALWAYS parallel:**
+- batch_product_lookup + zoho_search_records (account/contact lookup) → PARALLEL (no dependency)
+- zoho_search_records(Accounts) + zoho_search_records(Contacts) → PARALLEL
+- zoho_get_record(Account) + zoho_get_record(Contact) → PARALLEL (different modules)
+
+**NEVER parallel (sequential dependency):**
+- batch_product_lookup THEN zoho_create_record (Quote needs product IDs from lookup)
+- zoho_create_record(Deal) THEN zoho_create_record(Quote with deal.id) (Quote needs Deal ID)
+- zoho_search_records THEN zoho_get_record(result.id) (get needs the search result)
+
+**Example — Quote creation in 3 iterations (not 5):**
+Turn 1: [text] + batch_product_lookup([skus]) + zoho_search_records(account)  ← 2 parallel calls
+Turn 2: zoho_create_record(Quote with product IDs from turn 1 + account data from turn 1)
+Turn 3: [format success response to user]
+
+**Pre-resolved product data:** If the system message includes [Pre-resolved products: ...], use those product IDs directly. Skip batch_product_lookup entirely — go straight to zoho_create_record.
+
 ---
 
 ## NARRATE AS YOU WORK
@@ -6221,10 +6242,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       }
 
       // Dynamic max_tokens for speed:
-      // - Iteration 1: 4096 (needs room for initial planning + first tool calls)
-      // - Iteration 2+: 2048 (tool results + next tool calls, no need for verbose narration)
+      // - Iteration 0-1: 4096 (planning + first tool calls, needs room for parallel calls)
+      // - Iteration 2-3: 1536 (tool results + next tool calls, compact JSON payloads)
+      // - Iteration 4+: 1024 (finishing up, formatting response)
       // - Haiku exec steps: 1024 (just dispatching update/send, minimal reasoning)
-      const maxTok = _inPureExecMode ? 1024 : (iteration <= 1 ? 4096 : 2048);
+      const maxTok = _inPureExecMode ? 1024 : (iteration <= 1 ? 4096 : (iteration <= 3 ? 1536 : 1024));
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
@@ -8619,6 +8641,61 @@ CRITICAL URL RULES:
               const chatIntent = detectCrmEmailIntent(chatText);
               const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
               const useTools = chatIntent.hasAny && hasCrmCreds;
+
+              // SERVER-SIDE PRODUCT PRE-RESOLUTION
+              // If this looks like a quote creation request, pre-resolve product IDs from cache
+              // so Claude can skip the batch_product_lookup iteration entirely (~3-5s saved).
+              if (useTools && chatIntent.hasCrm && /\b(quote|create.*quote|quote.*for)\b/i.test(chatText)) {
+                const preSkuTokens = [];
+                const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C9|Z)\d[A-Z0-9-]*/gi;
+                let m;
+                while ((m = skuRegex.exec(chatText.toUpperCase())) !== null) {
+                  preSkuTokens.push(m[0]);
+                }
+                // Also detect license SKUs directly mentioned
+                const licRegex = /\bLIC-[A-Z0-9-]+/gi;
+                while ((m = licRegex.exec(chatText.toUpperCase())) !== null) {
+                  preSkuTokens.push(m[0]);
+                }
+                if (preSkuTokens.length > 0) {
+                  const preResolved = {};
+                  for (const raw of [...new Set(preSkuTokens)]) {
+                    const suffixed = applySuffix(raw);
+                    const cached = prices[suffixed] || prices[raw] || null;
+                    if (cached?.zoho_product_id) {
+                      preResolved[raw] = {
+                        suffixed_sku: suffixed,
+                        product_id: cached.zoho_product_id,
+                        list_price: cached.list || null,
+                        ecomm_price: cached.price || null,
+                        discount_per_unit: cached.discount_per_unit || 0,
+                        product_active: true
+                      };
+                      // Also pre-resolve licenses
+                      const licOptions = getLicenseSkus(raw);
+                      if (licOptions?.length) {
+                        for (const lic of licOptions) {
+                          const licCached = prices[lic.sku] || null;
+                          if (licCached?.zoho_product_id) {
+                            preResolved[lic.sku] = {
+                              suffixed_sku: lic.sku,
+                              product_id: licCached.zoho_product_id,
+                              list_price: licCached.list || null,
+                              ecomm_price: licCached.price || null,
+                              discount_per_unit: licCached.discount_per_unit || 0,
+                              product_active: true
+                            };
+                          }
+                        }
+                      }
+                    }
+                  }
+                  if (Object.keys(preResolved).length > 0) {
+                    enrichedMessage += `\n\n[Pre-resolved products: ${JSON.stringify(preResolved)}]`;
+                    console.log(`[API/chat] Pre-resolved ${Object.keys(preResolved).length} products from cache`);
+                  }
+                }
+              }
 
               // Use the same askClaude function as the GChat bot
               // This gives the extension chat full CRM tool-use capabilities
