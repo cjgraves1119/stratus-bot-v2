@@ -7480,11 +7480,8 @@ TONE: ${toneGuide[tone] || toneGuide.warm}
 ${quoteContext}
 ${instructions ? 'ADDITIONAL INSTRUCTIONS: ' + instructions : ''}
 
-Return ONLY valid JSON:
-{
-  "drafts": ["draft option 1", "draft option 2"],
-  "suggestedProducts": [{"sku": "MX67", "qty": 1}]
-}
+CRITICAL: Return ONLY a raw JSON object. No commentary, no explanation, no markdown code fences, no text before or after the JSON. Your entire response must be parseable by JSON.parse():
+{"drafts": ["draft option 1", "draft option 2"], "suggestedProducts": [{"sku": "MX67", "qty": 1}]}
 
 CRITICAL URL RULES:
 - Do NOT include any URLs or hyperlinks anywhere in the draft text. Quote links are automatically generated and displayed separately by the sidebar UI.
@@ -7508,9 +7505,24 @@ CRITICAL URL RULES:
             const draftText = draftData.content?.[0]?.text || '';
             var parsedDraft;
             try {
+              // Try direct parse first (clean JSON response)
               parsedDraft = JSON.parse(draftText.replace(/```json\n?|\n?```/g, '').trim());
             } catch (_) {
-              parsedDraft = { drafts: [draftText.substring(0, 2000)] };
+              // Extract JSON object from mixed text (Claude sometimes adds commentary before/after)
+              try {
+                var jsonMatch = draftText.match(/\{[\s\S]*"drafts"\s*:\s*\[[\s\S]*\]\s*[\s\S]*\}/);
+                if (jsonMatch) {
+                  parsedDraft = JSON.parse(jsonMatch[0]);
+                } else {
+                  parsedDraft = { drafts: [draftText.substring(0, 2000)] };
+                }
+              } catch (_2) {
+                parsedDraft = { drafts: [draftText.substring(0, 2000)] };
+              }
+            }
+            // Validate drafts array exists and has content
+            if (!parsedDraft.drafts || !Array.isArray(parsedDraft.drafts) || parsedDraft.drafts.length === 0) {
+              parsedDraft = { drafts: [draftText.replace(/```json\n?|\n?```/g, '').trim().substring(0, 2000)] };
             }
 
             // Build real Stratus URLs from suggestedProducts (products Claude recommends)
