@@ -3676,6 +3676,20 @@ function validateCrmWrite(module_name, data, isCreate = false) {
         }
       }
     }
+    // Server-side Closing_Date enforcement: correct past/invalid dates
+    if (data.Closing_Date) {
+      const parsedDate = new Date(data.Closing_Date + 'T00:00:00');
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (isNaN(parsedDate.getTime()) || parsedDate < today) {
+        const corrected = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+        console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${corrected}`);
+        data.Closing_Date = corrected;
+      }
+    }
+    // Auto-fill defaults for commonly skipped fields
+    if (!data.Meraki_ISR && isCreate) data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
+    if (!data.Owner) data.Owner = { id: '2570562000141711002' }; // Chris Graves
   }
 
   if (module_name === 'Tasks') {
@@ -3693,6 +3707,25 @@ function validateCrmWrite(module_name, data, isCreate = false) {
         errors.push(`❌ Missing required field "${field}" for Quote creation.`);
       }
     }
+    // Server-side Valid_Till enforcement: if Claude passes a past date or invalid date,
+    // override with today + 30 days. LLMs frequently miscalculate dates.
+    if (data.Valid_Till) {
+      const parsedDate = new Date(data.Valid_Till + 'T00:00:00');
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (isNaN(parsedDate.getTime()) || parsedDate < today) {
+        const corrected = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+        console.log(`[VALIDATE] Valid_Till "${data.Valid_Till}" is past/invalid, correcting to ${corrected}`);
+        data.Valid_Till = corrected;
+      }
+    } else {
+      // Missing Valid_Till — set default
+      data.Valid_Till = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+    }
+    // Auto-fill commonly skipped fields with safe defaults
+    if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
+    if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
+    if (!data.Owner) data.Owner = { id: '2570562000141711002' };
   }
 
   return errors.length > 0
@@ -3766,6 +3799,7 @@ async function executeToolCall(toolName, toolInput, env) {
                   Product_Code: suffixed,
                   Product_Name: suffixed,
                   Unit_Price: cached.list || null,
+                  Product_Active: true,
                   _from_cache: true,
                   ecomm_price: cached.price || null,
                   discount_per_unit: cached.discount_per_unit || 0,
@@ -3789,6 +3823,7 @@ async function executeToolCall(toolName, toolInput, env) {
                 Product_Code: k,
                 Product_Name: k,
                 Unit_Price: v.list || null,
+                Product_Active: true,
                 _from_cache: true,
                 ecomm_price: v.price || null,
                 discount_per_unit: v.discount_per_unit || 0,
@@ -4079,6 +4114,7 @@ async function executeToolCall(toolName, toolInput, env) {
               ecomm_price: cachedPrice.price || null,
               discount_per_unit: cachedPrice.discount_per_unit || 0,
               discount_pct: cachedPrice.discount_pct || 0,
+              product_active: true,
               found: true
             };
             // For hardware SKUs, suggest associated license SKUs so Claude doesn't need mapping knowledge
