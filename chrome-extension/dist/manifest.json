@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Stratus AI",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "description": "Cisco/Meraki sales assistant for Gmail — CRM integration, quoting, email analysis, and task management.",
   "icons": {
     "16": "icons/icon-16.png",

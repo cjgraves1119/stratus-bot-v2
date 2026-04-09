@@ -72,6 +72,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   // Suggest Task state
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestPreview, setSuggestPreview] = useState(null);
+  const [suggestEditSubject, setSuggestEditSubject] = useState('');
   const [suggestConfirmLoading, setSuggestConfirmLoading] = useState(false);
   const [suggestResult, setSuggestResult] = useState(null);
 
@@ -304,6 +305,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         threadDomains: emailContext?.allDomains || [],
       });
       setSuggestPreview(preview);
+      setSuggestEditSubject(preview.subject || `Follow up with ${preview.contactName || preview.senderName || preview.senderEmail || 'contact'}`);
     } catch (err) {
       setSuggestResult({ error: err.message });
     } finally {
@@ -316,9 +318,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setSuggestConfirmLoading(true);
     try {
       const result = await sendToBackground(MSG.SUGGEST_TASK, {
-        subject: suggestPreview.subject,
-        due_date: suggestPreview.due_date || suggestPreview.dueDate,
-        deal_id: suggestPreview.deal_id || suggestPreview.dealId || deals?.deals?.[0]?.id || '',
+        senderEmail: suggestPreview.senderEmail || emailContext?.customerEmail || emailContext?.senderEmail || '',
+        senderName: suggestPreview.senderName || suggestPreview.contactName || emailContext?.customerName || '',
+        subject: suggestEditSubject || suggestPreview.subject,
+        hasAccount: !!suggestPreview.accountId,
+        accountId: suggestPreview.accountId || data?.account?.id || '',
         contact_id: suggestPreview.contact_id || suggestPreview.contactId || data?.contact?.id || '',
         priority: suggestPreview.priority || 'Normal',
         description: suggestPreview.description || '',
@@ -1076,9 +1080,19 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 <div style={{ fontSize: 11, fontWeight: 700, color: '#2e7d32', marginBottom: 6, textTransform: 'uppercase' }}>
                   Suggested Follow-Up
                 </div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 4 }}>
-                  {suggestPreview.subject}
-                </div>
+                <input
+                  type="text"
+                  value={suggestEditSubject}
+                  onChange={(e) => setSuggestEditSubject(e.target.value)}
+                  style={{
+                    width: '100%', boxSizing: 'border-box', fontSize: 13, fontWeight: 600,
+                    color: COLORS.TEXT_PRIMARY, marginBottom: 4, padding: '6px 8px',
+                    border: '1px solid #a5d6a7', borderRadius: 4, background: 'white',
+                    outline: 'none',
+                  }}
+                  onFocus={(e) => e.target.style.borderColor = '#2e7d32'}
+                  onBlur={(e) => e.target.style.borderColor = '#a5d6a7'}
+                />
                 {suggestPreview.description && (
                   <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 4 }}>{suggestPreview.description}</div>
                 )}
