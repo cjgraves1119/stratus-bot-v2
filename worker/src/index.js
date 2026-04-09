@@ -2116,9 +2116,9 @@ function buildQuoteResponse(parsed) {
   if (parsed.isDuoUmbrella && parsed.items) {
     const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
     for (const item of parsed.items) {
-      const termMatch = item.baseSku.match(/(\d)YR$/);
+      const termMatch = item.baseSku.match(/(\d)YR?$/i);
       if (termMatch) {
-        const key = `${termMatch[1]}YR`;
+        const key = `${termMatch[1]}YR`;  // normalize 1Y → 1YR key
         if (termGroups[key]) termGroups[key].push({ sku: item.baseSku, qty: item.qty });
       }
     }
@@ -2126,10 +2126,10 @@ function buildQuoteResponse(parsed) {
     for (const [term, skus] of Object.entries(termGroups)) {
       if (skus.length > 0) {
         const url = buildStratusUrl(skus);
-        lines.push(`**${term.replace('YR', '-Year')}:** ${url}`);
+        lines.push(`**${term.replace('YR', '-Year')} Co-Term:** ${url}`);
       }
     }
-    return { text: lines.join('\n\n'), needsLlm: false };
+    return { message: lines.join('\n\n'), needsLlm: false };
   }
 
   // Multi-line license SKU list (CSV from dashboard)
