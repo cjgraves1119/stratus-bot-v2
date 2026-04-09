@@ -942,26 +942,7 @@ function injectComposeButton(composeEl) {
   const toolbar = composeEl.querySelector('.btC') || composeEl.querySelector('[role="toolbar"]');
   if (!toolbar) return;
 
-  // ── Stratus Quote button (existing) ──
-  const btn = document.createElement('div');
-  btn.className = 'stratus-compose-btn';
-  btn.title = 'Insert Stratus Quote';
-  btn.style.cssText = `
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
-    background: ${COLORS.STRATUS_BLUE}; color: white; font-size: 14px;
-    font-weight: 700; margin-left: 8px; transition: background 0.2s;
-    position: relative; z-index: 10;
-  `;
-  btn.textContent = 'S';
-  btn.addEventListener('mouseenter', () => { btn.style.background = COLORS.STRATUS_DARK; });
-  btn.addEventListener('mouseleave', () => { btn.style.background = COLORS.STRATUS_BLUE; });
-  btn.addEventListener('click', () => {
-    sendToBackground(MSG.SIDEBAR_NAVIGATE, { panel: 'quote' }).catch(() => {});
-  });
-  toolbar.appendChild(btn);
-
-  // ── Send + Update Task button ──
+  // ── Send + Update Task button (injected FIRST so S button can be placed before it) ──
   const sendTaskBtn = document.createElement('div');
   sendTaskBtn.className = 'stratus-send-task-btn';
   sendTaskBtn.title = 'Send email and update related Zoho task';
@@ -1077,6 +1058,54 @@ function injectComposeButton(composeEl) {
     }, 3000);
   });
 
+  // ── Stratus AI button (opens sidebar with current email context) ──
+  const btn = document.createElement('div');
+  btn.className = 'stratus-compose-btn';
+  btn.title = 'Open Stratus AI sidebar';
+  btn.style.cssText = `
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
+    background: ${COLORS.STRATUS_BLUE}; color: white; font-size: 14px;
+    font-weight: 700; margin-left: 6px; transition: background 0.2s;
+    position: relative; z-index: 10;
+  `;
+  btn.textContent = 'S';
+  btn.addEventListener('mouseenter', () => { btn.style.background = COLORS.STRATUS_DARK; });
+  btn.addEventListener('mouseleave', () => { btn.style.background = COLORS.STRATUS_BLUE; });
+  btn.addEventListener('click', async () => {
+    // Force re-extract email data from the current thread to refresh sidebar context.
+    // When compose is open, the email observer may not have re-fired, leaving stale context.
+    try {
+      const freshData = extractEmailData();
+      if (freshData) {
+        // Clear the dedup hash so EMAIL_CHANGED fires even if same thread
+        lastEmailHash = '';
+        await sendToBackground(MSG.EMAIL_CHANGED, freshData).catch(() => {});
+      }
+    } catch { /* extraction failure is non-fatal */ }
+
+    // Short delay to let sidebar process the updated email context
+    await new Promise(r => setTimeout(r, 200));
+
+    // Open sidebar + navigate to email panel for draft reply
+    try {
+      await sendToBackground(MSG.SIDEBAR_NAVIGATE, {
+        panel: 'email',
+        openPanel: true,
+      });
+    } catch {
+      try {
+        await chrome.runtime.sendMessage({
+          type: MSG.SIDEBAR_NAVIGATE,
+          panel: 'email',
+          openPanel: true,
+        });
+      } catch { /* sidebar may not be ready */ }
+    }
+  });
+
+  // Append both buttons: S first, then Send+Task (right-side group)
+  toolbar.appendChild(btn);
   toolbar.appendChild(sendTaskBtn);
 }
 
