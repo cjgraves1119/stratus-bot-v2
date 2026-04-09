@@ -8042,7 +8042,7 @@ CRITICAL URL RULES:
               return new Response(JSON.stringify({ error: 'query or domain required' }), { status: 400, headers: jsonHeaders });
             }
 
-            const validModules = ['Accounts', 'Contacts', 'Deals', 'Quotes'];
+            const validModules = ['Accounts', 'Contacts', 'Deals', 'Quotes', 'Sales_Orders'];
             const mod = validModules.includes(module) ? module : 'Accounts';
 
             const fieldMap = {
@@ -8050,6 +8050,7 @@ CRITICAL URL RULES:
               Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
               Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name',
               Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
+              Sales_Orders: 'id,Subject,SO_Number,Grand_Total,Status,Deal_Name,Account_Name,Client_Send_Status,Disti_Tracking_Number,Disti_Estimated_Ship_Date,Vendor_SO_Number',
             };
 
             try {

@@ -13,6 +13,7 @@ const MODULE_MAP = {
   Contacts: { label: 'Contacts', tab: 'Contacts' },
   Deals: { label: 'Deals', tab: 'Potentials' },
   Quotes: { label: 'Quotes', tab: 'Quotes' },
+  Sales_Orders: { label: 'POs', tab: 'SalesOrders' },
 };
 
 function buildZohoUrl(moduleId, recordId) {
@@ -202,6 +203,79 @@ export default function SearchPanel({ navData }) {
                 </span>
               )}
             </div>
+            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
+          </a>
+        );
+      }
+
+      case 'Sales_Orders': {
+        const poSubject = getFieldValue(record.Subject) || 'Unnamed PO';
+        const soNumber = getFieldValue(record.SO_Number);
+        const poTotal = getFieldValue(record.Grand_Total);
+        const poStatus = getFieldValue(record.Status);
+        const poDeal = getFieldValue(record.Deal_Name);
+        const poAccount = getFieldValue(record.Account_Name);
+        const signed = getFieldValue(record.Client_Send_Status);
+        const tracking = getFieldValue(record.Disti_Tracking_Number);
+        const estShip = getFieldValue(record.Disti_Estimated_Ship_Date);
+        const vendorSo = getFieldValue(record.Vendor_SO_Number);
+
+        const isSigned = signed && signed.toLowerCase() === 'signed';
+        const statusColor = poStatus === 'Delivered' ? '#2e7d32'
+          : poStatus === 'Cancelled' ? '#d93025'
+          : poStatus === 'Created' ? '#1565c0'
+          : '#5f6368';
+
+        return (
+          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
+            style={{
+              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
+              cursor: 'pointer', transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
+            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{poSubject}</div>
+            {soNumber && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>SO# {soNumber}</div>}
+            {poAccount && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{poAccount}</div>}
+            {poDeal && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Deal: {poDeal}</div>}
+
+            <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              {poStatus && (
+                <span style={{
+                  fontSize: 11, padding: '2px 6px', borderRadius: 4,
+                  background: poStatus === 'Delivered' ? '#e8f5e9' : poStatus === 'Cancelled' ? '#fce8e6' : '#e3f2fd',
+                  color: statusColor, fontWeight: 600,
+                }}>
+                  {poStatus}
+                </span>
+              )}
+              {signed && (
+                <span style={{
+                  fontSize: 11, padding: '2px 6px', borderRadius: 4,
+                  background: isSigned ? '#e8f5e9' : '#fff3e0',
+                  color: isSigned ? '#2e7d32' : '#e65100',
+                  fontWeight: 500,
+                }}>
+                  {isSigned ? '✓ Signed' : signed}
+                </span>
+              )}
+              {poTotal && (
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#2e7d32' }}>
+                  ${Number(poTotal).toLocaleString()}
+                </span>
+              )}
+            </div>
+
+            {(tracking || vendorSo || estShip) && (
+              <div style={{ marginTop: 6, padding: '6px 8px', background: '#f8f9fa', borderRadius: 6, fontSize: 11 }}>
+                {vendorSo && <div style={{ color: COLORS.TEXT_PRIMARY }}>Vendor SO: <strong>{vendorSo}</strong></div>}
+                {tracking && <div style={{ color: COLORS.TEXT_PRIMARY, marginTop: 2 }}>Tracking: <strong>{tracking}</strong></div>}
+                {estShip && <div style={{ color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>Est. Ship: {estShip}</div>}
+              </div>
+            )}
+
             <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
           </a>
         );
