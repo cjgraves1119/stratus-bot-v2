@@ -111,14 +111,14 @@ function DraftSection({ emailContext }) {
   return (
     <Section title="Draft Reply" collapsible defaultOpen={false}>
       {/* Quick Tone Buttons */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
-        {['warm', 'professional', 'brief'].map(t => (
+      <div style={{ display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap' }}>
+        {['warm', 'professional', 'brief', 'follow-up'].map(t => (
           <button key={t} onClick={() => setTone(t)} style={{
-            flex: 1, padding: '6px 0', border: `1px solid ${tone === t ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
+            flex: '1 1 auto', padding: '6px 4px', border: `1px solid ${tone === t ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
             borderRadius: 6, background: tone === t ? COLORS.STRATUS_LIGHT : 'transparent',
             color: tone === t ? COLORS.STRATUS_BLUE : COLORS.TEXT_SECONDARY,
-            fontSize: 12, fontWeight: tone === t ? 600 : 400, cursor: 'pointer',
-            textTransform: 'capitalize',
+            fontSize: 11, fontWeight: tone === t ? 600 : 400, cursor: 'pointer',
+            textTransform: 'capitalize', whiteSpace: 'nowrap',
           }}>
             {t}
           </button>

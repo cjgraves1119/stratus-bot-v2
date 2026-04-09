@@ -7252,7 +7252,8 @@ Return ONLY the JSON object, no markdown or extra text.`,
             const toneGuide = {
               warm: 'Friendly and personable. Use contractions. End with an engaging question.',
               professional: 'Polished but approachable. Clear and direct. End with a specific next step.',
-              brief: 'Very concise, 2-3 sentences max. Get to the point fast. End with a question.'
+              brief: 'Very concise, 2-3 sentences max. Get to the point fast. End with a question.',
+              'follow-up': 'You are following up on a previous conversation. Be brief and professional (3-5 sentences). Your goal is to get an update or move the conversation forward. Reference the specific topic from the previous email. Always end with a direct question that elicits a response, such as: "Were you able to look into this?", "How is everything going so far?", "What has feedback been so far?", "Do you have any updates on this?", "When would be a good time to reconnect?" Never start with filler like "I hope this email finds you well." Get straight to the check-in.'
             };
 
             // Detect SKUs in the email to provide product context and quote URLs

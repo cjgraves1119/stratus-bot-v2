@@ -1252,65 +1252,104 @@ function injectComposeButton(composeEl) {
   btn.addEventListener('mouseleave', () => { if (!btn._busy) btn.style.background = COLORS.STRATUS_BLUE; });
   btn.addEventListener('click', async () => {
     if (btn._busy) return;
-    btn._busy = true;
-    btn.textContent = '…';
-    btn.style.background = COLORS.STRATUS_DARK;
-    btn.style.cursor = 'default';
 
-    try {
-      // Extract email context directly from the compose window
-      const subject = getComposeSubject(composeEl);
-      const { body, senderEmail, senderName } = getComposeQuotedEmail(composeEl);
+    // Show tone picker dropdown
+    document.querySelector('.stratus-tone-picker')?.remove();
+    const picker = document.createElement('div');
+    picker.className = 'stratus-tone-picker';
+    picker.style.cssText = `
+      position: absolute; bottom: 40px; right: 0; z-index: 99999;
+      background: white; border-radius: 8px; padding: 6px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.2), 0 1px 4px rgba(0,0,0,0.1);
+      font-family: -apple-system, BlinkMacSystemFont, 'Google Sans', sans-serif;
+      display: flex; flex-direction: column; gap: 2px; min-width: 130px;
+    `;
 
-      if (!senderEmail && !body) {
-        // Fallback: try extracting from the thread behind the compose
-        const threadData = extractEmailData();
-        if (threadData) {
+    const tones = ['warm', 'professional', 'brief', 'follow-up'];
+    tones.forEach(t => {
+      const opt = document.createElement('div');
+      opt.style.cssText = `
+        padding: 7px 12px; font-size: 12px; cursor: pointer; border-radius: 5px;
+        color: #202124; text-transform: capitalize; transition: background 0.15s;
+      `;
+      opt.textContent = t;
+      opt.addEventListener('mouseenter', () => { opt.style.background = '#e8f0fe'; });
+      opt.addEventListener('mouseleave', () => { opt.style.background = 'transparent'; });
+      opt.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        picker.remove();
+        btn._busy = true;
+        btn.textContent = '…';
+        btn.style.background = COLORS.STRATUS_DARK;
+        btn.style.cursor = 'default';
+
+        try {
+          const subject = getComposeSubject(composeEl);
+          const { body, senderEmail, senderName } = getComposeQuotedEmail(composeEl);
+
+          if (!senderEmail && !body) {
+            const threadData = extractEmailData();
+            if (threadData) {
+              const result = await sendToBackground(MSG.DRAFT_REPLY, {
+                subject: threadData.subject || subject,
+                body: threadData.body || '',
+                senderEmail: threadData.customerEmail || threadData.senderEmail || '',
+                senderName: threadData.senderName || '',
+                tone: t,
+                instructions: '',
+              });
+              if (result?.drafts?.length) {
+                showComposeDraftPopup(composeEl, result.drafts, subject);
+              } else {
+                showSendConfirmation('Could not generate drafts. Try the sidebar instead.');
+              }
+              return;
+            }
+            showSendConfirmation('No email context found. Open an email thread and reply to use this feature.');
+            return;
+          }
+
           const result = await sendToBackground(MSG.DRAFT_REPLY, {
-            subject: threadData.subject || subject,
-            body: threadData.body || '',
-            senderEmail: threadData.customerEmail || threadData.senderEmail || '',
-            senderName: threadData.senderName || '',
-            tone: 'warm',
+            subject,
+            body,
+            senderEmail,
+            senderName,
+            tone: t,
             instructions: '',
           });
+
           if (result?.drafts?.length) {
             showComposeDraftPopup(composeEl, result.drafts, subject);
+          } else if (result?.draft) {
+            showComposeDraftPopup(composeEl, [result.draft], subject);
           } else {
-            showSendConfirmation('Could not generate drafts. Try the sidebar instead.');
+            showSendConfirmation('No drafts generated. Check the email context and try again.');
           }
-          return;
+        } catch (err) {
+          console.error('[Stratus] Draft reply error:', err);
+          showSendConfirmation('Draft failed: ' + (err.message || 'connection error'));
+        } finally {
+          btn.textContent = 'S';
+          btn.style.background = COLORS.STRATUS_BLUE;
+          btn.style.cursor = 'pointer';
+          btn._busy = false;
         }
-        showSendConfirmation('No email context found. Open an email thread and reply to use this feature.');
-        return;
-      }
-
-      // Call draft reply API directly (bypasses sidebar entirely)
-      const result = await sendToBackground(MSG.DRAFT_REPLY, {
-        subject,
-        body,
-        senderEmail,
-        senderName,
-        tone: 'warm',
-        instructions: '',
       });
+      picker.appendChild(opt);
+    });
 
-      if (result?.drafts?.length) {
-        showComposeDraftPopup(composeEl, result.drafts, subject);
-      } else if (result?.draft) {
-        showComposeDraftPopup(composeEl, [result.draft], subject);
-      } else {
-        showSendConfirmation('No drafts generated. Check the email context and try again.');
+    // Position relative to button
+    btn.style.position = 'relative';
+    btn.appendChild(picker);
+
+    // Close picker on outside click
+    const closePicker = (e) => {
+      if (!picker.contains(e.target) && e.target !== btn) {
+        picker.remove();
+        document.removeEventListener('click', closePicker);
       }
-    } catch (err) {
-      console.error('[Stratus] Draft reply error:', err);
-      showSendConfirmation('Draft failed: ' + (err.message || 'connection error'));
-    } finally {
-      btn.textContent = 'S';
-      btn.style.background = COLORS.STRATUS_BLUE;
-      btn.style.cursor = 'pointer';
-      btn._busy = false;
-    }
+    };
+    setTimeout(() => document.addEventListener('click', closePicker), 0);
   });
 
   // Append both buttons: S first, then Send+Task (right-side group)
