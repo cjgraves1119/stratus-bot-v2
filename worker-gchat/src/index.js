@@ -8572,6 +8572,20 @@ CRITICAL URL RULES:
                       billingStreet: r.Billing_Street, billingCity: r.Billing_City,
                       billingState: r.Billing_State, billingZip: r.Billing_Code }))
                   : rawRecords;
+
+                // Sales_Orders: also search Vendor_SO_Number via criteria (word search won't match custom fields)
+                if (mod === 'Sales_Orders') {
+                  const seen = new Set(records.map(r => r.id));
+                  try {
+                    const vendorResp = await zohoApiCall('GET',
+                      `Sales_Orders/search?criteria=((Vendor_SO_Number:starts_with:${encodeURIComponent(query)}))&fields=${fieldMap.Sales_Orders}&per_page=5`, env
+                    );
+                    for (const r of (vendorResp?.data || [])) {
+                      if (!seen.has(r.id)) { records.push(r); seen.add(r.id); }
+                    }
+                  } catch (_) {}
+                }
+
                 apiResult = { records, module: mod, query };
               }
             } catch (crmErr) {

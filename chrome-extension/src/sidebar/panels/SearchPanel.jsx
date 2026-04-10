@@ -69,8 +69,28 @@ export default function SearchPanel({ navData }) {
     return null;
   }
 
+  const cardStyle = {
+    display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+    borderRadius: 8, padding: 12, marginBottom: 8, transition: 'border-color 0.15s',
+    userSelect: 'text', cursor: 'default',
+  };
+
+  const zohoLinkStyle = {
+    fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4,
+    cursor: 'pointer', textDecoration: 'none', display: 'inline-block',
+  };
+
+  const copyableStyle = {
+    cursor: 'text', userSelect: 'text', borderRadius: 3,
+    padding: '0 2px', margin: '0 -2px',
+  };
+
   function renderRecord(record, mod, i) {
     const zohoUrl = buildZohoUrl(mod, record.id);
+    const hoverHandlers = {
+      onMouseEnter: e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE,
+      onMouseLeave: e => e.currentTarget.style.borderColor = COLORS.BORDER,
+    };
 
     switch (mod) {
       case 'Accounts': {
@@ -82,23 +102,13 @@ export default function SearchPanel({ navData }) {
         const location = [city, state].filter(Boolean).join(', ');
 
         return (
-          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
-            style={{
-              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
-              cursor: 'pointer', transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
-            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
-          >
-            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE, marginBottom: 2 }}>
-              {name}
-            </div>
+          <div key={i} style={cardStyle} {...hoverHandlers}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE, marginBottom: 2 }}>{name}</div>
             {phone && <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>{phone}</div>}
             {website && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{website}</div>}
             {location && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{location}</div>}
-            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
-          </a>
+            <a href={zohoUrl} target="_blank" rel="noopener" style={zohoLinkStyle}>Open in Zoho →</a>
+          </div>
         );
       }
 
@@ -111,21 +121,13 @@ export default function SearchPanel({ navData }) {
         const account = getFieldValue(record.Account_Name);
 
         return (
-          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
-            style={{
-              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
-              cursor: 'pointer', transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
-            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
-          >
+          <div key={i} style={cardStyle} {...hoverHandlers}>
             <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{name}</div>
             {account && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{account}</div>}
             {email && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{email}</div>}
             {phone && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{phone}</div>}
-            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
-          </a>
+            <a href={zohoUrl} target="_blank" rel="noopener" style={zohoLinkStyle}>Open in Zoho →</a>
+          </div>
         );
       }
 
@@ -137,15 +139,7 @@ export default function SearchPanel({ navData }) {
         const closeDate = getFieldValue(record.Closing_Date);
 
         return (
-          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
-            style={{
-              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
-              cursor: 'pointer', transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
-            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
-          >
+          <div key={i} style={cardStyle} {...hoverHandlers}>
             <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{name}</div>
             {account && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>{account}</div>}
             <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
@@ -167,8 +161,8 @@ export default function SearchPanel({ navData }) {
                 <span style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{closeDate}</span>
               )}
             </div>
-            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
-          </a>
+            <a href={zohoUrl} target="_blank" rel="noopener" style={zohoLinkStyle}>Open in Zoho →</a>
+          </div>
         );
       }
 
@@ -180,15 +174,7 @@ export default function SearchPanel({ navData }) {
         const stage = getFieldValue(record.Stage);
 
         return (
-          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
-            style={{
-              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
-              cursor: 'pointer', transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
-            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
-          >
+          <div key={i} style={cardStyle} {...hoverHandlers}>
             <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{subject}</div>
             {quoteNum && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>#{quoteNum}</div>}
             {deal && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Deal: {deal}</div>}
@@ -204,8 +190,8 @@ export default function SearchPanel({ navData }) {
                 </span>
               )}
             </div>
-            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
-          </a>
+            <a href={zohoUrl} target="_blank" rel="noopener" style={zohoLinkStyle}>Open in Zoho →</a>
+          </div>
         );
       }
 
@@ -228,17 +214,9 @@ export default function SearchPanel({ navData }) {
           : '#5f6368';
 
         return (
-          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
-            style={{
-              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
-              cursor: 'pointer', transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
-            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
-          >
+          <div key={i} style={cardStyle} {...hoverHandlers}>
             <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{poSubject}</div>
-            {soNumber && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>SO# {soNumber}</div>}
+            {soNumber && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>SO# <span style={copyableStyle}>{soNumber}</span></div>}
             {poAccount && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{poAccount}</div>}
             {poDeal && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Deal: {poDeal}</div>}
 
@@ -271,14 +249,14 @@ export default function SearchPanel({ navData }) {
 
             {(tracking || vendorSo || estShip) && (
               <div style={{ marginTop: 6, padding: '6px 8px', background: '#f8f9fa', borderRadius: 6, fontSize: 11 }}>
-                {vendorSo && <div style={{ color: COLORS.TEXT_PRIMARY }}>Vendor SO: <strong>{vendorSo}</strong></div>}
-                {tracking && <div style={{ color: COLORS.TEXT_PRIMARY, marginTop: 2 }}>Tracking: <strong>{tracking}</strong></div>}
+                {vendorSo && <div style={{ color: COLORS.TEXT_PRIMARY }}>Vendor SO: <span style={{ ...copyableStyle, fontWeight: 600 }}>{vendorSo}</span></div>}
+                {tracking && <div style={{ color: COLORS.TEXT_PRIMARY, marginTop: 2 }}>Tracking: <span style={{ ...copyableStyle, fontWeight: 600 }}>{tracking}</span></div>}
                 {estShip && <div style={{ color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>Est. Ship: {estShip}</div>}
               </div>
             )}
 
-            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
-          </a>
+            <a href={zohoUrl} target="_blank" rel="noopener" style={zohoLinkStyle}>Open in Zoho →</a>
+          </div>
         );
       }
 
@@ -298,17 +276,9 @@ export default function SearchPanel({ navData }) {
           : '#5f6368';
 
         return (
-          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
-            style={{
-              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
-              cursor: 'pointer', transition: 'border-color 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
-            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
-          >
+          <div key={i} style={cardStyle} {...hoverHandlers}>
             <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{invSubject}</div>
-            {invNumber && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>INV# {invNumber}</div>}
+            {invNumber && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>INV# <span style={copyableStyle}>{invNumber}</span></div>}
             {invAccount && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{invAccount}</div>}
 
             <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -336,8 +306,8 @@ export default function SearchPanel({ navData }) {
               </div>
             )}
 
-            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
-          </a>
+            <a href={zohoUrl} target="_blank" rel="noopener" style={zohoLinkStyle}>Open in Zoho →</a>
+          </div>
         );
       }
 
