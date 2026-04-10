@@ -6313,24 +6313,8 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     }
 
     const data = await response.json();
+    // trackUsage writes to Analytics Engine, KV, AND D1 bot_usage
     trackUsage(env, contModel, data.usage, 'crm-agent-continue').catch(() => {});
-
-    // Log token usage + cost to D1 for analytics dashboard (continuation path)
-    if (data?.usage) {
-      const _cCost = contModel.includes('haiku')
-        ? { input: 0.80, output: 4.00 }
-        : { input: 3.00, output: 15.00 };
-      const _cCostUsd = ((data.usage.input_tokens || 0) / 1e6) * _cCost.input +
-                        ((data.usage.output_tokens || 0) / 1e6) * _cCost.output;
-      logBotUsageToD1(env, {
-        bot: 'gchat', personId: null, requestText: '[continuation]', responsePath: 'crm-agent-continue',
-        model: contModel,
-        inputTokens: data.usage.input_tokens || 0,
-        outputTokens: data.usage.output_tokens || 0,
-        costUsd: _cCostUsd,
-        durationMs: null
-      }).catch(() => {});
-    }
 
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
@@ -6759,26 +6743,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const data = await response.json();
       console.log(`[GCHAT-AGENT] Response: stop_reason=${data.stop_reason}, content_blocks=${data.content?.length}, usage=${JSON.stringify(data.usage || {})}`);
 
-      // Track API usage
+      // Track API usage (writes to Analytics Engine, KV, AND D1 bot_usage)
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
       trackUsage(env, activeModel, data.usage, usageSource).catch(() => {});
-
-      // Log token usage + cost to D1 for analytics dashboard
-      if (data?.usage) {
-        const _COST = activeModel.includes('haiku')
-          ? { input: 0.80, output: 4.00 }   // haiku-4.5 per 1M tokens
-          : { input: 3.00, output: 15.00 };  // sonnet-4 per 1M tokens
-        const _costUsd = ((data.usage.input_tokens || 0) / 1e6) * _COST.input +
-                         ((data.usage.output_tokens || 0) / 1e6) * _COST.output;
-        logBotUsageToD1(env, {
-          bot: 'gchat', personId, requestText: userMessage, responsePath: usageSource,
-          model: activeModel,
-          inputTokens: data.usage.input_tokens || 0,
-          outputTokens: data.usage.output_tokens || 0,
-          costUsd: _costUsd,
-          durationMs: null
-        }).catch(() => {});
-      }
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
@@ -8679,37 +8646,6 @@ CRITICAL URL RULES:
                       billingStreet: r.Billing_Street, billingCity: r.Billing_City,
                       billingState: r.Billing_State, billingZip: r.Billing_Code }))
                   : rawRecords;
-
-                // Sales_Orders: also search Vendor_SO_Number via criteria (word search won't match custom fields)
-                if (mod === 'Sales_Orders') {
-                  const seen = new Set(records.map(r => r.id));
-                  try {
-                    const vendorResp = await zohoApiCall('GET',
-                      `Sales_Orders/search?criteria=((Vendor_SO_Number:starts_with:${encodeURIComponent(query)}))&fields=${fieldMap.Sales_Orders}&per_page=5`, env
-                    );
-                    for (const r of (vendorResp?.data || [])) {
-                      if (!seen.has(r.id)) { records.push(r); seen.add(r.id); }
-                    }
-                  } catch (_) {}
-                }
-
-                // Invoices: also search Invoice_Number via criteria (word search won't match number fields)
-                if (mod === 'Invoices') {
-                  const seen = new Set(records.map(r => r.id));
-                  // Strip "Invoice" prefix if present (e.g. "Invoice 25662" → "25662")
-                  const invQuery = query.replace(/^invoice\s*/i, '').trim();
-                  if (invQuery) {
-                    try {
-                      const invNumResp = await zohoApiCall('GET',
-                        `Invoices/search?criteria=((Invoice_Number:starts_with:${encodeURIComponent(invQuery)}))&fields=${fieldMap.Invoices}&per_page=10`, env
-                      );
-                      for (const r of (invNumResp?.data || [])) {
-                        if (!seen.has(r.id)) { records.push(r); seen.add(r.id); }
-                      }
-                    } catch (_) {}
-                  }
-                }
-
                 apiResult = { records, module: mod, query };
               }
             } catch (crmErr) {
