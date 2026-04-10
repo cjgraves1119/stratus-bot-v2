@@ -63,6 +63,64 @@ async function logBotUsageToD1(env, { personId, requestText, responsePath, model
   }
 }
 
+// ── Workflow Trace Helper (live flow visualization) ─────────────────────────
+// Lightweight per-step logger for the dashboard's live workflow animation.
+// Each request gets a trace_id; each pipeline step logs node_id + status.
+// Fire-and-forget — never blocks the request pipeline.
+function makeTraceId() {
+  return crypto.randomUUID ? crypto.randomUUID() : `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function ensureTraceTable(db) {
+  if (!db || globalThis.__traceTableReady) return;
+  try {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS workflow_traces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id TEXT NOT NULL,
+      bot TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'enter',
+      ts_ms REAL NOT NULL,
+      metadata TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_traces_created ON workflow_traces(created_at)`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON workflow_traces(trace_id)`).run();
+    globalThis.__traceTableReady = true;
+  } catch (_) { globalThis.__traceTableReady = true; /* may already exist */ }
+}
+
+function createTracer(env, bot) {
+  const traceId = makeTraceId();
+  const db = env?.ANALYTICS_DB;
+  const steps = []; // buffer for batch insert
+  const t0 = Date.now();
+
+  return {
+    traceId,
+    /** Log a node step. status: 'enter' | 'exit' | 'skip' */
+    step(nodeId, status = 'enter', meta = null) {
+      steps.push({ nodeId, status, tsMs: Date.now() - t0, meta });
+    },
+    /** Flush all buffered steps to D1 (call in ctx.waitUntil) */
+    async flush() {
+      if (!db || steps.length === 0) return;
+      try {
+        await ensureTraceTable(db);
+        const stmt = db.prepare(
+          `INSERT INTO workflow_traces (trace_id, bot, node_id, status, ts_ms, metadata) VALUES (?, ?, ?, ?, ?, ?)`
+        );
+        const batch = steps.map(s =>
+          stmt.bind(traceId, bot, s.nodeId, s.status, s.tsMs, s.meta ? JSON.stringify(s.meta) : null)
+        );
+        await db.batch(batch);
+      } catch (err) {
+        console.error('[D1] trace flush error:', err.message);
+      }
+    }
+  };
+}
+
 // ── R2 Object Storage Helpers (Webex bot) ──────────────────────────────────
 // Store and retrieve files (quote PDFs, attachments, reports) in R2.
 
@@ -3532,6 +3590,21 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       await addToHistory(kv, personId, 'assistant', reply);
     }
 
+    // Log token usage + cost to D1 (previously missed — cost was always $0)
+    if (data?.usage) {
+      const MODEL_COST = { input: 3.0, output: 15.0 }; // sonnet-4 per 1M tokens
+      const costUsd = ((data.usage.input_tokens || 0) / 1e6) * MODEL_COST.input +
+                      ((data.usage.output_tokens || 0) / 1e6) * MODEL_COST.output;
+      logBotUsageToD1(env, {
+        personId, requestText: userMessage, responsePath: 'claude',
+        model: 'claude-sonnet-4-20250514',
+        inputTokens: data.usage.input_tokens || 0,
+        outputTokens: data.usage.output_tokens || 0,
+        costUsd,
+        durationMs: null
+      }).catch(() => {});
+    }
+
     return reply;
   } catch (err) {
     console.error('Claude API error:', err.message, err.stack);
@@ -3655,6 +3728,27 @@ export default {
           return new Response(JSON.stringify({webex,gchat,timestamp:new Date().toISOString()}), {headers:DASH_CORS});
         } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
       }
+
+      // ── Live Workflow Traces: recent pipeline executions for animation ──
+      if (request.method === 'GET' && url.pathname === '/dashboard/traces') {
+        if (!db) return new Response(JSON.stringify({traces:[]}), {headers:DASH_CORS});
+        try {
+          await ensureTraceTable(db);
+          const since = url.searchParams.get('since') || new Date(Date.now() - 120000).toISOString();
+          const rows = await db.prepare(
+            `SELECT trace_id, bot, node_id, status, ts_ms, metadata, created_at
+             FROM workflow_traces WHERE created_at > ? ORDER BY created_at DESC, ts_ms ASC LIMIT 500`
+          ).bind(since).all();
+          // Group by trace_id
+          const grouped = {};
+          for (const r of rows.results) {
+            if (!grouped[r.trace_id]) grouped[r.trace_id] = { traceId: r.trace_id, bot: r.bot, createdAt: r.created_at, steps: [] };
+            grouped[r.trace_id].steps.push({ nodeId: r.node_id, status: r.status, tsMs: r.ts_ms, meta: r.metadata ? JSON.parse(r.metadata) : null });
+          }
+          return new Response(JSON.stringify({ traces: Object.values(grouped), timestamp: new Date().toISOString() }), { headers: DASH_CORS });
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
       return new Response(JSON.stringify({error:'Not found'}), {status:404, headers:DASH_CORS});
     }
 
@@ -3672,33 +3766,39 @@ export default {
       const body = await request.json();
 
       ctx.waitUntil((async () => {
+        const T = createTracer(env, 'webex');
         try {
           const event = body;
           if (event.resource !== 'messages' || event.event !== 'created') return;
+          T.step('wx-trigger', 'enter', { msgId: event.data?.id });
 
           const token = env.WEBEX_BOT_TOKEN;
           const kv = env.CONVERSATION_KV;
 
           // ── Webhook dedup: prevent duplicate processing of the same message ──
-          // Webex can deliver webhook events multiple times. Use KV to track
-          // processed message IDs with a 5-minute TTL.
+          T.step('wx-dedup', 'enter');
           const msgId = event.data?.id;
           if (msgId && kv) {
             const dedupKey = `dedup_${msgId}`;
             const already = await kv.get(dedupKey);
             if (already) {
               console.log(`[WEBEX] Dedup: skipping already-processed message ${msgId}`);
+              T.step('wx-dedup', 'exit', { result: 'duplicate' });
+              ctx.waitUntil(T.flush());
               return;
             }
-            await kv.put(dedupKey, '1', { expirationTtl: 300 }); // 5-min TTL
+            await kv.put(dedupKey, '1', { expirationTtl: 300 });
           }
+          T.step('wx-dedup', 'exit', { result: 'new' });
 
+          T.step('wx-botcheck', 'enter');
           const botId = await getBotPersonId(token);
           const personId = event.data.personId;
-          if (personId === botId) return;
+          if (personId === botId) { T.step('wx-botcheck', 'exit', { result: 'is_bot' }); ctx.waitUntil(T.flush()); return; }
+          T.step('wx-botcheck', 'exit', { result: 'not_bot' });
 
+          T.step('wx-getmsg', 'enter');
           const msg = await getMessage(event.data.id, token);
-          // Prefer html field to preserve line breaks (Webex text field collapses newlines to spaces)
           let text;
           if (msg.html) {
             text = msg.html.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
@@ -3706,112 +3806,181 @@ export default {
             text = (msg.text || '').trim();
           }
           const roomId = msg.roomId;
+          T.step('wx-getmsg', 'exit');
 
           // Check for image attachments
+          T.step('wx-image', 'enter');
           if (msg.files && msg.files.length > 0) {
             const fileUrl = msg.files[0];
             const imageData = await downloadWebexFile(fileUrl, token);
             if (imageData && imageData.mediaType.startsWith('image/')) {
+              T.step('wx-image', 'exit', { result: 'has_image' });
+              T.step('wx-imgclaude', 'enter');
               const prompt = text || 'A user sent this image. Analyze it and respond accordingly.';
               const claudeReply = await askClaude(prompt, personId, env, imageData);
+              T.step('wx-imgclaude', 'exit');
+              T.step('wx-send', 'enter');
               if (claudeReply && claudeReply.trim()) {
                 await sendMessage(roomId, claudeReply, token);
               } else {
                 await sendMessage(roomId, `I received your image but wasn't able to generate a response. Could you try sending it again, or describe what you need?`, token);
               }
+              T.step('wx-send', 'exit');
+              ctx.waitUntil(T.flush());
               return;
             }
-            // Image download failed — notify user instead of silently dropping
             if (msg.files.length > 0) {
               if (text) {
                 // Fall through to text processing below
               } else {
+                T.step('wx-image', 'exit', { result: 'file_failed' });
+                T.step('wx-send', 'enter');
                 await sendMessage(roomId, `I received a file attachment but couldn't process it as an image. Could you try sending it again?`, token);
+                T.step('wx-send', 'exit');
+                ctx.waitUntil(T.flush());
                 return;
               }
             }
           }
+          T.step('wx-image', 'exit', { result: 'text_only' });
 
-          if (!text) return;
+          if (!text) { ctx.waitUntil(T.flush()); return; }
           const _wxStartMs = Date.now();
 
           // Try deterministic EOL date lookup first (before quoting engine)
+          T.step('wx-eol', 'enter');
           const eolDateReply = handleEolDateRequest(text);
           if (eolDateReply) {
+            T.step('wx-eol', 'exit', { result: 'match' });
             await addToHistory(kv, personId, 'user', text);
             await addToHistory(kv, personId, 'assistant', eolDateReply);
+            T.step('wx-history', 'enter'); T.step('wx-history', 'exit');
+            T.step('wx-send', 'enter');
             await sendMessage(roomId, eolDateReply, token);
+            T.step('wx-send', 'exit');
+            ctx.waitUntil(T.flush());
             return;
           }
+          T.step('wx-eol', 'exit', { result: 'no_match' });
 
-          // Try deterministic quote confirmation (e.g. "yes" after a specs response)
+          // Try deterministic quote confirmation
+          T.step('wx-confirm', 'enter');
           const quoteConfirmReply = await handleQuoteConfirmation(text, personId, kv);
           if (quoteConfirmReply) {
+            T.step('wx-confirm', 'exit', { result: 'confirmed' });
             await addToHistory(kv, personId, 'user', text);
             await addToHistory(kv, personId, 'assistant', quoteConfirmReply);
+            T.step('wx-history', 'enter'); T.step('wx-history', 'exit');
+            T.step('wx-send', 'enter');
             await sendMessage(roomId, quoteConfirmReply, token);
+            T.step('wx-send', 'exit');
+            ctx.waitUntil(T.flush());
             return;
           }
+          T.step('wx-confirm', 'exit', { result: 'no' });
 
-          // Deterministic pricing calculator (runs BEFORE parseMessage so pricing
-          // requests for Duo/Umbrella/etc. don't get intercepted by quoting handlers)
+          // Deterministic pricing calculator
+          T.step('wx-pricing', 'enter');
           const pricingReply = await handlePricingRequest(text, personId, kv);
           if (pricingReply) {
+            T.step('wx-pricing', 'exit', { result: 'match' });
             await addToHistory(kv, personId, 'user', text);
             await addToHistory(kv, personId, 'assistant', pricingReply);
+            T.step('wx-history', 'enter'); T.step('wx-history', 'exit');
+            T.step('wx-send', 'enter');
             await sendMessage(roomId, pricingReply, token);
+            T.step('wx-send', 'exit');
+            ctx.waitUntil(T.flush());
             return;
           }
+          T.step('wx-pricing', 'exit', { result: 'no_match' });
 
           // Try deterministic engine first
+          T.step('wx-parse', 'enter');
           const parsed = parseMessage(text);
 
           if (parsed) {
-            // Clarification prompts (e.g. "which Duo tier?") — send directly, skip buildQuoteResponse
+            T.step('wx-parse', 'exit', { result: 'parsed', items: parsed.items?.length || 0 });
+
             if (parsed.isClarification && parsed.clarificationMessage) {
+              T.step('wx-clarify', 'enter'); T.step('wx-clarify', 'exit');
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', parsed.clarificationMessage);
+              T.step('wx-send', 'enter');
               await sendMessage(roomId, parsed.clarificationMessage, token);
+              T.step('wx-send', 'exit');
+              ctx.waitUntil(T.flush());
               return;
             }
 
+            T.step('wx-build', 'enter');
             const result = buildQuoteResponse(parsed);
+            T.step('wx-build', 'exit', { needsLlm: result.needsLlm, hasMessage: !!result.message });
 
             if (!result.needsLlm && result.message) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', result.message);
+              T.step('wx-send', 'enter');
               await sendMessage(roomId, result.message, token);
-              // D1 + Analytics Engine: log deterministic quote
+              T.step('wx-send', 'exit');
+              T.step('wx-d1', 'enter');
               logBotUsageToD1(env, { personId, requestText: text, responsePath: 'deterministic', durationMs: Date.now() - _wxStartMs }).catch(() => {});
               writeMetric(env, { path: 'deterministic', durationMs: Date.now() - _wxStartMs, personId });
+              T.step('wx-d1', 'exit');
+              ctx.waitUntil(T.flush());
               return;
             }
 
             if (result.revision) {
+              T.step('wx-revision', 'enter');
               const history = await getHistory(kv, personId);
               if (history.length > 0) {
+                T.step('wx-revision', 'exit', { result: 'has_history' });
+                T.step('wx-claude', 'enter');
                 const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                T.step('wx-claude', 'exit');
+                T.step('wx-send', 'enter');
                 await sendMessage(roomId, claudeReply, token);
+                T.step('wx-send', 'exit');
+                ctx.waitUntil(T.flush());
                 return;
               }
+              T.step('wx-revision', 'exit', { result: 'no_history' });
+              T.step('wx-send', 'enter');
               await sendMessage(roomId, `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`, token);
+              T.step('wx-send', 'exit');
+              ctx.waitUntil(T.flush());
               return;
             }
 
             if (result.errors && result.errors.length > 0) {
               const errorContext = result.errors.join('\n');
+              T.step('wx-claude', 'enter');
               const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+              T.step('wx-claude', 'exit');
+              T.step('wx-send', 'enter');
               await sendMessage(roomId, claudeReply, token);
+              T.step('wx-send', 'exit');
+              ctx.waitUntil(T.flush());
               return;
             }
+          } else {
+            T.step('wx-parse', 'exit', { result: 'no_parse' });
           }
 
           // Full fallback to Claude API
+          T.step('wx-claude', 'enter');
           const claudeReply = await askClaude(text, personId, env);
+          T.step('wx-claude', 'exit');
+          T.step('wx-send', 'enter');
           await sendMessage(roomId, claudeReply, token);
-          // D1 + Analytics Engine: log Claude fallback
+          T.step('wx-send', 'exit');
+          T.step('wx-d1', 'enter');
           logBotUsageToD1(env, { personId, requestText: text, responsePath: 'claude', durationMs: Date.now() - _wxStartMs }).catch(() => {});
           writeMetric(env, { path: 'claude', durationMs: Date.now() - _wxStartMs, personId });
+          T.step('wx-d1', 'exit');
+          T.step('wx-history', 'enter'); T.step('wx-history', 'exit');
+          ctx.waitUntil(T.flush());
 
         } catch (err) {
           console.error('Webhook error:', err.message, err.stack);
@@ -3823,6 +3992,7 @@ export default {
           } catch (notifyErr) {
             console.error('Failed to send error notification:', notifyErr.message);
           }
+          ctx.waitUntil(T.flush());
         }
       })());
 

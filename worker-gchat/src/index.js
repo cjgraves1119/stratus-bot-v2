@@ -264,6 +264,58 @@ async function logBotUsageToD1(env, { bot, personId, requestText, responsePath, 
   }
 }
 
+// ── Workflow Trace Helper (live flow visualization) ─────────────────────────
+function makeTraceId() {
+  return crypto.randomUUID ? crypto.randomUUID() : `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function ensureTraceTable(db) {
+  if (!db || globalThis.__traceTableReady) return;
+  try {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS workflow_traces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trace_id TEXT NOT NULL,
+      bot TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'enter',
+      ts_ms REAL NOT NULL,
+      metadata TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_traces_created ON workflow_traces(created_at)`).run();
+    await db.prepare(`CREATE INDEX IF NOT EXISTS idx_traces_trace_id ON workflow_traces(trace_id)`).run();
+    globalThis.__traceTableReady = true;
+  } catch (_) { globalThis.__traceTableReady = true; }
+}
+
+function createTracer(env, bot) {
+  const traceId = makeTraceId();
+  const db = env?.ANALYTICS_DB;
+  const steps = [];
+  const t0 = Date.now();
+  return {
+    traceId,
+    step(nodeId, status = 'enter', meta = null) {
+      steps.push({ nodeId, status, tsMs: Date.now() - t0, meta });
+    },
+    async flush() {
+      if (!db || steps.length === 0) return;
+      try {
+        await ensureTraceTable(db);
+        const stmt = db.prepare(
+          `INSERT INTO workflow_traces (trace_id, bot, node_id, status, ts_ms, metadata) VALUES (?, ?, ?, ?, ?, ?)`
+        );
+        const batch = steps.map(s =>
+          stmt.bind(traceId, bot, s.nodeId, s.status, s.tsMs, s.meta ? JSON.stringify(s.meta) : null)
+        );
+        await db.batch(batch);
+      } catch (err) {
+        console.error('[D1] trace flush error:', err.message);
+      }
+    }
+  };
+}
+
 // ── Analytics Engine: Real-time telemetry ────────────────────────────────────
 // Writes high-frequency data points for latency, cost, and throughput tracking.
 // Schema:
@@ -6263,6 +6315,23 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     const data = await response.json();
     trackUsage(env, contModel, data.usage, 'crm-agent-continue').catch(() => {});
 
+    // Log token usage + cost to D1 for analytics dashboard (continuation path)
+    if (data?.usage) {
+      const _cCost = contModel.includes('haiku')
+        ? { input: 0.80, output: 4.00 }
+        : { input: 3.00, output: 15.00 };
+      const _cCostUsd = ((data.usage.input_tokens || 0) / 1e6) * _cCost.input +
+                        ((data.usage.output_tokens || 0) / 1e6) * _cCost.output;
+      logBotUsageToD1(env, {
+        bot: 'gchat', personId: null, requestText: '[continuation]', responsePath: 'crm-agent-continue',
+        model: contModel,
+        inputTokens: data.usage.input_tokens || 0,
+        outputTokens: data.usage.output_tokens || 0,
+        costUsd: _cCostUsd,
+        durationMs: null
+      }).catch(() => {});
+    }
+
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
 
@@ -6693,6 +6762,23 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // Track API usage
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
       trackUsage(env, activeModel, data.usage, usageSource).catch(() => {});
+
+      // Log token usage + cost to D1 for analytics dashboard
+      if (data?.usage) {
+        const _COST = activeModel.includes('haiku')
+          ? { input: 0.80, output: 4.00 }   // haiku-4.5 per 1M tokens
+          : { input: 3.00, output: 15.00 };  // sonnet-4 per 1M tokens
+        const _costUsd = ((data.usage.input_tokens || 0) / 1e6) * _COST.input +
+                         ((data.usage.output_tokens || 0) / 1e6) * _COST.output;
+        logBotUsageToD1(env, {
+          bot: 'gchat', personId, requestText: userMessage, responsePath: usageSource,
+          model: activeModel,
+          inputTokens: data.usage.input_tokens || 0,
+          outputTokens: data.usage.output_tokens || 0,
+          costUsd: _costUsd,
+          durationMs: null
+        }).catch(() => {});
+      }
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
@@ -7348,6 +7434,26 @@ export default {
           return new Response(JSON.stringify({webex,gchat,timestamp:new Date().toISOString()}), {headers:DASH_CORS});
         } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
       }
+
+      // ── Live Workflow Traces ──
+      if (request.method === 'GET' && url.pathname === '/dashboard/traces') {
+        if (!db) return new Response(JSON.stringify({traces:[]}), {headers:DASH_CORS});
+        try {
+          await ensureTraceTable(db);
+          const since = url.searchParams.get('since') || new Date(Date.now() - 120000).toISOString();
+          const rows = await db.prepare(
+            `SELECT trace_id, bot, node_id, status, ts_ms, metadata, created_at
+             FROM workflow_traces WHERE created_at > ? ORDER BY created_at DESC, ts_ms ASC LIMIT 500`
+          ).bind(since).all();
+          const grouped = {};
+          for (const r of rows.results) {
+            if (!grouped[r.trace_id]) grouped[r.trace_id] = { traceId: r.trace_id, bot: r.bot, createdAt: r.created_at, steps: [] };
+            grouped[r.trace_id].steps.push({ nodeId: r.node_id, status: r.status, tsMs: r.ts_ms, meta: r.metadata ? JSON.parse(r.metadata) : null });
+          }
+          return new Response(JSON.stringify({ traces: Object.values(grouped), timestamp: new Date().toISOString() }), { headers: DASH_CORS });
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
       return new Response(JSON.stringify({error:'Not found'}), {status:404, headers:DASH_CORS});
     }
 
@@ -8572,20 +8678,6 @@ CRITICAL URL RULES:
                       billingStreet: r.Billing_Street, billingCity: r.Billing_City,
                       billingState: r.Billing_State, billingZip: r.Billing_Code }))
                   : rawRecords;
-
-                // Sales_Orders: also search Vendor_SO_Number via criteria (word search won't match custom fields)
-                if (mod === 'Sales_Orders') {
-                  const seen = new Set(records.map(r => r.id));
-                  try {
-                    const vendorResp = await zohoApiCall('GET',
-                      `Sales_Orders/search?criteria=((Vendor_SO_Number:starts_with:${encodeURIComponent(query)}))&fields=${fieldMap.Sales_Orders}&per_page=5`, env
-                    );
-                    for (const r of (vendorResp?.data || [])) {
-                      if (!seen.has(r.id)) { records.push(r); seen.add(r.id); }
-                    }
-                  } catch (_) {}
-                }
-
                 apiResult = { records, module: mod, query };
               }
             } catch (crmErr) {
@@ -11560,6 +11652,11 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         // Process through the deterministic engine (same as Webex bot)
         const _requestStartMs = Date.now();
+        const T = createTracer(env, isAddon ? 'addon' : 'gchat');
+        T.step('gc-trigger', 'enter', { isAddon, hasImage: !!imageData });
+        T.step('gc-jwt', 'enter'); T.step('gc-jwt', 'exit', { result: 'valid' });
+        T.step('gc-addon', 'enter'); T.step('gc-addon', 'exit', { result: isAddon ? 'addon' : 'direct' });
+        T.step('gc-text', 'enter'); T.step('gc-text', 'exit', { len: text?.length || 0 });
         let reply;
 
         // Check for Gmail "Share to Chat" (Gmail links or annotations)
@@ -11655,13 +11752,8 @@ Return ONLY a JSON object (no markdown, no explanation):
           }
         }
 
-        // CRM session continuation: if a CRM conversation is active (flag set by
-        // the async CRM handler), keep routing follow-up messages to the CRM agent
-        // even without explicit "zoho"/"crm" keywords. This allows multi-turn CRM
-        // workflows (ask clarifying questions → user answers → create quote).
-        // IMPORTANT: Do NOT hijack messages that are clearly quoting requests
-        // (e.g. "quote 5 MR44") — those should go through the deterministic engine
-        // even if a CRM session is active.
+        // CRM session check
+        T.step('gc-session', 'enter');
         if (!isExplicitCrmRequest && personId && kv) {
           const crmSession = await kv.get(`crm_session_${personId}`);
           console.log(`[GCHAT] CRM session check for ${personId}: ${crmSession ? 'ACTIVE' : 'NOT FOUND'}`);
@@ -11714,8 +11806,10 @@ Return ONLY a JSON object (no markdown, no explanation):
           }
         }
 
-        // Deterministic pricing calculator (runs BEFORE parseMessage so pricing
-        // requests for Duo/Umbrella/etc. don't get intercepted by quoting handlers)
+        T.step('gc-session', 'exit', { result: isExplicitCrmRequest ? 'crm_routed' : 'normal' });
+
+        // Deterministic pricing calculator
+        T.step('gc-pricing', 'enter');
         if (!reply && !isExplicitCrmRequest) {
           const pricingReply = await handlePricingRequest(text, personId, kv);
           if (pricingReply) {
@@ -11725,6 +11819,9 @@ Return ONLY a JSON object (no markdown, no explanation):
           }
         }
 
+        T.step('gc-pricing', 'exit', { result: reply ? 'match' : 'no_match' });
+
+        T.step('gc-parse', 'enter');
         if (!reply && !isExplicitCrmRequest) {
           const parsed = parseMessage(text);
           if (parsed) {
@@ -11756,8 +11853,11 @@ Return ONLY a JSON object (no markdown, no explanation):
           }
         }
 
+        T.step('gc-parse', 'exit', { result: reply ? 'resolved' : 'no_match' });
+
         if (!reply) {
           // Check if this is a CRM or email intent — if so, enable tool use
+          T.step('gc-intent', 'enter');
           const intent = detectCrmEmailIntent(text);
 
           // Image + action verb = almost certainly a CRM request (screenshot of Zoho, quote, etc.)
@@ -11781,8 +11881,10 @@ Return ONLY a JSON object (no markdown, no explanation):
           const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
           const hasGmailCreds = !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_REFRESH_TOKEN);
           const useTools = intent.hasAny && (hasCrmCreds || hasGmailCreds);
+          T.step('gc-intent', 'exit', { result: useTools ? 'crm_tools' : 'general', hasCrm: intent.hasCrm, hasEmail: intent.hasEmail });
 
           if (useTools) {
+            T.step('gc-dispatch', 'enter');
             console.log(`[GCHAT-AGENT] CRM/Email intent detected (crm=${intent.hasCrm}, email=${intent.hasEmail}). Enabling tool use.`);
 
             // ── Async response pattern ──────────────────────────────────────
@@ -11885,14 +11987,18 @@ Return ONLY a JSON object (no markdown, no explanation):
             console.log(`[GCHAT-AGENT] No GCP_SERVICE_ACCOUNT_KEY — falling back to synchronous CRM processing`);
           }
 
+          T.step('gc-claude', 'enter');
           reply = await askClaude(text, personId, env, imageData, useTools);
+          T.step('gc-claude', 'exit');
         }
 
         // If we have an image but no reply yet (no CRM intent, no SKU match),
         // send directly to Claude with the image for analysis
         if (!reply && imageData) {
+          T.step('gc-claude', 'enter');
           const prompt = text || 'A user sent this image. Analyze it and respond accordingly. If it contains Meraki license information, SKUs, or network details, provide relevant quoting or product guidance.';
           reply = await askClaude(prompt, personId, env, imageData);
+          T.step('gc-claude', 'exit');
         }
 
         // Adapt markdown for Google Chat (* instead of **)
@@ -11900,6 +12006,8 @@ Return ONLY a JSON object (no markdown, no explanation):
         reply = truncateGChatReply(reply);
 
         // ── D1 + Analytics Engine: Log this interaction (fire-and-forget) ──
+        T.step('gc-respond', 'enter');
+        T.step('gc-d1', 'enter');
         const _requestEndMs = Date.now();
         const _responsePath = useTools ? 'crm_agent' : (reply && !imageData ? 'deterministic' : 'claude');
         const _durationMs = _requestEndMs - (_requestStartMs || _requestEndMs);
@@ -11916,6 +12024,10 @@ Return ONLY a JSON object (no markdown, no explanation):
           durationMs: _durationMs,
           personId
         });
+        T.step('gc-d1', 'exit');
+        T.step('gc-history', 'enter'); T.step('gc-history', 'exit');
+        T.step('gc-respond', 'exit');
+        ctx.waitUntil(T.flush());
 
         return sendGChatResponse(reply || 'No response generated', isAddon);
 
