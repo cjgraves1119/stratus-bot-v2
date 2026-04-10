@@ -21,6 +21,9 @@
 const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
 const ANTHROPIC_API_DIRECT = 'https://api.anthropic.com/v1/messages'; // Fallback when gateway fails
 
+// ─── Cloudflare Workflows (durable execution for CRM agentic loops) ─────────
+import { WorkflowEntrypoint } from 'cloudflare:workers';
+
 // ─── Data Imports (embedded at build time by wrangler) ──────────────────────
 import pricesData from './data/prices.json';
 import catalogData from './data/auto-catalog.json';
@@ -137,8 +140,229 @@ async function trackUsage(env, model, usage, source) {
 
     // Write back with 90-day TTL (keeps ~3 months of history)
     await env.CONVERSATION_KV.put(monthKey, JSON.stringify(monthly), { expirationTtl: 90 * 86400 });
+    // ── D1: Write to bot_usage table (fire-and-forget) ──
+    if (env.ANALYTICS_DB) {
+      try {
+        await env.ANALYTICS_DB.prepare(
+          `INSERT INTO bot_usage (bot, person_id, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          source.startsWith('addon') ? 'addon' : 'gchat',
+          null, // person_id filled by caller if available
+          source === 'crm-agent' ? 'crm_agent' : (source.includes('addon') ? 'claude' : 'claude'),
+          model,
+          usage.input_tokens || 0,
+          usage.output_tokens || 0,
+          Math.round(totalCost * 1_000_000) / 1_000_000,
+          null
+        ).run();
+      } catch (d1Err) {
+        console.error('[D1] bot_usage insert error:', d1Err.message);
+      }
+    }
+
   } catch (err) {
     console.error('[USAGE] tracking error:', err.message);
+  }
+}
+
+// ── D1 Analytics Helpers ────────────────────────────────────────────────────
+// Fire-and-forget inserts into stratus-bot-analytics D1 database.
+// All functions are safe to call without await (non-blocking).
+
+/**
+ * Log a quote to D1 quote_history table.
+ */
+async function logQuoteToD1(env, { bot, personId, accountName, skus, totalList, totalEcomm, quoteUrl, responseType, eolWarnings, durationMs }) {
+  if (!env?.ANALYTICS_DB) return;
+  try {
+    await env.ANALYTICS_DB.prepare(
+      `INSERT INTO quote_history (bot, person_id, account_name, skus, total_list, total_ecomm, quote_url, response_type, eol_warnings, duration_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      bot || 'gchat',
+      personId || null,
+      accountName || null,
+      JSON.stringify(skus || []),
+      totalList || null,
+      totalEcomm || null,
+      quoteUrl || null,
+      responseType || 'deterministic',
+      eolWarnings ? JSON.stringify(eolWarnings) : null,
+      durationMs || null
+    ).run();
+  } catch (err) {
+    console.error('[D1] quote_history insert error:', err.message);
+  }
+}
+
+/**
+ * Log a CRM operation to D1 crm_operations table.
+ */
+async function logCrmOpToD1(env, { personId, operation, module, recordId, recordName, status, durationMs, errorMessage, details }) {
+  if (!env?.ANALYTICS_DB) return;
+  try {
+    await env.ANALYTICS_DB.prepare(
+      `INSERT INTO crm_operations (person_id, operation, module, record_id, record_name, status, duration_ms, error_message, details)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      personId || null,
+      operation,
+      module || null,
+      recordId || null,
+      recordName || null,
+      status,
+      durationMs || null,
+      errorMessage || null,
+      details ? JSON.stringify(details) : null
+    ).run();
+  } catch (err) {
+    console.error('[D1] crm_operations insert error:', err.message);
+  }
+}
+
+/**
+ * Log a price change to D1 pricing_history table.
+ */
+async function logPriceChangeToD1(env, { sku, oldPrice, newPrice, listPrice }) {
+  if (!env?.ANALYTICS_DB) return;
+  const change = (newPrice || 0) - (oldPrice || 0);
+  const changePct = oldPrice ? (change / oldPrice) * 100 : 0;
+  try {
+    await env.ANALYTICS_DB.prepare(
+      `INSERT INTO pricing_history (sku, old_price, new_price, list_price, price_change, change_pct)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(sku, oldPrice || null, newPrice || null, listPrice || null, change, Math.round(changePct * 100) / 100).run();
+  } catch (err) {
+    console.error('[D1] pricing_history insert error:', err.message);
+  }
+}
+
+/**
+ * Log a bot interaction to D1 bot_usage table (for non-Claude paths like deterministic).
+ */
+async function logBotUsageToD1(env, { bot, personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage }) {
+  if (!env?.ANALYTICS_DB) return;
+  try {
+    await env.ANALYTICS_DB.prepare(
+      `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      bot || 'gchat',
+      personId || null,
+      (requestText || '').substring(0, 500),
+      responsePath,
+      model || null,
+      inputTokens || 0,
+      outputTokens || 0,
+      costUsd || 0,
+      durationMs || null,
+      errorMessage || null
+    ).run();
+  } catch (err) {
+    console.error('[D1] bot_usage insert error:', err.message);
+  }
+}
+
+// ── Analytics Engine: Real-time telemetry ────────────────────────────────────
+// Writes high-frequency data points for latency, cost, and throughput tracking.
+// Schema:
+//   blobs[0] = bot ('webex'|'gchat'|'addon')
+//   blobs[1] = response_path ('deterministic'|'claude'|'crm_agent'|'pricing'|'error')
+//   blobs[2] = model (e.g. 'claude-sonnet-4-20250514' or 'none')
+//   doubles[0] = duration_ms
+//   doubles[1] = input_tokens
+//   doubles[2] = output_tokens
+//   doubles[3] = cost_usd
+//   indexes[0] = person_id (sampling key)
+function writeMetric(env, { bot, path, model, durationMs, inputTokens, outputTokens, costUsd, personId }) {
+  if (!env?.BOT_METRICS) return;
+  try {
+    env.BOT_METRICS.writeDataPoint({
+      blobs: [bot || 'gchat', path || 'unknown', model || 'none'],
+      doubles: [durationMs || 0, inputTokens || 0, outputTokens || 0, costUsd || 0],
+      indexes: [personId || 'anonymous']
+    });
+  } catch (_) {} // Never block on metrics
+}
+
+// ── R2 Object Storage Helpers ───────────────────────────────────────────────
+// Store and retrieve files (quote PDFs, attachments, reports) in R2.
+// All operations are fire-and-forget safe — failures never block bot responses.
+
+/**
+ * Store a file in R2. Returns the key on success, null on failure.
+ * @param {object} env - Worker env with BOT_STORAGE binding
+ * @param {string} key - Object key (e.g. 'quotes/Q-00123.pdf')
+ * @param {ArrayBuffer|string|ReadableStream} data - File content
+ * @param {object} [opts] - R2 put options (httpMetadata, customMetadata, etc.)
+ */
+async function r2Put(env, key, data, opts = {}) {
+  if (!env?.BOT_STORAGE) return null;
+  try {
+    await env.BOT_STORAGE.put(key, data, {
+      httpMetadata: opts.httpMetadata || {},
+      customMetadata: opts.customMetadata || {}
+    });
+    return key;
+  } catch (err) {
+    console.error('[R2] put error:', key, err.message);
+    return null;
+  }
+}
+
+/**
+ * Retrieve a file from R2. Returns { data, httpMetadata, customMetadata } or null.
+ */
+async function r2Get(env, key) {
+  if (!env?.BOT_STORAGE) return null;
+  try {
+    const obj = await env.BOT_STORAGE.get(key);
+    if (!obj) return null;
+    return {
+      data: await obj.arrayBuffer(),
+      httpMetadata: obj.httpMetadata,
+      customMetadata: obj.customMetadata,
+      size: obj.size,
+      uploaded: obj.uploaded
+    };
+  } catch (err) {
+    console.error('[R2] get error:', key, err.message);
+    return null;
+  }
+}
+
+/**
+ * Delete a file from R2.
+ */
+async function r2Delete(env, key) {
+  if (!env?.BOT_STORAGE) return false;
+  try {
+    await env.BOT_STORAGE.delete(key);
+    return true;
+  } catch (err) {
+    console.error('[R2] delete error:', key, err.message);
+    return false;
+  }
+}
+
+/**
+ * List objects in R2 under a prefix.
+ * @param {string} prefix - Key prefix (e.g. 'quotes/')
+ * @param {number} [limit=100] - Max objects to return
+ */
+async function r2List(env, prefix, limit = 100) {
+  if (!env?.BOT_STORAGE) return [];
+  try {
+    const listed = await env.BOT_STORAGE.list({ prefix, limit });
+    return listed.objects.map(o => ({
+      key: o.key,
+      size: o.size,
+      uploaded: o.uploaded
+    }));
+  } catch (err) {
+    console.error('[R2] list error:', prefix, err.message);
+    return [];
   }
 }
 
@@ -6874,6 +7098,135 @@ async function verifyGoogleChatToken(request, env) {
  * The bot will parse email content and extract any Cisco/Meraki
  * products mentioned, generating quote links.
  */
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Cloudflare Workflow: Durable CRM Execution
+// ═══════════════════════════════════════════════════════════════════════════════
+// Replaces Queue-based CRM dispatch with per-step retries and durable state.
+// Each step is independently retriable — if Zoho times out, only that step
+// re-runs, not the entire agentic loop.
+//
+// Dispatch priority: CRM_WORKFLOW → CRM_QUEUE → ctx.waitUntil
+// ═══════════════════════════════════════════════════════════════════════════════
+export class CrmWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    const { text, personId, spaceName, threadName, imageDataKey } = event.payload;
+
+    if (!spaceName) {
+      throw new Error('[WORKFLOW] No spaceName in payload — cannot deliver response');
+    }
+
+    const env = this.env;
+    const workflowStart = Date.now();
+    console.log(`[WORKFLOW] Starting CRM workflow for: "${(text || '').substring(0, 80)}..."`);
+
+    // Step 1: Load live prices from shared KV
+    await step.do('load-prices', async () => {
+      if (env.CONVERSATION_KV) {
+        await loadLivePrices(env);
+      }
+      return true;
+    });
+
+    // Step 2: Send "Working on it..." progress message
+    const progressMsgName = await step.do('send-progress',
+      { retries: { limit: 2, delay: '2 seconds' } },
+      async () => {
+        try {
+          const msg = await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', null, env);
+          return msg?.name || null;
+        } catch (err) {
+          console.error(`[WORKFLOW] Failed to send progress: ${err.message}`);
+          return null; // Non-fatal: proceed without progress updates
+        }
+      }
+    );
+
+    // Step 3: Run the CRM agentic loop (main work)
+    // This is the heavy step — askClaude may make multiple Zoho + Anthropic calls.
+    // Timeout: 5 minutes. Retry once on failure (covers transient API errors).
+    const result = await step.do('process-crm',
+      { retries: { limit: 1, delay: '5 seconds' }, timeout: '5 minutes' },
+      async () => {
+        // Reload live prices in case this step was retried (module state is lost on retry)
+        if (env.CONVERSATION_KV) await loadLivePrices(env);
+
+        // Retrieve image data from KV if the caller stored it there
+        let imageData = null;
+        if (imageDataKey) {
+          try {
+            imageData = await env.CONVERSATION_KV.get(imageDataKey, 'json');
+            await env.CONVERSATION_KV.delete(imageDataKey); // Clean up temp key
+          } catch (_) {}
+        }
+
+        // Progress callback: update the "Working on it..." message with step details
+        let _stepLog = [];
+        const progressCallback = progressMsgName
+          ? async (stepMsg) => {
+              if (!stepMsg) return;
+              const lines = stepMsg.split('\n').filter(l => /^[🔍📄🔗✏️📦🌐📧✍️📤⚙️]/.test(l.trim()));
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (_stepLog.length === 0 || _stepLog[_stepLog.length - 1] !== trimmed) {
+                  _stepLog.push(trimmed);
+                }
+              }
+              const recentSteps = _stepLog.slice(-5);
+              const display = recentSteps.length > 0
+                ? `⏳ *Working on it...*\n\n${recentSteps.join('\n')}`
+                : '⏳ Working on it...';
+              try { await updateGChatMessage(progressMsgName, display, env); } catch (_) {}
+            }
+          : async () => {};
+
+        const reply = await askClaude(text, personId, env, imageData, true, progressCallback, 300000);
+        let finalReply = typeof reply === 'string' ? reply : (reply?.reply || 'Done.');
+        finalReply = adaptMarkdownForGChat(finalReply);
+        finalReply = truncateGChatReply(finalReply);
+        return finalReply;
+      }
+    );
+
+    // Step 4: Deliver final response to Google Chat
+    await step.do('deliver-response',
+      { retries: { limit: 3, delay: '2 seconds', backoff: 'linear' } },
+      async () => {
+        let delivered = false;
+        if (progressMsgName) {
+          try {
+            delivered = await updateGChatMessage(progressMsgName, result, env);
+            if (delivered) console.log(`[WORKFLOW] Final response PATCH'd onto ${progressMsgName}`);
+          } catch (patchErr) {
+            console.warn(`[WORKFLOW] PATCH failed: ${patchErr.message}`);
+          }
+        }
+        if (!delivered) {
+          await sendAsyncGChatMessage(spaceName, result, null, env);
+        }
+        return delivered;
+      }
+    );
+
+    // Step 5: Update conversation history in KV
+    await step.do('update-history',
+      { retries: { limit: 2, delay: '1 second' } },
+      async () => {
+        const kv = env.CONVERSATION_KV;
+        if (personId && kv) {
+          await addToHistory(kv, personId, 'user', text);
+          await addToHistory(kv, personId, 'assistant', result);
+          await kv.put(`crm_session_${personId}`, 'active', { expirationTtl: 600 });
+        }
+        return true;
+      }
+    );
+
+    console.log(`[WORKFLOW] Completed in ${Date.now() - workflowStart}ms`);
+    return { success: true, spaceName, textLength: result?.length || 0 };
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     // Load KV-cached live prices (if available from daily cron refresh)
@@ -6883,6 +7236,68 @@ export default {
     }
 
     const url = new URL(request.url);
+    // ── Dashboard API (consumed by stratus-dashboard.pages.dev) ──
+    const DASH_CORS = {'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET, OPTIONS','Access-Control-Allow-Headers':'Content-Type, X-Dashboard-Key'};
+    if (url.pathname.startsWith('/dashboard/')) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
+      const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
+      if (dashKey !== 'stratus2026') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/stats') {
+        try {
+          const range = url.searchParams.get('range') || '24h';
+          const rs = {'1h':"-1 hour",'6h':"-6 hours",'24h':"-1 day",'7d':"-7 days",'30d':"-30 days",'all':"-100 years"}[range] || "-1 day";
+          const since = `datetime('now','${rs}')`;
+          const [usage,quotes,errors,pathBreakdown,modelBreakdown,hourly,recentErrors] = await Promise.all([
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total,COALESCE(SUM(input_tokens),0) as input_tokens,COALESCE(SUM(output_tokens),0) as output_tokens,COALESCE(SUM(cost_usd),0) as total_cost,COALESCE(AVG(duration_ms),0) as avg_duration FROM bot_usage WHERE created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total,COALESCE(SUM(total_list),0) as total_list,COALESCE(SUM(total_ecomm),0) as total_ecomm FROM quote_history WHERE created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total FROM bot_usage WHERE response_path='error' AND created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT response_path,COUNT(*) as count FROM bot_usage WHERE created_at >= ${since} GROUP BY response_path ORDER BY count DESC`).all(),
+            env.ANALYTICS_DB.prepare(`SELECT model,COUNT(*) as count,COALESCE(SUM(input_tokens),0) as input_tokens,COALESCE(SUM(output_tokens),0) as output_tokens,COALESCE(SUM(cost_usd),0) as cost FROM bot_usage WHERE model IS NOT NULL AND created_at >= ${since} GROUP BY model ORDER BY count DESC`).all(),
+            env.ANALYTICS_DB.prepare(`SELECT strftime('%Y-%m-%dT%H:00:00Z',created_at) as hour,COUNT(*) as count,SUM(CASE WHEN response_path='error' THEN 1 ELSE 0 END) as errors FROM bot_usage WHERE created_at >= ${since} GROUP BY hour ORDER BY hour`).all(),
+            env.ANALYTICS_DB.prepare(`SELECT created_at,bot,response_path,error_message,duration_ms FROM bot_usage WHERE response_path='error' AND created_at >= ${since} ORDER BY created_at DESC LIMIT 20`).all()
+          ]);
+          return new Response(JSON.stringify({range,timestamp:new Date().toISOString(),usage,quotes,errors,pathBreakdown:pathBreakdown.results,modelBreakdown:modelBreakdown.results,hourly:hourly.results,recentErrors:recentErrors.results}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/events') {
+        try {
+          const since = url.searchParams.get('since') || new Date(Date.now()-300000).toISOString();
+          const limit = Math.min(parseInt(url.searchParams.get('limit')||'50'),100);
+          const [events,quotes] = await Promise.all([
+            env.ANALYTICS_DB.prepare('SELECT id,created_at,bot,response_path,model,input_tokens,output_tokens,cost_usd,duration_ms,error_message FROM bot_usage WHERE created_at > ? ORDER BY created_at DESC LIMIT ?').bind(since,limit).all(),
+            env.ANALYTICS_DB.prepare('SELECT id,created_at,bot,skus,total_list,total_ecomm,response_type,eol_warnings,duration_ms FROM quote_history WHERE created_at > ? ORDER BY created_at DESC LIMIT ?').bind(since,limit).all()
+          ]);
+          return new Response(JSON.stringify({events:events.results,quotes:quotes.results,timestamp:new Date().toISOString()}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/crm-stats') {
+        try {
+          const range = url.searchParams.get('range') || '24h';
+          const rs = {'1h':"-1 hour",'6h':"-6 hours",'24h':"-1 day",'7d':"-7 days",'30d':"-30 days",'all':"-100 years"}[range] || "-1 day";
+          const since = `datetime('now','${rs}')`;
+          const [ops,breakdown] = await Promise.all([
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total,SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as success,SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) as errors FROM crm_operations WHERE created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT operation,module,COUNT(*) as count FROM crm_operations WHERE created_at >= ${since} GROUP BY operation,module ORDER BY count DESC LIMIT 20`).all()
+          ]);
+          return new Response(JSON.stringify({operations:ops,breakdown:breakdown.results}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/pricing-status') {
+        try {
+          const kv = env.CONVERSATION_KV;
+          const result = kv ? await kv.get('prices_live','json') : null;
+          const error = kv ? await kv.get('prices_live_error','json') : null;
+          const recentChanges = env.ANALYTICS_DB ? await env.ANALYTICS_DB.prepare('SELECT sku,old_price,new_price,list_price,price_change,change_pct,refreshed_at FROM pricing_history WHERE price_change != 0 ORDER BY refreshed_at DESC LIMIT 20').all() : {results:[]};
+          return new Response(JSON.stringify({hasLivePrices:!!result,refreshedAt:result?.refreshedAt||null,stats:result?.stats||null,lastError:error||null,recentChanges:recentChanges.results}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      return new Response(JSON.stringify({error:'Not found'}), {status:404, headers:DASH_CORS});
+    }
 
     // Log ALL incoming requests for debugging
     console.log(`[GCHAT-DEBUG] ${request.method} ${url.pathname} from ${request.headers.get('user-agent') || 'unknown'}`);
@@ -9873,6 +10288,31 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                     }
                   }
                 } catch (_) {}
+
+                // Fetch CCW Deal Number from the most recent quote per deal
+                try {
+                  const dealIds = deals.map(d => d.id).filter(Boolean);
+                  if (dealIds.length > 0) {
+                    const dealIdList = dealIds.map(id => `'${id}'`).join(',');
+                    const qtCoql = `select CCW_Deal_Number, Deal_Name, Created_Time from Quotes where Deal_Name.id in (${dealIdList}) and CCW_Deal_Number is not null order by Created_Time desc limit 50`;
+                    const qtResp = await zohoApiCall('POST', 'coql', env, { select_query: qtCoql });
+                    if (qtResp?.data) {
+                      // Map: first (most recent) CCW Deal Number per deal
+                      const ccwByDeal = {};
+                      for (const q of qtResp.data) {
+                        const dId = q.Deal_Name?.id;
+                        if (dId && !ccwByDeal[dId]) {
+                          ccwByDeal[dId] = q.CCW_Deal_Number;
+                        }
+                      }
+                      for (const deal of deals) {
+                        if (ccwByDeal[deal.id]) {
+                          deal.ccwDealNumber = ccwByDeal[deal.id];
+                        }
+                      }
+                    }
+                  }
+                } catch (_) {}
               }
 
               apiResult = { deals, weborders, accountId: targetAccountId || null };
@@ -11053,6 +11493,7 @@ Return ONLY a JSON object (no markdown, no explanation):
         } catch (dbgErr) { /* ignore debug errors */ }
 
         // Process through the deterministic engine (same as Webex bot)
+        const _requestStartMs = Date.now();
         let reply;
 
         // Check for Gmail "Share to Chat" (Gmail links or annotations)
@@ -11293,52 +11734,78 @@ Return ONLY a JSON object (no markdown, no explanation):
             const hasAsyncCreds = !!env.GCP_SERVICE_ACCOUNT_KEY;
 
             if (spaceName && hasAsyncCreds) {
-              // ARCHITECTURE: Dispatch CRM work via Cloudflare Queue.
+              // ARCHITECTURE: Dispatch CRM work via Cloudflare Workflow (preferred)
+              //   or Queue (fallback) or ctx.waitUntil (last resort).
               //
-              // Why Queue?  → Queue consumers get their own INDEPENDENT execution context
-              //   with up to 15 minutes of wall-clock time. This completely bypasses:
-              //   - ctx.waitUntil 30s wall-clock limit (killed multi-step agentic loops)
-              //   - Service Binding shared-context issue (SB subrequests die with parent)
-              //   - Self-fetch restriction (Workers can't fetch their own URL)
+              // Workflow advantages over Queue:
+              //   - Per-step retries (Zoho timeout? only that step re-runs)
+              //   - Durable state persisted between steps
+              //   - Step-level visibility in CF dashboard
+              //   - No wall-clock limit (runs as long as needed)
               //
-              // Flow: webhook → queue.send(payload) → return 200 immediately
-              //       queue consumer → askClaude with tools → deliver via GChat REST API
+              // Queue kept as fallback in case Workflow binding isn't available.
+              //
+              // Flow: webhook → workflow.create(payload) → return 200 immediately
+              //       workflow steps: progress → askClaude → deliver → update history
               const _imgData = imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null;
 
-              // ── Queue dispatch with ctx.waitUntil fallback ──────────────────
-              if (env.CRM_QUEUE) {
+              // ── Dispatch: Workflow → Queue → ctx.waitUntil ─────────────────
+              if (env.CRM_WORKFLOW) {
                 try {
-                  await env.CRM_QUEUE.send({
-                    text,
-                    personId,
-                    spaceName,
-                    threadName,
-                    imageData: _imgData
+                  // Store image data in KV if present (may exceed workflow payload limit)
+                  let imageDataKey = null;
+                  if (_imgData) {
+                    imageDataKey = `workflow_img_${Date.now()}_${personId}`;
+                    await env.CONVERSATION_KV.put(imageDataKey, JSON.stringify(_imgData), { expirationTtl: 300 });
+                  }
+                  await env.CRM_WORKFLOW.create({
+                    params: { text, personId, spaceName, threadName, imageDataKey }
                   });
+                  console.log(`[GCHAT-DISPATCH] CRM work dispatched to Workflow for: "${text.substring(0, 60)}..."`);
+                } catch (workflowErr) {
+                  console.error(`[GCHAT-DISPATCH] Workflow create failed: ${workflowErr.message} — falling back to Queue`);
+                  // Fall through to Queue
+                  if (env.CRM_QUEUE) {
+                    try {
+                      await env.CRM_QUEUE.send({ text, personId, spaceName, threadName, imageData: _imgData });
+                      console.log(`[GCHAT-DISPATCH] Fell back to Queue successfully`);
+                    } catch (queueErr) {
+                      console.error(`[GCHAT-DISPATCH] Queue also failed: ${queueErr.message}`);
+                      try {
+                        await sendAsyncGChatMessage(spaceName, `❌ Failed to process request: ${workflowErr.message.substring(0, 100)}`, null, env);
+                      } catch (_) {}
+                    }
+                  } else {
+                    try {
+                      await sendAsyncGChatMessage(spaceName, `❌ Failed to process request: ${workflowErr.message.substring(0, 100)}`, null, env);
+                    } catch (_) {}
+                  }
+                }
+              } else if (env.CRM_QUEUE) {
+                // Queue fallback (original dispatch method)
+                try {
+                  await env.CRM_QUEUE.send({ text, personId, spaceName, threadName, imageData: _imgData });
                   console.log(`[GCHAT-DISPATCH] CRM work queued for: "${text.substring(0, 60)}..."`);
                 } catch (queueErr) {
                   console.error(`[GCHAT-DISPATCH] Queue send failed: ${queueErr.message}`);
-                  // Fallback: try to send error message directly
                   try {
                     await sendAsyncGChatMessage(spaceName, `❌ Failed to queue request: ${queueErr.message.substring(0, 100)}`, null, env);
                   } catch (_) {}
                 }
               } else {
-                // Queue binding not available (queue not created yet).
-                // Fall back to ctx.waitUntil — has 30s wall-clock limit, so multi-step
-                // CRM loops may timeout, but simple queries will still work.
-                console.warn(`[GCHAT-DISPATCH] CRM_QUEUE binding not available — falling back to ctx.waitUntil`);
+                // Last resort: ctx.waitUntil (30s wall-clock limit)
+                console.warn(`[GCHAT-DISPATCH] No CRM_WORKFLOW or CRM_QUEUE — falling back to ctx.waitUntil`);
                 ctx.waitUntil((async () => {
                   try {
                     await sendAsyncGChatMessage(spaceName, '⏳ Working on it...', threadName, env);
-                    const result = await askClaude(text, personId, env, imageData ? { base64: imageData.base64, mediaType: imageData.mediaType } : null, true);
+                    const result = await askClaude(text, personId, env, _imgData, true);
                     if (result) {
                       await sendAsyncGChatMessage(spaceName, result, threadName, env);
                     }
                   } catch (fallbackErr) {
                     console.error(`[GCHAT-DISPATCH] ctx.waitUntil fallback failed: ${fallbackErr.message}`);
                     try {
-                      await sendAsyncGChatMessage(spaceName, `❌ Request failed (no queue available): ${fallbackErr.message.substring(0, 100)}`, threadName, env);
+                      await sendAsyncGChatMessage(spaceName, `❌ Request failed: ${fallbackErr.message.substring(0, 100)}`, threadName, env);
                     } catch (_) {}
                   }
                 })());
@@ -11365,6 +11832,24 @@ Return ONLY a JSON object (no markdown, no explanation):
         // Adapt markdown for Google Chat (* instead of **)
         reply = adaptMarkdownForGChat(reply);
         reply = truncateGChatReply(reply);
+
+        // ── D1 + Analytics Engine: Log this interaction (fire-and-forget) ──
+        const _requestEndMs = Date.now();
+        const _responsePath = useTools ? 'crm_agent' : (reply && !imageData ? 'deterministic' : 'claude');
+        const _durationMs = _requestEndMs - (_requestStartMs || _requestEndMs);
+        ctx.waitUntil(logBotUsageToD1(env, {
+          bot: isAddon ? 'addon' : 'gchat',
+          personId,
+          requestText: text,
+          responsePath: _responsePath,
+          durationMs: _durationMs
+        }));
+        writeMetric(env, {
+          bot: isAddon ? 'addon' : 'gchat',
+          path: _responsePath,
+          durationMs: _durationMs,
+          personId
+        });
 
         return sendGChatResponse(reply || 'No response generated', isAddon);
 
@@ -11706,6 +12191,13 @@ Return ONLY a JSON object (no markdown, no explanation):
           // Track if price actually changed
           if (existing?.price !== price) {
             priceChanges.push({ sku, oldPrice: existing?.price, newPrice: price });
+            // D1: Log price change (fire-and-forget)
+            ctx.waitUntil(logPriceChangeToD1(env, {
+              sku,
+              oldPrice: existing?.price,
+              newPrice: price,
+              listPrice: existing?.list || null
+            }));
           }
 
           // Merge into existing entry — preserve zoho_product_id and all other fields

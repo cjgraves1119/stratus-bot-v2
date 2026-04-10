@@ -28,6 +28,102 @@ let livePrices = null;       // KV-cached prices (refreshed daily by GChat worke
 let livePricesCacheTs = 0;   // When we last read from KV (ms)
 const LIVE_PRICES_CACHE_TTL = 300000; // 5 minutes in-memory cache
 
+// ── Analytics Engine: Real-time telemetry (Webex bot) ───────────────────────
+function writeMetric(env, { path, model, durationMs, inputTokens, outputTokens, costUsd, personId }) {
+  if (!env?.BOT_METRICS) return;
+  try {
+    env.BOT_METRICS.writeDataPoint({
+      blobs: ['webex', path || 'unknown', model || 'none'],
+      doubles: [durationMs || 0, inputTokens || 0, outputTokens || 0, costUsd || 0],
+      indexes: [personId || 'anonymous']
+    });
+  } catch (_) {}
+}
+
+// ── D1 Analytics Helper (Webex bot) ─────────────────────────────────────────
+async function logBotUsageToD1(env, { personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage }) {
+  if (!env?.ANALYTICS_DB) return;
+  try {
+    await env.ANALYTICS_DB.prepare(
+      `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message)
+       VALUES ('webex', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      personId || null,
+      (requestText || '').substring(0, 500),
+      responsePath,
+      model || null,
+      inputTokens || 0,
+      outputTokens || 0,
+      costUsd || 0,
+      durationMs || null,
+      errorMessage || null
+    ).run();
+  } catch (err) {
+    console.error('[D1] bot_usage insert error:', err.message);
+  }
+}
+
+// ── R2 Object Storage Helpers (Webex bot) ──────────────────────────────────
+// Store and retrieve files (quote PDFs, attachments, reports) in R2.
+
+async function r2Put(env, key, data, opts = {}) {
+  if (!env?.BOT_STORAGE) return null;
+  try {
+    await env.BOT_STORAGE.put(key, data, {
+      httpMetadata: opts.httpMetadata || {},
+      customMetadata: opts.customMetadata || {}
+    });
+    return key;
+  } catch (err) {
+    console.error('[R2] put error:', key, err.message);
+    return null;
+  }
+}
+
+async function r2Get(env, key) {
+  if (!env?.BOT_STORAGE) return null;
+  try {
+    const obj = await env.BOT_STORAGE.get(key);
+    if (!obj) return null;
+    return {
+      data: await obj.arrayBuffer(),
+      httpMetadata: obj.httpMetadata,
+      customMetadata: obj.customMetadata,
+      size: obj.size,
+      uploaded: obj.uploaded
+    };
+  } catch (err) {
+    console.error('[R2] get error:', key, err.message);
+    return null;
+  }
+}
+
+async function r2Delete(env, key) {
+  if (!env?.BOT_STORAGE) return false;
+  try {
+    await env.BOT_STORAGE.delete(key);
+    return true;
+  } catch (err) {
+    console.error('[R2] delete error:', key, err.message);
+    return false;
+  }
+}
+
+async function r2List(env, prefix, limit = 100) {
+  if (!env?.BOT_STORAGE) return [];
+  try {
+    const listed = await env.BOT_STORAGE.list({ prefix, limit });
+    return listed.objects.map(o => ({
+      key: o.key,
+      size: o.size,
+      uploaded: o.uploaded
+    }));
+  } catch (err) {
+    console.error('[R2] list error:', prefix, err.message);
+    return [];
+  }
+}
+
 // Load live prices from KV (if available). Cached in-memory per isolate.
 // GChat worker's daily cron writes to PRICES_KV; this worker reads from it.
 async function loadLivePrices(env) {
@@ -3450,6 +3546,68 @@ export default {
     await loadLivePrices(env);
 
     const url = new URL(request.url);
+    // ── Dashboard API (consumed by stratus-dashboard.pages.dev) ──
+    const DASH_CORS = {'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET, OPTIONS','Access-Control-Allow-Headers':'Content-Type, X-Dashboard-Key'};
+    if (url.pathname.startsWith('/dashboard/')) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
+      const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
+      if (dashKey !== 'stratus2026') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/stats') {
+        try {
+          const range = url.searchParams.get('range') || '24h';
+          const rs = {'1h':"-1 hour",'6h':"-6 hours",'24h':"-1 day",'7d':"-7 days",'30d':"-30 days",'all':"-100 years"}[range] || "-1 day";
+          const since = `datetime('now','${rs}')`;
+          const [usage,quotes,errors,pathBreakdown,modelBreakdown,hourly,recentErrors] = await Promise.all([
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total,COALESCE(SUM(input_tokens),0) as input_tokens,COALESCE(SUM(output_tokens),0) as output_tokens,COALESCE(SUM(cost_usd),0) as total_cost,COALESCE(AVG(duration_ms),0) as avg_duration FROM bot_usage WHERE created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total,COALESCE(SUM(total_list),0) as total_list,COALESCE(SUM(total_ecomm),0) as total_ecomm FROM quote_history WHERE created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total FROM bot_usage WHERE response_path='error' AND created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT response_path,COUNT(*) as count FROM bot_usage WHERE created_at >= ${since} GROUP BY response_path ORDER BY count DESC`).all(),
+            env.ANALYTICS_DB.prepare(`SELECT model,COUNT(*) as count,COALESCE(SUM(input_tokens),0) as input_tokens,COALESCE(SUM(output_tokens),0) as output_tokens,COALESCE(SUM(cost_usd),0) as cost FROM bot_usage WHERE model IS NOT NULL AND created_at >= ${since} GROUP BY model ORDER BY count DESC`).all(),
+            env.ANALYTICS_DB.prepare(`SELECT strftime('%Y-%m-%dT%H:00:00Z',created_at) as hour,COUNT(*) as count,SUM(CASE WHEN response_path='error' THEN 1 ELSE 0 END) as errors FROM bot_usage WHERE created_at >= ${since} GROUP BY hour ORDER BY hour`).all(),
+            env.ANALYTICS_DB.prepare(`SELECT created_at,bot,response_path,error_message,duration_ms FROM bot_usage WHERE response_path='error' AND created_at >= ${since} ORDER BY created_at DESC LIMIT 20`).all()
+          ]);
+          return new Response(JSON.stringify({range,timestamp:new Date().toISOString(),usage,quotes,errors,pathBreakdown:pathBreakdown.results,modelBreakdown:modelBreakdown.results,hourly:hourly.results,recentErrors:recentErrors.results}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/events') {
+        try {
+          const since = url.searchParams.get('since') || new Date(Date.now()-300000).toISOString();
+          const limit = Math.min(parseInt(url.searchParams.get('limit')||'50'),100);
+          const [events,quotes] = await Promise.all([
+            env.ANALYTICS_DB.prepare('SELECT id,created_at,bot,response_path,model,input_tokens,output_tokens,cost_usd,duration_ms,error_message FROM bot_usage WHERE created_at > ? ORDER BY created_at DESC LIMIT ?').bind(since,limit).all(),
+            env.ANALYTICS_DB.prepare('SELECT id,created_at,bot,skus,total_list,total_ecomm,response_type,eol_warnings,duration_ms FROM quote_history WHERE created_at > ? ORDER BY created_at DESC LIMIT ?').bind(since,limit).all()
+          ]);
+          return new Response(JSON.stringify({events:events.results,quotes:quotes.results,timestamp:new Date().toISOString()}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/crm-stats') {
+        try {
+          const range = url.searchParams.get('range') || '24h';
+          const rs = {'1h':"-1 hour",'6h':"-6 hours",'24h':"-1 day",'7d':"-7 days",'30d':"-30 days",'all':"-100 years"}[range] || "-1 day";
+          const since = `datetime('now','${rs}')`;
+          const [ops,breakdown] = await Promise.all([
+            env.ANALYTICS_DB.prepare(`SELECT COUNT(*) as total,SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as success,SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) as errors FROM crm_operations WHERE created_at >= ${since}`).first(),
+            env.ANALYTICS_DB.prepare(`SELECT operation,module,COUNT(*) as count FROM crm_operations WHERE created_at >= ${since} GROUP BY operation,module ORDER BY count DESC LIMIT 20`).all()
+          ]);
+          return new Response(JSON.stringify({operations:ops,breakdown:breakdown.results}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/pricing-status') {
+        try {
+          const kv = env.CONVERSATION_KV;
+          const result = kv ? await kv.get('prices_live','json') : null;
+          const error = kv ? await kv.get('prices_live_error','json') : null;
+          const recentChanges = env.ANALYTICS_DB ? await env.ANALYTICS_DB.prepare('SELECT sku,old_price,new_price,list_price,price_change,change_pct,refreshed_at FROM pricing_history WHERE price_change != 0 ORDER BY refreshed_at DESC LIMIT 20').all() : {results:[]};
+          return new Response(JSON.stringify({hasLivePrices:!!result,refreshedAt:result?.refreshedAt||null,stats:result?.stats||null,lastError:error||null,recentChanges:recentChanges.results}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
+      return new Response(JSON.stringify({error:'Not found'}), {status:404, headers:DASH_CORS});
+    }
 
     // Health check
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
@@ -3526,6 +3684,7 @@ export default {
           }
 
           if (!text) return;
+          const _wxStartMs = Date.now();
 
           // Try deterministic EOL date lookup first (before quoting engine)
           const eolDateReply = handleEolDateRequest(text);
@@ -3573,6 +3732,9 @@ export default {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', result.message);
               await sendMessage(roomId, result.message, token);
+              // D1 + Analytics Engine: log deterministic quote
+              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'deterministic', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+              writeMetric(env, { path: 'deterministic', durationMs: Date.now() - _wxStartMs, personId });
               return;
             }
 
@@ -3598,6 +3760,9 @@ export default {
           // Full fallback to Claude API
           const claudeReply = await askClaude(text, personId, env);
           await sendMessage(roomId, claudeReply, token);
+          // D1 + Analytics Engine: log Claude fallback
+          logBotUsageToD1(env, { personId, requestText: text, responsePath: 'claude', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+          writeMetric(env, { path: 'claude', durationMs: Date.now() - _wxStartMs, personId });
 
         } catch (err) {
           console.error('Webhook error:', err.message, err.stack);
