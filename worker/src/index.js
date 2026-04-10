@@ -3546,6 +3546,40 @@ export default {
     await loadLivePrices(env);
 
     const url = new URL(request.url);
+    // ── Dashboard Manifest: auto-written to KV on first request after deploy ──
+    const WORKER_MANIFEST = {
+      worker: 'webex',
+      version: '2.0.0-cf',
+      deployedAt: new Date().toISOString(),
+      routes: ['POST /webhook', 'GET /health'],
+      handlers: [
+        {id:'wx-trigger',name:'Webex Webhook',type:'trigger',fn:'fetch()'},
+        {id:'wx-dedup',name:'Dedup Check',type:'decision',fn:'kv.get(dedup_)'},
+        {id:'wx-botcheck',name:'Bot Self-Check',type:'decision',fn:'getBotPersonId()'},
+        {id:'wx-getmsg',name:'Get Message',type:'api',fn:'getMessage()'},
+        {id:'wx-image',name:'Image Check',type:'decision',fn:'msg.files'},
+        {id:'wx-imgclaude',name:'Claude Vision',type:'api',fn:'askClaude(imageData)'},
+        {id:'wx-eol',name:'EOL Lookup',type:'action',fn:'handleEolDateRequest()'},
+        {id:'wx-confirm',name:'Quote Confirm',type:'action',fn:'handleQuoteConfirmation()'},
+        {id:'wx-pricing',name:'Pricing Calculator',type:'action',fn:'handlePricingRequest()'},
+        {id:'wx-parse',name:'parseMessage',type:'action',fn:'parseMessage()'},
+        {id:'wx-clarify',name:'Clarification',type:'decision',fn:'clarification prompt'},
+        {id:'wx-build',name:'Build Quote',type:'action',fn:'buildQuoteResponse()'},
+        {id:'wx-revision',name:'Revision Check',type:'decision',fn:'revision detection'},
+        {id:'wx-claude',name:'Claude Fallback',type:'api',fn:'askClaude()'},
+        {id:'wx-send',name:'Send Response',type:'output',fn:'sendMessage()'},
+        {id:'wx-history',name:'Update History',type:'storage',fn:'addToHistory()'},
+        {id:'wx-d1',name:'D1 + Analytics',type:'storage',fn:'ANALYTICS_DB + BOT_METRICS'}
+      ],
+      bindings: {kv:'CONVERSATION_KV',d1:'ANALYTICS_DB',ae:'BOT_METRICS',ai:'AI_GATEWAY'}
+    };
+    if (!globalThis.__manifestWritten) {
+      globalThis.__manifestWritten = true;
+      ctx.waitUntil((async () => {
+        try { await env.CONVERSATION_KV.put('dashboard_manifest_webex', JSON.stringify(WORKER_MANIFEST), {expirationTtl:86400}); }
+        catch(e) { console.warn('Manifest write failed:', e.message); }
+      })());
+    }
     // ── Dashboard API (consumed by stratus-dashboard.pages.dev) ──
     const DASH_CORS = {'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET, OPTIONS','Access-Control-Allow-Headers':'Content-Type, X-Dashboard-Key'};
     if (url.pathname.startsWith('/dashboard/')) {
@@ -3606,6 +3640,17 @@ export default {
         } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
       }
 
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/config') {
+        try {
+          const kv = env.CONVERSATION_KV;
+          const [webex,gchat] = await Promise.all([
+            kv.get('dashboard_manifest_webex','json'),
+            kv.get('dashboard_manifest_gchat','json')
+          ]);
+          return new Response(JSON.stringify({webex,gchat,timestamp:new Date().toISOString()}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
       return new Response(JSON.stringify({error:'Not found'}), {status:404, headers:DASH_CORS});
     }
 

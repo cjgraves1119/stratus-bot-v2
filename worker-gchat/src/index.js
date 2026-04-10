@@ -7236,6 +7236,43 @@ export default {
     }
 
     const url = new URL(request.url);
+    // ── Dashboard Manifest: auto-written to KV on first request after deploy ──
+    const WORKER_MANIFEST = {
+      worker: 'gchat',
+      version: '2.0.0-cf',
+      deployedAt: new Date().toISOString(),
+      routes: ['POST /', 'POST /_refresh-prices', 'GET /_prices-status', 'GET /_new-skus', 'GET /_debug-errors', 'GET /_admin/usage', 'POST /_work', 'POST /_continue', 'CRON 0 11 * * *'],
+      handlers: [
+        {id:'gc-trigger',name:'GChat Webhook',type:'trigger',fn:'fetch()'},
+        {id:'gc-jwt',name:'JWT Verify',type:'decision',fn:'verifyGoogleJwt()'},
+        {id:'gc-addon',name:'Source Check',type:'decision',fn:'addon vs chat'},
+        {id:'gc-text',name:'Extract Text',type:'action',fn:'extractMessageText()'},
+        {id:'gc-session',name:'CRM Session',type:'decision',fn:'kv session check'},
+        {id:'gc-followup',name:'CRM Follow-up',type:'decision',fn:'crmFollowUp detection'},
+        {id:'gc-pricing',name:'Pricing Calculator',type:'action',fn:'handlePricingRequest()'},
+        {id:'gc-parse',name:'parseMessage',type:'action',fn:'parseMessage()'},
+        {id:'gc-build',name:'Build Quote',type:'action',fn:'buildQuoteResponse()'},
+        {id:'gc-intent',name:'CRM Intent',type:'decision',fn:'detectCrmEmailIntent()'},
+        {id:'gc-dispatch',name:'CRM Dispatch',type:'workflow',fn:'CRM_WORKFLOW/CRM_QUEUE'},
+        {id:'gc-workflow',name:'CRM Workflow',type:'workflow',fn:'CrmWorkflow class'},
+        {id:'gc-agent',name:'CRM Agent',type:'api',fn:'handleCrmRequest()'},
+        {id:'gc-claude',name:'Claude Fallback',type:'api',fn:'askClaude()'},
+        {id:'gc-respond',name:'Send Response',type:'output',fn:'sendGChatMessage()'},
+        {id:'gc-d1',name:'D1 + Analytics',type:'storage',fn:'ANALYTICS_DB + BOT_METRICS'},
+        {id:'gc-history',name:'Update History',type:'storage',fn:'addToHistory()'},
+        {id:'cr-trigger',name:'Price Cron',type:'trigger',fn:'scheduled()'},
+        {id:'cr-zoho',name:'Zoho WooProducts',type:'api',fn:'fetchWooProduct()'},
+        {id:'cr-kv',name:'KV Price Write',type:'storage',fn:'PRICES_KV.put()'}
+      ],
+      bindings: {kv:'CONVERSATION_KV',d1:'ANALYTICS_DB',ae:'BOT_METRICS',ai:'AI_GATEWAY',workflow:'CRM_WORKFLOW',queue:'CRM_QUEUE'}
+    };
+    if (!globalThis.__manifestWritten) {
+      globalThis.__manifestWritten = true;
+      ctx.waitUntil((async () => {
+        try { await env.CONVERSATION_KV.put('dashboard_manifest_gchat', JSON.stringify(WORKER_MANIFEST), {expirationTtl:86400}); }
+        catch(e) { console.warn('Manifest write failed:', e.message); }
+      })());
+    }
     // ── Dashboard API (consumed by stratus-dashboard.pages.dev) ──
     const DASH_CORS = {'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET, OPTIONS','Access-Control-Allow-Headers':'Content-Type, X-Dashboard-Key'};
     if (url.pathname.startsWith('/dashboard/')) {
@@ -7296,6 +7333,17 @@ export default {
         } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
       }
 
+
+      if (request.method === 'GET' && url.pathname === '/dashboard/config') {
+        try {
+          const kv = env.CONVERSATION_KV;
+          const [webex,gchat] = await Promise.all([
+            kv.get('dashboard_manifest_webex','json'),
+            kv.get('dashboard_manifest_gchat','json')
+          ]);
+          return new Response(JSON.stringify({webex,gchat,timestamp:new Date().toISOString()}), {headers:DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
       return new Response(JSON.stringify({error:'Not found'}), {status:404, headers:DASH_CORS});
     }
 
