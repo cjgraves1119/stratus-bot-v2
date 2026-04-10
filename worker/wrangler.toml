@@ -7,9 +7,28 @@ compatibility_date = "2024-01-01"
 # WEBEX_BOT_TOKEN = set via wrangler secret
 # ANTHROPIC_API_KEY = set via wrangler secret
 
+# ── D1 Database: Analytics & history ─────────────────────────────────
+# Quote history, bot usage analytics, CRM operation log, pricing history
+[[d1_databases]]
+binding = "ANALYTICS_DB"
+database_name = "stratus-bot-analytics"
+database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
+
 [[kv_namespaces]]
 binding = "CONVERSATION_KV"
 id = "360fbb8a75bf400e87cb96893a811a56"
+
+# ── Analytics Engine: Real-time telemetry ────────────────────────────
+# High-frequency metrics: latency, throughput, error rates, cost tracking
+[[analytics_engine_datasets]]
+binding = "BOT_METRICS"
+dataset = "stratus_bot_metrics"
+
+# ── R2 Object Storage: Quote PDFs, attachments, reports ─────────────
+# Zero-egress storage for generated files. Bucket: stratus-bot-storage
+[[r2_buckets]]
+binding = "BOT_STORAGE"
+bucket_name = "stratus-bot-storage"
 
 # Shared pricing KV — written by GChat worker's daily cron, read here for live prices
 [[kv_namespaces]]
