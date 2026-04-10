@@ -7440,10 +7440,11 @@ export default {
         if (!db) return new Response(JSON.stringify({traces:[]}), {headers:DASH_CORS});
         try {
           await ensureTraceTable(db);
-          const since = url.searchParams.get('since') || new Date(Date.now() - 120000).toISOString();
+          const sinceRaw = url.searchParams.get('since') || new Date(Date.now() - 120000).toISOString();
+          const since = sinceRaw.replace('T', ' ').replace(/\.\d+Z$/, '').replace('Z', '');
           const rows = await db.prepare(
             `SELECT trace_id, bot, node_id, status, ts_ms, metadata, created_at
-             FROM workflow_traces WHERE created_at > ? ORDER BY created_at DESC, ts_ms ASC LIMIT 500`
+             FROM workflow_traces WHERE created_at > ? ORDER BY created_at DESC, ts_ms ASC, id ASC LIMIT 500`
           ).bind(since).all();
           const grouped = {};
           for (const r of rows.results) {
