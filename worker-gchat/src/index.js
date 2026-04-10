@@ -7279,8 +7279,10 @@ export default {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
       const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
       if (dashKey !== 'stratus2026') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+      const db = env.ANALYTICS_DB;
 
       if (request.method === 'GET' && url.pathname === '/dashboard/stats') {
+        if (!db) return new Response(JSON.stringify({error:'D1 not bound',usage:{total:0},quotes:{total:0},errors:{total:0},pathBreakdown:[],modelBreakdown:[],hourly:[],recentErrors:[]}), {headers:DASH_CORS});
         try {
           const range = url.searchParams.get('range') || '24h';
           const rs = {'1h':"-1 hour",'6h':"-6 hours",'24h':"-1 day",'7d':"-7 days",'30d':"-30 days",'all':"-100 years"}[range] || "-1 day";
@@ -7299,6 +7301,7 @@ export default {
       }
 
       if (request.method === 'GET' && url.pathname === '/dashboard/events') {
+        if (!db) return new Response(JSON.stringify({events:[],quotes:[]}), {headers:DASH_CORS});
         try {
           const since = url.searchParams.get('since') || new Date(Date.now()-300000).toISOString();
           const limit = Math.min(parseInt(url.searchParams.get('limit')||'50'),100);
@@ -7311,6 +7314,7 @@ export default {
       }
 
       if (request.method === 'GET' && url.pathname === '/dashboard/crm-stats') {
+        if (!db) return new Response(JSON.stringify({operations:{total:0,errors:0},breakdown:[]}), {headers:DASH_CORS});
         try {
           const range = url.searchParams.get('range') || '24h';
           const rs = {'1h':"-1 hour",'6h':"-6 hours",'24h':"-1 day",'7d':"-7 days",'30d':"-30 days",'all':"-100 years"}[range] || "-1 day";
