@@ -8509,7 +8509,7 @@ CRITICAL URL RULES:
               return new Response(JSON.stringify({ error: 'query or domain required' }), { status: 400, headers: jsonHeaders });
             }
 
-            const validModules = ['Accounts', 'Contacts', 'Deals', 'Quotes', 'Sales_Orders'];
+            const validModules = ['Accounts', 'Contacts', 'Deals', 'Quotes', 'Sales_Orders', 'Invoices'];
             const mod = validModules.includes(module) ? module : 'Accounts';
 
             const fieldMap = {
@@ -8518,6 +8518,7 @@ CRITICAL URL RULES:
               Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name',
               Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
               Sales_Orders: 'id,Subject,SO_Number,Grand_Total,Status,Deal_Name,Account_Name,Client_Send_Status,Disti_Tracking_Number,Disti_Estimated_Ship_Date,Vendor_SO_Number',
+              Invoices: 'id,Subject,Invoice_Number,Grand_Total,Status,Due_Date,Account_Name,Invoice_Date',
             };
 
             try {
@@ -8533,7 +8534,7 @@ CRITICAL URL RULES:
                   );
                   for (const r of (domainResp?.data || [])) {
                     if (!seen.has(r.id)) {
-                      results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                      results.push({ ...r, name: r.Account_Name, phone: r.Phone, website: r.Website,
                         billingStreet: r.Billing_Street, billingCity: r.Billing_City,
                         billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
                       seen.add(r.id);
@@ -8550,7 +8551,7 @@ CRITICAL URL RULES:
                     );
                     for (const r of (baseResp?.data || [])) {
                       if (!seen.has(r.id)) {
-                        results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                        results.push({ ...r, name: r.Account_Name, phone: r.Phone, website: r.Website,
                           billingStreet: r.Billing_Street, billingCity: r.Billing_City,
                           billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
                         seen.add(r.id);
@@ -8566,9 +8567,9 @@ CRITICAL URL RULES:
                   `${mod}/search?word=${encodeURIComponent(query)}&fields=${fieldMap[mod]}&per_page=10`, env
                 );
                 const rawRecords = searchResp?.data || [];
-                // Normalize accounts to consistent shape
+                // Pass raw Zoho field names + normalized aliases for backward compat
                 const records = mod === 'Accounts'
-                  ? rawRecords.map(r => ({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
+                  ? rawRecords.map(r => ({ ...r, name: r.Account_Name, phone: r.Phone, website: r.Website,
                       billingStreet: r.Billing_Street, billingCity: r.Billing_City,
                       billingState: r.Billing_State, billingZip: r.Billing_Code }))
                   : rawRecords;

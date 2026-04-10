@@ -14,6 +14,7 @@ const MODULE_MAP = {
   Deals: { label: 'Deals', tab: 'Potentials' },
   Quotes: { label: 'Quotes', tab: 'Quotes' },
   Sales_Orders: { label: 'POs', tab: 'SalesOrders' },
+  Invoices: { label: 'Invoices', tab: 'Invoices' },
 };
 
 function buildZohoUrl(moduleId, recordId) {
@@ -73,11 +74,11 @@ export default function SearchPanel({ navData }) {
 
     switch (mod) {
       case 'Accounts': {
-        const name = getFieldValue(record.Account_Name) || 'Unnamed Account';
-        const phone = getFieldValue(record.Phone);
-        const website = getFieldValue(record.Website);
-        const city = getFieldValue(record.Billing_City);
-        const state = getFieldValue(record.Billing_State);
+        const name = getFieldValue(record.name) || getFieldValue(record.Account_Name) || 'Unnamed Account';
+        const phone = getFieldValue(record.phone) || getFieldValue(record.Phone);
+        const website = getFieldValue(record.website) || getFieldValue(record.Website);
+        const city = getFieldValue(record.billingCity) || getFieldValue(record.Billing_City);
+        const state = getFieldValue(record.billingState) || getFieldValue(record.Billing_State);
         const location = [city, state].filter(Boolean).join(', ');
 
         return (
@@ -273,6 +274,65 @@ export default function SearchPanel({ navData }) {
                 {vendorSo && <div style={{ color: COLORS.TEXT_PRIMARY }}>Vendor SO: <strong>{vendorSo}</strong></div>}
                 {tracking && <div style={{ color: COLORS.TEXT_PRIMARY, marginTop: 2 }}>Tracking: <strong>{tracking}</strong></div>}
                 {estShip && <div style={{ color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>Est. Ship: {estShip}</div>}
+              </div>
+            )}
+
+            <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, marginTop: 4 }}>Open in Zoho →</div>
+          </a>
+        );
+      }
+
+      case 'Invoices': {
+        const invSubject = getFieldValue(record.Subject) || 'Unnamed Invoice';
+        const invNumber = getFieldValue(record.Invoice_Number);
+        const invTotal = getFieldValue(record.Grand_Total);
+        const invStatus = getFieldValue(record.Status);
+        const invDue = getFieldValue(record.Due_Date);
+        const invAccount = getFieldValue(record.Account_Name);
+        const invDate = getFieldValue(record.Invoice_Date);
+
+        const isOverdue = invStatus === 'Overdue' || (invDue && new Date(invDue) < new Date() && invStatus !== 'Paid');
+        const statusColor = invStatus === 'Paid' ? '#2e7d32'
+          : isOverdue ? '#d93025'
+          : invStatus === 'Sent' ? '#1565c0'
+          : '#5f6368';
+
+        return (
+          <a key={i} href={zohoUrl} target="_blank" rel="noopener"
+            style={{
+              display: 'block', background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              borderRadius: 8, padding: 12, marginBottom: 8, textDecoration: 'none',
+              cursor: 'pointer', transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE}
+            onMouseLeave={e => e.currentTarget.style.borderColor = COLORS.BORDER}
+          >
+            <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{invSubject}</div>
+            {invNumber && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>INV# {invNumber}</div>}
+            {invAccount && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{invAccount}</div>}
+
+            <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              {invStatus && (
+                <span style={{
+                  fontSize: 11, padding: '2px 6px', borderRadius: 4,
+                  background: invStatus === 'Paid' ? '#e8f5e9' : isOverdue ? '#fce8e6' : '#e3f2fd',
+                  color: statusColor, fontWeight: 600,
+                }}>
+                  {isOverdue && invStatus !== 'Overdue' ? 'Overdue' : invStatus}
+                </span>
+              )}
+              {invTotal && (
+                <span style={{ fontSize: 12, fontWeight: 600, color: '#2e7d32' }}>
+                  ${Number(invTotal).toLocaleString()}
+                </span>
+              )}
+            </div>
+
+            {(invDue || invDate) && (
+              <div style={{ marginTop: 4, fontSize: 11, color: COLORS.TEXT_SECONDARY }}>
+                {invDate && <span>Issued: {invDate}</span>}
+                {invDate && invDue && <span> · </span>}
+                {invDue && <span style={{ color: isOverdue ? '#d93025' : 'inherit', fontWeight: isOverdue ? 600 : 400 }}>Due: {invDue}</span>}
               </div>
             )}
 
