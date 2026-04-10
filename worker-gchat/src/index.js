@@ -2160,7 +2160,7 @@ function parseMessage(text) {
       const items = [...counts.entries()].map(([baseSku, qty]) => ({ baseSku, qty }));
       // Detect license-related intent from surrounding text
       const nonModelLines = lines.filter(l => !modelPattern.test(l)).join(' ').toUpperCase();
-      const isLicenseOnly = /\b(LICENSE|RENEWAL|RENEW|LIC)\b/.test(nonModelLines);
+      const isLicenseOnly = /\b(LICENSE|LICENCE|LISCENSE|LISCENCE|RENEWAL|RENEW|LIC)\b/.test(nonModelLines);
       const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?)\b/.test(nonModelLines);
       return {
         items,
@@ -2213,22 +2213,40 @@ function parseMessage(text) {
   }
 
   const modifiers = { hardwareOnly: false, licenseOnly: false };
-  if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper) && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
+  if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper) && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
     modifiers.hardwareOnly = true;
   }
-  if (/\b(LICENSE\s+ONLY|JUST\s+THE\s+LICENSE|JUST\s+LICENSE|LICENSE[S]?\s+ONLY|NO\s+HARDWARE|RENEWAL\s+ONLY|LICENSE\s+RENEWAL|RENEW\s+(THE\s+)?LICENSE[S]?|RENEWAL\s+FOR|RENEW\s+EXISTING)\b/.test(upper)) {
+  // LICENSE keyword variations including common misspellings: licence, liscense, liscence, liceses, etc.
+  const LIC_WORD = `(?:LICENSE|LICENCE|LISCENSE|LISCENCE|LICESE|LIC)`;
+  const LIC_WORDS = `(?:LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|LIC)`;
+  const licOnlyRe = new RegExp(`\\b(${LIC_WORDS}\\s+ONLY|JUST\\s+THE\\s+${LIC_WORD}|JUST\\s+${LIC_WORD}|${LIC_WORDS}\\s+ONLY|NO\\s+HARDWARE|RENEWAL\\s+ONLY|${LIC_WORD}\\s+RENEWAL|RENEW\\s+(THE\\s+)?${LIC_WORDS}|RENEWAL\\s+FOR|RENEW\\s+EXISTING)\\b`);
+  if (licOnlyRe.test(upper)) {
     modifiers.licenseOnly = true;
   }
   // "licenses for [SKU]" or "renewal [SKU]" implies license-only (renewal scenario)
   // But NOT "MX67 with 3 year license" — that's hardware + license
-  if (!modifiers.licenseOnly && /\b(LICENSE[S]?\s+FOR\s+(AN?\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d|RENEWAL[S]?\s+(OF\s+|FOR\s+)?(\d+\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)\d)/.test(upper)) {
-    modifiers.licenseOnly = true;
+  // Also matches bare family names: "renewal for 4 MR" (no model number)
+  if (!modifiers.licenseOnly) {
+    const licForSkuRe = new RegExp(`\\b(${LIC_WORDS}\\s+FOR\\s+(AN?\\s+)?(\\d+\\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)(\\d|'?S?\\b)|RENEWAL[S]?\\s+(OF\\s+|FOR\\s+)?(\\d+\\s*)?(MR|MS|MX|MV|MT|MG|CW|Z)(\\d|'?S?\\b))`);
+    if (licForSkuRe.test(upper)) modifiers.licenseOnly = true;
   }
   // "[SKU] license" or "[SKU] renewal" at end of short input (e.g. "mr44 license", "5 MR44 renewal")
   // Also matches family-only like "mr license". Requires ^ anchor to avoid matching full sentences.
   // But NOT "[SKU] with X year license" (hardware + license)
-  if (!modifiers.licenseOnly && /^(QUOTE\s+)?(\d+\s+)?(MR|MS|MX|MV|MT|MG|CW|Z)\d*[A-Z0-9-]*\s+(LICENSE[S]?|RENEWAL[S]?)\s*$/i.test(upper.trim()) && !/\bWITH\b/.test(upper)) {
+  if (!modifiers.licenseOnly) {
+    const skuLicRe = new RegExp(`^(QUOTE\\s+)?(\\d+\\s+)?(MR|MS|MX|MV|MT|MG|CW|Z)\\d*[A-Z0-9-]*\\s+(${LIC_WORDS}|RENEWAL[S]?)\\s*$`, 'i');
+    if (skuLicRe.test(upper.trim()) && !/\bWITH\b/.test(upper)) modifiers.licenseOnly = true;
+  }
+  // "renewal for X MS130, Y MR, Z MX67" — "renewal for" at start implies license-only for entire request
+  if (!modifiers.licenseOnly && /^\s*(QUOTE\s+)?RENEWAL\s+(FOR\s+)?\d/i.test(upper)) {
     modifiers.licenseOnly = true;
+  }
+  // Trailing "licenses" / "licence" / "liscense" at end of multi-product list implies license-only
+  // e.g., "2 MS130-24P, 4 MR, and 5 MX67 ENT liceses"
+  // But NOT "MX67 with 3 year license" (hardware + license)
+  if (!modifiers.licenseOnly && !/\bWITH\b/.test(upper)) {
+    const trailingLicRe = new RegExp(`\\b(ENT(?:ERPRISE)?\\s+)?${LIC_WORDS}\\s*$`);
+    if (trailingLicRe.test(upper.trim())) modifiers.licenseOnly = true;
   }
 
   const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
@@ -2342,36 +2360,38 @@ function parseMessage(text) {
   // ── Model-agnostic license handler (MR, MV, MT) ──
   // These families use a single license SKU regardless of specific model.
   // "MR license", "5 MV licenses", "quote MT renewal", "licenses for MR", etc.
+  // Also handles possessives/plurals: "MR's", "MRs", "MR'S"
   // The model doesn't matter — all MR use LIC-ENT, all MV use LIC-MV, all MT use LIC-MT.
+  const AGNOSTIC_FAMILY = `(MR|MV|MT)(?:'?S)?`;  // matches MR, MRs, MR's, MR'S, etc.
   let agnosticFamily = null;
   let agnosticQty = 1;
   let _m;
 
-  // Pattern A: "5 MR licenses", "10 MV renewal" (qty before family)
-  _m = upper.match(/(\d+)\s*[X×]?\s*(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?/i);
+  // Pattern A: "5 MR licenses", "10 MV renewal", "4 MR's licenses" (qty before family)
+  _m = upper.match(new RegExp(`(\\d+)\\s*[X×]?\\s*${AGNOSTIC_FAMILY}\\s+(${LIC_WORDS}|RENEWAL)S?`, 'i'));
   if (_m) { agnosticQty = parseInt(_m[1]); agnosticFamily = _m[2].toUpperCase(); }
 
   // Pattern B: "MR license", "MV licenses", "MT renewal", "quote MR license" (no qty)
   if (!agnosticFamily) {
-    _m = upper.trim().match(/^(?:QUOTE\s+)?(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*$/i);
+    _m = upper.trim().match(new RegExp(`^(?:QUOTE\\s+)?${AGNOSTIC_FAMILY}\\s+(${LIC_WORDS}|RENEWAL)S?\\s*$`, 'i'));
     if (_m) { agnosticFamily = _m[1].toUpperCase(); }
   }
 
   // Pattern C: "MR licenses 5", "MT renewal 10" (qty after keyword)
   if (!agnosticFamily) {
-    _m = upper.match(/(MR|MV|MT)\s+(LICENSE|LIC|RENEWAL)S?\s*[X×]?\s*(\d+)/i);
+    _m = upper.match(new RegExp(`${AGNOSTIC_FAMILY}\\s+(${LIC_WORDS}|RENEWAL)S?\\s*[X×]?\\s*(\\d+)`, 'i'));
     if (_m) { agnosticFamily = _m[1].toUpperCase(); agnosticQty = parseInt(_m[3]); }
   }
 
   // Pattern D: "licenses for MR", "renewal for MV" (keyword before family)
   if (!agnosticFamily) {
-    _m = upper.trim().match(/^(?:QUOTE\s+)?(LICENSE|LIC|RENEWAL)S?\s+(?:FOR\s+)?(MR|MV|MT)\s*$/i);
+    _m = upper.trim().match(new RegExp(`^(?:QUOTE\\s+)?(${LIC_WORDS}|RENEWAL)S?\\s+(?:FOR\\s+)?${AGNOSTIC_FAMILY}\\s*$`, 'i'));
     if (_m) { agnosticFamily = _m[2].toUpperCase(); }
   }
 
   // Pattern E: "5 MR", "10 MV" (qty + family only, if licenseOnly modifier already set)
   if (!agnosticFamily && modifiers.licenseOnly) {
-    _m = upper.trim().match(/^(?:QUOTE\s+)?(\d+)\s*[X×]?\s*(MR|MV|MT)\s*(ENT(?:ERPRISE)?)?$/i);
+    _m = upper.trim().match(new RegExp(`^(?:QUOTE\\s+)?(\\d+)\\s*[X×]?\\s*${AGNOSTIC_FAMILY}\\s*(ENT(?:ERPRISE)?)?$`, 'i'));
     if (_m) { agnosticQty = parseInt(_m[1]); agnosticFamily = _m[2].toUpperCase(); }
   }
 
@@ -2418,6 +2438,26 @@ function parseMessage(text) {
     /Z\d+[A-Z]*/gi
   ];
 
+  // ── Bare family names (MR, MRs, MR's, MV, MT) in multi-product lists ──
+  // When licenseOnly is true, bare family names like "4 MR" should be captured
+  // as model-agnostic license items. SKU patterns above require digits after MR/MV/MT.
+  // We handle this separately to inject them as special "MR-AGN" / "MV-AGN" / "MT-AGN" items.
+  const bareAgnosticItems = [];
+  if (modifiers.licenseOnly) {
+    // Match patterns like "4 MR", "5 MV's", "3 MT'S", "10 MRs" in multi-product context
+    const bareRe = /\b(\d+)\s*[X×]?\s*(MR|MV|MT)(?:'?S)?\b/gi;
+    let bareMatch;
+    while ((bareMatch = bareRe.exec(upper)) !== null) {
+      const family = bareMatch[2].toUpperCase();
+      const qty = parseInt(bareMatch[1]);
+      const pos = bareMatch.index;
+      // Only match if there's NO digit immediately after the family name (avoids matching MR44, MV72, etc.)
+      const afterChar = upper[pos + bareMatch[0].length];
+      if (afterChar && /\d/.test(afterChar)) continue;
+      bareAgnosticItems.push({ baseSku: `${family}-AGN`, qty, position: pos, _agnosticFamily: family });
+    }
+  }
+
   const rawMatches = [];
   const matched = new Set();
 
@@ -2452,6 +2492,16 @@ function parseMessage(text) {
       return other.baseSku.length > item.baseSku.length && other.baseSku.includes(item.baseSku);
     });
   });
+
+  // Merge bare agnostic items (MR-AGN, MV-AGN, MT-AGN) into foundItems
+  // Only include if no specific model from that family was already matched (e.g., MR44 would suppress MR-AGN)
+  for (const bare of bareAgnosticItems) {
+    const family = bare._agnosticFamily;
+    const alreadyHasFamily = foundItems.some(f => f.baseSku.startsWith(family) && f.baseSku !== `${family}-AGN`);
+    if (!alreadyHasFamily) {
+      foundItems.push(bare);
+    }
+  }
 
   foundItems.sort((a, b) => a.position - b.position);
   const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
@@ -2720,6 +2770,36 @@ function buildQuoteResponse(parsed) {
   const tierWarnings = [];
 
   for (const { baseSku, qty } of parsed.items) {
+    // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN) ──
+    // These are injected by the bare-family parser for "4 MR", "5 MV's", etc.
+    // They bypass normal SKU validation and generate license-only items directly.
+    const agnMatch = baseSku.match(/^(MR|MV|MT)-AGN$/);
+    if (agnMatch) {
+      const family = agnMatch[1];
+      let licSkus;
+      if (family === 'MR') {
+        licSkus = [
+          { term: '1Y', sku: 'LIC-ENT-1YR' },
+          { term: '3Y', sku: 'LIC-ENT-3YR' },
+          { term: '5Y', sku: 'LIC-ENT-5YR' }
+        ];
+      } else if (family === 'MV') {
+        licSkus = [
+          { term: '1Y', sku: 'LIC-MV-1YR' },
+          { term: '3Y', sku: 'LIC-MV-3YR' },
+          { term: '5Y', sku: 'LIC-MV-5YR' }
+        ];
+      } else if (family === 'MT') {
+        licSkus = [
+          { term: '1Y', sku: 'LIC-MT-1Y' },
+          { term: '3Y', sku: 'LIC-MT-3Y' },
+          { term: '5Y', sku: 'LIC-MT-5Y' }
+        ];
+      }
+      resolvedItems.push({ baseSku: `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true });
+      continue;
+    }
+
     const validation = validateSku(baseSku);
     if (!validation.valid) {
       const suggest = validation.suggest ? `\nDid you mean: ${validation.suggest.slice(0, 3).join(', ')}?` : '';
@@ -2853,8 +2933,8 @@ function buildQuoteResponse(parsed) {
         // Also include non-EOL resolved items
         // Default: hardware + licenses (user asked for a regular quote, non-EOL gear is current)
         // licenseOnly: license-only (user explicitly asked for license renewal)
-        for (const { hwSku, qty, licenseSkus } of resolvedItems) {
-          if (!modifiers.licenseOnly && !modifiers.hardwareOnly) urlItems.push({ sku: hwSku, qty });
+        for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
+          if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !modifiers.hardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty });
@@ -2889,8 +2969,8 @@ function buildQuoteResponse(parsed) {
       // Also include non-EOL resolved items
       // Default: hardware + licenses (refresh option includes all current gear as-is)
       // licenseOnly: license-only for non-EOL (user asked for license renewal, only EOL gets replacement hw)
-      for (const { hwSku, qty, licenseSkus } of resolvedItems) {
-        if (!modifiers.licenseOnly && !modifiers.hardwareOnly) urlItems.push({ sku: hwSku, qty });
+      for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
+        if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
         if (licenseSkus && !modifiers.hardwareOnly) {
           const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
           if (licSku) urlItems.push({ sku: licSku, qty });
@@ -3039,8 +3119,8 @@ function buildQuoteResponse(parsed) {
     if (resolvedItems.length > 0) {
       if (parsed.showPricing) {
         const allItems = [];
-        for (const { hwSku, qty, licenseSkus } of resolvedItems) {
-          if (!modifiers.licenseOnly) allItems.push({ sku: hwSku, qty });
+        for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
+          if (!modifiers.licenseOnly && !isAgnosticLicense) allItems.push({ sku: hwSku, qty });
           if (licenseSkus && !modifiers.hardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === '3Y')?.sku;
             if (licSku) allItems.push({ sku: licSku, qty });
@@ -3059,9 +3139,10 @@ function buildQuoteResponse(parsed) {
   if (resolvedItems.length > 0) {
     if (modifiers.hardwareOnly) {
       // Hardware-only: single URL (no license terms to differentiate)
+      // Skip agnostic license items (they have no hardware)
       const urlItems = [];
-      for (const { hwSku, qty } of resolvedItems) {
-        urlItems.push({ sku: hwSku, qty });
+      for (const { hwSku, qty, isAgnosticLicense } of resolvedItems) {
+        if (!isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
       }
       if (urlItems.length > 0) {
         const url = buildStratusUrl(urlItems);
@@ -3072,8 +3153,8 @@ function buildQuoteResponse(parsed) {
     } else {
       for (const term of terms) {
         const urlItems = [];
-        for (const { hwSku, qty, licenseSkus } of resolvedItems) {
-          if (!modifiers.licenseOnly) urlItems.push({ sku: hwSku, qty });
+        for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
+          if (!modifiers.licenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty });
