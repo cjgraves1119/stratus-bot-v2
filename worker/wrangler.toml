@@ -30,6 +30,10 @@ dataset = "stratus_bot_metrics"
 binding = "BOT_STORAGE"
 bucket_name = "stratus-bot-storage"
 
+# ── Workers AI: Vision model for image analysis A/B test ───────────
+[ai]
+binding = "AI"
+
 # Shared pricing KV — written by GChat worker's daily cron, read here for live prices
 [[kv_namespaces]]
 binding = "PRICES_KV"
