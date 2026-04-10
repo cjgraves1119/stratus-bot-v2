@@ -8679,6 +8679,37 @@ CRITICAL URL RULES:
                       billingStreet: r.Billing_Street, billingCity: r.Billing_City,
                       billingState: r.Billing_State, billingZip: r.Billing_Code }))
                   : rawRecords;
+
+                // Sales_Orders: also search Vendor_SO_Number via criteria (word search won't match custom fields)
+                if (mod === 'Sales_Orders') {
+                  const seen = new Set(records.map(r => r.id));
+                  try {
+                    const vendorResp = await zohoApiCall('GET',
+                      `Sales_Orders/search?criteria=((Vendor_SO_Number:starts_with:${encodeURIComponent(query)}))&fields=${fieldMap.Sales_Orders}&per_page=5`, env
+                    );
+                    for (const r of (vendorResp?.data || [])) {
+                      if (!seen.has(r.id)) { records.push(r); seen.add(r.id); }
+                    }
+                  } catch (_) {}
+                }
+
+                // Invoices: also search Invoice_Number via criteria (word search won't match number fields)
+                if (mod === 'Invoices') {
+                  const seen = new Set(records.map(r => r.id));
+                  // Strip "Invoice" prefix if present (e.g. "Invoice 25662" → "25662")
+                  const invQuery = query.replace(/^invoice\s*/i, '').trim();
+                  if (invQuery) {
+                    try {
+                      const invNumResp = await zohoApiCall('GET',
+                        `Invoices/search?criteria=((Invoice_Number:starts_with:${encodeURIComponent(invQuery)}))&fields=${fieldMap.Invoices}&per_page=10`, env
+                      );
+                      for (const r of (invNumResp?.data || [])) {
+                        if (!seen.has(r.id)) { records.push(r); seen.add(r.id); }
+                      }
+                    } catch (_) {}
+                  }
+                }
+
                 apiResult = { records, module: mod, query };
               }
             } catch (crmErr) {
