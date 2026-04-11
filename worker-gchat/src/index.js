@@ -700,12 +700,7 @@ function applySuffix(sku) {
   if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
-  if (upper.startsWith('MS450')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (upper.startsWith('MS390')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
-    return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  }
+  if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MX\d+C[W]?(-HW)?-NA$/i.test(upper)) return upper;
   if (/^MX\d+C(W)?$/i.test(upper)) return upper.endsWith('-HW-NA') ? upper : `${upper}-HW-NA`;
   if (/^Z\d+C?X$/i.test(upper)) return upper;
@@ -3233,14 +3228,16 @@ https://stratusinfosystems.com/order/?item={item1},{item2}&qty={qty1},{qty2}
 Items and quantities are separate comma-separated lists in matching order.
 
 ## SKU SUFFIX RULES
-- MR, MV, MT, MG, MS130, MS130R, MS390, Z (not Z4X/Z4CX) → add -HW
+- Most MS switches (MS120/125/130/130R/210/225/250/350/390/425/450) → add -HW
+- MR, MV, MT, MG, Z (not Z4X/Z4CX) → add -HW
 - MX non-cellular → add -HW
 - MX cellular (MXxxC, MXxxCW) → add -HW-NA
 - CW Wi-Fi 6E (CW916x) → add -MR
 - CW Wi-Fi 7 (CW917x) → add -RTG
-- MS150, MS450, C9xxx-M, MA- accessories → no suffix
+- MS150, C9200/C9300 (ending in 4G/4X), C8xxx, MA- accessories → no suffix (these families end in 4G/4X like Catalyst switches)
 - Z4X, Z4CX → no suffix (sold as-is)
-- Legacy switches (MS120/125/210/225/250/350/425) → add -HW
+
+IMPORTANT: CW9166I and CW9164I are CURRENT Wi-Fi 6E access points (use -MR suffix). They are NOT end-of-life. Do NOT substitute MR36 or any other replacement. Only SKUs listed in the EOL replacements map should be treated as EOL.
 
 ## LICENSE RULES (CRITICAL — term suffix format matters! Follow EXACTLY)
 Three license tiers exist for MX/Z:
@@ -4076,9 +4073,8 @@ async function gmailApiCall(method, path, env, body = null) {
 
 // ─── CRM Validation Constants ─────────────────────────────────────────────────
 const VALID_DEAL_STAGES = [
-  'Qualification', 'Needs Analysis', 'Value Proposition', 'Identify Decision Makers',
-  'Proposal/Negotiation', 'Verbal Commit/Invoicing', 'Closed (Won)', 'Closed (Lost)',
-  'Closed-Lost to Competition'
+  'Qualification', 'Proposal/Negotiation', 'Verbal Commit/Invoicing',
+  'Closed (Won)', 'Closed (Lost)'
 ];
 const VALID_LEAD_SOURCES = [
   'Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website',
@@ -4092,9 +4088,11 @@ const BLOCKED_STAGE_VALUES = ['Closed (Won)']; // Must be set by PO automation, 
 // Common misspellings/wrong values → correct values for helpful error messages
 const PICKLIST_CORRECTIONS = {
   // Stage corrections — map common wrong values to actual Zoho picklist values
+  // ONLY 5 valid stages: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Won), Closed (Lost)
   'Closed Lost': 'Closed (Lost)',
   'Closed-Lost': 'Closed (Lost)',
   'closed lost': 'Closed (Lost)',
+  'Closed-Lost to Competition': 'Closed (Lost)',  // Not a real stage — map to Closed (Lost)
   'Closed Won': 'Closed (Won)',
   'Closed-Won': 'Closed (Won)',
   'closed won': 'Closed (Won)',
@@ -4102,6 +4100,9 @@ const PICKLIST_CORRECTIONS = {
   'Negotiation/Review': 'Proposal/Negotiation',
   'Negotiation': 'Proposal/Negotiation',
   'Proposal': 'Proposal/Negotiation',
+  'Needs Analysis': 'Qualification',              // Not a real stage — map to Qualification
+  'Value Proposition': 'Proposal/Negotiation',     // Not a real stage — map to Proposal/Negotiation
+  'Identify Decision Makers': 'Qualification',     // Not a real stage — map to Qualification
   'Waiting on Customer': 'Verbal Commit/Invoicing',
   'PO Received': 'Verbal Commit/Invoicing',
   'Verbal Commit': 'Verbal Commit/Invoicing',
@@ -4325,7 +4326,7 @@ function parseZohoResponse(result, action = 'operation') {
 }
 
 // ─── Tool Execution Router ────────────────────────────────────────────────────
-async function executeToolCall(toolName, toolInput, env) {
+async function executeToolCall(toolName, toolInput, env, personId) {
   try {
     switch (toolName) {
       // ── Zoho CRM Tools ──
@@ -4599,8 +4600,22 @@ async function executeToolCall(toolName, toolInput, env) {
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
           correctQuotedItemDiscounts(recordData.Quoted_Items);
         }
+        const createStart = Date.now();
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
-        return parseZohoResponse(createResult, `${module_name} record creation`);
+        const parsed = parseZohoResponse(createResult, `${module_name} record creation`);
+        const createdId = parsed?.data?.[0]?.details?.id || parsed?.data?.[0]?.id || null;
+        logCrmOpToD1(env, {
+          personId: personId || null,
+          operation: 'create',
+          module: module_name,
+          recordId: createdId,
+          recordName: recordData.Subject || recordData.Deal_Name || recordData.Last_Name || null,
+          status: parsed?.data?.[0]?.status === 'error' ? 'error' : 'success',
+          durationMs: Date.now() - createStart,
+          errorMessage: parsed?.data?.[0]?.status === 'error' ? parsed.data[0].message : null,
+          details: { fields: Object.keys(recordData) }
+        });
+        return parsed;
       }
 
       case 'zoho_update_record': {
@@ -4619,11 +4634,24 @@ async function executeToolCall(toolName, toolInput, env) {
           console.log(`[GCHAT] Quote update payload — record_id: ${record_id}, item_count: ${data.Quoted_Items.length}`);
           console.log(`[GCHAT] First item sample:`, JSON.stringify(data.Quoted_Items[0]));
         }
+        const updateStart = Date.now();
         const updateResult = await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
         if (module_name === 'Quotes') {
           console.log(`[GCHAT] Quote update response:`, JSON.stringify(updateResult)?.substring(0, 500));
         }
-        return parseZohoResponse(updateResult, `${module_name} record update`);
+        const updateParsed = parseZohoResponse(updateResult, `${module_name} record update`);
+        logCrmOpToD1(env, {
+          personId: personId || null,
+          operation: 'update',
+          module: module_name,
+          recordId: record_id,
+          recordName: null,
+          status: updateParsed?.data?.[0]?.status === 'error' ? 'error' : 'success',
+          durationMs: Date.now() - updateStart,
+          errorMessage: updateParsed?.data?.[0]?.status === 'error' ? updateParsed.data[0].message : null,
+          details: { fields: Object.keys(data) }
+        });
+        return updateParsed;
       }
 
       case 'zoho_get_related_records': {
@@ -5485,7 +5513,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_update_record',
-    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use valid picklist values: Qualification, Needs Analysis, Value Proposition, Identify Decision Makers, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost), Closed-Lost to Competition. "Closed (Won)" is blocked — deals auto-close when a PO is attached. Server-side validation auto-corrects known wrong values and rejects invalid ones.',
+    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use these 5 valid picklist values: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost). "Closed (Won)" is blocked — deals auto-close when a PO is attached. NEVER use any other stage value. Server-side validation auto-corrects known wrong values and rejects invalid ones.',
     input_schema: {
       type: 'object',
       properties: {
@@ -5916,18 +5944,14 @@ Every Deal Create call MUST include ALL of these fields:
 Closing_Date: calculate dynamically as today + 30 days, YYYY-MM-DD format.
 Never set Stage to "Closed (Won)" manually — deals auto-close when a PO (Sales_Order) is attached.
 
-VALID DEAL STAGES (use ONLY these exact values):
+VALID DEAL STAGES — ONLY these 5 exist (use ONLY these exact values):
 - Qualification (default for new deals)
-- Needs Analysis
-- Value Proposition
-- Identify Decision Makers
 - Proposal/Negotiation
 - Verbal Commit/Invoicing
 - Closed (Lost)
-- Closed-Lost to Competition
 - Closed (Won) — BLOCKED, auto-set by PO automation only
 
-IMPORTANT: Never invent stage names. If unsure, use "Qualification" as default. The server will auto-correct known wrong values but will reject anything not in the picklist.
+THERE ARE ONLY 5 STAGES. Never use "Needs Analysis", "Value Proposition", "Identify Decision Makers", "Closed-Lost to Competition", or any other stage name. These do NOT exist in the picklist. If unsure, use "Qualification" as default. The server will auto-correct known wrong values but will reject anything not in the valid list.
 
 ---
 
@@ -5941,6 +5965,7 @@ Every Quote Create call MUST include ALL of these fields:
 \`\`\`json
 {
   "Subject": "{Account} - {Description}",
+  "Quote_Stage": "Qualification",
   "Deal_Name": {"id": "{deal_id}"},
   "Account_Name": {"id": "{account_id}"},
   "Contact_Name": {"id": "{contact_id_or_placeholder}"},
@@ -6506,7 +6531,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 
       const toolPromises = toolBlocks.map(async (block) => {
         console.log(`[GCHAT-CONTINUE] Tool: ${block.name}`);
-        const result = await executeToolCall(block.name, block.input, env);
+        const result = await executeToolCall(block.name, block.input, env, personId);
         const resultStr = JSON.stringify(result);
         // zoho_get_record returns large payloads for Quotes (Quoted_Items); use higher limit
         const truncLimit = block.name === 'zoho_get_record' ? 8000 : 2000;
@@ -6638,11 +6663,6 @@ CRITICAL RULES:
 - Single word "price" or "pricing" alone = "clarify".
 - "MR44 license" or "licenses for 3 MT" = "quote".
 - "LIC-ENT-3YR" or any bare license SKU = "quote".
-- Any SKU + "hardware only", "hw only", "no license", "hardware no license" = "quote". Example: "MX85 hardware only no license" = quote for MX85-HW.
-- Any SKU + "license only", "licenses only", "just the license", "renewal only" = "quote". Example: "MR46 license only 3 year" = quote for LIC-ENT-3YR.
-- Any SKU + "add-on", "add on license", "co-term", "coterm" = "quote".
-- A bare model number with no other context (e.g. "MX85", "MR46", "CW9164") = "quote" with qty 1.
-- Renewal/refresh phrasing with a SKU = "quote": "renew MR46 licenses", "refresh 10 MR44s", "replace MV22".
 
 VARIANT CLARIFICATION TABLES (use when user gives an incomplete model):
 MS switches with variants — if user says just the base model, ask which:
@@ -6771,6 +6791,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
 
     let systemPrompt = SYSTEM_PROMPT;
+    // Inject current date so the LLM knows "today" for date calculations
+    const todayStr = new Date().toISOString().split('T')[0];
+    systemPrompt = `Today's date is ${todayStr}.\n\n` + systemPrompt;
     const kv = env.CONVERSATION_KV;
 
     // Context-aware: bare "yes"/"yeah"/"sure" after bot offered datasheet check
@@ -7202,7 +7225,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
             };
           }
 
-          const result = await executeToolCall(block.name, block.input, env);
+          const result = await executeToolCall(block.name, block.input, env, personId);
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           console.log(`[GCHAT-AGENT] Tool result (${block.name}): ${resultStr.substring(0, 200)}`);
 
@@ -7699,7 +7722,7 @@ export default {
     if (url.pathname.startsWith('/dashboard/')) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
       const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
-      if (dashKey !== 'stratus2026') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+      if (dashKey !== 'Biscuit4') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
       const db = env.ANALYTICS_DB;
 
       if (request.method === 'GET' && url.pathname === '/dashboard/stats') {

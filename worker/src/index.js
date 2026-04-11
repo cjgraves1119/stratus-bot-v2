@@ -559,11 +559,6 @@ CRITICAL RULES:
 - Single word "price" or "pricing" alone = "clarify".
 - "MR44 license" or "licenses for 3 MT" = "quote".
 - "LIC-ENT-3YR" or any bare license SKU = "quote".
-- Any SKU + "hardware only", "hw only", "no license", "hardware no license" = "quote". Example: "MX85 hardware only no license" = quote for MX85-HW.
-- Any SKU + "license only", "licenses only", "just the license", "renewal only" = "quote". Example: "MR46 license only 3 year" = quote for LIC-ENT-3YR.
-- Any SKU + "add-on", "add on license", "co-term", "coterm" = "quote".
-- A bare model number with no other context (e.g. "MX85", "MR46", "CW9164") = "quote" with qty 1.
-- Renewal/refresh phrasing with a SKU = "quote": "renew MR46 licenses", "refresh 10 MR44s", "replace MV22".
 
 VARIANT CLARIFICATION TABLES (use when user gives an incomplete model):
 MS switches with variants — if user says just the base model, ask which:
@@ -774,12 +769,7 @@ function applySuffix(sku) {
     return cwBase.endsWith('-MR') ? cwBase : `${cwBase}-MR`;
   }
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
-  if (upper.startsWith('MS450')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (upper.startsWith('MS390')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
-    return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  }
+  if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MX\d+C[W]?(-HW)?-NA$/i.test(upper)) return upper;
   if (/^MX\d+C(W)?$/i.test(upper)) return upper.endsWith('-HW-NA') ? upper : `${upper}-HW-NA`;
   if (/^Z\d+C?X$/i.test(upper)) return upper;
@@ -3335,14 +3325,16 @@ https://stratusinfosystems.com/order/?item={item1},{item2}&qty={qty1},{qty2}
 Items and quantities are separate comma-separated lists in matching order.
 
 ## SKU SUFFIX RULES
-- MR, MV, MT, MG, MS130, MS130R, MS390, Z (not Z4X/Z4CX) → add -HW
+- Most MS switches (MS120/125/130/130R/210/225/250/350/390/425/450) → add -HW
+- MR, MV, MT, MG, Z (not Z4X/Z4CX) → add -HW
 - MX non-cellular → add -HW
 - MX cellular (MXxxC, MXxxCW) → add -HW-NA
 - CW Wi-Fi 6E (CW916x) → add -MR
 - CW Wi-Fi 7 (CW917x) → add -RTG
-- MS150, MS450, C9xxx-M, MA- accessories → no suffix
+- MS150, C9200/C9300 (ending in 4G/4X), C8xxx, MA- accessories → no suffix (these families end in 4G/4X like Catalyst switches)
 - Z4X, Z4CX → no suffix (sold as-is)
-- Legacy switches (MS120/125/210/225/250/350/425) → add -HW
+
+IMPORTANT: CW9166I and CW9164I are CURRENT Wi-Fi 6E access points (use -MR suffix). They are NOT end-of-life. Do NOT substitute MR36 or any other replacement. Only SKUs listed in the EOL replacements map should be treated as EOL.
 
 ## LICENSE RULES (CRITICAL — term suffix format matters! Follow EXACTLY)
 Three license tiers exist for MX/Z:
@@ -3951,6 +3943,7 @@ export default {
         {id:'wx-pricing',name:'Pricing Calculator',type:'action',fn:'handlePricingRequest()'},
         {id:'wx-parse',name:'parseMessage',type:'action',fn:'parseMessage()'},
         {id:'wx-clarify',name:'Clarification',type:'decision',fn:'clarification prompt'},
+        {id:'wx-cfclassify',name:'CF Intent Classifier',type:'api',fn:'classifyWithCF()'},
         {id:'wx-build',name:'Build Quote',type:'action',fn:'buildQuoteResponse()'},
         {id:'wx-revision',name:'Revision Check',type:'decision',fn:'revision detection'},
         {id:'wx-claude',name:'Claude Fallback',type:'api',fn:'askClaude()'},
@@ -3972,7 +3965,7 @@ export default {
     if (url.pathname.startsWith('/dashboard/')) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
       const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
-      if (dashKey !== 'stratus2026') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+      if (dashKey !== 'Biscuit4') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
       const db = env.ANALYTICS_DB; // may be undefined if D1 binding missing
 
       if (request.method === 'GET' && url.pathname === '/dashboard/stats') {
@@ -4234,49 +4227,9 @@ export default {
           // Architecture: CF decides WHAT to do, deterministic engine does the QUOTING.
           // This eliminates false-positive quoting on product-info/advisory questions
           // because the deterministic engine never makes routing decisions — only CF does.
+          // Matches GChat worker architecture (v2.0.0-cf-first-advisor).
 
-          // Pre-check: Deterministic clarifications (Duo/Umbrella tier selection) — always instant, no CF needed
-          T.step('wx-parse', 'enter');
-          const parsed = parseMessage(text);
-          if (parsed) {
-            T.step('wx-parse', 'exit', { result: 'parsed', items: parsed.items?.length || 0, advisory: parsed.isAdvisory, revision: parsed.isRevision });
-            if (parsed.isClarification && parsed.clarificationMessage) {
-              T.step('wx-clarify', 'enter'); T.step('wx-clarify', 'exit');
-              await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', parsed.clarificationMessage);
-              T.step('wx-send', 'enter');
-              await sendMessage(roomId, parsed.clarificationMessage, token);
-              T.step('wx-send', 'exit');
-              ctx.waitUntil(T.flush());
-              return;
-            }
-            // Revision requests go straight to Claude (needs conversation history)
-            if (parsed.isRevision) {
-              T.step('wx-revision', 'enter');
-              const history = await getHistory(kv, personId);
-              if (history.length > 0) {
-                T.step('wx-revision', 'exit', { result: 'has_history' });
-                T.step('wx-claude', 'enter');
-                const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
-                T.step('wx-claude', 'exit');
-                T.step('wx-send', 'enter');
-                await sendMessage(roomId, claudeReply, token);
-                T.step('wx-send', 'exit');
-                ctx.waitUntil(T.flush());
-                return;
-              }
-              T.step('wx-revision', 'exit', { result: 'no_history' });
-              T.step('wx-send', 'enter');
-              await sendMessage(roomId, `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`, token);
-              T.step('wx-send', 'exit');
-              ctx.waitUntil(T.flush());
-              return;
-            }
-          } else {
-            T.step('wx-parse', 'exit', { result: 'no_parse' });
-          }
-
-          // ── CF Workers AI intent classifier — the brain of the waterfall ──
+          // ── Step 1: CF Workers AI intent classifier — the brain of the waterfall ──
           T.step('wx-cfclassify', 'enter');
           const classification = await classifyWithCF(text, env);
           T.step('wx-cfclassify', 'exit');
@@ -4337,8 +4290,49 @@ export default {
               // Use CF's extracted clean text if available, otherwise original text
               const quoteText = classification.extracted || text;
               console.log(`[CF-First] Quote intent, executing deterministic with: ${quoteText}`);
+
+              // ── Step 2: Deterministic engine only runs when CF routes to "quote" ──
+              T.step('wx-parse', 'enter');
               const quoteParsed = parseMessage(quoteText);
-              if (quoteParsed && !quoteParsed.isClarification) {
+              if (quoteParsed) {
+                T.step('wx-parse', 'exit', { result: 'parsed', items: quoteParsed.items?.length || 0, advisory: quoteParsed.isAdvisory, revision: quoteParsed.isRevision });
+
+                // Clarification responses (Duo/Umbrella tier selection) — instant
+                if (quoteParsed.isClarification && quoteParsed.clarificationMessage) {
+                  T.step('wx-clarify', 'enter'); T.step('wx-clarify', 'exit');
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', quoteParsed.clarificationMessage);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, quoteParsed.clarificationMessage, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                // Revision requests go straight to Claude (needs conversation history)
+                if (quoteParsed.isRevision) {
+                  T.step('wx-revision', 'enter');
+                  const history = await getHistory(kv, personId);
+                  if (history.length > 0) {
+                    T.step('wx-revision', 'exit', { result: 'has_history' });
+                    T.step('wx-claude', 'enter');
+                    const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                    T.step('wx-claude', 'exit');
+                    T.step('wx-send', 'enter');
+                    await sendMessage(roomId, claudeReply, token);
+                    T.step('wx-send', 'exit');
+                    ctx.waitUntil(T.flush());
+                    return;
+                  }
+                  T.step('wx-revision', 'exit', { result: 'no_history' });
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                // Normal quote — build the response
                 const quoteResult = buildQuoteResponse(quoteParsed);
                 if (quoteResult.message && !quoteResult.needsLlm) {
                   await addToHistory(kv, personId, 'user', text);
@@ -4366,6 +4360,8 @@ export default {
                   ctx.waitUntil(T.flush());
                   return;
                 }
+              } else {
+                T.step('wx-parse', 'exit', { result: 'no_parse' });
               }
               // Deterministic couldn't handle CF's extracted quote — fall through to Claude
               console.log('[CF-First] Deterministic couldn\'t execute CF quote intent, falling to Claude');

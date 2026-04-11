@@ -97,15 +97,22 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
-  if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
-  if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
-  if (upper.startsWith('MS450')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (upper.startsWith('MS390')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
-    return upper.endsWith('-HW') ? upper : `${upper}-HW`;
+  // CW Wi-Fi 7 (917x): add -RTG suffix
+  if (/^CW917\d/.test(upper)) {
+    // Auto-append I if bare model number (CW9172→CW9172I, but not CW9172H or CW9176 which are already full)
+    let cwBase = upper;
+    if (/^CW917\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    return cwBase.endsWith('-RTG') ? cwBase : `${cwBase}-RTG`;
   }
+  // CW Wi-Fi 6E (916x): auto-append I for standard internal-antenna model, add -MR suffix
+  if (/^CW916\d/.test(upper)) {
+    let cwBase = upper;
+    // CW9162→CW9162I, CW9164→CW9164I, CW9166→CW9166I (but not CW9163E, CW9166D1, etc.)
+    if (/^CW916\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    return cwBase.endsWith('-MR') ? cwBase : `${cwBase}-MR`;
+  }
+  if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
+  if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MX\d+C[W]?(-HW)?-NA$/i.test(upper)) return upper;
   if (/^MX\d+C(W)?$/i.test(upper)) return upper.endsWith('-HW-NA') ? upper : `${upper}-HW-NA`;
   if (/^Z\d+C?X$/i.test(upper)) return upper;
@@ -679,7 +686,7 @@ const tests = [
     customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
   })),
 
-  // MS150 → no suffix (critical: no -HW)
+  // MS150 → no suffix (ends in 4G/4X like C9200/C9300 Catalyst switches)
   ...[
     ['MS150-24P-4G', 'MS150-24P-4G'], ['MS150-48FP-4X', 'MS150-48FP-4X'],
     ['MS150-48LP-4G', 'MS150-48LP-4G'],
