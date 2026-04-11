@@ -74,8 +74,10 @@ const prices = new Proxy(staticPrices, {
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
 // Pricing per 1M tokens (USD) by model
 const MODEL_PRICING = {
+  'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
   'claude-sonnet-4-20250514': { input: 3.00, output: 15.00 },
   'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
+  'claude-opus-4-6': { input: 15.00, output: 75.00 },
   'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00 },
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
 };
@@ -91,7 +93,7 @@ const MODEL_PRICING = {
 async function trackUsage(env, model, usage, source) {
   if (!usage || !env?.CONVERSATION_KV) return;
   try {
-    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-20250514'];
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
     const inputCost = (usage.input_tokens / 1_000_000) * pricing.input;
     const outputCost = (usage.output_tokens / 1_000_000) * pricing.output;
     const totalCost = inputCost + outputCost;
@@ -3600,7 +3602,7 @@ async function processEmailThread(text, personId, env, kv) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 512,
         system: 'You are a JSON extraction tool. Return ONLY valid JSON with no markdown or extra text.',
         messages: [{ role: 'user', content: prompt }]
@@ -3613,7 +3615,7 @@ async function processEmailThread(text, personId, env, kv) {
     }
 
     const data = await response.json();
-    trackUsage(env, 'claude-sonnet-4-20250514', data.usage, 'email-parse').catch(() => {});
+    trackUsage(env, 'claude-sonnet-4-6', data.usage, 'email-parse').catch(() => {});
     const rawJson = data.content[0].text.trim();
 
     // Parse JSON response
@@ -6209,6 +6211,23 @@ function buildCrmSystemPrompt(text) {
   let prompt = CRM_AGENT_SYSTEM_PROMPT_BASE;
   const lower = (text || '').toLowerCase();
 
+  // ── Advisor tool guidance (Anthropic advisor-tool-2026-03-01 beta) ──
+  // Sonnet 4.6 executor + Opus 4.6 advisor for strategic CRM decisions.
+  // The advisor sees the full transcript and provides plans/corrections.
+  prompt += `\n\n## ADVISOR TOOL
+You have access to an advisor tool backed by a stronger reviewer model. It takes NO parameters — when you call advisor(), your entire conversation history is automatically forwarded.
+
+Call advisor BEFORE substantive work — before writing CRM records, before committing to a quote structure, before building on assumptions about account relationships or field values. Orientation (searching records, reading data) is not substantive work.
+
+Also call advisor:
+- When the task is complete, BEFORE your final response. Make your deliverable durable first (write the record, send the email), then call advisor for validation.
+- When stuck — errors recurring, unexpected Zoho data, unclear field mappings.
+- When considering a change of approach (e.g., creating a new account vs updating existing).
+
+Give the advice serious weight. If you follow a step and it fails empirically, or you have primary-source evidence that contradicts a specific claim, adapt. If there's a conflict between your data and the advisor's guidance, surface it in one more advisor call.
+
+The advisor should respond in under 100 words and use enumerated steps, not explanations.\n`;
+
   // Detect email intake intent
   const emailIntakePatterns = [
     /\bnew\s+customer\b/i,
@@ -6365,19 +6384,28 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.every(n => _contExecTools.has(n));
     const contModel = (iteration > 3 && _isPureExec)
       ? 'claude-haiku-4-5-20251001'
-      : 'claude-sonnet-4-20250514';
+      : 'claude-sonnet-4-6';
     console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
     // Dynamic max_tokens: 2048 for most iterations, 1024 for pure exec (Haiku dispatch)
     const contMaxTok = _isPureExec ? 1024 : 2048;
+    // Add advisor tool for Sonnet iterations in continuation path
+    let contTools = tools;
+    if (contModel === 'claude-sonnet-4-6' && tools.length > 0) {
+      contTools = [
+        ...tools,
+        { type: 'advisor_20260301', name: 'advisor', model: 'claude-opus-4-6' }
+      ];
+    }
+
     const requestBody = {
       model: contModel,
       max_tokens: contMaxTok,
       system: systemPrompt,
       messages
     };
-    if (tools.length > 0) {
-      requestBody.tools = tools;
+    if (contTools.length > 0) {
+      requestBody.tools = contTools;
     }
 
     const response = await callAnthropicWithRetry(requestBody);
@@ -6523,6 +6551,151 @@ function handleQuoteUrlTool(params) {
   return { url, label: label || `${term}-Year Co-Term`, items_count: items.length };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// CF Workers AI: Intent classifier → deterministic engine → Claude fallback
+// CF-first waterfall: CF classifies ALL inputs before deterministic engine
+// ═══════════════════════════════════════════════════════════════
+const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+
+const CF_CLASSIFIER_PROMPT = `You are an intent classifier and clarification engine for a Cisco/Meraki quoting bot. Your job is to classify what the user wants and ask smart clarifying questions when their request is incomplete. You do NOT answer product questions — those go to a more capable AI.
+
+Respond with ONLY a JSON object, nothing else.
+
+Categories:
+- "quote": User wants a quote or pricing. They mention a specific model (MR46, MS130-8P, MX67, CW9164, MT14, Z4, MG51, etc.) with or without a quantity, or a bare license SKU (LIC-ENT-3YR, LIC-MV-5YR), or a generic license request ("5 MR licenses", "MR44 license"). Even if the model is EOL or unknown to you, classify as "quote" — the backend validates SKUs. If no quantity specified, assume 1. Extract the clean request.
+- "clarify": User wants a quote but is too vague OR specified an incomplete model that needs a variant selection. Generate a helpful clarification using the variant tables below. Examples: "quote me some switches" (which model?), "I need APs" (which model?), "quote 5 MS130-24" (1G or 10G uplinks?), "pricing for Meraki" (which product family?).
+- "product_info": User is asking about specs, features, sizing, recommendations, comparisons, EOL, compatibility, or capabilities — NOT asking for a quote. Examples: "what firewall for 50 users", "difference between MR46 and CW9164", "does MX67 support SD-WAN", "is MV22 weatherproof", "is MR46 indoor or outdoor". Set reply to empty — these go to the advanced AI.
+- "escalate": Complex requests needing the advanced AI. Use for: proposal writing, deployment planning, detailed technical analysis. Set reply to empty.
+- "conversation": Greetings, thanks, farewells, jokes, identity questions, general chat, non-product topics, single characters ("q", "?", "!"), short reactions ("nice", "cool", "ok", "lol").
+
+CRITICAL RULES:
+- Never use "unclear" as an intent.
+- product_info reply MUST be empty. Never answer product questions yourself.
+- For "clarify", always generate a reply asking which specific model/variant.
+- Single word "price" or "pricing" alone = "clarify".
+- "MR44 license" or "licenses for 3 MT" = "quote".
+- "LIC-ENT-3YR" or any bare license SKU = "quote".
+
+VARIANT CLARIFICATION TABLES (use when user gives an incomplete model):
+MS switches with variants — if user says just the base model, ask which:
+- MS130-8: 8-port compact (no variants)
+- MS130-12: 12-port → MS130-12P (PoE, 1G) or MS130-12X (mGig, 10G uplinks)
+- MS130-24: 24-port → MS130-24P (PoE, 1G uplinks) or MS130-24X (PoE, 10G uplinks)
+- MS130-48: 48-port → MS130-48P (PoE, 1G uplinks) or MS130-48X (PoE, 10G uplinks)
+- MS210-24: 24-port → MS210-24P (PoE) or MS210-24 (no PoE)
+- MS210-48: 48-port → MS210-48FP (full PoE) or MS210-48LP (partial PoE) or MS210-48 (no PoE)
+- MS225-24: 24-port → MS225-24P (PoE) or MS225-24 (no PoE)
+- MS225-48: 48-port → MS225-48FP (full PoE) or MS225-48LP (partial PoE) or MS225-48 (no PoE)
+- MS250-24: 24-port → MS250-24P (PoE) or MS250-24 (no PoE)
+- MS250-48: 48-port → MS250-48FP (full PoE) or MS250-48LP (partial PoE) or MS250-48 (no PoE)
+- MS390-24: → MS390-24P (PoE), MS390-24UX (mGig+UPOE), MS390-24U (mGig)
+- MS390-48: → MS390-48P (PoE), MS390-48UX (mGig+UPOE), MS390-48UX2 (mGig+UPOE 2nd gen), MS390-48U (mGig)
+
+MX sizing by user count (for basic sizing clarifications):
+- Up to 50 users: MX67 ($595) or MX68 ($795)
+- Up to 200 users: MX75 ($2,195)
+- Up to 600 users: MX85 ($3,995)
+- Up to 2,000 users: MX95 ($7,995)
+- Up to 5,000 users: MX105 ($12,995)
+- Up to 10,000 users: MX250 ($19,995)
+- Unlimited: MX450 ($34,995)
+
+Product families (for vague "I need switches/APs/cameras" clarifications):
+MR access points: MR28, MR36H, MR44 (End-of-Sale), MR46, MR57, MR78
+CW Wi-Fi 7 access points: CW9162, CW9164, CW9166, CW9172, CW9176
+MS switches: MS120, MS130, MS210, MS225, MS250, MS350, MS390, MS410, MS425, MS450
+MX security appliances: MX67, MX68, MX75, MX85, MX95, MX105, MX250, MX450
+MV cameras: MV2, MV12, MV22, MV32, MV72, MV93
+MT sensors: MT14, MT15, MT20, MT40
+Teleworker: Z4, Z4C
+Cellular: MG51, MG52
+IMPORTANT — Unknown/EOL model rule: If a user mentions a model number that follows Cisco/Meraki naming patterns (MR##, MX##, MS###-##, MV##, CW####, MT##, Z#, MG##) but is NOT in the active product list above, it is likely end-of-life or a typo. ALWAYS classify as "quote" if they want pricing — NEVER "clarify". The backend has full EOL data and handles replacement mapping automatically.
+
+Respond with ONLY this JSON:
+{"intent":"<category>","reply":"<for clarify or conversation only. MUST be empty for quote, product_info, escalate>","extracted":"<for quote only: extract clean request like 'quote 10 MR46 with 3 year license'. Empty for all other intents>"}`;
+
+const CF_CONVO_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products. Be friendly, concise, and professional. Keep responses under 4 sentences.
+
+Key product knowledge:
+- MX security appliances: MX67 ($595, 50 users), MX68 ($795, 50), MX75 ($2,195, 200), MX85 ($3,995, 600), MX95 ($7,995, 2000), MX105 ($12,995, 5000), MX250 ($19,995, 10000), MX450 ($34,995, unlimited)
+- MR access points: MR28 ($495), MR36H ($595), MR44 ($995, EoS-replaced by CW9164), MR46 ($1,295), MR57 ($1,895), MR78 ($2,495)
+- MS switches: MS120-8 ($595), MS130-8 ($695), MS210-24 ($2,495), MS225-24 ($3,495), MS250-24 ($4,995), MS390-24 ($7,995)
+- CW Wi-Fi 7: CW9162 ($995), CW9164 ($1,495), CW9166 ($1,995), CW9172 ($2,495), CW9176 ($3,995)
+- MV cameras: MV2 ($495), MV12 ($995), MV22 ($1,295), MV32 ($1,995), MV72 ($3,495), MV93 ($4,995)
+- MT sensors: MT14 ($149), MT15 ($199), MT20 ($129), MT40 ($199) — free tier up to 100 sensors
+- All hardware needs a license (1yr/3yr/5yr). APs use LIC-ENT-. MX uses LIC-SEC- or LIC-ENT-.
+
+For quote requests, tell users to say "quote [qty] [model]" and you'll generate an instant quote.`;
+
+// Helper: extract text from Workers AI response (handles native string, native object, and OpenAI formats)
+function extractAIResponse(result) {
+  const raw = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+  if (typeof raw === 'string') return raw.trim();
+  if (typeof raw === 'object') return JSON.stringify(raw);  // Llama 4 Scout returns parsed JSON objects
+  return String(raw);
+}
+
+async function classifyWithCF(userMessage, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CLASSIFIER_PROMPT },
+          { role: 'user', content: userMessage }
+        ],
+        max_tokens: 256
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 8000))
+    ]);
+    const elapsed = Date.now() - startMs;
+
+    // Llama 4 Scout returns result.response as a pre-parsed JSON object
+    const rawResponse = result?.response ?? result?.choices?.[0]?.message?.content;
+    if (typeof rawResponse === 'object' && rawResponse !== null && rawResponse.intent) {
+      console.log(`[CF-Classify] Pre-parsed object (${elapsed}ms): intent=${rawResponse.intent}`);
+      return { ...rawResponse, elapsed, raw: JSON.stringify(rawResponse) };
+    }
+
+    // Fallback: string response (other models) — extract JSON
+    const raw = typeof rawResponse === 'string' ? rawResponse.trim() : String(rawResponse || '');
+    console.log(`[CF-Classify] Raw response (${elapsed}ms): ${raw.substring(0, 200)}`);
+    let jsonStr = raw;
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (jsonMatch) jsonStr = jsonMatch[0];
+    const parsed = JSON.parse(jsonStr);
+    return { ...parsed, elapsed, raw };
+  } catch (err) {
+    console.error(`[CF-Classify] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
+  }
+}
+
+async function askCFConversation(userMessage, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CONVO_PROMPT },
+          { role: 'user', content: userMessage }
+        ],
+        max_tokens: 256
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 10000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const response = extractAIResponse(result);
+    if (response.length > 5) return { response, elapsed };
+    return null;
+  } catch (err) {
+    console.error(`[CF-Convo] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
+  }
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
@@ -6666,17 +6839,25 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     const _expandedQuoteCache = {}; // { recordId: expandedDataString }
 
     // Helper: call Anthropic API with retry for 429/529 + model fallback
+    // Supports advisor tool beta header when advisor is in the tools array
     async function callAnthropicWithRetry(body, maxRetries = 3) {
+      const hasAdvisor = body.tools?.some(t => t.type === 'advisor_20260301');
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'cf-aig-skip-cache': 'true'  // CRM tool-use calls are always unique
+      };
+      if (hasAdvisor) {
+        headers['anthropic-beta'] = 'advisor-tool-2026-03-01';
+        console.log(`[GCHAT-ADVISOR] Advisor tool active — Opus 4.6 available for strategic guidance`);
+      }
+
       let lastResponse = null;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         const response = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'cf-aig-skip-cache': 'true'  // CRM tool-use calls are always unique
-          },
+          headers,
           body: JSON.stringify(body)
         });
 
@@ -6691,10 +6872,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
         return response;
       }
-      // All retries exhausted on primary model — try fallback to Haiku
+      // All retries exhausted on primary model — try fallback to Haiku (without advisor)
       if (body.model !== 'claude-haiku-4-5-20251001') {
         console.log(`[GCHAT-AGENT] Primary model exhausted retries, falling back to Haiku`);
-        const fallbackBody = { ...body, model: 'claude-haiku-4-5-20251001' };
+        // Strip advisor tool from fallback — Haiku can use it but won't need it for simple retries
+        const fallbackTools = body.tools?.filter(t => t.type !== 'advisor_20260301');
+        const fallbackBody = { ...body, model: 'claude-haiku-4-5-20251001', tools: fallbackTools };
         return await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
@@ -6756,9 +6939,15 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const _inPureExecMode = useTools
         && _lastToolNames.length > 0
         && _lastToolNames.every(n => _executionTools.has(n));
+
+      // ── Advisor-aware model selection ──────────────────────────────
+      // CRM tool-use path: Sonnet 4.6 as executor with Opus 4.6 advisor
+      // for strategic guidance on complex decisions. Haiku for pure
+      // execution steps (updates/sends) where the plan is already set.
+      // Non-CRM path: Sonnet 4.6 for general product questions.
       const activeModel = (useTools && iteration > 2 && _inPureExecMode)
         ? 'claude-haiku-4-5-20251001'
-        : 'claude-sonnet-4-20250514';
+        : 'claude-sonnet-4-6';
       if (useTools) {
         console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
@@ -6769,14 +6958,31 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // - Iteration 4+: 1024 (finishing up, formatting response)
       // - Haiku exec steps: 1024 (just dispatching update/send, minimal reasoning)
       const maxTok = _inPureExecMode ? 1024 : (iteration <= 1 ? 4096 : (iteration <= 3 ? 1536 : 1024));
+
+      // ── Build tools array with advisor when in CRM mode ──────────
+      // The advisor tool lets Sonnet consult Opus for strategic guidance
+      // on complex CRM decisions (deal routing, field validation, etc.)
+      // Only include advisor for Sonnet iterations (not Haiku pure-exec steps)
+      let activeTools = tools;
+      if (useTools && activeModel === 'claude-sonnet-4-6') {
+        activeTools = [
+          ...tools,
+          {
+            type: 'advisor_20260301',
+            name: 'advisor',
+            model: 'claude-opus-4-6'
+          }
+        ];
+      }
+
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
         system: systemPrompt,
         messages
       };
-      if (tools.length > 0) {
-        requestBody.tools = tools;
+      if (activeTools.length > 0) {
+        requestBody.tools = activeTools;
       }
 
       const response = await callAnthropicWithRetry(requestBody);
@@ -7828,7 +8034,7 @@ ${(data.recentRequests || []).map(r => {
                   'anthropic-version': '2023-06-01'
                 },
                 body: JSON.stringify({
-                  model: 'claude-sonnet-4-20250514',
+                  model: 'claude-sonnet-4-6',
                   max_tokens: 500,
                   system: `You are a concise email analyzer for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
 {
@@ -7844,7 +8050,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
 
               if (summaryResp.ok) {
                 const summaryData = await summaryResp.json();
-                ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-20250514', summaryData.usage, 'addon-analyze'));
+                ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', summaryData.usage, 'addon-analyze'));
                 const text = summaryData.content?.[0]?.text || '';
                 try {
                   const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
@@ -8075,7 +8281,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
                 'anthropic-version': '2023-06-01'
               },
               body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
+                model: 'claude-sonnet-4-6',
                 max_tokens: 1500,
                 system: `You are drafting email replies for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki exclusive reseller specializing in Meraki). Write in Chris's voice:
 
@@ -8123,7 +8329,7 @@ CRITICAL URL RULES:
             }
 
             const draftData = await draftResp.json();
-            ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-20250514', draftData.usage, 'addon-draft'));
+            ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', draftData.usage, 'addon-draft'));
             const draftText = draftData.content?.[0]?.text || '';
             var parsedDraft;
             try {
@@ -11516,7 +11722,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         // Step 2: Test Anthropic API with tools
         const testBody = {
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           max_tokens: 256,
           system: 'You are a test assistant. Respond with "API working" and use the test_tool to confirm tool use works.',
           messages: [{ role: 'user', content: 'test' }],
@@ -11857,7 +12063,8 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         T.step('gc-session', 'exit', { result: isExplicitCrmRequest ? 'crm_routed' : 'normal' });
 
-        // Deterministic pricing calculator
+        // ── CF-FIRST WATERFALL: CF classifies intent, deterministic executes quotes ──
+        // Pre-check: Deterministic pricing calculator (Duo/Umbrella tier math) — always instant
         T.step('gc-pricing', 'enter');
         if (!reply && !isExplicitCrmRequest) {
           const pricingReply = await handlePricingRequest(text, personId, kv);
@@ -11867,25 +12074,19 @@ Return ONLY a JSON object (no markdown, no explanation):
             reply = pricingReply;
           }
         }
-
         T.step('gc-pricing', 'exit', { result: reply ? 'match' : 'no_match' });
 
+        // Pre-check: Deterministic clarifications (Duo/Umbrella tier selection) — always instant
         T.step('gc-parse', 'enter');
         if (!reply && !isExplicitCrmRequest) {
           const parsed = parseMessage(text);
           if (parsed) {
-            // Clarification prompts (e.g. "which Duo tier?") — send directly
             if (parsed.isClarification && parsed.clarificationMessage) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', parsed.clarificationMessage);
               reply = parsed.clarificationMessage;
             }
-            const result = !reply ? buildQuoteResponse(parsed) : null;
-            if (result && !result.needsLlm && result.message) {
-              await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', result.message);
-              reply = result.message;
-            } else if (result && result.revision) {
+            if (!reply && parsed.isRevision) {
               const history = await getHistory(kv, personId);
               if (history.length > 0) {
                 reply = await askClaude(
@@ -11895,9 +12096,73 @@ Return ONLY a JSON object (no markdown, no explanation):
               } else {
                 reply = 'I don\'t have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"';
               }
-            } else if (result && result.errors && result.errors.length > 0) {
-              const errorContext = result.errors.join('\n');
-              reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+            }
+          }
+
+          // ── CF Workers AI intent classifier — the brain of the waterfall ──
+          if (!reply) {
+            T.step('gc-cf', 'enter');
+            const classification = await classifyWithCF(text, env);
+            T.step('gc-cf', 'exit', { intent: classification?.intent || 'null' });
+
+            if (classification) {
+              // CF: clarify — CF asks which variant/model (MS130-24P vs 24X, etc.)
+              if (classification.intent === 'clarify' && classification.reply) {
+                await addToHistory(kv, personId, 'user', text);
+                await addToHistory(kv, personId, 'assistant', classification.reply);
+                reply = classification.reply;
+                console.log(`[CF-First] Clarification sent (${classification.elapsed}ms)`);
+              }
+
+              // CF: product_info — route to Claude (CF classifies, Claude answers)
+              if (!reply && classification.intent === 'product_info') {
+                console.log(`[CF-First] Product info question, routing to Claude`);
+                // Fall through to Claude below
+              }
+
+              // CF: escalate — route to Claude
+              if (!reply && classification.intent === 'escalate') {
+                console.log(`[CF-First] Escalation, routing to Claude`);
+                // Fall through to Claude below
+              }
+
+              // CF: conversation — CF handles greetings/thanks/chat
+              if (!reply && classification.intent === 'conversation') {
+                const convoResult = classification.reply
+                  ? { response: classification.reply }
+                  : await askCFConversation(text, env);
+                if (convoResult?.response) {
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', convoResult.response);
+                  reply = convoResult.response;
+                  console.log(`[CF-First] Conversation handled by CF`);
+                }
+              }
+
+              // CF: quote — deterministic engine executes the quote
+              if (!reply && classification.intent === 'quote') {
+                const quoteText = classification.extracted || text;
+                const quoteParsed = parseMessage(quoteText);
+                if (quoteParsed && !quoteParsed.isClarification) {
+                  const quoteResult = buildQuoteResponse(quoteParsed);
+                  if (quoteResult && quoteResult.message && !quoteResult.needsLlm) {
+                    await addToHistory(kv, personId, 'user', text);
+                    await addToHistory(kv, personId, 'assistant', quoteResult.message);
+                    reply = quoteResult.message;
+                    console.log(`[CF-First] Quote executed by deterministic engine (cf-deterministic)`);
+                  } else if (quoteResult && quoteResult.errors && quoteResult.errors.length > 0) {
+                    const errorContext = quoteResult.errors.join('\n');
+                    reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+                    console.log(`[CF-First] Quote had errors, escalated to Claude`);
+                  }
+                }
+                // If parseMessage or buildQuoteResponse couldn't handle it, fall through to Claude
+                if (!reply) {
+                  console.log(`[CF-First] Quote intent but deterministic engine couldn't resolve, falling to Claude`);
+                }
+              }
+            } else {
+              console.log(`[CF-First] CF classifier unavailable, falling through to Claude`);
             }
           }
         }
@@ -12058,7 +12323,7 @@ Return ONLY a JSON object (no markdown, no explanation):
         T.step('gc-respond', 'enter');
         T.step('gc-d1', 'enter');
         const _requestEndMs = Date.now();
-        const _responsePath = useTools ? 'crm_agent' : (reply && !imageData ? 'deterministic' : 'claude');
+        const _responsePath = useTools ? 'crm_agent_advisor' : (reply && !imageData ? 'cf-deterministic' : 'claude');
         const _durationMs = _requestEndMs - (_requestStartMs || _requestEndMs);
         ctx.waitUntil(logBotUsageToD1(env, {
           bot: isAddon ? 'addon' : 'gchat',

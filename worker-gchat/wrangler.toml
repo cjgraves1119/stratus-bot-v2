@@ -65,6 +65,10 @@ queue = "stratus-gchat-crm-queue"
 max_batch_size = 1
 max_retries = 0
 
+# Cloudflare Workers AI — used for intent classification (CF-first waterfall)
+[ai]
+binding = "AI"
+
 # Daily price refresh from Zoho WooProducts → KV
 # Runs at 11:00 UTC (6:00 AM CT / 5:00 AM CST)
 [triggers]
