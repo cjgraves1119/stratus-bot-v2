@@ -529,62 +529,189 @@ async function downloadWebexFile(fileUrl, token) {
   }
 }
 
-// ─── Workers AI Vision (A/B Test: Llama 3.2 11B Vision) ─────────────────────
-// Temporary: used for image analysis comparison vs Claude. Remove after test.
-async function askWorkersAI(userMessage, env, imageData) {
-  if (!env.AI) {
-    console.error('[WorkersAI] AI binding not available');
+// ─── Workers AI Vision Cascade Test ──────────────────────────────────────────
+// Tries 3 vision models in order. Returns first successful result tagged with model name.
+// Goal: find a free CF model that can extract structured data from dashboard screenshots,
+// so we can feed the text output to Claude instead of the expensive base64 image.
+
+
+// ═══════════════════════════════════════════════════════════════
+// CF Workers AI — Tiered routing layer
+// Deterministic engine → CF intent classifier → Claude fallback
+// ═══════════════════════════════════════════════════════════════
+const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+
+const CF_CLASSIFIER_PROMPT = `You are an intent classifier and clarification engine for a Cisco/Meraki quoting bot. Your job is to classify what the user wants and ask smart clarifying questions when their request is incomplete. You do NOT answer product questions — those go to a more capable AI.
+
+Respond with ONLY a JSON object, nothing else.
+
+Categories:
+- "quote": User wants a quote or pricing. They mention a specific model (MR46, MS130-8P, MX67, CW9164, MT14, Z4, MG51, etc.) with or without a quantity, or a bare license SKU (LIC-ENT-3YR, LIC-MV-5YR), or a generic license request ("5 MR licenses", "MR44 license"). Even if the model is EOL or unknown to you, classify as "quote" — the backend validates SKUs. If no quantity specified, assume 1. Extract the clean request.
+- "clarify": User wants a quote but is too vague OR specified an incomplete model that needs a variant selection. Generate a helpful clarification using the variant tables below. Examples: "quote me some switches" (which model?), "I need APs" (which model?), "quote 5 MS130-24" (1G or 10G uplinks?), "pricing for Meraki" (which product family?).
+- "product_info": User is asking about specs, features, sizing, recommendations, comparisons, EOL, compatibility, or capabilities — NOT asking for a quote. Examples: "what firewall for 50 users", "difference between MR46 and CW9164", "does MX67 support SD-WAN", "is MV22 weatherproof", "is MR46 indoor or outdoor". Set reply to empty — these go to the advanced AI.
+- "escalate": Complex requests needing the advanced AI. Use for: proposal writing, deployment planning, detailed technical analysis. Set reply to empty.
+- "conversation": Greetings, thanks, farewells, jokes, identity questions, general chat, non-product topics, single characters ("q", "?", "!"), short reactions ("nice", "cool", "ok", "lol").
+
+CRITICAL RULES:
+- Never use "unclear" as an intent.
+- product_info reply MUST be empty. Never answer product questions yourself.
+- For "clarify", always generate a reply asking which specific model/variant.
+- Single word "price" or "pricing" alone = "clarify".
+- "MR44 license" or "licenses for 3 MT" = "quote".
+- "LIC-ENT-3YR" or any bare license SKU = "quote".
+
+VARIANT CLARIFICATION TABLES (use when user gives an incomplete model):
+MS switches with variants — if user says just the base model, ask which:
+- MS130-8: 8-port compact (no variants)
+- MS130-12: 12-port → MS130-12P (PoE, 1G) or MS130-12X (mGig, 10G uplinks)
+- MS130-24: 24-port → MS130-24P (PoE, 1G uplinks) or MS130-24X (PoE, 10G uplinks)
+- MS130-48: 48-port → MS130-48P (PoE, 1G uplinks) or MS130-48X (PoE, 10G uplinks)
+- MS210-24: 24-port → MS210-24P (PoE) or MS210-24 (no PoE)
+- MS210-48: 48-port → MS210-48FP (full PoE) or MS210-48LP (partial PoE) or MS210-48 (no PoE)
+- MS225-24: 24-port → MS225-24P (PoE) or MS225-24 (no PoE)
+- MS225-48: 48-port → MS225-48FP (full PoE) or MS225-48LP (partial PoE) or MS225-48 (no PoE)
+- MS250-24: 24-port → MS250-24P (PoE) or MS250-24 (no PoE)
+- MS250-48: 48-port → MS250-48FP (full PoE) or MS250-48LP (partial PoE) or MS250-48 (no PoE)
+- MS390-24: → MS390-24P (PoE), MS390-24UX (mGig+UPOE), MS390-24U (mGig)
+- MS390-48: → MS390-48P (PoE), MS390-48UX (mGig+UPOE), MS390-48UX2 (mGig+UPOE 2nd gen), MS390-48U (mGig)
+
+MX sizing by user count (for basic sizing clarifications):
+- Up to 50 users: MX67 ($595) or MX68 ($795)
+- Up to 200 users: MX75 ($2,195)
+- Up to 600 users: MX85 ($3,995)
+- Up to 2,000 users: MX95 ($7,995)
+- Up to 5,000 users: MX105 ($12,995)
+- Up to 10,000 users: MX250 ($19,995)
+- Unlimited: MX450 ($34,995)
+
+Product families (for vague "I need switches/APs/cameras" clarifications):
+MR access points: MR28, MR36H, MR44 (End-of-Sale), MR46, MR57, MR78
+CW Wi-Fi 7 access points: CW9162, CW9164, CW9166, CW9172, CW9176
+MS switches: MS120, MS130, MS210, MS225, MS250, MS350, MS390, MS410, MS425, MS450
+MX security appliances: MX67, MX68, MX75, MX85, MX95, MX105, MX250, MX450
+MV cameras: MV2, MV12, MV22, MV32, MV72, MV93
+MT sensors: MT14, MT15, MT20, MT40
+Teleworker: Z4, Z4C
+Cellular: MG51, MG52
+IMPORTANT — Unknown/EOL model rule: If a user mentions a model number that follows Cisco/Meraki naming patterns (MR##, MX##, MS###-##, MV##, CW####, MT##, Z#, MG##) but is NOT in the active product list above, it is likely end-of-life or a typo. ALWAYS classify as "quote" if they want pricing — NEVER "clarify". The backend has full EOL data and handles replacement mapping automatically.
+
+Respond with ONLY this JSON:
+{"intent":"<category>","reply":"<for clarify or conversation only. MUST be empty for quote, product_info, escalate>","extracted":"<for quote only: extract clean request like 'quote 10 MR46 with 3 year license'. Empty for all other intents>"}`;
+
+const CF_CONVO_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products. Be friendly, concise, and professional. Keep responses under 4 sentences.
+
+Key product knowledge:
+- MX security appliances: MX67 ($595, 50 users), MX68 ($795, 50), MX75 ($2,195, 200), MX85 ($3,995, 600), MX95 ($7,995, 2000), MX105 ($12,995, 5000), MX250 ($19,995, 10000), MX450 ($34,995, unlimited)
+- MR access points: MR28 ($495), MR36H ($595), MR44 ($995, EoS-replaced by CW9164), MR46 ($1,295), MR57 ($1,895), MR78 ($2,495)
+- MS switches: MS120-8 ($595), MS130-8 ($695), MS210-24 ($2,495), MS225-24 ($3,495), MS250-24 ($4,995), MS390-24 ($7,995)
+- CW Wi-Fi 7: CW9162 ($995), CW9164 ($1,495), CW9166 ($1,995), CW9172 ($2,495), CW9176 ($3,995)
+- MV cameras: MV2 ($495), MV12 ($995), MV22 ($1,295), MV32 ($1,995), MV72 ($3,495), MV93 ($4,995)
+- MT sensors: MT14 ($149), MT15 ($199), MT20 ($129), MT40 ($199) — free tier up to 100 sensors
+- All hardware needs a license (1yr/3yr/5yr). APs use LIC-ENT-. MX uses LIC-SEC- or LIC-ENT-.
+
+For quote requests, tell users to say "quote [qty] [model]" and you'll generate an instant quote.`;
+
+// Helper: extract text from Workers AI response (handles native string, native object, and OpenAI formats)
+function extractAIResponse(result) {
+  const raw = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+  if (typeof raw === 'string') return raw.trim();
+  if (typeof raw === 'object') return JSON.stringify(raw);  // Llama 4 Scout returns parsed JSON objects
+  return String(raw);
+}
+
+async function classifyWithCF(userMessage, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CLASSIFIER_PROMPT },
+          { role: 'user', content: userMessage }
+        ],
+        max_tokens: 256
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 8000))
+    ]);
+    const elapsed = Date.now() - startMs;
+
+    // Llama 4 Scout returns result.response as a pre-parsed JSON object
+    const rawResponse = result?.response ?? result?.choices?.[0]?.message?.content;
+    if (typeof rawResponse === 'object' && rawResponse !== null && rawResponse.intent) {
+      console.log(`[CF-Classify] Pre-parsed object (${elapsed}ms): intent=${rawResponse.intent}`);
+      return { ...rawResponse, elapsed, raw: JSON.stringify(rawResponse) };
+    }
+
+    // Fallback: string response (other models) — extract JSON
+    const raw = typeof rawResponse === 'string' ? rawResponse.trim() : String(rawResponse || '');
+    console.log(`[CF-Classify] Raw response (${elapsed}ms): ${raw.substring(0, 200)}`);
+    let jsonStr = raw;
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (jsonMatch) jsonStr = jsonMatch[0];
+    const parsed = JSON.parse(jsonStr);
+    return { ...parsed, elapsed, raw };
+  } catch (err) {
+    console.error(`[CF-Classify] Error: ${err.message} (${Date.now() - startMs}ms)`);
     return null;
   }
+}
 
+async function askCFConversation(userMessage, env) {
+  if (!env.AI) return null;
   const startMs = Date.now();
-
   try {
-    // Convert base64 to Uint8Array for Workers AI
-    const binaryStr = atob(imageData.base64);
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) {
-      bytes[i] = binaryStr.charCodeAt(i);
-    }
-
-    const result = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
-      messages: [
-        {
-          role: 'user',
-          content: userMessage || 'Analyze this image and describe what you see.'
-        }
-      ],
-      image: [...bytes],  // Workers AI expects number array
-      max_tokens: 2048
-    });
-
-    const elapsed = Date.now() - startMs;
-    const response = result?.response || '';
-    console.log(`[WorkersAI] Vision completed in ${elapsed}ms (${response.length} chars)`);
-    return response;
-  } catch (err) {
-    const elapsed = Date.now() - startMs;
-    console.error(`[WorkersAI] Vision error after ${elapsed}ms:`, err.message);
-
-    // Fallback: try alternate input format (some models want base64 directly)
-    try {
-      const result = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
         messages: [
-          {
-            role: 'user',
-            content: userMessage || 'Analyze this image and describe what you see.'
-          }
+          { role: 'system', content: CF_CONVO_PROMPT },
+          { role: 'user', content: userMessage }
         ],
-        image: imageData.base64,  // Try raw base64 string
-        max_tokens: 2048
-      });
-      const response = result?.response || '';
-      console.log(`[WorkersAI] Fallback format succeeded (${response.length} chars)`);
-      return response;
-    } catch (err2) {
-      console.error('[WorkersAI] Fallback also failed:', err2.message);
+        max_tokens: 256
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 10000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const response = extractAIResponse(result);
+    if (response.length > 5) return { response, elapsed };
+    return null;
+  } catch (err) {
+    console.error(`[CF-Convo] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
+  }
+}
+
+// CF Vision: analyze images via Llama 4 Scout (free) before falling back to Claude
+async function askCFVision(prompt, imageData, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: `data:${imageData.mediaType};base64,${imageData.base64}` } }
+          ]
+        }],
+        max_tokens: 1500
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('CF_VISION_TIMEOUT')), 15000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const response = extractAIResponse(result);
+    // Validate: if model says "can't see" or returns too short, it failed
+    if (response.length < 20) return null;
+    const cantSee = /(can'?t see|cannot see|don'?t see|unable to (see|view)|no image|text-based|upload)/i;
+    if (cantSee.test(response)) {
+      console.log(`[CF-Vision] Model can't see image (${elapsed}ms), falling back to Claude`);
       return null;
     }
+    console.log(`[CF-Vision] Success (${elapsed}ms, ${response.length} chars)`);
+    return { response, elapsed };
+  } catch (err) {
+    console.error(`[CF-Vision] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
   }
 }
 
@@ -627,8 +754,20 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
-  if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
+  // CW Wi-Fi 7 (917x): add -RTG suffix
+  if (/^CW917\d/.test(upper)) {
+    // Auto-append I if bare model number (CW9172→CW9172I, but not CW9172H or CW9176 which are already full)
+    let cwBase = upper;
+    if (/^CW917\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    return cwBase.endsWith('-RTG') ? cwBase : `${cwBase}-RTG`;
+  }
+  // CW Wi-Fi 6E (916x): auto-append I for standard internal-antenna model, add -MR suffix
+  if (/^CW916\d/.test(upper)) {
+    let cwBase = upper;
+    // CW9162→CW9162I, CW9164→CW9164I, CW9166→CW9166I (but not CW9163E, CW9166D1, etc.)
+    if (/^CW916\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    return cwBase.endsWith('-MR') ? cwBase : `${cwBase}-MR`;
+  }
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (upper.startsWith('MS450')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
@@ -1146,8 +1285,18 @@ function detectFamily(sku) {
 function getPrice(sku) {
   const upper = sku.toUpperCase();
   if (prices[upper]) return prices[upper];
+  // Try stripping -HW suffix (MR46-HW → MR46)
   const noHw = upper.replace(/-HW(-NA)?$/, '');
-  if (prices[noHw]) return prices[noHw];
+  if (noHw !== upper && prices[noHw]) return prices[noHw];
+  // Try adding -HW suffix (MR46 → MR46-HW)
+  if (prices[`${upper}-HW`]) return prices[`${upper}-HW`];
+  // Try adding -MR suffix for CW Wi-Fi 6E (CW9164I → CW9164I-MR)
+  if (prices[`${upper}-MR`]) return prices[`${upper}-MR`];
+  // Try adding -RTG suffix for CW Wi-Fi 7 (CW9172I → CW9172I-RTG)
+  if (prices[`${upper}-RTG`]) return prices[`${upper}-RTG`];
+  // Try full applySuffix normalization as last resort
+  const suffixed = applySuffix(upper);
+  if (suffixed !== upper && prices[suffixed]) return prices[suffixed];
   return null;
 }
 
@@ -1451,6 +1600,10 @@ async function handlePricingRequest(text, personId, kv) {
   const optionRef = text.match(/\b(?:OPTION\s+(1|2|3|A|B|B1|B2))\b/i);
   const termRef = text.match(/\b(\d)\s*-?\s*YEAR/i);
 
+  // Only use history-based pricing when there's an EXPLICIT reference to a prior quote
+  // (option number, term year, "the 3-year", etc.) — NOT just any pricing question
+  if (!optionRef && !termRef) return null;
+
   if (!personId || !kv) return null;
 
   // Search recent assistant messages for one containing the referenced option/URLs
@@ -1478,8 +1631,8 @@ async function handlePricingRequest(text, personId, kv) {
       lastResponse = assistantMsgs.find(m => m.content.toUpperCase().includes(legacyKey))?.content;
     }
   }
-  // Fallback: find the most recent message with Stratus order URLs
-  if (!lastResponse) {
+  // Fallback for term references: find most recent message with Stratus order URLs
+  if (!lastResponse && termRef) {
     lastResponse = assistantMsgs.find(m => m.content.includes('stratusinfosystems.com/order/'))?.content;
   }
   if (!lastResponse) return null;
@@ -2197,6 +2350,14 @@ function parseMessage(text) {
     /\bSHOULD I (GET|USE|GO|CHOOSE|PICK)\b/, /\bWHAT (DO YOU|WOULD YOU) (RECOMMEND|SUGGEST)\b/,
     /\bCOMPARE\b/, /\bTELL ME ABOUT\b/, /\bWHAT('?S| IS) THE BEST\b/,
     /\bHOW (DOES|DO|MANY|MUCH THROUGHPUT|FAST)\b/, /\bSPECS?\b/, /\bDIFFERENCE BETWEEN\b/,
+    // Product info / support / feature questions (should NOT generate quotes)
+    /\bDOES .+ SUPPORT\b/, /\bIS .+ SUPPORTED\b/, /\bIS .+ (STILL )?AVAILABLE\b/,
+    /\bWHAT .+ SUPPORT\b/, /\bWHAT (POE|UPLINK|PORT|SPEED|THROUGHPUT|BANDWIDTH|FEATURE)/,
+    /\bDOES .+ (HAVE|INCLUDE|COME WITH|OFFER)\b/,
+    /\bIS .+ (EOL|END OF LIFE|DISCONTINUED|DEPRECATED|STILL SOLD)\b/,
+    /\bCAN .+ (HANDLE|SUPPORT|DO)\b/,
+    /\bWHAT('?S| IS|'S) .+ (CAPABLE|RATED|MAX|MAXIMUM)\b/,
+    /\bWRITE .+ PROPOSAL\b/, /\bDRAFT .+ PROPOSAL\b/, /\bBUILD .+ PROPOSAL\b/,
     // Accessory/connectivity intent patterns (Phase 2)
     /\bWHAT SFP\b/, /\bWHICH SFP\b/, /\bWHAT OPTIC\b/, /\bWHICH OPTIC\b/,
     /\bCONNECT .+ TO\b/, /\bLINK .+ TO\b/, /\bHOOK UP\b/,
@@ -2408,7 +2569,7 @@ function parseMessage(text) {
       const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
-      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
+      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*(?:OF\s+)?(?:THE\s+)?$/);
       const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
       // For inline format (SKU1 qty1 SKU2 qty2...), prefer afterQty to avoid picking up previous SKU's quantity
       if (afterQty) qty = parseInt(afterQty[1]);
@@ -2700,7 +2861,7 @@ function buildQuoteResponse(parsed) {
   const resolvedItems = [];
   const tierWarnings = [];
 
-  for (const { baseSku, qty } of parsed.items) {
+  for (let { baseSku, qty } of parsed.items) {
     // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN) ──
     // These are injected by the bare-family parser for "4 MR", "5 MV's", etc.
     // They bypass normal SKU validation and generate license-only items directly.
@@ -2729,6 +2890,13 @@ function buildQuoteResponse(parsed) {
       }
       resolvedItems.push({ baseSku: `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true });
       continue;
+    }
+
+    // Pre-normalize CW base models: CW9164→CW9164I, CW9166→CW9166I, CW9162→CW9162I, CW9172→CW9172I
+    // Users commonly type just the base number without the I suffix
+    const bUpper = baseSku.toUpperCase();
+    if (/^CW9(16|17)\d$/.test(bUpper) && !bUpper.endsWith('I')) {
+      baseSku = `${bUpper}I`;
     }
 
     const validation = validateSku(baseSku);
@@ -3771,7 +3939,8 @@ export default {
         {id:'wx-botcheck',name:'Bot Self-Check',type:'decision',fn:'getBotPersonId()'},
         {id:'wx-getmsg',name:'Get Message',type:'api',fn:'getMessage()'},
         {id:'wx-image',name:'Image Check',type:'decision',fn:'msg.files'},
-        {id:'wx-imgclaude',name:'Claude Vision',type:'api',fn:'askClaude(imageData)'},
+        {id:'wx-cfvision',name:'CF Vision (Llama 4 Scout)',type:'api',fn:'askCFVision()'},
+        {id:'wx-imgclaude',name:'Claude Vision (fallback)',type:'api',fn:'askClaude(imageData)'},
         {id:'wx-eol',name:'EOL Lookup',type:'action',fn:'handleEolDateRequest()'},
         {id:'wx-confirm',name:'Quote Confirm',type:'action',fn:'handleQuoteConfirmation()'},
         {id:'wx-pricing',name:'Pricing Calculator',type:'action',fn:'handlePricingRequest()'},
@@ -3951,45 +4120,41 @@ export default {
           T.step('wx-getmsg', 'exit');
 
           // Check for image attachments
-          // ╔═══════════════════════════════════════════════════════════╗
-          // ║  A/B TEST: Workers AI vision (temporary — revert after)  ║
-          // ║  GChat = Claude (control), Webex = Workers AI (test)     ║
-          // ╚═══════════════════════════════════════════════════════════╝
           T.step('wx-image', 'enter');
           if (msg.files && msg.files.length > 0) {
             const fileUrl = msg.files[0];
             const imageData = await downloadWebexFile(fileUrl, token);
             if (imageData && imageData.mediaType.startsWith('image/')) {
               T.step('wx-image', 'exit', { result: 'has_image' });
-              const prompt = text || 'Analyze this Meraki license dashboard screenshot. Parse all license types, device counts, and expiration dates. List each device name, license limit, and current device count.';
-              const imgStartMs = Date.now();
+              const prompt = text || 'A user sent this image. Analyze it and respond accordingly.';
 
-              // Try Workers AI first
-              T.step('wx-imgclaude', 'enter');  // reuse step name for tracing continuity
-              let reply = await askWorkersAI(prompt, env, imageData);
-              const workersAiMs = Date.now() - imgStartMs;
+              // Tier 1: Try CF Workers AI vision (Llama 4 Scout — free)
+              T.step('wx-cfvision', 'enter');
+              const cfVision = await askCFVision(prompt, imageData, env);
+              T.step('wx-cfvision', 'exit');
 
-              if (reply && reply.trim()) {
-                // Tag the response so we know which engine answered
-                reply = `**[CF Workers AI — Llama 3.2 Vision]** _(${workersAiMs}ms)_\n\n${reply}`;
-              } else {
-                // Fallback to Claude if Workers AI fails
-                console.log('[A/B TEST] Workers AI returned empty, falling back to Claude');
-                const claudeFallbackStart = Date.now();
-                reply = await askClaude(prompt, personId, env, imageData);
-                const claudeMs = Date.now() - claudeFallbackStart;
-                if (reply && reply.trim()) {
-                  reply = `**[Claude Sonnet — Fallback]** _(Workers AI failed, Claude took ${claudeMs}ms)_\n\n${reply}`;
-                }
+              if (cfVision) {
+                // CF vision succeeded
+                await addToHistory(kv, personId, 'user', `[Image] ${prompt}`);
+                await addToHistory(kv, personId, 'assistant', cfVision.response);
+                T.step('wx-send', 'enter');
+                await sendMessage(roomId, `${cfVision.response}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
+                T.step('wx-send', 'exit');
+                T.step('wx-d1', 'enter');
+                logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision', durationMs: cfVision.elapsed }).catch(() => {});
+                writeMetric(env, { path: 'cf-vision', durationMs: cfVision.elapsed, personId });
+                T.step('wx-d1', 'exit');
+                ctx.waitUntil(T.flush());
+                return;
               }
+
+              // Tier 2: Fall back to Claude vision (paid)
+              console.log('[Routing] CF vision failed, falling back to Claude');
+              T.step('wx-imgclaude', 'enter');
+              const claudeReply = await askClaude(prompt, personId, env, imageData);
               T.step('wx-imgclaude', 'exit');
-
               T.step('wx-send', 'enter');
-              if (reply && reply.trim()) {
-                await sendMessage(roomId, reply, token);
-              } else {
-                await sendMessage(roomId, `I received your image but neither vision model could process it. Could you try sending it again?`, token);
-              }
+              await sendMessage(roomId, claudeReply, token);
               T.step('wx-send', 'exit');
               ctx.waitUntil(T.flush());
               return;
@@ -4060,13 +4225,16 @@ export default {
           }
           T.step('wx-pricing', 'exit', { result: 'no_match' });
 
-          // Try deterministic engine first
+          // ── CF-FIRST WATERFALL: CF classifies intent, deterministic executes quotes ──
+          // Architecture: CF decides WHAT to do, deterministic engine does the QUOTING.
+          // This eliminates false-positive quoting on product-info/advisory questions
+          // because the deterministic engine never makes routing decisions — only CF does.
+
+          // Pre-check: Deterministic clarifications (Duo/Umbrella tier selection) — always instant, no CF needed
           T.step('wx-parse', 'enter');
           const parsed = parseMessage(text);
-
           if (parsed) {
-            T.step('wx-parse', 'exit', { result: 'parsed', items: parsed.items?.length || 0 });
-
+            T.step('wx-parse', 'exit', { result: 'parsed', items: parsed.items?.length || 0, advisory: parsed.isAdvisory, revision: parsed.isRevision });
             if (parsed.isClarification && parsed.clarificationMessage) {
               T.step('wx-clarify', 'enter'); T.step('wx-clarify', 'exit');
               await addToHistory(kv, personId, 'user', text);
@@ -4077,26 +4245,8 @@ export default {
               ctx.waitUntil(T.flush());
               return;
             }
-
-            T.step('wx-build', 'enter');
-            const result = buildQuoteResponse(parsed);
-            T.step('wx-build', 'exit', { needsLlm: result.needsLlm, hasMessage: !!result.message });
-
-            if (!result.needsLlm && result.message) {
-              await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', result.message);
-              T.step('wx-send', 'enter');
-              await sendMessage(roomId, result.message, token);
-              T.step('wx-send', 'exit');
-              T.step('wx-d1', 'enter');
-              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'deterministic', durationMs: Date.now() - _wxStartMs }).catch(() => {});
-              writeMetric(env, { path: 'deterministic', durationMs: Date.now() - _wxStartMs, personId });
-              T.step('wx-d1', 'exit');
-              ctx.waitUntil(T.flush());
-              return;
-            }
-
-            if (result.revision) {
+            // Revision requests go straight to Claude (needs conversation history)
+            if (parsed.isRevision) {
               T.step('wx-revision', 'enter');
               const history = await getHistory(kv, personId);
               if (history.length > 0) {
@@ -4117,23 +4267,107 @@ export default {
               ctx.waitUntil(T.flush());
               return;
             }
-
-            if (result.errors && result.errors.length > 0) {
-              const errorContext = result.errors.join('\n');
-              T.step('wx-claude', 'enter');
-              const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
-              T.step('wx-claude', 'exit');
-              T.step('wx-send', 'enter');
-              await sendMessage(roomId, claudeReply, token);
-              T.step('wx-send', 'exit');
-              ctx.waitUntil(T.flush());
-              return;
-            }
           } else {
             T.step('wx-parse', 'exit', { result: 'no_parse' });
           }
 
-          // Full fallback to Claude API
+          // ── CF Workers AI intent classifier — the brain of the waterfall ──
+          T.step('wx-cfclassify', 'enter');
+          const classification = await classifyWithCF(text, env);
+          T.step('wx-cfclassify', 'exit');
+
+          if (classification) {
+            console.log(`[CF-First] Intent: ${classification.intent} (${classification.elapsed}ms)`);
+
+            // CF: clarify — ambiguous input needs more info
+            if (classification.intent === 'clarify' && classification.reply) {
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', classification.reply);
+              T.step('wx-send', 'enter');
+              await sendMessage(roomId, `${classification.reply}\n\n_⚡ Workers AI (${classification.elapsed}ms, free)_`, token);
+              T.step('wx-send', 'exit');
+              T.step('wx-d1', 'enter');
+              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+              writeMetric(env, { path: 'cf-clarify', durationMs: Date.now() - _wxStartMs, personId });
+              T.step('wx-d1', 'exit');
+              ctx.waitUntil(T.flush());
+              return;
+            }
+
+            // CF: product_info — route to Claude (CF classifies, Claude answers)
+            if (classification.intent === 'product_info') {
+              console.log(`[CF-First] Product info question, routing to Claude`);
+              // Fall through to Claude below — CF identified the intent, Claude provides the answer
+            }
+
+            // CF: escalate — complex request needs Claude
+            if (classification.intent === 'escalate') {
+              console.log(`[CF-Escalate] Complex request, falling through to Claude`);
+              // Don't return — fall through to Claude below
+            }
+
+            // CF: conversation — casual chat, CF handles directly
+            else if (classification.intent === 'conversation') {
+              const convoReply = classification.reply && classification.reply.length > 5
+                ? classification.reply
+                : (await askCFConversation(text, env))?.response;
+
+              if (convoReply) {
+                await addToHistory(kv, personId, 'user', text);
+                await addToHistory(kv, personId, 'assistant', convoReply);
+                T.step('wx-send', 'enter');
+                await sendMessage(roomId, `${convoReply}\n\n_⚡ Workers AI (${classification.elapsed}ms, free)_`, token);
+                T.step('wx-send', 'exit');
+                T.step('wx-d1', 'enter');
+                logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-conversation', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                writeMetric(env, { path: 'cf-conversation', durationMs: Date.now() - _wxStartMs, personId });
+                T.step('wx-d1', 'exit');
+                ctx.waitUntil(T.flush());
+                return;
+              }
+            }
+
+            // CF: quote — CF says this is a quote request, execute via deterministic engine
+            else if (classification.intent === 'quote') {
+              // Use CF's extracted clean text if available, otherwise original text
+              const quoteText = classification.extracted || text;
+              console.log(`[CF-First] Quote intent, executing deterministic with: ${quoteText}`);
+              const quoteParsed = parseMessage(quoteText);
+              if (quoteParsed && !quoteParsed.isClarification) {
+                const quoteResult = buildQuoteResponse(quoteParsed);
+                if (quoteResult.message && !quoteResult.needsLlm) {
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', quoteResult.message);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, `${quoteResult.message}\n\n_⚡ CF-routed deterministic (${classification.elapsed}ms classify, free)_`, token);
+                  T.step('wx-send', 'exit');
+                  T.step('wx-d1', 'enter');
+                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-deterministic', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                  writeMetric(env, { path: 'cf-deterministic', durationMs: Date.now() - _wxStartMs, personId });
+                  T.step('wx-d1', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+                // Deterministic had errors — pass context to Claude
+                if (quoteResult.errors && quoteResult.errors.length > 0) {
+                  const errorContext = quoteResult.errors.join('\n');
+                  console.log(`[CF-First] Deterministic errors, escalating to Claude: ${errorContext}`);
+                  T.step('wx-claude', 'enter');
+                  const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+                  T.step('wx-claude', 'exit');
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, claudeReply, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+              }
+              // Deterministic couldn't handle CF's extracted quote — fall through to Claude
+              console.log('[CF-First] Deterministic couldn\'t execute CF quote intent, falling to Claude');
+            }
+          }
+
+          // Full fallback to Claude API (Tier 3)
           T.step('wx-claude', 'enter');
           const claudeReply = await askClaude(text, personId, env);
           T.step('wx-claude', 'exit');
@@ -4162,6 +4396,144 @@ export default {
       })());
 
       return new Response('OK', { status: 200 });
+    }
+
+    // ── Test routing endpoint: simulates full waterfall without sending messages ──
+    if (url.pathname === '/test-routing') {
+      const input = url.searchParams.get('input');
+      if (!input) return new Response(JSON.stringify({ error: 'input required' }), { headers: { 'content-type': 'application/json' } });
+
+      const result = { input, layer: null, response: null, details: {} };
+      const startMs = Date.now();
+
+      try {
+        // Layer 1: Deterministic — EOL date
+        const eolReply = handleEolDateRequest(input);
+        if (eolReply) {
+          result.layer = 'deterministic-eol';
+          result.response = eolReply.substring(0, 300);
+          result.details.ms = Date.now() - startMs;
+          return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+        }
+
+        // Layer 1: Deterministic — pricing (skip history-dependent part)
+        const pricingIntent = /\b(COSTS?|PRICES?|PRICING|HOW MUCH|TOTAL|WHAT DOES .* COSTS?|WHAT IS THE COSTS?|WHAT('S| IS) THE PRICES?)\b/i.test(input);
+        if (pricingIntent) {
+          const directSkuMatch = input.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for))?\s+(\d+)\s*x?\s+([A-Z0-9][-A-Z0-9]+)/i);
+          const singleSkuMatch = !directSkuMatch && input.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for|is|does))?\s+(?:an?\s+)?([A-Z0-9][-A-Z0-9]+)/i);
+          if (directSkuMatch) {
+            const qty = parseInt(directSkuMatch[1]);
+            const sku = directSkuMatch[2].toUpperCase();
+            const resp = formatPricingResponse(null, [sku], [qty]);
+            if (resp) {
+              result.layer = 'deterministic-pricing';
+              result.response = resp.substring(0, 300);
+              result.details = { sku, qty, ms: Date.now() - startMs };
+              return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+            }
+          }
+          // Reverse pattern: "what does [SKU] cost" — SKU before pricing keyword
+          const reverseSkuMatch = !directSkuMatch && !singleSkuMatch && input.match(/(?:what|how)\s+(?:does|do|is|would)\s+(?:an?\s+)?(?:the\s+)?(\d+\s+)?([A-Z0-9][-A-Z0-9]+)\s+(?:cost|run|go for|price)/i);
+          const pricingSkuMatch = singleSkuMatch || reverseSkuMatch;
+          if (pricingSkuMatch && !/^(OPTION|THE|THIS|THAT|MY|IT|A|AN)$/i.test(pricingSkuMatch[reverseSkuMatch ? 2 : 1])) {
+            const skuIdx = reverseSkuMatch ? 2 : 1;
+            const qtyIdx = reverseSkuMatch ? 1 : null;
+            const sku = pricingSkuMatch[skuIdx].toUpperCase();
+            const qty = qtyIdx && pricingSkuMatch[qtyIdx] ? parseInt(pricingSkuMatch[qtyIdx]) : 1;
+            const resp = formatPricingResponse(null, [sku], [qty]);
+            if (resp) {
+              result.layer = 'deterministic-pricing';
+              result.response = resp.substring(0, 300);
+              result.details = { sku, qty, ms: Date.now() - startMs };
+              return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+            }
+            result.details.pricingSkuAttempt = sku;
+          }
+        }
+
+        // Pre-check: Deterministic clarifications (Duo/Umbrella tier — instant, free)
+        const parsed = parseMessage(input);
+        if (parsed && parsed.isClarification && parsed.clarificationMessage) {
+          result.layer = 'deterministic-clarify';
+          result.response = parsed.clarificationMessage.substring(0, 300);
+          result.details.ms = Date.now() - startMs;
+          return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+        }
+
+        // CF-FIRST: CF Workers AI classifies intent, deterministic executes quotes
+        const classification = await classifyWithCF(input, env);
+        if (classification) {
+          result.details.cfIntent = classification.intent;
+          result.details.cfElapsed = classification.elapsed;
+          result.details.cfReply = (classification.reply || '').substring(0, 300);
+          result.details.cfExtracted = classification.extracted || '';
+
+          if (classification.intent === 'clarify' && classification.reply) {
+            result.layer = 'cf-clarify';
+            result.response = classification.reply.substring(0, 300);
+            result.details.ms = Date.now() - startMs;
+            return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+          }
+          if (classification.intent === 'product_info') {
+            // CF identified product_info — route to Claude (CF doesn't answer these)
+            result.layer = 'claude';
+            result.response = '[Product info question routed to Claude by CF]';
+            result.details.ms = Date.now() - startMs;
+            result.details.productInfoRoute = 'cf-to-claude';
+            return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+          }
+          if (classification.intent === 'escalate') {
+            result.layer = 'claude';
+            result.response = '[Escalated to Claude by CF classifier]';
+            result.details.ms = Date.now() - startMs;
+            result.details.escalateReason = 'cf-escalate';
+            return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+          }
+          if (classification.intent === 'conversation') {
+            const convoReply = classification.reply && classification.reply.length > 5
+              ? classification.reply
+              : (await askCFConversation(input, env))?.response;
+            if (convoReply) {
+              result.layer = 'cf-conversation';
+              result.response = convoReply.substring(0, 300);
+              result.details.ms = Date.now() - startMs;
+              return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+            }
+          }
+          if (classification.intent === 'quote') {
+            // CF says quote — execute via deterministic engine
+            const quoteText = classification.extracted || input;
+            const quoteParsed = parseMessage(quoteText);
+            if (quoteParsed && !quoteParsed.isClarification) {
+              const quoteResult = buildQuoteResponse(quoteParsed);
+              if (quoteResult.message && !quoteResult.needsLlm) {
+                result.layer = 'cf-deterministic';
+                result.response = quoteResult.message.substring(0, 500);
+                result.details.ms = Date.now() - startMs;
+                return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+              }
+              if (quoteResult.errors) {
+                result.details.deterministicErrors = quoteResult.errors;
+              }
+            }
+            result.details.cfExtractedButFailed = true;
+          }
+        } else {
+          result.details.cfFailed = true;
+        }
+
+        // Fallthrough: Claude API
+        result.layer = 'claude';
+        result.response = '[Would fall through to Claude API]';
+        result.details.ms = Date.now() - startMs;
+        return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+
+      } catch (err) {
+        result.layer = 'error';
+        result.response = err.message;
+        result.details.ms = Date.now() - startMs;
+        return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+      }
     }
 
     return new Response('Not Found', { status: 404 });
