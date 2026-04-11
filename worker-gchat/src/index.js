@@ -6136,7 +6136,12 @@ The user can only see your text responses, not tool calls. Always include a brie
 // Minimal system prompt for CRM/email agent mode (saves ~4K tokens vs full SYSTEM_PROMPT)
 const CRM_AGENT_SYSTEM_PROMPT_BASE = `You are Stratus AI, the sales assistant for Stratus Information Systems, a Cisco-exclusive Meraki reseller. You help with CRM and email tasks.
 
-Keep responses concise and well-formatted for Google Chat (* for bold, not **).
+Keep responses concise and well-formatted for Google Chat:
+- Use * for bold (not **)
+- NEVER use markdown links [text](url) — just paste the raw URL on its own line
+- NEVER use markdown tables (| col | col |) — use simple text lists instead
+- For quote summaries, list items line by line: "MR46-HW × 10 — $2,296 ea — $22,960 total"
+- Zoho links: paste the full URL on its own line after the record name
 ${CRM_SYSTEM_PROMPT}`;
 
 // ── Conditional prompt sections (loaded only when relevant intent detected) ──
@@ -7350,6 +7355,17 @@ function adaptMarkdownForGChat(text) {
   out = out.replace(/^•\s*/gm, '- ');
   // Convert --- horizontal rules to a plain separator
   out = out.replace(/^---+$/gm, '────────────────');
+  // Convert markdown links [text](url) to "text: url" or just "text\nurl"
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1\n$2');
+  // Strip markdown table separator rows (|---|---|)
+  out = out.replace(/^\|[\s\-:|]+\|$/gm, '');
+  // Convert markdown table rows to clean text: "| col1 | col2 |" → "col1 · col2"
+  out = out.replace(/^\|(.+)\|$/gm, (_, row) => {
+    return row.split('|').map(c => c.trim()).filter(Boolean).join(' · ');
+  });
+  // Clean up stray asterisks wrapping URLs (e.g., "*https://..." or "...484)*")
+  out = out.replace(/\*\s*(https?:\/\/\S+)/g, '$1');
+  out = out.replace(/(https?:\/\/\S+?)\)\*/g, '$1');
   return out;
 }
 
