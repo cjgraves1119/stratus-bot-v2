@@ -4076,9 +4076,8 @@ async function gmailApiCall(method, path, env, body = null) {
 
 // ─── CRM Validation Constants ─────────────────────────────────────────────────
 const VALID_DEAL_STAGES = [
-  'Qualification', 'Needs Analysis', 'Value Proposition', 'Identify Decision Makers',
-  'Proposal/Negotiation', 'Verbal Commit/Invoicing', 'Closed (Won)', 'Closed (Lost)',
-  'Closed-Lost to Competition'
+  'Qualification', 'Proposal/Negotiation', 'Verbal Commit/Invoicing',
+  'Closed (Won)', 'Closed (Lost)'
 ];
 const VALID_LEAD_SOURCES = [
   'Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website',
@@ -4092,9 +4091,11 @@ const BLOCKED_STAGE_VALUES = ['Closed (Won)']; // Must be set by PO automation, 
 // Common misspellings/wrong values → correct values for helpful error messages
 const PICKLIST_CORRECTIONS = {
   // Stage corrections — map common wrong values to actual Zoho picklist values
+  // ONLY 5 valid stages: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Won), Closed (Lost)
   'Closed Lost': 'Closed (Lost)',
   'Closed-Lost': 'Closed (Lost)',
   'closed lost': 'Closed (Lost)',
+  'Closed-Lost to Competition': 'Closed (Lost)',  // Not a real stage — map to Closed (Lost)
   'Closed Won': 'Closed (Won)',
   'Closed-Won': 'Closed (Won)',
   'closed won': 'Closed (Won)',
@@ -4102,6 +4103,9 @@ const PICKLIST_CORRECTIONS = {
   'Negotiation/Review': 'Proposal/Negotiation',
   'Negotiation': 'Proposal/Negotiation',
   'Proposal': 'Proposal/Negotiation',
+  'Needs Analysis': 'Qualification',              // Not a real stage — map to Qualification
+  'Value Proposition': 'Proposal/Negotiation',     // Not a real stage — map to Proposal/Negotiation
+  'Identify Decision Makers': 'Qualification',     // Not a real stage — map to Qualification
   'Waiting on Customer': 'Verbal Commit/Invoicing',
   'PO Received': 'Verbal Commit/Invoicing',
   'Verbal Commit': 'Verbal Commit/Invoicing',
@@ -5485,7 +5489,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_update_record',
-    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use valid picklist values: Qualification, Needs Analysis, Value Proposition, Identify Decision Makers, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost), Closed-Lost to Competition. "Closed (Won)" is blocked — deals auto-close when a PO is attached. Server-side validation auto-corrects known wrong values and rejects invalid ones.',
+    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use these 5 valid picklist values: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost). "Closed (Won)" is blocked — deals auto-close when a PO is attached. NEVER use any other stage value. Server-side validation auto-corrects known wrong values and rejects invalid ones.',
     input_schema: {
       type: 'object',
       properties: {
@@ -5916,18 +5920,14 @@ Every Deal Create call MUST include ALL of these fields:
 Closing_Date: calculate dynamically as today + 30 days, YYYY-MM-DD format.
 Never set Stage to "Closed (Won)" manually — deals auto-close when a PO (Sales_Order) is attached.
 
-VALID DEAL STAGES (use ONLY these exact values):
+VALID DEAL STAGES — ONLY these 5 exist (use ONLY these exact values):
 - Qualification (default for new deals)
-- Needs Analysis
-- Value Proposition
-- Identify Decision Makers
 - Proposal/Negotiation
 - Verbal Commit/Invoicing
 - Closed (Lost)
-- Closed-Lost to Competition
 - Closed (Won) — BLOCKED, auto-set by PO automation only
 
-IMPORTANT: Never invent stage names. If unsure, use "Qualification" as default. The server will auto-correct known wrong values but will reject anything not in the picklist.
+THERE ARE ONLY 5 STAGES. Never use "Needs Analysis", "Value Proposition", "Identify Decision Makers", "Closed-Lost to Competition", or any other stage name. These do NOT exist in the picklist. If unsure, use "Qualification" as default. The server will auto-correct known wrong values but will reject anything not in the valid list.
 
 ---
 
