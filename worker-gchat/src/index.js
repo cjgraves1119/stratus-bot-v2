@@ -12417,6 +12417,16 @@ Return ONLY a JSON object (no markdown, no explanation):
           T.step('gc-claude', 'exit');
         }
 
+        // General Claude fallback — catches anything CF couldn't handle:
+        // greetings when CF is unavailable, product questions, anything that
+        // didn't match pricing/clarification/CF/CRM patterns
+        if (!reply && !imageData) {
+          T.step('gc-claude', 'enter');
+          console.log(`[CF-First] No match from CF or deterministic — falling back to Claude`);
+          reply = await askClaude(text, personId, env);
+          T.step('gc-claude', 'exit');
+        }
+
         // If we have an image but no reply yet (no CRM intent, no SKU match),
         // send directly to Claude with the image for analysis
         if (!reply && imageData) {
