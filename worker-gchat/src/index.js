@@ -6141,7 +6141,10 @@ Keep responses concise and well-formatted for Google Chat:
 - NEVER use markdown links [text](url) — just paste the raw URL on its own line
 - NEVER use markdown tables (| col | col |) — use simple text lists instead
 - For quote summaries, list items line by line: "MR46-HW × 10 — $2,296 ea — $22,960 total"
-- Zoho links: paste the full URL on its own line after the record name
+- Zoho links: ALWAYS put the URL on a completely separate line with a blank line before it. Example:
+  *Quote: Advisor Test Corp - MR46*
+
+  https://crm.zoho.com/crm/org647122552/tab/Quotes/1234567890
 ${CRM_SYSTEM_PROMPT}`;
 
 // ── Conditional prompt sections (loaded only when relevant intent detected) ──
@@ -7366,6 +7369,8 @@ function adaptMarkdownForGChat(text) {
   // Clean up stray asterisks wrapping URLs (e.g., "*https://..." or "...484)*")
   out = out.replace(/\*\s*(https?:\/\/\S+)/g, '$1');
   out = out.replace(/(https?:\/\/\S+?)\)\*/g, '$1');
+  // Force a newline before any URL that's glued to preceding text (e.g., "Title*https://..." or "Titlehttps://...")
+  out = out.replace(/([^\s\n])(https?:\/\/)/g, '$1\n$2');
   return out;
 }
 
