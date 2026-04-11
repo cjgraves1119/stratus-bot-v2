@@ -559,6 +559,11 @@ CRITICAL RULES:
 - Single word "price" or "pricing" alone = "clarify".
 - "MR44 license" or "licenses for 3 MT" = "quote".
 - "LIC-ENT-3YR" or any bare license SKU = "quote".
+- Any SKU + "hardware only", "hw only", "no license", "hardware no license" = "quote". Example: "MX85 hardware only no license" = quote for MX85-HW.
+- Any SKU + "license only", "licenses only", "just the license", "renewal only" = "quote". Example: "MR46 license only 3 year" = quote for LIC-ENT-3YR.
+- Any SKU + "add-on", "add on license", "co-term", "coterm" = "quote".
+- A bare model number with no other context (e.g. "MX85", "MR46", "CW9164") = "quote" with qty 1.
+- Renewal/refresh phrasing with a SKU = "quote": "renew MR46 licenses", "refresh 10 MR44s", "replace MV22".
 
 VARIANT CLARIFICATION TABLES (use when user gives an incomplete model):
 MS switches with variants — if user says just the base model, ask which:
