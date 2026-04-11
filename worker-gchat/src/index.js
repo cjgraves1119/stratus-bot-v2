@@ -12591,7 +12591,7 @@ Return ONLY a JSON object (no markdown, no explanation):
       } catch (err) {
         console.error('[GCHAT] Webhook error:', err.message, err.stack);
         return sendGChatResponse(
-          'Something went wrong processing your request. Try again with a specific SKU like "quote 10 MR44".',
+          `⚠️ DEBUG: ${err.message}\n\nStack: ${(err.stack || '').substring(0, 300)}`,
           true // assume add-on format for safety
         );
       }
