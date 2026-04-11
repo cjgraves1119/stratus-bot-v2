@@ -11696,11 +11696,122 @@ Return ONLY a JSON object (no markdown, no explanation):
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
       return new Response(JSON.stringify({
         status: 'Stratus AI (Google Chat) running',
-        version: '1.2.0-gchat-async',
+        version: '2.0.0-cf-first-advisor',
         runtime: 'cloudflare-workers'
       }), {
         headers: { 'Content-Type': 'application/json' }
       });
+    }
+
+    // ── Test routing endpoint: mirrors CF-first waterfall logic for stress testing ──
+    if (request.method === 'GET' && url.pathname === '/test-routing') {
+      const input = url.searchParams.get('input');
+      if (!input) {
+        return new Response(JSON.stringify({ error: 'Missing ?input= parameter' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Load live prices for deterministic engine
+      if (env.CONVERSATION_KV) {
+        await loadLivePrices(env);
+      }
+
+      const result = {
+        input,
+        layer: null,
+        response: null,
+        details: {}
+      };
+
+      try {
+        // Pre-check: Deterministic pricing calculator
+        const pricingReply = await handlePricingRequest(input, 'test', env.CONVERSATION_KV);
+        if (pricingReply) {
+          result.layer = 'deterministic-pricing';
+          result.response = pricingReply;
+          return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        }
+
+        // Pre-check: Deterministic clarifications (Duo/Umbrella)
+        const parsed = parseMessage(input);
+        if (parsed && parsed.isClarification && parsed.clarificationMessage) {
+          result.layer = 'deterministic-clarify';
+          result.response = parsed.clarificationMessage;
+          return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        }
+
+        // Pre-check: EOL date requests
+        const eolReply = handleEolDateRequest(input);
+        if (eolReply) {
+          result.layer = 'deterministic-eol';
+          result.response = eolReply;
+          return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        }
+
+        // CF-FIRST: CF classifies, deterministic executes quotes
+        const classification = await classifyWithCF(input, env);
+        result.details.cf = classification ? {
+          intent: classification.intent,
+          elapsed: classification.elapsed,
+          reply: classification.reply || '',
+          extracted: classification.extracted || ''
+        } : null;
+
+        if (classification) {
+          if (classification.intent === 'clarify' && classification.reply) {
+            result.layer = 'cf-clarify';
+            result.response = classification.reply;
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'product_info') {
+            result.layer = 'claude';
+            result.response = '[Product info question routed to Claude by CF]';
+            result.details.productInfoRoute = 'cf-to-claude';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'escalate') {
+            result.layer = 'claude';
+            result.response = '[Escalated to Claude by CF]';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'conversation') {
+            result.layer = 'cf-conversation';
+            result.response = classification.reply || '[Conversation handled by CF]';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'quote') {
+            const quoteText = classification.extracted || input;
+            const quoteParsed = parseMessage(quoteText);
+            if (quoteParsed && !quoteParsed.isClarification) {
+              const quoteResult = buildQuoteResponse(quoteParsed);
+              if (quoteResult && quoteResult.message && !quoteResult.needsLlm) {
+                result.layer = 'cf-deterministic';
+                result.response = quoteResult.message;
+                return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+              }
+            }
+            // Quote intent but deterministic couldn't resolve
+            result.layer = 'claude';
+            result.response = '[Quote intent but deterministic engine could not resolve — sent to Claude]';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+        }
+
+        // Full fallback to Claude
+        result.layer = 'claude';
+        result.response = '[CF unavailable or unclassified — full Claude fallback]';
+      } catch (err) {
+        result.layer = 'error';
+        result.response = err.message;
+      }
+
+      return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
     }
 
     // Diagnostic: test CRM agent flow end-to-end
