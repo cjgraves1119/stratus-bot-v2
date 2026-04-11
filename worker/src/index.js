@@ -3943,6 +3943,7 @@ export default {
         {id:'wx-pricing',name:'Pricing Calculator',type:'action',fn:'handlePricingRequest()'},
         {id:'wx-parse',name:'parseMessage',type:'action',fn:'parseMessage()'},
         {id:'wx-clarify',name:'Clarification',type:'decision',fn:'clarification prompt'},
+        {id:'wx-cfclassify',name:'CF Intent Classifier',type:'api',fn:'classifyWithCF()'},
         {id:'wx-build',name:'Build Quote',type:'action',fn:'buildQuoteResponse()'},
         {id:'wx-revision',name:'Revision Check',type:'decision',fn:'revision detection'},
         {id:'wx-claude',name:'Claude Fallback',type:'api',fn:'askClaude()'},
