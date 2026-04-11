@@ -3964,7 +3964,7 @@ export default {
     if (url.pathname.startsWith('/dashboard/')) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
       const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
-      if (dashKey !== 'stratus2026') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+      if (dashKey !== 'Biscuit4') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
       const db = env.ANALYTICS_DB; // may be undefined if D1 binding missing
 
       if (request.method === 'GET' && url.pathname === '/dashboard/stats') {
