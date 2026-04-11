@@ -4227,49 +4227,9 @@ export default {
           // Architecture: CF decides WHAT to do, deterministic engine does the QUOTING.
           // This eliminates false-positive quoting on product-info/advisory questions
           // because the deterministic engine never makes routing decisions — only CF does.
+          // Matches GChat worker architecture (v2.0.0-cf-first-advisor).
 
-          // Pre-check: Deterministic clarifications (Duo/Umbrella tier selection) — always instant, no CF needed
-          T.step('wx-parse', 'enter');
-          const parsed = parseMessage(text);
-          if (parsed) {
-            T.step('wx-parse', 'exit', { result: 'parsed', items: parsed.items?.length || 0, advisory: parsed.isAdvisory, revision: parsed.isRevision });
-            if (parsed.isClarification && parsed.clarificationMessage) {
-              T.step('wx-clarify', 'enter'); T.step('wx-clarify', 'exit');
-              await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', parsed.clarificationMessage);
-              T.step('wx-send', 'enter');
-              await sendMessage(roomId, parsed.clarificationMessage, token);
-              T.step('wx-send', 'exit');
-              ctx.waitUntil(T.flush());
-              return;
-            }
-            // Revision requests go straight to Claude (needs conversation history)
-            if (parsed.isRevision) {
-              T.step('wx-revision', 'enter');
-              const history = await getHistory(kv, personId);
-              if (history.length > 0) {
-                T.step('wx-revision', 'exit', { result: 'has_history' });
-                T.step('wx-claude', 'enter');
-                const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
-                T.step('wx-claude', 'exit');
-                T.step('wx-send', 'enter');
-                await sendMessage(roomId, claudeReply, token);
-                T.step('wx-send', 'exit');
-                ctx.waitUntil(T.flush());
-                return;
-              }
-              T.step('wx-revision', 'exit', { result: 'no_history' });
-              T.step('wx-send', 'enter');
-              await sendMessage(roomId, `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`, token);
-              T.step('wx-send', 'exit');
-              ctx.waitUntil(T.flush());
-              return;
-            }
-          } else {
-            T.step('wx-parse', 'exit', { result: 'no_parse' });
-          }
-
-          // ── CF Workers AI intent classifier — the brain of the waterfall ──
+          // ── Step 1: CF Workers AI intent classifier — the brain of the waterfall ──
           T.step('wx-cfclassify', 'enter');
           const classification = await classifyWithCF(text, env);
           T.step('wx-cfclassify', 'exit');
@@ -4330,8 +4290,49 @@ export default {
               // Use CF's extracted clean text if available, otherwise original text
               const quoteText = classification.extracted || text;
               console.log(`[CF-First] Quote intent, executing deterministic with: ${quoteText}`);
+
+              // ── Step 2: Deterministic engine only runs when CF routes to "quote" ──
+              T.step('wx-parse', 'enter');
               const quoteParsed = parseMessage(quoteText);
-              if (quoteParsed && !quoteParsed.isClarification) {
+              if (quoteParsed) {
+                T.step('wx-parse', 'exit', { result: 'parsed', items: quoteParsed.items?.length || 0, advisory: quoteParsed.isAdvisory, revision: quoteParsed.isRevision });
+
+                // Clarification responses (Duo/Umbrella tier selection) — instant
+                if (quoteParsed.isClarification && quoteParsed.clarificationMessage) {
+                  T.step('wx-clarify', 'enter'); T.step('wx-clarify', 'exit');
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', quoteParsed.clarificationMessage);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, quoteParsed.clarificationMessage, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                // Revision requests go straight to Claude (needs conversation history)
+                if (quoteParsed.isRevision) {
+                  T.step('wx-revision', 'enter');
+                  const history = await getHistory(kv, personId);
+                  if (history.length > 0) {
+                    T.step('wx-revision', 'exit', { result: 'has_history' });
+                    T.step('wx-claude', 'enter');
+                    const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                    T.step('wx-claude', 'exit');
+                    T.step('wx-send', 'enter');
+                    await sendMessage(roomId, claudeReply, token);
+                    T.step('wx-send', 'exit');
+                    ctx.waitUntil(T.flush());
+                    return;
+                  }
+                  T.step('wx-revision', 'exit', { result: 'no_history' });
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                // Normal quote — build the response
                 const quoteResult = buildQuoteResponse(quoteParsed);
                 if (quoteResult.message && !quoteResult.needsLlm) {
                   await addToHistory(kv, personId, 'user', text);
@@ -4359,6 +4360,8 @@ export default {
                   ctx.waitUntil(T.flush());
                   return;
                 }
+              } else {
+                T.step('wx-parse', 'exit', { result: 'no_parse' });
               }
               // Deterministic couldn't handle CF's extracted quote — fall through to Claude
               console.log('[CF-First] Deterministic couldn\'t execute CF quote intent, falling to Claude');
