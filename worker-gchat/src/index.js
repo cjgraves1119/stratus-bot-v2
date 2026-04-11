@@ -12444,7 +12444,7 @@ Return ONLY a JSON object (no markdown, no explanation):
         T.step('gc-respond', 'enter');
         T.step('gc-d1', 'enter');
         const _requestEndMs = Date.now();
-        const _responsePath = useTools ? 'crm_agent_advisor' : (reply && !imageData ? 'cf-deterministic' : 'claude');
+        const _responsePath = (typeof useTools !== 'undefined' && useTools) ? 'crm_agent_advisor' : (reply && !imageData ? 'cf-deterministic' : 'claude');
         const _durationMs = _requestEndMs - (_requestStartMs || _requestEndMs);
         ctx.waitUntil(logBotUsageToD1(env, {
           bot: isAddon ? 'addon' : 'gchat',
@@ -12591,7 +12591,7 @@ Return ONLY a JSON object (no markdown, no explanation):
       } catch (err) {
         console.error('[GCHAT] Webhook error:', err.message, err.stack);
         return sendGChatResponse(
-          `⚠️ DEBUG: ${err.message}\n\nStack: ${(err.stack || '').substring(0, 300)}`,
+          'Something went wrong processing your request. Try again with a specific SKU like "quote 10 MR44".',
           true // assume add-on format for safety
         );
       }
