@@ -769,12 +769,7 @@ function applySuffix(sku) {
     return cwBase.endsWith('-MR') ? cwBase : `${cwBase}-MR`;
   }
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
-  if (upper.startsWith('MS450')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS130R?-/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (upper.startsWith('MS390')) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  if (/^MS[1-4]\d{2}-/.test(upper) && !upper.startsWith('MS150') && !upper.startsWith('MS130') && !upper.startsWith('MS390')) {
-    return upper.endsWith('-HW') ? upper : `${upper}-HW`;
-  }
+  if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MX\d+C[W]?(-HW)?-NA$/i.test(upper)) return upper;
   if (/^MX\d+C(W)?$/i.test(upper)) return upper.endsWith('-HW-NA') ? upper : `${upper}-HW-NA`;
   if (/^Z\d+C?X$/i.test(upper)) return upper;
@@ -3330,14 +3325,16 @@ https://stratusinfosystems.com/order/?item={item1},{item2}&qty={qty1},{qty2}
 Items and quantities are separate comma-separated lists in matching order.
 
 ## SKU SUFFIX RULES
-- MR, MV, MT, MG, MS130, MS130R, MS390, Z (not Z4X/Z4CX) → add -HW
+- Most MS switches (MS120/125/130/130R/210/225/250/350/390/425/450) → add -HW
+- MR, MV, MT, MG, Z (not Z4X/Z4CX) → add -HW
 - MX non-cellular → add -HW
 - MX cellular (MXxxC, MXxxCW) → add -HW-NA
 - CW Wi-Fi 6E (CW916x) → add -MR
 - CW Wi-Fi 7 (CW917x) → add -RTG
-- MS150, MS450, C9xxx-M, MA- accessories → no suffix
+- MS150, C9200/C9300 (ending in 4G/4X), C8xxx, MA- accessories → no suffix (these families end in 4G/4X like Catalyst switches)
 - Z4X, Z4CX → no suffix (sold as-is)
-- Legacy switches (MS120/125/210/225/250/350/425) → add -HW
+
+IMPORTANT: CW9166I and CW9164I are CURRENT Wi-Fi 6E access points (use -MR suffix). They are NOT end-of-life. Do NOT substitute MR36 or any other replacement. Only SKUs listed in the EOL replacements map should be treated as EOL.
 
 ## LICENSE RULES (CRITICAL — term suffix format matters! Follow EXACTLY)
 Three license tiers exist for MX/Z:
