@@ -1532,6 +1532,10 @@ async function handlePricingRequest(text, personId, kv) {
   const pricingIntent = /\b(COSTS?|PRICES?|PRICING|HOW MUCH|TOTAL|WHAT DOES .* COSTS?|WHAT IS THE COSTS?|WHAT('S| IS) THE PRICES?|CART TOTAL|BREAKDOWN|ESTIMATE|INCLUDE\s+(COST|COSTS|PRICE|PRICES|PRICING)|WITH\s+(COST|COSTS|PRICE|PRICES|PRICING))\b/i.test(text);
   if (!pricingIntent) return null;
 
+  // Bail out on competitive analysis / vague category phrases — these need CF classification
+  if (/\b(total cost of ownership|TCO|vs\s+\w+|versus|compared?\s+to|ROI)\b/i.test(text)) return null;
+  if (/\b(pricing for|how much for|cost of)\s+(meraki|cisco|switches|aps?|access points?|cameras?|sensors?|firewalls?|routers?|networking)\s*$/i.test(text)) return null;
+
   // Pattern 0: Duo / Umbrella natural language pricing (e.g. "cost of Duo Advantage", "price of 10 Umbrella DNS Essentials")
   const isDuoPricing = /\b(?:DUO|CISCO\s*DUO)\b/i.test(upper);
   const isUmbPricing = /\bUMBRELLA\b/i.test(upper);
@@ -1589,8 +1593,9 @@ async function handlePricingRequest(text, personId, kv) {
 
   if (singleSkuMatch) {
     const sku = singleSkuMatch[1].toUpperCase();
-    // Filter out common false positives
-    if (!/^(OPTION|THE|THIS|THAT|MY|IT|A|AN)$/i.test(sku)) {
+    // Filter out common false positives and non-SKU words
+    // Real Cisco SKUs always contain a digit (MR46, CW9164, MS130-24P) or start with LIC-
+    if (!/^(OPTION|THE|THIS|THAT|MY|IT|A|AN)$/i.test(sku) && (/\d/.test(sku) || /^LIC-/i.test(sku))) {
       const resp = formatPricingResponse(null, [sku], [1]);
       if (resp) return resp;
     }
