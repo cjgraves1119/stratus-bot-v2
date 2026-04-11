@@ -4077,26 +4077,38 @@ async function gmailApiCall(method, path, env, body = null) {
 // ─── CRM Validation Constants ─────────────────────────────────────────────────
 const VALID_DEAL_STAGES = [
   'Qualification', 'Needs Analysis', 'Value Proposition', 'Identify Decision Makers',
-  'Proposal/Price Quote', 'Negotiation/Review', 'Closed Won', 'Closed (Lost)',
-  'Waiting on Customer', 'PO Received'
+  'Proposal/Negotiation', 'Verbal Commit/Invoicing', 'Closed (Won)', 'Closed (Lost)',
+  'Closed-Lost to Competition'
 ];
 const VALID_LEAD_SOURCES = [
-  'Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website', 'PharosIQ'
+  'Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website',
+  'PharosIQ', 'Stratus ADR Referral', 'Stratus ISM'
 ];
 const VALID_TASK_STATUSES = [
   'Not Started', 'Deferred', 'In Progress', 'Waiting for input', 'Completed'
 ];
-const BLOCKED_STAGE_VALUES = ['Closed Won']; // Must be set by PO automation, never manually
+const BLOCKED_STAGE_VALUES = ['Closed (Won)']; // Must be set by PO automation, never manually
 
 // Common misspellings/wrong values → correct values for helpful error messages
 const PICKLIST_CORRECTIONS = {
+  // Stage corrections — map common wrong values to actual Zoho picklist values
   'Closed Lost': 'Closed (Lost)',
   'Closed-Lost': 'Closed (Lost)',
   'closed lost': 'Closed (Lost)',
+  'Closed Won': 'Closed (Won)',
+  'Closed-Won': 'Closed (Won)',
+  'closed won': 'Closed (Won)',
+  'Proposal/Price Quote': 'Proposal/Negotiation',
+  'Negotiation/Review': 'Proposal/Negotiation',
+  'Negotiation': 'Proposal/Negotiation',
+  'Proposal': 'Proposal/Negotiation',
+  'Waiting on Customer': 'Verbal Commit/Invoicing',
+  'PO Received': 'Verbal Commit/Invoicing',
+  'Verbal Commit': 'Verbal Commit/Invoicing',
+  // Lead_Source corrections
   'Referral': 'Stratus Referal',
   'Stratus Referral': 'Stratus Referal',
   'Meraki ISR Referral': 'Meraki ISR Referal',
-  'Closed-Won': 'Closed Won',
   '-None-': null  // Should never be used for Lead_Source
 };
 
@@ -4161,30 +4173,42 @@ function validateCrmWrite(module_name, data, isCreate = false) {
   const errors = [];
 
   if (module_name === 'Deals') {
-    // Stage validation
+    // Stage validation — auto-correct known wrong values, block invalid ones
     if (data.Stage) {
-      // Check for blocked values first
+      // Check for blocked values first (Closed Won must come from PO automation)
       if (BLOCKED_STAGE_VALUES.includes(data.Stage)) {
-        errors.push(`❌ Stage "${data.Stage}" cannot be set manually. Deals auto-close to Closed Won when a PO (Sales_Order) is attached.`);
+        errors.push(`❌ Stage "${data.Stage}" cannot be set manually. Deals auto-close to Closed (Won) when a PO (Sales_Order) is attached.`);
       }
-      // Check for common misspellings
+      // Auto-correct known misspellings/wrong values silently
       else if (PICKLIST_CORRECTIONS[data.Stage] !== undefined) {
         const correction = PICKLIST_CORRECTIONS[data.Stage];
-        errors.push(`❌ Invalid Stage "${data.Stage}". Did you mean "${correction}"?`);
+        if (correction && VALID_DEAL_STAGES.includes(correction)) {
+          console.log(`[PICKLIST-FIX] Stage auto-corrected: "${data.Stage}" → "${correction}"`);
+          data.Stage = correction;
+        } else if (BLOCKED_STAGE_VALUES.includes(correction)) {
+          errors.push(`❌ Stage "${data.Stage}" maps to "${correction}" which cannot be set manually.`);
+        } else {
+          errors.push(`❌ Invalid Stage "${data.Stage}". Valid options: ${VALID_DEAL_STAGES.join(', ')}`);
+        }
       }
-      // Check against valid values
+      // Check against valid values — reject anything not in the picklist
       else if (!VALID_DEAL_STAGES.includes(data.Stage)) {
         errors.push(`❌ Invalid Stage "${data.Stage}". Valid options: ${VALID_DEAL_STAGES.join(', ')}`);
       }
     }
 
-    // Lead_Source validation
+    // Lead_Source validation — auto-correct known wrong values
     if (data.Lead_Source) {
       if (data.Lead_Source === '-None-') {
         errors.push('❌ Lead_Source cannot be "-None-". Use "Stratus Referal" as default or specify the correct source.');
       } else if (PICKLIST_CORRECTIONS[data.Lead_Source] !== undefined) {
         const correction = PICKLIST_CORRECTIONS[data.Lead_Source];
-        errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Did you mean "${correction}"?`);
+        if (correction && VALID_LEAD_SOURCES.includes(correction)) {
+          console.log(`[PICKLIST-FIX] Lead_Source auto-corrected: "${data.Lead_Source}" → "${correction}"`);
+          data.Lead_Source = correction;
+        } else {
+          errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Valid options: ${VALID_LEAD_SOURCES.join(', ')}`);
+        }
       } else if (!VALID_LEAD_SOURCES.includes(data.Lead_Source)) {
         errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Valid options: ${VALID_LEAD_SOURCES.join(', ')}`);
       }
@@ -4249,6 +4273,11 @@ function validateCrmWrite(module_name, data, isCreate = false) {
     if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
     if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
     if (!data.Owner) data.Owner = { id: '2570562000141711002' };
+    // Contact_Name enforcement: every quote must have a contact
+    if (!data.Contact_Name) {
+      console.log('[VALIDATE] Quote missing Contact_Name — applying Stratus Sales placeholder');
+      data.Contact_Name = { id: '2570562000116205038' }; // Stratus Sales placeholder
+    }
   }
 
   return errors.length > 0
@@ -4884,7 +4913,9 @@ async function executeToolCall(toolName, toolInput, env) {
               contactId = acctContacts.data[0].id;
               results.steps.push(`Found Contact on Account: ${acctContacts.data[0].Full_Name} (${contactId})`);
             } else {
-              results.steps.push('No contact found on Account (quote will be created without contact)');
+              // Fallback: use Stratus Sales placeholder contact so quotes always have a contact
+              contactId = '2570562000116205038'; // Stratus Sales (info@stratusinfosystems.com)
+              results.steps.push('No contact found on Account — using Stratus Sales placeholder. Please update the contact on this quote.');
             }
           }
           if (contactId) {
@@ -5419,7 +5450,7 @@ const CRM_EMAIL_TOOLS = [
       type: 'object',
       properties: {
         module_name: { type: 'string', description: 'CRM module API name: Deals, Quotes, Contacts, Accounts, Tasks, Products, Sales_Orders, Invoices' },
-        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:2570562000141711002) and (Stage:not_equals:Closed Won)' },
+        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:2570562000141711002) and (Stage:not_equals:Closed (Won))' },
         fields: { type: 'string', description: 'Comma-separated field API names to return. Example: id,Deal_Name,Stage,Amount,Account_Name' },
         page: { type: 'number', description: 'Page number (default 1)' },
         per_page: { type: 'number', description: 'Records per page (max 200, default 20)' }
@@ -5454,7 +5485,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_update_record',
-    description: 'Update an existing Zoho CRM record. Stage changes ARE supported (e.g., Qualification → Proposal/Price Quote, Negotiation/Review → Closed (Lost)). Server-side validation prevents invalid picklist values. Only "Closed Won" is blocked — deals auto-close when a PO is attached.',
+    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use valid picklist values: Qualification, Needs Analysis, Value Proposition, Identify Decision Makers, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost), Closed-Lost to Competition. "Closed (Won)" is blocked — deals auto-close when a PO is attached. Server-side validation auto-corrects known wrong values and rejects invalid ones.',
     input_schema: {
       type: 'object',
       properties: {
@@ -5883,11 +5914,28 @@ Every Deal Create call MUST include ALL of these fields:
 }
 \`\`\`
 Closing_Date: calculate dynamically as today + 30 days, YYYY-MM-DD format.
-Never set Stage to "Closed Won" manually — deals auto-close when a PO is attached.
+Never set Stage to "Closed (Won)" manually — deals auto-close when a PO (Sales_Order) is attached.
+
+VALID DEAL STAGES (use ONLY these exact values):
+- Qualification (default for new deals)
+- Needs Analysis
+- Value Proposition
+- Identify Decision Makers
+- Proposal/Negotiation
+- Verbal Commit/Invoicing
+- Closed (Lost)
+- Closed-Lost to Competition
+- Closed (Won) — BLOCKED, auto-set by PO automation only
+
+IMPORTANT: Never invent stage names. If unsure, use "Qualification" as default. The server will auto-correct known wrong values but will reject anything not in the picklist.
 
 ---
 
 ## QUOTE CREATION — COMPLETE REQUIRED PAYLOAD
+
+Every Quote MUST have a Contact_Name. Lookup order:
+1. Search Contacts by Account_Name to find an existing contact
+2. If no contact found, use Stratus Sales placeholder (ID: 2570562000116205038) and note in response: "Contact set to Stratus Sales placeholder — please update with the actual contact."
 
 Every Quote Create call MUST include ALL of these fields:
 \`\`\`json
@@ -5895,7 +5943,7 @@ Every Quote Create call MUST include ALL of these fields:
   "Subject": "{Account} - {Description}",
   "Deal_Name": {"id": "{deal_id}"},
   "Account_Name": {"id": "{account_id}"},
-  "Contact_Name": {"id": "{contact_id}"},
+  "Contact_Name": {"id": "{contact_id_or_placeholder}"},
   "Valid_Till": "{YYYY-MM-DD, today + 30 days}",
   "Cisco_Billing_Term": "Prepaid Term",
   "Billing_Street": "{from Account record or lookup}",
@@ -6025,10 +6073,17 @@ When the user asks to change license terms on an existing quote:
 ## PICKLIST PROTECTION
 
 NEVER create new dropdown values — Zoho silently accepts invalid values and creates duplicates.
-- WRONG: "Closed Lost" → CORRECT: "Closed (Lost)" with parentheses
+Server-side validation auto-corrects known wrong values, but you should still use exact picklist values.
+
+Stage corrections (server auto-fixes these, but avoid sending them):
+- WRONG: "Closed Won" / "Closed-Won" → CORRECT: "Closed (Won)" (parentheses required)
+- WRONG: "Closed Lost" / "Closed-Lost" → CORRECT: "Closed (Lost)" (parentheses required)
+- WRONG: "Proposal/Price Quote" → CORRECT: "Proposal/Negotiation"
+- WRONG: "Negotiation/Review" → CORRECT: "Proposal/Negotiation"
 - WRONG: "Referral" → CORRECT: "Stratus Referal" (one R)
-- Always validate Stage live via zoho_get_field before any Stage write
-- Lead_Source is stable — use the cached list above
+
+ONLY use values from the VALID DEAL STAGES list above. Do NOT invent stages like "Waiting on Customer", "PO Received", or any other custom value.
+For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) — ONLY select from existing options, never create new ones.
 
 ---
 
