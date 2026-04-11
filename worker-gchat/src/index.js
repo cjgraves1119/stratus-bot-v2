@@ -74,8 +74,10 @@ const prices = new Proxy(staticPrices, {
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
 // Pricing per 1M tokens (USD) by model
 const MODEL_PRICING = {
+  'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
   'claude-sonnet-4-20250514': { input: 3.00, output: 15.00 },
   'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
+  'claude-opus-4-6': { input: 15.00, output: 75.00 },
   'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00 },
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
 };
@@ -91,7 +93,7 @@ const MODEL_PRICING = {
 async function trackUsage(env, model, usage, source) {
   if (!usage || !env?.CONVERSATION_KV) return;
   try {
-    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-20250514'];
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
     const inputCost = (usage.input_tokens / 1_000_000) * pricing.input;
     const outputCost = (usage.output_tokens / 1_000_000) * pricing.output;
     const totalCost = inputCost + outputCost;
@@ -3600,7 +3602,7 @@ async function processEmailThread(text, personId, env, kv) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         max_tokens: 512,
         system: 'You are a JSON extraction tool. Return ONLY valid JSON with no markdown or extra text.',
         messages: [{ role: 'user', content: prompt }]
@@ -3613,7 +3615,7 @@ async function processEmailThread(text, personId, env, kv) {
     }
 
     const data = await response.json();
-    trackUsage(env, 'claude-sonnet-4-20250514', data.usage, 'email-parse').catch(() => {});
+    trackUsage(env, 'claude-sonnet-4-6', data.usage, 'email-parse').catch(() => {});
     const rawJson = data.content[0].text.trim();
 
     // Parse JSON response
@@ -4075,26 +4077,38 @@ async function gmailApiCall(method, path, env, body = null) {
 // ─── CRM Validation Constants ─────────────────────────────────────────────────
 const VALID_DEAL_STAGES = [
   'Qualification', 'Needs Analysis', 'Value Proposition', 'Identify Decision Makers',
-  'Proposal/Price Quote', 'Negotiation/Review', 'Closed Won', 'Closed (Lost)',
-  'Waiting on Customer', 'PO Received'
+  'Proposal/Negotiation', 'Verbal Commit/Invoicing', 'Closed (Won)', 'Closed (Lost)',
+  'Closed-Lost to Competition'
 ];
 const VALID_LEAD_SOURCES = [
-  'Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website', 'PharosIQ'
+  'Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website',
+  'PharosIQ', 'Stratus ADR Referral', 'Stratus ISM'
 ];
 const VALID_TASK_STATUSES = [
   'Not Started', 'Deferred', 'In Progress', 'Waiting for input', 'Completed'
 ];
-const BLOCKED_STAGE_VALUES = ['Closed Won']; // Must be set by PO automation, never manually
+const BLOCKED_STAGE_VALUES = ['Closed (Won)']; // Must be set by PO automation, never manually
 
 // Common misspellings/wrong values → correct values for helpful error messages
 const PICKLIST_CORRECTIONS = {
+  // Stage corrections — map common wrong values to actual Zoho picklist values
   'Closed Lost': 'Closed (Lost)',
   'Closed-Lost': 'Closed (Lost)',
   'closed lost': 'Closed (Lost)',
+  'Closed Won': 'Closed (Won)',
+  'Closed-Won': 'Closed (Won)',
+  'closed won': 'Closed (Won)',
+  'Proposal/Price Quote': 'Proposal/Negotiation',
+  'Negotiation/Review': 'Proposal/Negotiation',
+  'Negotiation': 'Proposal/Negotiation',
+  'Proposal': 'Proposal/Negotiation',
+  'Waiting on Customer': 'Verbal Commit/Invoicing',
+  'PO Received': 'Verbal Commit/Invoicing',
+  'Verbal Commit': 'Verbal Commit/Invoicing',
+  // Lead_Source corrections
   'Referral': 'Stratus Referal',
   'Stratus Referral': 'Stratus Referal',
   'Meraki ISR Referral': 'Meraki ISR Referal',
-  'Closed-Won': 'Closed Won',
   '-None-': null  // Should never be used for Lead_Source
 };
 
@@ -4159,30 +4173,42 @@ function validateCrmWrite(module_name, data, isCreate = false) {
   const errors = [];
 
   if (module_name === 'Deals') {
-    // Stage validation
+    // Stage validation — auto-correct known wrong values, block invalid ones
     if (data.Stage) {
-      // Check for blocked values first
+      // Check for blocked values first (Closed Won must come from PO automation)
       if (BLOCKED_STAGE_VALUES.includes(data.Stage)) {
-        errors.push(`❌ Stage "${data.Stage}" cannot be set manually. Deals auto-close to Closed Won when a PO (Sales_Order) is attached.`);
+        errors.push(`❌ Stage "${data.Stage}" cannot be set manually. Deals auto-close to Closed (Won) when a PO (Sales_Order) is attached.`);
       }
-      // Check for common misspellings
+      // Auto-correct known misspellings/wrong values silently
       else if (PICKLIST_CORRECTIONS[data.Stage] !== undefined) {
         const correction = PICKLIST_CORRECTIONS[data.Stage];
-        errors.push(`❌ Invalid Stage "${data.Stage}". Did you mean "${correction}"?`);
+        if (correction && VALID_DEAL_STAGES.includes(correction)) {
+          console.log(`[PICKLIST-FIX] Stage auto-corrected: "${data.Stage}" → "${correction}"`);
+          data.Stage = correction;
+        } else if (BLOCKED_STAGE_VALUES.includes(correction)) {
+          errors.push(`❌ Stage "${data.Stage}" maps to "${correction}" which cannot be set manually.`);
+        } else {
+          errors.push(`❌ Invalid Stage "${data.Stage}". Valid options: ${VALID_DEAL_STAGES.join(', ')}`);
+        }
       }
-      // Check against valid values
+      // Check against valid values — reject anything not in the picklist
       else if (!VALID_DEAL_STAGES.includes(data.Stage)) {
         errors.push(`❌ Invalid Stage "${data.Stage}". Valid options: ${VALID_DEAL_STAGES.join(', ')}`);
       }
     }
 
-    // Lead_Source validation
+    // Lead_Source validation — auto-correct known wrong values
     if (data.Lead_Source) {
       if (data.Lead_Source === '-None-') {
         errors.push('❌ Lead_Source cannot be "-None-". Use "Stratus Referal" as default or specify the correct source.');
       } else if (PICKLIST_CORRECTIONS[data.Lead_Source] !== undefined) {
         const correction = PICKLIST_CORRECTIONS[data.Lead_Source];
-        errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Did you mean "${correction}"?`);
+        if (correction && VALID_LEAD_SOURCES.includes(correction)) {
+          console.log(`[PICKLIST-FIX] Lead_Source auto-corrected: "${data.Lead_Source}" → "${correction}"`);
+          data.Lead_Source = correction;
+        } else {
+          errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Valid options: ${VALID_LEAD_SOURCES.join(', ')}`);
+        }
       } else if (!VALID_LEAD_SOURCES.includes(data.Lead_Source)) {
         errors.push(`❌ Invalid Lead_Source "${data.Lead_Source}". Valid options: ${VALID_LEAD_SOURCES.join(', ')}`);
       }
@@ -4247,6 +4273,11 @@ function validateCrmWrite(module_name, data, isCreate = false) {
     if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
     if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
     if (!data.Owner) data.Owner = { id: '2570562000141711002' };
+    // Contact_Name enforcement: every quote must have a contact
+    if (!data.Contact_Name) {
+      console.log('[VALIDATE] Quote missing Contact_Name — applying Stratus Sales placeholder');
+      data.Contact_Name = { id: '2570562000116205038' }; // Stratus Sales placeholder
+    }
   }
 
   return errors.length > 0
@@ -4882,7 +4913,9 @@ async function executeToolCall(toolName, toolInput, env) {
               contactId = acctContacts.data[0].id;
               results.steps.push(`Found Contact on Account: ${acctContacts.data[0].Full_Name} (${contactId})`);
             } else {
-              results.steps.push('No contact found on Account (quote will be created without contact)');
+              // Fallback: use Stratus Sales placeholder contact so quotes always have a contact
+              contactId = '2570562000116205038'; // Stratus Sales (info@stratusinfosystems.com)
+              results.steps.push('No contact found on Account — using Stratus Sales placeholder. Please update the contact on this quote.');
             }
           }
           if (contactId) {
@@ -5417,7 +5450,7 @@ const CRM_EMAIL_TOOLS = [
       type: 'object',
       properties: {
         module_name: { type: 'string', description: 'CRM module API name: Deals, Quotes, Contacts, Accounts, Tasks, Products, Sales_Orders, Invoices' },
-        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:2570562000141711002) and (Stage:not_equals:Closed Won)' },
+        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:2570562000141711002) and (Stage:not_equals:Closed (Won))' },
         fields: { type: 'string', description: 'Comma-separated field API names to return. Example: id,Deal_Name,Stage,Amount,Account_Name' },
         page: { type: 'number', description: 'Page number (default 1)' },
         per_page: { type: 'number', description: 'Records per page (max 200, default 20)' }
@@ -5452,7 +5485,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_update_record',
-    description: 'Update an existing Zoho CRM record. Stage changes ARE supported (e.g., Qualification → Proposal/Price Quote, Negotiation/Review → Closed (Lost)). Server-side validation prevents invalid picklist values. Only "Closed Won" is blocked — deals auto-close when a PO is attached.',
+    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use valid picklist values: Qualification, Needs Analysis, Value Proposition, Identify Decision Makers, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost), Closed-Lost to Competition. "Closed (Won)" is blocked — deals auto-close when a PO is attached. Server-side validation auto-corrects known wrong values and rejects invalid ones.',
     input_schema: {
       type: 'object',
       properties: {
@@ -5881,11 +5914,28 @@ Every Deal Create call MUST include ALL of these fields:
 }
 \`\`\`
 Closing_Date: calculate dynamically as today + 30 days, YYYY-MM-DD format.
-Never set Stage to "Closed Won" manually — deals auto-close when a PO is attached.
+Never set Stage to "Closed (Won)" manually — deals auto-close when a PO (Sales_Order) is attached.
+
+VALID DEAL STAGES (use ONLY these exact values):
+- Qualification (default for new deals)
+- Needs Analysis
+- Value Proposition
+- Identify Decision Makers
+- Proposal/Negotiation
+- Verbal Commit/Invoicing
+- Closed (Lost)
+- Closed-Lost to Competition
+- Closed (Won) — BLOCKED, auto-set by PO automation only
+
+IMPORTANT: Never invent stage names. If unsure, use "Qualification" as default. The server will auto-correct known wrong values but will reject anything not in the picklist.
 
 ---
 
 ## QUOTE CREATION — COMPLETE REQUIRED PAYLOAD
+
+Every Quote MUST have a Contact_Name. Lookup order:
+1. Search Contacts by Account_Name to find an existing contact
+2. If no contact found, use Stratus Sales placeholder (ID: 2570562000116205038) and note in response: "Contact set to Stratus Sales placeholder — please update with the actual contact."
 
 Every Quote Create call MUST include ALL of these fields:
 \`\`\`json
@@ -5893,7 +5943,7 @@ Every Quote Create call MUST include ALL of these fields:
   "Subject": "{Account} - {Description}",
   "Deal_Name": {"id": "{deal_id}"},
   "Account_Name": {"id": "{account_id}"},
-  "Contact_Name": {"id": "{contact_id}"},
+  "Contact_Name": {"id": "{contact_id_or_placeholder}"},
   "Valid_Till": "{YYYY-MM-DD, today + 30 days}",
   "Cisco_Billing_Term": "Prepaid Term",
   "Billing_Street": "{from Account record or lookup}",
@@ -6023,10 +6073,17 @@ When the user asks to change license terms on an existing quote:
 ## PICKLIST PROTECTION
 
 NEVER create new dropdown values — Zoho silently accepts invalid values and creates duplicates.
-- WRONG: "Closed Lost" → CORRECT: "Closed (Lost)" with parentheses
+Server-side validation auto-corrects known wrong values, but you should still use exact picklist values.
+
+Stage corrections (server auto-fixes these, but avoid sending them):
+- WRONG: "Closed Won" / "Closed-Won" → CORRECT: "Closed (Won)" (parentheses required)
+- WRONG: "Closed Lost" / "Closed-Lost" → CORRECT: "Closed (Lost)" (parentheses required)
+- WRONG: "Proposal/Price Quote" → CORRECT: "Proposal/Negotiation"
+- WRONG: "Negotiation/Review" → CORRECT: "Proposal/Negotiation"
 - WRONG: "Referral" → CORRECT: "Stratus Referal" (one R)
-- Always validate Stage live via zoho_get_field before any Stage write
-- Lead_Source is stable — use the cached list above
+
+ONLY use values from the VALID DEAL STAGES list above. Do NOT invent stages like "Waiting on Customer", "PO Received", or any other custom value.
+For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) — ONLY select from existing options, never create new ones.
 
 ---
 
@@ -6134,7 +6191,15 @@ The user can only see your text responses, not tool calls. Always include a brie
 // Minimal system prompt for CRM/email agent mode (saves ~4K tokens vs full SYSTEM_PROMPT)
 const CRM_AGENT_SYSTEM_PROMPT_BASE = `You are Stratus AI, the sales assistant for Stratus Information Systems, a Cisco-exclusive Meraki reseller. You help with CRM and email tasks.
 
-Keep responses concise and well-formatted for Google Chat (* for bold, not **).
+Keep responses concise and well-formatted for Google Chat:
+- Use * for bold (not **)
+- NEVER use markdown links [text](url) — just paste the raw URL on its own line
+- NEVER use markdown tables (| col | col |) — use simple text lists instead
+- For quote summaries, list items line by line: "MR46-HW × 10 — $2,296 ea — $22,960 total"
+- Zoho links: ALWAYS put the URL on a completely separate line with a blank line before it. Example:
+  *Quote: Advisor Test Corp - MR46*
+
+  https://crm.zoho.com/crm/org647122552/tab/Quotes/1234567890
 ${CRM_SYSTEM_PROMPT}`;
 
 // ── Conditional prompt sections (loaded only when relevant intent detected) ──
@@ -6208,6 +6273,23 @@ Run on Sales_Orders module (PO record), NOT Quotes. Search Sales_Orders by Deal_
 function buildCrmSystemPrompt(text) {
   let prompt = CRM_AGENT_SYSTEM_PROMPT_BASE;
   const lower = (text || '').toLowerCase();
+
+  // ── Advisor tool guidance (Anthropic advisor-tool-2026-03-01 beta) ──
+  // Sonnet 4.6 executor + Opus 4.6 advisor for strategic CRM decisions.
+  // The advisor sees the full transcript and provides plans/corrections.
+  prompt += `\n\n## ADVISOR TOOL
+You have access to an advisor tool backed by a stronger reviewer model. It takes NO parameters — when you call advisor(), your entire conversation history is automatically forwarded.
+
+Call advisor BEFORE substantive work — before writing CRM records, before committing to a quote structure, before building on assumptions about account relationships or field values. Orientation (searching records, reading data) is not substantive work.
+
+Also call advisor:
+- When the task is complete, BEFORE your final response. Make your deliverable durable first (write the record, send the email), then call advisor for validation.
+- When stuck — errors recurring, unexpected Zoho data, unclear field mappings.
+- When considering a change of approach (e.g., creating a new account vs updating existing).
+
+Give the advice serious weight. If you follow a step and it fails empirically, or you have primary-source evidence that contradicts a specific claim, adapt. If there's a conflict between your data and the advisor's guidance, surface it in one more advisor call.
+
+The advisor should respond in under 100 words and use enumerated steps, not explanations.\n`;
 
   // Detect email intake intent
   const emailIntakePatterns = [
@@ -6365,19 +6447,28 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.every(n => _contExecTools.has(n));
     const contModel = (iteration > 3 && _isPureExec)
       ? 'claude-haiku-4-5-20251001'
-      : 'claude-sonnet-4-20250514';
+      : 'claude-sonnet-4-6';
     console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
     // Dynamic max_tokens: 2048 for most iterations, 1024 for pure exec (Haiku dispatch)
     const contMaxTok = _isPureExec ? 1024 : 2048;
+    // Add advisor tool for Sonnet iterations in continuation path
+    let contTools = tools;
+    if (contModel === 'claude-sonnet-4-6' && tools.length > 0) {
+      contTools = [
+        ...tools,
+        { type: 'advisor_20260301', name: 'advisor', model: 'claude-opus-4-6' }
+      ];
+    }
+
     const requestBody = {
       model: contModel,
       max_tokens: contMaxTok,
       system: systemPrompt,
       messages
     };
-    if (tools.length > 0) {
-      requestBody.tools = tools;
+    if (contTools.length > 0) {
+      requestBody.tools = contTools;
     }
 
     const response = await callAnthropicWithRetry(requestBody);
@@ -6523,6 +6614,156 @@ function handleQuoteUrlTool(params) {
   return { url, label: label || `${term}-Year Co-Term`, items_count: items.length };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// CF Workers AI: Intent classifier → deterministic engine → Claude fallback
+// CF-first waterfall: CF classifies ALL inputs before deterministic engine
+// ═══════════════════════════════════════════════════════════════
+const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+
+const CF_CLASSIFIER_PROMPT = `You are an intent classifier and clarification engine for a Cisco/Meraki quoting bot. Your job is to classify what the user wants and ask smart clarifying questions when their request is incomplete. You do NOT answer product questions — those go to a more capable AI.
+
+Respond with ONLY a JSON object, nothing else.
+
+Categories:
+- "quote": User wants a quote or pricing. They mention a specific model (MR46, MS130-8P, MX67, CW9164, MT14, Z4, MG51, etc.) with or without a quantity, or a bare license SKU (LIC-ENT-3YR, LIC-MV-5YR), or a generic license request ("5 MR licenses", "MR44 license"). Even if the model is EOL or unknown to you, classify as "quote" — the backend validates SKUs. If no quantity specified, assume 1. Extract the clean request.
+- "clarify": User wants a quote but is too vague OR specified an incomplete model that needs a variant selection. Generate a helpful clarification using the variant tables below. Examples: "quote me some switches" (which model?), "I need APs" (which model?), "quote 5 MS130-24" (1G or 10G uplinks?), "pricing for Meraki" (which product family?).
+- "product_info": User is asking about specs, features, sizing, recommendations, comparisons, EOL, compatibility, or capabilities — NOT asking for a quote. Examples: "what firewall for 50 users", "difference between MR46 and CW9164", "does MX67 support SD-WAN", "is MV22 weatherproof", "is MR46 indoor or outdoor". Set reply to empty — these go to the advanced AI.
+- "escalate": Complex requests needing the advanced AI. Use for: proposal writing, deployment planning, detailed technical analysis. Set reply to empty.
+- "conversation": Greetings, thanks, farewells, jokes, identity questions, general chat, non-product topics, single characters ("q", "?", "!"), short reactions ("nice", "cool", "ok", "lol").
+
+CRITICAL RULES:
+- Never use "unclear" as an intent.
+- product_info reply MUST be empty. Never answer product questions yourself.
+- For "clarify", always generate a reply asking which specific model/variant.
+- Single word "price" or "pricing" alone = "clarify".
+- "MR44 license" or "licenses for 3 MT" = "quote".
+- "LIC-ENT-3YR" or any bare license SKU = "quote".
+- Any SKU + "hardware only", "hw only", "no license", "hardware no license" = "quote". Example: "MX85 hardware only no license" = quote for MX85-HW.
+- Any SKU + "license only", "licenses only", "just the license", "renewal only" = "quote". Example: "MR46 license only 3 year" = quote for LIC-ENT-3YR.
+- Any SKU + "add-on", "add on license", "co-term", "coterm" = "quote".
+- A bare model number with no other context (e.g. "MX85", "MR46", "CW9164") = "quote" with qty 1.
+- Renewal/refresh phrasing with a SKU = "quote": "renew MR46 licenses", "refresh 10 MR44s", "replace MV22".
+
+VARIANT CLARIFICATION TABLES (use when user gives an incomplete model):
+MS switches with variants — if user says just the base model, ask which:
+- MS130-8: 8-port compact (no variants)
+- MS130-12: 12-port → MS130-12P (PoE, 1G) or MS130-12X (mGig, 10G uplinks)
+- MS130-24: 24-port → MS130-24P (PoE, 1G uplinks) or MS130-24X (PoE, 10G uplinks)
+- MS130-48: 48-port → MS130-48P (PoE, 1G uplinks) or MS130-48X (PoE, 10G uplinks)
+- MS210-24: 24-port → MS210-24P (PoE) or MS210-24 (no PoE)
+- MS210-48: 48-port → MS210-48FP (full PoE) or MS210-48LP (partial PoE) or MS210-48 (no PoE)
+- MS225-24: 24-port → MS225-24P (PoE) or MS225-24 (no PoE)
+- MS225-48: 48-port → MS225-48FP (full PoE) or MS225-48LP (partial PoE) or MS225-48 (no PoE)
+- MS250-24: 24-port → MS250-24P (PoE) or MS250-24 (no PoE)
+- MS250-48: 48-port → MS250-48FP (full PoE) or MS250-48LP (partial PoE) or MS250-48 (no PoE)
+- MS390-24: → MS390-24P (PoE), MS390-24UX (mGig+UPOE), MS390-24U (mGig)
+- MS390-48: → MS390-48P (PoE), MS390-48UX (mGig+UPOE), MS390-48UX2 (mGig+UPOE 2nd gen), MS390-48U (mGig)
+
+MX sizing by user count (for basic sizing clarifications):
+- Up to 50 users: MX67 ($595) or MX68 ($795)
+- Up to 200 users: MX75 ($2,195)
+- Up to 600 users: MX85 ($3,995)
+- Up to 2,000 users: MX95 ($7,995)
+- Up to 5,000 users: MX105 ($12,995)
+- Up to 10,000 users: MX250 ($19,995)
+- Unlimited: MX450 ($34,995)
+
+Product families (for vague "I need switches/APs/cameras" clarifications):
+MR access points: MR28, MR36H, MR44 (End-of-Sale), MR46, MR57, MR78
+CW Wi-Fi 7 access points: CW9162, CW9164, CW9166, CW9172, CW9176
+MS switches: MS120, MS130, MS210, MS225, MS250, MS350, MS390, MS410, MS425, MS450
+MX security appliances: MX67, MX68, MX75, MX85, MX95, MX105, MX250, MX450
+MV cameras: MV2, MV12, MV22, MV32, MV72, MV93
+MT sensors: MT14, MT15, MT20, MT40
+Teleworker: Z4, Z4C
+Cellular: MG51, MG52
+IMPORTANT — Unknown/EOL model rule: If a user mentions a model number that follows Cisco/Meraki naming patterns (MR##, MX##, MS###-##, MV##, CW####, MT##, Z#, MG##) but is NOT in the active product list above, it is likely end-of-life or a typo. ALWAYS classify as "quote" if they want pricing — NEVER "clarify". The backend has full EOL data and handles replacement mapping automatically.
+
+Respond with ONLY this JSON:
+{"intent":"<category>","reply":"<for clarify or conversation only. MUST be empty for quote, product_info, escalate>","extracted":"<for quote only: extract clean request like 'quote 10 MR46 with 3 year license'. Empty for all other intents>"}`;
+
+const CF_CONVO_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products. Be friendly, concise, and professional. Keep responses under 4 sentences.
+
+Key product knowledge:
+- MX security appliances: MX67 ($595, 50 users), MX68 ($795, 50), MX75 ($2,195, 200), MX85 ($3,995, 600), MX95 ($7,995, 2000), MX105 ($12,995, 5000), MX250 ($19,995, 10000), MX450 ($34,995, unlimited)
+- MR access points: MR28 ($495), MR36H ($595), MR44 ($995, EoS-replaced by CW9164), MR46 ($1,295), MR57 ($1,895), MR78 ($2,495)
+- MS switches: MS120-8 ($595), MS130-8 ($695), MS210-24 ($2,495), MS225-24 ($3,495), MS250-24 ($4,995), MS390-24 ($7,995)
+- CW Wi-Fi 7: CW9162 ($995), CW9164 ($1,495), CW9166 ($1,995), CW9172 ($2,495), CW9176 ($3,995)
+- MV cameras: MV2 ($495), MV12 ($995), MV22 ($1,295), MV32 ($1,995), MV72 ($3,495), MV93 ($4,995)
+- MT sensors: MT14 ($149), MT15 ($199), MT20 ($129), MT40 ($199) — free tier up to 100 sensors
+- All hardware needs a license (1yr/3yr/5yr). APs use LIC-ENT-. MX uses LIC-SEC- or LIC-ENT-.
+
+For quote requests, tell users to say "quote [qty] [model]" and you'll generate an instant quote.`;
+
+// Helper: extract text from Workers AI response (handles native string, native object, and OpenAI formats)
+function extractAIResponse(result) {
+  const raw = result?.response ?? result?.choices?.[0]?.message?.content ?? '';
+  if (typeof raw === 'string') return raw.trim();
+  if (typeof raw === 'object') return JSON.stringify(raw);  // Llama 4 Scout returns parsed JSON objects
+  return String(raw);
+}
+
+async function classifyWithCF(userMessage, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CLASSIFIER_PROMPT },
+          { role: 'user', content: userMessage }
+        ],
+        max_tokens: 256
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 8000))
+    ]);
+    const elapsed = Date.now() - startMs;
+
+    // Llama 4 Scout returns result.response as a pre-parsed JSON object
+    const rawResponse = result?.response ?? result?.choices?.[0]?.message?.content;
+    if (typeof rawResponse === 'object' && rawResponse !== null && rawResponse.intent) {
+      console.log(`[CF-Classify] Pre-parsed object (${elapsed}ms): intent=${rawResponse.intent}`);
+      return { ...rawResponse, elapsed, raw: JSON.stringify(rawResponse) };
+    }
+
+    // Fallback: string response (other models) — extract JSON
+    const raw = typeof rawResponse === 'string' ? rawResponse.trim() : String(rawResponse || '');
+    console.log(`[CF-Classify] Raw response (${elapsed}ms): ${raw.substring(0, 200)}`);
+    let jsonStr = raw;
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (jsonMatch) jsonStr = jsonMatch[0];
+    const parsed = JSON.parse(jsonStr);
+    return { ...parsed, elapsed, raw };
+  } catch (err) {
+    console.error(`[CF-Classify] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
+  }
+}
+
+async function askCFConversation(userMessage, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CONVO_PROMPT },
+          { role: 'user', content: userMessage }
+        ],
+        max_tokens: 256
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT')), 10000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const response = extractAIResponse(result);
+    if (response.length > 5) return { response, elapsed };
+    return null;
+  } catch (err) {
+    console.error(`[CF-Convo] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
+  }
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
@@ -6666,17 +6907,25 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     const _expandedQuoteCache = {}; // { recordId: expandedDataString }
 
     // Helper: call Anthropic API with retry for 429/529 + model fallback
+    // Supports advisor tool beta header when advisor is in the tools array
     async function callAnthropicWithRetry(body, maxRetries = 3) {
+      const hasAdvisor = body.tools?.some(t => t.type === 'advisor_20260301');
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'cf-aig-skip-cache': 'true'  // CRM tool-use calls are always unique
+      };
+      if (hasAdvisor) {
+        headers['anthropic-beta'] = 'advisor-tool-2026-03-01';
+        console.log(`[GCHAT-ADVISOR] Advisor tool active — Opus 4.6 available for strategic guidance`);
+      }
+
       let lastResponse = null;
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         const response = await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'cf-aig-skip-cache': 'true'  // CRM tool-use calls are always unique
-          },
+          headers,
           body: JSON.stringify(body)
         });
 
@@ -6691,10 +6940,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
         return response;
       }
-      // All retries exhausted on primary model — try fallback to Haiku
+      // All retries exhausted on primary model — try fallback to Haiku (without advisor)
       if (body.model !== 'claude-haiku-4-5-20251001') {
         console.log(`[GCHAT-AGENT] Primary model exhausted retries, falling back to Haiku`);
-        const fallbackBody = { ...body, model: 'claude-haiku-4-5-20251001' };
+        // Strip advisor tool from fallback — Haiku can use it but won't need it for simple retries
+        const fallbackTools = body.tools?.filter(t => t.type !== 'advisor_20260301');
+        const fallbackBody = { ...body, model: 'claude-haiku-4-5-20251001', tools: fallbackTools };
         return await fetch(ANTHROPIC_API_URL, {
           method: 'POST',
           headers: {
@@ -6756,9 +7007,15 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const _inPureExecMode = useTools
         && _lastToolNames.length > 0
         && _lastToolNames.every(n => _executionTools.has(n));
+
+      // ── Advisor-aware model selection ──────────────────────────────
+      // CRM tool-use path: Sonnet 4.6 as executor with Opus 4.6 advisor
+      // for strategic guidance on complex decisions. Haiku for pure
+      // execution steps (updates/sends) where the plan is already set.
+      // Non-CRM path: Sonnet 4.6 for general product questions.
       const activeModel = (useTools && iteration > 2 && _inPureExecMode)
         ? 'claude-haiku-4-5-20251001'
-        : 'claude-sonnet-4-20250514';
+        : 'claude-sonnet-4-6';
       if (useTools) {
         console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
@@ -6769,14 +7026,31 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // - Iteration 4+: 1024 (finishing up, formatting response)
       // - Haiku exec steps: 1024 (just dispatching update/send, minimal reasoning)
       const maxTok = _inPureExecMode ? 1024 : (iteration <= 1 ? 4096 : (iteration <= 3 ? 1536 : 1024));
+
+      // ── Build tools array with advisor when in CRM mode ──────────
+      // The advisor tool lets Sonnet consult Opus for strategic guidance
+      // on complex CRM decisions (deal routing, field validation, etc.)
+      // Only include advisor for Sonnet iterations (not Haiku pure-exec steps)
+      let activeTools = tools;
+      if (useTools && activeModel === 'claude-sonnet-4-6') {
+        activeTools = [
+          ...tools,
+          {
+            type: 'advisor_20260301',
+            name: 'advisor',
+            model: 'claude-opus-4-6'
+          }
+        ];
+      }
+
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
         system: systemPrompt,
         messages
       };
-      if (tools.length > 0) {
-        requestBody.tools = tools;
+      if (activeTools.length > 0) {
+        requestBody.tools = activeTools;
       }
 
       const response = await callAnthropicWithRetry(requestBody);
@@ -7144,6 +7418,19 @@ function adaptMarkdownForGChat(text) {
   out = out.replace(/^•\s*/gm, '- ');
   // Convert --- horizontal rules to a plain separator
   out = out.replace(/^---+$/gm, '────────────────');
+  // Convert markdown links [text](url) to "text: url" or just "text\nurl"
+  out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1\n$2');
+  // Strip markdown table separator rows (|---|---|)
+  out = out.replace(/^\|[\s\-:|]+\|$/gm, '');
+  // Convert markdown table rows to clean text: "| col1 | col2 |" → "col1 · col2"
+  out = out.replace(/^\|(.+)\|$/gm, (_, row) => {
+    return row.split('|').map(c => c.trim()).filter(Boolean).join(' · ');
+  });
+  // Clean up stray asterisks wrapping URLs (e.g., "*https://..." or "...484)*")
+  out = out.replace(/\*\s*(https?:\/\/\S+)/g, '$1');
+  out = out.replace(/(https?:\/\/\S+?)\)\*/g, '$1');
+  // Force a newline before any URL that's glued to preceding text (e.g., "Title*https://..." or "Titlehttps://...")
+  out = out.replace(/([^\s\n])(https?:\/\/)/g, '$1\n$2');
   return out;
 }
 
@@ -7828,7 +8115,7 @@ ${(data.recentRequests || []).map(r => {
                   'anthropic-version': '2023-06-01'
                 },
                 body: JSON.stringify({
-                  model: 'claude-sonnet-4-20250514',
+                  model: 'claude-sonnet-4-6',
                   max_tokens: 500,
                   system: `You are a concise email analyzer for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
 {
@@ -7844,7 +8131,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
 
               if (summaryResp.ok) {
                 const summaryData = await summaryResp.json();
-                ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-20250514', summaryData.usage, 'addon-analyze'));
+                ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', summaryData.usage, 'addon-analyze'));
                 const text = summaryData.content?.[0]?.text || '';
                 try {
                   const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
@@ -8075,7 +8362,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
                 'anthropic-version': '2023-06-01'
               },
               body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
+                model: 'claude-sonnet-4-6',
                 max_tokens: 1500,
                 system: `You are drafting email replies for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki exclusive reseller specializing in Meraki). Write in Chris's voice:
 
@@ -8123,7 +8410,7 @@ CRITICAL URL RULES:
             }
 
             const draftData = await draftResp.json();
-            ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-20250514', draftData.usage, 'addon-draft'));
+            ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', draftData.usage, 'addon-draft'));
             const draftText = draftData.content?.[0]?.text || '';
             var parsedDraft;
             try {
@@ -11490,11 +11777,122 @@ Return ONLY a JSON object (no markdown, no explanation):
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
       return new Response(JSON.stringify({
         status: 'Stratus AI (Google Chat) running',
-        version: '1.2.0-gchat-async',
+        version: '2.0.0-cf-first-advisor',
         runtime: 'cloudflare-workers'
       }), {
         headers: { 'Content-Type': 'application/json' }
       });
+    }
+
+    // ── Test routing endpoint: mirrors CF-first waterfall logic for stress testing ──
+    if (request.method === 'GET' && url.pathname === '/test-routing') {
+      const input = url.searchParams.get('input');
+      if (!input) {
+        return new Response(JSON.stringify({ error: 'Missing ?input= parameter' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Load live prices for deterministic engine
+      if (env.CONVERSATION_KV) {
+        await loadLivePrices(env);
+      }
+
+      const result = {
+        input,
+        layer: null,
+        response: null,
+        details: {}
+      };
+
+      try {
+        // Pre-check: Deterministic pricing calculator
+        const pricingReply = await handlePricingRequest(input, 'test', env.CONVERSATION_KV);
+        if (pricingReply) {
+          result.layer = 'deterministic-pricing';
+          result.response = pricingReply;
+          return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        }
+
+        // Pre-check: Deterministic clarifications (Duo/Umbrella)
+        const parsed = parseMessage(input);
+        if (parsed && parsed.isClarification && parsed.clarificationMessage) {
+          result.layer = 'deterministic-clarify';
+          result.response = parsed.clarificationMessage;
+          return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        }
+
+        // Pre-check: EOL date requests
+        const eolReply = handleEolDateRequest(input);
+        if (eolReply) {
+          result.layer = 'deterministic-eol';
+          result.response = eolReply;
+          return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        }
+
+        // CF-FIRST: CF classifies, deterministic executes quotes
+        const classification = await classifyWithCF(input, env);
+        result.details.cf = classification ? {
+          intent: classification.intent,
+          elapsed: classification.elapsed,
+          reply: classification.reply || '',
+          extracted: classification.extracted || ''
+        } : null;
+
+        if (classification) {
+          if (classification.intent === 'clarify' && classification.reply) {
+            result.layer = 'cf-clarify';
+            result.response = classification.reply;
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'product_info') {
+            result.layer = 'claude';
+            result.response = '[Product info question routed to Claude by CF]';
+            result.details.productInfoRoute = 'cf-to-claude';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'escalate') {
+            result.layer = 'claude';
+            result.response = '[Escalated to Claude by CF]';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'conversation') {
+            result.layer = 'cf-conversation';
+            result.response = classification.reply || '[Conversation handled by CF]';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+
+          if (classification.intent === 'quote') {
+            const quoteText = classification.extracted || input;
+            const quoteParsed = parseMessage(quoteText);
+            if (quoteParsed && !quoteParsed.isClarification) {
+              const quoteResult = buildQuoteResponse(quoteParsed);
+              if (quoteResult && quoteResult.message && !quoteResult.needsLlm) {
+                result.layer = 'cf-deterministic';
+                result.response = quoteResult.message;
+                return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+              }
+            }
+            // Quote intent but deterministic couldn't resolve
+            result.layer = 'claude';
+            result.response = '[Quote intent but deterministic engine could not resolve — sent to Claude]';
+            return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+          }
+        }
+
+        // Full fallback to Claude
+        result.layer = 'claude';
+        result.response = '[CF unavailable or unclassified — full Claude fallback]';
+      } catch (err) {
+        result.layer = 'error';
+        result.response = err.message;
+      }
+
+      return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
     }
 
     // Diagnostic: test CRM agent flow end-to-end
@@ -11516,7 +11914,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         // Step 2: Test Anthropic API with tools
         const testBody = {
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
           max_tokens: 256,
           system: 'You are a test assistant. Respond with "API working" and use the test_tool to confirm tool use works.',
           messages: [{ role: 'user', content: 'test' }],
@@ -11857,7 +12255,8 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         T.step('gc-session', 'exit', { result: isExplicitCrmRequest ? 'crm_routed' : 'normal' });
 
-        // Deterministic pricing calculator
+        // ── CF-FIRST WATERFALL: CF classifies intent, deterministic executes quotes ──
+        // Pre-check: Deterministic pricing calculator (Duo/Umbrella tier math) — always instant
         T.step('gc-pricing', 'enter');
         if (!reply && !isExplicitCrmRequest) {
           const pricingReply = await handlePricingRequest(text, personId, kv);
@@ -11867,25 +12266,19 @@ Return ONLY a JSON object (no markdown, no explanation):
             reply = pricingReply;
           }
         }
-
         T.step('gc-pricing', 'exit', { result: reply ? 'match' : 'no_match' });
 
+        // Pre-check: Deterministic clarifications (Duo/Umbrella tier selection) — always instant
         T.step('gc-parse', 'enter');
         if (!reply && !isExplicitCrmRequest) {
           const parsed = parseMessage(text);
           if (parsed) {
-            // Clarification prompts (e.g. "which Duo tier?") — send directly
             if (parsed.isClarification && parsed.clarificationMessage) {
               await addToHistory(kv, personId, 'user', text);
               await addToHistory(kv, personId, 'assistant', parsed.clarificationMessage);
               reply = parsed.clarificationMessage;
             }
-            const result = !reply ? buildQuoteResponse(parsed) : null;
-            if (result && !result.needsLlm && result.message) {
-              await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', result.message);
-              reply = result.message;
-            } else if (result && result.revision) {
+            if (!reply && parsed.isRevision) {
               const history = await getHistory(kv, personId);
               if (history.length > 0) {
                 reply = await askClaude(
@@ -11895,9 +12288,73 @@ Return ONLY a JSON object (no markdown, no explanation):
               } else {
                 reply = 'I don\'t have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"';
               }
-            } else if (result && result.errors && result.errors.length > 0) {
-              const errorContext = result.errors.join('\n');
-              reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+            }
+          }
+
+          // ── CF Workers AI intent classifier — the brain of the waterfall ──
+          if (!reply) {
+            T.step('gc-cf', 'enter');
+            const classification = await classifyWithCF(text, env);
+            T.step('gc-cf', 'exit', { intent: classification?.intent || 'null' });
+
+            if (classification) {
+              // CF: clarify — CF asks which variant/model (MS130-24P vs 24X, etc.)
+              if (classification.intent === 'clarify' && classification.reply) {
+                await addToHistory(kv, personId, 'user', text);
+                await addToHistory(kv, personId, 'assistant', classification.reply);
+                reply = classification.reply;
+                console.log(`[CF-First] Clarification sent (${classification.elapsed}ms)`);
+              }
+
+              // CF: product_info — route to Claude (CF classifies, Claude answers)
+              if (!reply && classification.intent === 'product_info') {
+                console.log(`[CF-First] Product info question, routing to Claude`);
+                // Fall through to Claude below
+              }
+
+              // CF: escalate — route to Claude
+              if (!reply && classification.intent === 'escalate') {
+                console.log(`[CF-First] Escalation, routing to Claude`);
+                // Fall through to Claude below
+              }
+
+              // CF: conversation — CF handles greetings/thanks/chat
+              if (!reply && classification.intent === 'conversation') {
+                const convoResult = classification.reply
+                  ? { response: classification.reply }
+                  : await askCFConversation(text, env);
+                if (convoResult?.response) {
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', convoResult.response);
+                  reply = convoResult.response;
+                  console.log(`[CF-First] Conversation handled by CF`);
+                }
+              }
+
+              // CF: quote — deterministic engine executes the quote
+              if (!reply && classification.intent === 'quote') {
+                const quoteText = classification.extracted || text;
+                const quoteParsed = parseMessage(quoteText);
+                if (quoteParsed && !quoteParsed.isClarification) {
+                  const quoteResult = buildQuoteResponse(quoteParsed);
+                  if (quoteResult && quoteResult.message && !quoteResult.needsLlm) {
+                    await addToHistory(kv, personId, 'user', text);
+                    await addToHistory(kv, personId, 'assistant', quoteResult.message);
+                    reply = quoteResult.message;
+                    console.log(`[CF-First] Quote executed by deterministic engine (cf-deterministic)`);
+                  } else if (quoteResult && quoteResult.errors && quoteResult.errors.length > 0) {
+                    const errorContext = quoteResult.errors.join('\n');
+                    reply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+                    console.log(`[CF-First] Quote had errors, escalated to Claude`);
+                  }
+                }
+                // If parseMessage or buildQuoteResponse couldn't handle it, fall through to Claude
+                if (!reply) {
+                  console.log(`[CF-First] Quote intent but deterministic engine couldn't resolve, falling to Claude`);
+                }
+              }
+            } else {
+              console.log(`[CF-First] CF classifier unavailable, falling through to Claude`);
             }
           }
         }
@@ -12041,6 +12498,16 @@ Return ONLY a JSON object (no markdown, no explanation):
           T.step('gc-claude', 'exit');
         }
 
+        // General Claude fallback — catches anything CF couldn't handle:
+        // greetings when CF is unavailable, product questions, anything that
+        // didn't match pricing/clarification/CF/CRM patterns
+        if (!reply && !imageData) {
+          T.step('gc-claude', 'enter');
+          console.log(`[CF-First] No match from CF or deterministic — falling back to Claude`);
+          reply = await askClaude(text, personId, env);
+          T.step('gc-claude', 'exit');
+        }
+
         // If we have an image but no reply yet (no CRM intent, no SKU match),
         // send directly to Claude with the image for analysis
         if (!reply && imageData) {
@@ -12058,7 +12525,7 @@ Return ONLY a JSON object (no markdown, no explanation):
         T.step('gc-respond', 'enter');
         T.step('gc-d1', 'enter');
         const _requestEndMs = Date.now();
-        const _responsePath = useTools ? 'crm_agent' : (reply && !imageData ? 'deterministic' : 'claude');
+        const _responsePath = (typeof useTools !== 'undefined' && useTools) ? 'crm_agent_advisor' : (reply && !imageData ? 'cf-deterministic' : 'claude');
         const _durationMs = _requestEndMs - (_requestStartMs || _requestEndMs);
         ctx.waitUntil(logBotUsageToD1(env, {
           bot: isAddon ? 'addon' : 'gchat',
