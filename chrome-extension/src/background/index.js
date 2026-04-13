@@ -60,6 +60,8 @@ chrome.runtime.onStartup.addListener(() => {
 let currentEmailContext = null;
 let currentCrmContext = null;
 let currentTaskRescheduleContext = null;
+let currentZohoPageContext = null; // Set by Zoho content script
+let currentPageType = 'other';     // 'gmail' | 'zoho' | 'other'
 
 registerMessageHandlers({
   // ── Email Context ──
@@ -293,6 +295,52 @@ registerMessageHandlers({
     return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description);
   },
 
+  // ── Zoho Page Context ──
+  [MSG.ZOHO_CONTEXT_CHANGED]: async (payload) => {
+    currentZohoPageContext = payload;
+    // Persist to session storage for recovery after service worker sleep
+    try {
+      await chrome.storage.session.set({ zohoPageContext: payload });
+    } catch (err) {
+      console.error('[Stratus] Failed to persist Zoho context:', err);
+    }
+    return { success: true };
+  },
+
+  [MSG.GET_PAGE_CONTEXT]: async () => {
+    // Determine current page type from the active tab URL
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const url = tab?.url || '';
+
+      if (url.startsWith('https://mail.google.com/')) {
+        currentPageType = 'gmail';
+      } else if (url.startsWith('https://crm.zoho.com/')) {
+        currentPageType = 'zoho';
+      } else {
+        currentPageType = 'other';
+      }
+    } catch {
+      // Fallback if tabs query fails
+    }
+
+    // Recover Zoho context from session storage if needed
+    if (!currentZohoPageContext) {
+      try {
+        const stored = await chrome.storage.session.get('zohoPageContext');
+        if (stored?.zohoPageContext) {
+          currentZohoPageContext = stored.zohoPageContext;
+        }
+      } catch {}
+    }
+
+    return {
+      pageType: currentPageType,
+      zohoContext: currentZohoPageContext,
+      emailContext: currentEmailContext,
+    };
+  },
+
   // ── Tab Screenshot Capture ──
   [MSG.CAPTURE_TAB]: async () => {
     try {
@@ -337,13 +385,28 @@ chrome.notifications.onClicked.addListener(handleNotificationClick);
 // Side Panel
 // ─────────────────────────────────────────────
 
-// Enable side panel for Gmail tabs only
+// Enable side panel for all tabs (Gmail, Zoho CRM, and everything else for search)
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (tab.url && tab.url.startsWith('https://mail.google.com/')) {
+  if (tab.url) {
     chrome.sidePanel.setOptions({
       tabId,
       path: 'sidebar.html',
       enabled: true,
     }).catch(() => {});
+
+    // Track page type transitions and clear stale context
+    if (changeInfo.status === 'complete') {
+      if (tab.url.startsWith('https://mail.google.com/')) {
+        currentPageType = 'gmail';
+        currentZohoPageContext = null;
+      } else if (tab.url.startsWith('https://crm.zoho.com/')) {
+        currentPageType = 'zoho';
+        currentEmailContext = null;
+      } else {
+        currentPageType = 'other';
+        currentEmailContext = null;
+        currentZohoPageContext = null;
+      }
+    }
   }
 });

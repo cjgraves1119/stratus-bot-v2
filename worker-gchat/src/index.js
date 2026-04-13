@@ -9940,10 +9940,13 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 enrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${chatText}`;
               }
 
-              // Inject systemContext from extension (Zoho execution rules, email context)
-              if (chatSystemContext && chatSystemContext.trim()) {
-                enrichedMessage = `[Extension Instructions]\n${chatSystemContext}\n[End Instructions]\n\n${enrichedMessage}`;
-              }
+              // NOTE: Do NOT inject the extension's systemContext (Zoho capability claims)
+              // into the user message. When injected as [Extension Instructions], Claude
+              // sees it as a prompt injection attempt and refuses to comply. Instead, we
+              // always enable CRM tools for extension chat (see useTools below), and the
+              // CRM system prompt (buildCrmSystemPrompt) is set as the actual system prompt.
+              // Only inject email context parts if present (customer/domain info).
+              // The extension systemContext is intentionally ignored here.
 
               // ── IMPLICIT QUOTE CONTEXT ──
               // Scan recent conversation history for the most recently mentioned Zoho quote.
@@ -9973,15 +9976,13 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               }
 
               // ── CRM TOOL-USE DECISION ──
-              // Use tools if: (a) current message has CRM intent, OR (b) an active CRM session
-              // exists from a recent exchange (crm_session key set when tools were last used).
-              // This prevents follow-up messages like "consolidate the licenses" from losing
-              // Zoho access just because they don't explicitly say "in zoho."
-              const chatIntent = detectCrmEmailIntent(chatText);
+              // The Chrome extension chat is a CRM interface — ALWAYS enable tools when
+              // Zoho credentials are present. Unlike the GChat bot (which handles both
+              // quoting and CRM), the extension chat exists specifically for CRM operations.
+              // Gating on detectCrmEmailIntent caused false negatives ("add contact to
+              // account" didn't match) which made Claude refuse to use tools.
               const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
-              let crmSessionActive = null;
-              try { crmSessionActive = await env.CONVERSATION_KV.get(`crm_session_${chatPersonId}`); } catch (_e) {}
-              const useTools = hasCrmCreds && (chatIntent.hasAny || !!crmSessionActive);
+              const useTools = hasCrmCreds;
 
               // SERVER-SIDE PRODUCT PRE-RESOLUTION
               // If this looks like a quote creation request, pre-resolve product IDs from cache
@@ -10064,10 +10065,8 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               await addToHistory(env.CONVERSATION_KV, chatPersonId, 'user', enrichedMessage);
               await addToHistory(env.CONVERSATION_KV, chatPersonId, 'assistant', replyText);
 
-              // Set / refresh CRM session whenever tools were used or session was already active.
-              // This keeps the session alive across follow-up messages without requiring
-              // the user to repeat "in zoho" every time.
-              if (useTools || crmSessionActive) {
+              // Keep CRM session alive for potential cross-channel context (e.g. GChat follow-ups)
+              if (useTools) {
                 await env.CONVERSATION_KV.put(`crm_session_${chatPersonId}`, 'active', { expirationTtl: 900 });
               }
 

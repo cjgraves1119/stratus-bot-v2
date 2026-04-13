@@ -24,10 +24,17 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
   // Persistent personId for conversation history (enables pricing follow-ups, revisions, confirmations)
   const personIdRef = useRef('chrome-ext-quote-' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now()));
 
-  // Pre-fill from navData
+  // Pre-fill from navData — additive: append clicked SKUs as comma-separated
   useEffect(() => {
     if (navData?.skuText) {
-      setSkuText(navData.skuText);
+      setSkuText((prev) => {
+        const incoming = navData.skuText.trim();
+        if (!prev.trim()) return incoming;
+        // Avoid duplicates: check if this SKU is already in the list
+        const existing = prev.split(',').map(s => s.trim().toUpperCase());
+        if (existing.includes(incoming.toUpperCase())) return prev;
+        return `${prev.trim()}, ${incoming}`;
+      });
       setResult(null);
       setImageAnalysis(null);
       setTimeout(() => inputRef.current?.focus(), 100);

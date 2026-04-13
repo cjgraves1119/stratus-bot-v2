@@ -135,6 +135,10 @@ export const MSG = {
 
   // Tab Screenshot Capture
   CAPTURE_TAB: 'CAPTURE_TAB',
+
+  // Zoho Page Context Detection
+  ZOHO_CONTEXT_CHANGED: 'ZOHO_CONTEXT_CHANGED',
+  GET_PAGE_CONTEXT: 'GET_PAGE_CONTEXT',
 };
 
 // Keyboard shortcut command names (match manifest.json)

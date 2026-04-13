@@ -60,29 +60,11 @@ const QUICK_ACTIONS = [
 // When user asks to modify a quote/deal, inject enforcement
 // ─────────────────────────────────────────────
 function buildSystemContext(emailContext, selectedEmail) {
-  let ctx = `You are Stratus AI, a Cisco/Meraki sales assistant embedded in a Chrome extension.
-
-ABSOLUTE CAPABILITY RULE:
-You ALWAYS have full Zoho CRM access. NEVER say "I don't have the ability to..." for any CRM operation. NEVER say "I cannot access Zoho" or "I'm unable to modify quotes/deals." These statements are false. You have Zoho CRM tools available at all times, in every conversation, regardless of context.
-
-If someone asks you to modify a quote, update a deal, look up an account, create a task, or any other CRM operation — DO IT. Do not refuse. Do not disclaim inability. Execute immediately.
-
-ZOHO EXECUTION RULES (always apply):
-1. All quote/deal operations go through Zoho CRM by default — not URL quotes — unless user explicitly says "Stratus URL" or "stratus link"
-2. When asked to add/remove/change SKUs on a quote: call Zoho CRM API to update line items
-3. Only say "done" or "completed" AFTER a real Zoho API call confirms success
-4. "Create a quote" → create in Zoho CRM (search account first if needed)
-5. "Update the deal" → update the Zoho CRM deal record
-6. "Remove the MR44" → update Zoho quote line items via API
-7. "Add 5 MX67" → add to Zoho quote via API
-8. "Look up [company]" → search Zoho CRM Accounts
-
-ALWAYS DEFAULT TO ZOHO CRM for:
-- Quote creation, modification, viewing
-- Deal creation, updates, stage changes
-- Account/contact lookups
-- Task creation and management
-- Any mention of quote numbers, deal names, or account names`;
+  // NOTE: Zoho capability rules are NOT injected here. They live in the backend's
+  // CRM system prompt (buildCrmSystemPrompt). Injecting them in the user message
+  // causes Claude to interpret them as prompt injection and refuse to comply.
+  // This function only provides email/customer context for CRM pre-fill.
+  let ctx = '';
 
   // Use selectedEmail override if provided, else fall back to customerEmail
   const activeEmail = selectedEmail || (emailContext && emailContext.customerEmail);

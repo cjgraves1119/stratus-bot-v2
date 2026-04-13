@@ -85,8 +85,45 @@ export default function App() {
   // Lift chat state here so it persists when switching tabs
   const [chatMessages, setChatMessages] = useState([]);
 
-  // Load initial state with retry for email context
+  const [pageType, setPageType] = useState(null); // 'gmail' | 'zoho' | 'other'
+  const [zohoPageContext, setZohoPageContext] = useState(null);
+
+  // Detect page context first, then load appropriate data
   useEffect(() => {
+    sendToBackground(MSG.GET_AUTH_STATUS).then(setAuthStatus).catch(() => {});
+
+    // Ask background what page we're on
+    sendToBackground(MSG.GET_PAGE_CONTEXT).then((ctx) => {
+      const type = ctx?.pageType || 'other';
+      setPageType(type);
+
+      if (type === 'gmail') {
+        // On Gmail: load email context with retries, default to CRM tab
+        setActiveTab('crm');
+        loadEmailContextWithRetry();
+        sendToBackground(MSG.GET_CRM_CONTEXT).then((c) => {
+          if (c && !c.empty) setCrmContext(c);
+        }).catch(() => {});
+      } else if (type === 'zoho') {
+        // On Zoho: load Zoho record context, default to CRM tab
+        setActiveTab('crm');
+        if (ctx?.zohoContext) {
+          setZohoPageContext(ctx.zohoContext);
+          // If we have a record, trigger a CRM lookup
+          triggerZohoRecordLookup(ctx.zohoContext);
+        }
+      } else {
+        // On any other page: default to Search tab
+        setActiveTab('search');
+      }
+    }).catch(() => {
+      // Fallback: default to search
+      setPageType('other');
+      setActiveTab('search');
+    });
+  }, []);
+
+  function loadEmailContextWithRetry() {
     let retryCount = 0;
     const maxRetries = 5;
     const retryDelay = 800;
@@ -108,19 +145,67 @@ export default function App() {
     }
 
     fetchEmailContext();
+  }
 
-    sendToBackground(MSG.GET_CRM_CONTEXT).then((ctx) => {
-      if (ctx && !ctx.empty) setCrmContext(ctx);
-    }).catch(() => {});
+  /**
+   * When on a Zoho record page, trigger the CRM lookup using the record's
+   * email, account name, or domain so the CRM panel shows relevant data.
+   */
+  function triggerZohoRecordLookup(zohoCtx) {
+    if (!zohoCtx || zohoCtx.page !== 'record') return;
 
-    sendToBackground(MSG.GET_AUTH_STATUS).then(setAuthStatus).catch(() => {});
-  }, []);
+    const { module, recordId, recordName, email, accountName, website } = zohoCtx;
+
+    // For contacts with email, do a contact lookup
+    if (module === 'Contacts' && email) {
+      sendToBackground(MSG.CRM_LOOKUP, { email, domain: email.split('@')[1] }).then((result) => {
+        if (result && result.found) setCrmContext(result);
+      }).catch(() => {});
+      return;
+    }
+
+    // For accounts, search by account name or website domain
+    if (module === 'Accounts') {
+      const searchTerm = recordName || accountName;
+      if (searchTerm) {
+        sendToBackground(MSG.CRM_ACCOUNT_SEARCH, { query: searchTerm, domain: website }).then((result) => {
+          if (result && result.found) setCrmContext(result);
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // For deals, quotes, etc. — try account name or email
+    if (accountName) {
+      sendToBackground(MSG.CRM_ACCOUNT_SEARCH, { query: accountName }).then((result) => {
+        if (result && result.found) setCrmContext(result);
+      }).catch(() => {});
+    } else if (email) {
+      sendToBackground(MSG.CRM_LOOKUP, { email, domain: email.split('@')[1] }).then((result) => {
+        if (result && result.found) setCrmContext(result);
+      }).catch(() => {});
+    }
+  }
 
   // Listen for email changes from content script
   useEffect(() => {
     return onMessage(MSG.EMAIL_CHANGED, (data) => {
       setEmailContext(data);
       setCrmContext(null);
+    });
+  }, []);
+
+  // Listen for Zoho page navigation (record changes within Zoho SPA)
+  useEffect(() => {
+    return onMessage(MSG.ZOHO_CONTEXT_CHANGED, (data) => {
+      setZohoPageContext(data);
+      setPageType('zoho');
+      setCrmContext(null); // Reset so CRM panel re-fetches
+
+      if (data?.page === 'record') {
+        setActiveTab('crm');
+        triggerZohoRecordLookup(data);
+      }
     });
   }, []);
 

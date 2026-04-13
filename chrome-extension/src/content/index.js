@@ -374,6 +374,9 @@ function highlightSkusInEmail() {
     }
 
     textNodes.forEach((node) => {
+      // Skip text nodes inside <a> tags — highlighting breaks links (e.g. order URLs with SKUs)
+      if (node.parentElement?.closest('a')) return;
+
       const text = node.textContent;
       if (!SKU_PATTERN.test(text)) return;
 
