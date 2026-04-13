@@ -4498,7 +4498,12 @@ export default {
                   ctx.waitUntil(T.flush());
                   return;
                 }
-              } else {
+                // parseMessage returned a result but buildQuoteResponse couldn't produce output.
+                // This happens with mixed hw+lic comma input where items=[] and no directLicenseList.
+                // Fall through to the SKU validation block below (shared with the null-parse branch).
+              }
+              // ── Shared: parseMessage returned null OR returned empty/unquotable result ──
+              {
                 T.step('wx-parse', 'exit', { result: 'no_parse' });
 
                 // ── VISION SKU FOLLOW-UP ──
@@ -4532,6 +4537,85 @@ export default {
                   }
                 } catch (_visionErr) {
                   console.warn(`[CF-First] Vision SKU follow-up check failed: ${_visionErr.message}`);
+                }
+              }
+              // ── SKU VALIDATION + SUGGESTIONS ──
+              // Before falling to Claude, try to validate raw SKU tokens from the text.
+              // This catches typos (CW9172IH → CW9172I) and mixed hw+lic comma input.
+              {
+                const _valText = (quoteText || text).toUpperCase();
+                // Extract all SKU-like tokens: hardware models AND license SKUs
+                const _allTokens = [];
+                const _hwRe = /\b((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/gi;
+                const _licRe = /\b(LIC-[A-Z0-9-]+)\b/gi;
+                let _m;
+                while ((_m = _hwRe.exec(_valText)) !== null) _allTokens.push(_m[1].toUpperCase());
+                while ((_m = _licRe.exec(_valText)) !== null) _allTokens.push(_m[1].toUpperCase());
+                // Strip -RTG, -MR, -HW suffixes from hardware tokens for validation (these are ordering suffixes, not model names)
+                const _cleanTokens = [...new Set(_allTokens)].map(t => {
+                  if (t.startsWith('LIC-')) return { raw: t, clean: t, isLicense: true };
+                  return { raw: t, clean: t.replace(/-(RTG|MR|HW)$/i, ''), isLicense: false };
+                });
+
+                if (_cleanTokens.length > 0) {
+                  const _suggestions = [];
+                  const _validItems = [];
+                  for (const tk of _cleanTokens) {
+                    if (tk.isLicense) {
+                      // License SKUs are valid by nature — pass through
+                      _validItems.push(tk.raw);
+                    } else {
+                      const val = validateSku(tk.clean);
+                      if (val.valid) {
+                        _validItems.push(tk.raw);
+                      } else {
+                        _suggestions.push({ input: tk.raw, reason: val.reason || `${tk.raw} is not a recognized model`, suggest: val.suggest || [] });
+                      }
+                    }
+                  }
+
+                  // If we have any suggestions or valid items, build a response instead of falling to Claude
+                  if (_suggestions.length > 0 || _validItems.length > 0) {
+                    let _msg = '';
+                    // Show suggestions for invalid SKUs
+                    for (const s of _suggestions) {
+                      _msg += `⚠️ **${s.input}**: ${s.reason}\n`;
+                      if (s.suggest.length > 0) _msg += `Did you mean: ${s.suggest.join(', ')}?\n`;
+                      _msg += '\n';
+                    }
+                    // If we have valid items, try to build a quote for them
+                    if (_validItems.length > 0) {
+                      const _validText = _validItems.join(', ');
+                      const _reParsed = parseMessage(_validText);
+                      if (_reParsed) {
+                        const _reResult = buildQuoteResponse(_reParsed);
+                        if (_reResult.message && !_reResult.needsLlm) {
+                          if (_suggestions.length > 0) {
+                            _msg += `_The items above were skipped. Quote generated for recognized models below._\n\n`;
+                          }
+                          _msg += _reResult.message;
+                          await addToHistory(kv, personId, 'user', text);
+                          await addToHistory(kv, personId, 'assistant', _msg);
+                          T.step('wx-send', 'enter');
+                          await sendMessage(roomId, `${_msg}\n\n_⚡ Validated + Deterministic (${classification.elapsed}ms classify, free)_`, token);
+                          T.step('wx-send', 'exit');
+                          ctx.waitUntil(T.flush());
+                          return;
+                        }
+                      }
+                    }
+                    // If only suggestions (no valid items), show them
+                    if (_suggestions.length > 0 && _validItems.length === 0) {
+                      _msg += `Please correct the SKUs above and try again.`;
+                      await addToHistory(kv, personId, 'user', text);
+                      await addToHistory(kv, personId, 'assistant', _msg);
+                      T.step('wx-send', 'enter');
+                      await sendMessage(roomId, _msg, token);
+                      T.step('wx-send', 'exit');
+                      ctx.waitUntil(T.flush());
+                      return;
+                    }
+                  }
                 }
               }
               // Deterministic couldn't handle CF's extracted quote — fall through to Claude
