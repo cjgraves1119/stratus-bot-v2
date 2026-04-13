@@ -5200,24 +5200,32 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
           results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
 
-          // STEP 7: Fetch the created quote to get actual line items + Grand_Total
+          // STEP 7: Fetch the created quote to get actual line items, Grand_Total, and Quote_Number
+          // Quote_Number is a Zoho auto-generated field (different from the record ID) — always
+          // surface it so the user and Claude can reference it in follow-up messages.
           let quoteVerification = null;
           try {
-            const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}`, env);
+            const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Quoted_Items`, env);
             if (fetchedQuote?.data?.[0]) {
+              const fq = fetchedQuote.data[0];
               quoteVerification = {
-                Grand_Total: fetchedQuote.data[0].Grand_Total,
-                Sub_Total: fetchedQuote.data[0].Sub_Total,
-                Quote_Stage: fetchedQuote.data[0].Quote_Stage,
-                item_count: fetchedQuote.data[0].Quoted_Items?.length || 0,
-                items: (fetchedQuote.data[0].Quoted_Items || []).map(item => ({
+                Quote_Number: fq.Quote_Number || null,
+                Grand_Total: fq.Grand_Total,
+                Sub_Total: fq.Sub_Total,
+                Quote_Stage: fq.Quote_Stage,
+                item_count: fq.Quoted_Items?.length || 0,
+                items: (fq.Quoted_Items || []).map(item => ({
                   product: item.Product_Name?.name || item.product?.name || 'Unknown',
                   qty: item.Quantity,
                   unit_price: item.unit_price,
                   total: item.total
                 }))
               };
-              results.steps.push(`Verified: ${quoteVerification.item_count} items, Grand Total: $${quoteVerification.Grand_Total}`);
+              // Attach Quote_Number to the top-level quote record so Claude surfaces it
+              if (fq.Quote_Number) {
+                results.records.quote.quote_number = fq.Quote_Number;
+              }
+              results.steps.push(`Verified: ${quoteVerification.item_count} items, Grand Total: $${quoteVerification.Grand_Total}${fq.Quote_Number ? ', Quote #' + fq.Quote_Number : ''}`);
             }
           } catch (e) {
             results.steps.push('Quote verification fetch failed (quote was created successfully)');
@@ -5851,6 +5859,17 @@ function detectCrmEmailIntent(text) {
     /\bwhat\s+(was|were)\s+(just\s+)?(creat|made?|built?|add)/i,
     // Stop-then-ask pattern — user says stop, then asks follow-up
     /\bstop\b.{0,50}\b(creat|quot|deal|zoho|account)/i,
+    // Quote line item operations (consolidate, merge, combine, make single, etc.)
+    /\b(consolidat|merg|combin)\b.{0,50}\b(line\s*items?|licenses?|SKU|MR|MS|MX|CW|LIC)/i,
+    /\bmake\s+(them|it|those)\s+(a\s+)?(single|one)\s+(line\s*item|line|entry)/i,
+    /\b(quantity|qty)\s+\d+\b.{0,30}\b(quote|line)/i,
+    // Billing / shipping address updates
+    /\b(billing|shipping)\s+(address|addr)\b/i,
+    /\bupdate.{0,20}\b(address|addr|billing|shipping)\b/i,
+    // Implicit "that quote" / "the quote" (without needing to say "zoho")
+    /\b(that|the|this|same)\s+(zoho\s+)?quote\b/i,
+    /\bon\s+(that|the|this|same)\s+quote\b/i,
+    /\bunder\s+(that|the|this|same)\s+quote\b/i,
   ];
 
   // Email intents
@@ -5879,6 +5898,24 @@ function detectCrmEmailIntent(text) {
 
 // ─── CRM System Prompt Extension ─────────────────────────────────────────────
 const CRM_SYSTEM_PROMPT = `
+
+## ZOHO CRM ALWAYS AVAILABLE
+
+You ALWAYS have full Zoho CRM access. NEVER say "I don't have the ability to..." or "I cannot access Zoho" for any CRM operation. These statements are false. Execute CRM operations immediately without disclaimers.
+
+---
+
+## QUOTE REFERENCES — CRITICAL RULES
+
+**Quote_Number ≠ Record ID.** Always refer to quotes by their Quote_Number field, never the internal record ID:
+- ✓ Correct: "Quote #2570562000399584611" or "[Quote Name](url)"
+- ✗ Wrong: "Quote ID 2570562000399584606" (record ID is only for URLs, not labels)
+
+When create_deal_and_quote returns, the quote record includes \`quote_number\`. Always display it as "Quote #XXXXXXX" in your response.
+
+**Implicit quote context:** When a [Session: Most recently worked quote] context header appears at the top of the message, that IS the quote being referred to when the user says "the quote", "that quote", "same quote", or similar — use it immediately without asking which quote.
+
+---
 
 ## SPEED CRITICAL — READ THIS FIRST
 
@@ -9908,10 +9945,43 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 enrichedMessage = `[Extension Instructions]\n${chatSystemContext}\n[End Instructions]\n\n${enrichedMessage}`;
               }
 
-              // Detect if this is a CRM request that needs tool-use
+              // ── IMPLICIT QUOTE CONTEXT ──
+              // Scan recent conversation history for the most recently mentioned Zoho quote.
+              // Inject it so Claude knows which quote "the quote" / "that quote" refers to.
+              let lastQuoteRef = null;
+              if (chatHistory && chatHistory.length > 0) {
+                for (let _qi = chatHistory.length - 1; _qi >= 0; _qi--) {
+                  const _qm = chatHistory[_qi];
+                  if (_qm.role === 'assistant' && _qm.content) {
+                    const _urlMatch = _qm.content.match(/crm\.zoho\.com\/crm\/org\d+\/tab\/Quotes\/(\d+)/);
+                    const _numMatch = _qm.content.match(/Quote[:\s#]+(\d{14,})/i);
+                    if (_urlMatch || _numMatch) {
+                      lastQuoteRef = {
+                        recordId: _urlMatch ? _urlMatch[1] : null,
+                        quoteNumber: _numMatch ? _numMatch[1] : null
+                      };
+                      break;
+                    }
+                  }
+                }
+              }
+              if (lastQuoteRef) {
+                const _qDesc = [];
+                if (lastQuoteRef.quoteNumber) _qDesc.push(`Quote_Number: ${lastQuoteRef.quoteNumber}`);
+                if (lastQuoteRef.recordId) _qDesc.push(`Record_ID: ${lastQuoteRef.recordId} — URL: https://crm.zoho.com/crm/org647122552/tab/Quotes/${lastQuoteRef.recordId}`);
+                enrichedMessage = `[Session: Most recently worked quote — ${_qDesc.join(', ')}. When user says "the quote", "that quote", or "same quote" without specifying another, use THIS quote. Do NOT ask which quote.]\n\n${enrichedMessage}`;
+              }
+
+              // ── CRM TOOL-USE DECISION ──
+              // Use tools if: (a) current message has CRM intent, OR (b) an active CRM session
+              // exists from a recent exchange (crm_session key set when tools were last used).
+              // This prevents follow-up messages like "consolidate the licenses" from losing
+              // Zoho access just because they don't explicitly say "in zoho."
               const chatIntent = detectCrmEmailIntent(chatText);
               const hasCrmCreds = !!(env.ZOHO_CLIENT_ID && env.ZOHO_REFRESH_TOKEN);
-              const useTools = chatIntent.hasAny && hasCrmCreds;
+              let crmSessionActive = null;
+              try { crmSessionActive = await env.CONVERSATION_KV.get(`crm_session_${chatPersonId}`); } catch (_e) {}
+              const useTools = hasCrmCreds && (chatIntent.hasAny || !!crmSessionActive);
 
               // SERVER-SIDE PRODUCT PRE-RESOLUTION
               // If this looks like a quote creation request, pre-resolve product IDs from cache
@@ -9994,8 +10064,10 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               await addToHistory(env.CONVERSATION_KV, chatPersonId, 'user', enrichedMessage);
               await addToHistory(env.CONVERSATION_KV, chatPersonId, 'assistant', replyText);
 
-              // Set CRM session if tools were used
-              if (useTools) {
+              // Set / refresh CRM session whenever tools were used or session was already active.
+              // This keeps the session alive across follow-up messages without requiring
+              // the user to repeat "in zoho" every time.
+              if (useTools || crmSessionActive) {
                 await env.CONVERSATION_KV.put(`crm_session_${chatPersonId}`, 'active', { expirationTtl: 900 });
               }
 
