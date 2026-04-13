@@ -6953,10 +6953,14 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     } else {
       userContent = userMessage;
     }
-    // For CRM tool-use, limit history to last 2 messages to keep Anthropic payload small.
-    // Full 10-message history + tool calls + tools schema = 50-65K chars → too slow for ctx.waitUntil 30s wall-clock limit.
-    // 2-message history keeps follow-up context while fitting the full agentic flow in ~15-20s.
-    const effectiveHistory = useTools ? history.slice(-2) : history;
+    // For CRM tool-use, limit history to keep Anthropic payload manageable.
+    // GChat CRM path (ctx.waitUntil 30s limit): only 2 messages to fit agentic flow in ~15-20s.
+    // Chrome extension chat (120s timeout): 10 messages for multi-turn context retention.
+    // Non-CRM quoting path: full history (default 10 from KV).
+    const isExtensionChat = personId && personId.startsWith('ext:');
+    const effectiveHistory = useTools
+      ? (isExtensionChat ? history.slice(-10) : history.slice(-2))
+      : history;
     let messages = [...effectiveHistory, { role: 'user', content: userContent }];
 
     // Determine if we should include CRM/email tools
@@ -9959,12 +9963,19 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               const chatUserEmail = request.headers.get('x-user-email') || 'chrome-extension-user';
               const chatPersonId = `ext:${chatUserEmail}`;
 
-              // Seed conversation history from prior chat messages if provided
+              // Seed conversation history from prior chat messages if provided.
+              // Write the full batch at once (replacing KV) instead of individual addToHistory
+              // calls, which caused duplicates and unnecessary KV round-trips.
               if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
-                // Store the last few messages as history so askClaude can see them
-                for (const msg of chatHistory.slice(-6)) {
-                  await addToHistory(env.CONVERSATION_KV, chatPersonId, msg.role, msg.content);
-                }
+                const seedMessages = chatHistory.slice(-10).map(msg => ({
+                  role: msg.role,
+                  content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+                }));
+                await env.CONVERSATION_KV.put(
+                  `conv:${chatPersonId}`,
+                  JSON.stringify({ messages: seedMessages }),
+                  { expirationTtl: 1800 }
+                );
               }
 
               // Build a context-enriched message
