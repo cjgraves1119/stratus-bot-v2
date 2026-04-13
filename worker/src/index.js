@@ -2269,6 +2269,50 @@ function parseMessage(text) {
     }
   }
 
+  // ── Single-line comma/semicolon-separated License SKU input ──
+  // Handles: "LIC-MX68W-SEC-1YR, LIC-ENT-1YR, LIC-MS220-8P-1YR"
+  // Also handles qty variants: "2x LIC-ENT-1YR, LIC-MX68-SEC-1YR"
+  // The multi-line parser above requires >= 2 newline-separated lines,
+  // so comma-separated input on a single line falls through. Catch it here.
+  if (lines.length <= 2) {
+    const commaParts = text.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
+    const licFromComma = [];
+    for (const part of commaParts) {
+      // "LIC-xxx" or "LIC-xxx qty" or "qty LIC-xxx" or "LIC-xxx x qty"
+      const m1 = part.match(/^\s*(LIC-[A-Z0-9-]+)\s*$/i);
+      const m2 = part.match(/^\s*(LIC-[A-Z0-9-]+)\s+(\d+)\s*$/i);
+      const m3 = part.match(/^\s*(\d+)\s*[xX×]?\s*(LIC-[A-Z0-9-]+)\s*$/i);
+      const m4 = part.match(/^\s*(LIC-[A-Z0-9-]+)\s*[xX×]\s*(\d+)\s*$/i);
+      if (m2) {
+        licFromComma.push({ sku: m2[1].toUpperCase(), qty: parseInt(m2[2]) });
+      } else if (m3) {
+        licFromComma.push({ sku: m3[2].toUpperCase(), qty: parseInt(m3[1]) });
+      } else if (m4) {
+        licFromComma.push({ sku: m4[1].toUpperCase(), qty: parseInt(m4[2]) });
+      } else if (m1) {
+        licFromComma.push({ sku: m1[1].toUpperCase(), qty: 1 });
+      }
+    }
+    // If we found >= 2 license SKUs from comma separation, treat as direct license list
+    if (licFromComma.length >= 2) {
+      const seenC = new Set();
+      const dedupC = [];
+      for (const item of licFromComma) {
+        if (!seenC.has(item.sku)) { seenC.add(item.sku); dedupC.push(item); }
+      }
+      return {
+        items: [],
+        directLicenseList: dedupC,
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false
+      };
+    }
+  }
+
   // Multi-line bare model list (one device per line, no quantities)
   // Detects patterns like: MR36\nMR36\nMS250-24P\nMR44\n...
   // Counts occurrences of each model to derive quantities
