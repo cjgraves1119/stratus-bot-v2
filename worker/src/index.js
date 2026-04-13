@@ -685,6 +685,45 @@ async function askCFConversation(userMessage, env) {
   }
 }
 
+// ─── Extract SKUs from vision response text ─────────────────────────────────
+// Parses a CF Vision (or Claude) response for SKU + quantity pairs so they can
+// be stored in KV and fed to the deterministic quote engine on a follow-up
+// "quote this" / "quote both" message.
+function extractSkusFromVisionText(text) {
+  const skus = [];
+  // Match patterns like:
+  //   | LIC-ENT-3YR | 6 |       (markdown table)
+  //   LIC-ENT-3YR: 6             (colon separated)
+  //   LIC-ENT-3YR has a count of 6
+  //   LIC-ENT-3YR × 6, LIC-ENT-3YR x 6
+  //   MR44 (12), MX67 (3)
+  //   6x LIC-ENT-3YR or 6 x LIC-ENT-3YR
+  const skuRegex = /\b((?:LIC-[A-Z0-9-]+|(?:MR|MS|MX|MV|MT|MG|CW|C9|Z)\d[A-Z0-9-]*))\b/gi;
+  const lines = text.split('\n');
+  for (const line of lines) {
+    let match;
+    while ((match = skuRegex.exec(line)) !== null) {
+      const sku = match[1].toUpperCase();
+      // Look for quantity near this SKU (within the same line)
+      const beforeSku = line.substring(0, match.index);
+      const afterSku = line.substring(match.index + match[0].length);
+      let qty = 1;
+      // After: "| 6 |", ": 6", "count of 6", "× 6", "x 6", "(6)"
+      const afterQty = afterSku.match(/(?:\s*[\|:×x]\s*|\s+(?:has\s+a\s+)?count\s+of\s+|\s*\(\s*)(\d+)/i);
+      if (afterQty) { qty = parseInt(afterQty[1], 10); }
+      else {
+        // Before: "6x ", "6 x ", "6 "
+        const beforeQty = beforeSku.match(/(\d+)\s*[x×]?\s*$/i);
+        if (beforeQty) { qty = parseInt(beforeQty[1], 10); }
+      }
+      if (qty > 0 && qty < 10000) {
+        skus.push({ sku, qty });
+      }
+    }
+  }
+  return skus;
+}
+
 // CF Vision: analyze images via Llama 4 Scout (free) before falling back to Claude
 async function askCFVision(prompt, imageData, env) {
   if (!env.AI) return null;
@@ -4142,9 +4181,40 @@ export default {
               T.step('wx-cfvision', 'exit');
 
               if (cfVision) {
-                // CF vision succeeded
+                // CF vision succeeded — extract SKUs and store for follow-up "quote this" requests
+                const visionSkus = extractSkusFromVisionText(cfVision.response);
+                if (visionSkus.length > 0) {
+                  await kv.put(`vision_skus_${personId}`, JSON.stringify(visionSkus), { expirationTtl: 300 });
+                  console.log(`[CF-Vision] Extracted ${visionSkus.length} SKUs from vision, stored in KV for 5min`);
+                }
+
                 await addToHistory(kv, personId, 'user', `[Image] ${prompt}`);
                 await addToHistory(kv, personId, 'assistant', cfVision.response);
+
+                // If the user's text implies a quote request AND we extracted SKUs,
+                // auto-generate the quote alongside the vision response
+                const isQuoteRequest = /\b(quote|price|cost|order)\s*(this|these|both|them|all|it)/i.test(text);
+                if (isQuoteRequest && visionSkus.length > 0) {
+                  const skuText = visionSkus.map(s => `${s.qty} ${s.sku}`).join(', ');
+                  const visionQuoteParsed = parseMessage(skuText);
+                  if (visionQuoteParsed && visionQuoteParsed.items.length > 0) {
+                    const visionQuoteResult = buildQuoteResponse(visionQuoteParsed);
+                    if (visionQuoteResult.message && !visionQuoteResult.needsLlm) {
+                      const combined = `${cfVision.response}\n\n---\n\n${visionQuoteResult.message}`;
+                      await addToHistory(kv, personId, 'assistant', combined);
+                      T.step('wx-send', 'enter');
+                      await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + Deterministic Quote (${cfVision.elapsed}ms, free)_`, token);
+                      T.step('wx-send', 'exit');
+                      T.step('wx-d1', 'enter');
+                      logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision-quote', durationMs: cfVision.elapsed }).catch(() => {});
+                      writeMetric(env, { path: 'cf-vision-quote', durationMs: cfVision.elapsed, personId });
+                      T.step('wx-d1', 'exit');
+                      ctx.waitUntil(T.flush());
+                      return;
+                    }
+                  }
+                }
+
                 T.step('wx-send', 'enter');
                 await sendMessage(roomId, `${cfVision.response}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
                 T.step('wx-send', 'exit');
@@ -4372,6 +4442,39 @@ export default {
                 }
               } else {
                 T.step('wx-parse', 'exit', { result: 'no_parse' });
+
+                // ── VISION SKU FOLLOW-UP ──
+                // If parseMessage returned null (no SKUs in the text), check if the user
+                // recently sent a dashboard screenshot. "quote this" / "quote both" after a
+                // vision parse should use the stored SKUs rather than asking for clarification.
+                try {
+                  const storedVisionSkus = await kv.get(`vision_skus_${personId}`, 'json');
+                  if (storedVisionSkus && storedVisionSkus.length > 0) {
+                    const visionSkuText = storedVisionSkus.map(s => `${s.qty} ${s.sku}`).join(', ');
+                    console.log(`[CF-First] Found ${storedVisionSkus.length} vision SKUs in KV, re-parsing: ${visionSkuText}`);
+                    const visionParsed = parseMessage(visionSkuText);
+                    if (visionParsed && visionParsed.items.length > 0) {
+                      const visionResult = buildQuoteResponse(visionParsed);
+                      if (visionResult.message && !visionResult.needsLlm) {
+                        await addToHistory(kv, personId, 'user', text);
+                        await addToHistory(kv, personId, 'assistant', visionResult.message);
+                        T.step('wx-send', 'enter');
+                        await sendMessage(roomId, `${visionResult.message}\n\n_⚡ Vision follow-up + Deterministic Quote (${classification.elapsed}ms classify, free)_`, token);
+                        T.step('wx-send', 'exit');
+                        T.step('wx-d1', 'enter');
+                        logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                        writeMetric(env, { path: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, personId });
+                        T.step('wx-d1', 'exit');
+                        // Clear vision SKUs after successful use
+                        await kv.delete(`vision_skus_${personId}`);
+                        ctx.waitUntil(T.flush());
+                        return;
+                      }
+                    }
+                  }
+                } catch (_visionErr) {
+                  console.warn(`[CF-First] Vision SKU follow-up check failed: ${_visionErr.message}`);
+                }
               }
               // Deterministic couldn't handle CF's extracted quote — fall through to Claude
               console.log('[CF-First] Deterministic couldn\'t execute CF quote intent, falling to Claude');
