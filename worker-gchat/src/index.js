@@ -10031,7 +10031,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               // SERVER-SIDE PRODUCT PRE-RESOLUTION
               // If this looks like a quote creation request, pre-resolve product IDs from cache
               // so Claude can skip the batch_product_lookup iteration entirely (~3-5s saved).
-              if (useTools && chatIntent.hasCrm && /\b(quote|create.*quote|quote.*for)\b/i.test(chatText)) {
+              if (useTools && /\b(quote|create.*quote|quote.*for)\b/i.test(chatText)) {
                 const preSkuTokens = [];
                 const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C9|Z)\d[A-Z0-9-]*/gi;
                 let m;
