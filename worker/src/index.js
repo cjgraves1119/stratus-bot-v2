@@ -4181,7 +4181,7 @@ export default {
               T.step('wx-cfvision', 'exit');
 
               if (cfVision) {
-                // CF vision succeeded — extract SKUs and store for follow-up "quote this" requests
+                // CF vision succeeded — extract SKUs and store for follow-up requests
                 const visionSkus = extractSkusFromVisionText(cfVision.response);
                 if (visionSkus.length > 0) {
                   await kv.put(`vision_skus_${personId}`, JSON.stringify(visionSkus), { expirationTtl: 300 });
@@ -4189,18 +4189,18 @@ export default {
                 }
 
                 await addToHistory(kv, personId, 'user', `[Image] ${prompt}`);
-                await addToHistory(kv, personId, 'assistant', cfVision.response);
 
-                // If the user's text implies a quote request AND we extracted SKUs,
-                // auto-generate the quote alongside the vision response
-                const isQuoteRequest = /\b(quote|price|cost|order)\s*(this|these|both|them|all|it)/i.test(text);
-                if (isQuoteRequest && visionSkus.length > 0) {
+                // When SKUs are extracted, ALWAYS auto-generate the quote — no need to wait
+                // for the user to say "quote this". Build a clean summary + quote URLs.
+                if (visionSkus.length > 0) {
+                  // Clean summary line: "LIC-ENT-3YR × 6" instead of raw markdown table
+                  const skuSummary = visionSkus.map(s => `**${s.sku}** × ${s.qty}`).join('\n');
                   const skuText = visionSkus.map(s => `${s.qty} ${s.sku}`).join(', ');
                   const visionQuoteParsed = parseMessage(skuText);
                   if (visionQuoteParsed && visionQuoteParsed.items.length > 0) {
                     const visionQuoteResult = buildQuoteResponse(visionQuoteParsed);
                     if (visionQuoteResult.message && !visionQuoteResult.needsLlm) {
-                      const combined = `${cfVision.response}\n\n---\n\n${visionQuoteResult.message}`;
+                      const combined = `**Detected SKUs:**\n${skuSummary}\n\n---\n\n${visionQuoteResult.message}`;
                       await addToHistory(kv, personId, 'assistant', combined);
                       T.step('wx-send', 'enter');
                       await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + Deterministic Quote (${cfVision.elapsed}ms, free)_`, token);
@@ -4213,8 +4213,22 @@ export default {
                       return;
                     }
                   }
+                  // Deterministic couldn't build the quote — still show the clean summary
+                  // and store SKUs for follow-up, then fall through to send just the summary
+                  await addToHistory(kv, personId, 'assistant', `**Detected SKUs:**\n${skuSummary}`);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, `**Detected SKUs:**\n${skuSummary}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
+                  T.step('wx-send', 'exit');
+                  T.step('wx-d1', 'enter');
+                  logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision', durationMs: cfVision.elapsed }).catch(() => {});
+                  writeMetric(env, { path: 'cf-vision', durationMs: cfVision.elapsed, personId });
+                  T.step('wx-d1', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
                 }
 
+                // No SKUs extracted — send the raw vision response (non-license screenshot)
+                await addToHistory(kv, personId, 'assistant', cfVision.response);
                 T.step('wx-send', 'enter');
                 await sendMessage(roomId, `${cfVision.response}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
                 T.step('wx-send', 'exit');
