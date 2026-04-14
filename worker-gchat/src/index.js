@@ -7874,38 +7874,64 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
   return flat;
 }
 
-// Parse CF response tool_calls into a normalized form.
-// Handles 3 variants:
-//   - Flat: { tool_calls: [{ name, arguments }] }          (Llama, Hermes)
-//   - OpenAI: { tool_calls: [{ function: { name, arguments } }] }  (Gemma 4, Mistral)
+// Normalized response extractor for CF Workers AI models.
+// Handles 4 format variants depending on which model is returning:
+//   - OpenAI-style: { choices: [{ message: { content, tool_calls: [{id, function:{name, arguments}}] } }] }  (Gemma 4)
+//   - Top-level OpenAI tool_calls: { response, tool_calls: [{id, function:{name, arguments}}] }  (Mistral)
+//   - Flat: { response, tool_calls: [{ name, arguments }] }  (Llama, Hermes)
 //   - Embedded in text: response text contains JSON tool call (fallback)
-function parseCfToolCalls(cfResponse) {
-  const calls = [];
+// Returns { text, calls: [{ id, name, arguments }] } — IDs preserved from the model when available.
+function extractCfResponse(cfResponse) {
   const parseArgs = (a) => {
     if (typeof a === 'object' && a !== null) return a;
     if (typeof a === 'string') { try { return JSON.parse(a); } catch { return {}; } }
     return {};
   };
+
+  // Variant 1: OpenAI Chat Completions format (Gemma 4)
+  if (cfResponse.choices && Array.isArray(cfResponse.choices) && cfResponse.choices[0]?.message) {
+    const msg = cfResponse.choices[0].message;
+    const calls = [];
+    if (Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        if (tc.function && tc.function.name) {
+          calls.push({ id: tc.id || null, name: tc.function.name, arguments: parseArgs(tc.function.arguments) });
+        } else if (tc.name) {
+          calls.push({ id: tc.id || null, name: tc.name, arguments: parseArgs(tc.arguments) });
+        }
+      }
+    }
+    return { text: msg.content || '', calls };
+  }
+
+  // Variant 2/3: top-level tool_calls (Llama, Hermes, Mistral)
+  const text = cfResponse.response || '';
+  const calls = [];
   if (Array.isArray(cfResponse.tool_calls) && cfResponse.tool_calls.length > 0) {
     for (const tc of cfResponse.tool_calls) {
       if (tc.function && tc.function.name) {
-        calls.push({ name: tc.function.name, arguments: parseArgs(tc.function.arguments) });
+        calls.push({ id: tc.id || null, name: tc.function.name, arguments: parseArgs(tc.function.arguments) });
       } else if (tc.name) {
-        calls.push({ name: tc.name, arguments: parseArgs(tc.arguments) });
+        calls.push({ id: tc.id || null, name: tc.name, arguments: parseArgs(tc.arguments) });
       }
     }
-    return calls;
+    return { text, calls };
   }
-  // Fallback: some models embed tool calls in response text as JSON
-  const text = cfResponse.response || '';
+
+  // Variant 4: embedded JSON in text
   const jsonMatch = text.match(/\{[\s\S]*"name"[\s\S]*"arguments"[\s\S]*\}/);
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.name) calls.push({ name: parsed.name, arguments: parseArgs(parsed.arguments) });
+      if (parsed.name) calls.push({ id: null, name: parsed.name, arguments: parseArgs(parsed.arguments) });
     } catch {}
   }
-  return calls;
+  return { text, calls };
+}
+
+// Legacy shim — returns just the calls array (used by older code paths)
+function parseCfToolCalls(cfResponse) {
+  return extractCfResponse(cfResponse).calls;
 }
 
 // CF Workers AI agentic loop — mirrors askClaude but uses CF models.
@@ -7922,18 +7948,28 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   let iteration = 0;
   let finalReply = '';
 
+  // Detect OpenAI-style response (Gemma 4 uses max_completion_tokens, Mistral uses max_tokens)
+  const isGemma = /gemma/i.test(modelId);
+
   while (iteration < maxIterations) {
     iteration++;
     try {
-      const cfResponse = await env.AI.run(modelId, {
+      const requestBody = {
         messages,
         tools: cfTools,
-        max_tokens: 2048,
-        temperature: 0.3
-      });
+        temperature: 0.3,
+        tool_choice: 'auto'
+      };
+      // Gemma uses max_completion_tokens (OpenAI Chat Completions spec);
+      // others use max_tokens.
+      if (isGemma) {
+        requestBody.max_completion_tokens = 2048;
+      } else {
+        requestBody.max_tokens = 2048;
+      }
 
-      const calls = parseCfToolCalls(cfResponse);
-      const responseText = cfResponse.response || '';
+      const cfResponse = await env.AI.run(modelId, requestBody);
+      const { text: responseText, calls } = extractCfResponse(cfResponse);
 
       if (calls.length === 0) {
         // No more tool calls — we have the final answer
@@ -7941,9 +7977,9 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
         break;
       }
 
-      // Record tool calls and execute them (OpenAI format requires id on each call)
+      // Record tool calls and execute them — preserve model-provided IDs when available
       const callsWithIds = calls.map((c, i) => ({
-        id: `call_${iteration}_${i}`,
+        id: c.id || `call_${iteration}_${i}`,
         type: 'function',
         function: { name: c.name, arguments: JSON.stringify(c.arguments) }
       }));
