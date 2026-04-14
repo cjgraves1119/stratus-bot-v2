@@ -8310,6 +8310,131 @@ async function runAll() {
 // END A/B MODEL BENCHMARK INFRASTRUCTURE
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// WATERFALL INFERENCE: Gemma 4 first, Claude fallback on stall
+// Used by the gateway worker via /api/chat-waterfall endpoint.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Detect if a Gemma response should trigger Claude fallback.
+function gemmaStallDetected(result) {
+  if (!result) return { stalled: true, reason: 'no_result' };
+  const reply = result.reply || '';
+  if (!reply || reply.trim().length < 5) return { stalled: true, reason: 'empty_reply' };
+  if (reply.includes('(empty response)')) return { stalled: true, reason: 'empty_marker' };
+  if (reply.includes('max iterations reached')) return { stalled: true, reason: 'max_iter_loop' };
+  if (reply.startsWith('API error:')) return { stalled: true, reason: 'api_error' };
+  if (/I (don't|cannot|can't) have (access|the ability|tools)/i.test(reply)) return { stalled: true, reason: 'refusal' };
+  if ((result.iterations || 0) >= 10 && (result.toolCalls || []).length >= 10) return { stalled: true, reason: 'tool_loop' };
+  return { stalled: false, reason: null };
+}
+
+// Main waterfall function: try Gemma first, escalate to Claude if stalled.
+// Returns { reply, model, tierUsed, gemmaResult, claudeResult, totalMs }.
+async function askWithWaterfall(userMessage, env, personId, options = {}) {
+  const startMs = Date.now();
+  const useClaudeOnly = options.forceClaude === true;
+  const useGemmaOnly = options.forceGemma === true;
+  const dryRun = options.dryRun === true;
+  const maxGemmaWaitMs = options.maxGemmaWaitMs || 45000; // Give Gemma up to 45s
+
+  // Force-Claude mode: skip straight to Claude path
+  if (useClaudeOnly) {
+    const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
+    return { ...r, model: 'claude-sonnet-4-6', tierUsed: 'claude', totalMs: Date.now() - startMs };
+  }
+
+  // Tier 1: Gemma 4 with optimized prompt
+  let gemmaResult = null;
+  let gemmaError = null;
+  try {
+    gemmaResult = await askCfModel(
+      '@cf/google/gemma-4-26b-a4b-it',
+      userMessage,
+      GEMMA_OPTIMIZED_PROMPT,
+      CRM_EMAIL_TOOLS,
+      env,
+      personId,
+      dryRun,
+      10
+    );
+  } catch (err) {
+    gemmaError = err.message;
+  }
+
+  // Check if Gemma stalled
+  const stallCheck = gemmaResult ? gemmaStallDetected(gemmaResult) : { stalled: true, reason: gemmaError ? 'exception' : 'no_response' };
+
+  if (!stallCheck.stalled) {
+    // Gemma succeeded — return its result
+    return {
+      reply: gemmaResult.reply,
+      model: '@cf/google/gemma-4-26b-a4b-it',
+      tierUsed: 'gemma',
+      gemmaResult,
+      claudeResult: null,
+      stallReason: null,
+      toolCalls: gemmaResult.toolCalls,
+      iterations: gemmaResult.iterations,
+      elapsedMs: gemmaResult.elapsedMs,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // Force-Gemma mode: return the stalled Gemma result anyway
+  if (useGemmaOnly) {
+    return {
+      reply: gemmaResult?.reply || `Gemma failed: ${stallCheck.reason}`,
+      model: '@cf/google/gemma-4-26b-a4b-it',
+      tierUsed: 'gemma-forced',
+      gemmaResult,
+      claudeResult: null,
+      stallReason: stallCheck.reason,
+      toolCalls: gemmaResult?.toolCalls || [],
+      iterations: gemmaResult?.iterations || 0,
+      elapsedMs: gemmaResult?.elapsedMs || 0,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // Tier 2: Claude fallback
+  console.log(`[WATERFALL] Gemma stalled (${stallCheck.reason}), escalating to Claude for personId=${personId}`);
+  const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
+
+  return {
+    reply: claudeResult.reply,
+    model: 'claude-sonnet-4-6',
+    tierUsed: 'claude-fallback',
+    gemmaResult,
+    claudeResult,
+    stallReason: stallCheck.reason,
+    toolCalls: claudeResult.toolCalls,
+    iterations: claudeResult.iterations,
+    elapsedMs: claudeResult.elapsedMs,
+    totalMs: Date.now() - startMs
+  };
+}
+
+// Log waterfall outcome to D1 analytics for hit-rate tracking.
+async function logWaterfallTelemetry(env, outcome) {
+  if (!env.ANALYTICS_DB) return;
+  try {
+    await env.ANALYTICS_DB.prepare(
+      'INSERT INTO waterfall_log (timestamp, tier_used, stall_reason, total_ms, model, tool_count, iterations) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(
+      new Date().toISOString(),
+      outcome.tierUsed,
+      outcome.stallReason || '',
+      outcome.totalMs,
+      outcome.model,
+      (outcome.toolCalls || []).length,
+      outcome.iterations || 0
+    ).run();
+  } catch (err) {
+    // Table may not exist yet — that's fine, graceful degrade
+    console.log('[WATERFALL] Telemetry logging skipped:', err.message);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     // Load KV-cached live prices (if available from daily cron refresh)
@@ -8663,13 +8788,14 @@ ${(data.recentRequests || []).map(r => {
     // agent rather than duplicating any logic.
     // ══════════════════════════════════════════════════════════════
     if (url.pathname.startsWith('/api/')) {
-      // Benchmark endpoints are intentionally auth-free: they only accept
-      // hardcoded task IDs, default to dry-run (writes mocked), and are read-only
-      // for writes so spam is harmless. This lets the sandbox-based benchmark
-      // runner call them without needing a shared secret.
+      // Benchmark + waterfall endpoints are intentionally auth-free:
+      // - Benchmark: hardcoded tasks, dry-run default, spam-safe
+      // - Waterfall: called by the gateway worker via service binding
+      //   (the gateway adds its own auth at the edge)
       const isBenchmark = url.pathname.startsWith('/api/benchmark/');
+      const isWaterfall = url.pathname === '/api/chat-waterfall';
       const apiKey = request.headers.get('X-API-Key');
-      if (!isBenchmark && (!apiKey || apiKey !== env.GMAIL_ADDON_API_KEY)) {
+      if (!isBenchmark && !isWaterfall && (!apiKey || apiKey !== env.GMAIL_ADDON_API_KEY)) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
@@ -10524,6 +10650,70 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           // ── A/B Benchmark: list available tasks and models ──
           case '/api/benchmark/list': {
             apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
+            break;
+          }
+
+          // ── Waterfall endpoint: Gemma-first with Claude fallback ──
+          // Called by the gateway worker (stratus-ai-bot-gateway) for all /api/chat requests.
+          // Accepts: { text, emailContext, history, forceModel: 'gemma'|'claude'|undefined, dryRun }
+          case '/api/chat-waterfall': {
+            const { text: wText, emailContext: wEc, history: wHistory, forceModel, dryRun: wDryRun } = apiBody;
+            if (!wText) {
+              apiResult = { error: 'text is required' };
+              break;
+            }
+            try {
+              const wUserEmail = request.headers.get('x-user-email') || 'gateway-user';
+              const wPersonId = `gw:${wUserEmail}`;
+
+              // Seed KV history (same as /api/chat)
+              if (wHistory && Array.isArray(wHistory) && wHistory.length > 0) {
+                const seedMessages = wHistory.slice(-10).map(msg => ({
+                  role: msg.role,
+                  content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+                }));
+                await env.CONVERSATION_KV.put(`conv:${wPersonId}`, JSON.stringify({ messages: seedMessages }), { expirationTtl: 1800 });
+              }
+
+              // Build enriched message with email context
+              let wEnrichedMessage = wText;
+              if (wEc && wEc.subject) {
+                const ctxParts = [`Subject: "${wEc.subject}"`];
+                if (wEc.senderName || wEc.senderEmail) ctxParts.push(`From: ${wEc.senderName || ''} (${wEc.senderEmail || ''})`);
+                if (wEc.customerEmail) ctxParts.push(`Customer: ${wEc.customerEmail}`);
+                if (wEc.customerDomain) ctxParts.push(`Domain: ${wEc.customerDomain}`);
+                wEnrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${wText}`;
+              }
+
+              // Run the waterfall
+              const outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
+                forceGemma: forceModel === 'gemma',
+                forceClaude: forceModel === 'claude',
+                dryRun: wDryRun === true
+              });
+
+              // Log telemetry (async, non-blocking)
+              logWaterfallTelemetry(env, outcome).catch(() => {});
+
+              // Save to conversation history
+              await addToHistory(env.CONVERSATION_KV, wPersonId, 'user', wEnrichedMessage);
+              await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', outcome.reply);
+
+              apiResult = {
+                success: true,
+                reply: outcome.reply,
+                model: outcome.model,
+                tierUsed: outcome.tierUsed,
+                stallReason: outcome.stallReason,
+                elapsedMs: outcome.elapsedMs,
+                totalMs: outcome.totalMs,
+                iterations: outcome.iterations,
+                toolCallCount: (outcome.toolCalls || []).length
+              };
+            } catch (wErr) {
+              console.error(`[WATERFALL] Error: ${wErr.message}`);
+              apiResult = { error: wErr.message, stack: wErr.stack?.substring(0, 500) };
+            }
             break;
           }
 

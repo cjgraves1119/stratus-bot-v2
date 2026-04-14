@@ -1,0 +1,9 @@
+{
+  "name": "stratus-ai-bot-gateway",
+  "version": "1.0.0",
+  "description": "Stratus AI Gateway - Gemma-first waterfall routing to main worker",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

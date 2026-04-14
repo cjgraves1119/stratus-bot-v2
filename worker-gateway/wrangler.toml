@@ -1,0 +1,32 @@
+name = "stratus-ai-bot-gateway"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Gateway worker: thin routing layer that implements the
+# Gemma-first → Claude-fallback waterfall for CRM tool-use.
+# Delegates heavy lifting to stratus-ai-bot-gchat via service binding.
+# Existing clients (Chrome extension, Webex bot, GChat bot) stay on
+# the main worker unless explicitly pointed here for testing.
+
+[vars]
+GATEWAY_VERSION = "1.0.0-gemma-first"
+
+# Service binding to main worker (where tool execution lives)
+[[services]]
+binding = "MAIN_WORKER"
+service = "stratus-ai-bot-gchat"
+
+# AI binding (Cloudflare Workers AI — free inference)
+[ai]
+binding = "AI"
+
+# Shared KV for conversation history (same namespace as main worker)
+[[kv_namespaces]]
+binding = "CONVERSATION_KV"
+id = "af24db17eaa644fe9456e2ae74379766"
+
+# Analytics: log waterfall outcomes for hit-rate analysis
+[[d1_databases]]
+binding = "ANALYTICS_DB"
+database_name = "stratus-bot-analytics"
+database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
