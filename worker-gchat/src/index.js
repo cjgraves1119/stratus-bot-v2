@@ -4376,6 +4376,29 @@ function parseZohoResponse(result, action = 'operation') {
 
 // ─── Tool Execution Router ────────────────────────────────────────────────────
 async function executeToolCall(toolName, toolInput, env, personId) {
+  // ── Benchmark dry-run interception ──
+  // When askClaudeForBenchmark sets env.__BENCHMARK_DRY_RUN, mock write ops
+  // and log every tool call (read or write) to env.__BENCHMARK_TRACKER.
+  try {
+    if (env && env.__BENCHMARK_TRACKER) {
+      env.__BENCHMARK_TRACKER.push({ name: toolName, arguments: toolInput });
+    }
+    if (env && env.__BENCHMARK_DRY_RUN && typeof BENCHMARK_WRITE_TOOLS !== 'undefined' && BENCHMARK_WRITE_TOOLS.has(toolName)) {
+      const mockId = `DRY_RUN_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+      const mocks = {
+        'zoho_create_record': { data: [{ code: 'SUCCESS', details: { id: mockId, Created_Time: new Date().toISOString() } }] },
+        'zoho_update_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id || mockId, Modified_Time: new Date().toISOString() } }] },
+        'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
+        'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
+        'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
+        'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
+        'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
+        'webex_send_message': { success: true, message_id: mockId, dry_run: true },
+      };
+      return mocks[toolName] || { success: true, mocked: true, id: mockId };
+    }
+  } catch (_) {}
+
   try {
     switch (toolName) {
       // ── Zoho CRM Tools ──
@@ -7833,28 +7856,43 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
 }
 
 // Translate Anthropic tool format → CF Workers AI function-calling format.
-// Anthropic: { name, description, input_schema: {type,properties,required} }
-// CF:        { name, description, parameters: {type,properties,required} }
-function anthropicToolsToCfFormat(anthropicTools) {
-  return anthropicTools
-    .filter(t => !t.type || t.type === 'custom') // skip built-ins like advisor
+// Different CF models expect different wrappers:
+//   - Llama / Hermes: flat { name, description, parameters }
+//   - Gemma 4 / Mistral: OpenAI-compat { type:'function', function:{ name, description, parameters } }
+function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
+  const flat = anthropicTools
+    .filter(t => !t.type || t.type === 'custom')
     .map(t => ({
       name: t.name,
       description: t.description,
       parameters: t.input_schema
     }));
+  const needsOpenAiWrap = /gemma|mistral/i.test(modelId);
+  if (needsOpenAiWrap) {
+    return flat.map(t => ({ type: 'function', function: t }));
+  }
+  return flat;
 }
 
 // Parse CF response tool_calls into a normalized form.
-// CF sometimes returns tool_calls at top level, sometimes embedded in response text as JSON.
+// Handles 3 variants:
+//   - Flat: { tool_calls: [{ name, arguments }] }          (Llama, Hermes)
+//   - OpenAI: { tool_calls: [{ function: { name, arguments } }] }  (Gemma 4, Mistral)
+//   - Embedded in text: response text contains JSON tool call (fallback)
 function parseCfToolCalls(cfResponse) {
   const calls = [];
+  const parseArgs = (a) => {
+    if (typeof a === 'object' && a !== null) return a;
+    if (typeof a === 'string') { try { return JSON.parse(a); } catch { return {}; } }
+    return {};
+  };
   if (Array.isArray(cfResponse.tool_calls) && cfResponse.tool_calls.length > 0) {
     for (const tc of cfResponse.tool_calls) {
-      calls.push({
-        name: tc.name,
-        arguments: typeof tc.arguments === 'string' ? (() => { try { return JSON.parse(tc.arguments); } catch { return {}; } })() : (tc.arguments || {})
-      });
+      if (tc.function && tc.function.name) {
+        calls.push({ name: tc.function.name, arguments: parseArgs(tc.function.arguments) });
+      } else if (tc.name) {
+        calls.push({ name: tc.name, arguments: parseArgs(tc.arguments) });
+      }
     }
     return calls;
   }
@@ -7864,7 +7902,7 @@ function parseCfToolCalls(cfResponse) {
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.name) calls.push({ name: parsed.name, arguments: parsed.arguments || {} });
+      if (parsed.name) calls.push({ name: parsed.name, arguments: parseArgs(parsed.arguments) });
     } catch {}
   }
   return calls;
@@ -7874,7 +7912,7 @@ function parseCfToolCalls(cfResponse) {
 // Returns { reply, toolCalls, iterations, elapsedMs, errors }.
 async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 10) {
   const startMs = Date.now();
-  const cfTools = anthropicToolsToCfFormat(anthropicTools);
+  const cfTools = anthropicToolsToCfFormat(anthropicTools, modelId);
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage }
@@ -7944,29 +7982,32 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   };
 }
 
-// Wrapper for askClaude in benchmark context — uses dry-run tool execution.
-// We can't easily modify askClaude itself without invasive changes, so we patch
-// executeToolCall temporarily via a per-request flag stored in env.
+// Wrapper for askClaude in benchmark context.
+// Sets env.__BENCHMARK_DRY_RUN so executeToolCall can intercept writes
+// at the case level without needing globalThis hooks.
+// Tool call counts are inferred by scraping the agent log from KV.
 async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWallMs = 60000) {
   const startMs = Date.now();
-  const toolCallsLog = [];
   const errors = [];
 
-  // Monkey-patch executeToolCall for this request by wrapping it via globalThis
-  const origExecute = globalThis.__benchmark_execute_override;
-  globalThis.__benchmark_execute_override = async (toolName, toolInput) => {
-    const { result, mocked } = await executeToolCallDryRun(toolName, toolInput, env, personId, dryRun);
-    toolCallsLog.push({ name: toolName, arguments: toolInput, mocked });
-    return result;
-  };
+  // Create a wrapped env that carries the dry-run flag and a tool tracker.
+  // executeToolCall checks env.__BENCHMARK_DRY_RUN and env.__BENCHMARK_TRACKER.
+  const toolCallsLog = [];
+  const wrappedEnv = new Proxy(env, {
+    get(target, prop) {
+      if (prop === '__BENCHMARK_DRY_RUN') return dryRun;
+      if (prop === '__BENCHMARK_TRACKER') return toolCallsLog;
+      return target[prop];
+    }
+  });
 
   try {
-    const reply = await askClaude(userMessage, personId, env, null, true, null, maxWallMs);
+    const reply = await askClaude(userMessage, personId, wrappedEnv, null, true, null, maxWallMs);
     const replyText = typeof reply === 'string' ? reply : (reply?.reply || '(continuation returned)');
     return {
       reply: replyText,
       toolCalls: toolCallsLog,
-      iterations: toolCallsLog.length,
+      iterations: Math.max(1, Math.ceil(toolCallsLog.length / 2)),
       elapsedMs: Date.now() - startMs,
       errors
     };
@@ -7975,12 +8016,10 @@ async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWall
     return {
       reply: `askClaude error: ${err.message}`,
       toolCalls: toolCallsLog,
-      iterations: toolCallsLog.length,
+      iterations: 0,
       elapsedMs: Date.now() - startMs,
       errors
     };
-  } finally {
-    globalThis.__benchmark_execute_override = origExecute;
   }
 }
 
