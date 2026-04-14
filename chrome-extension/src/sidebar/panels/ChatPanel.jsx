@@ -175,13 +175,19 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     async function refreshPageCtx() {
       try {
         const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT, {});
+        console.log('[Stratus Chat] GET_PAGE_CONTEXT returned:', ctx);
         if (cancelled) return;
-        if (ctx?.pageType === 'zoho' && ctx?.zohoContext?.recordId) {
+        // Accept Zoho context whenever recordId is present, regardless of pageType.
+        // pageType is derived from chrome.tabs.query({active:true}) which can be
+        // unreliable when the side panel itself is considered the active context.
+        if (ctx?.zohoContext?.recordId) {
           setZohoPageContext(ctx.zohoContext);
         } else {
           setZohoPageContext(null);
         }
-      } catch {}
+      } catch (err) {
+        console.warn('[Stratus Chat] GET_PAGE_CONTEXT failed:', err?.message);
+      }
     }
     refreshPageCtx();
     // Poll every 2s while the panel is open to catch navigation within Zoho
