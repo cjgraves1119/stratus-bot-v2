@@ -7941,15 +7941,23 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
         break;
       }
 
-      // Record tool calls and execute them
-      messages.push({ role: 'assistant', content: responseText, tool_calls: calls });
-      for (const call of calls) {
+      // Record tool calls and execute them (OpenAI format requires id on each call)
+      const callsWithIds = calls.map((c, i) => ({
+        id: `call_${iteration}_${i}`,
+        type: 'function',
+        function: { name: c.name, arguments: JSON.stringify(c.arguments) }
+      }));
+      messages.push({ role: 'assistant', content: responseText || '', tool_calls: callsWithIds });
+      for (let i = 0; i < calls.length; i++) {
+        const call = calls[i];
+        const callId = callsWithIds[i].id;
         toolCallsLog.push({ iteration, name: call.name, arguments: call.arguments });
         try {
           const { result, mocked } = await executeToolCallDryRun(call.name, call.arguments, env, personId, dryRun);
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           messages.push({
             role: 'tool',
+            tool_call_id: callId,
             name: call.name,
             content: resultStr.substring(0, 4000) + (mocked ? ' [DRY_RUN_MOCKED]' : '')
           });
@@ -7957,6 +7965,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
           errors.push({ iteration, tool: call.name, error: toolErr.message });
           messages.push({
             role: 'tool',
+            tool_call_id: callId,
             name: call.name,
             content: JSON.stringify({ error: toolErr.message })
           });
