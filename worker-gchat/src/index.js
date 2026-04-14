@@ -10736,13 +10736,25 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               // Log telemetry (async, non-blocking)
               logWaterfallTelemetry(env, outcome).catch(() => {});
 
-              // Save to conversation history
+              // ── Tier indicator: appended to reply so users can visually verify
+              //    which tier handled each request during the testing phase. ──
+              const tierBadges = {
+                'deterministic': `⚡ Deterministic engine (free, instant)`,
+                'gemma': `🔷 Gemma 4 26B (CF Workers AI, free) · ${outcome.elapsedMs}ms`,
+                'claude-fallback': `🔶 Claude Sonnet 4.6 (fell back from Gemma — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
+                'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`,
+                'gemma-forced': `🔷 Gemma 4 26B (forced, stalled: ${outcome.stallReason || 'none'})`
+              };
+              const badge = tierBadges[outcome.tierUsed] || `model: ${outcome.model}`;
+              const replyWithBadge = `${outcome.reply}\n\n---\n_${badge}_`;
+
+              // Save to conversation history (without badge — badge is UI-only)
               await addToHistory(env.CONVERSATION_KV, wPersonId, 'user', wEnrichedMessage);
               await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', outcome.reply);
 
               apiResult = {
                 success: true,
-                reply: outcome.reply,
+                reply: replyWithBadge,
                 model: outcome.model,
                 tierUsed: outcome.tierUsed,
                 stallReason: outcome.stallReason,
