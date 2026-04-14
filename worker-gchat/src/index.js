@@ -10685,12 +10685,53 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 wEnrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${wText}`;
               }
 
-              // Run the waterfall
-              const outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
-                forceGemma: forceModel === 'gemma',
-                forceClaude: forceModel === 'claude',
-                dryRun: wDryRun === true
-              });
+              // ── TIER 0: Deterministic Engine Pre-Check ──
+              // If the message is a pure SKU/quote request, skip the LLMs entirely.
+              // Uses CF Llama for intent classification, then parseMessage for SKU extraction.
+              // Only triggers when forceModel isn't set (respects manual overrides).
+              let deterministicResult = null;
+              if (!forceModel) {
+                try {
+                  const classification = await classifyWithCF(wText, env);
+                  if (classification?.intent === 'quote') {
+                    const quoteText = classification.extracted || wText;
+                    const parsed = parseMessage(quoteText);
+                    if (parsed && !parsed.isClarification && !parsed.isRevision) {
+                      const qResult = buildQuoteResponse(parsed);
+                      if (qResult && qResult.message && !qResult.needsLlm) {
+                        deterministicResult = qResult.message;
+                        console.log(`[WATERFALL] Tier 0 hit: deterministic engine handled quote request`);
+                      }
+                    }
+                  }
+                } catch (detErr) {
+                  console.log(`[WATERFALL] Tier 0 skipped: ${detErr.message}`);
+                }
+              }
+
+              let outcome;
+              if (deterministicResult) {
+                // Return the deterministic answer without invoking any LLM
+                outcome = {
+                  reply: deterministicResult,
+                  model: 'deterministic',
+                  tierUsed: 'deterministic',
+                  gemmaResult: null,
+                  claudeResult: null,
+                  stallReason: null,
+                  toolCalls: [],
+                  iterations: 0,
+                  elapsedMs: 0,
+                  totalMs: Date.now() - (typeof t0 !== 'undefined' ? t0 : Date.now())
+                };
+              } else {
+                // Run the waterfall (Gemma → Claude)
+                outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
+                  forceGemma: forceModel === 'gemma',
+                  forceClaude: forceModel === 'claude',
+                  dryRun: wDryRun === true
+                });
+              }
 
               // Log telemetry (async, non-blocking)
               logWaterfallTelemetry(env, outcome).catch(() => {});
