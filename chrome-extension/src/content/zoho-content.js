@@ -170,6 +170,23 @@ function extractWebsite() {
 let lastSentContext = null;
 
 /**
+ * Persist context directly to chrome.storage.local so the sidebar can always
+ * read it, even when the MV3 service worker is sleeping (sendMessage would
+ * silently fail if the background is inactive).
+ *
+ * We still fire sendMessage() so the background's in-memory cache
+ * (currentZohoPageContext) stays warm while the worker is alive.
+ */
+function persistContext(ctx) {
+  chrome.storage.local.set({ zohoPageContext: ctx }, () => {
+    if (chrome.runtime.lastError) {
+      console.warn('[Stratus AI] Failed to persist Zoho context to storage:',
+        chrome.runtime.lastError.message);
+    }
+  });
+}
+
+/**
  * Detect the current Zoho record and send context to the background.
  */
 function detectAndSendContext() {
@@ -181,6 +198,9 @@ function detectAndSendContext() {
     const key = JSON.stringify(ctx);
     if (key !== lastSentContext) {
       lastSentContext = key;
+      // Write directly to storage — don't rely on the service worker being alive
+      persistContext(ctx);
+      // Also message the background to update its in-memory cache (best-effort)
       chrome.runtime.sendMessage({
         type: 'ZOHO_CONTEXT_CHANGED',
         ...ctx,
@@ -210,6 +230,9 @@ function detectAndSendContext() {
   const key = JSON.stringify(ctx);
   if (key !== lastSentContext) {
     lastSentContext = key;
+    // Write directly to storage — don't rely on the service worker being alive
+    persistContext(ctx);
+    // Also message the background to update its in-memory cache (best-effort)
     chrome.runtime.sendMessage({
       type: 'ZOHO_CONTEXT_CHANGED',
       ...ctx,
