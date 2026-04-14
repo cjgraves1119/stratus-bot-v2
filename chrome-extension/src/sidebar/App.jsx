@@ -88,39 +88,63 @@ export default function App() {
   const [pageType, setPageType] = useState(null); // 'gmail' | 'zoho' | 'other'
   const [zohoPageContext, setZohoPageContext] = useState(null);
 
-  // Detect page context first, then load appropriate data
+  // Detect page context first, then load appropriate data.
+  //
+  // Two-path strategy (MV3-safe):
+  //   1. sendToBackground(GET_PAGE_CONTEXT) — fast if service worker is alive.
+  //   2. If that fails or returns no zohoContext, read chrome.storage.local directly.
+  //      Content scripts write zohoPageContext straight to storage now, so it's
+  //      always available even when the background worker has gone idle.
   useEffect(() => {
     sendToBackground(MSG.GET_AUTH_STATUS).then(setAuthStatus).catch(() => {});
 
-    // Ask background what page we're on
-    sendToBackground(MSG.GET_PAGE_CONTEXT).then((ctx) => {
-      const type = ctx?.pageType || 'other';
+    async function initPageContext() {
+      let type = 'other';
+      let zohoCtx = null;
+
+      // Path 1: background message
+      try {
+        const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT);
+        type = ctx?.pageType || 'other';
+        if (ctx?.zohoContext?.recordId) zohoCtx = ctx.zohoContext;
+      } catch (err) {
+        console.warn('[Stratus App] GET_PAGE_CONTEXT via background failed:', err?.message);
+      }
+
+      // Path 2: direct storage read (fallback when worker is sleeping)
+      if (!zohoCtx) {
+        try {
+          const stored = await chrome.storage.local.get('zohoPageContext');
+          if (stored?.zohoPageContext?.recordId) {
+            zohoCtx = stored.zohoPageContext;
+            type = 'zoho'; // Storage presence implies we're on Zoho
+            console.log('[Stratus App] Zoho context recovered from storage:', zohoCtx);
+          }
+        } catch (err) {
+          console.warn('[Stratus App] chrome.storage.local read failed:', err?.message);
+        }
+      }
+
       setPageType(type);
 
       if (type === 'gmail') {
-        // On Gmail: load email context with retries, default to CRM tab
         setActiveTab('crm');
         loadEmailContextWithRetry();
         sendToBackground(MSG.GET_CRM_CONTEXT).then((c) => {
           if (c && !c.empty) setCrmContext(c);
         }).catch(() => {});
       } else if (type === 'zoho') {
-        // On Zoho: load Zoho record context, default to CRM tab
         setActiveTab('crm');
-        if (ctx?.zohoContext) {
-          setZohoPageContext(ctx.zohoContext);
-          // If we have a record, trigger a CRM lookup
-          triggerZohoRecordLookup(ctx.zohoContext);
+        if (zohoCtx) {
+          setZohoPageContext(zohoCtx);
+          triggerZohoRecordLookup(zohoCtx);
         }
       } else {
-        // On any other page: default to Search tab
         setActiveTab('search');
       }
-    }).catch(() => {
-      // Fallback: default to search
-      setPageType('other');
-      setActiveTab('search');
-    });
+    }
+
+    initPageContext();
   }, []);
 
   function loadEmailContextWithRetry() {
@@ -267,14 +291,42 @@ export default function App() {
     );
   }
 
+  // Derive a short label for the blue pill from the active Zoho page context
+  const zohoModuleLabel = zohoPageContext?.module
+    ? ({ Quotes: 'Quote', Potentials: 'Deal', Deals: 'Deal', Accounts: 'Account',
+         Contacts: 'Contact', Tasks: 'Task', SalesOrders: 'Sales Order',
+         Invoices: 'Invoice' })[zohoPageContext.module] || zohoPageContext.module
+    : null;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: COLORS.BG_SECONDARY }}>
       {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', padding: '10px 16px',
         background: COLORS.STRATUS_DARK, color: 'white',
+        flexWrap: 'wrap', gap: 6,
       }}>
         <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>Stratus AI</div>
+
+        {/* Blue pill — shows current Zoho record across ALL tabs, always visible */}
+        {zohoPageContext?.recordId && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            background: '#1a73e8cc', border: '1px solid #4fa3f780',
+            borderRadius: 12, padding: '2px 8px',
+            fontSize: 10, fontWeight: 600, color: 'white',
+            maxWidth: 160, overflow: 'hidden',
+            title: `${zohoModuleLabel} ${zohoPageContext.recordId}`,
+          }}>
+            <span>📄</span>
+            <span style={{
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {zohoModuleLabel}{zohoPageContext.recordName ? ': ' + zohoPageContext.recordName : ' ' + zohoPageContext.recordId}
+            </span>
+          </div>
+        )}
+
         <button
           onClick={() => chrome.runtime.openOptionsPage()}
           style={{
