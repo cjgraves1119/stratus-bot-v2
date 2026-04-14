@@ -12,34 +12,68 @@ import { MSG, COLORS } from '../../lib/constants';
 
 // ─────────────────────────────────────────────
 // Markdown renderer
+// Handles: [text](url) links, bare URLs, **bold**, *bold*, _italic_, --- hr
 // ─────────────────────────────────────────────
 function renderMarkdown(text) {
   if (!text) return null;
   const lines = text.split('\n');
+  const linkStyle = { color: COLORS.STRATUS_BLUE, textDecoration: 'underline', wordBreak: 'break-all' };
+
   return lines.map((line, i) => {
+    // Horizontal rule
+    if (/^\s*---+\s*$/.test(line)) {
+      return <hr key={i} style={{ border: 'none', borderTop: `1px solid ${COLORS.BORDER}`, margin: '8px 0' }} />;
+    }
+
+    // Process inline elements: markdown links first, then bare URLs, then emphasis
     const parts = [];
-    let remaining = line;
-    const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
-    let match, lastIdx = 0;
-    while ((match = linkRegex.exec(line)) !== null) {
+    let lastIdx = 0;
+    // Combined regex: [text](url) OR bare http(s)://... URL
+    const combinedRegex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')]+)/g;
+    let match;
+    while ((match = combinedRegex.exec(line)) !== null) {
       if (match.index > lastIdx) parts.push(line.substring(lastIdx, match.index));
-      parts.push(
-        <a key={`l-${i}-${match.index}`} href={match[2]} target="_blank" rel="noopener"
-          style={{ color: COLORS.STRATUS_BLUE, textDecoration: 'underline', wordBreak: 'break-all' }}>
-          {match[1]}
-        </a>
-      );
+      if (match[1] && match[2]) {
+        // Markdown-style link: [text](url)
+        parts.push(
+          <a key={`l-${i}-${match.index}`} href={match[2]} target="_blank" rel="noopener" style={linkStyle}>
+            {match[1]}
+          </a>
+        );
+      } else if (match[3]) {
+        // Bare URL — link with the URL as its own text
+        const url = match[3];
+        const display = url.length > 80 ? url.substring(0, 77) + '...' : url;
+        parts.push(
+          <a key={`u-${i}-${match.index}`} href={url} target="_blank" rel="noopener" style={linkStyle}>
+            {display}
+          </a>
+        );
+      }
       lastIdx = match.index + match[0].length;
     }
     if (lastIdx < line.length) parts.push(line.substring(lastIdx));
     const processed = parts.length > 0 ? parts : [line];
+
+    // Apply **bold**, *bold* (single-asterisk), and _italic_ to string parts
     const final = processed.map((part, pi) => {
       if (typeof part !== 'string') return part;
-      const boldParts = part.split(/\*\*([^*]+)\*\*/g);
-      return boldParts.map((bp, bi) =>
-        bi % 2 === 1 ? <strong key={`b-${i}-${pi}-${bi}`}>{bp}</strong> : bp
-      );
+      // Split on **bold**, *bold*, or _italic_ (capture groups preserve the delimiters)
+      const segments = part.split(/(\*\*[^*]+\*\*|\*[^*\n]+\*|_[^_\n]+_)/g);
+      return segments.map((seg, si) => {
+        if (/^\*\*[^*]+\*\*$/.test(seg)) {
+          return <strong key={`b-${i}-${pi}-${si}`}>{seg.slice(2, -2)}</strong>;
+        }
+        if (/^\*[^*\n]+\*$/.test(seg)) {
+          return <strong key={`sb-${i}-${pi}-${si}`}>{seg.slice(1, -1)}</strong>;
+        }
+        if (/^_[^_\n]+_$/.test(seg)) {
+          return <em key={`it-${i}-${pi}-${si}`} style={{ color: COLORS.TEXT_SECONDARY }}>{seg.slice(1, -1)}</em>;
+        }
+        return seg;
+      });
     });
+
     return (
       <div key={i} style={{ minHeight: line.trim() === '' ? 8 : 'auto' }}>
         {final}
