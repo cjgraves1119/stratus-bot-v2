@@ -169,26 +169,45 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     setSelectedContextEmail(null);
   }, [emailContext?.customerEmail, emailContext?.subject]);
 
-  // Pull current page context (Zoho record, if any) on mount and when user returns to chat tab
+  // Pull current page context (Zoho record, if any) on mount and when user returns to chat tab.
+  //
+  // Two-path read strategy:
+  //   1. Try sendToBackground(GET_PAGE_CONTEXT) — fast if the service worker is alive.
+  //   2. If the message fails OR returns nothing, fall back to chrome.storage.local directly.
+  //      Content scripts write zohoPageContext straight to storage now (MV3-safe), so the
+  //      value is always there even when the background worker has gone idle.
   useEffect(() => {
     let cancelled = false;
     async function refreshPageCtx() {
+      let zohoCtx = null;
+
+      // Path 1: background message (best-effort — worker may be sleeping)
       try {
         const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT, {});
-        console.log('[Stratus Chat] GET_PAGE_CONTEXT returned:', ctx);
-        if (cancelled) return;
-        // Accept Zoho context whenever recordId is present, regardless of pageType.
-        // pageType is derived from chrome.tabs.query({active:true}) which can be
-        // unreliable when the side panel itself is considered the active context.
-        if (ctx?.zohoContext?.recordId) {
-          setZohoPageContext(ctx.zohoContext);
-        } else {
-          setZohoPageContext(null);
+        if (!cancelled && ctx?.zohoContext?.recordId) {
+          zohoCtx = ctx.zohoContext;
         }
       } catch (err) {
-        console.warn('[Stratus Chat] GET_PAGE_CONTEXT failed:', err?.message);
+        console.warn('[Stratus Chat] GET_PAGE_CONTEXT via background failed:', err?.message);
       }
+
+      // Path 2: read chrome.storage.local directly (always available in MV3 content/sidebar)
+      if (!zohoCtx) {
+        try {
+          const stored = await chrome.storage.local.get('zohoPageContext');
+          if (stored?.zohoPageContext?.recordId) {
+            zohoCtx = stored.zohoPageContext;
+            console.log('[Stratus Chat] Zoho context recovered from storage directly:', zohoCtx);
+          }
+        } catch (err) {
+          console.warn('[Stratus Chat] chrome.storage.local read failed:', err?.message);
+        }
+      }
+
+      if (cancelled) return;
+      setZohoPageContext(zohoCtx || null);
     }
+
     refreshPageCtx();
     // Poll every 2s while the panel is open to catch navigation within Zoho
     const interval = setInterval(refreshPageCtx, 2000);
