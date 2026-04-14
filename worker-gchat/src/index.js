@@ -5974,13 +5974,31 @@ You ALWAYS have full Zoho CRM access. NEVER say "I don't have the ability to..."
 
 ## QUOTE REFERENCES — CRITICAL RULES
 
-**Quote_Number ≠ Record ID.** Always refer to quotes by their Quote_Number field, never the internal record ID:
-- ✓ Correct: "Quote #2570562000399584611" or "[Quote Name](url)"
-- ✗ Wrong: "Quote ID 2570562000399584606" (record ID is only for URLs, not labels)
+**Quote_Number ≠ Record ID. These are two DIFFERENT numeric values.**
+- \`Quote_Number\` is what the customer and user see on the quote page (e.g. 2570562000399909183)
+- \`id\` (record ID) is Zoho's internal identifier used in URLs (e.g. 2570562000399909180)
+- They often LOOK similar (long numerics) but they are NOT interchangeable
 
-When create_deal_and_quote returns, the quote record includes \`quote_number\`. Always display it as "Quote #XXXXXXX" in your response.
+**When a user mentions a quote number in chat (e.g. "give me the url for quote 2570562000399909183"):**
+1. ALWAYS search by Quote_Number first: \`zoho_search_records(Quotes, criteria=(Quote_Number:equals:<the-number>))\`
+2. NEVER use \`zoho_get_record\` with that number — it will fail because Quote_Number is not a record ID
+3. The search response gives you BOTH fields: \`id\` (record ID, use for URLs) AND \`Quote_Number\` (user-visible)
+4. If search returns 0 records with Quote_Number:equals, fall back to Quote_Number:starts_with or try treating it as a record ID via zoho_get_record
+
+**URL construction rule (memorize this):**
+- Quote URL format: \`https://crm.zoho.com/crm/org647122552/tab/Quotes/{RECORD_ID}\`
+- Use the record's \`id\` field in the URL, NEVER the Quote_Number
+- Example: if search returns \`{id: "2570562000399909180", Quote_Number: "2570562000399909183"}\`, the URL is \`.../tab/Quotes/2570562000399909180\` (id), and you refer to it as "Quote #2570562000399909183" (Quote_Number)
+
+**In labels/text referring to quotes:**
+- ✓ Correct: "Quote #2570562000399909183" or "[Kraemer North America - MR44 3YR](url)"
+- ✗ Wrong: "Quote ID 2570562000399909180" (record ID is only for URLs, not labels)
+
+When create_deal_and_quote returns, the quote record includes \`quote_number\` AND \`quote_id\`. Always display "Quote #<quote_number>" in text and use \`quote_id\` for any URL.
 
 **Implicit quote context:** When a [Session: Most recently worked quote] context header appears at the top of the message, that IS the quote being referred to when the user says "the quote", "that quote", "same quote", or similar — use it immediately without asking which quote.
+
+**Active Zoho page context:** When an [Active Zoho page:...] context block appears at the top of the message, the user is VIEWING that record right now. Words like "this quote", "this deal", "modify this", "the current one" refer to THAT record. Use its recordId directly — do not search, just call zoho_get_record(module, recordId) or zoho_update_record as appropriate.
 
 ---
 
@@ -8120,6 +8138,21 @@ CRITICAL RULES:
 4. NEVER call the same search repeatedly. If a search returns results, summarize them and stop calling tools.
 5. For product/technical questions with no tool match, answer from your knowledge directly — do NOT search Zoho.
 6. Owner ID for Chris Graves is 2570562000141711002.
+
+QUOTE NUMBER vs RECORD ID (CRITICAL):
+- Quote_Number (what users see, e.g. "2570562000399909183") is a FIELD on the quote record
+- id (record ID, e.g. "2570562000399909180") is Zoho's internal key — used in URLs
+- These two values are DIFFERENT numbers even though they look similar
+- When user says "quote <number>", search by Quote_Number: zoho_search_records(Quotes, criteria=(Quote_Number:equals:<number>))
+- NEVER use zoho_get_record with a user-provided quote number — it will fail
+- URLs always use the record id field, not Quote_Number
+- URL format: https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>
+- Refer to quotes in text as "Quote #<Quote_Number>" (the user-visible one)
+
+ACTIVE ZOHO PAGE:
+- If the message starts with "[Active Zoho page: ... <Module> <recordId>]", the user is viewing that record right now
+- "This quote", "this deal", "modify this", "the current one" → refers to THAT record
+- Skip searches, call zoho_get_record(module, recordId) or zoho_update_record directly
 
 Default defaults for new deals:
 - Lead_Source: "Stratus Referal"
