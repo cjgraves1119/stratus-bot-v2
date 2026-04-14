@@ -325,6 +325,11 @@ const urlObserver = new MutationObserver(() => {
     lastSentContext = null; // Reset so we re-detect
     retryCount = 0;
 
+    // Immediately clear stale context from storage so the sidebar doesn't
+    // show the previous record during the render delay. detectAndSendContext()
+    // will write the correct new context once Zoho finishes rendering.
+    chrome.storage.local.remove('zohoPageContext');
+
     // Delay to let Zoho render the new page
     setTimeout(() => {
       detectAndSendContext();
