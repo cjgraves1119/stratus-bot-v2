@@ -153,6 +153,7 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
   const [error, setError] = useState(null);
   const [selectedContextEmail, setSelectedContextEmail] = useState(null);
   const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
+  const [zohoPageContext, setZohoPageContext] = useState(null);
   const messagesEndRef = useRef(null);
   // AbortController ref for stop functionality
   const abortRef = useRef(null);
@@ -167,6 +168,52 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
   useEffect(() => {
     setSelectedContextEmail(null);
   }, [emailContext?.customerEmail, emailContext?.subject]);
+
+  // Pull current page context (Zoho record, if any) on mount and when user returns to chat tab
+  useEffect(() => {
+    let cancelled = false;
+    async function refreshPageCtx() {
+      try {
+        const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT, {});
+        if (cancelled) return;
+        if (ctx?.pageType === 'zoho' && ctx?.zohoContext?.recordId) {
+          setZohoPageContext(ctx.zohoContext);
+        } else {
+          setZohoPageContext(null);
+        }
+      } catch {}
+    }
+    refreshPageCtx();
+    // Poll every 2s while the panel is open to catch navigation within Zoho
+    const interval = setInterval(refreshPageCtx, 2000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // Build a context hint string for "this quote"-style references
+  function buildZohoPageContextHint(ctx) {
+    if (!ctx || !ctx.recordId) return '';
+    const moduleLabel = ({
+      Quotes: 'Quote',
+      Potentials: 'Deal',
+      Deals: 'Deal',
+      Accounts: 'Account',
+      Contacts: 'Contact',
+      Tasks: 'Task',
+      SalesOrders: 'Sales Order',
+      Invoices: 'Invoice',
+    })[ctx.module] || ctx.module || 'Record';
+    const url = `https://crm.zoho.com/crm/org647122552/tab/${ctx.module}/${ctx.recordId}`;
+    const lines = [
+      `[Active Zoho page: user is currently viewing ${moduleLabel} ${ctx.recordId}`,
+    ];
+    if (ctx.recordName) lines[0] += ` — "${ctx.recordName}"`;
+    lines[0] += `]`;
+    lines.push(`URL: ${url}`);
+    if (ctx.accountName) lines.push(`Account: ${ctx.accountName}`);
+    if (ctx.email) lines.push(`Contact email: ${ctx.email}`);
+    lines.push(`When the user says "this", "this quote", "the quote", "modify this", etc., they mean ${moduleLabel} ${ctx.recordId}. Act on it directly without asking which one.`);
+    return lines.join('\n');
+  }
 
   // Pre-fill from navData
   useEffect(() => {
@@ -304,8 +351,19 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
           ? { ...emailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
           : emailContext || null;
 
+      // Inject active Zoho page context so "this quote", "this deal", "modify this",
+      // etc. resolve to whatever record the user is currently viewing in Zoho CRM.
+      // The hint is prepended to the user message so the LLM sees it as part of
+      // the query context — not injected into system prompt (which Claude flags as
+      // prompt injection when it looks like capability claims).
+      let textToSend = messageText;
+      const zohoHint = buildZohoPageContextHint(zohoPageContext);
+      if (zohoHint) {
+        textToSend = `${zohoHint}\n\nUser message: ${messageText}`;
+      }
+
       const response = await sendToBackground(MSG.CHAT_HANDOFF, {
-        text: messageText,
+        text: textToSend,
         emailContext: effectiveContext,
         history: historyForApi,
         systemContext: buildSystemContext(emailContext, selectedContextEmail === '__none__' ? null : selectedContextEmail),
@@ -384,6 +442,21 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
                 </button>
               ))}
             </div>
+            {zohoPageContext && zohoPageContext.recordId && (
+              <div style={{
+                marginTop: 12, padding: '6px 10px', background: '#e8f4f8',
+                border: `1px solid ${COLORS.STRATUS_BLUE}55`, borderRadius: 6,
+                fontSize: 11, color: COLORS.STRATUS_BLUE, display: 'flex',
+                alignItems: 'center', gap: 6
+              }}>
+                <span>📄</span>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  Viewing {({Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact',Tasks:'Task',SalesOrders:'Sales Order',Invoices:'Invoice'}[zohoPageContext.module] || zohoPageContext.module)}
+                  {zohoPageContext.recordName ? ': ' + zohoPageContext.recordName : ' ' + zohoPageContext.recordId}
+                </span>
+                <span style={{ fontSize: 10, opacity: 0.7 }}>— referenced by "this"</span>
+              </div>
+            )}
             {participantOptions.length > 0 && (
               <div style={{ marginTop: 12, position: 'relative' }}>
                 <button
