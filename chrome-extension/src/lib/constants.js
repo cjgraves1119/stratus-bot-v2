@@ -2,7 +2,11 @@
  * Stratus AI Chrome Extension — Constants & Configuration
  */
 
-export const API_BASE = 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev';
+// Pointed at the gateway worker (Gemma-first waterfall with Claude fallback).
+// Gateway transparently forwards non-chat /api/* paths to the main worker.
+// ROLLBACK: change to 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev' to
+// revert to the original Claude-only path. No other code changes needed.
+export const API_BASE = 'https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev';
 
 export const ZOHO = {
   ORG_URL: 'https://crm.zoho.com/crm/org647122552',

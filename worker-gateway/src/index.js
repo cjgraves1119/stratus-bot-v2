@@ -265,6 +265,37 @@ export default {
       return jsonResponse(forwarded.data, forwarded.status);
     }
 
+    // ── Transparent passthrough for all other /api/* paths ──
+    // The extension calls 30+ endpoints (crm-lookup, quote, analyze-email, etc.)
+    // that live on the main worker. Forward them as-is so clients can point
+    // their entire API_BASE at the gateway. Only /api/chat gets the waterfall;
+    // everything else is pass-through with zero modification.
+    if (pathname.startsWith('/api/') && pathname !== '/api/chat') {
+      try {
+        const forwardHeaders = {};
+        for (const [k, v] of request.headers.entries()) {
+          // Skip hop-by-hop headers that service binding handles itself
+          if (['host', 'content-length', 'cf-connecting-ip', 'cf-ray'].includes(k.toLowerCase())) continue;
+          forwardHeaders[k] = v;
+        }
+        const init = {
+          method: request.method,
+          headers: forwardHeaders
+        };
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+          init.body = await request.arrayBuffer();
+        }
+        const targetUrl = `https://stratus-ai-bot-gchat.internal${pathname}${url.search || ''}`;
+        const resp = await env.MAIN_WORKER.fetch(new Request(targetUrl, init));
+        // Pass through response with CORS headers added
+        const respHeaders = new Headers(resp.headers);
+        for (const [k, v] of Object.entries(CORS_HEADERS)) respHeaders.set(k, v);
+        return new Response(resp.body, { status: resp.status, headers: respHeaders });
+      } catch (err) {
+        return jsonResponse({ error: 'gateway_passthrough_failed', path: pathname, detail: err.message }, 502);
+      }
+    }
+
     // Stats endpoint — quick glance at gateway_log table
     if (request.method === 'GET' && pathname === '/stats') {
       if (!env.ANALYTICS_DB) return jsonResponse({ error: 'analytics not configured' }, 500);
