@@ -8008,6 +8008,7 @@ const BENCHMARK_TASKS = [
 
 const BENCHMARK_MODELS = [
   { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
+  { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
   { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B (CF)', type: 'cf' },
   { id: '@hf/nousresearch/hermes-2-pro-mistral-7b', label: 'Hermes 2 Pro 7B (CF)', type: 'cf' },
   { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1 24B (CF)', type: 'cf' }
@@ -8083,6 +8084,7 @@ const BENCHMARK_DASHBOARD_HTML = `<!DOCTYPE html>
       <th>Tier</th>
       <th>Task</th>
       <th>Claude Sonnet 4.6</th>
+      <th>Gemma 4 26B</th>
       <th>Llama 3.3 70B</th>
       <th>Hermes 2 Pro 7B</th>
       <th>Mistral Small 24B</th>
@@ -8094,6 +8096,17 @@ const BENCHMARK_DASHBOARD_HTML = `<!DOCTYPE html>
 <script>
 const TASKS = ${JSON.stringify(BENCHMARK_TASKS)};
 const MODELS = ${JSON.stringify(BENCHMARK_MODELS)};
+
+// API key: read from ?key= URL param and store, or prompt
+function getApiKey() {
+  const urlKey = new URLSearchParams(location.search).get('key');
+  if (urlKey) { try { sessionStorage.setItem('bench_api_key', urlKey); } catch {} return urlKey; }
+  try { const stored = sessionStorage.getItem('bench_api_key'); if (stored) return stored; } catch {}
+  const prompted = prompt('Enter GMAIL_ADDON_API_KEY (needed to call benchmark endpoints):');
+  if (prompted) { try { sessionStorage.setItem('bench_api_key', prompted); } catch {} }
+  return prompted || '';
+}
+const API_KEY = getApiKey();
 
 function renderCell(result) {
   if (!result) return '<td>—</td>';
@@ -8157,9 +8170,10 @@ async function runAll() {
       try {
         const resp = await fetch('/api/benchmark/run', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
           body: JSON.stringify({ taskId: task.id, modelId: model.id, dryRun })
         });
+        if (resp.status === 401) throw new Error('Unauthorized — check API key');
         const data = await resp.json();
         row.children[idx + 2].outerHTML = renderCell(data);
       } catch (err) {
