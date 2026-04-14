@@ -8087,7 +8087,18 @@ const BENCHMARK_TASKS = [
   { id: 'task_12', tier: 'complex', name: 'Clone and modify quote (dry-run)', prompt: 'Find the most recent quote for Chris Graves, clone it, and change the quantity of the first line item to 10' },
   { id: 'task_13', tier: 'complex', name: 'Add SKU to existing quote (dry-run)', prompt: 'Find the most recent open quote for Chris Graves and add 2x LIC-ENT-3YR to it' },
   { id: 'task_14', tier: 'complex', name: 'Handle missing record gracefully', prompt: 'Find the account "Nonexistent Fake Company XYZ 12345" and if not found, respond that no account was found — do NOT create one' },
-  { id: 'task_15', tier: 'complex', name: 'Multi-module reconciliation', prompt: 'Find all open deals for Chris Graves that have an associated quote but no related invoice, and list them' }
+  { id: 'task_15', tier: 'complex', name: 'Multi-module reconciliation', prompt: 'Find all open deals for Chris Graves that have an associated quote but no related invoice, and list them' },
+  // ── Webex-bot-style tasks (technical questions, product info, fallback scenarios) ──
+  { id: 'task_16', tier: 'simple', name: 'Product spec question', prompt: 'What are the specifications of the Meraki MR46 access point?' },
+  { id: 'task_17', tier: 'simple', name: 'EOL lookup', prompt: 'When does the MR44 go end-of-life?' },
+  { id: 'task_18', tier: 'simple', name: 'Product comparison', prompt: 'What is the difference between the MS150-24P and MS250-24P?' },
+  { id: 'task_19', tier: 'simple', name: 'License term explanation', prompt: 'Explain the difference between LIC-ENT-1YR and LIC-ENT-3YR licensing' },
+  { id: 'task_20', tier: 'medium', name: 'SKU recommendation', prompt: 'I need an access point for a small office with about 20 users. What Meraki AP would you recommend?' },
+  { id: 'task_21', tier: 'medium', name: 'Upgrade path', prompt: 'The MR55 is EOL — what is the recommended replacement product?' },
+  { id: 'task_22', tier: 'medium', name: 'SKU suffix explanation', prompt: 'Why does the MR46 SKU sometimes have -HW at the end and sometimes not?' },
+  { id: 'task_23', tier: 'complex', name: 'Technical design question', prompt: 'I have a warehouse with metal shelving and about 50,000 square feet. How many MR access points would I need, and which model?' },
+  { id: 'task_24', tier: 'complex', name: 'Mixed licensing question', prompt: 'If I buy 5 MR46 access points and 3 MX67 firewalls, what license SKUs do I need for each, and can they all be on the same 3-year co-term?' },
+  { id: 'task_25', tier: 'complex', name: 'Price + quantity calculation', prompt: 'What is the approximate list price for 10x MR46-HW with 3-year enterprise licenses?' }
 ];
 
 const BENCHMARK_MODELS = [
@@ -8098,11 +8109,34 @@ const BENCHMARK_MODELS = [
   { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1 24B (CF)', type: 'cf' }
 ];
 
+// Simplified CRM system prompt for Gemma 4 (strips verbose rules, focuses on core guidance).
+// Helps smaller models avoid loops by giving them tighter, clearer instructions.
+const GEMMA_OPTIMIZED_PROMPT = `You are a Stratus sales assistant with Zoho CRM tools.
+
+CRITICAL RULES:
+1. When the user asks you to find/lookup something, use zoho_search_records ONE TIME, then summarize what you found and STOP.
+2. When creating a deal or quote, use create_deal_and_quote (one call) and report the result.
+3. When the search returns 0 records, respond "No records found" and STOP — do NOT create anything.
+4. NEVER call the same search repeatedly. If a search returns results, summarize them and stop calling tools.
+5. For product/technical questions with no tool match, answer from your knowledge directly — do NOT search Zoho.
+6. Owner ID for Chris Graves is 2570562000141711002.
+
+Default defaults for new deals:
+- Lead_Source: "Stratus Referal"
+- Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
+
+Respond in 1-3 short paragraphs maximum. End with a direct answer, not another question.`;
+
 // Run a single benchmark task against a single model.
-async function runBenchmarkTask(task, modelConfig, env, personId, dryRun) {
-  const systemPrompt = typeof buildCrmSystemPrompt === 'function'
-    ? buildCrmSystemPrompt(task.prompt)
-    : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
+async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full') {
+  let systemPrompt;
+  if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
+    systemPrompt = GEMMA_OPTIMIZED_PROMPT;
+  } else {
+    systemPrompt = typeof buildCrmSystemPrompt === 'function'
+      ? buildCrmSystemPrompt(task.prompt)
+      : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
+  }
 
   if (modelConfig.type === 'claude') {
     return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000);
@@ -10466,7 +10500,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
 
           // ── A/B Benchmark: run a single task against a single model ──
           case '/api/benchmark/run': {
-            const { taskId, modelId, dryRun: bDryRun } = apiBody;
+            const { taskId, modelId, dryRun: bDryRun, promptVariant } = apiBody;
             if (!taskId || !modelId) {
               apiResult = { error: 'taskId and modelId are required' };
               break;
@@ -10479,8 +10513,8 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             }
             try {
               const benchPersonId = `bench:${taskId}:${Date.now()}`;
-              const result = await runBenchmarkTask(task, model, env, benchPersonId, bDryRun !== false);
-              apiResult = { taskId, modelId, ...result };
+              const result = await runBenchmarkTask(task, model, env, benchPersonId, bDryRun !== false, promptVariant || 'full');
+              apiResult = { taskId, modelId, promptVariant: promptVariant || 'full', ...result };
             } catch (bErr) {
               apiResult = { taskId, modelId, error: bErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
             }
