@@ -298,9 +298,10 @@ registerMessageHandlers({
   // ── Zoho Page Context ──
   [MSG.ZOHO_CONTEXT_CHANGED]: async (payload) => {
     currentZohoPageContext = payload;
-    // Persist to session storage for recovery after service worker sleep
+    // Persist to LOCAL storage (not session) so it survives service worker restarts.
+    // Manifest V3 service workers die after ~30s idle; session storage clears with them.
     try {
-      await chrome.storage.session.set({ zohoPageContext: payload });
+      await chrome.storage.local.set({ zohoPageContext: payload });
     } catch (err) {
       console.error('[Stratus] Failed to persist Zoho context:', err);
     }
@@ -324,10 +325,10 @@ registerMessageHandlers({
       // Fallback if tabs query fails
     }
 
-    // Recover Zoho context from session storage if needed
+    // Recover Zoho context from LOCAL storage (survives service worker restarts)
     if (!currentZohoPageContext) {
       try {
-        const stored = await chrome.storage.session.get('zohoPageContext');
+        const stored = await chrome.storage.local.get('zohoPageContext');
         if (stored?.zohoPageContext) {
           currentZohoPageContext = stored.zohoPageContext;
         }
