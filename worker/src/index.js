@@ -624,6 +624,144 @@ function extractAIResponse(result) {
   return String(raw);
 }
 
+// ── Schema v2 classifier (SHADOW MODE) ──
+// Rich structured output: intent + items + modifiers + revision + reference.
+// Runs in parallel with the legacy classifier. Output is logged for comparison
+// but does NOT drive routing yet. After a week of shadow data, we flip the flag.
+const CF_CLASSIFIER_PROMPT_V2 = `You are an intent classifier for a Cisco/Meraki quoting bot. Output a single JSON object — no prose, no markdown.
+
+SCHEMA:
+{"intent":"quote|revise|price_lookup|dashboard_parse|clarify|product_info|escalate|conversation","confidence":0.0-1.0,"reply":"","items":[{"sku":"...","qty":1,"sku_type":"hardware|license|accessory"}],"modifiers":{"hardware_only":false,"license_only":false,"with_license":null,"term_years":null,"tier":null,"show_pricing":false,"all_terms":false},"revision":{"action":null,"target_sku":null,"add_items":[],"new_term":null,"new_tier":null,"new_qty":null,"hw_lic_toggle":null},"reference":{"is_pronoun_ref":false,"option_ref":null,"resolve_from_history":false},"dashboard":{"is_meraki_license_page":false}}
+
+INTENT RULES:
+- "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1.
+- "price_lookup": "cost of X", "how much is X", "price for X", or pronoun pricing ("cost of that").
+- "revise": message modifies a prior quote — "license only", "hardware only", "3 year only", "add X", "remove X", "swap X for Y", "make it N", "change to SEC". Requires prior context.
+- "dashboard_parse": image of Meraki license dashboard.
+- "clarify": quote request too vague — "some switches", "need APs", "pricing" alone, "5 MS130-24" (missing variant).
+- "product_info": spec, compare, size, capability, EOL-status question — NOT a quote.
+- "escalate": complex proposal / deployment planning.
+- "conversation": greeting, thanks, jokes, identity, short reactions ("lol","ok","?").
+
+MODIFIER RULES:
+- hardware_only: "hw only","hardware only","no license","just hardware","without licensing".
+- license_only: "license only","just the license","licenses only","renewal only","renew X","lic only","renew N X licenses".
+- with_license: true when user says "with license","with licensing","and license". null otherwise.
+- term_years: 1/3/5 for "1 year"/"3 year"/"5 year"/"three year"/"just the 5 year". null otherwise.
+- tier: "SEC" for "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for "SD-WAN"/"SDW". null otherwise.
+- show_pricing: true for pricing intent ("cost","how much","with pricing","price").
+- all_terms: true when user says "1yr 3yr and 5yr" or "all terms".
+
+REVISION RULES:
+- action: "add"/"remove"/"swap"/"change_term"/"change_tier"/"toggle_hw_lic"/"change_qty".
+- "license only"/"hardware only" after prior quote → action=toggle_hw_lic, hw_lic_toggle="license_only"/"hardware_only".
+- "3 year only"/"make it 5 year" → action=change_term, new_term=3 or 5.
+- "add 2 MX67" → action=add, add_items=[{sku:"MX67",qty:2}].
+- "remove MR44"/"take out MR44" → action=remove, target_sku="MR44".
+- "swap MR44 for MR46" → action=swap, target_sku="MR44", add_items=[{sku:"MR46"}].
+- "make it 5" → action=change_qty, new_qty=5.
+- "change to SEC" → action=change_tier, new_tier="SEC".
+- "add pricing" → action=null but set modifiers.show_pricing=true, reference.resolve_from_history=true.
+- For revisions: set reference.resolve_from_history=true.
+
+REFERENCE RULES:
+- is_pronoun_ref: true for "that"/"those"/"it"/"them"/"this"/"these"/"the switch"/"the AP"/"the quote".
+- option_ref: 1/2/3 if user says "Option 1/2/3".
+- resolve_from_history: true whenever the message only makes sense with prior context.
+
+SKU KNOWLEDGE:
+Valid Meraki families: MR (APs), MX (firewalls), MS (switches), MV (cameras), MT (sensors), MG (cellular), Z (teleworker), CW (Wi-Fi 6E/7).
+Bare license SKUs like "LIC-ENT-3YR","LIC-MX64-SEC-3YR" → items with sku_type="license".
+If a model looks valid but you don't recognize it (EOL or new), still emit as quote — the backend validates.
+Word numbers: "one"=1,"two"=2,...,"ten"=10,"a couple"=2,"a few"=3.
+
+Return ONLY the JSON object. No markdown fences. No explanation.`;
+
+async function classifyWithCFv2(userMessage, priorContext, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const userText = priorContext ? `Prior assistant context:\n${priorContext}\n\nUser message:\n${userMessage}` : userMessage;
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CLASSIFIER_PROMPT_V2 },
+          { role: 'user', content: userText }
+        ],
+        max_tokens: 512
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('V2_TIMEOUT')), 8000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const rawResponse = result?.response ?? result?.choices?.[0]?.message?.content;
+    if (typeof rawResponse === 'object' && rawResponse !== null && rawResponse.intent) {
+      return { ...rawResponse, elapsed, raw: JSON.stringify(rawResponse) };
+    }
+    const raw = typeof rawResponse === 'string' ? rawResponse.trim() : String(rawResponse || '');
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { elapsed, raw, parseError: 'no JSON found' };
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return { ...parsed, elapsed, raw };
+    } catch (e) {
+      return { elapsed, raw, parseError: e.message };
+    }
+  } catch (err) {
+    return { elapsed: Date.now() - startMs, error: err.message };
+  }
+}
+
+// Async-fire-and-forget: log the shadow comparison to D1 via ctx.waitUntil.
+async function logShadowClassification(env, { personId, requestText, priorContext, legacy, v2 }) {
+  if (!env.ANALYTICS_DB) return;
+  try {
+    // Ensure table exists (idempotent)
+    await env.ANALYTICS_DB.prepare(`CREATE TABLE IF NOT EXISTS classifier_shadow (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT DEFAULT (datetime('now')),
+      person_id TEXT,
+      request_text TEXT,
+      prior_context TEXT,
+      legacy_intent TEXT,
+      legacy_elapsed_ms INTEGER,
+      legacy_raw TEXT,
+      v2_intent TEXT,
+      v2_confidence REAL,
+      v2_elapsed_ms INTEGER,
+      v2_items TEXT,
+      v2_modifiers TEXT,
+      v2_revision TEXT,
+      v2_reference TEXT,
+      v2_raw TEXT,
+      v2_parse_error TEXT,
+      intent_agree INTEGER
+    )`).run();
+    const intentAgree = legacy?.intent && v2?.intent ? (String(legacy.intent).toLowerCase() === String(v2.intent).toLowerCase() ? 1 : 0) : null;
+    await env.ANALYTICS_DB.prepare(`INSERT INTO classifier_shadow
+      (person_id, request_text, prior_context, legacy_intent, legacy_elapsed_ms, legacy_raw, v2_intent, v2_confidence, v2_elapsed_ms, v2_items, v2_modifiers, v2_revision, v2_reference, v2_raw, v2_parse_error, intent_agree)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      personId || null,
+      String(requestText || '').substring(0, 1000),
+      String(priorContext || '').substring(0, 2000),
+      legacy?.intent || null,
+      legacy?.elapsed || null,
+      String(legacy?.raw || '').substring(0, 2000),
+      v2?.intent || null,
+      v2?.confidence || null,
+      v2?.elapsed || null,
+      v2?.items ? JSON.stringify(v2.items).substring(0, 1000) : null,
+      v2?.modifiers ? JSON.stringify(v2.modifiers).substring(0, 500) : null,
+      v2?.revision ? JSON.stringify(v2.revision).substring(0, 500) : null,
+      v2?.reference ? JSON.stringify(v2.reference).substring(0, 200) : null,
+      String(v2?.raw || '').substring(0, 2000),
+      v2?.parseError || v2?.error || null,
+      intentAgree
+    ).run();
+  } catch (e) {
+    console.warn('[Shadow] log failed:', e.message);
+  }
+}
+
 async function classifyWithCF(userMessage, env) {
   if (!env.AI) return null;
   const startMs = Date.now();
@@ -4360,6 +4498,19 @@ export default {
         } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
       }
 
+      // ── /dashboard/shadow-classifier ── recent shadow log rows + agreement stats (shadow mode analysis)
+      if (request.method === 'GET' && url.pathname === '/dashboard/shadow-classifier') {
+        if (!db) return new Response(JSON.stringify({error:'D1 not bound'}), {status:500, headers:DASH_CORS});
+        try {
+          const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 500);
+          const [rows, stats] = await Promise.all([
+            db.prepare('SELECT id, created_at, substr(request_text,1,120) as req, legacy_intent, v2_intent, v2_confidence, intent_agree, v2_items, v2_modifiers, v2_revision, v2_reference, v2_parse_error, v2_elapsed_ms, legacy_elapsed_ms FROM classifier_shadow ORDER BY id DESC LIMIT ?').bind(limit).all(),
+            db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN intent_agree=1 THEN 1 ELSE 0 END) as agree, SUM(CASE WHEN v2_parse_error IS NOT NULL THEN 1 ELSE 0 END) as v2_parse_fail, AVG(legacy_elapsed_ms) as avg_legacy_ms, AVG(v2_elapsed_ms) as avg_v2_ms FROM classifier_shadow WHERE created_at >= datetime('now','-7 days')").first()
+          ]);
+          return new Response(JSON.stringify({stats, rows: rows.results || []}, null, 2), {headers: DASH_CORS});
+        } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
+      }
+
       // ── Live Workflow Traces: recent pipeline executions for animation ──
       if (request.method === 'GET' && url.pathname === '/dashboard/traces') {
         if (!db) return new Response(JSON.stringify({traces:[]}), {headers:DASH_CORS});
@@ -4626,9 +4777,32 @@ export default {
           // Matches GChat worker architecture (v2.0.0-cf-first-advisor).
 
           // ── Step 1: CF Workers AI intent classifier — the brain of the waterfall ──
+          // SHADOW MODE: run legacy + Schema v2 classifier in parallel. Only legacy
+          // drives routing. Both outputs are logged to D1 for disagreement analysis.
+          // Pull most recent assistant message for v2 context.
+          let priorCtxForV2 = '';
+          try {
+            const hist = await getHistory(kv, personId);
+            const lastAsst = (hist || []).filter(h => h.role === 'assistant').slice(-1)[0];
+            if (lastAsst) priorCtxForV2 = String(lastAsst.content || '').substring(0, 1500);
+          } catch {}
           T.step('wx-cfclassify', 'enter');
-          const classification = await classifyWithCF(text, env);
+          const [classification, v2Classification] = await Promise.all([
+            classifyWithCF(text, env),
+            classifyWithCFv2(text, priorCtxForV2, env).catch(e => ({ error: e.message }))
+          ]);
           T.step('wx-cfclassify', 'exit');
+          // Fire-and-forget: log shadow comparison to D1 (non-blocking)
+          ctx.waitUntil(logShadowClassification(env, {
+            personId,
+            requestText: text,
+            priorContext: priorCtxForV2,
+            legacy: classification,
+            v2: v2Classification
+          }));
+          if (v2Classification) {
+            console.log(`[Shadow-V2] intent=${v2Classification.intent || 'ERR'} conf=${v2Classification.confidence || '?'} (${v2Classification.elapsed || 0}ms)${v2Classification.parseError ? ' parseErr=' + v2Classification.parseError : ''}`);
+          }
 
           if (classification) {
             console.log(`[CF-First] Intent: ${classification.intent} (${classification.elapsed}ms)`);
@@ -5047,6 +5221,58 @@ export default {
         result.response = err.message;
         result.details.ms = Date.now() - startMs;
         return new Response(JSON.stringify(result, null, 2), { headers: { 'content-type': 'application/json' } });
+      }
+    }
+
+    // ── /api/benchmark-classifier ── POST with {input, prior_context?, model?}
+    // Runs the Schema v2 classifier prompt against the named CF Workers AI model
+    // via the bound AI gateway (which works with the deployed worker's auth).
+    // Used by the offline benchmark runner to A/B Llama vs Gemma vs Hermes.
+    if (url.pathname === '/api/benchmark-classifier') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key' } });
+      if (request.method !== 'POST') return new Response('POST required', { status: 405 });
+      const key = request.headers.get('X-Bench-Key') || new URL(request.url).searchParams.get('key');
+      if (key !== 'Biscuit4') return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
+      try {
+        const body = await request.json();
+        const input = body.input;
+        const priorCtx = body.prior_context || '';
+        const model = body.model || '@cf/meta/llama-4-scout-17b-16e-instruct';
+        if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
+        if (!env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
+
+        const systemPrompt = `You are an intent classifier for a Cisco/Meraki quoting bot. Output a single JSON object — no prose, no markdown.\n\nSCHEMA:\n{"intent":"quote|revise|price_lookup|dashboard_parse|clarify|product_info|escalate|conversation","confidence":0.0-1.0,"reply":"","items":[{"sku":"...","qty":1,"sku_type":"hardware|license|accessory"}],"modifiers":{"hardware_only":false,"license_only":false,"with_license":null,"term_years":null,"tier":null,"show_pricing":false,"all_terms":false},"revision":{"action":null,"target_sku":null,"add_items":[],"new_term":null,"new_tier":null,"new_qty":null,"hw_lic_toggle":null},"reference":{"is_pronoun_ref":false,"option_ref":null,"resolve_from_history":false},"dashboard":{"is_meraki_license_page":false}}\n\nINTENT RULES:\n- "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1.\n- "price_lookup": "cost of X", "how much is X", "price for X", or pronoun pricing ("cost of that").\n- "revise": message modifies a prior quote — "license only", "hardware only", "3 year only", "add X", "remove X", "swap X for Y", "make it N", "change to SEC". Requires prior context.\n- "dashboard_parse": image of Meraki license dashboard.\n- "clarify": quote request too vague — "some switches", "need APs", "pricing" alone, "5 MS130-24" (missing variant).\n- "product_info": spec, compare, size, capability, EOL-status question — NOT a quote.\n- "escalate": complex proposal / deployment planning.\n- "conversation": greeting, thanks, jokes, identity, short reactions ("lol","ok","?").\n\nMODIFIER RULES:\n- hardware_only: "hw only","hardware only","no license","just hardware","without licensing".\n- license_only: "license only","just the license","licenses only","renewal only","renew X","lic only".\n- with_license: true when user says "with license","with licensing","and license". null otherwise.\n- term_years: 1/3/5 for "1 year"/"3 year"/"5 year"/"three year". null otherwise.\n- tier: "SEC" for "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for "SD-WAN"/"SDW". null otherwise.\n- show_pricing: true for pricing intent ("cost","how much","with pricing","price").\n- all_terms: true when user says "1yr 3yr and 5yr" or "all terms".\n\nREVISION RULES:\n- action: "add"/"remove"/"swap"/"change_term"/"change_tier"/"toggle_hw_lic"/"change_qty".\n- "license only"/"hardware only" after prior quote → action=toggle_hw_lic, hw_lic_toggle="license_only"/"hardware_only".\n- "3 year only"/"make it 5 year" → action=change_term, new_term=3 or 5.\n- "add 2 MX67" → action=add, add_items=[{sku:"MX67",qty:2}].\n- "remove MR44"/"take out MR44" → action=remove, target_sku="MR44".\n- "swap MR44 for MR46" → action=swap, target_sku="MR44", add_items=[{sku:"MR46"}].\n- "make it 5" → action=change_qty, new_qty=5.\n- "change to SEC" → action=change_tier, new_tier="SEC".\n- For revisions: set reference.resolve_from_history=true.\n\nREFERENCE RULES:\n- is_pronoun_ref: true for "that"/"those"/"it"/"them"/"this"/"these"/"the switch"/"the AP"/"the quote".\n- option_ref: 1/2/3 if user says "Option 1/2/3".\n- resolve_from_history: true whenever the message only makes sense with prior context.\n\nSKU KNOWLEDGE:\nValid Meraki families: MR (APs), MX (firewalls), MS (switches), MV (cameras), MT (sensors), MG (cellular), Z (teleworker), CW (Wi-Fi 6E/7).\nBare license SKUs like "LIC-ENT-3YR","LIC-MX64-SEC-3YR" → items with sku_type="license".\nIf a model looks valid but you don't recognize it (EOL or new), still emit as quote — the backend validates.\nWord numbers: "one"=1,"two"=2,...,"ten"=10,"a couple"=2,"a few"=3.\n\nReturn ONLY the JSON object. No markdown fences. No explanation.`;
+
+        const userText = priorCtx ? `Prior assistant context:\n${priorCtx}\n\nUser message:\n${input}` : input;
+
+        const isGemma = /gemma/i.test(model);
+        const requestBody = isGemma
+          ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 512 }
+          : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 512 };
+
+        const start = Date.now();
+        let aiResult, err = null;
+        try {
+          aiResult = await env.AI.run(model, requestBody);
+        } catch (e) { err = e.message; }
+        const elapsed = Date.now() - start;
+
+        // Extract response
+        let raw = null, parsed = null, parseError = null;
+        if (aiResult) {
+          raw = aiResult.response ?? aiResult.choices?.[0]?.message?.content ?? null;
+          if (typeof raw === 'object' && raw !== null) { parsed = raw; raw = JSON.stringify(raw); }
+          else if (typeof raw === 'string') {
+            try {
+              const m = raw.match(/\{[\s\S]*\}/);
+              if (m) parsed = JSON.parse(m[0]);
+            } catch (e) { parseError = e.message; }
+          }
+        }
+
+        return new Response(JSON.stringify({ model, input, elapsed, raw, parsed, parseError, err }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'content-type':'application/json' } });
       }
     }
 
