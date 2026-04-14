@@ -8545,8 +8545,13 @@ ${(data.recentRequests || []).map(r => {
     // agent rather than duplicating any logic.
     // ══════════════════════════════════════════════════════════════
     if (url.pathname.startsWith('/api/')) {
+      // Benchmark endpoints are intentionally auth-free: they only accept
+      // hardcoded task IDs, default to dry-run (writes mocked), and are read-only
+      // for writes so spam is harmless. This lets the sandbox-based benchmark
+      // runner call them without needing a shared secret.
+      const isBenchmark = url.pathname.startsWith('/api/benchmark/');
       const apiKey = request.headers.get('X-API-Key');
-      if (!apiKey || apiKey !== env.GMAIL_ADDON_API_KEY) {
+      if (!isBenchmark && (!apiKey || apiKey !== env.GMAIL_ADDON_API_KEY)) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
