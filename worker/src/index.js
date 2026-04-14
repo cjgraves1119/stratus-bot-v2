@@ -1561,6 +1561,172 @@ async function handleQuoteConfirmation(text, personId, kv) {
 }
 
 /**
+ * Case 1 + routing improvement: Handle modifier-only follow-ups after a quote.
+ *
+ * Triggers on messages like:
+ *   "hardware only" / "hw only"
+ *   "license only" / "licenses only" / "just the licenses"
+ *   "with pricing" / "add pricing"
+ *   "3 year only" / "just the 3 year" / "only 1 year"
+ *   "remove MR44" / "take out MR44" / "without MR44"
+ *   "add 2 MX67" / "also include 1 MS130-24P"
+ *   "change MR44 to MR46" / "swap MR44 for MR46"
+ *
+ * Looks at the most recent assistant message with a Stratus order URL, parses
+ * it back into {sku, qty}, applies the mutation, and rebuilds deterministically.
+ * Returns response string if handled, null to pass through.
+ */
+async function handleFollowUpModifier(text, personId, kv) {
+  if (!personId || !kv) return null;
+  const upper = text.toUpperCase().trim();
+  // Ignore if the message itself contains SKU tokens — that's handled downstream
+  // UNLESS the phrase is "add ..." or "also ..." which we want to apply to the prior quote.
+  const hasAddPrefix = /^(ADD|ALSO\s+(?:ADD|INCLUDE))\b/i.test(upper);
+  const hasRemovePrefix = /^(REMOVE|TAKE\s+OUT|WITHOUT)\b/i.test(upper);
+  const hasSwapPrefix = /^(CHANGE|SWAP|REPLACE)\b/i.test(upper);
+
+  // Pure modifier phrases (no SKU tokens needed)
+  const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?)\s*\.?\s*$/i.test(upper);
+  const isLicOnly = /^(LICENSE[S]?\s+ONLY|LICENCE[S]?\s+ONLY|JUST\s+(THE\s+)?LICENSE[S]?|LICENSE[S]?\s+RENEWAL|RENEWAL\s+ONLY|NO\s+HARDWARE)\s*\.?\s*$/i.test(upper);
+  const isTermOnly = upper.match(/^(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(\d)\s*-?\s*YEAR(?:\s+ONLY|\s+PLEASE)?\s*\.?\s*$/i);
+  const isAddPricing = /^(ADD\s+PRICING|WITH\s+PRICING|INCLUDE\s+PRICING|SHOW\s+ME\s+PRICING|HOW\s+MUCH(\s+(IS|ARE)\s+(IT|THAT|THOSE|THIS|THESE|THEM))?\s*\??\s*)$/i.test(upper);
+
+  if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) return null;
+
+  const history = await getHistory(kv, personId);
+  if (!history || history.length === 0) return null;
+  const assistantMsgs = history.filter(h => h.role === 'assistant').reverse();
+
+  // Find the last assistant message with a Stratus URL
+  let lastUrl = null, lastTermLabels = [];
+  for (const m of assistantMsgs) {
+    // Capture ALL URLs + their term labels. Handle both **label:** and **label**: markdown.
+    const urlRegex = /(?:\*\*)?(\d)-Year\s+Co-Term(?:\*\*)?\s*:?\s*(?:\*\*)?\s*(https:\/\/stratusinfosystems\.com\/order\/\?item=[^\s)*]+)/gi;
+    const urlMatches = [...m.content.matchAll(urlRegex)];
+    if (urlMatches.length > 0) {
+      lastTermLabels = urlMatches.map(u => ({ term: parseInt(u[1], 10), url: u[2] }));
+      lastUrl = lastTermLabels[0].url;
+      break;
+    }
+    // Fallback: any Stratus URL without a term label (e.g. single-url pricing response)
+    const anyUrl = m.content.match(/(https:\/\/stratusinfosystems\.com\/order\/\?item=[^\s)*]+)/);
+    if (anyUrl) {
+      lastUrl = anyUrl[1];
+      lastTermLabels = [{ term: null, url: anyUrl[1] }];
+      break;
+    }
+  }
+  if (!lastUrl) return null;
+
+  // Parse each URL into {sku, qty}[]
+  const urlToItems = (url) => {
+    const m = url.match(/[?&]item=([^&]+)&qty=([^&\s)]+)/);
+    if (!m) return null;
+    const skus = m[1].split(',').map(s => decodeURIComponent(s.trim()));
+    const qtys = m[2].split(',').map(q => parseInt(decodeURIComponent(q.trim()), 10));
+    if (skus.length !== qtys.length) return null;
+    return skus.map((sku, i) => ({ sku, qty: qtys[i] }));
+  };
+
+  // For mutations, we apply to all terms (hw only, license only, term reduction) OR a specific one.
+  // Build a map of term → items.
+  const termItems = {};
+  for (const entry of lastTermLabels) {
+    const items = urlToItems(entry.url);
+    if (items) termItems[entry.term || 'na'] = items;
+  }
+  if (Object.keys(termItems).length === 0) return null;
+
+  // Helper: apply "hardware only" — drop LIC-* SKUs
+  const applyHwOnly = (items) => items.filter(i => !/^LIC-/i.test(i.sku));
+  // Helper: apply "license only" — keep LIC-* SKUs, OR if none, generate from hardware
+  const applyLicOnly = (items, term) => {
+    const licOnly = items.filter(i => /^LIC-/i.test(i.sku));
+    if (licOnly.length > 0) return licOnly;
+    // Generate licenses from hardware SKUs
+    const generated = [];
+    for (const { sku, qty } of items) {
+      const cleanBase = sku.replace(/-(HW|MR|RTG|HW-NA)$/i, '');
+      const lics = getLicenseSkus(cleanBase, null);
+      if (lics) {
+        const found = lics.find(l => l.term === `${term || 3}Y`);
+        if (found) generated.push({ sku: found.sku, qty });
+      }
+    }
+    return generated;
+  };
+  // Helper: apply add/remove/swap
+  const applyItemMutation = (items, freshText) => {
+    const up = freshText.toUpperCase();
+    // Remove
+    const removeMatch = up.match(/^(?:REMOVE|TAKE\s+OUT|WITHOUT)\s+(\d+\s+)?([A-Z0-9][-A-Z0-9]+)/i);
+    if (removeMatch) {
+      const rmSku = removeMatch[2].toUpperCase();
+      return items.filter(i => i.sku.toUpperCase() !== rmSku && i.sku.toUpperCase() !== applySuffix(rmSku).toUpperCase());
+    }
+    // Add
+    const addMatch = freshText.match(/^(?:ADD|ALSO\s+(?:ADD|INCLUDE))\s+(.+)$/i);
+    if (addMatch) {
+      const parsed = parseMessage(addMatch[1]);
+      if (parsed && parsed.items && parsed.items.length > 0) {
+        const merged = items.slice();
+        for (const it of parsed.items) {
+          const hwSku = applySuffix(it.baseSku);
+          const existingIdx = merged.findIndex(e => e.sku.toUpperCase() === hwSku.toUpperCase());
+          if (existingIdx >= 0) merged[existingIdx].qty += it.qty;
+          else merged.push({ sku: hwSku, qty: it.qty });
+        }
+        return merged;
+      }
+    }
+    return null;
+  };
+
+  let filteredTerms = Object.entries(termItems);
+
+  // Apply term filter
+  if (isTermOnly) {
+    const wantTerm = parseInt(isTermOnly[1], 10);
+    const single = filteredTerms.find(([k]) => String(k) === String(wantTerm));
+    if (single) filteredTerms = [single];
+  }
+
+  // Apply mutation
+  const mutated = [];
+  for (const [term, items] of filteredTerms) {
+    let out = items;
+    if (isHwOnly) out = applyHwOnly(out);
+    else if (isLicOnly) out = applyLicOnly(out, term === 'na' ? null : parseInt(term, 10));
+    else if (hasRemovePrefix || hasAddPrefix || hasSwapPrefix) {
+      const r = applyItemMutation(out, text);
+      if (r) out = r;
+      else return null; // couldn't parse the mutation — pass through
+    }
+    if (out.length > 0) mutated.push({ term, items: out });
+  }
+  if (mutated.length === 0) return null;
+
+  // Render response
+  const lines = [];
+  const showPricing = isAddPricing;
+  for (const { term, items } of mutated) {
+    const url = buildStratusUrl(items);
+    const label = term === 'na' ? '' : `**${term}-Year Co-Term:** `;
+    lines.push(`${label}${url}`);
+    if (showPricing) {
+      lines.push(buildPricingBlock(items, false));
+    }
+    lines.push('');
+  }
+  if (isAddPricing && !showPricing) {
+    // simple pricing-only: price the hardware+licenses for first term
+    const first = mutated[0];
+    lines.push(buildPricingBlock(first.items, false));
+  }
+  return lines.join('\n').trim();
+}
+
+/**
  * Detect pricing intent and handle deterministically.
  * Returns a response string if handled, or null to pass through to Claude.
  */
@@ -1618,6 +1784,30 @@ async function handlePricingRequest(text, personId, kv) {
     }
   }
 
+  // ── NEW (Case 3 fix): Detect "with license" / "with N year license" / "with licensing" ──
+  // When present, append the appropriate license SKU(s) to the pricing call.
+  // Allow optional tier word (SEC/ENT/etc) between "year" and "license".
+  const withLicenseMatch = text.match(/\bwith\s+(?:a\s+)?(?:(\d)\s*[-\s]?\s*year\s+)?(?:(?:ENT(?:ERPRISE)?|SEC(?:URITY)?|ADVANCED\s+SECURITY|SDW|SD[\s-]?WAN)\s+)?(license|licence|licensing|lic)\b/i);
+  const wantsLicense = !!withLicenseMatch;
+  const licenseTerm = withLicenseMatch && withLicenseMatch[1] ? parseInt(withLicenseMatch[1]) : 3;
+  const licenseTierMatch = wantsLicense && text.match(/\bwith\s+(?:a\s+)?(?:\d\s*[-\s]?\s*year\s+)?(ENT(?:ERPRISE)?|SEC(?:URITY)?|ADVANCED\s+SECURITY|SDW|SD[\s-]?WAN)\s+(license|licence|licensing)/i);
+  let licenseTierOverride = null;
+  if (licenseTierMatch) {
+    const t = licenseTierMatch[1].toUpperCase();
+    if (/SEC|ADVANCED/.test(t)) licenseTierOverride = 'SEC';
+    else if (/ENT/.test(t)) licenseTierOverride = 'ENT';
+    else if (/SDW|SD.?WAN/.test(t)) licenseTierOverride = 'SDW';
+  }
+  const _licenseSkusFor = (baseSku, term, tier) => {
+    try {
+      const cleanBase = baseSku.replace(/-(HW|MR|RTG|HW-NA)$/i, '');
+      const lics = getLicenseSkus(cleanBase, tier);
+      if (!lics) return [];
+      const m = lics.find(l => l.term === `${term}Y`);
+      return m ? [m.sku] : [];
+    } catch { return []; }
+  };
+
   // Pattern 1: Direct SKU pricing request like "cost of 2x MS150-48FP-4X" or "price of MR44"
   const directSkuMatch = text.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for))?\s+(\d+)\s*x?\s+([A-Z0-9][-A-Z0-9]+)/i);
   const singleSkuMatch = !directSkuMatch && text.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for|is|does))?\s+(?:an?\s+)?([A-Z0-9][-A-Z0-9]+)/i);
@@ -1625,18 +1815,59 @@ async function handlePricingRequest(text, personId, kv) {
   if (directSkuMatch) {
     const qty = parseInt(directSkuMatch[1]);
     const sku = directSkuMatch[2].toUpperCase();
-    const resp = formatPricingResponse(null, [sku], [qty]);
+    const skus = [sku];
+    const qtys = [qty];
+    if (wantsLicense) {
+      for (const ls of _licenseSkusFor(sku, licenseTerm, licenseTierOverride)) { skus.push(ls); qtys.push(qty); }
+    }
+    const resp = formatPricingResponse(null, skus, qtys);
     if (resp) return resp;
-    // SKU not found in prices — fall through to Claude
   }
 
   if (singleSkuMatch) {
     const sku = singleSkuMatch[1].toUpperCase();
-    // Filter out common false positives and non-SKU words
-    // Real Cisco SKUs always contain a digit (MR46, CW9164, MS130-24P) or start with LIC-
     if (!/^(OPTION|THE|THIS|THAT|MY|IT|A|AN)$/i.test(sku) && (/\d/.test(sku) || /^LIC-/i.test(sku))) {
-      const resp = formatPricingResponse(null, [sku], [1]);
+      const skus = [sku];
+      const qtys = [1];
+      if (wantsLicense) {
+        for (const ls of _licenseSkusFor(sku, licenseTerm, licenseTierOverride)) { skus.push(ls); qtys.push(1); }
+      }
+      const resp = formatPricingResponse(null, skus, qtys);
       if (resp) return resp;
+    }
+  }
+
+  // ── NEW (Case 4 fix): Pronoun resolution for pricing follow-ups ──
+  // "what is the cost of that" / "how much is it" / "price of those"
+  // → look back at history for most recently quoted SKU(s) and price them.
+  const pronounRef = text.match(/(?:cost|price|pricing|how much)(?:\s+(?:of|for|is|does|are|would))?\s+(?:an?\s+|the\s+)?(that|those|this|these|it|them|the\s+switch(?:es)?|the\s+ap(?:s)?|the\s+access\s+point(?:s)?|the\s+firewall|the\s+camera(?:s)?|the\s+quote)\b/i);
+  if (pronounRef && personId && kv) {
+    const history = await getHistory(kv, personId);
+    if (history && history.length > 0) {
+      const assistantMsgs = history.filter(h => h.role === 'assistant').reverse();
+      for (const m of assistantMsgs) {
+        const urlMatch = m.content.match(/stratusinfosystems\.com\/order\/\?item=([^\s&]+)&qty=([^\s)]+)/);
+        if (urlMatch) {
+          const skuList = urlMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+          const qtyList = urlMatch[2].split(',').map(q => parseInt(q.trim(), 10));
+          if (skuList.length > 0 && qtyList.length === skuList.length) {
+            const finalSkus = skuList.slice();
+            const finalQtys = qtyList.slice();
+            if (wantsLicense) {
+              for (let i = 0; i < skuList.length; i++) {
+                const s = skuList[i];
+                if (!s.toUpperCase().startsWith('LIC-')) {
+                  for (const ls of _licenseSkusFor(s, licenseTerm, licenseTierOverride)) {
+                    if (!finalSkus.some(e => e.toUpperCase() === ls.toUpperCase())) { finalSkus.push(ls); finalQtys.push(qtyList[i]); }
+                  }
+                }
+              }
+            }
+            const resp = formatPricingResponse(null, finalSkus, finalQtys);
+            if (resp) return resp;
+          }
+        }
+      }
     }
   }
 
@@ -4344,6 +4575,33 @@ export default {
             return;
           }
           T.step('wx-confirm', 'exit', { result: 'no' });
+
+          // ── NEW (Case 1 fix): Follow-up modifier handler ──
+          // Runs BEFORE pricing + CF classify so modifier-only messages like
+          // "license only", "hardware only", "3 year only", "add 2 MX67" apply
+          // to the prior quote URL instead of being mis-routed to Claude/clarify.
+          T.step('wx-followup', 'enter');
+          try {
+            const followUpReply = await handleFollowUpModifier(text, personId, kv);
+            if (followUpReply) {
+              T.step('wx-followup', 'exit', { result: 'match' });
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', followUpReply);
+              T.step('wx-send', 'enter');
+              await sendMessage(roomId, `${followUpReply}\n\n_⚡ Follow-up modifier (deterministic, free)_`, token);
+              T.step('wx-send', 'exit');
+              T.step('wx-d1', 'enter');
+              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'followup-modifier', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+              writeMetric(env, { path: 'followup-modifier', durationMs: Date.now() - _wxStartMs, personId });
+              T.step('wx-d1', 'exit');
+              ctx.waitUntil(T.flush());
+              return;
+            }
+            T.step('wx-followup', 'exit', { result: 'no_match' });
+          } catch (e) {
+            console.warn('[FollowUp] error:', e.message);
+            T.step('wx-followup', 'exit', { result: 'error' });
+          }
 
           // Deterministic pricing calculator
           T.step('wx-pricing', 'enter');
