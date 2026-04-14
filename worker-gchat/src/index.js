@@ -7766,6 +7766,418 @@ export class CrmWorkflow extends WorkflowEntrypoint {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// A/B MODEL BENCHMARK INFRASTRUCTURE
+// Compares Claude vs Cloudflare Workers AI models on CRM tool-use tasks.
+// Supports dry-run mode: reads hit real CRM, writes are mocked.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Tools that WRITE to Zoho/Gmail/Webex — mocked in dry-run mode
+const BENCHMARK_WRITE_TOOLS = new Set([
+  'zoho_create_record',
+  'zoho_update_record',
+  'zoho_delete_record',
+  'create_deal_and_quote',
+  'velocity_hub_submit',
+  'gmail_create_draft',
+  'gmail_send_email',
+  'webex_send_message',
+  'zoho_create_note',
+  'zoho_update_note'
+]);
+
+// Tools that READ — always execute against real CRM
+const BENCHMARK_READ_TOOLS = new Set([
+  'zoho_search_records',
+  'zoho_get_record',
+  'zoho_get_related_records',
+  'zoho_get_field',
+  'zoho_coql_query',
+  'batch_product_lookup',
+  'gmail_search_messages',
+  'gmail_read_message',
+  'gmail_read_thread',
+  'parse_quote_url',
+  'web_search_domain',
+  'build_quote_url'
+]);
+
+// Wrapper for executeToolCall that mocks writes in dry-run mode.
+// Returns { result, mocked, payloadPreview }.
+async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun) {
+  if (dryRun && BENCHMARK_WRITE_TOOLS.has(toolName)) {
+    // Mock successful write — log payload for manual review
+    const mockId = `DRY_RUN_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const mockResults = {
+      'zoho_create_record': { data: [{ code: 'SUCCESS', details: { id: mockId, Created_Time: new Date().toISOString() } }] },
+      'zoho_update_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id || mockId, Modified_Time: new Date().toISOString() } }] },
+      'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
+      'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
+      'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
+      'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
+      'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
+      'webex_send_message': { success: true, message_id: mockId, dry_run: true },
+      'zoho_create_note': { data: [{ code: 'SUCCESS', details: { id: mockId } }] },
+      'zoho_update_note': { data: [{ code: 'SUCCESS', details: { id: toolInput.note_id || mockId } }] }
+    };
+    const mockResult = mockResults[toolName] || { success: true, mocked: true, id: mockId };
+    return {
+      result: mockResult,
+      mocked: true,
+      payloadPreview: JSON.stringify(toolInput).substring(0, 500)
+    };
+  }
+  // Real execution (reads, or writes when dry_run=false)
+  const result = await executeToolCall(toolName, toolInput, env, personId);
+  return { result, mocked: false, payloadPreview: null };
+}
+
+// Translate Anthropic tool format → CF Workers AI function-calling format.
+// Anthropic: { name, description, input_schema: {type,properties,required} }
+// CF:        { name, description, parameters: {type,properties,required} }
+function anthropicToolsToCfFormat(anthropicTools) {
+  return anthropicTools
+    .filter(t => !t.type || t.type === 'custom') // skip built-ins like advisor
+    .map(t => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.input_schema
+    }));
+}
+
+// Parse CF response tool_calls into a normalized form.
+// CF sometimes returns tool_calls at top level, sometimes embedded in response text as JSON.
+function parseCfToolCalls(cfResponse) {
+  const calls = [];
+  if (Array.isArray(cfResponse.tool_calls) && cfResponse.tool_calls.length > 0) {
+    for (const tc of cfResponse.tool_calls) {
+      calls.push({
+        name: tc.name,
+        arguments: typeof tc.arguments === 'string' ? (() => { try { return JSON.parse(tc.arguments); } catch { return {}; } })() : (tc.arguments || {})
+      });
+    }
+    return calls;
+  }
+  // Fallback: some models embed tool calls in response text as JSON
+  const text = cfResponse.response || '';
+  const jsonMatch = text.match(/\{[\s\S]*"name"[\s\S]*"arguments"[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed.name) calls.push({ name: parsed.name, arguments: parsed.arguments || {} });
+    } catch {}
+  }
+  return calls;
+}
+
+// CF Workers AI agentic loop — mirrors askClaude but uses CF models.
+// Returns { reply, toolCalls, iterations, elapsedMs, errors }.
+async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 10) {
+  const startMs = Date.now();
+  const cfTools = anthropicToolsToCfFormat(anthropicTools);
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage }
+  ];
+  const toolCallsLog = [];
+  const errors = [];
+  let iteration = 0;
+  let finalReply = '';
+
+  while (iteration < maxIterations) {
+    iteration++;
+    try {
+      const cfResponse = await env.AI.run(modelId, {
+        messages,
+        tools: cfTools,
+        max_tokens: 2048,
+        temperature: 0.3
+      });
+
+      const calls = parseCfToolCalls(cfResponse);
+      const responseText = cfResponse.response || '';
+
+      if (calls.length === 0) {
+        // No more tool calls — we have the final answer
+        finalReply = responseText || '(empty response)';
+        break;
+      }
+
+      // Record tool calls and execute them
+      messages.push({ role: 'assistant', content: responseText, tool_calls: calls });
+      for (const call of calls) {
+        toolCallsLog.push({ iteration, name: call.name, arguments: call.arguments });
+        try {
+          const { result, mocked } = await executeToolCallDryRun(call.name, call.arguments, env, personId, dryRun);
+          const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+          messages.push({
+            role: 'tool',
+            name: call.name,
+            content: resultStr.substring(0, 4000) + (mocked ? ' [DRY_RUN_MOCKED]' : '')
+          });
+        } catch (toolErr) {
+          errors.push({ iteration, tool: call.name, error: toolErr.message });
+          messages.push({
+            role: 'tool',
+            name: call.name,
+            content: JSON.stringify({ error: toolErr.message })
+          });
+        }
+      }
+    } catch (apiErr) {
+      errors.push({ iteration, phase: 'api_call', error: apiErr.message });
+      finalReply = `API error: ${apiErr.message}`;
+      break;
+    }
+  }
+
+  if (iteration >= maxIterations && !finalReply) {
+    finalReply = '(max iterations reached without final response)';
+  }
+
+  return {
+    reply: finalReply,
+    toolCalls: toolCallsLog,
+    iterations: iteration,
+    elapsedMs: Date.now() - startMs,
+    errors
+  };
+}
+
+// Wrapper for askClaude in benchmark context — uses dry-run tool execution.
+// We can't easily modify askClaude itself without invasive changes, so we patch
+// executeToolCall temporarily via a per-request flag stored in env.
+async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWallMs = 60000) {
+  const startMs = Date.now();
+  const toolCallsLog = [];
+  const errors = [];
+
+  // Monkey-patch executeToolCall for this request by wrapping it via globalThis
+  const origExecute = globalThis.__benchmark_execute_override;
+  globalThis.__benchmark_execute_override = async (toolName, toolInput) => {
+    const { result, mocked } = await executeToolCallDryRun(toolName, toolInput, env, personId, dryRun);
+    toolCallsLog.push({ name: toolName, arguments: toolInput, mocked });
+    return result;
+  };
+
+  try {
+    const reply = await askClaude(userMessage, personId, env, null, true, null, maxWallMs);
+    const replyText = typeof reply === 'string' ? reply : (reply?.reply || '(continuation returned)');
+    return {
+      reply: replyText,
+      toolCalls: toolCallsLog,
+      iterations: toolCallsLog.length,
+      elapsedMs: Date.now() - startMs,
+      errors
+    };
+  } catch (err) {
+    errors.push({ phase: 'askClaude', error: err.message });
+    return {
+      reply: `askClaude error: ${err.message}`,
+      toolCalls: toolCallsLog,
+      iterations: toolCallsLog.length,
+      elapsedMs: Date.now() - startMs,
+      errors
+    };
+  } finally {
+    globalThis.__benchmark_execute_override = origExecute;
+  }
+}
+
+// Benchmark task definitions: 15 CRM workflows of varying complexity.
+const BENCHMARK_TASKS = [
+  // Simple — single tool call
+  { id: 'task_01', tier: 'simple', name: 'Find account by name', prompt: 'Find the Zoho account for "Stratus Information Systems"' },
+  { id: 'task_02', tier: 'simple', name: 'Find contact by email', prompt: 'Find the contact in Zoho with email chrisg@stratusinfosystems.com' },
+  { id: 'task_03', tier: 'simple', name: 'List open deals for owner', prompt: 'List the 5 most recent open deals owned by Chris Graves (owner ID 2570562000141711002)' },
+  { id: 'task_04', tier: 'simple', name: 'Get last 5 closed-won deals', prompt: 'Show me the 5 most recent Closed Won deals owned by Chris Graves' },
+  { id: 'task_05', tier: 'simple', name: 'Get tasks due this week', prompt: 'List tasks for Chris Graves (owner 2570562000141711002) with Due_Date this week' },
+  // Medium — 2-4 tool calls
+  { id: 'task_06', tier: 'medium', name: 'Account + contacts', prompt: 'Find the "Stratus Information Systems" account and list its associated contacts' },
+  { id: 'task_07', tier: 'medium', name: 'Quote summary', prompt: 'Find the most recent quote owned by Chris Graves and summarize its line items' },
+  { id: 'task_08', tier: 'medium', name: 'Deal detail lookup', prompt: 'Find the most recent open deal for Chris Graves and report its stage, amount, and any related quote' },
+  { id: 'task_09', tier: 'medium', name: 'Add contact to account (dry-run)', prompt: 'Add a new contact named "Test User" with email testuser@example.com to the Stratus Information Systems account' },
+  { id: 'task_10', tier: 'medium', name: 'Update task due date (dry-run)', prompt: 'Find the most overdue open task for Chris Graves and push its due date to next Friday' },
+  // Complex — 5+ tool calls
+  { id: 'task_11', tier: 'complex', name: 'Create full deal+quote (dry-run)', prompt: 'Create a new deal and quote for Stratus Information Systems: 5x MR46 access points with 3-year licenses. Use Lead_Source "Stratus Referal" and default Stratus Sales Meraki ISR.' },
+  { id: 'task_12', tier: 'complex', name: 'Clone and modify quote (dry-run)', prompt: 'Find the most recent quote for Chris Graves, clone it, and change the quantity of the first line item to 10' },
+  { id: 'task_13', tier: 'complex', name: 'Add SKU to existing quote (dry-run)', prompt: 'Find the most recent open quote for Chris Graves and add 2x LIC-ENT-3YR to it' },
+  { id: 'task_14', tier: 'complex', name: 'Handle missing record gracefully', prompt: 'Find the account "Nonexistent Fake Company XYZ 12345" and if not found, respond that no account was found — do NOT create one' },
+  { id: 'task_15', tier: 'complex', name: 'Multi-module reconciliation', prompt: 'Find all open deals for Chris Graves that have an associated quote but no related invoice, and list them' }
+];
+
+const BENCHMARK_MODELS = [
+  { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
+  { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B (CF)', type: 'cf' },
+  { id: '@hf/nousresearch/hermes-2-pro-mistral-7b', label: 'Hermes 2 Pro 7B (CF)', type: 'cf' },
+  { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1 24B (CF)', type: 'cf' }
+];
+
+// Run a single benchmark task against a single model.
+async function runBenchmarkTask(task, modelConfig, env, personId, dryRun) {
+  const systemPrompt = typeof buildCrmSystemPrompt === 'function'
+    ? buildCrmSystemPrompt(task.prompt)
+    : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
+
+  if (modelConfig.type === 'claude') {
+    return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000);
+  }
+  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10);
+}
+
+// HTML dashboard for benchmark results
+const BENCHMARK_DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Stratus AI — Model A/B Benchmark</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 1600px; margin: 0 auto; padding: 20px; background: #f6f8fa; color: #24292e; }
+  h1 { font-size: 24px; margin-bottom: 8px; }
+  .subtitle { color: #586069; margin-bottom: 24px; }
+  .controls { background: white; padding: 16px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  button { background: #0366d6; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 14px; }
+  button:hover { background: #0256c1; }
+  button:disabled { background: #959da5; cursor: not-allowed; }
+  button.secondary { background: #e1e4e8; color: #24292e; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e1e4e8; font-size: 13px; vertical-align: top; }
+  th { background: #f6f8fa; font-weight: 600; position: sticky; top: 0; }
+  .task-cell { max-width: 280px; }
+  .task-name { font-weight: 600; }
+  .task-prompt { color: #586069; font-size: 12px; margin-top: 4px; }
+  .result-cell { max-width: 240px; font-size: 12px; }
+  .reply-preview { max-height: 80px; overflow: hidden; text-overflow: ellipsis; color: #24292e; }
+  .stats { display: flex; gap: 8px; margin-top: 4px; font-size: 11px; color: #586069; }
+  .badge { padding: 2px 6px; border-radius: 3px; font-weight: 600; }
+  .badge-ok { background: #d4edda; color: #155724; }
+  .badge-warn { background: #fff3cd; color: #856404; }
+  .badge-err { background: #f8d7da; color: #721c24; }
+  .tier { text-transform: uppercase; font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
+  .tier-simple { background: #c3e6cb; color: #155724; }
+  .tier-medium { background: #ffeaa7; color: #856404; }
+  .tier-complex { background: #fab1a0; color: #721c24; }
+  .status { font-size: 12px; padding: 10px; background: #e7f3ff; border-radius: 6px; margin-bottom: 20px; }
+  details { margin-top: 4px; }
+  summary { cursor: pointer; color: #0366d6; font-size: 11px; }
+  pre { background: #f6f8fa; padding: 8px; border-radius: 4px; font-size: 10px; overflow-x: auto; max-width: 220px; }
+</style>
+</head>
+<body>
+<h1>Stratus AI — Model A/B Benchmark</h1>
+<div class="subtitle">Compare Claude vs Cloudflare Workers AI on 15 CRM tool-use tasks. Writes are mocked (dry-run); reads hit real Zoho.</div>
+
+<div class="controls">
+  <label><input type="checkbox" id="dryRun" checked> Dry-run mode (recommended)</label>
+  <label>Tasks: <select id="taskFilter"><option value="all">All (15)</option><option value="simple">Simple only</option><option value="medium">Medium only</option><option value="complex">Complex only</option></select></label>
+  <label>Models: <select id="modelFilter"><option value="all">All 4</option><option value="cf-only">CF only</option><option value="claude">Claude only</option></select></label>
+  <button onclick="runAll()">▶ Run All</button>
+  <button class="secondary" onclick="clearResults()">Clear</button>
+  <span id="status" class="status" style="margin: 0;"></span>
+</div>
+
+<table id="resultsTable">
+  <thead>
+    <tr>
+      <th>Tier</th>
+      <th>Task</th>
+      <th>Claude Sonnet 4.6</th>
+      <th>Llama 3.3 70B</th>
+      <th>Hermes 2 Pro 7B</th>
+      <th>Mistral Small 24B</th>
+    </tr>
+  </thead>
+  <tbody id="resultsBody"></tbody>
+</table>
+
+<script>
+const TASKS = ${JSON.stringify(BENCHMARK_TASKS)};
+const MODELS = ${JSON.stringify(BENCHMARK_MODELS)};
+
+function renderCell(result) {
+  if (!result) return '<td>—</td>';
+  if (result.error) return '<td class="result-cell"><span class="badge badge-err">ERROR</span><div class="reply-preview">' + escapeHtml(result.error) + '</div></td>';
+  const statusBadge = result.errors && result.errors.length > 0
+    ? '<span class="badge badge-warn">PARTIAL</span>'
+    : '<span class="badge badge-ok">OK</span>';
+  const replyHtml = escapeHtml(result.reply || '').substring(0, 300);
+  const toolList = (result.toolCalls || []).map(tc => tc.name).join(', ') || 'none';
+  return '<td class="result-cell">' + statusBadge +
+    '<div class="reply-preview">' + replyHtml + '</div>' +
+    '<div class="stats">⏱ ' + result.elapsedMs + 'ms &nbsp;·&nbsp; 🔧 ' + (result.toolCalls?.length || 0) + ' calls &nbsp;·&nbsp; 🔄 ' + (result.iterations || 0) + ' iter</div>' +
+    '<details><summary>Tools used</summary><pre>' + escapeHtml(toolList) + '</pre></details>' +
+    '</td>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function filterTasks() {
+  const tier = document.getElementById('taskFilter').value;
+  return tier === 'all' ? TASKS : TASKS.filter(t => t.tier === tier);
+}
+
+function filterModels() {
+  const sel = document.getElementById('modelFilter').value;
+  if (sel === 'cf-only') return MODELS.filter(m => m.type === 'cf');
+  if (sel === 'claude') return MODELS.filter(m => m.type === 'claude');
+  return MODELS;
+}
+
+function clearResults() {
+  document.getElementById('resultsBody').innerHTML = '';
+  document.getElementById('status').textContent = '';
+}
+
+async function runAll() {
+  const dryRun = document.getElementById('dryRun').checked;
+  const tasks = filterTasks();
+  const models = filterModels();
+  const tbody = document.getElementById('resultsBody');
+  const status = document.getElementById('status');
+  clearResults();
+
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+    const row = document.createElement('tr');
+    row.innerHTML = '<td><span class="tier tier-' + task.tier + '">' + task.tier + '</span></td>' +
+      '<td class="task-cell"><div class="task-name">' + escapeHtml(task.name) + '</div><div class="task-prompt">' + escapeHtml(task.prompt) + '</div></td>' +
+      MODELS.map(() => '<td>⏳ pending</td>').join('');
+    tbody.appendChild(row);
+    status.textContent = 'Running task ' + (i + 1) + '/' + tasks.length + ': ' + task.name;
+
+    // Run all models for this task in parallel
+    const promises = MODELS.map(async (model, idx) => {
+      if (!models.find(m => m.id === model.id)) {
+        row.children[idx + 2].innerHTML = '<span style="color:#959da5">skipped</span>';
+        return;
+      }
+      try {
+        const resp = await fetch('/api/benchmark/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taskId: task.id, modelId: model.id, dryRun })
+        });
+        const data = await resp.json();
+        row.children[idx + 2].outerHTML = renderCell(data);
+      } catch (err) {
+        row.children[idx + 2].outerHTML = renderCell({ error: err.message });
+      }
+    });
+    await Promise.all(promises);
+  }
+  status.textContent = '✓ Completed ' + tasks.length + ' tasks across ' + models.length + ' models.';
+}
+</script>
+</body>
+</html>`;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// END A/B MODEL BENCHMARK INFRASTRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════
+
 export default {
   async fetch(request, env, ctx) {
     // Load KV-cached live prices (if available from daily cron refresh)
@@ -9949,6 +10361,35 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
+          // ── A/B Benchmark: run a single task against a single model ──
+          case '/api/benchmark/run': {
+            const { taskId, modelId, dryRun: bDryRun } = apiBody;
+            if (!taskId || !modelId) {
+              apiResult = { error: 'taskId and modelId are required' };
+              break;
+            }
+            const task = BENCHMARK_TASKS.find(t => t.id === taskId);
+            const model = BENCHMARK_MODELS.find(m => m.id === modelId);
+            if (!task || !model) {
+              apiResult = { error: `Unknown ${!task ? 'task' : 'model'} id` };
+              break;
+            }
+            try {
+              const benchPersonId = `bench:${taskId}:${Date.now()}`;
+              const result = await runBenchmarkTask(task, model, env, benchPersonId, bDryRun !== false);
+              apiResult = { taskId, modelId, ...result };
+            } catch (bErr) {
+              apiResult = { taskId, modelId, error: bErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
+            }
+            break;
+          }
+
+          // ── A/B Benchmark: list available tasks and models ──
+          case '/api/benchmark/list': {
+            apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
+            break;
+          }
+
           // ── Chat: CRM-aware Claude agent for Chrome Extension sidebar ──
           // Routes through the same askClaude() tool-use loop as the GChat bot,
           // giving the extension chat full Zoho CRM capabilities.
@@ -11940,6 +12381,13 @@ Return ONLY a JSON object (no markdown, no explanation):
         runtime: 'cloudflare-workers'
       }), {
         headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // A/B Benchmark HTML dashboard
+    if (request.method === 'GET' && url.pathname === '/benchmark') {
+      return new Response(BENCHMARK_DASHBOARD_HTML, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
     }
 
