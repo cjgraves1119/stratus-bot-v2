@@ -827,39 +827,80 @@ async function askCFConversation(userMessage, env) {
 // Parses a CF Vision (or Claude) response for SKU + quantity pairs so they can
 // be stored in KV and fed to the deterministic quote engine on a follow-up
 // "quote this" / "quote both" message.
+function isValidSkuToken(sku) {
+  if (!sku) return false;
+  const s = sku.toUpperCase();
+  if (s.startsWith('LIC-')) return true;
+  if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
+  if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
+  return true;
+}
+
+function dedupeSkus(skus) {
+  const map = new Map();
+  for (const { sku, qty } of skus) {
+    map.set(sku, (map.get(sku) || 0) + qty);
+  }
+  return Array.from(map.entries()).map(([sku, qty]) => ({ sku, qty }));
+}
+
 function extractSkusFromVisionText(text) {
   const skus = [];
-  // Match patterns like:
-  //   | LIC-ENT-3YR | 6 |       (markdown table)
-  //   LIC-ENT-3YR: 6             (colon separated)
-  //   LIC-ENT-3YR has a count of 6
-  //   LIC-ENT-3YR × 6, LIC-ENT-3YR x 6
-  //   MR44 (12), MX67 (3)
-  //   6x LIC-ENT-3YR or 6 x LIC-ENT-3YR
+  if (!text) return skus;
+
+  if (/LICENSE_DASHBOARD_PARSE_V1/.test(text)) {
+    const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+    let m;
+    while ((m = lineRe.exec(text)) !== null) {
+      const sku = m[1].toUpperCase();
+      const limit = parseInt(m[2], 10);
+      const active = parseInt(m[3], 10);
+      if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
+      if (active === 0 && limit === 0) continue;
+      if (active === 0) continue;
+      const qty = Math.min(limit || active, active || limit);
+      if (qty <= 0 || qty > 500) continue;
+      if (!isValidSkuToken(sku)) continue;
+      skus.push({ sku, qty });
+    }
+    if (skus.length > 0) return dedupeSkus(skus);
+  }
+
+  const mrEntRe = /MR\s+Enterprise[^\n\d]{0,40}?(\d+)/gi;
+  let mEnt;
+  while ((mEnt = mrEntRe.exec(text)) !== null) {
+    const qty = parseInt(mEnt[1], 10);
+    if (qty > 0 && qty <= 500) skus.push({ sku: 'MR-ENT', qty });
+  }
+
   const skuRegex = /\b((?:LIC-[A-Z0-9-]+|(?:MR|MS|MX|MV|MT|MG|CW|C9|Z)\d[A-Z0-9-]*))\b/gi;
-  const lines = text.split('\n');
+  const lines = text.split(/\n|\r/);
   for (const line of lines) {
+    if (/license\s+history/i.test(line)) continue;
+    if (/\b[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/i.test(line)) continue;
     let match;
+    skuRegex.lastIndex = 0;
     while ((match = skuRegex.exec(line)) !== null) {
       const sku = match[1].toUpperCase();
-      // Look for quantity near this SKU (within the same line)
+      if (!isValidSkuToken(sku)) continue;
       const beforeSku = line.substring(0, match.index);
       const afterSku = line.substring(match.index + match[0].length);
       let qty = 1;
-      // After: "| 6 |", ": 6", "count of 6", "× 6", "x 6", "(6)"
       const afterQty = afterSku.match(/(?:\s*[\|:×x]\s*|\s+(?:has\s+a\s+)?count\s+of\s+|\s*\(\s*)(\d+)/i);
-      if (afterQty) { qty = parseInt(afterQty[1], 10); }
-      else {
-        // Before: "6x ", "6 x ", "6 "
-        const beforeQty = beforeSku.match(/(\d+)\s*[x×]?\s*$/i);
-        if (beforeQty) { qty = parseInt(beforeQty[1], 10); }
+      if (afterQty) {
+        qty = parseInt(afterQty[1], 10);
+      } else {
+        const beforeQty = beforeSku.match(/(?:^|[\s,|])(\d+)\s*[x×]?\s+$/i);
+        if (beforeQty) {
+          qty = parseInt(beforeQty[1], 10);
+        }
       }
-      if (qty > 0 && qty < 10000) {
+      if (qty > 0 && qty <= 500) {
         skus.push({ sku, qty });
       }
     }
   }
-  return skus;
+  return dedupeSkus(skus);
 }
 
 // CF Vision: analyze images via Llama 4 Scout (free) before falling back to Claude
@@ -4599,7 +4640,27 @@ export default {
             const imageData = await downloadWebexFile(fileUrl, token);
             if (imageData && imageData.mediaType.startsWith('image/')) {
               T.step('wx-image', 'exit', { result: 'has_image' });
-              const prompt = text || 'A user sent this image. Analyze it and respond accordingly.';
+              const DASHBOARD_VISION_PROMPT = `You are analyzing a Cisco Meraki license dashboard screenshot.
+
+Extract every license row in this exact format:
+
+LICENSE_DASHBOARD_PARSE_V1
+---
+SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
+---
+EXPIRATION: <YYYY-MM-DD or unknown>
+MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
+MR_EDITION: <Enterprise | Advanced | none>
+
+Rules:
+- One SKU per line between the --- markers.
+- MR Enterprise rows MUST be included. Use the SKU "MR-ENT".
+- Ignore license keys (e.g. Z2FE-AW8G-CKFN) in the License History section — those are NOT SKUs.
+- Ignore any SKU where LIMIT and ACTIVE are both 0.
+- If you see "MX Advanced Security" or "MX Secure SD-WAN Plus", note it in MX_EDITION.
+- Quantities must be the numbers from the "License limit" and "Current device count" columns — never invent quantities from model numbers.`;
+
+              const prompt = text || DASHBOARD_VISION_PROMPT;
 
               // Tier 1: Try CF Workers AI vision (Llama 4 Scout — free)
               T.step('wx-cfvision', 'enter');
@@ -4621,29 +4682,108 @@ export default {
                 if (visionSkus.length > 0) {
                   // Clean summary line: "LIC-ENT-3YR × 6" instead of raw markdown table
                   const skuSummary = visionSkus.map(s => `**${s.sku}** × ${s.qty}`).join('\n');
-                  const skuText = visionSkus.map(s => `${s.qty} ${s.sku}`).join(', ');
-                  const visionQuoteParsed = parseMessage(skuText);
-                  if (visionQuoteParsed && visionQuoteParsed.items.length > 0) {
-                    const visionQuoteResult = buildQuoteResponse(visionQuoteParsed);
-                    if (visionQuoteResult.message && !visionQuoteResult.needsLlm) {
-                      const combined = `**Detected SKUs:**\n${skuSummary}\n\n---\n\n${visionQuoteResult.message}`;
-                      await addToHistory(kv, personId, 'assistant', combined);
-                      T.step('wx-send', 'enter');
-                      await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + Deterministic Quote (${cfVision.elapsed}ms, free)_`, token);
-                      T.step('wx-send', 'exit');
-                      T.step('wx-d1', 'enter');
-                      logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision-quote', durationMs: cfVision.elapsed }).catch(() => {});
-                      writeMetric(env, { path: 'cf-vision-quote', durationMs: cfVision.elapsed, personId });
-                      T.step('wx-d1', 'exit');
-                      ctx.waitUntil(T.flush());
-                      return;
+
+                  // MR-ENT is a generic "MR Enterprise license" signal from the vision
+                  // extractor. It is NOT a real catalog SKU. Routing it through the text
+                  // bridge with hardware SKUs triggers parseMessage's agnostic-family
+                  // short-circuit which DROPS the hardware items. So: strip MR-ENT out
+                  // of parseMessage input and handle MR licenses separately after.
+                  const mrEntItems = visionSkus.filter(s => s.sku === 'MR-ENT' || s.sku === 'MR_ENT');
+                  const hardwareItems = visionSkus.filter(s => s.sku !== 'MR-ENT' && s.sku !== 'MR_ENT');
+                  const mrEntQty = mrEntItems.reduce((sum, s) => sum + (s.qty || 0), 0);
+
+                  const skuText = hardwareItems.map(s => `${s.qty} ${s.sku}`).join(', ');
+                  const visionQuoteParsed = hardwareItems.length > 0 ? parseMessage(skuText) : null;
+                  const hwResult = (visionQuoteParsed && visionQuoteParsed.items.length > 0)
+                    ? buildQuoteResponse(visionQuoteParsed)
+                    : null;
+
+                  // MR-license handling: merge LIC-ENT-{term}YR directly into the
+                  // hardware quote URLs when both are present (one unified cart per
+                  // term). If MR-only (no hardware), emit a standalone 3-URL block.
+                  const mergeMrIntoUrls = (msg, qty) => {
+                    if (!msg || !qty) return msg;
+                    // Each stratus URL has shape: ...?item=A,B,C&qty=1,2,3
+                    // Append LIC-ENT-{termYr} and qty to the matching term URL.
+                    return msg.replace(
+                      /(https:\/\/stratusinfosystems\.com\/order\/\?item=)([^&\s]+)(&qty=)([^\s)]+)/g,
+                      (full, pre, items, midQty, qtys) => {
+                        // Detect term from surrounding context by scanning the item list.
+                        let term = null;
+                        if (/-1YR?\b/.test(items) || /-1Y\b/.test(items)) term = '1YR';
+                        else if (/-3YR?\b/.test(items) || /-3Y\b/.test(items)) term = '3YR';
+                        else if (/-5YR?\b/.test(items) || /-5Y\b/.test(items)) term = '5YR';
+                        if (!term) return full;
+                        return `${pre}${items},LIC-ENT-${term}${midQty}${qtys},${qty}`;
+                      }
+                    );
+                  };
+
+                  let mrBlock = '';
+                  let mergedHwMessage = hwResult ? hwResult.message : null;
+                  if (mrEntQty > 0) {
+                    if (hwResult && hwResult.message && !hwResult.needsLlm) {
+                      // Hardware present: merge MR licenses into the existing term URLs.
+                      // MR-ENT is listed in "Detected SKUs" already, so no need for an
+                      // extra callout — treat it like any other detected item.
+                      mergedHwMessage = mergeMrIntoUrls(hwResult.message, mrEntQty);
+                    } else {
+                      // No hardware: emit standalone MR block so user still gets URLs.
+                      const mr1 = buildStratusUrl([{ sku: 'LIC-ENT-1YR', qty: mrEntQty }]);
+                      const mr3 = buildStratusUrl([{ sku: 'LIC-ENT-3YR', qty: mrEntQty }]);
+                      const mr5 = buildStratusUrl([{ sku: 'LIC-ENT-5YR', qty: mrEntQty }]);
+                      mrBlock = [
+                        '',
+                        `**MR Enterprise Licenses (${mrEntQty} AP${mrEntQty === 1 ? '' : 's'}):**`,
+                        `**1-Year:** ${mr1}`,
+                        `**3-Year:** ${mr3}`,
+                        `**5-Year:** ${mr5}`
+                      ].join('\n\n');
                     }
                   }
-                  // Deterministic couldn't build the quote — still show the clean summary
-                  // and store SKUs for follow-up, then fall through to send just the summary
-                  await addToHistory(kv, personId, 'assistant', `**Detected SKUs:**\n${skuSummary}`);
+
+                  if (hwResult && hwResult.message && !hwResult.needsLlm) {
+                    // Drop detection: verify every extracted SKU appears in the combined
+                    // rendered output (merged hardware message + optional MR block).
+                    const qmsg = (mergedHwMessage || '') + (mrBlock || '');
+                    const droppedFlags = [];
+                    for (const s of visionSkus) {
+                      const upper = s.sku.toUpperCase();
+                      let seen = false;
+                      if (upper === 'MR-ENT' || upper === 'MR_ENT') {
+                        seen = /\bLIC-ENT-[135]YR?\b/.test(qmsg);
+                      } else {
+                        const escaped = upper.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        const directRe = new RegExp(`\\b${escaped}\\b`);
+                        const licRe = new RegExp(`LIC-${escaped}(?:-[A-Z0-9]+)?-[135]Y`);
+                        seen = directRe.test(qmsg) || licRe.test(qmsg);
+                      }
+                      if (!seen) droppedFlags.push(`⚠️ **${s.sku}** × ${s.qty} was detected but did not appear in the quote — manual review needed.`);
+                    }
+                    const dropBlock = droppedFlags.length > 0 ? `\n\n${droppedFlags.join('\n')}` : '';
+                    if (droppedFlags.length > 0) {
+                      console.warn(`[CF-Vision] ${droppedFlags.length} SKU(s) dropped from final quote:`, droppedFlags);
+                    }
+                    const combined = `**Detected SKUs:**\n${skuSummary}${dropBlock}\n\n---\n\n${mergedHwMessage}${mrBlock}`;
+                    await addToHistory(kv, personId, 'assistant', combined);
+                    T.step('wx-send', 'enter');
+                    await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + Deterministic Quote (${cfVision.elapsed}ms, free)_`, token);
+                    T.step('wx-send', 'exit');
+                    T.step('wx-d1', 'enter');
+                    logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision-quote', durationMs: cfVision.elapsed }).catch(() => {});
+                    writeMetric(env, { path: 'cf-vision-quote', durationMs: cfVision.elapsed, personId });
+                    T.step('wx-d1', 'exit');
+                    ctx.waitUntil(T.flush());
+                    return;
+                  }
+                  // Deterministic couldn't build the hardware quote — still show the clean
+                  // summary. If we DID produce an MR-licenses block (e.g. MR-only screenshot),
+                  // include it so the user still gets the three LIC-ENT URLs.
+                  const summaryTail = mrBlock ? `\n\n---${mrBlock}` : '';
+                  const summaryMsg = `**Detected SKUs:**\n${skuSummary}${summaryTail}`;
+                  await addToHistory(kv, personId, 'assistant', summaryMsg);
                   T.step('wx-send', 'enter');
-                  await sendMessage(roomId, `**Detected SKUs:**\n${skuSummary}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
+                  await sendMessage(roomId, `${summaryMsg}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
                   T.step('wx-send', 'exit');
                   T.step('wx-d1', 'enter');
                   logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision', durationMs: cfVision.elapsed }).catch(() => {});

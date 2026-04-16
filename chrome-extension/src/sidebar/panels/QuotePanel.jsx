@@ -18,6 +18,11 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
   const [analyzingImage, setAnalyzingImage] = useState(false);
   const [imageAnalysis, setImageAnalysis] = useState(null);
   const [showZohoPrompt, setShowZohoPrompt] = useState(false);
+  // MR-ENT is detected from license dashboards but is NOT a real catalog SKU. We
+  // strip it from the quote engine input (otherwise parseMessage's agnostic-family
+  // short-circuit would drop all hardware SKUs) and keep the qty here so we can
+  // append the three LIC-ENT-{1,3,5}YR URLs to the result after handleGenerate.
+  const [mrEntPendingQty, setMrEntPendingQty] = useState(0);
   const inputRef = useRef(null);
   const lastRequestRef = useRef(0); // Rate-limit: min 1s between requests
 
@@ -66,17 +71,88 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         });
         setImageAnalysis({ analysis: res.analysis, hasUrls: true });
       } else if (res && res.analysis) {
-        // Got analysis text, try to extract SKUs from it
-        // Filter out license SKUs (LIC-*) — image parsing should only extract hardware models
-        const skuRegex = /\b((?:MR|MV|MT|MG|MX|MS|CW|C9|C8|Z)[A-Z0-9-]+)\b/gi;
-        const rawMatches = res.analysis.match(skuRegex) || [];
-        const matches = [...new Set(rawMatches.map(s => s.toUpperCase()))]
-          .filter(s => !s.startsWith('LIC-')); // Exclude license keys from hardware detection
-        if (matches.length > 0) {
-          setSkuText(matches.join('\n'));
-          setImageAnalysis({ skus: matches, message: `Detected ${matches.length} hardware SKU(s) from image` });
+        // Got analysis text — try LICENSE_DASHBOARD_PARSE_V1 parsing first to preserve quantities
+        const analysisText = res.analysis || '';
+        const isValidSkuTokenLocal = (sku) => {
+          if (!sku) return false;
+          const s = sku.toUpperCase();
+          if (s.startsWith('LIC-')) return true;
+          if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
+          if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
+          return true;
+        };
+        const parsedItems = [];
+        if (/LICENSE_DASHBOARD_PARSE_V1/.test(analysisText)) {
+          const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+          let m;
+          while ((m = lineRe.exec(analysisText)) !== null) {
+            const sku = m[1].toUpperCase();
+            const limit = parseInt(m[2], 10);
+            const active = parseInt(m[3], 10);
+            if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
+            if (active === 0 && limit === 0) continue;
+            if (active === 0) continue;
+            const qty = Math.min(limit || active, active || limit);
+            if (qty <= 0 || qty > 500) continue;
+            if (!isValidSkuTokenLocal(sku)) continue;
+            parsedItems.push({ sku, qty });
+          }
+        }
+        // Dedupe while preserving order
+        const dedupMap = new Map();
+        for (const { sku, qty } of parsedItems) {
+          dedupMap.set(sku, (dedupMap.get(sku) || 0) + qty);
+        }
+        const deduped = Array.from(dedupMap.entries()).map(([sku, qty]) => ({ sku, qty }));
+
+        if (deduped.length > 0) {
+          // MR-ENT is the generic "MR Enterprise license" signal from the vision
+          // extractor. It is NOT a real catalog SKU, and routing it through the
+          // text bridge with hardware SKUs triggers parseMessage's agnostic-family
+          // short-circuit which DROPS the hardware items. So: strip MR-ENT out
+          // of the quote-engine input and stash its qty; handleGenerate will
+          // append the three LIC-ENT-{1,3,5}YR URLs to the result post-hoc.
+          const mrEntItems = deduped.filter(d => d.sku === 'MR-ENT' || d.sku === 'MR_ENT');
+          const hardwareItems = deduped.filter(d => d.sku !== 'MR-ENT' && d.sku !== 'MR_ENT');
+          const mrQty = mrEntItems.reduce((sum, d) => sum + (d.qty || 0), 0);
+          setMrEntPendingQty(mrQty);
+
+          const formatted = hardwareItems.map(({ sku, qty }) => `${sku} x ${qty}`).join('\n');
+          setSkuText(formatted);
+          setImageAnalysis({ skus: deduped.map(d => d.sku), message: `Detected ${deduped.length} SKU(s) with quantities from dashboard` });
+
+          // MR-only screenshot: no hardware to send to the quote engine. Populate
+          // the result directly with the three LIC-ENT-{1,3,5}YR URLs so the user
+          // still gets usable output instead of an empty quote.
+          if (hardwareItems.length === 0 && mrQty > 0) {
+            const mkUrl = (sku, qty) =>
+              `https://stratusinfosystems.com/order/?item=${encodeURIComponent(sku)}&qty=${qty}`;
+            setResult({
+              urls: [
+                { url: mkUrl('LIC-ENT-1YR', mrQty), label: '1-Year Co-Term' },
+                { url: mkUrl('LIC-ENT-3YR', mrQty), label: '3-Year Co-Term' },
+                { url: mkUrl('LIC-ENT-5YR', mrQty), label: '5-Year Co-Term' },
+              ],
+              eolWarnings: [],
+              suggestions: null,
+              parsed: [{ baseSku: 'LIC-ENT', qty: mrQty }],
+              source: 'vision-mr-only',
+              handlerType: 'vision-mr-only',
+            });
+            setMrEntPendingQty(0); // already rendered; don't double-append in handleGenerate
+          }
         } else {
-          setImageAnalysis({ skus: [], message: 'No hardware SKUs detected in this image.', analysis: res.analysis });
+          // Fallback: regex-only hardware extraction (original behavior, no qty)
+          const skuRegex = /\b((?:MR|MV|MT|MG|MX|MS|CW|C9|C8|Z)[A-Z0-9-]+)\b/gi;
+          const rawMatches = analysisText.match(skuRegex) || [];
+          const matches = [...new Set(rawMatches.map(s => s.toUpperCase()))]
+            .filter(s => !s.startsWith('LIC-')); // Exclude license keys from hardware detection
+          if (matches.length > 0) {
+            setSkuText(matches.join('\n'));
+            setImageAnalysis({ skus: matches, message: `Detected ${matches.length} hardware SKU(s) from image` });
+          } else {
+            setImageAnalysis({ skus: [], message: 'No hardware SKUs detected in this image.', analysis: analysisText });
+          }
         }
       } else {
         setImageAnalysis({ skus: [], message: 'No SKUs detected in this image.' });
@@ -136,8 +212,21 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
             source: 'eol-date',
           });
         } else if (urlsArr.length > 0 || (suggestArr && suggestArr.length > 0) || res.claudeResponse) {
+          // If the image analysis detected MR-ENT alongside hardware, append the
+          // three LIC-ENT-{1,3,5}YR URLs to the result so MR licenses ride
+          // alongside the hardware quote (instead of being silently dropped).
+          let finalUrls = urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' });
+          if (mrEntPendingQty > 0) {
+            const mkUrl = (sku, qty) =>
+              `https://stratusinfosystems.com/order/?item=${encodeURIComponent(sku)}&qty=${qty}`;
+            finalUrls = finalUrls.concat([
+              { url: mkUrl('LIC-ENT-1YR', mrEntPendingQty), label: `MR Ent Licenses — 1-Year (${mrEntPendingQty} AP${mrEntPendingQty === 1 ? '' : 's'})` },
+              { url: mkUrl('LIC-ENT-3YR', mrEntPendingQty), label: `MR Ent Licenses — 3-Year (${mrEntPendingQty} AP${mrEntPendingQty === 1 ? '' : 's'})` },
+              { url: mkUrl('LIC-ENT-5YR', mrEntPendingQty), label: `MR Ent Licenses — 5-Year (${mrEntPendingQty} AP${mrEntPendingQty === 1 ? '' : 's'})` },
+            ]);
+          }
           setResult({
-            urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
+            urls: finalUrls,
             eolWarnings: eolArr,
             suggestions: suggestArr,
             parsed: parsedRaw.map(p => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 })),
@@ -145,6 +234,7 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
             handlerType: res.handlerType || 'deterministic',
             source: res.claudeResponse && urlsArr.length === 0 ? 'claude' : 'api',
           });
+          setMrEntPendingQty(0); // consumed
         } else if (res.error) {
           setError(res.error);
         } else {

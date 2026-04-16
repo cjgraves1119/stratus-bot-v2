@@ -362,7 +362,25 @@ export async function analyzeImageForSkus(imageUrl, imageBase64) {
   return apiCall('/api/parse-dashboard', {
     imageUrl: imageUrl || undefined,
     imageBase64: imageBase64 || undefined,
-    instructions: 'Extract all Cisco/Meraki SKU numbers and their quantities from this image. Return them as a structured list.',
+    instructions: `You are analyzing a Cisco Meraki license dashboard screenshot.
+
+Extract every license row in this exact format:
+
+LICENSE_DASHBOARD_PARSE_V1
+---
+SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
+---
+EXPIRATION: <YYYY-MM-DD or unknown>
+MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
+MR_EDITION: <Enterprise | Advanced | none>
+
+Rules:
+- One SKU per line between the --- markers.
+- MR Enterprise rows MUST be included. Use the SKU "MR-ENT".
+- Ignore license keys (e.g. Z2FE-AW8G-CKFN) in the License History section — those are NOT SKUs.
+- Ignore any SKU where LIMIT and ACTIVE are both 0.
+- If you see "MX Advanced Security" or "MX Secure SD-WAN Plus", note it in MX_EDITION.
+- Quantities must be the numbers from the "License limit" and "Current device count" columns — never invent quantities from model numbers.`,
   }, { timeout: 60000 });
 }
 
@@ -375,13 +393,22 @@ export async function analyzeImageForSkus(imageUrl, imageBase64) {
  * Routes through the same askClaude() tool-use loop as the GChat bot,
  * giving the extension chat full Zoho CRM capabilities.
  */
-export async function chatWithCrm(requestText, emailContext, history, systemContext) {
+export async function chatWithCrm(requestText, emailContext, history, systemContext, progressId) {
   return apiCall('/api/chat', {
     text: requestText,
     emailContext,
     history: history || [],
     systemContext: systemContext || '',
+    progressId: progressId || undefined,
   }, { timeout: 130000 }); // 2+ minute timeout for CRM tool-use loops
+}
+
+/**
+ * Poll the chat progress endpoint. Returns { steps: [{ts, message}], status }.
+ */
+export async function getChatProgress(progressId) {
+  if (!progressId) return { steps: [], status: 'unknown' };
+  return apiCall('/api/chat-progress', { progressId }, { timeout: 5000 });
 }
 
 /**

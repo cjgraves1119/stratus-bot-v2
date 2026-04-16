@@ -935,6 +935,9 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
 
   const mvMatch = upper.match(/^MV(\d+)/);
   if (mvMatch) {
+    // Suggest the standard 1/3/5 terms for display. Longer terms (7Y, 10Y) exist
+    // but are offered case-by-case. batch_product_lookup queries the live catalog
+    // if a non-standard term is requested and returns actual alternatives.
     return [
       { term: '1Y', sku: 'LIC-MV-1YR' },
       { term: '3Y', sku: 'LIC-MV-3YR' },
@@ -4376,6 +4379,22 @@ function parseZohoResponse(result, action = 'operation') {
 
 // ─── Tool Execution Router ────────────────────────────────────────────────────
 async function executeToolCall(toolName, toolInput, env, personId) {
+  // ── Progress event emission ──
+  // If env.__PROGRESS_ID is set (smuggled in from /api/chat-waterfall), write a
+  // human-readable step message to KV so the client can display progress.
+  // Fire-and-forget — no latency impact on the tool call itself.
+  try {
+    if (env && env.__PROGRESS_ID) {
+      const msg = toolProgressMessage(toolName, toolInput || {});
+      // Don't await — write in background via waitUntil if available, otherwise
+      // just let it race with the actual tool call.
+      const p = writeProgressEvent(env, env.__PROGRESS_ID, msg);
+      if (env.__PROGRESS_CTX && typeof env.__PROGRESS_CTX.waitUntil === 'function') {
+        env.__PROGRESS_CTX.waitUntil(p);
+      }
+    }
+  } catch (_) {}
+
   // ── Benchmark dry-run interception ──
   // When askClaudeForBenchmark sets env.__BENCHMARK_DRY_RUN, mock write ops
   // and log every tool call (read or write) to env.__BENCHMARK_TRACKER.
@@ -4672,6 +4691,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
           correctQuotedItemDiscounts(recordData.Quoted_Items);
         }
+        // Set Do_Not_Auto_Update_Prices on new Quotes so user-supplied Discount values
+        // are preserved across subsequent updates (see zoho_update_record for rationale).
+        if (module_name === 'Quotes' && recordData.Quoted_Items && !('Do_Not_Auto_Update_Prices' in recordData)) {
+          recordData.Do_Not_Auto_Update_Prices = true;
+        }
         const createStart = Date.now();
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
         const parsed = parseZohoResponse(createResult, `${module_name} record creation`);
@@ -4701,11 +4725,37 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (module_name === 'Quotes' && data.Quoted_Items) {
           correctQuotedItemDiscounts(data.Quoted_Items);
         }
+
+        // ── CRITICAL: Do_Not_Auto_Update_Prices ──────────────────────────────
+        // Quotes with populated CCW_Deal_Number + Cisco_Estimate_Status="Success.VALID"
+        // are locked to Cisco-computed pricing by default. Any Discount field in
+        // Quoted_Items payload is SILENTLY REJECTED — Zoho returns SUCCESS but
+        // the actual value remains unchanged. Setting Do_Not_Auto_Update_Prices: true
+        // in the SAME payload breaks the auto-recompute and honors user-supplied
+        // Discount values. This was diagnosed via direct MCP testing on 2026-04-14.
+        if (module_name === 'Quotes' && data.Quoted_Items && !('Do_Not_Auto_Update_Prices' in data)) {
+          data.Do_Not_Auto_Update_Prices = true;
+          console.log(`[GCHAT] Auto-injecting Do_Not_Auto_Update_Prices:true to allow Discount changes`);
+        }
+
         // Debug: log what we're sending (especially useful for Quoted_Items updates)
         if (module_name === 'Quotes' && data.Quoted_Items) {
           console.log(`[GCHAT] Quote update payload — record_id: ${record_id}, item_count: ${data.Quoted_Items.length}`);
           console.log(`[GCHAT] First item sample:`, JSON.stringify(data.Quoted_Items[0]));
         }
+
+        // ── PRE-UPDATE SNAPSHOT for Quoted_Items ─────────────────────────────
+        // Grab the current state BEFORE we PUT so we can detect silent no-ops
+        // (e.g. model sends the existing values unchanged, so Grand_Total stays
+        // identical — API returns SUCCESS but nothing changed).
+        let preUpdateSnapshot = null;
+        if (module_name === 'Quotes' && data.Quoted_Items) {
+          try {
+            const pre = await zohoApiCall('GET', `Quotes/${record_id}?fields=id,Grand_Total,Sub_Total,Quoted_Items`, env);
+            preUpdateSnapshot = pre?.data?.[0] || null;
+          } catch (_) {}
+        }
+
         const updateStart = Date.now();
         const updateResult = await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
         if (module_name === 'Quotes') {
@@ -4723,6 +4773,203 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           errorMessage: updateParsed?.data?.[0]?.status === 'error' ? updateParsed.data[0].message : null,
           details: { fields: Object.keys(data) }
         });
+
+        // ── SERVER-SIDE VERIFICATION for Quoted_Items updates ────────────────
+        // Zoho returns SUCCESS even for malformed Quoted_Items payloads that
+        // silently fail. To prevent ANY model (Gemma, Claude, Haiku) from
+        // hallucinating a successful modification, we re-fetch the quote
+        // immediately and embed the ACTUAL post-update line items into the
+        // tool response. The model cannot claim success that didn't happen
+        // because the evidence of what actually changed is in the tool result.
+        if (module_name === 'Quotes' && data.Quoted_Items && updateParsed?.success) {
+          // Log the EXACT payload Claude sent so we can diagnose silent no-ops
+          console.log(`[GCHAT] Quote update verification starting. Payload Quoted_Items:`, JSON.stringify(data.Quoted_Items).substring(0, 1500));
+          try {
+            const verifyFields = 'id,Quote_Number,Grand_Total,Sub_Total,Quoted_Items';
+            const verifyResult = await zohoApiCall('GET', `Quotes/${record_id}?fields=${verifyFields}`, env);
+            const verifyRecord = verifyResult?.data?.[0];
+
+            if (verifyRecord) {
+              // Slim down line items to essentials for the model
+              const actualItems = (verifyRecord.Quoted_Items || []).map(item => ({
+                id: item.id,
+                product_name: item.Product_Name?.name || item.Product_Name,
+                product_code: item.Product_Name?.Product_Code || null,
+                quantity: item.Quantity,
+                list_price: item.List_Price,
+                discount: item.Discount,
+                total: item.Total,
+              }));
+
+              // Compute what the model REQUESTED vs what actually landed.
+              // Three operation types on Quoted_Items:
+              //   DELETE — item has id + _delete: null
+              //   MODIFY — item has id + other changed fields (Discount, Quantity, etc.)
+              //   ADD    — item has no id, has Product_Name.id
+              const requested = data.Quoted_Items.map(i => {
+                const isDelete = i._delete === null;
+                const hasId = !!i.id;
+                return {
+                  raw: i,
+                  id: i.id || null,
+                  product_id: i.Product_Name?.id || null,
+                  requested_quantity: i.Quantity,
+                  requested_discount: i.Discount,
+                  delete: isDelete,
+                  modify: hasId && !isDelete,
+                  add: !hasId,
+                };
+              });
+
+              const requestedDeleteIds = new Set(
+                requested.filter(r => r.delete && r.id).map(r => r.id)
+              );
+              const requestedModifications = requested.filter(r => r.modify);
+
+              const actualItemIds = new Set(actualItems.map(i => i.id));
+              const actualItemsById = new Map(actualItems.map(i => [i.id, i]));
+
+              const deletesApplied = [...requestedDeleteIds].filter(id => !actualItemIds.has(id));
+              const deletesFailed = [...requestedDeleteIds].filter(id => actualItemIds.has(id));
+
+              // Check each MODIFICATION against actual post-update state. Zoho returns
+              // SUCCESS even when modifying fields (like Discount) on existing items
+              // has no effect — e.g. wrong field name, wrong value type, etc.
+              const modificationResults = requestedModifications.map(r => {
+                const actual = actualItemsById.get(r.id);
+                if (!actual) {
+                  return { id: r.id, applied: false, reason: 'Item no longer in quote after update' };
+                }
+                const checks = {};
+                let allApplied = true;
+                if (r.requested_quantity !== undefined) {
+                  // Normalize to numbers (Zoho may return string or number)
+                  const wantQ = Number(r.requested_quantity);
+                  const gotQ = Number(actual.quantity);
+                  const match = wantQ === gotQ;
+                  checks.quantity = { requested: wantQ, actual: gotQ, match };
+                  if (!match) allApplied = false;
+                }
+                if (r.requested_discount !== undefined) {
+                  // Zoho stores Discount as a flat dollar amount. Tolerate small float drift.
+                  const wantD = Number(r.requested_discount);
+                  const gotD = Number(actual.discount || 0);
+                  const match = Math.abs(wantD - gotD) < 0.01;
+                  checks.discount = { requested: wantD, actual: gotD, match };
+                  if (!match) allApplied = false;
+                }
+                return {
+                  id: r.id,
+                  applied: allApplied,
+                  checks,
+                };
+              });
+
+              const modificationsFailed = modificationResults.filter(m => !m.applied);
+              const modificationsApplied = modificationResults.filter(m => m.applied);
+
+              const verification = {
+                ...updateParsed,
+                verification: {
+                  verified_at: new Date().toISOString(),
+                  quote_number: verifyRecord.Quote_Number,
+                  grand_total: verifyRecord.Grand_Total,
+                  sub_total: verifyRecord.Sub_Total,
+                  actual_line_items: actualItems,
+                  actual_item_count: actualItems.length,
+                  requested_operations: {
+                    deletes_requested: requested.filter(r => r.delete).length,
+                    deletes_applied: deletesApplied.length,
+                    deletes_failed: deletesFailed,
+                    adds_requested: requested.filter(r => r.add).length,
+                    modifications_requested: requestedModifications.length,
+                    modifications_applied: modificationsApplied.length,
+                    modifications_failed: modificationsFailed,
+                  },
+                },
+              };
+
+              // FAIL LOUDLY if any requested change didn't actually land
+              const warnings = [];
+              if (deletesFailed.length > 0) {
+                warnings.push(`DELETE FAILED: ${deletesFailed.length} line item(s) were NOT removed despite API SUCCESS. IDs still present: ${deletesFailed.join(', ')}.`);
+              }
+              if (modificationsFailed.length > 0) {
+                const details = modificationsFailed.map(m => {
+                  const fieldIssues = Object.entries(m.checks || {})
+                    .filter(([_, c]) => !c.match)
+                    .map(([field, c]) => `${field}: requested=${c.requested} actual=${c.actual}`)
+                    .join(', ');
+                  return `item ${m.id} (${fieldIssues || m.reason})`;
+                }).join('; ');
+                warnings.push(`MODIFICATION FAILED: ${modificationsFailed.length} line item change(s) did NOT apply. ${details}. Zoho accepted the payload but the values did not change.`);
+              }
+
+              // ── No-op detection: compare pre-update vs post-update snapshots ──
+              // If the model sent a Quoted_Items payload but the Grand_Total / Sub_Total
+              // is unchanged, the update was effectively a no-op. This catches the case
+              // where Claude sends an existing Discount value without actually changing
+              // anything, or where Zoho silently ignores the payload.
+              if (preUpdateSnapshot) {
+                const preTotal = Number(preUpdateSnapshot.Grand_Total || 0);
+                const postTotal = Number(verifyRecord.Grand_Total || 0);
+                const preSub = Number(preUpdateSnapshot.Sub_Total || 0);
+                const postSub = Number(verifyRecord.Sub_Total || 0);
+                const totalChanged = Math.abs(preTotal - postTotal) > 0.01;
+                const subChanged = Math.abs(preSub - postSub) > 0.01;
+
+                // Also compute per-item diff — detect whether ANY line item's Discount,
+                // Quantity, or Product changed
+                const preItemsById = new Map(
+                  (preUpdateSnapshot.Quoted_Items || []).map(i => [i.id, {
+                    discount: Number(i.Discount || 0),
+                    quantity: Number(i.Quantity || 0),
+                    product_id: i.Product_Name?.id || null,
+                  }])
+                );
+                let anyItemChanged = false;
+                for (const post of actualItems) {
+                  const pre = preItemsById.get(post.id);
+                  if (!pre) { anyItemChanged = true; break; } // new item added
+                  if (Math.abs(pre.discount - Number(post.discount || 0)) > 0.01) { anyItemChanged = true; break; }
+                  if (pre.quantity !== Number(post.quantity || 0)) { anyItemChanged = true; break; }
+                }
+                if (preItemsById.size !== actualItems.length) anyItemChanged = true; // item removed
+
+                verification.verification.pre_update_totals = { grand_total: preTotal, sub_total: preSub };
+                verification.verification.post_update_totals = { grand_total: postTotal, sub_total: postSub };
+                verification.verification.any_item_changed = anyItemChanged;
+
+                if (!totalChanged && !subChanged && !anyItemChanged) {
+                  warnings.push(
+                    `NO-OP UPDATE DETECTED: The quote is completely unchanged after the update call. Pre-update Grand_Total=${preTotal}, post-update Grand_Total=${postTotal}. No line item fields differ. This means the values you sent in Quoted_Items matched what was already there (no real change). If the user asked you to change something, you sent the WRONG values — re-read the quote, recompute what the target should be, and try again with DIFFERENT numbers.`
+                  );
+                }
+              }
+
+              if (warnings.length > 0) {
+                verification.verification.WARNING =
+                  warnings.join(' | ') + ' The update did NOT achieve what was requested. Tell the user the modification failed and offer to retry. Do NOT claim the change was applied.';
+                verification.success = false;
+                verification.message = '⚠️ Zoho returned SUCCESS but verification detected the changes did not actually land. See verification.WARNING.';
+              }
+
+              console.log(`[GCHAT] Quote update verification: ${actualItems.length} items, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}`);
+              return verification;
+            }
+          } catch (verifyErr) {
+            console.warn(`[GCHAT] Quote verification fetch failed:`, verifyErr.message);
+            // Annotate the response so the model knows verification couldn't run
+            return {
+              ...updateParsed,
+              verification: {
+                verified: false,
+                reason: `Verification re-fetch failed: ${verifyErr.message}. Tell the user to manually confirm the quote in Zoho before trusting this result.`,
+              },
+            };
+          }
+        }
+
         return updateParsed;
       }
 
@@ -4803,6 +5050,39 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const licOptions = getLicenseSkus(rawSku);
               if (licOptions?.length) {
                 apiResult.suggested_licenses = licOptions.map(l => l.sku);
+              }
+            }
+            // SKU NOT FOUND — query Zoho Products directly to find real alternatives
+            // (e.g. LIC-MV-*) instead of relying on hardcoded term lists that may
+            // be incomplete. This ensures we never tell the model a product is
+            // "inactive" when the real reason is "SKU string mismatch" AND we
+            // surface actual live alternatives rather than guesses.
+            if (!match) {
+              apiResult.not_found_reason = `SKU "${suffixed}" was not found via Product_Code:equals search. This does NOT mean the product is inactive — it means this exact SKU string is not in the catalog.`;
+              if (rawSku.startsWith('LIC-')) {
+                try {
+                  // Derive the license family prefix: LIC-MV-7YR → LIC-MV-
+                  // LIC-ENT-7YR → LIC-ENT-, LIC-MS130-24P-7YR → LIC-MS130-24P-
+                  const familyMatch = rawSku.match(/^(LIC-[^-]+(?:-[^-\d][^-]*)?)-/i);
+                  const familyPrefix = familyMatch ? familyMatch[1] + '-' : rawSku.split('-').slice(0, -1).join('-') + '-';
+                  const familyResult = await zohoApiCall('GET',
+                    `Products/search?criteria=(Product_Code:starts_with:${encodeURIComponent(familyPrefix)})&fields=id,Product_Code,Product_Active`,
+                    env
+                  );
+                  const familyRecords = familyResult?.data || [];
+                  const activeAlternatives = familyRecords
+                    .filter(r => r.Product_Active !== false)
+                    .map(r => r.Product_Code)
+                    .sort();
+                  if (activeAlternatives.length > 0) {
+                    apiResult.live_alternatives = activeAlternatives;
+                    apiResult.hint = `Live Zoho catalog search found these active SKUs starting with "${familyPrefix}": ${activeAlternatives.join(', ')}. Compare to what the user asked for and propose the closest match, or ask which one they want.`;
+                  } else {
+                    apiResult.hint = `No active SKUs found starting with "${familyPrefix}" in live Zoho catalog. Tell the user you could not find any variants of this license family.`;
+                  }
+                } catch (altErr) {
+                  apiResult.hint = `Could not query live alternatives (${altErr.message}). Tell the user the exact SKU was not found and ask them to clarify the term.`;
+                }
               }
             }
             batchResults[rawSku] = apiResult;
@@ -6011,7 +6291,7 @@ When create_deal_and_quote returns, the quote record includes \`quote_number\` A
 **Target iteration counts (fewer = faster):**
 - New deal + quote: 2 iterations (1 create_deal_and_quote call + 1 summary)
 - URL-to-quote update: 2-3 iterations (parse_quote_url + update + summary)
-- Quote modification: 2-3 iterations (read + update + summary — skip verification unless error)
+- Quote modification: 3-4 iterations (read + update + re-fetch to verify + summary)
 - Simple lookup: 1-2 iterations
 - NEVER exceed 4 iterations for any quote operation
 
@@ -6165,16 +6445,35 @@ Use **batch_product_lookup** for ALL product lookups. Use **parse_quote_url** fo
 
 **When found: false for a LIC-* SKU:** Search Zoho Products directly before giving up. found: false does NOT mean invalid. Only report "not available" if both batch_product_lookup AND Products search fail.
 
+**NEVER claim a product is "inactive", "discontinued", or "marked inactive in inventory" unless Zoho explicitly returns a Product_Active: false field on the specific product record.** If batch_product_lookup returns found: false, it means the exact SKU string you generated did not match any Product_Code in Zoho — it does NOT mean the product is inactive, discontinued, or unavailable. Non-standard license terms (7YR, 10YR, etc.) may exist in the catalog even if the common 1/3/5 year variants are the defaults.
+
+**When found: false:** Check the tool response for a "live_alternatives" array or "hint" field. batch_product_lookup automatically queries live Zoho Products for SKUs starting with the same family prefix and returns whatever actually exists. Use the live_alternatives list to propose the closest match to what the user asked for (e.g. user asked for LIC-MV-7YR → live_alternatives shows LIC-MV-7YR exists → retry with that exact SKU; or shows only 1/3/5/10 year exists → ask which one). Never invent a reason why a SKU isn't available — always rely on the tool's live catalog query.
+
 ### Ecomm Pricing (DEFAULT)
 - Discount is a DOLLAR AMOUNT: Discount = discount_per_unit * Quantity
 - Do NOT set unit_price (Zoho uses stored list price) or Description
 - Only use list pricing if user explicitly asks for "list price" or "no discount"
 
+### Changing Discount Percentage on Existing Line Items
+When the user asks to change a discount percentage (e.g. "change discount to 50%"):
+1. zoho_get_record to pull current Quoted_Items with their List_Price and Quantity
+2. For each line item being changed, compute NEW dollars: new_discount_dollars = List_Price * Quantity * (new_pct / 100)
+   Example: List_Price=1755.12, Quantity=66, new_pct=50 → new_discount_dollars = 1755.12 * 66 * 0.50 = 57918.96
+   The computed value MUST differ from the current Discount dollar value. If it does not, you are computing the wrong number.
+3. Send an update with Quoted_Items: [{ "id": "<existing_line_item_id>", "Discount": new_discount_dollars, "Description": "NN% Discount" }]
+4. The Discount field is the ONLY lever for changing price — never touch Product_Name or unit_price to reflect a pricing change. The server auto-injects Do_Not_Auto_Update_Prices:true to break the Cisco-estimate auto-recompute that would otherwise silently overwrite your Discount value.
+5. **MANDATORY response-checking:** The server returns a verification object embedded in the tool response. If it contains:
+   - A "verification.WARNING" field — the update did NOT land. You MUST tell the user it failed and NOT claim success. Read the warning and retry with corrected values.
+   - "verification.success: false" — same as above. Do not override this with your own "Done" message.
+   - "verification.any_item_changed: false" — you sent a no-op (wrong numbers). Recompute and retry.
+6. Only claim success if verification.success is true AND verification.any_item_changed is true AND the actual_line_items in the verification show the correct new Discount values. Never say "Done" based on the Zoho API top-level "code: SUCCESS" alone — that code fires even on no-op updates.
+
 ### Quote Update Workflow (minimize tool calls)
 1. URL provided? → parse_quote_url. Otherwise → batch_product_lookup for all SKUs in ONE call
 2. Existing items to keep/delete? → zoho_get_record. Empty quote? → skip
 3. Build Quoted_Items: Product_Name.id, Quantity, Discount. No Description, no unit_price.
-4. zoho_update_record ONCE → STOP. No verification unless error.
+4. zoho_update_record ONCE.
+5. **ALWAYS re-fetch with zoho_get_record after any Quoted_Items update.** Zoho returns SUCCESS even for malformed payloads that silently fail — the only source of truth is re-reading the record. Report the ACTUAL line items from the re-fetch, not the API response code. If the items do not match what was requested, say so and attempt to fix.
 Steps 1 and 2 can run in PARALLEL.
 
 ### Quoted_Items ADDITIVE RULE (CRITICAL)
@@ -6212,7 +6511,7 @@ When the user asks to change license terms on an existing quote:
      {"Product_Name": {"id": "new_5yr_switch_product_id"}, "Quantity": 1, "Discount": discount_per_unit * 1}
    ]
 3. NEVER split deletes and adds into separate update calls — this creates duplicates because adds happen before deletes are processed
-4. Report success. Only call zoho_get_record to verify if something looks wrong.
+4. Call zoho_get_record to re-fetch the quote and verify the Quoted_Items actually changed. Report the ACTUAL line items — never report success based only on the API response code.
 
 **NEVER DO (Line Item Updates):**
 - NEVER send Quoted_Items with items you want to keep, expecting Zoho to remove the rest — this ADDS duplicates
@@ -6533,6 +6832,44 @@ function toolProgressMessage(toolName, toolInput) {
     default:
       return `⚙️ Running ${toolName}...`;
   }
+}
+
+// ─── Lightweight progress channel via KV ────────────────────────────────────
+// Client passes a `progressId` with the chat request. As tools fire, the
+// waterfall/askClaude/askCfModel write a short step message to KV keyed on
+// the id. The client polls /api/chat-progress/:id at ~1Hz to render steps.
+// Zero latency impact (fire-and-forget writes), no streaming complexity.
+async function writeProgressEvent(env, progressId, message) {
+  if (!progressId || !env?.CONVERSATION_KV) return;
+  try {
+    const key = `progress:${progressId}`;
+    const existing = await env.CONVERSATION_KV.get(key, 'json');
+    const steps = Array.isArray(existing?.steps) ? existing.steps : [];
+    steps.push({ ts: Date.now(), message });
+    // Cap to last 30 events to avoid pathological KV sizes
+    const trimmed = steps.length > 30 ? steps.slice(-30) : steps;
+    await env.CONVERSATION_KV.put(
+      key,
+      JSON.stringify({ steps: trimmed, status: 'running' }),
+      { expirationTtl: 600 }
+    );
+  } catch (err) {
+    console.warn(`[PROGRESS] KV write failed: ${err.message}`);
+  }
+}
+
+async function markProgressComplete(env, progressId) {
+  if (!progressId || !env?.CONVERSATION_KV) return;
+  try {
+    const key = `progress:${progressId}`;
+    const existing = await env.CONVERSATION_KV.get(key, 'json');
+    const steps = Array.isArray(existing?.steps) ? existing.steps : [];
+    await env.CONVERSATION_KV.put(
+      key,
+      JSON.stringify({ steps, status: 'complete' }),
+      { expirationTtl: 120 } // Keep 2 min after complete so client can final-read
+    );
+  } catch (_) {}
 }
 
 // Continuation variant of askClaude: resumes a tool loop from saved state.
@@ -8358,7 +8695,48 @@ function gemmaStallDetected(result) {
   if (reply.startsWith('API error:')) return { stalled: true, reason: 'api_error' };
   if (/I (don't|cannot|can't) have (access|the ability|tools)/i.test(reply)) return { stalled: true, reason: 'refusal' };
   if ((result.iterations || 0) >= 10 && (result.toolCalls || []).length >= 10) return { stalled: true, reason: 'tool_loop' };
+
+  // ── Raw tool-syntax leak: Gemma sometimes emits its special-token tool
+  // syntax (<|tool|>call>:call:zoho_update_record(...)) as prose INSTEAD of
+  // actually invoking the tool. When this happens, the structured tool_calls
+  // array is empty, so executeToolCall never runs, the user sees gibberish,
+  // and no changes land in Zoho. Treat this as an immediate stall.
+  if (/<\|tool\|>|<\|>tool_call<\|>|call>:\s*call:\s*\w+|^\s*zoho_(update|create|delete|get|search)_record\s*\(/i.test(reply)) {
+    return { stalled: true, reason: 'raw_tool_syntax_leak' };
+  }
+
+  // Also flag when reply starts with what looks like structured JSON args
+  // without any accompanying human text (another Gemma failure mode)
+  if (/^\s*\{[\s\S]*?"?(Quoted_Items|module_name|record_id)"?\s*:/.test(reply) && reply.length < 2000) {
+    return { stalled: true, reason: 'raw_json_args_leak' };
+  }
+
   return { stalled: false, reason: null };
+}
+
+// Detect high-stakes WRITE intents that should skip Gemma entirely and go
+// straight to Claude. Gemma's tool-calling is inconsistent for quote updates,
+// discount changes, line-item modifications, etc. — it often emits raw syntax
+// as prose instead of invoking the tool, resulting in silent failures and
+// hallucinated confirmations. Read-only queries stay on Gemma for cost savings.
+function shouldForceClaudeForWrite(userMessage) {
+  if (!userMessage || typeof userMessage !== 'string') return false;
+  const text = userMessage.toLowerCase();
+
+  // Quote/deal modification verbs paired with modification targets
+  const writePatterns = [
+    /\b(change|update|modify|edit|swap|replace|set|adjust|reduce|increase|add|remove|delete)\b.{0,60}\b(discount|quantity|qty|price|license|term|line\s*item|sku|product|stage|amount|total)/i,
+    /\b(discount|quantity|qty|price|license|term|line\s*item|sku|product|stage|amount|total)\b.{0,30}\b(to|from|at|be|become)\b.{0,20}\b(\d|\$|%|\w+yr|\w+ear)/i,
+    /\b(bump|drop|raise|lower)\b.{0,30}\b(discount|price|qty|quantity)/i,
+    /\b(close|reopen|advance|move)\b.{0,30}\b(deal|quote|stage)/i,
+    /\bapprove\b.{0,20}\b(deal|quote|discount|request)/i,
+    /\bcreate\b.{0,20}\b(deal|quote|task|contact|account|note)/i,
+    /\bdelete\b.{0,20}\b(line|item|row|sku|product|task|note)/i,
+    /\bmake\s+(it|the\s+\w+)\b.{0,30}\b(\d+%|\d+\s*%|\d+\s*year|\d+y|\d+\s*yr)/i,
+    /^\s*(change|update|modify|set|make)\b/i, // Bare "change X to Y" openings
+  ];
+
+  return writePatterns.some(p => p.test(userMessage));
 }
 
 // Main waterfall function: try Gemma first, escalate to Claude if stalled.
@@ -8374,6 +8752,22 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   if (useClaudeOnly) {
     const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
     return { ...r, model: 'claude-sonnet-4-6', tierUsed: 'claude', totalMs: Date.now() - startMs };
+  }
+
+  // Pre-emptive write-intent bypass: quote/deal modifications go straight to
+  // Claude. Gemma's tool-calling reliability for writes is not acceptable
+  // (raw-syntax leaks, missing fields, skipped verification re-fetches).
+  // Save Gemma for what it does reliably: read/lookup queries.
+  if (!useGemmaOnly && shouldForceClaudeForWrite(userMessage)) {
+    console.log(`[WATERFALL] Write-intent detected — routing directly to Claude (skipping Gemma)`);
+    const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
+    return {
+      ...r,
+      model: 'claude-sonnet-4-6',
+      tierUsed: 'claude',
+      stallReason: 'write_intent_skip_gemma',
+      totalMs: Date.now() - startMs
+    };
   }
 
   // Tier 1: Gemma 4 with optimized prompt
@@ -9729,7 +10123,25 @@ CRITICAL URL RULES:
                 break;
               }
 
-              const dashPrompt = dashInstructions || 'Analyze this Meraki license dashboard screenshot. Parse all license types, device counts, and expiration dates. Follow the LICENSE DASHBOARD SCREENSHOT HANDLING rules exactly.';
+              const dashPrompt = dashInstructions || `You are analyzing a Cisco Meraki license dashboard screenshot.
+
+Extract every license row in this exact format:
+
+LICENSE_DASHBOARD_PARSE_V1
+---
+SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
+---
+EXPIRATION: <YYYY-MM-DD or unknown>
+MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
+MR_EDITION: <Enterprise | Advanced | none>
+
+Rules:
+- One SKU per line between the --- markers.
+- MR Enterprise rows MUST be included. Use the SKU "MR-ENT".
+- Ignore license keys (e.g. Z2FE-AW8G-CKFN) in the License History section — those are NOT SKUs.
+- Ignore any SKU where LIMIT and ACTIVE are both 0.
+- If you see "MX Advanced Security" or "MX Secure SD-WAN Plus", note it in MX_EDITION.
+- Quantities must be the numbers from the "License limit" and "Current device count" columns — never invent quantities from model numbers.`;
 
               // Call Claude with vision (reuse existing askClaude)
               const imageData = { base64: resolvedBase64, mediaType: resolvedMediaType };
@@ -9758,10 +10170,85 @@ CRITICAL URL RULES:
                 }
               }
 
+              // Fallback: if no URLs came back in the response, parse the
+              // LICENSE_DASHBOARD_PARSE_V1 block directly and build 1Y/3Y/5Y URLs here.
+              const fbDropFlags = [];
+              if (dashQuoteUrls.length === 0 && /LICENSE_DASHBOARD_PARSE_V1/.test(claudeResponse || '')) {
+                const isValidSkuTokenFb = (sku) => {
+                  if (!sku) return false;
+                  const s = sku.toUpperCase();
+                  if (s.startsWith('LIC-')) return true;
+                  if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
+                  if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
+                  return true;
+                };
+                const fbItems = [];
+                const fbRe = /SKU:\s*([A-Z0-9][A-Z0-9-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+                let fbM;
+                while ((fbM = fbRe.exec(claudeResponse || '')) !== null) {
+                  const sku = fbM[1].toUpperCase();
+                  const limit = parseInt(fbM[2], 10);
+                  const active = parseInt(fbM[3], 10);
+                  if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
+                  if (active === 0 && limit === 0) continue;
+                  if (active === 0) continue;
+                  const qty = Math.min(limit || active, active || limit);
+                  if (qty <= 0 || qty > 500) continue;
+                  if (!isValidSkuTokenFb(sku)) continue;
+                  fbItems.push({ sku, qty });
+                }
+                // Dedupe (model key preserves MR-ENT as its own bucket)
+                const fbMap = new Map();
+                for (const { sku, qty } of fbItems) {
+                  fbMap.set(sku, (fbMap.get(sku) || 0) + qty);
+                }
+                const fbDeduped = Array.from(fbMap.entries()).map(([sku, qty]) => ({ sku, qty }));
+
+                if (fbDeduped.length > 0 && typeof buildStratusUrl === 'function') {
+                  // Produce 1Y / 3Y / 5Y license-renewal URLs (parity with Webex path).
+                  const fbTerms = [
+                    { term: '1Y', suffix: '1YR', label: '1-Year Co-Term' },
+                    { term: '3Y', suffix: '3YR', label: '3-Year Co-Term' },
+                    { term: '5Y', suffix: '5YR', label: '5-Year Co-Term' }
+                  ];
+                  for (const t of fbTerms) {
+                    const itemsForTerm = [];
+                    for (const { sku, qty } of fbDeduped) {
+                      // MR-ENT → LIC-ENT-{1,3,5}YR (generic AP license)
+                      if (sku === 'MR-ENT' || sku === 'MR_ENT') {
+                        itemsForTerm.push({ sku: `LIC-ENT-${t.suffix}`, qty });
+                        continue;
+                      }
+                      // Try catalog license mapping (EOL-safe, uses the engine's rules)
+                      let mapped = null;
+                      try {
+                        const licSkus = getLicenseSkus(sku, null);
+                        if (licSkus) {
+                          const licEntry = licSkus.find(l => l.term === t.term);
+                          if (licEntry) mapped = licEntry.sku;
+                        }
+                      } catch (_) { /* ignore */ }
+                      if (mapped) {
+                        itemsForTerm.push({ sku: mapped, qty });
+                      } else {
+                        // No license mapping — surface as drop flag (once, on 1Y pass)
+                        if (t.term === '1Y') {
+                          fbDropFlags.push(`⚠️ ${sku} × ${qty} was detected but no license mapping was found.`);
+                        }
+                      }
+                    }
+                    if (itemsForTerm.length > 0) {
+                      dashQuoteUrls.push({ url: buildStratusUrl(itemsForTerm), label: t.label });
+                    }
+                  }
+                }
+              }
+
               apiResult = {
                 analysis: claudeResponse || 'No analysis generated.',
                 quoteUrls: dashQuoteUrls,
                 rawUrls: dashUrls,
+                dropFlags: fbDropFlags,
               };
             } catch (err) {
               console.error('[PARSE-DASHBOARD] Error:', err.message);
@@ -10690,10 +11177,20 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           // Called by the gateway worker (stratus-ai-bot-gateway) for all /api/chat requests.
           // Accepts: { text, emailContext, history, forceModel: 'gemma'|'claude'|undefined, dryRun }
           case '/api/chat-waterfall': {
-            const { text: wText, emailContext: wEc, history: wHistory, forceModel, dryRun: wDryRun } = apiBody;
+            const { text: wText, emailContext: wEc, history: wHistory, forceModel, dryRun: wDryRun, progressId: wProgressId } = apiBody;
             if (!wText) {
               apiResult = { error: 'text is required' };
               break;
+            }
+            // Wire progressId into env so executeToolCall can emit step events
+            // as each tool fires. Safe to set even when undefined — the hook
+            // no-ops without it.
+            if (wProgressId) {
+              env.__PROGRESS_ID = wProgressId;
+              env.__PROGRESS_CTX = ctx; // for waitUntil on KV writes
+              // Seed an initial "thinking" event so the client sees *something*
+              // immediately on the first poll
+              await writeProgressEvent(env, wProgressId, '🤔 Thinking...');
             }
             try {
               const wUserEmail = request.headers.get('x-user-email') || 'gateway-user';
@@ -10799,6 +11296,31 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             } catch (wErr) {
               console.error(`[WATERFALL] Error: ${wErr.message}`);
               apiResult = { error: wErr.message, stack: wErr.stack?.substring(0, 500) };
+            }
+            // Mark progress channel complete so client can stop polling
+            if (wProgressId) {
+              try { await markProgressComplete(env, wProgressId); } catch (_) {}
+              env.__PROGRESS_ID = null;
+              env.__PROGRESS_CTX = null;
+            }
+            break;
+          }
+
+          // ── Chat Progress: poll endpoint for step-by-step updates ──
+          // Client generates a progressId, sends it on /api/chat-waterfall, then
+          // polls here at ~1Hz until status === 'complete'. KV-backed so reads
+          // work across worker isolates. Lightweight; zero extra LLM cost.
+          case '/api/chat-progress': {
+            const pid = url.searchParams.get('id') || apiBody?.progressId;
+            if (!pid) {
+              apiResult = { error: 'progressId is required' };
+              break;
+            }
+            try {
+              const stored = await env.CONVERSATION_KV.get(`progress:${pid}`, 'json');
+              apiResult = stored || { steps: [], status: 'unknown' };
+            } catch (e) {
+              apiResult = { steps: [], status: 'unknown', error: e.message };
             }
             break;
           }
