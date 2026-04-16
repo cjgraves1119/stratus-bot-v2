@@ -634,18 +634,18 @@ SCHEMA:
 {"intent":"quote|revise|price_lookup|dashboard_parse|clarify|product_info|escalate|conversation","confidence":0.0-1.0,"reply":"","items":[{"sku":"...","qty":1,"sku_type":"hardware|license|accessory"}],"modifiers":{"hardware_only":false,"license_only":false,"with_license":null,"term_years":null,"tier":null,"show_pricing":false,"all_terms":false},"revision":{"action":null,"target_sku":null,"add_items":[],"new_term":null,"new_tier":null,"new_qty":null,"hw_lic_toggle":null},"reference":{"is_pronoun_ref":false,"option_ref":null,"resolve_from_history":false},"dashboard":{"is_meraki_license_page":false}}
 
 INTENT RULES:
-- "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1.
+- "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1. "renewal for [SKU list]" or "renew N [SKU]" = quote with license_only=true (NOT revise — renewals with explicit SKUs are fresh license quotes).
 - "price_lookup": "cost of X", "how much is X", "price for X", or pronoun pricing ("cost of that").
-- "revise": message modifies a prior quote — "license only", "hardware only", "3 year only", "add X", "remove X", "swap X for Y", "make it N", "change to SEC". Requires prior context.
-- "dashboard_parse": image of Meraki license dashboard.
-- "clarify": quote request too vague — "some switches", "need APs", "pricing" alone, "5 MS130-24" (missing variant).
-- "product_info": spec, compare, size, capability, EOL-status question — NOT a quote.
+- "revise": message modifies a prior quote — "license only", "hardware only", "3 year only", "add X", "remove X", "swap X for Y", "make it N", "change to SEC". HARD RULE: "revise" requires prior_context to be present. If prior_context is empty/null, NEVER output "revise" — use "quote" or "clarify" instead.
+- "dashboard_parse": image of Meraki license dashboard. NEVER use for messages containing stratusinfosystems.com URLs — those are the bot's own quote output, not dashboards.
+- "clarify": quote request too vague — "some switches", "need APs", "pricing" alone, "5 MS130-24" (missing variant). Also use when a bare product category name is given without quantity or context (e.g. "DNS security").
+- "product_info": spec, compare, size, capability, EOL-status, or sizing/recommendation question — NOT a quote. Includes: "what do I need for X users", "what do you recommend for X", "which firewall for X employees", "what's the best AP for a warehouse". If the user is asking WHAT to buy (not quoting a specific SKU), it's product_info.
 - "escalate": complex proposal / deployment planning.
 - "conversation": greeting, thanks, jokes, identity, short reactions ("lol","ok","?").
 
 MODIFIER RULES:
 - hardware_only: "hw only","hardware only","no license","just hardware","without licensing".
-- license_only: "license only","just the license","licenses only","renewal only","renew X","lic only","renew N X licenses".
+- license_only: "license only","just the license","licenses only","renewal only","renew X","renewal for X","lic only". When the user says "renewal for [devices]" they want license quotes — set license_only=true and intent="quote".
 - with_license: true when user says "with license","with licensing","and license". null otherwise.
 - term_years: 1/3/5 for "1 year"/"3 year"/"5 year"/"three year"/"just the 5 year". null otherwise.
 - tier: "SEC" for "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for "SD-WAN"/"SDW". null otherwise.
@@ -653,6 +653,7 @@ MODIFIER RULES:
 - all_terms: true when user says "1yr 3yr and 5yr" or "all terms".
 
 REVISION RULES:
+- CRITICAL: Only use intent="revise" when prior_context is provided. If prior_context is empty or absent, the message is standalone — classify as "quote", "clarify", or another intent instead.
 - action: "add"/"remove"/"swap"/"change_term"/"change_tier"/"toggle_hw_lic"/"change_qty".
 - "license only"/"hardware only" after prior quote → action=toggle_hw_lic, hw_lic_toggle="license_only"/"hardware_only".
 - "3 year only"/"make it 5 year" → action=change_term, new_term=3 or 5.
@@ -663,6 +664,7 @@ REVISION RULES:
 - "change to SEC" → action=change_tier, new_tier="SEC".
 - "add pricing" → action=null but set modifiers.show_pricing=true, reference.resolve_from_history=true.
 - For revisions: set reference.resolve_from_history=true.
+- "renewal for [device list]" is NOT a revision — it's a fresh quote with license_only=true.
 
 REFERENCE RULES:
 - is_pronoun_ref: true for "that"/"those"/"it"/"them"/"this"/"these"/"the switch"/"the AP"/"the quote".
@@ -711,11 +713,48 @@ async function classifyWithCFv2(userMessage, priorContext, env) {
   }
 }
 
+// ── Gemma 4 shadow classifier (same Schema v2 prompt, different model) ──
+const GEMMA4_MODEL = '@cf/google/gemma-4-26b-a4b-it';
+async function classifyWithGemma4(userMessage, priorContext, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const userText = priorContext ? `Prior assistant context:\n${priorContext}\n\nUser message:\n${userMessage}` : userMessage;
+    const result = await Promise.race([
+      env.AI.run(GEMMA4_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CLASSIFIER_PROMPT_V2 },
+          { role: 'user', content: userText }
+        ],
+        max_completion_tokens: 512
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('GEMMA4_TIMEOUT')), 10000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    // Gemma 4 uses OpenAI-style response: choices[0].message.content
+    const rawResponse = result?.choices?.[0]?.message?.content ?? result?.response;
+    if (typeof rawResponse === 'object' && rawResponse !== null && rawResponse.intent) {
+      return { ...rawResponse, elapsed, raw: JSON.stringify(rawResponse) };
+    }
+    const raw = typeof rawResponse === 'string' ? rawResponse.trim() : String(rawResponse || '');
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { elapsed, raw, parseError: 'no JSON found' };
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return { ...parsed, elapsed, raw };
+    } catch (e) {
+      return { elapsed, raw, parseError: e.message };
+    }
+  } catch (err) {
+    return { elapsed: Date.now() - startMs, error: err.message };
+  }
+}
+
 // Async-fire-and-forget: log the shadow comparison to D1 via ctx.waitUntil.
-async function logShadowClassification(env, { personId, requestText, priorContext, legacy, v2 }) {
+async function logShadowClassification(env, { personId, requestText, priorContext, legacy, v2, gemma4 }) {
   if (!env.ANALYTICS_DB) return;
   try {
-    // Ensure table exists (idempotent)
+    // Migrate table: add Gemma 4 columns if they don't exist yet
     await env.ANALYTICS_DB.prepare(`CREATE TABLE IF NOT EXISTS classifier_shadow (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at TEXT DEFAULT (datetime('now')),
@@ -734,12 +773,34 @@ async function logShadowClassification(env, { personId, requestText, priorContex
       v2_reference TEXT,
       v2_raw TEXT,
       v2_parse_error TEXT,
-      intent_agree INTEGER
+      intent_agree INTEGER,
+      gemma4_intent TEXT,
+      gemma4_confidence REAL,
+      gemma4_elapsed_ms INTEGER,
+      gemma4_items TEXT,
+      gemma4_modifiers TEXT,
+      gemma4_revision TEXT,
+      gemma4_reference TEXT,
+      gemma4_raw TEXT,
+      gemma4_parse_error TEXT,
+      gemma4_agree INTEGER
     )`).run();
+    // Safe migration for existing tables: add columns if missing (SQLite ignores duplicate ADD COLUMN errors)
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_intent TEXT`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_confidence REAL`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_elapsed_ms INTEGER`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_items TEXT`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_modifiers TEXT`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_revision TEXT`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_reference TEXT`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_raw TEXT`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_parse_error TEXT`).run(); } catch {}
+    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_agree INTEGER`).run(); } catch {}
     const intentAgree = legacy?.intent && v2?.intent ? (String(legacy.intent).toLowerCase() === String(v2.intent).toLowerCase() ? 1 : 0) : null;
+    const gemma4Agree = legacy?.intent && gemma4?.intent ? (String(legacy.intent).toLowerCase() === String(gemma4.intent).toLowerCase() ? 1 : 0) : null;
     await env.ANALYTICS_DB.prepare(`INSERT INTO classifier_shadow
-      (person_id, request_text, prior_context, legacy_intent, legacy_elapsed_ms, legacy_raw, v2_intent, v2_confidence, v2_elapsed_ms, v2_items, v2_modifiers, v2_revision, v2_reference, v2_raw, v2_parse_error, intent_agree)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      (person_id, request_text, prior_context, legacy_intent, legacy_elapsed_ms, legacy_raw, v2_intent, v2_confidence, v2_elapsed_ms, v2_items, v2_modifiers, v2_revision, v2_reference, v2_raw, v2_parse_error, intent_agree, gemma4_intent, gemma4_confidence, gemma4_elapsed_ms, gemma4_items, gemma4_modifiers, gemma4_revision, gemma4_reference, gemma4_raw, gemma4_parse_error, gemma4_agree)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
       personId || null,
       String(requestText || '').substring(0, 1000),
       String(priorContext || '').substring(0, 2000),
@@ -755,7 +816,17 @@ async function logShadowClassification(env, { personId, requestText, priorContex
       v2?.reference ? JSON.stringify(v2.reference).substring(0, 200) : null,
       String(v2?.raw || '').substring(0, 2000),
       v2?.parseError || v2?.error || null,
-      intentAgree
+      intentAgree,
+      gemma4?.intent || null,
+      gemma4?.confidence || null,
+      gemma4?.elapsed || null,
+      gemma4?.items ? JSON.stringify(gemma4.items).substring(0, 1000) : null,
+      gemma4?.modifiers ? JSON.stringify(gemma4.modifiers).substring(0, 500) : null,
+      gemma4?.revision ? JSON.stringify(gemma4.revision).substring(0, 500) : null,
+      gemma4?.reference ? JSON.stringify(gemma4.reference).substring(0, 200) : null,
+      String(gemma4?.raw || '').substring(0, 2000),
+      gemma4?.parseError || gemma4?.error || null,
+      gemma4Agree
     ).run();
   } catch (e) {
     console.warn('[Shadow] log failed:', e.message);
@@ -4548,8 +4619,8 @@ export default {
         try {
           const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 500);
           const [rows, stats] = await Promise.all([
-            db.prepare('SELECT id, created_at, substr(request_text,1,120) as req, legacy_intent, v2_intent, v2_confidence, intent_agree, v2_items, v2_modifiers, v2_revision, v2_reference, v2_parse_error, v2_elapsed_ms, legacy_elapsed_ms FROM classifier_shadow ORDER BY id DESC LIMIT ?').bind(limit).all(),
-            db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN intent_agree=1 THEN 1 ELSE 0 END) as agree, SUM(CASE WHEN v2_parse_error IS NOT NULL THEN 1 ELSE 0 END) as v2_parse_fail, AVG(legacy_elapsed_ms) as avg_legacy_ms, AVG(v2_elapsed_ms) as avg_v2_ms FROM classifier_shadow WHERE created_at >= datetime('now','-7 days')").first()
+            db.prepare('SELECT id, created_at, substr(request_text,1,120) as req, legacy_intent, v2_intent, v2_confidence, intent_agree, v2_items, v2_modifiers, v2_revision, v2_reference, v2_parse_error, v2_elapsed_ms, legacy_elapsed_ms, gemma4_intent, gemma4_confidence, gemma4_elapsed_ms, gemma4_items, gemma4_modifiers, gemma4_revision, gemma4_reference, gemma4_parse_error, gemma4_agree FROM classifier_shadow ORDER BY id DESC LIMIT ?').bind(limit).all(),
+            db.prepare("SELECT COUNT(*) as total, SUM(CASE WHEN intent_agree=1 THEN 1 ELSE 0 END) as v2_agree, SUM(CASE WHEN gemma4_agree=1 THEN 1 ELSE 0 END) as gemma4_agree, SUM(CASE WHEN v2_parse_error IS NOT NULL THEN 1 ELSE 0 END) as v2_parse_fail, SUM(CASE WHEN gemma4_parse_error IS NOT NULL THEN 1 ELSE 0 END) as gemma4_parse_fail, AVG(legacy_elapsed_ms) as avg_legacy_ms, AVG(v2_elapsed_ms) as avg_v2_ms, AVG(gemma4_elapsed_ms) as avg_gemma4_ms FROM classifier_shadow WHERE created_at >= datetime('now','-7 days')").first()
           ]);
           return new Response(JSON.stringify({stats, rows: rows.results || []}, null, 2), {headers: DASH_CORS});
         } catch(err) { return new Response(JSON.stringify({error:err.message}), {status:500, headers:DASH_CORS}); }
@@ -4935,21 +5006,26 @@ Hard rules:
             if (lastAsst) priorCtxForV2 = String(lastAsst.content || '').substring(0, 1500);
           } catch {}
           T.step('wx-cfclassify', 'enter');
-          const [classification, v2Classification] = await Promise.all([
+          const [classification, v2Classification, gemma4Classification] = await Promise.all([
             classifyWithCF(text, env),
-            classifyWithCFv2(text, priorCtxForV2, env).catch(e => ({ error: e.message }))
+            classifyWithCFv2(text, priorCtxForV2, env).catch(e => ({ error: e.message })),
+            classifyWithGemma4(text, priorCtxForV2, env).catch(e => ({ error: e.message }))
           ]);
           T.step('wx-cfclassify', 'exit');
-          // Fire-and-forget: log shadow comparison to D1 (non-blocking)
+          // Fire-and-forget: log three-way shadow comparison to D1 (non-blocking)
           ctx.waitUntil(logShadowClassification(env, {
             personId,
             requestText: text,
             priorContext: priorCtxForV2,
             legacy: classification,
-            v2: v2Classification
+            v2: v2Classification,
+            gemma4: gemma4Classification
           }));
           if (v2Classification) {
             console.log(`[Shadow-V2] intent=${v2Classification.intent || 'ERR'} conf=${v2Classification.confidence || '?'} (${v2Classification.elapsed || 0}ms)${v2Classification.parseError ? ' parseErr=' + v2Classification.parseError : ''}`);
+          }
+          if (gemma4Classification) {
+            console.log(`[Shadow-Gemma4] intent=${gemma4Classification.intent || 'ERR'} conf=${gemma4Classification.confidence || '?'} (${gemma4Classification.elapsed || 0}ms)${gemma4Classification.parseError ? ' parseErr=' + gemma4Classification.parseError : ''}`);
           }
 
           if (classification) {
@@ -5389,7 +5465,8 @@ Hard rules:
         if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
         if (!env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
 
-        const systemPrompt = `You are an intent classifier for a Cisco/Meraki quoting bot. Output a single JSON object — no prose, no markdown.\n\nSCHEMA:\n{"intent":"quote|revise|price_lookup|dashboard_parse|clarify|product_info|escalate|conversation","confidence":0.0-1.0,"reply":"","items":[{"sku":"...","qty":1,"sku_type":"hardware|license|accessory"}],"modifiers":{"hardware_only":false,"license_only":false,"with_license":null,"term_years":null,"tier":null,"show_pricing":false,"all_terms":false},"revision":{"action":null,"target_sku":null,"add_items":[],"new_term":null,"new_tier":null,"new_qty":null,"hw_lic_toggle":null},"reference":{"is_pronoun_ref":false,"option_ref":null,"resolve_from_history":false},"dashboard":{"is_meraki_license_page":false}}\n\nINTENT RULES:\n- "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1.\n- "price_lookup": "cost of X", "how much is X", "price for X", or pronoun pricing ("cost of that").\n- "revise": message modifies a prior quote — "license only", "hardware only", "3 year only", "add X", "remove X", "swap X for Y", "make it N", "change to SEC". Requires prior context.\n- "dashboard_parse": image of Meraki license dashboard.\n- "clarify": quote request too vague — "some switches", "need APs", "pricing" alone, "5 MS130-24" (missing variant).\n- "product_info": spec, compare, size, capability, EOL-status question — NOT a quote.\n- "escalate": complex proposal / deployment planning.\n- "conversation": greeting, thanks, jokes, identity, short reactions ("lol","ok","?").\n\nMODIFIER RULES:\n- hardware_only: "hw only","hardware only","no license","just hardware","without licensing".\n- license_only: "license only","just the license","licenses only","renewal only","renew X","lic only".\n- with_license: true when user says "with license","with licensing","and license". null otherwise.\n- term_years: 1/3/5 for "1 year"/"3 year"/"5 year"/"three year". null otherwise.\n- tier: "SEC" for "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for "SD-WAN"/"SDW". null otherwise.\n- show_pricing: true for pricing intent ("cost","how much","with pricing","price").\n- all_terms: true when user says "1yr 3yr and 5yr" or "all terms".\n\nREVISION RULES:\n- action: "add"/"remove"/"swap"/"change_term"/"change_tier"/"toggle_hw_lic"/"change_qty".\n- "license only"/"hardware only" after prior quote → action=toggle_hw_lic, hw_lic_toggle="license_only"/"hardware_only".\n- "3 year only"/"make it 5 year" → action=change_term, new_term=3 or 5.\n- "add 2 MX67" → action=add, add_items=[{sku:"MX67",qty:2}].\n- "remove MR44"/"take out MR44" → action=remove, target_sku="MR44".\n- "swap MR44 for MR46" → action=swap, target_sku="MR44", add_items=[{sku:"MR46"}].\n- "make it 5" → action=change_qty, new_qty=5.\n- "change to SEC" → action=change_tier, new_tier="SEC".\n- For revisions: set reference.resolve_from_history=true.\n\nREFERENCE RULES:\n- is_pronoun_ref: true for "that"/"those"/"it"/"them"/"this"/"these"/"the switch"/"the AP"/"the quote".\n- option_ref: 1/2/3 if user says "Option 1/2/3".\n- resolve_from_history: true whenever the message only makes sense with prior context.\n\nSKU KNOWLEDGE:\nValid Meraki families: MR (APs), MX (firewalls), MS (switches), MV (cameras), MT (sensors), MG (cellular), Z (teleworker), CW (Wi-Fi 6E/7).\nBare license SKUs like "LIC-ENT-3YR","LIC-MX64-SEC-3YR" → items with sku_type="license".\nIf a model looks valid but you don't recognize it (EOL or new), still emit as quote — the backend validates.\nWord numbers: "one"=1,"two"=2,...,"ten"=10,"a couple"=2,"a few"=3.\n\nReturn ONLY the JSON object. No markdown fences. No explanation.`;
+        // Use the same prompt constant as the live shadow classifier
+        const systemPrompt = CF_CLASSIFIER_PROMPT_V2; // was: inline hardcoded prompt
 
         const userText = priorCtx ? `Prior assistant context:\n${priorCtx}\n\nUser message:\n${input}` : input;
 
