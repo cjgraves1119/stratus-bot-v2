@@ -5482,12 +5482,17 @@ Hard rules:
         } catch (e) { err = e.message; }
         const elapsed = Date.now() - start;
 
-        // Extract response
+        // Extract response — handle both Llama (.response) and Gemma 4 (.choices[]) formats
         let raw = null, parsed = null, parseError = null;
         if (aiResult) {
-          raw = aiResult.response ?? aiResult.choices?.[0]?.message?.content ?? null;
+          // Try all known response formats
+          raw = aiResult.response ?? aiResult.choices?.[0]?.message?.content ?? aiResult.result?.response ?? null;
+          // If still null, stringify the entire result for debugging
+          if (raw === null || raw === undefined) {
+            raw = '__DEBUG_FULL_RESULT__' + JSON.stringify(aiResult).substring(0, 2000);
+          }
           if (typeof raw === 'object' && raw !== null) { parsed = raw; raw = JSON.stringify(raw); }
-          else if (typeof raw === 'string') {
+          else if (typeof raw === 'string' && !raw.startsWith('__DEBUG_')) {
             try {
               const m = raw.match(/\{[\s\S]*\}/);
               if (m) parsed = JSON.parse(m[0]);
