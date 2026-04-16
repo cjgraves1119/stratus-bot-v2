@@ -4902,7 +4902,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     .join(', ');
                   return `item ${m.id} (${fieldIssues || m.reason})`;
                 }).join('; ');
-                warnings.push(`MODIFICATION FAILED: ${modificationsFailed.length} line item change(s) did NOT apply. ${details}. Zoho accepted the payload but the values did not change.`);
+                // Detect quantity-specific failures and provide actionable retry guidance
+                const qtyFailures = modificationsFailed.filter(m => m.checks?.quantity && !m.checks.quantity.match);
+                if (qtyFailures.length > 0) {
+                  warnings.push(`QUANTITY UPDATE REJECTED: ${qtyFailures.length} line item(s) quantity did NOT change. ${details}. To fix: resubmit the FULL Quoted_Items array (all items, not just the changed one) with the correct Quantity value inside each item object. Partial Quoted_Items payloads are silently ignored by Zoho.`);
+                } else {
+                  warnings.push(`MODIFICATION FAILED: ${modificationsFailed.length} line item change(s) did NOT apply. ${details}. Zoho accepted the payload but the values did not change. Resubmit with the full Quoted_Items array.`);
+                }
               }
 
               // ── No-op detection: compare pre-update vs post-update snapshots ──
@@ -5820,6 +5826,47 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         return await gmailApiCall('POST', 'messages/send', env, sendBody);
       }
 
+      case 'assign_cisco_rep_to_deal': {
+        const { deal_id, rep_email, rep_id } = toolInput;
+        if (!deal_id) return { error: 'deal_id is required' };
+        if (!rep_id && !rep_email) return { error: 'rep_email or rep_id is required' };
+        try {
+          let finalRepId = rep_id || '';
+          let finalRepName = rep_email || '';
+
+          // If no rep_id provided, look up via Meraki_ISRs module by email
+          if (!finalRepId && rep_email) {
+            const isrSearch = await zohoApiCall('GET',
+              `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(rep_email)})&fields=id,Name,Email,Title`, env
+            ).catch(() => null);
+            if (isrSearch?.data && isrSearch.data.length > 0) {
+              finalRepId = isrSearch.data[0].id;
+              finalRepName = isrSearch.data[0].Name || rep_email;
+            } else {
+              return { success: false, error: `Rep ${rep_email} not found in Meraki_ISRs module. Verify the email is correct.` };
+            }
+          }
+
+          const updateResp = await zohoApiCall('PUT', `Deals/${deal_id}`, env, {
+            data: [{
+              Meraki_ISR: { id: finalRepId },
+              Reason: 'Meraki ISR recommended',
+            }],
+          });
+          const updateRecord = updateResp?.data?.[0];
+          const success = updateRecord?.code === 'SUCCESS';
+          return {
+            success,
+            deal_id,
+            rep_id: finalRepId,
+            rep_name: finalRepName,
+            message: success ? `Assigned ${finalRepName} (${finalRepId}) as Meraki ISR on deal ${deal_id}. Reason set to "Meraki ISR recommended".` : (updateRecord?.message || 'Update failed'),
+          };
+        } catch (err) {
+          return { error: 'Rep assignment failed: ' + err.message };
+        }
+      }
+
       default:
         return { error: `Unknown tool: ${toolName}` };
     }
@@ -5861,7 +5908,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_create_record',
-    description: 'Create a new record in Zoho CRM. Server-side validation enforces required fields: Deals need Deal_Name, Stage, Lead_Source, Owner, Closing_Date. Quotes need Subject, Deal_Name, Valid_Till. Invalid picklist values are blocked before reaching Zoho. Response includes clear success/failure status.',
+    description: 'Create a new record in Zoho CRM. Server-side validation enforces required fields: Deals need Deal_Name, Stage, Lead_Source, Owner, Closing_Date. Quotes need Subject, Deal_Name, Valid_Till. Invalid picklist values are blocked before reaching Zoho. Response includes clear success/failure status. IMPORTANT for Quotes: line items go in the Quoted_Items array, each with: {"Product_Name": {"id": "<product_id>"}, "Quantity": <integer, REQUIRED even if 1>, "List_Price": <number>, "Discount": <percentage_as_dollar_amount>}. Quantity on the root Quote object is IGNORED by Zoho — it MUST be inside each Quoted_Items entry.',
     input_schema: {
       type: 'object',
       properties: {
@@ -5873,7 +5920,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_update_record',
-    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use these 5 valid picklist values: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost). "Closed (Won)" is blocked — deals auto-close when a PO is attached. NEVER use any other stage value. Server-side validation auto-corrects known wrong values and rejects invalid ones.',
+    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use these 5 valid picklist values: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost). "Closed (Won)" is blocked — deals auto-close when a PO is attached. NEVER use any other stage value. Server-side validation auto-corrects known wrong values and rejects invalid ones. IMPORTANT for Quote line item updates: always send the FULL Quoted_Items array with ALL items (not just the changed one). Each item needs: id (existing line item ID), Quantity (integer), Discount (dollar amount). Partial payloads or Quantity on the root object are silently ignored by Zoho. Server auto-verifies after update and returns actual values — trust verification, not the API status code.',
     input_schema: {
       type: 'object',
       properties: {
@@ -6007,6 +6054,20 @@ const CRM_EMAIL_TOOLS = [
       properties: {
         deal_id: { type: 'string', description: 'The 8-digit CCW Deal Number (DID) from LIVE_CiscoQuote_Deal' },
         country: { type: 'string', description: 'Country for deal approval (default: "United States")' }
+      },
+      required: ['deal_id']
+    }
+  },
+  // Assign Cisco Rep to Deal
+  {
+    name: 'assign_cisco_rep_to_deal',
+    description: 'Assign a Cisco rep (Meraki ISR) to a Deal by email or ID. Searches the Meraki_ISRs module (NOT Contacts — Cisco reps do NOT live in Contacts). Updates Deal.Meraki_ISR and sets Reason="Meraki ISR recommended". Use this whenever the user asks to set, update, or change the Meraki ISR / Cisco rep / ISR on a deal. Any @cisco.com email belongs to a Meraki ISR — NEVER search the Contacts module for @cisco.com addresses.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        deal_id: { type: 'string', description: 'Zoho Deal record ID' },
+        rep_email: { type: 'string', description: 'Cisco rep email (e.g. jacporti@cisco.com). Always @cisco.com.' },
+        rep_id: { type: 'string', description: 'Optional: Meraki_ISRs record ID if already known. If omitted, email is used to look up.' },
       },
       required: ['deal_id']
     }
@@ -6414,6 +6475,8 @@ Meraki_ISR defaults:
 - Lead_Source = Meraki ISR Referal → Meraki_ISR = REQUIRED (ask for rep name), Reason = "Meraki ISR recommended"
 - Lead_Source = Meraki ADR Referal → prompt for ADR name
 
+**CRITICAL — Cisco reps live in the Meraki_ISRs module (NOT Contacts).** Any @cisco.com email belongs to a Meraki ISR. When the user asks to assign, update, or change the Meraki ISR / Cisco rep on a deal, use the \`assign_cisco_rep_to_deal\` tool — do NOT search the Contacts module for @cisco.com addresses.
+
 Proceed-first rule: Create with Stratus Referal + Stratus Sales defaults. Ask about Cisco rep involvement AFTER creation unless a rep is obviously mentioned up front.
 
 ---
@@ -6581,6 +6644,8 @@ For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) �
 ## ADMIN ACTION WORKFLOW
 (Full workflow loaded conditionally when admin action intent is detected.)
 
+**Self-report discipline:** Before saying you lack a tool or capability, check your tool list. You have zoho_update_record which can trigger Admin Actions, assign_cisco_rep_to_deal for rep assignment, and batch_product_lookup for products. NEVER report "I don't have a tool" when you have a tool that can accomplish the task. If you used a tool, state plainly what you did in your response.
+
 ---
 
 ## URL / ECOMM QUOTE LINK GENERATION
@@ -6709,7 +6774,9 @@ Admin Actions are Zoho automations triggered by writing an action name to the Ad
 | 4 | LIVE_SendToEsign | "send for signature", "send PO", "esign" | Quote_Stage updates |
 
 **Step 1: LIVE_CiscoQuote_Deal (DID generation)**
-Async, takes 30-90 seconds. After triggering, re-fetch. If CCW_Deal_Number populated → report + auto-submit to Velocity Hub (velocity_hub_submit). If null → tell user it's processing, offer to check back. DID must be exactly 8 digits.
+To generate a Cisco DID, call zoho_update_record on Quotes with {"Admin_Action": "LIVE_CiscoQuote_Deal"}. This is async (30-90 seconds). Re-fetch the Quote after 30s and read CCW_Deal_Number. When present, it is an 8-digit string — THAT is the DID. Report it + auto-submit to Velocity Hub (velocity_hub_submit). If null → tell user it is processing, offer to check back.
+NEVER say "I don't have a tool to generate a DID" — you DO have zoho_update_record which is the exact mechanism. State plainly: "I fired LIVE_CiscoQuote_Deal, waiting for CCW_Deal_Number to populate."
+**Where the DID lives:** The DID is stored on Quote.CCW_Deal_Number (NOT Deal.CCW_Deal_ID). When verifying a DID, always check the QUOTE record. Deal.CCW_Deal_ID is a separate field that may be empty. After DID is confirmed, the server auto-syncs it to the Deal.
 
 **Step 3: LIVE_ConvertQuoteToSO**
 Show validation first: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion.
@@ -6829,6 +6896,8 @@ function toolProgressMessage(toolName, toolInput) {
       return `✍️ Creating draft email to ${toolInput.to || ''}...`;
     case 'gmail_send_email':
       return `📤 Sending email to ${toolInput.to || ''}...`;
+    case 'assign_cisco_rep_to_deal':
+      return `👤 Assigning Cisco rep ${toolInput.rep_email || ''} to deal...`;
     default:
       return `⚙️ Running ${toolName}...`;
   }
@@ -7842,7 +7911,22 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
                       crmCtx.account_id = rec.Account_Name?.id || crmCtx.account_id || null;
                       crmCtx.deal_id = rec.Deal_Name?.id || crmCtx.deal_id || null;
                       // Capture CCW Deal Number (DID) when present from Admin Action results
-                      if (rec.CCW_Deal_Number) crmCtx.ccw_deal_number = rec.CCW_Deal_Number;
+                      if (rec.CCW_Deal_Number) {
+                        crmCtx.ccw_deal_number = rec.CCW_Deal_Number;
+                        // ── DID SYNC: propagate Quote.CCW_Deal_Number → Deal.CCW_Deal_ID ──
+                        // The DID lives on the Quote but users often check the Deal record.
+                        // Write it back so Deal is self-describing.
+                        const syncDealId = rec.Deal_Name?.id || crmCtx.deal_id;
+                        if (syncDealId) {
+                          zohoApiCall('PUT', `Deals/${syncDealId}`, env, {
+                            data: [{ CCW_Deal_ID: rec.CCW_Deal_Number }]
+                          }).then(() => {
+                            console.log(`[DID-SYNC] Wrote CCW_Deal_Number=${rec.CCW_Deal_Number} → Deal.CCW_Deal_ID on deal ${syncDealId}`);
+                          }).catch(err => {
+                            console.warn(`[DID-SYNC] Deal write-back failed for deal ${syncDealId}:`, err.message);
+                          });
+                        }
+                      }
                       // Compact line items: product code + qty + line item ID
                       if (rec.Quoted_Items) {
                         crmCtx.line_items = rec.Quoted_Items.map(i => ({
@@ -8157,6 +8241,7 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'zoho_delete_record',
   'create_deal_and_quote',
   'velocity_hub_submit',
+  'assign_cisco_rep_to_deal',
   'gmail_create_draft',
   'gmail_send_email',
   'webex_send_message',
