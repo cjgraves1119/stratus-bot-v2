@@ -6768,7 +6768,7 @@ Admin Actions are Zoho automations triggered by writing an action name to the Ad
 **Admin Action Sequence:**
 | Step | Action | Trigger Phrases | Verify Field |
 |------|--------|----------------|-------------|
-| 1 | LIVE_CiscoQuote_Deal | "create deal id", "generate DID", "submit to CCW" | CCW_Deal_Number (8-digit) |
+| 1 | LIVE_CiscoQuote_Deal | "create deal id", "generate DID", "get me a DID", "submit for DID", "fire the DID", "need a DID", "submit to CCW" | CCW_Deal_Number (8-digit) |
 | 2 | LIVE_GetQuoteData | "get quote data", "get disti pricing" | Vendor_Lines populated |
 | 3 | LIVE_ConvertQuoteToSO | "convert to PO", "create purchase order" | Sales_Orders linked |
 | 4 | LIVE_SendToEsign | "send for signature", "send PO", "esign" | Quote_Stage updates |
@@ -6822,7 +6822,7 @@ The advisor should respond in under 100 words and use enumerated steps, not expl
 
   // Detect admin action intent
   const adminActionPatterns = [
-    /\b(admin\s*action|generate\s*did|deal\s*id|submit.*ccw|convert.*po|purchase\s*order|esign|send.*signature|quote.to.po|did\s+generation)\b/i,
+    /\b(admin\s*action|generate\s*(the\s+)?did|deal\s*id|submit\s+(for\s+|to\s+|.*)?did\b|submit.*ccw|convert.*po|purchase\s*order|esign|send.*signature|quote.to.po|did\s+generation|(get|need|fire|kick\s*off|create|run)\s+(a\s+|the\s+|me\s+a\s+)?did\b)/i,
     /\bLIVE_/i,
     /\b(get\s+quote\s+data|disti\s+pricing|vendor\s+lines)\b/i,
   ];
