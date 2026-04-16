@@ -60,8 +60,57 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     try {
       const res = await sendToBackground(MSG.ANALYZE_IMAGE, { imageUrl, imageBase64 });
 
+      // Always run the V1 parse on res.analysis (if any) so we can populate the SKU
+      // textarea and the detected-SKU banner — even if the worker pre-built quoteUrls.
+      // Prior behavior: we early-returned on worker URLs and left skuText + banner
+      // empty, making it look like nothing was detected.
+      const rawAnalysisText = (res && res.analysis) || '';
+      // Strip markdown bold/italic markers (**SKU:**, *LIMIT:*) so the structured
+      // regex below doesn't fail when Claude wraps labels in markdown.
+      const analysisText = rawAnalysisText.replace(/\*{1,3}/g, '');
+      const isValidSkuTokenLocal = (sku) => {
+        if (!sku) return false;
+        const s = sku.toUpperCase();
+        if (s.startsWith('LIC-')) return true;
+        // MR-ENT is a synthetic SKU from the vision extractor (means "MR Enterprise licenses")
+        if (s === 'MR-ENT' || s === 'MR_ENT') return true;
+        if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
+        if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
+        return true;
+      };
+      const parsedItems = [];
+      if (/LICENSE_DASHBOARD_PARSE_V1/.test(analysisText)) {
+        const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+        let m;
+        while ((m = lineRe.exec(analysisText)) !== null) {
+          const sku = m[1].toUpperCase().replace(/_/g, '-');
+          const limit = parseInt(m[2], 10);
+          const active = parseInt(m[3], 10);
+          if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
+          if (active === 0 && limit === 0) continue;
+          if (active === 0) continue;
+          const qty = Math.min(limit || active, active || limit);
+          if (qty <= 0 || qty > 500) continue;
+          if (!isValidSkuTokenLocal(sku)) continue;
+          parsedItems.push({ sku, qty });
+        }
+      }
+      // Dedupe while preserving order
+      const dedupMap = new Map();
+      for (const { sku, qty } of parsedItems) {
+        dedupMap.set(sku, (dedupMap.get(sku) || 0) + qty);
+      }
+      const deduped = Array.from(dedupMap.entries()).map(([sku, qty]) => ({ sku, qty }));
+
+      // Split MR-ENT (synthetic) from hardware for textarea population
+      const mrEntItemsTop = deduped.filter(d => d.sku === 'MR-ENT' || d.sku === 'MR_ENT');
+      const hardwareItemsTop = deduped.filter(d => d.sku !== 'MR-ENT' && d.sku !== 'MR_ENT');
+      const mrQtyTop = mrEntItemsTop.reduce((sum, d) => sum + (d.qty || 0), 0);
+
       if (res && res.quoteUrls && Array.isArray(res.quoteUrls) && res.quoteUrls.length > 0) {
-        // API returned full quote URLs — show them directly
+        // Worker returned full quote URLs — show them directly, BUT also populate
+        // the textarea (hardware SKUs) and banner (all detected SKUs) so the user
+        // can see what was captured and optionally re-run the quote.
         setResult({
           urls: res.quoteUrls.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
           eolWarnings: [],
@@ -69,47 +118,32 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
           parsed: [],
           source: 'api',
         });
-        setImageAnalysis({ analysis: res.analysis, hasUrls: true });
-      } else if (res && res.analysis) {
-        // Got analysis text — try LICENSE_DASHBOARD_PARSE_V1 parsing first to preserve quantities
-        const rawAnalysisText = res.analysis || '';
-        // Strip markdown bold/italic markers (**SKU:**, *LIMIT:*) so the structured
-        // regex below doesn't fail when Claude wraps labels in markdown.
-        const analysisText = rawAnalysisText.replace(/\*{1,3}/g, '');
-        const isValidSkuTokenLocal = (sku) => {
-          if (!sku) return false;
-          const s = sku.toUpperCase();
-          if (s.startsWith('LIC-')) return true;
-          // MR-ENT is a synthetic SKU from the vision extractor (means "MR Enterprise licenses")
-          if (s === 'MR-ENT' || s === 'MR_ENT') return true;
-          if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
-          if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
-          return true;
-        };
-        const parsedItems = [];
-        if (/LICENSE_DASHBOARD_PARSE_V1/.test(analysisText)) {
-          const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
-          let m;
-          while ((m = lineRe.exec(analysisText)) !== null) {
-            const sku = m[1].toUpperCase().replace(/_/g, '-');
-            const limit = parseInt(m[2], 10);
-            const active = parseInt(m[3], 10);
-            if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
-            if (active === 0 && limit === 0) continue;
-            if (active === 0) continue;
-            const qty = Math.min(limit || active, active || limit);
-            if (qty <= 0 || qty > 500) continue;
-            if (!isValidSkuTokenLocal(sku)) continue;
-            parsedItems.push({ sku, qty });
+        if (deduped.length > 0) {
+          const formattedTop = hardwareItemsTop.map(({ sku, qty }) => `${sku} x ${qty}`).join('\n');
+          // If we only detected MR-ENT (license-only screenshot), show a helpful
+          // string in the textarea so the user sees what was found.
+          if (formattedTop) {
+            setSkuText(formattedTop);
+          } else if (mrQtyTop > 0) {
+            setSkuText(`MR Enterprise × ${mrQtyTop} (license-only)`);
           }
+          setImageAnalysis({
+            skus: deduped.map(d => d.sku),
+            message: `Detected ${deduped.length} SKU${deduped.length > 1 ? 's' : ''} with quantities from dashboard`,
+            analysis: rawAnalysisText,
+            hasUrls: true,
+          });
+        } else {
+          // URLs came back but V1 block didn't parse — still show URLs, but let the
+          // user know the capture wasn't structured.
+          setImageAnalysis({
+            skus: [],
+            message: 'Quote URLs generated. Structured SKU block not parsed — review the URLs below.',
+            analysis: rawAnalysisText,
+            hasUrls: true,
+          });
         }
-        // Dedupe while preserving order
-        const dedupMap = new Map();
-        for (const { sku, qty } of parsedItems) {
-          dedupMap.set(sku, (dedupMap.get(sku) || 0) + qty);
-        }
-        const deduped = Array.from(dedupMap.entries()).map(([sku, qty]) => ({ sku, qty }));
-
+      } else if (res && res.analysis) {
         if (deduped.length > 0) {
           // MR-ENT is the generic "MR Enterprise license" signal from the vision
           // extractor. It is NOT a real catalog SKU, and routing it through the

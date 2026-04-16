@@ -10337,11 +10337,44 @@ Hard rules:
                 }
               }
 
+              // Re-parse V1 block (cheap, ~10 items max) to give the client
+              // structured parsedItems — used to populate the UI textarea and
+              // detected-SKU banner without the client having to re-parse.
+              const parsedItemsForClient = [];
+              {
+                const isValidFb2 = (sku) => {
+                  if (!sku) return false;
+                  const s = sku.toUpperCase();
+                  if (s.startsWith('LIC-')) return true;
+                  if (s === 'MR-ENT' || s === 'MR_ENT') return true;
+                  if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
+                  if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
+                  return true;
+                };
+                const rx = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+                const seen = new Map();
+                let mm;
+                while ((mm = rx.exec(cleanedResponse)) !== null) {
+                  const sku = mm[1].toUpperCase().replace(/_/g, '-');
+                  const limit = parseInt(mm[2], 10);
+                  const active = parseInt(mm[3], 10);
+                  if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
+                  if (active === 0 && limit === 0) continue;
+                  if (active === 0) continue;
+                  const qty = Math.min(limit || active, active || limit);
+                  if (qty <= 0 || qty > 500) continue;
+                  if (!isValidFb2(sku)) continue;
+                  seen.set(sku, (seen.get(sku) || 0) + qty);
+                }
+                for (const [sku, qty] of seen.entries()) parsedItemsForClient.push({ sku, qty });
+              }
+
               apiResult = {
                 analysis: claudeResponse || 'No analysis generated.',
                 quoteUrls: dashQuoteUrls,
                 rawUrls: dashUrls,
                 dropFlags: fbDropFlags,
+                parsedItems: parsedItemsForClient,
               };
             } catch (err) {
               console.error('[PARSE-DASHBOARD] Error:', err.message);
