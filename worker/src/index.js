@@ -726,7 +726,8 @@ async function classifyWithGemma4(userMessage, priorContext, env) {
           { role: 'system', content: CF_CLASSIFIER_PROMPT_V2 },
           { role: 'user', content: userText }
         ],
-        max_completion_tokens: 512
+        max_completion_tokens: 4096,
+        thinking: { type: 'disabled' }
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('GEMMA4_TIMEOUT')), 10000))
     ]);
@@ -5472,7 +5473,7 @@ Hard rules:
 
         const isGemma = /gemma/i.test(model);
         const requestBody = isGemma
-          ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 512 }
+          ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 4096, thinking: { type: 'disabled' } }
           : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 512 };
 
         const start = Date.now();
@@ -5485,12 +5486,16 @@ Hard rules:
         // Extract response — handle both Llama (.response) and Gemma 4 (.choices[]) formats
         let raw = null, parsed = null, parseError = null;
         if (aiResult) {
-          // Try all known response formats
-          raw = aiResult.response ?? aiResult.choices?.[0]?.message?.content ?? aiResult.result?.response ?? null;
-          // If still null, stringify the entire result for debugging
-          if (raw === null || raw === undefined) {
-            raw = '__DEBUG_FULL_RESULT__' + JSON.stringify(aiResult).substring(0, 2000);
+          // Try all known response formats (Llama=.response, Gemma4=.choices[].message.content, fallback to reasoning)
+          raw = aiResult.response ?? aiResult.choices?.[0]?.message?.content ?? null;
+          // Gemma 4 may put content in reasoning field if thinking is enabled
+          if ((raw === null || raw === undefined) && aiResult.choices?.[0]?.message?.reasoning) {
+            const reasoning = aiResult.choices[0].message.reasoning;
+            const jsonInReasoning = reasoning.match(/\{[\s\S]*\}/);
+            if (jsonInReasoning) raw = jsonInReasoning[0];
           }
+          // Last resort: check result.response
+          if (raw === null || raw === undefined) raw = aiResult.result?.response ?? null;
           if (typeof raw === 'object' && raw !== null) { parsed = raw; raw = JSON.stringify(raw); }
           else if (typeof raw === 'string' && !raw.startsWith('__DEBUG_')) {
             try {
