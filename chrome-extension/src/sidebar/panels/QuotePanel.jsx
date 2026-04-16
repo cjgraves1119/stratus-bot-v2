@@ -119,14 +119,17 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
           source: 'api',
         });
         if (deduped.length > 0) {
-          const formattedTop = hardwareItemsTop.map(({ sku, qty }) => `${sku} x ${qty}`).join('\n');
-          // If we only detected MR-ENT (license-only screenshot), show a helpful
-          // string in the textarea so the user sees what was found.
-          if (formattedTop) {
-            setSkuText(formattedTop);
-          } else if (mrQtyTop > 0) {
-            setSkuText(`MR Enterprise × ${mrQtyTop} (license-only)`);
-          }
+          // Show ALL detected items in the textarea — including MR-ENT — so the
+          // user has visibility into what was captured. handleGenerate strips
+          // MR-ENT tokens before sending to the quote engine (otherwise
+          // parseMessage's agnostic-family short-circuit drops hardware SKUs).
+          const formattedTop = deduped
+            .map(({ sku, qty }) => `${sku} x ${qty}`)
+            .join('\n');
+          setSkuText(formattedTop);
+          // Stash MR-ENT qty so handleGenerate can re-append LIC-ENT URLs when
+          // the user hits Generate Quote on an edited textarea.
+          setMrEntPendingQty(mrQtyTop);
           setImageAnalysis({
             skus: deduped.map(d => d.sku),
             message: `Detected ${deduped.length} SKU${deduped.length > 1 ? 's' : ''} with quantities from dashboard`,
@@ -156,7 +159,10 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
           const mrQty = mrEntItems.reduce((sum, d) => sum + (d.qty || 0), 0);
           setMrEntPendingQty(mrQty);
 
-          const formatted = hardwareItems.map(({ sku, qty }) => `${sku} x ${qty}`).join('\n');
+          // Show ALL detected items (including MR-ENT) in the textarea for
+          // visibility. handleGenerate strips MR-ENT before sending so the
+          // quote engine doesn't short-circuit on the synthetic token.
+          const formatted = deduped.map(({ sku, qty }) => `${sku} x ${qty}`).join('\n');
           setSkuText(formatted);
           setImageAnalysis({ skus: deduped.map(d => d.sku), message: `Detected ${deduped.length} SKU(s) with quantities from dashboard` });
 
@@ -244,10 +250,58 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setShowZohoPrompt(false);
 
     try {
+      // MR-ENT is a synthetic token from the vision extractor (means "MR
+      // Enterprise licenses"). It's NOT a real catalog SKU — routing it
+      // through parseMessage with hardware SKUs triggers the agnostic-family
+      // short-circuit, which silently DROPS all hardware items. Strip MR-ENT
+      // lines from the input and stash their qty so we can re-append the three
+      // LIC-ENT-{1,3,5}YR URLs to the result post-hoc.
+      const lines = skuText.trim().split(/\r?\n/);
+      let mrEntStripQty = 0;
+      const keptLines = [];
+      const mrEntLineRe = /^\s*(?:MR[-_]ENT|MR\s+Enterprise)(?:\s*[xX×*]\s*|\s+)(\d+)\s*$/;
+      for (const line of lines) {
+        const m = line.match(mrEntLineRe);
+        if (m) {
+          const q = parseInt(m[1], 10);
+          if (Number.isFinite(q) && q > 0 && q <= 500) mrEntStripQty += q;
+        } else {
+          keptLines.push(line);
+        }
+      }
+      if (mrEntStripQty > 0) {
+        // Re-stash so the post-hoc URL append below picks it up even if the
+        // user cleared the previous mrEntPendingQty by editing the textarea.
+        setMrEntPendingQty((prev) => Math.max(prev || 0, mrEntStripQty));
+      }
+      const skuTextForApi = keptLines.join('\n').trim();
+
+      // If the user's input was ONLY MR-ENT, skip the worker call and produce
+      // the three co-term URLs directly.
+      if (!skuTextForApi && mrEntStripQty > 0) {
+        const mkUrl = (sku, qty) =>
+          `https://stratusinfosystems.com/order/?item=${encodeURIComponent(sku)}&qty=${qty}`;
+        setResult({
+          urls: [
+            { url: mkUrl('LIC-ENT-1YR', mrEntStripQty), label: '1-Year Co-Term' },
+            { url: mkUrl('LIC-ENT-3YR', mrEntStripQty), label: '3-Year Co-Term' },
+            { url: mkUrl('LIC-ENT-5YR', mrEntStripQty), label: '5-Year Co-Term' },
+          ],
+          eolWarnings: [],
+          suggestions: null,
+          parsed: [{ baseSku: 'LIC-ENT', qty: mrEntStripQty }],
+          source: 'vision-mr-only',
+          handlerType: 'vision-mr-only',
+        });
+        setMrEntPendingQty(0);
+        setLoading(false);
+        return;
+      }
+
       // Route ALL requests through the worker API — uses the exact same
       // handler chain as Webex and GChat bots: EOL dates → confirmations → pricing → SKU quotes → Claude
       const res = await sendToBackground(MSG.GENERATE_QUOTE, {
-        skuText: skuText.trim(),
+        skuText: skuTextForApi,
         personId: personIdRef.current,
       });
       if (res) {
