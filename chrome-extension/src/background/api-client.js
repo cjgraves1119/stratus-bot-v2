@@ -357,6 +357,11 @@ export async function detectSkus(text) {
  * Analyze an image for SKUs via Claude vision.
  * Uses the /api/parse-dashboard endpoint which handles
  * both imageUrl and imageBase64.
+ *
+ * Prompt discipline: Claude MUST emit ONLY the V1 block — no preamble,
+ * no recommendations, no markdown bold. The parser relies on strict format
+ * and a loose prose fallback will hallucinate SKUs (e.g. picking up "MS130-24P"
+ * from a sentence like "consider upgrading to MS130-24P").
  */
 export async function analyzeImageForSkus(imageUrl, imageBase64) {
   return apiCall('/api/parse-dashboard', {
@@ -364,7 +369,9 @@ export async function analyzeImageForSkus(imageUrl, imageBase64) {
     imageBase64: imageBase64 || undefined,
     instructions: `You are analyzing a Cisco Meraki license dashboard screenshot.
 
-Extract every license row in this exact format:
+Only extract rows from the TOP "License information" table — the one with the columns "License limit" and "Current device count". IGNORE the "License History" section at the bottom (those are past renewals with license keys like Z228-BEAC-D2QX and old devices — they must never appear in output).
+
+Respond with ONLY this block. No preamble, no summary, no recommendations, no markdown bold, no explanations:
 
 LICENSE_DASHBOARD_PARSE_V1
 ---
@@ -374,13 +381,16 @@ EXPIRATION: <YYYY-MM-DD or unknown>
 MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
 MR_EDITION: <Enterprise | Advanced | none>
 
-Rules:
-- One SKU per line between the --- markers.
-- MR Enterprise rows MUST be included. Use the SKU "MR-ENT".
-- Ignore license keys (e.g. Z2FE-AW8G-CKFN) in the License History section — those are NOT SKUs.
-- Ignore any SKU where LIMIT and ACTIVE are both 0.
-- If you see "MX Advanced Security" or "MX Secure SD-WAN Plus", note it in MX_EDITION.
-- Quantities must be the numbers from the "License limit" and "Current device count" columns — never invent quantities from model numbers.`,
+Hard rules:
+1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, MX models, MS models, MT, MV, MG, Z-series).
+2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
+3. Skip any row where ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip.
+4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table. If unsure, leave it out.
+5. Do NOT include SKUs from the "License History" section (e.g. MX84 from a prior renewal).
+6. LIMIT and ACTIVE must be the exact integers from the "License limit" and "Current device count" columns — never derive from model numbers.
+7. Preserve hyphens exactly (MS120-24P, not MS120 24P).
+8. Do not wrap labels in asterisks or other markdown. Output plain ASCII only.
+9. If nothing extractable, emit the block with no SKU lines between the --- markers.`,
   }, { timeout: 60000 });
 }
 

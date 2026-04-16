@@ -246,8 +246,13 @@ registerMessageHandlers({
   },
 
   // ── Chat Handoff (CRM-aware) ──
-  [MSG.CHAT_HANDOFF]: async ({ text, emailContext, history, systemContext }) => {
-    return api.chatWithCrm(text, emailContext, history, systemContext);
+  [MSG.CHAT_HANDOFF]: async ({ text, emailContext, history, systemContext, progressId }) => {
+    return api.chatWithCrm(text, emailContext, history, systemContext, progressId);
+  },
+
+  // ── Chat Progress polling ──
+  [MSG.CHAT_PROGRESS]: async ({ progressId }) => {
+    return api.getChatProgress(progressId);
   },
 
   // ── CCW / Velocity Hub ──

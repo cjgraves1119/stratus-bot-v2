@@ -72,21 +72,26 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         setImageAnalysis({ analysis: res.analysis, hasUrls: true });
       } else if (res && res.analysis) {
         // Got analysis text — try LICENSE_DASHBOARD_PARSE_V1 parsing first to preserve quantities
-        const analysisText = res.analysis || '';
+        const rawAnalysisText = res.analysis || '';
+        // Strip markdown bold/italic markers (**SKU:**, *LIMIT:*) so the structured
+        // regex below doesn't fail when Claude wraps labels in markdown.
+        const analysisText = rawAnalysisText.replace(/\*{1,3}/g, '');
         const isValidSkuTokenLocal = (sku) => {
           if (!sku) return false;
           const s = sku.toUpperCase();
           if (s.startsWith('LIC-')) return true;
+          // MR-ENT is a synthetic SKU from the vision extractor (means "MR Enterprise licenses")
+          if (s === 'MR-ENT' || s === 'MR_ENT') return true;
           if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
           if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
           return true;
         };
         const parsedItems = [];
         if (/LICENSE_DASHBOARD_PARSE_V1/.test(analysisText)) {
-          const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+          const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
           let m;
           while ((m = lineRe.exec(analysisText)) !== null) {
-            const sku = m[1].toUpperCase();
+            const sku = m[1].toUpperCase().replace(/_/g, '-');
             const limit = parseInt(m[2], 10);
             const active = parseInt(m[3], 10);
             if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
@@ -142,17 +147,47 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
             setMrEntPendingQty(0); // already rendered; don't double-append in handleGenerate
           }
         } else {
-          // Fallback: regex-only hardware extraction (original behavior, no qty)
-          const skuRegex = /\b((?:MR|MV|MT|MG|MX|MS|CW|C9|C8|Z)[A-Z0-9-]+)\b/gi;
-          const rawMatches = analysisText.match(skuRegex) || [];
-          const matches = [...new Set(rawMatches.map(s => s.toUpperCase()))]
-            .filter(s => !s.startsWith('LIC-')); // Exclude license keys from hardware detection
-          if (matches.length > 0) {
-            setSkuText(matches.join('\n'));
-            setImageAnalysis({ skus: matches, message: `Detected ${matches.length} hardware SKU(s) from image` });
-          } else {
-            setImageAnalysis({ skus: [], message: 'No hardware SKUs detected in this image.', analysis: analysisText });
+          // Structured V1 parse failed — don't fall back to prose-regex extraction,
+          // which hallucinates SKUs from recommendations/descriptions (e.g. picks up
+          // "MS130-24P" from "consider MS130-24P") and silently misses MR Enterprise
+          // rows (which are written as "MR Enterprise" with a space, not "MR-ENT").
+          // Instead, surface the raw response so the user can retry or re-screenshot.
+          const narrowMrMatch = analysisText.match(/MR\s+Enterprise[^0-9]{0,40}(\d{1,3})/i);
+          if (narrowMrMatch) {
+            // Best-effort MR-only capture when Claude described the dashboard in prose
+            // rather than emitting the V1 block. Never trust prose SKU tokens beyond
+            // the explicit "MR Enterprise: N" pattern.
+            const mrQty = parseInt(narrowMrMatch[1], 10);
+            if (Number.isFinite(mrQty) && mrQty > 0 && mrQty <= 500) {
+              setMrEntPendingQty(mrQty);
+              setImageAnalysis({
+                skus: ['MR-ENT'],
+                message: `Detected MR Enterprise × ${mrQty} (prose fallback — no structured block). If hardware SKUs are missing, try re-capturing the screenshot.`,
+                analysis: rawAnalysisText,
+              });
+              const mkUrl = (sku, qty) =>
+                `https://stratusinfosystems.com/order/?item=${encodeURIComponent(sku)}&qty=${qty}`;
+              setResult({
+                urls: [
+                  { url: mkUrl('LIC-ENT-1YR', mrQty), label: '1-Year Co-Term' },
+                  { url: mkUrl('LIC-ENT-3YR', mrQty), label: '3-Year Co-Term' },
+                  { url: mkUrl('LIC-ENT-5YR', mrQty), label: '5-Year Co-Term' },
+                ],
+                eolWarnings: [],
+                suggestions: null,
+                parsed: [{ baseSku: 'LIC-ENT', qty: mrQty }],
+                source: 'vision-mr-only',
+                handlerType: 'vision-mr-only',
+              });
+              setMrEntPendingQty(0);
+              return;
+            }
           }
+          setImageAnalysis({
+            skus: [],
+            message: 'Vision couldn\'t parse the dashboard into a structured block. Try re-uploading a cleaner screenshot, or paste SKUs manually below.',
+            analysis: rawAnalysisText,
+          });
         }
       } else {
         setImageAnalysis({ skus: [], message: 'No SKUs detected in this image.' });

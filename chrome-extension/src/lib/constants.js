@@ -115,6 +115,7 @@ export const MSG = {
   // Chat Handoff
   CHAT_HANDOFF: 'CHAT_HANDOFF',
   CHAT_STOP: 'CHAT_STOP',
+  CHAT_PROGRESS: 'CHAT_PROGRESS',
 
   // CCW / Velocity Hub
   CCW_LOOKUP: 'CCW_LOOKUP',

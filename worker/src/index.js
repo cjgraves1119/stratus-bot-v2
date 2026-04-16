@@ -848,11 +848,14 @@ function extractSkusFromVisionText(text) {
   const skus = [];
   if (!text) return skus;
 
-  if (/LICENSE_DASHBOARD_PARSE_V1/.test(text)) {
-    const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+  // Strip markdown bold/italic so Claude's occasional `**SKU:**` doesn't break the regex.
+  const cleanedText = text.replace(/\*{1,3}/g, '');
+
+  if (/LICENSE_DASHBOARD_PARSE_V1/.test(cleanedText)) {
+    const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
     let m;
-    while ((m = lineRe.exec(text)) !== null) {
-      const sku = m[1].toUpperCase();
+    while ((m = lineRe.exec(cleanedText)) !== null) {
+      const sku = m[1].toUpperCase().replace(/_/g, '-');
       const limit = parseInt(m[2], 10);
       const active = parseInt(m[3], 10);
       if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
@@ -868,13 +871,13 @@ function extractSkusFromVisionText(text) {
 
   const mrEntRe = /MR\s+Enterprise[^\n\d]{0,40}?(\d+)/gi;
   let mEnt;
-  while ((mEnt = mrEntRe.exec(text)) !== null) {
+  while ((mEnt = mrEntRe.exec(cleanedText)) !== null) {
     const qty = parseInt(mEnt[1], 10);
     if (qty > 0 && qty <= 500) skus.push({ sku: 'MR-ENT', qty });
   }
 
   const skuRegex = /\b((?:LIC-[A-Z0-9-]+|(?:MR|MS|MX|MV|MT|MG|CW|C9|Z)\d[A-Z0-9-]*))\b/gi;
-  const lines = text.split(/\n|\r/);
+  const lines = cleanedText.split(/\n|\r/);
   for (const line of lines) {
     if (/license\s+history/i.test(line)) continue;
     if (/\b[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/i.test(line)) continue;
@@ -4642,7 +4645,9 @@ export default {
               T.step('wx-image', 'exit', { result: 'has_image' });
               const DASHBOARD_VISION_PROMPT = `You are analyzing a Cisco Meraki license dashboard screenshot.
 
-Extract every license row in this exact format:
+Only extract rows from the TOP "License information" table — the one with the columns "License limit" and "Current device count". IGNORE the "License History" section at the bottom (those are past renewals with license keys like Z228-BEAC-D2QX and old devices — they must never appear in output).
+
+Respond with ONLY this block. No preamble, no summary, no recommendations, no markdown bold, no explanations:
 
 LICENSE_DASHBOARD_PARSE_V1
 ---
@@ -4652,13 +4657,16 @@ EXPIRATION: <YYYY-MM-DD or unknown>
 MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
 MR_EDITION: <Enterprise | Advanced | none>
 
-Rules:
-- One SKU per line between the --- markers.
-- MR Enterprise rows MUST be included. Use the SKU "MR-ENT".
-- Ignore license keys (e.g. Z2FE-AW8G-CKFN) in the License History section — those are NOT SKUs.
-- Ignore any SKU where LIMIT and ACTIVE are both 0.
-- If you see "MX Advanced Security" or "MX Secure SD-WAN Plus", note it in MX_EDITION.
-- Quantities must be the numbers from the "License limit" and "Current device count" columns — never invent quantities from model numbers.`;
+Hard rules:
+1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, MX models, MS models, MT, MV, MG, Z-series).
+2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
+3. Skip any row where ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip.
+4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table. If unsure, leave it out.
+5. Do NOT include SKUs from the "License History" section (e.g. MX84 from a prior renewal).
+6. LIMIT and ACTIVE must be the exact integers from the "License limit" and "Current device count" columns — never derive from model numbers.
+7. Preserve hyphens exactly (MS120-24P, not MS120 24P).
+8. Do not wrap labels in asterisks or other markdown. Output plain ASCII only.
+9. If nothing extractable, emit the block with no SKU lines between the --- markers.`;
 
               const prompt = text || DASHBOARD_VISION_PROMPT;
 

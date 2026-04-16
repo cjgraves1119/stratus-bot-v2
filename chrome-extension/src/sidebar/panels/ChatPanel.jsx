@@ -154,10 +154,14 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
   const [selectedContextEmail, setSelectedContextEmail] = useState(null);
   const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
   const [zohoPageContext, setZohoPageContext] = useState(null);
+  // Progress steps — populated via polling while a chat request is in flight
+  const [progressSteps, setProgressSteps] = useState([]);
   const messagesEndRef = useRef(null);
   // AbortController ref for stop functionality
   const abortRef = useRef(null);
   const lastSendRef = useRef(0); // Rate-limit: min 1s between sends
+  // Active progress poll interval — cleared when request completes
+  const progressIntervalRef = useRef(null);
 
   // Auto-scroll
   useEffect(() => {
@@ -387,11 +391,46 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
         textToSend = `${zohoHint}\n\nUser message: ${messageText}`;
       }
 
+      // ── Progress tracking ────────────────────────────────────────────────
+      // Generate a short id, send it with the chat request, and poll the
+      // gateway every second to render "🔍 Searching Zoho Accounts..." style
+      // step messages as tools fire. KV-backed; zero added latency on the
+      // chat call itself (writes are fire-and-forget on the server).
+      const progressId = `p_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
+      setProgressSteps([]);
+
+      // Clear any prior interval (defensive — shouldn't happen, but safe)
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+
+      progressIntervalRef.current = setInterval(async () => {
+        if (thisAbort.aborted) {
+          if (progressIntervalRef.current) {
+            clearInterval(progressIntervalRef.current);
+            progressIntervalRef.current = null;
+          }
+          return;
+        }
+        try {
+          const progress = await sendToBackground(MSG.CHAT_PROGRESS, { progressId });
+          if (progress && Array.isArray(progress.steps)) {
+            setProgressSteps(progress.steps);
+          }
+          if (progress?.status === 'complete' && progressIntervalRef.current) {
+            clearInterval(progressIntervalRef.current);
+            progressIntervalRef.current = null;
+          }
+        } catch (_) { /* ignore poll failures */ }
+      }, 1000);
+
       const response = await sendToBackground(MSG.CHAT_HANDOFF, {
         text: textToSend,
         emailContext: effectiveContext,
         history: historyForApi,
         systemContext: buildSystemContext(emailContext, selectedContextEmail === '__none__' ? null : selectedContextEmail),
+        progressId,
       });
 
       if (thisAbort.aborted) return; // Stopped by user
@@ -415,7 +454,17 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
         setError(err.message || 'Failed to send message');
       }
     } finally {
-      if (!thisAbort.aborted) setLoading(false);
+      // Always clean up progress polling when the request ends
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+      if (!thisAbort.aborted) {
+        setLoading(false);
+        // Clear progress steps after a short delay so the user can see the
+        // final state briefly before it disappears
+        setTimeout(() => setProgressSteps([]), 1500);
+      }
     }
   }, [input, loading, messages, emailContext, onMessagesChange]);
 
@@ -575,13 +624,18 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
 
         {loading && (
           <div style={{
-            alignSelf: 'flex-start', padding: '10px 14px',
+            alignSelf: 'flex-start', maxWidth: '95%',
+            padding: '10px 14px',
             background: COLORS.BG_SECONDARY, borderRadius: 8,
             color: COLORS.TEXT_SECONDARY, fontSize: 13,
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span>●●●</span>
-              <span style={{ fontSize: 11 }}>Working...</span>
+              <span style={{ fontSize: 11 }}>
+                {progressSteps.length > 0
+                  ? progressSteps[progressSteps.length - 1].message
+                  : 'Working...'}
+              </span>
               <button onClick={handleStop} style={{
                 marginLeft: 4, padding: '2px 8px',
                 background: '#fce8e6', color: COLORS.ERROR,
@@ -591,6 +645,23 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
                 Stop
               </button>
             </div>
+            {/* Prior steps rendered as a compact history below the current one */}
+            {progressSteps.length > 1 && (
+              <div style={{
+                marginTop: 8, paddingTop: 8,
+                borderTop: `1px solid ${COLORS.BORDER}`,
+                display: 'flex', flexDirection: 'column', gap: 3,
+              }}>
+                {progressSteps.slice(0, -1).map((step, idx) => (
+                  <div key={idx} style={{
+                    fontSize: 10, color: COLORS.TEXT_SECONDARY,
+                    opacity: 0.75, lineHeight: 1.4,
+                  }}>
+                    <span style={{ marginRight: 6 }}>✓</span>{step.message}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
