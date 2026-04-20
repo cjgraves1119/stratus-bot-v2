@@ -2855,13 +2855,13 @@ if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
       },
     },
     {
-      name: '[URL] multiple URLs in message → uses last one',
+      name: '[URL] multiple URLs with distinct terms → requestedTerm=null (1/3/5Y re-emitted on revise)',
       run: () => {
         const content = '1-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-1YR&qty=10,10 3-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=10,10 5-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-5YR&qty=10,10';
         const r = _realExtractPriorFromAssistantUrl(content);
         return {
-          pass: r && r.requestedTerm === 5,
-          actual: JSON.stringify({ term: r?.requestedTerm }),
+          pass: r && r.requestedTerm === null && r.items[0]?.baseSku === 'MR44' && r.items[0]?.qty === 10 && r.requestedTier === 'ENT',
+          actual: JSON.stringify({ term: r?.requestedTerm, items: r?.items, tier: r?.requestedTier }),
         };
       },
     },
@@ -2896,6 +2896,82 @@ if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
         return {
           pass: mr46?.qty === 10 && r.requestedTerm === 5 && r.requestedTier === 'ENT',
           actual: JSON.stringify({ mr46, term: r?.requestedTerm, tier: r?.requestedTier }),
+        };
+      },
+    },
+    // ═══ LPC regression: multi-option/multi-term prior with MX-SEC + MR-ENT ═══
+    {
+      name: '[URL] MX-SEC hw + LIC-ENT (MR) → tier=SEC (MX wins, MR-ENT is fallback)',
+      run: () => {
+        const r = _realExtractPriorFromAssistantUrl('https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-SEC-5YR,LIC-ENT-5YR&qty=1,1,24');
+        return {
+          pass: r && r.requestedTier === 'SEC',
+          actual: JSON.stringify({ tier: r?.requestedTier, items: r?.items }),
+        };
+      },
+    },
+    {
+      name: '[URL] LPC 3-term refresh (Option 3) → items + MR-AGN qty=24, term=null, tier=SEC',
+      run: () => {
+        const option3 = [
+          '1-Year: https://stratusinfosystems.com/order/?item=MS130-8,LIC-MS130-8-1YR,C9300L-24P-4X-M,LIC-C9300L-24P-M-1Y-A,MX67-HW,LIC-MX67-SEC-1YR,MX68-HW,LIC-MX68-SEC-1YR,MX85-HW,LIC-MX85-SEC-1YR,LIC-ENT-1YR&qty=1,1,1,1,1,1,1,1,1,1,24',
+          '3-Year: https://stratusinfosystems.com/order/?item=MS130-8,LIC-MS130-8-3YR,C9300L-24P-4X-M,LIC-C9300L-24P-M-3Y-A,MX67-HW,LIC-MX67-SEC-3YR,MX68-HW,LIC-MX68-SEC-3YR,MX85-HW,LIC-MX85-SEC-3YR,LIC-ENT-3YR&qty=1,1,1,1,1,1,1,1,1,1,24',
+          '5-Year: https://stratusinfosystems.com/order/?item=MS130-8,LIC-MS130-8-5YR,C9300L-24P-4X-M,LIC-C9300L-24P-M-5Y-A,MX67-HW,LIC-MX67-SEC-5YR,MX68-HW,LIC-MX68-SEC-5YR,MX85-HW,LIC-MX85-SEC-5YR,LIC-ENT-5YR&qty=1,1,1,1,1,1,1,1,1,1,24',
+        ].join('\n\n');
+        const r = _realExtractPriorFromAssistantUrl(option3);
+        const mrAgn = r?.items?.find(i => i.baseSku === 'MR-AGN');
+        const mx85 = r?.items?.find(i => i.baseSku === 'MX85');
+        return {
+          pass: r && r.requestedTerm === null && r.requestedTier === 'SEC' && mrAgn?.qty === 24 && mx85?.qty === 1,
+          actual: JSON.stringify({ term: r?.requestedTerm, tier: r?.requestedTier, mrAgn, mx85, itemCount: r?.items?.length }),
+        };
+      },
+    },
+    {
+      name: '[CHAIN] LPC 3-term refresh → swap MX85 to MX95 preserves MR-AGN qty=24, tier=SEC, term=null',
+      run: () => {
+        const option3 = [
+          '1-Year: https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-SEC-1YR,MX68-HW,LIC-MX68-SEC-1YR,MX85-HW,LIC-MX85-SEC-1YR,LIC-ENT-1YR&qty=1,1,1,1,1,1,24',
+          '3-Year: https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-SEC-3YR,MX68-HW,LIC-MX68-SEC-3YR,MX85-HW,LIC-MX85-SEC-3YR,LIC-ENT-3YR&qty=1,1,1,1,1,1,24',
+          '5-Year: https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-SEC-5YR,MX68-HW,LIC-MX68-SEC-5YR,MX85-HW,LIC-MX85-SEC-5YR,LIC-ENT-5YR&qty=1,1,1,1,1,1,24',
+        ].join('\n\n');
+        const prior = _realExtractPriorFromAssistantUrl(option3);
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'swap', target_sku: 'MX85', add_items: [{ sku: 'MX95' }] },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const mx95 = r?.items?.find(i => i.baseSku === 'MX95');
+        const mx85 = r?.items?.find(i => i.baseSku === 'MX85');
+        const mx67 = r?.items?.find(i => i.baseSku === 'MX67');
+        const mrAgn = r?.items?.find(i => i.baseSku === 'MR-AGN');
+        return {
+          pass: mx95?.qty === 1 && !mx85 && mx67?.qty === 1 && mrAgn?.qty === 24 && r.requestedTerm === null && r.requestedTier === 'SEC',
+          actual: JSON.stringify({ mx95, mx85, mx67, mrAgn, term: r?.requestedTerm, tier: r?.requestedTier }),
+        };
+      },
+    },
+    {
+      name: '[URL] pure MX-SEC (no agnostic) single term → tier=SEC, term=3, no MR-AGN injected',
+      run: () => {
+        const r = _realExtractPriorFromAssistantUrl('https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-SEC-3YR&qty=2,2');
+        const mrAgn = r?.items?.find(i => i.baseSku === 'MR-AGN');
+        return {
+          pass: r && r.requestedTier === 'SEC' && r.requestedTerm === 3 && !mrAgn,
+          actual: JSON.stringify({ tier: r?.requestedTier, term: r?.requestedTerm, mrAgn, items: r?.items }),
+        };
+      },
+    },
+    {
+      name: '[URL] hardware + multiple licenses — MX-tier wins over MR-ENT fallback',
+      run: () => {
+        // Order matters: MR (agnostic ENT) comes AFTER MX licenses in the URL.
+        // Regression: previously the last license "won" tier inference, flipping
+        // MX from SEC to ENT. Now MX is authoritative regardless of order.
+        const r = _realExtractPriorFromAssistantUrl('https://stratusinfosystems.com/order/?item=MX67-HW,LIC-MX67-SEC-5YR,LIC-ENT-5YR&qty=1,1,10');
+        return {
+          pass: r && r.requestedTier === 'SEC',
+          actual: JSON.stringify({ tier: r?.requestedTier }),
         };
       },
     },

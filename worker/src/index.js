@@ -3025,55 +3025,118 @@ function applyV2Revision(priorParsed, v2) {
 // Returns null if no parseable URL is found in the content.
 function extractPriorFromAssistantUrl(content) {
   if (!content || typeof content !== 'string') return null;
-  // Find the last /order/?... URL in the message
+  // Find ALL /order/?... URLs in the message. A multi-term quote (1Y/3Y/5Y)
+  // or multi-option quote (Option 1/2/3) can emit several URLs; we pool
+  // items + licenses across all of them so revise-after-multi-term preserves
+  // the full item list and lets us detect "all terms were shown."
   const urls = content.match(/stratusinfosystems\.com\/order\/\?[^\s)`"'<>]+/gi);
   if (!urls || urls.length === 0) return null;
-  // Use the last one (most recent if multiple terms shown)
-  const url = urls[urls.length - 1];
-  const qs = url.split('?')[1] || '';
-  const params = {};
-  for (const kv of qs.split('&')) {
-    const [k, v] = kv.split('=');
-    if (k) params[k] = decodeURIComponent(v || '');
-  }
-  const itemStr = params.item || '';
-  const qtyStr = params.qty || '';
-  if (!itemStr) return null;
-  const skus = itemStr.split(',').map(s => s.trim()).filter(Boolean);
-  const qtys = qtyStr.split(',').map(n => parseInt(n, 10));
-  if (skus.length === 0) return null;
 
   const stripHw = (s) => String(s || '').toUpperCase()
     .replace(/-(HW|MR|RTG)(-NA)?$/i, (m, _a, na) => (na ? na : ''))
     .replace(/-(SEC|ENT|SDW|SD-WAN)$/i, '')
     .trim();
 
-  const items = [];
-  const licList = [];
-  let inferredTerm = null;
-  let inferredTier = null;
-  for (let i = 0; i < skus.length; i++) {
-    const sku = skus[i].toUpperCase();
-    const qty = Number.isFinite(qtys[i]) && qtys[i] > 0 ? qtys[i] : 1;
-    if (sku.startsWith('LIC-')) {
-      licList.push({ sku, qty });
-      // Pull term from license SKU (LIC-ENT-3YR → 3, LIC-ENT-5YR → 5)
-      const tm = sku.match(/-([135])Y(R?)$/);
-      if (tm) inferredTerm = parseInt(tm[1], 10);
-      // Pull tier from license SKU
-      if (/-SEC-/.test(sku) || /-MX-SEC/.test(sku)) inferredTier = 'SEC';
-      else if (/-ENT-/.test(sku) || /-MX-ENT/.test(sku)) inferredTier = 'ENT';
-      else if (/-SDW-/.test(sku) || /-SD-WAN-/.test(sku)) inferredTier = 'SDW';
-    } else {
-      const base = stripHw(sku);
-      if (base) items.push({ baseSku: base, qty });
+  // Pool across URLs. Keep first-seen qty for each distinct SKU (all terms
+  // typically carry the same quantities anyway).
+  const itemMap = new Map(); // baseSku → qty
+  const licMap  = new Map(); // sku     → qty
+  const termsSeen = new Set();
+  // Track MX tier and agnostic tier separately. MX-specific licenses (which
+  // are hardware-tied) are authoritative when present; family-agnostic MR
+  // licenses are the fallback. This prevents LIC-ENT-5YR (tier-agnostic MR)
+  // from corrupting MX's tier during swap revisions.
+  let mxTier = null;
+  let agnosticTier = null;
+
+  for (const url of urls) {
+    const qs = url.split('?')[1] || '';
+    const params = {};
+    for (const kv of qs.split('&')) {
+      const [k, v] = kv.split('=');
+      if (k) params[k] = decodeURIComponent(v || '');
+    }
+    const itemStr = params.item || '';
+    const qtyStr  = params.qty  || '';
+    if (!itemStr) continue;
+    const skus = itemStr.split(',').map(s => s.trim()).filter(Boolean);
+    const qtys = qtyStr.split(',').map(n => parseInt(n, 10));
+
+    for (let i = 0; i < skus.length; i++) {
+      const sku = skus[i].toUpperCase();
+      const qty = Number.isFinite(qtys[i]) && qtys[i] > 0 ? qtys[i] : 1;
+      if (sku.startsWith('LIC-')) {
+        if (!licMap.has(sku)) licMap.set(sku, qty);
+        // Term — collect ALL distinct term years across URLs. If more than
+        // one (e.g. 1Y/3Y/5Y all shown), the caller should render all three.
+        const tm = sku.match(/-([135])Y(R?)$/);
+        if (tm) termsSeen.add(parseInt(tm[1], 10));
+        // Tier — MX-specific takes precedence (LIC-MX67-SEC, LIC-MX-SEC for
+        // fixtures). Tier-agnostic MR (LIC-ENT/SEC/SDW-*YR) is only a fallback
+        // when no MX licenses are present.
+        const mxMatch = sku.match(/^LIC-MX\w*-(SEC|ENT|SDW)-/);
+        if (mxMatch) {
+          mxTier = mxMatch[1];
+        } else {
+          const agMatch = sku.match(/^LIC-(ENT|SEC|SDW)-[135]YR?$/);
+          if (agMatch) agnosticTier = agMatch[1];
+        }
+      } else {
+        const base = stripHw(sku);
+        if (base && !itemMap.has(base)) itemMap.set(base, qty);
+      }
     }
   }
 
-  if (items.length === 0 && licList.length === 0) return null;
+  const inferredTier = mxTier || agnosticTier;
 
-  // Pure license path — use directLicense for single, directLicenseList for multi
-  if (items.length === 0 && licList.length > 0) {
+  if (itemMap.size === 0 && licMap.size === 0) return null;
+
+  const items = [];
+  for (const [baseSku, qty] of itemMap) items.push({ baseSku, qty });
+
+  // If >1 distinct term surfaced across URLs, leave term null so the renderer
+  // emits 1/3/5Y again on revision. Exactly 1 → lock to that term.
+  const inferredTerm = termsSeen.size === 1 ? [...termsSeen][0] : null;
+
+  // Partition licenses: family-agnostic standalone licenses (MR ENT/SEC/SDW,
+  // MV, MT) can't be regenerated from any hardware item. When mixed alongside
+  // real hardware, we convert them into MR-AGN / MV-AGN / MT-AGN items that
+  // the renderer recognizes so the quantity survives swap revisions. When
+  // pure-license (no hw at all), we leave items empty so the caller takes
+  // the directLicense / directLicenseList path below. All other licenses
+  // (MX-, MS-, Cxxxx-, etc.) are hardware-tied and will be regenerated by
+  // buildQuoteResponse from item+term+tier, so they're dropped here.
+  if (itemMap.size > 0) {
+    const agnInjections = [];
+    for (const [sku, qty] of licMap) {
+      if (/^LIC-(ENT|SEC|SDW)-[135]YR?$/.test(sku)) {
+        agnInjections.push({ family: 'MR', qty });
+      } else if (/^LIC-MV-[135]YR?$/.test(sku)) {
+        agnInjections.push({ family: 'MV', qty });
+      } else if (/^LIC-MT-[135]Y$/.test(sku)) {
+        agnInjections.push({ family: 'MT', qty });
+      }
+    }
+    for (const { family, qty } of agnInjections) {
+      const agnSku = `${family}-AGN`;
+      // Skip if hardware from that family is already present (e.g. MR44 in
+      // items means the MR license belongs to it, not a standalone bulk).
+      const familyPresent = items.some(it => {
+        const m = it.baseSku.match(/^([A-Z]+)/);
+        return m && m[1] === family;
+      });
+      if (!familyPresent && !items.some(it => it.baseSku === agnSku)) {
+        items.push({ baseSku: agnSku, qty });
+      }
+    }
+  }
+
+  // Pure license path — no hardware, only loose licenses. Use directLicense
+  // for single, directLicenseList for multi. (Reached only when itemMap was
+  // empty AND every license was non-agnostic, which is rare but possible.)
+  if (items.length === 0 && licMap.size > 0) {
+    const licList = [...licMap.entries()].map(([sku, qty]) => ({ sku, qty }));
     if (licList.length === 1) {
       return {
         items: [],
@@ -3102,10 +3165,10 @@ function extractPriorFromAssistantUrl(content) {
     };
   }
 
-  // Mixed or hardware-only path — deterministic licenses get auto-generated by
-  // buildQuoteResponse from item+term+tier, so we don't need to carry licList.
-  // But if there are no licenses in the URL, it was likely a hardware_only quote.
-  const hardwareOnly = licList.length === 0;
+  // Mixed or hardware-only path. Hardware-tied licenses get auto-generated
+  // by buildQuoteResponse from item+term+tier. hardwareOnly only true if
+  // we saw zero licenses at all in the URL(s).
+  const hardwareOnly = licMap.size === 0;
   return {
     items,
     requestedTerm: inferredTerm,
@@ -4167,16 +4230,9 @@ function buildQuoteResponse(parsed) {
         // User explicitly asked for license renewal — simple label, everything is license-only
         lines.push(`**Option 1 — Renew Existing Licenses:**`);
       } else {
-        // Regular quote — clarify that EOL items are license-only while current gear includes hardware
-        const eolNames = eolItems.map(e => e.baseSku).join(', ');
+        // Regular quote — EOL items already called out in the "Products End of Life" block above.
+        // Just emit the header; skip the per-item info lines (redundant with the EOL callout).
         lines.push(`**Option 1 — As Quoted:**`);
-        for (const { baseSku } of eolItems) {
-          lines.push(`ℹ️ ${baseSku} — license renewal only (no longer orderable)`);
-        }
-        if (resolvedItems.length > 0) {
-          lines.push(`All other hardware included. See Option 2 for replacement hardware.`);
-        }
-        lines.push('');
       }
       for (const term of terms) {
         const urlItems = [];
