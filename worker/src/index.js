@@ -566,6 +566,8 @@ CRITICAL RULES:
 - Any SKU + "hardware only", "hw only", "no license", "hardware no license" = "quote". Example: "MX85 hardware only no license" = quote for MX85-HW.
 - Any SKU + "license only", "licenses only", "just the license", "renewal only" = "quote". Example: "MR46 license only 3 year" = quote for LIC-ENT-3YR.
 - Any SKU + "add-on", "add on license", "co-term", "coterm" = "quote".
+- SDW TIER RULE: Any MX model followed by "SDW", "SD-WAN", "SD WAN", "sdwan", "sd-wan", or suffix "-SDW" = "quote" for that MX with SD-WAN license. Examples: "MX85-SDW 3 year" → quote 1 MX85 with SD-WAN 3yr license; "MX75 sdwan" → quote 1 MX75 with SD-WAN license; "MX95 SD-WAN with licensing" → quote 1 MX95 with SD-WAN license. The base SKU is the MX model (e.g., "MX85"), the tier is SD-WAN. NEVER drop the SDW tier and NEVER classify these as "clarify".
+- SWAP RULE: "swap X for Y", "replace X with Y", "change X to Y", "substitute X with Y" = "quote" for Y (with qty if given). Keep the swapped-out SKU X as context in extracted. Example: "swap MR44 for 5 MR46 3 year" → quote 5 MR46 with 3 year license (swapping out MR44). Treat swap as a single atomic quote, never as separate remove + add operations.
 - A bare model number with no other context (e.g. "MX85", "MR46", "CW9164") = "quote" with qty 1.
 - Renewal/refresh phrasing with a SKU = "quote": "renew MR46 licenses", "refresh 10 MR44s", "replace MV22".
 - When generating variant clarifications, ONLY suggest models from the variant tables above. NEVER invent model numbers like "MS150-8" or "MS150-16" — those do not exist.
@@ -657,8 +659,9 @@ MODIFIER RULES:
 - license_only: "license only","just the license","licenses only","renewal only","renew X","renewal for X","lic only". When the user says "renewal for [devices]" they want license quotes — set license_only=true and intent="quote".
 - with_license: true when user says "with license","with licensing","and license". null otherwise.
 - term_years: 1/3/5 for "1 year"/"3 year"/"5 year"/"three year"/"just the 5 year". null otherwise.
-- tier: "SEC" for "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for "SD-WAN"/"SDW". null otherwise.
-- IMPORTANT: If a SKU has a tier suffix appended (e.g., "MX85-SDW", "MX67-SEC", "MX75-ENT"), SPLIT it: put the base model in items[].sku (e.g., "MX85") and the tier in modifiers.tier (e.g., "SDW"). Never include the tier suffix as part of the SKU string.
+- tier: "SEC" for "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for any of "SD-WAN"/"SDW"/"SD WAN"/"sdwan"/"sd-wan"/"sd wan" (case-insensitive). null otherwise.
+- CRITICAL — SDW TIER: Whenever the user says "SDW", "SD-WAN", "SD WAN", "sdwan", or any case variant ANYWHERE in the message, you MUST set modifiers.tier="SDW". Never drop it. Never leave tier as null when these phrasings are present. This applies even when the phrasing is in a suffix (MX85-SDW), separated by space (MX85 SDW), or appended after the model (MX85 SD-WAN with licensing).
+- TIER SUFFIX SPLITTING: If a SKU has a tier suffix or space-separated tier word appended — examples: "MX85-SDW", "MX85 SDW", "MX85 sdwan", "MX85-SD-WAN", "MX67-SEC", "MX67 SEC", "MX75-ENT", "MX75 enterprise" — SPLIT it: put the base model in items[].sku (e.g., "MX85") and the tier in modifiers.tier (e.g., "SDW"). Never include the tier suffix as part of the SKU string. Never leave the tier as null when you've stripped a tier suffix.
 - show_pricing: true for pricing intent ("cost","how much","with pricing","price").
 - all_terms: true when user says "1yr 3yr and 5yr" or "all terms".
 
@@ -669,7 +672,7 @@ REVISION RULES:
 - "3 year only"/"make it 5 year" → action=change_term, new_term=3 or 5.
 - "add 2 MX67" → action=add, add_items=[{sku:"MX67",qty:2}].
 - "remove MR44"/"take out MR44" → action=remove, target_sku="MR44".
-- "swap MR44 for MR46" → action=swap, target_sku="MR44", add_items=[{sku:"MR46"}].
+- SWAP — any of "swap X for Y", "replace X with Y", "change X to Y", "substitute X with Y", "exchange X for Y" → action="swap", target_sku="X", add_items=[{sku:"Y", qty: if given}]. Examples: "swap MR44 for MR46" → swap, target MR44, add MR46; "replace the MR44s with MR46" → swap, target MR44, add MR46; "change MX75 to MX85" → swap, target MX75, add MX85. CRITICAL: Swap is ONE atomic action. NEVER split "swap X for Y" into separate action="remove" (X) + action="add" (Y) — that loses the swap semantics. Always emit a single revise with action="swap".
 - "make it 5" → action=change_qty, new_qty=5.
 - "change to SEC" → action=change_tier, new_tier="SEC".
 - "add pricing" → action=null but set modifiers.show_pricing=true, reference.resolve_from_history=true.
