@@ -5758,11 +5758,13 @@ Hard rules:
         const input = body.input;
         const priorCtx = body.prior_context || '';
         const model = body.model || '@cf/meta/llama-4-scout-17b-16e-instruct';
+        // prompt_variant: "v2" (default, Schema v2 rich output) | "legacy" (CF_CLASSIFIER_PROMPT)
+        const promptVariant = (body.prompt_variant || 'v2').toLowerCase();
         if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
         if (!env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
 
-        // Use the same prompt constant as the live shadow classifier
-        const systemPrompt = CF_CLASSIFIER_PROMPT_V2; // was: inline hardcoded prompt
+        // Select system prompt by variant
+        const systemPrompt = promptVariant === 'legacy' ? CF_CLASSIFIER_PROMPT : CF_CLASSIFIER_PROMPT_V2;
 
         const userText = priorCtx ? `Prior assistant context:\n${priorCtx}\n\nUser message:\n${input}` : input;
 
@@ -5800,7 +5802,7 @@ Hard rules:
           }
         }
 
-        return new Response(JSON.stringify({ model, input, elapsed, raw, parsed, parseError, err }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
+        return new Response(JSON.stringify({ model, prompt_variant: promptVariant, input, elapsed, raw, parsed, parseError, err }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'content-type':'application/json' } });
       }
