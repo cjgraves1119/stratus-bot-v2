@@ -543,7 +543,9 @@ async function downloadWebexFile(fileUrl, token) {
 const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
 
 // Feature flag: when true, Schema V2 classifier (Llama) drives routing instead of legacy
-const USE_V2_CLASSIFIER = false; // Flip to true after shadow data confirms parity
+// Enabled 2026-04-20 after 74-fixture benchmark: Llama V2 93% accuracy at 1.7s p50.
+// To rollback: flip this to false and redeploy (or git revert the cutover commit).
+const USE_V2_CLASSIFIER = true;
 
 const CF_CLASSIFIER_PROMPT = `You are an intent classifier and clarification engine for a Cisco/Meraki quoting bot. Your job is to classify what the user wants and ask smart clarifying questions when their request is incomplete. You do NOT answer product questions — those go to a more capable AI.
 
@@ -5231,25 +5233,51 @@ Hard rules:
             if (lastAsst) priorCtxForV2 = String(lastAsst.content || '').substring(0, 1500);
           } catch {}
           T.step('wx-cfclassify', 'enter');
-          // CRITICAL PATH: only the legacy classifier blocks the response. The two
-          // shadow classifiers (Schema v2 + Gemma 4) are kicked off here but awaited
-          // inside a ctx.waitUntil below, so they never delay user-visible latency.
-          // Before this change Promise.all was waiting for Gemma 4 (~12s) on every
-          // message even though legacy (~500ms) already had the routing answer.
-          const classification = await classifyWithCF(text, env);
+          // CRITICAL PATH routing logic depends on USE_V2_CLASSIFIER:
+          //   - V2 ON  (default, as of 2026-04-20 cutover): run Llama V2 + legacy in
+          //     PARALLEL. V2 drives routing; legacy is the fallback if V2 errors or
+          //     fails to parse. Gemma 4 stays in the shadow (non-blocking D1 log).
+          //     Total critical-path latency ≈ max(V2, legacy) ≈ 1.7s p50.
+          //   - V2 OFF (rollback mode): legacy alone on hot path, V2+Gemma shadow
+          //     only for D1 comparison logging. Latency ≈ 500ms p50.
+          let classification;          // legacy result (always fetched)
+          let v2Classification = null; // V2 result (fetched only when flag on)
+          let _gemmaShadowPromise;     // Gemma always runs, always shadow
+
+          if (USE_V2_CLASSIFIER) {
+            // V2 + legacy in parallel, Gemma as async shadow
+            const _v2Promise = classifyWithCFv2(text, priorCtxForV2, env)
+              .catch(e => ({ error: e.message, parseError: true }));
+            const _legacyPromise = classifyWithCF(text, env)
+              .catch(e => ({ error: e.message, intent: 'escalate' }));
+            _gemmaShadowPromise = classifyWithGemma4(text, priorCtxForV2, env)
+              .catch(e => ({ error: e.message }));
+            [v2Classification, classification] = await Promise.all([_v2Promise, _legacyPromise]);
+          } else {
+            // Rollback mode — legacy only on hot path
+            classification = await classifyWithCF(text, env);
+            const _v2Shadow = classifyWithCFv2(text, priorCtxForV2, env)
+              .catch(e => ({ error: e.message }));
+            _gemmaShadowPromise = classifyWithGemma4(text, priorCtxForV2, env)
+              .catch(e => ({ error: e.message }));
+            // V2 shadow folds into the Gemma shadow await below
+            _gemmaShadowPromise = Promise.all([_v2Shadow, _gemmaShadowPromise])
+              .then(([v2c, g4c]) => ({ _v2Shadow: v2c, _gemma: g4c }));
+          }
           T.step('wx-cfclassify', 'exit');
 
-          // Shadow classifiers + D1 logging — run after response, non-blocking.
-          // If USE_V2_CLASSIFIER is ever flipped true, the shadow path still
-          // populates the comparison log; but for routing we keep legacy on the
-          // hot path. A separate cutover flag can swap this when ready.
-          const _shadowPromise = Promise.all([
-            classifyWithCFv2(text, priorCtxForV2, env).catch(e => ({ error: e.message })),
-            classifyWithGemma4(text, priorCtxForV2, env).catch(e => ({ error: e.message }))
-          ]);
+          // Shadow await — non-blocking D1 logging of all classifiers
           ctx.waitUntil((async () => {
             try {
-              const [v2c, g4c] = await _shadowPromise;
+              let v2c, g4c;
+              if (USE_V2_CLASSIFIER) {
+                v2c = v2Classification;
+                g4c = await _gemmaShadowPromise;
+              } else {
+                const shadow = await _gemmaShadowPromise;
+                v2c = shadow._v2Shadow;
+                g4c = shadow._gemma;
+              }
               if (v2c) console.log(`[Shadow-V2] intent=${v2c.intent || 'ERR'} conf=${v2c.confidence || '?'} (${v2c.elapsed || 0}ms)${v2c.parseError ? ' parseErr=' + v2c.parseError : ''}`);
               if (g4c) console.log(`[Shadow-Gemma4] intent=${g4c.intent || 'ERR'} conf=${g4c.confidence || '?'} (${g4c.elapsed || 0}ms)${g4c.parseError ? ' parseErr=' + g4c.parseError : ''}`);
               await logShadowClassification(env, {
@@ -5258,16 +5286,15 @@ Hard rules:
               });
             } catch (e) { console.warn('[Shadow] error:', e?.message); }
           })());
-          // These stay referenced for the (currently disabled) V2-active branch
-          // below — they'll be undefined at that point and USE_V2_CLASSIFIER is
-          // false, so the branch is a no-op. When we cut over, we'll either flip
-          // the waterfall to V2 on the critical path or keep legacy as primary.
-          const v2Classification = null;
-          const gemma4Classification = null;
 
-          // Prepare for V2 cutover — when enabled, v2 drives routing with legacy fallback
+          // Select active classification — V2 if valid, legacy otherwise
           let activeClassification = classification; // legacy by default
-          if (USE_V2_CLASSIFIER && v2Classification && !v2Classification.parseError) {
+          const v2Valid = USE_V2_CLASSIFIER
+            && v2Classification
+            && !v2Classification.parseError
+            && !v2Classification.error
+            && v2Classification.intent;
+          if (v2Valid) {
             // Map V2 schema intent to legacy format for routing compatibility
             activeClassification = {
               intent: v2Classification.intent,
@@ -5277,9 +5304,9 @@ Hard rules:
               // Preserve V2 rich structure for downstream use
               _v2: v2Classification
             };
-            console.log(`[V2-Active] Using V2 classifier: intent=${activeClassification.intent}`);
-          } else if (USE_V2_CLASSIFIER && !v2Classification) {
-            console.log(`[V2-Fallback] V2 failed, using legacy classifier`);
+            console.log(`[V2-Active] intent=${activeClassification.intent} (V2 ${v2Classification.elapsed}ms / legacy ${classification?.elapsed}ms)`);
+          } else if (USE_V2_CLASSIFIER) {
+            console.log(`[V2-Fallback] V2 failed (${v2Classification?.error || v2Classification?.parseError || 'null'}), using legacy classifier`);
           }
 
           if (activeClassification) {
