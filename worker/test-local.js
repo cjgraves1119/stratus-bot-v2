@@ -56,7 +56,7 @@ function buildParserShim() {
     src = src.slice(0, edIdx) + src.slice(end + 1);
   }
 
-  src += '\nmodule.exports = { parseMessage, buildStratusUrl: typeof buildStratusUrl !== "undefined" ? buildStratusUrl : null, getLicenseSkus: typeof getLicenseSkus !== "undefined" ? getLicenseSkus : null, validateSku: typeof validateSku !== "undefined" ? validateSku : null, applySuffix: typeof applySuffix !== "undefined" ? applySuffix : null, buildQuoteFromV2: typeof buildQuoteFromV2 !== "undefined" ? buildQuoteFromV2 : null, applyV2Revision: typeof applyV2Revision !== "undefined" ? applyV2Revision : null };\n';
+  src += '\nmodule.exports = { parseMessage, buildStratusUrl: typeof buildStratusUrl !== "undefined" ? buildStratusUrl : null, getLicenseSkus: typeof getLicenseSkus !== "undefined" ? getLicenseSkus : null, validateSku: typeof validateSku !== "undefined" ? validateSku : null, applySuffix: typeof applySuffix !== "undefined" ? applySuffix : null, buildQuoteFromV2: typeof buildQuoteFromV2 !== "undefined" ? buildQuoteFromV2 : null, applyV2Revision: typeof applyV2Revision !== "undefined" ? applyV2Revision : null, extractPriorFromAssistantUrl: typeof extractPriorFromAssistantUrl !== "undefined" ? extractPriorFromAssistantUrl : null };\n';
 
   const shimPath = path.join(os.tmpdir(), `stratus-parser-shim-${process.pid}.cjs`);
   fs.writeFileSync(shimPath, src);
@@ -66,11 +66,13 @@ function buildParserShim() {
 let _realParseMessage = null;
 let _realBuildQuoteFromV2 = null;
 let _realApplyV2Revision = null;
+let _realExtractPriorFromAssistantUrl = null;
 try {
   const shim = buildParserShim();
   _realParseMessage = shim.parseMessage;
   _realBuildQuoteFromV2 = shim.buildQuoteFromV2;
   _realApplyV2Revision = shim.applyV2Revision;
+  _realExtractPriorFromAssistantUrl = shim.extractPriorFromAssistantUrl;
 } catch (e) {
   console.warn(`⚠️  Could not build parseMessage shim: ${e.message}`);
   console.warn('   Parser integration tests will be skipped.');
@@ -2705,6 +2707,82 @@ if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
       run: () => {
         const r = _realApplyV2Revision(null, { intent: 'revise', modifiers: { action: 'change_term' } });
         return { pass: r === null, actual: JSON.stringify(r) };
+      },
+    },
+    // ═══ extractPriorFromAssistantUrl (chained-revision state) ═══
+    {
+      name: '[URL] single hw+lic → items=MR44, term=5 from LIC-ENT-5YR',
+      run: () => {
+        const r = _realExtractPriorFromAssistantUrl('5-Year Co-Term: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-5YR&qty=10,10');
+        return {
+          pass: r && r.items[0]?.baseSku === 'MR44' && r.items[0]?.qty === 10 && r.requestedTerm === 5 && r.requestedTier === 'ENT',
+          actual: JSON.stringify({ items: r?.items, term: r?.requestedTerm, tier: r?.requestedTier }),
+        };
+      },
+    },
+    {
+      name: '[URL] hardware-only (no LIC) → hardwareOnly=true, term=null',
+      run: () => {
+        const r = _realExtractPriorFromAssistantUrl('Hardware only: https://stratusinfosystems.com/order/?item=MR44-HW&qty=5');
+        return {
+          pass: r && r.items[0]?.baseSku === 'MR44' && r.items[0]?.qty === 5 && r.modifiers?.hardwareOnly === true && r.requestedTerm === null,
+          actual: JSON.stringify({ items: r?.items, mods: r?.modifiers }),
+        };
+      },
+    },
+    {
+      name: '[URL] SEC tier MX75 → tier=SEC',
+      run: () => {
+        const r = _realExtractPriorFromAssistantUrl('https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX-SEC-3YR&qty=1,1');
+        return {
+          pass: r && r.requestedTier === 'SEC' && r.requestedTerm === 3,
+          actual: JSON.stringify({ tier: r?.requestedTier, term: r?.requestedTerm }),
+        };
+      },
+    },
+    {
+      name: '[URL] multiple URLs in message → uses last one',
+      run: () => {
+        const content = '1-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-1YR&qty=10,10 3-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=10,10 5-Year: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-5YR&qty=10,10';
+        const r = _realExtractPriorFromAssistantUrl(content);
+        return {
+          pass: r && r.requestedTerm === 5,
+          actual: JSON.stringify({ term: r?.requestedTerm }),
+        };
+      },
+    },
+    {
+      name: '[URL] no URL in content → returns null',
+      run: () => {
+        const r = _realExtractPriorFromAssistantUrl('Could you clarify what you want to quote?');
+        return { pass: r === null, actual: JSON.stringify(r) };
+      },
+    },
+    {
+      name: '[URL] pure license → directLicenseList preserves qty + term',
+      run: () => {
+        const r = _realExtractPriorFromAssistantUrl('https://stratusinfosystems.com/order/?item=LIC-ENT-3YR&qty=50');
+        return {
+          pass: r && r.directLicense?.sku === 'LIC-ENT-3YR' && r.directLicense?.qty === 50 && r.requestedTerm === 3,
+          actual: JSON.stringify({ dl: r?.directLicense, term: r?.requestedTerm }),
+        };
+      },
+    },
+    // ═══ Integration: assistant URL → applyV2Revision preserves chain ═══
+    {
+      name: '[CHAIN] MR44 5yr → swap to MR46 preserves 5YR term',
+      run: () => {
+        const prior = _realExtractPriorFromAssistantUrl('5-Year Co-Term: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-5YR&qty=10,10');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'swap', target_sku: 'MR44', add_items: [{ sku: 'MR46' }] },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const mr46 = r?.items?.find(i => i.baseSku === 'MR46');
+        return {
+          pass: mr46?.qty === 10 && r.requestedTerm === 5 && r.requestedTier === 'ENT',
+          actual: JSON.stringify({ mr46, term: r?.requestedTerm, tier: r?.requestedTier }),
+        };
       },
     },
   ];
