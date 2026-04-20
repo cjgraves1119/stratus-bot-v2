@@ -144,5 +144,5 @@ After setting secrets:
 
 ```bash
 cd worker-gchat
-CLOUDFLARE_API_TOKEN=cfut_mdGEfjYouFvngAqpuloxYvGwxUjVXmzquHqvEo7E7bc0b83e npx wrangler deploy
+CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" npx wrangler deploy
 ```
