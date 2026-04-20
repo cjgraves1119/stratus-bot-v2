@@ -2709,6 +2709,120 @@ if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
         return { pass: r === null, actual: JSON.stringify(r) };
       },
     },
+    // ═══ show_pricing action (PR 3) ═══
+    {
+      name: '[V2R] show_pricing: flips showPricing=true on prior 10 MR44 3yr, keeps items/term/tier',
+      run: () => {
+        const prior = _realParseMessage('10 MR44 3yr');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'show_pricing' },
+          modifiers: { show_pricing: true },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const mr44 = r?.items?.find(i => i.baseSku === 'MR44');
+        return {
+          pass: r?.showPricing === true && mr44?.qty === 10 && r?.requestedTerm === 3 && r?._revised === 'show_pricing',
+          actual: JSON.stringify({ showPricing: r?.showPricing, qty: mr44?.qty, term: r?.requestedTerm, revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] show_pricing preserves tier (MX75 SEC 5yr → same + pricing)',
+      run: () => {
+        const prior = _realExtractPriorFromAssistantUrl('https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX-SEC-5YR&qty=2,2');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'show_pricing' },
+          modifiers: { show_pricing: true },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return {
+          pass: r?.showPricing === true && r?.requestedTier === 'SEC' && r?.requestedTerm === 5 && r?.items?.[0]?.baseSku === 'MX75',
+          actual: JSON.stringify({ showPricing: r?.showPricing, tier: r?.requestedTier, term: r?.requestedTerm, items: r?.items }),
+        };
+      },
+    },
+    {
+      name: '[V2R] show_pricing on chained revision state — MR46 5yr + pricing',
+      run: () => {
+        // Simulate: user quoted MR44 3yr, revised to 5yr, swapped to MR46, now asks for cost
+        const prior = _realExtractPriorFromAssistantUrl('5-Year Co-Term: https://stratusinfosystems.com/order/?item=MR46-HW,LIC-ENT-5YR&qty=10,10');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'show_pricing' },
+          modifiers: { show_pricing: true },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const mr46 = r?.items?.find(i => i.baseSku === 'MR46');
+        return {
+          pass: r?.showPricing === true && mr46?.qty === 10 && r?.requestedTerm === 5 && r?.requestedTier === 'ENT',
+          actual: JSON.stringify({ showPricing: r?.showPricing, mr46, term: r?.requestedTerm, tier: r?.requestedTier }),
+        };
+      },
+    },
+    {
+      name: '[V2R] show_pricing on directLicense-only prior preserves license',
+      run: () => {
+        const prior = _realExtractPriorFromAssistantUrl('https://stratusinfosystems.com/order/?item=LIC-ENT-3YR&qty=50');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'show_pricing' },
+          modifiers: { show_pricing: true },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return {
+          pass: r?.showPricing === true && r?.directLicense?.sku === 'LIC-ENT-3YR' && r?.directLicense?.qty === 50,
+          actual: JSON.stringify({ showPricing: r?.showPricing, dl: r?.directLicense }),
+        };
+      },
+    },
+    {
+      name: '[V2R] back-compat: action=null + modifiers.show_pricing=true still applies show_pricing',
+      run: () => {
+        const prior = _realParseMessage('10 MR44 3yr');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: null },
+          modifiers: { show_pricing: true },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return {
+          pass: r?.showPricing === true && r?._revised === 'show_pricing' && r?.items?.[0]?.qty === 10,
+          actual: JSON.stringify({ showPricing: r?.showPricing, revised: r?._revised, items: r?.items }),
+        };
+      },
+    },
+    {
+      name: '[V2R] show_pricing is idempotent — prior already showPricing=true stays that way',
+      run: () => {
+        const prior = _realParseMessage('10 MR44 3yr');
+        prior.showPricing = true;
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'show_pricing' },
+          modifiers: { show_pricing: true },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return {
+          pass: r?.showPricing === true && r?.items?.[0]?.qty === 10 && r?.requestedTerm === 3,
+          actual: JSON.stringify({ showPricing: r?.showPricing, qty: r?.items?.[0]?.qty, term: r?.requestedTerm }),
+        };
+      },
+    },
+    {
+      name: '[V2R] show_pricing with empty prior → returns null (nothing to price)',
+      run: () => {
+        // Empty prior (no items, no direct license) shouldn't synthesize anything.
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'show_pricing' },
+          modifiers: { show_pricing: true },
+        };
+        const r = _realApplyV2Revision({ items: [], modifiers: {} }, v2);
+        return { pass: r === null, actual: JSON.stringify(r) };
+      },
+    },
     // ═══ extractPriorFromAssistantUrl (chained-revision state) ═══
     {
       name: '[URL] single hw+lic → items=MR44, term=5 from LIC-ENT-5YR',

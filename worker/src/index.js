@@ -648,7 +648,7 @@ SCHEMA:
 
 INTENT RULES:
 - "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1. "renewal for [SKU list]" or "renew N [SKU]" = quote with license_only=true (NOT revise — renewals with explicit SKUs are fresh license quotes).
-- "price_lookup": "cost of X", "how much is X", "price for X", or pronoun pricing ("cost of that").
+- "price_lookup": standalone pricing question naming a SPECIFIC SKU with NO prior quote context — "cost of MR44", "how much is MR44", "price for MR44". If prior_context is present AND the user is asking to see pricing on the prior quote (e.g. "what is the cost", "how much", "with pricing"), use intent="revise" with action="show_pricing" instead.
 - "revise": message modifies a prior quote — "license only", "hardware only", "3 year only", "add X", "remove X", "swap X for Y", "make it N", "change to SEC". HARD RULE: "revise" requires prior_context to be present. If prior_context is empty/null, NEVER output "revise" — use "quote" or "clarify" instead.
 - "dashboard_parse": image of Meraki license dashboard. NEVER use for messages containing stratusinfosystems.com URLs — those are the bot's own quote output, not dashboards.
 - "clarify": quote request too vague — "some switches", "need APs", "pricing" alone, "5 MS130-24" (missing variant). Also use when a bare product category name is given without quantity or context (e.g. "DNS security").
@@ -669,7 +669,7 @@ MODIFIER RULES:
 
 REVISION RULES:
 - CRITICAL: Only use intent="revise" when prior_context is provided. If prior_context is empty or absent, the message is standalone — classify as "quote", "clarify", or another intent instead.
-- action: "add"/"remove"/"swap"/"change_term"/"change_tier"/"toggle_hw_lic"/"change_qty".
+- action: "add"/"remove"/"swap"/"change_term"/"change_tier"/"toggle_hw_lic"/"change_qty"/"show_pricing".
 - "license only"/"hardware only" after prior quote → action=toggle_hw_lic, hw_lic_toggle="license_only"/"hardware_only".
 - "3 year only"/"make it 5 year" → action=change_term, new_term=3 or 5.
 - "add 2 MX67" → action=add, add_items=[{sku:"MX67",qty:2}].
@@ -677,7 +677,7 @@ REVISION RULES:
 - SWAP — any of "swap X for Y", "replace X with Y", "change X to Y", "substitute X with Y", "exchange X for Y" → action="swap", target_sku="X", add_items=[{sku:"Y", qty: if given}]. Examples: "swap MR44 for MR46" → swap, target MR44, add MR46; "replace the MR44s with MR46" → swap, target MR44, add MR46; "change MX75 to MX85" → swap, target MX75, add MX85. CRITICAL: Swap is ONE atomic action. NEVER split "swap X for Y" into separate action="remove" (X) + action="add" (Y) — that loses the swap semantics. Always emit a single revise with action="swap".
 - "make it 5" → action=change_qty, new_qty=5.
 - "change to SEC" → action=change_tier, new_tier="SEC".
-- "add pricing" → action=null but set modifiers.show_pricing=true, reference.resolve_from_history=true.
+- Pricing follow-up on a prior quote — the user wants to see the dollar figures on items they've already been quoted. Natural-language examples: "what is the cost", "how much", "how much is that", "how much does it cost", "what's the price", "with pricing", "add pricing", "show me pricing", "give me pricing", "what's this cost", "total cost", "the price", "pricing" — basically any message that asks about cost/price/pricing without introducing new SKUs or changing the spec. → action="show_pricing", set modifiers.show_pricing=true, reference.resolve_from_history=true. This is a no-op on items/term/tier — keep the prior quote exactly as-is and just render it with pricing visible. Trust the semantic meaning of the message; you don't need the exact phrase to match — if the intent is "I want to see the cost of what you just quoted," use show_pricing.
 - For revisions: set reference.resolve_from_history=true.
 - "renewal for [device list]" is NOT a revision — it's a fresh quote with license_only=true.
 
@@ -2867,7 +2867,10 @@ function applyV2Revision(priorParsed, v2) {
   if (!priorParsed || !v2 || !v2.revision) return null;
   const rev = v2.revision || {};
   const mods = v2.modifiers || {};
-  const action = rev.action;
+  // Back-compat: if the classifier left action=null but flagged show_pricing,
+  // treat it as a show_pricing revision. Keeps us resilient to prompt drift.
+  let action = rev.action;
+  if (!action && mods.show_pricing) action = 'show_pricing';
   if (!action) return null;
 
   // Can't revise a prior that has no hardware items and no direct license list.
@@ -2968,6 +2971,12 @@ function applyV2Revision(priorParsed, v2) {
           else next.items.push({ baseSku: base, qty });
         }
       }
+      return next;
+    }
+    case 'show_pricing': {
+      // No structural change — keep items/term/tier/qty as-is. Flip showPricing
+      // so buildQuoteResponse renders the existing quote with dollar figures.
+      next.showPricing = true;
       return next;
     }
     case 'swap': {
