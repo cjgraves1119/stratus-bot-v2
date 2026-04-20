@@ -2,3 +2,8 @@ node_modules/
 .env
 *.log
 .DS_Store
+
+# Secrets file — lives in parent Bots/ directory, but add here as
+# belt-and-suspenders in case someone ever copies it into the repo tree.
+.stratus-secrets
+*.stratus-secrets
