@@ -1,0 +1,31 @@
+name: Secret Scan (gitleaks)
+
+# Runs gitleaks on every push and PR.
+# Belt-and-suspenders layer on top of GitHub's native secret scanning + push protection.
+# gitleaks catches generic secret patterns GitHub's scanner may miss (e.g., internal tokens,
+# high-entropy strings in novel formats).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  gitleaks:
+    name: gitleaks scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so gitleaks can scan diffs against base ref
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Config file with allowlist lives in repo root as .gitleaks.toml
+          GITLEAKS_CONFIG: .gitleaks.toml

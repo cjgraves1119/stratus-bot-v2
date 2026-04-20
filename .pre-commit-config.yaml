@@ -1,0 +1,18 @@
+# Local pre-commit hook config for stratus-bot-v2
+#
+# Setup (once per dev machine):
+#   brew install pre-commit   # or: pip install pre-commit
+#   cd /path/to/stratus-bot-v2
+#   pre-commit install
+#
+# After install, pre-commit runs gitleaks on every `git commit` and blocks
+# the commit if any secrets are detected. This catches leaks BEFORE they
+# hit GitHub (belt-and-suspenders with GitHub Push Protection).
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        name: gitleaks (block secrets in commit)
+        # Uses .gitleaks.toml in repo root for rules + allowlist

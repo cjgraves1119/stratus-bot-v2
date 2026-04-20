@@ -1,0 +1,44 @@
+# gitleaks config for stratus-bot-v2
+# Uses gitleaks' default ruleset (covers AWS, GCP, Cloudflare, GitHub PATs,
+# Slack, Stripe, etc.) plus a project-specific allowlist for safe fixtures.
+
+[extend]
+useDefault = true
+
+# Rule: catch any Cloudflare API token even if gitleaks' default misses a variant.
+# Cloudflare tokens start with "cfut_" (Workers) or are 40-char base62.
+[[rules]]
+id = "cloudflare-api-token-cfut"
+description = "Cloudflare Workers API Token (cfut_ prefix)"
+regex = '''cfut_[a-zA-Z0-9]{50,}'''
+tags = ["cloudflare", "token"]
+
+# Rule: catch GitHub PATs that slipped past GitHub's native scanner (e.g., in docs).
+[[rules]]
+id = "github-pat-classic"
+description = "GitHub Personal Access Token (classic)"
+regex = '''ghp_[a-zA-Z0-9]{36,}'''
+tags = ["github", "pat"]
+
+[allowlist]
+description = "Allow safe test fixtures and documentation placeholders"
+
+paths = [
+    # Example env template with no real values
+    '''\.env\.example$''',
+    # node_modules (should never be committed but double-safeguard)
+    '''node_modules/''',
+    # Large test data files (hundreds of SKUs, no secrets)
+    '''data/pricing/''',
+    '''classifier-fixtures\.json$''',
+]
+
+regexes = [
+    # Placeholder patterns in docs — e.g., "YOUR_TOKEN_HERE" or "<stored in ...>"
+    '''YOUR_[A-Z_]+_HERE''',
+    '''<stored in [^>]+>''',
+    '''<set in \$[A-Z_]+ env var>''',
+    # Example/fake tokens used intentionally for illustration
+    '''cfut_EXAMPLE[a-zA-Z0-9]*''',
+    '''ghp_EXAMPLE[a-zA-Z0-9]*''',
+]
