@@ -56,7 +56,7 @@ function buildParserShim() {
     src = src.slice(0, edIdx) + src.slice(end + 1);
   }
 
-  src += '\nmodule.exports = { parseMessage, buildStratusUrl: typeof buildStratusUrl !== "undefined" ? buildStratusUrl : null, getLicenseSkus: typeof getLicenseSkus !== "undefined" ? getLicenseSkus : null, validateSku: typeof validateSku !== "undefined" ? validateSku : null, applySuffix: typeof applySuffix !== "undefined" ? applySuffix : null };\n';
+  src += '\nmodule.exports = { parseMessage, buildStratusUrl: typeof buildStratusUrl !== "undefined" ? buildStratusUrl : null, getLicenseSkus: typeof getLicenseSkus !== "undefined" ? getLicenseSkus : null, validateSku: typeof validateSku !== "undefined" ? validateSku : null, applySuffix: typeof applySuffix !== "undefined" ? applySuffix : null, buildQuoteFromV2: typeof buildQuoteFromV2 !== "undefined" ? buildQuoteFromV2 : null, applyV2Revision: typeof applyV2Revision !== "undefined" ? applyV2Revision : null };\n';
 
   const shimPath = path.join(os.tmpdir(), `stratus-parser-shim-${process.pid}.cjs`);
   fs.writeFileSync(shimPath, src);
@@ -64,8 +64,13 @@ function buildParserShim() {
 }
 
 let _realParseMessage = null;
+let _realBuildQuoteFromV2 = null;
+let _realApplyV2Revision = null;
 try {
-  _realParseMessage = buildParserShim().parseMessage;
+  const shim = buildParserShim();
+  _realParseMessage = shim.parseMessage;
+  _realBuildQuoteFromV2 = shim.buildQuoteFromV2;
+  _realApplyV2Revision = shim.applyV2Revision;
 } catch (e) {
   console.warn(`⚠️  Could not build parseMessage shim: ${e.message}`);
   console.warn('   Parser integration tests will be skipped.');
@@ -2429,6 +2434,299 @@ if (_realParseMessage) {
       failed++;
     }
   }
+}
+
+// ─── V2 Classifier adapter tests (PR 2) ─────────────────────────────────────
+// buildQuoteFromV2 adapts the V2 rich schema into parseMessage-shape so the
+// deterministic quote path can consume V2 output directly, preserving modifier
+// and item fidelity that a parseMessage round-trip would lose.
+// applyV2Revision mutates a prior parseMessage result based on a V2 revise
+// classification (change_term, change_tier, toggle_hw_lic, change_qty,
+// remove, add, swap).
+if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
+  console.log('\n─── V2 adapter tests (buildQuoteFromV2 + applyV2Revision) ───');
+
+  const v2Fixtures = [
+    // ═══ buildQuoteFromV2 ═══
+    {
+      name: '[V2] quote 10 MR44 → items[MR44 qty=10], no term (all_terms default)',
+      run: () => {
+        const v2 = {
+          intent: 'quote',
+          items: [{ sku: 'MR44', qty: 10 }],
+          modifiers: { show_pricing: false },
+        };
+        const r = _realBuildQuoteFromV2(v2, '10 MR44');
+        return {
+          pass: r && r.items?.length === 1 && r.items[0].baseSku === 'MR44' && r.items[0].qty === 10 && r.requestedTerm === null && r._fromV2 === true,
+          actual: JSON.stringify(r),
+        };
+      },
+    },
+    {
+      name: '[V2] quote 10 MR44 3yr → requestedTerm=3',
+      run: () => {
+        const v2 = {
+          intent: 'quote',
+          items: [{ sku: 'MR44', qty: 10 }],
+          modifiers: { term_years: 3 },
+        };
+        const r = _realBuildQuoteFromV2(v2, '10 MR44 3yr');
+        return {
+          pass: r && r.requestedTerm === 3 && r.items?.[0]?.qty === 10,
+          actual: JSON.stringify({ term: r?.requestedTerm, items: r?.items }),
+        };
+      },
+    },
+    {
+      name: '[V2] hardware_only modifier → modifiers.hardwareOnly=true',
+      run: () => {
+        const v2 = {
+          intent: 'quote',
+          items: [{ sku: 'MR44', qty: 5 }],
+          modifiers: { hardware_only: true },
+        };
+        const r = _realBuildQuoteFromV2(v2, '5 MR44 hardware only');
+        return {
+          pass: r && r.modifiers?.hardwareOnly === true,
+          actual: JSON.stringify(r?.modifiers),
+        };
+      },
+    },
+    {
+      name: '[V2] tier ENT (modifiers.tier) → requestedTier=ENT',
+      run: () => {
+        const v2 = {
+          intent: 'quote',
+          items: [{ sku: 'MX75', qty: 1 }],
+          modifiers: { tier: 'ENT' },
+        };
+        const r = _realBuildQuoteFromV2(v2, 'MX75 enterprise');
+        return {
+          pass: r && r.requestedTier === 'ENT',
+          actual: r?.requestedTier,
+        };
+      },
+    },
+    {
+      name: '[V2] hw + LIC-ENT-3YR → term inferred to 3 from license SKU',
+      run: () => {
+        const v2 = {
+          intent: 'quote',
+          items: [
+            { sku: 'MR44', qty: 10 },
+            { sku: 'LIC-ENT-3YR', qty: 10 },
+          ],
+          modifiers: {},
+        };
+        const r = _realBuildQuoteFromV2(v2, '10 MR44 with LIC-ENT-3YR');
+        const hasHw = r?.items?.some(i => i.baseSku === 'MR44');
+        return {
+          pass: hasHw && r.requestedTerm === 3 && r.items.length === 1,
+          actual: JSON.stringify({ items: r?.items, term: r?.requestedTerm }),
+        };
+      },
+    },
+    {
+      name: '[V2] license-only → directLicense with qty',
+      run: () => {
+        const v2 = {
+          intent: 'quote',
+          items: [{ sku: 'LIC-ENT-3YR', qty: 50 }],
+          modifiers: {},
+        };
+        const r = _realBuildQuoteFromV2(v2, 'LIC-ENT-3YR x 50');
+        const ok = (r?.directLicense?.sku === 'LIC-ENT-3YR' && r?.directLicense?.qty === 50)
+          || (r?.directLicenseList?.[0]?.sku === 'LIC-ENT-3YR' && r?.directLicenseList?.[0]?.qty === 50);
+        return {
+          pass: ok,
+          actual: JSON.stringify({ dl: r?.directLicense, dll: r?.directLicenseList }),
+        };
+      },
+    },
+    {
+      name: '[V2] empty items → returns null (falls back to parseMessage)',
+      run: () => {
+        const v2 = { intent: 'quote', items: [], modifiers: {} };
+        const r = _realBuildQuoteFromV2(v2, '');
+        return { pass: r === null, actual: JSON.stringify(r) };
+      },
+    },
+    {
+      name: '[V2] non-quote intent → returns null',
+      run: () => {
+        const v2 = { intent: 'conversation', items: [], modifiers: {} };
+        const r = _realBuildQuoteFromV2(v2, 'hey');
+        return { pass: r === null, actual: JSON.stringify(r) };
+      },
+    },
+    // ═══ applyV2Revision ═══
+    {
+      name: '[V2R] change_term: 3yr → 5yr on prior 10 MR44',
+      run: () => {
+        const prior = _realParseMessage('10 MR44 3yr');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'change_term', new_term: 5 },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return {
+          pass: r && r.requestedTerm === 5 && r._revised === 'change_term',
+          actual: JSON.stringify({ term: r?.requestedTerm, revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] change_tier: ENT → SEC on prior MX75',
+      run: () => {
+        const prior = _realParseMessage('MX75 enterprise');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'change_tier', new_tier: 'SEC' },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return {
+          pass: r && r.requestedTier === 'SEC' && r._revised === 'change_tier',
+          actual: JSON.stringify({ tier: r?.requestedTier, revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] toggle_hw_lic: enable hardware_only on prior quote',
+      run: () => {
+        const prior = _realParseMessage('10 MR44 3yr');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'toggle_hw_lic', hw_lic_toggle: 'hardware_only' },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return {
+          pass: r && r.modifiers?.hardwareOnly === true && r._revised === 'toggle_hw_lic',
+          actual: JSON.stringify({ mods: r?.modifiers, revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] change_qty: update all MR44 items from 10 → 25',
+      run: () => {
+        const prior = _realParseMessage('10 MR44 3yr');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'change_qty', new_qty: 25 },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const mr44 = r?.items?.find(i => i.baseSku === 'MR44');
+        return {
+          pass: mr44?.qty === 25 && r?._revised === 'change_qty',
+          actual: JSON.stringify({ mr44, revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] change_qty with target_sku: only MS125 changes, MR44 untouched',
+      run: () => {
+        const prior = _realParseMessage('5 MR46 and 2 MS225-24P');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'change_qty', new_qty: 8, target_sku: 'MS225-24P' },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const ms = r?.items?.find(i => /MS225/.test(i.baseSku));
+        const mr = r?.items?.find(i => /MR46/.test(i.baseSku));
+        return {
+          pass: ms?.qty === 8 && mr?.qty === 5,
+          actual: JSON.stringify({ ms, mr }),
+        };
+      },
+    },
+    {
+      name: '[V2R] remove: drop MS225 from mixed prior',
+      run: () => {
+        const prior = _realParseMessage('5 MR46 and 2 MS225-24P');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'remove', target_sku: 'MS225-24P' },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const hasMs = r?.items?.some(i => /MS225/.test(i.baseSku));
+        return {
+          pass: r && !hasMs && r._revised === 'remove' && r.items.length === 1,
+          actual: JSON.stringify({ items: r?.items?.map(i => i.baseSku), revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] add: append MS125-24P to prior MR44',
+      run: () => {
+        const prior = _realParseMessage('10 MR44');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'add', add_items: [{ sku: 'MS125-24P', qty: 2 }] },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const hasMs = r?.items?.some(i => /MS125/.test(i.baseSku));
+        return {
+          pass: r && hasMs && r._revised === 'add',
+          actual: JSON.stringify({ items: r?.items?.map(i => `${i.qty}x${i.baseSku}`), revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] swap: MR44 → MR46 preserving qty=10',
+      run: () => {
+        const prior = _realParseMessage('10 MR44');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'swap', target_sku: 'MR44', add_items: [{ sku: 'MR46' }] },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        const mr46 = r?.items?.find(i => /MR46/.test(i.baseSku));
+        const mr44 = r?.items?.find(i => /MR44/.test(i.baseSku));
+        return {
+          pass: r && mr46?.qty === 10 && !mr44 && r._revised === 'swap',
+          actual: JSON.stringify({ items: r?.items?.map(i => `${i.qty}x${i.baseSku}`), revised: r?._revised }),
+        };
+      },
+    },
+    {
+      name: '[V2R] unhandled action → returns null (caller falls back to Claude)',
+      run: () => {
+        const prior = _realParseMessage('10 MR44');
+        const v2 = {
+          intent: 'revise',
+          revision: { action: 'reformat_output_for_excel' },
+        };
+        const r = _realApplyV2Revision(prior, v2);
+        return { pass: r === null, actual: JSON.stringify(r) };
+      },
+    },
+    {
+      name: '[V2R] null priorParsed → returns null',
+      run: () => {
+        const r = _realApplyV2Revision(null, { intent: 'revise', modifiers: { action: 'change_term' } });
+        return { pass: r === null, actual: JSON.stringify(r) };
+      },
+    },
+  ];
+
+  for (const t of v2Fixtures) {
+    process.stdout.write(`  ${t.name}... `);
+    try {
+      const res = t.run();
+      if (res.pass) {
+        console.log('✅ PASS');
+        passed++;
+      } else {
+        console.log(`❌ FAIL — ${res.actual}`);
+        failed++;
+      }
+    } catch (e) {
+      console.log(`❌ THROW — ${e.message}`);
+      failed++;
+    }
+  }
+} else {
+  console.log('\n─── V2 adapter tests ─── SKIPPED (functions not exported)');
 }
 
 console.log(`\n${passed}/${passed + failed} tests passed`);

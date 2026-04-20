@@ -2707,6 +2707,305 @@ function convertWordNumbers(text) {
   return result;
 }
 
+// ─── V2 Classifier → parseMessage-shape Adapter (PR 2) ─────────────────────
+// Consumes the Llama V2 classifier's rich JSON schema and produces the same
+// shape `parseMessage` returns, so `buildQuoteResponse` can run untouched.
+// This replaces the legacy PR 1 adapter, which collapsed V2 `items[]` into a
+// joined string and re-ran `parseMessage` on it, discarding modifier,
+// revision, reference, and dashboard fidelity.
+//
+// Returns:
+//   - null → caller should fall back to parseMessage (not a quote intent, or
+//            V2 items[] empty)
+//   - { items, requestedTerm, modifiers, requestedTier, isAdvisory, isRevision,
+//       showPricing, unresolvedCategories, _fromV2: true }
+//
+// License-only paths return directLicense / directLicenseList exactly as
+// parseMessage does, so downstream license-list rendering is unchanged.
+function buildQuoteFromV2(v2, rawText) {
+  if (!v2 || typeof v2 !== 'object') return null;
+  if (v2.intent !== 'quote') return null;
+
+  const items = Array.isArray(v2.items) ? v2.items.filter(i => i && i.sku) : [];
+  if (items.length === 0) return null;
+
+  const mods = (v2.modifiers && typeof v2.modifiers === 'object') ? v2.modifiers : {};
+  const showPricing = Boolean(mods.show_pricing);
+
+  // Classify each V2 item into hardware vs license. Trust sku_type first,
+  // fall back to LIC- prefix heuristic.
+  const hwItems = [];
+  const licItems = [];
+  for (const it of items) {
+    const sku = String(it.sku).toUpperCase().trim();
+    if (!sku) continue;
+    const qty = Number.isFinite(Number(it.qty)) && Number(it.qty) > 0 ? Math.floor(Number(it.qty)) : 1;
+    const isLicense = (it.sku_type === 'license') || sku.startsWith('LIC-');
+    if (isLicense) licItems.push({ sku, qty });
+    else hwItems.push({ sku, qty });
+  }
+
+  // Pure license path — caller renders via directLicense / directLicenseList
+  if (hwItems.length === 0 && licItems.length > 0) {
+    if (licItems.length === 1) {
+      return {
+        items: [],
+        directLicense: { sku: licItems[0].sku, qty: licItems[0].qty },
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing,
+        unresolvedCategories: [],
+        _fromV2: true
+      };
+    }
+    // Dedupe — if V2 emitted the same license twice, keep the higher qty.
+    const byKey = new Map();
+    for (const it of licItems) {
+      const prev = byKey.get(it.sku);
+      if (!prev || it.qty > prev.qty) byKey.set(it.sku, it);
+    }
+    const dedup = [...byKey.values()];
+    return {
+      items: [],
+      directLicenseList: dedup,
+      requestedTerm: null,
+      modifiers: { hardwareOnly: false, licenseOnly: true },
+      requestedTier: null,
+      isAdvisory: false,
+      isRevision: false,
+      showPricing,
+      unresolvedCategories: [],
+      _fromV2: true
+    };
+  }
+
+  // Hardware path — normalize base SKUs (strip any suffix V2 may have left on)
+  // so `applySuffix` / `buildQuoteResponse` can re-apply the correct one.
+  const normHw = [];
+  const seen = new Set();
+  for (const it of hwItems) {
+    let base = it.sku
+      // Strip -HW / -HW-NA / -MR / -RTG hardware suffixes; re-added later.
+      .replace(/-(HW|MR|RTG)(-NA)?$/i, (m, _a, na) => (na ? na : ''))
+      // Defense-in-depth: if V2 missed a tier-suffix split, drop it here.
+      .replace(/-(SEC|ENT|SDW|SD-WAN)$/i, '')
+      .trim();
+    if (!base) continue;
+    // Dedupe — if the same base appears twice, keep the higher qty.
+    if (seen.has(base)) {
+      const prev = normHw.find(x => x.baseSku === base);
+      if (prev && it.qty > prev.qty) prev.qty = it.qty;
+      continue;
+    }
+    seen.add(base);
+    normHw.push({ baseSku: base, qty: it.qty });
+  }
+
+  if (normHw.length === 0 && licItems.length === 0) return null;
+
+  // requestedTerm — all_terms wins (null triggers 1/3/5Y output); otherwise term_years.
+  let requestedTerm = null;
+  if (!mods.all_terms) {
+    const t = parseInt(mods.term_years, 10);
+    if ([1, 3, 5].includes(t)) requestedTerm = t;
+  }
+
+  // requestedTier — SEC / ENT / SDW only; anything else falls through to default.
+  let requestedTier = null;
+  if (mods.tier) {
+    const raw = String(mods.tier).toUpperCase().replace(/\s+/g, '').replace(/^SD-WAN$/, 'SDW');
+    if (['SEC', 'ENT', 'SDW'].includes(raw)) requestedTier = raw;
+  }
+
+  // Hardware + attached licenses (e.g. "MR44 with LIC-ENT-3YR"): buildQuoteResponse
+  // auto-generates licenses for each hardware item, so explicit license items are
+  // redundant here. We still honor an explicit term_years signal pulled from the
+  // attached license (e.g. "5 MR44 with LIC-ENT-3YR" implies 3yr).
+  if (requestedTerm == null && licItems.length > 0 && !mods.all_terms) {
+    for (const lic of licItems) {
+      const termMatch = lic.sku.match(/-([135])YR?$/);
+      if (termMatch) {
+        const impliedTerm = parseInt(termMatch[1], 10);
+        if ([1, 3, 5].includes(impliedTerm)) {
+          requestedTerm = impliedTerm;
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    items: normHw,
+    requestedTerm,
+    modifiers: {
+      hardwareOnly: Boolean(mods.hardware_only),
+      licenseOnly: Boolean(mods.license_only)
+    },
+    requestedTier,
+    isAdvisory: false,
+    isRevision: false,
+    showPricing,
+    unresolvedCategories: [],
+    _fromV2: true
+  };
+}
+
+// ─── V2 Revision Applicator (PR 2) ─────────────────────────────────────────
+// Applies a V2 revision object to a prior parseMessage-shape quote and returns
+// a new parseMessage-shape result that can feed straight into buildQuoteResponse.
+// Returns null for revision actions we can't handle deterministically (caller
+// falls back to askClaude which has the full conversation history).
+//
+// Supported actions (deterministic, fast): change_term, change_tier,
+// toggle_hw_lic, add, remove, swap, change_qty.
+// Unsupported or ambiguous cases (empty prior, missing target, no add_items)
+// return null so the caller can route to Claude.
+function applyV2Revision(priorParsed, v2) {
+  if (!priorParsed || !v2 || !v2.revision) return null;
+  const rev = v2.revision || {};
+  const mods = v2.modifiers || {};
+  const action = rev.action;
+  if (!action) return null;
+
+  // Can't revise a prior that has no hardware items and no direct license list.
+  const hasItems = Array.isArray(priorParsed.items) && priorParsed.items.length > 0;
+  const hasDirLic = priorParsed.directLicense || (Array.isArray(priorParsed.directLicenseList) && priorParsed.directLicenseList.length > 0);
+  if (!hasItems && !hasDirLic) return null;
+
+  // Deep-ish clone of the prior quote shape.
+  const next = {
+    items: hasItems ? priorParsed.items.map(i => ({ baseSku: i.baseSku, qty: i.qty })) : [],
+    directLicense: priorParsed.directLicense ? { ...priorParsed.directLicense } : undefined,
+    directLicenseList: Array.isArray(priorParsed.directLicenseList)
+      ? priorParsed.directLicenseList.map(l => ({ ...l }))
+      : undefined,
+    requestedTerm: priorParsed.requestedTerm ?? null,
+    modifiers: { ...(priorParsed.modifiers || { hardwareOnly: false, licenseOnly: false }) },
+    requestedTier: priorParsed.requestedTier ?? null,
+    isAdvisory: false,
+    isRevision: false,
+    showPricing: Boolean(mods.show_pricing) || Boolean(priorParsed.showPricing),
+    unresolvedCategories: [],
+    _fromV2: true,
+    _revised: action
+  };
+  // Prune undefined direct* keys so downstream treats them as absent.
+  if (!next.directLicense) delete next.directLicense;
+  if (!next.directLicenseList) delete next.directLicenseList;
+
+  const stripHwSuffix = (s) => String(s || '').toUpperCase()
+    .replace(/-(HW|MR|RTG)(-NA)?$/i, (m, _a, na) => (na ? na : ''))
+    .replace(/-(SEC|ENT|SDW|SD-WAN)$/i, '')
+    .trim();
+
+  switch (action) {
+    case 'change_term': {
+      const t = parseInt(rev.new_term, 10);
+      if (![1, 3, 5].includes(t)) return null;
+      next.requestedTerm = t;
+      return next;
+    }
+    case 'change_tier': {
+      const raw = String(rev.new_tier || '').toUpperCase().replace(/\s+/g, '').replace(/^SD-WAN$/, 'SDW');
+      if (!['SEC', 'ENT', 'SDW'].includes(raw)) return null;
+      next.requestedTier = raw;
+      return next;
+    }
+    case 'toggle_hw_lic': {
+      const t = rev.hw_lic_toggle;
+      if (t === 'hardware_only') { next.modifiers.hardwareOnly = true; next.modifiers.licenseOnly = false; return next; }
+      if (t === 'license_only')  { next.modifiers.licenseOnly = true; next.modifiers.hardwareOnly = false; return next; }
+      return null;
+    }
+    case 'change_qty': {
+      const q = parseInt(rev.new_qty, 10);
+      if (!Number.isFinite(q) || q <= 0) return null;
+      // If target_sku given, change only that item; otherwise apply to all.
+      const tgt = rev.target_sku ? stripHwSuffix(rev.target_sku) : null;
+      if (tgt && hasItems) {
+        let hit = false;
+        for (const it of next.items) {
+          if (stripHwSuffix(it.baseSku) === tgt) { it.qty = q; hit = true; }
+        }
+        if (!hit) return null;
+      } else if (hasItems) {
+        for (const it of next.items) it.qty = q;
+      } else if (next.directLicenseList) {
+        for (const it of next.directLicenseList) it.qty = q;
+      } else if (next.directLicense) {
+        next.directLicense.qty = q;
+      }
+      return next;
+    }
+    case 'remove': {
+      const tgt = rev.target_sku ? stripHwSuffix(rev.target_sku) : null;
+      if (!tgt) return null;
+      if (hasItems) next.items = next.items.filter(it => stripHwSuffix(it.baseSku) !== tgt);
+      if (next.directLicenseList) next.directLicenseList = next.directLicenseList.filter(l => String(l.sku || '').toUpperCase() !== tgt);
+      if (next.directLicense && String(next.directLicense.sku).toUpperCase() === tgt) delete next.directLicense;
+      if ((next.items?.length || 0) === 0 && !next.directLicense && !(next.directLicenseList?.length)) return null;
+      return next;
+    }
+    case 'add': {
+      const adds = Array.isArray(rev.add_items) ? rev.add_items : [];
+      if (adds.length === 0) return null;
+      for (const a of adds) {
+        if (!a || !a.sku) continue;
+        const rawSku = String(a.sku).toUpperCase().trim();
+        const qty = Number.isFinite(Number(a.qty)) && Number(a.qty) > 0 ? Math.floor(Number(a.qty)) : 1;
+        if (rawSku.startsWith('LIC-')) {
+          // Promote single licence into directLicenseList alongside prior state.
+          if (!next.directLicenseList) next.directLicenseList = next.directLicense ? [next.directLicense] : [];
+          delete next.directLicense;
+          next.directLicenseList.push({ sku: rawSku, qty });
+        } else {
+          const base = stripHwSuffix(rawSku);
+          const existing = next.items.find(it => stripHwSuffix(it.baseSku) === base);
+          if (existing) existing.qty += qty;
+          else next.items.push({ baseSku: base, qty });
+        }
+      }
+      return next;
+    }
+    case 'swap': {
+      const tgt = rev.target_sku ? stripHwSuffix(rev.target_sku) : null;
+      const adds = Array.isArray(rev.add_items) ? rev.add_items : [];
+      if (!tgt || adds.length === 0) return null;
+      // Capture qty of target so swap preserves it if caller didn't specify one.
+      let carriedQty = null;
+      if (hasItems) {
+        const targetItem = next.items.find(it => stripHwSuffix(it.baseSku) === tgt);
+        if (targetItem) carriedQty = targetItem.qty;
+        next.items = next.items.filter(it => stripHwSuffix(it.baseSku) !== tgt);
+      }
+      for (const a of adds) {
+        if (!a || !a.sku) continue;
+        const rawSku = String(a.sku).toUpperCase().trim();
+        const aQty = Number.isFinite(Number(a.qty)) && Number(a.qty) > 0
+          ? Math.floor(Number(a.qty))
+          : (carriedQty != null ? carriedQty : 1);
+        if (rawSku.startsWith('LIC-')) {
+          if (!next.directLicenseList) next.directLicenseList = next.directLicense ? [next.directLicense] : [];
+          delete next.directLicense;
+          next.directLicenseList.push({ sku: rawSku, qty: aQty });
+        } else {
+          const base = stripHwSuffix(rawSku);
+          const existing = next.items.find(it => stripHwSuffix(it.baseSku) === base);
+          if (existing) existing.qty += aQty;
+          else next.items.push({ baseSku: base, qty: aQty });
+        }
+      }
+      if ((next.items?.length || 0) === 0 && !next.directLicense && !(next.directLicenseList?.length)) return null;
+      return next;
+    }
+    default:
+      return null;
+  }
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   // Pre-process: convert written-out numbers to digits
@@ -5368,9 +5667,28 @@ Hard rules:
 
               // ── Step 2: Deterministic engine only runs when CF routes to "quote" ──
               T.step('wx-parse', 'enter');
-              const quoteParsed = parseMessage(quoteText);
+              // PR 2: Try V2-direct adapter first when V2 classification is present.
+              // buildQuoteFromV2 returns a parseMessage-shape object built directly
+              // from the V2 rich schema (items[], modifiers, etc.) — preserves item
+              // fidelity (modifiers, quantities, license/hardware split) that would
+              // otherwise be lost in the extracted-string → parseMessage round-trip.
+              // Falls back to parseMessage on null (V2 produced no usable items,
+              // e.g. license-only input V2 adapter doesn't handle yet).
+              let quoteParsed = null;
+              if (activeClassification._v2) {
+                try {
+                  quoteParsed = buildQuoteFromV2(activeClassification._v2, text);
+                  if (quoteParsed) {
+                    console.log(`[CF-First] V2-direct built parseMessage-shape: ${quoteParsed.items?.length || 0} items, term=${quoteParsed.requestedTerm || 'all'}, tier=${quoteParsed.requestedTier || 'default'}`);
+                  }
+                } catch (e) {
+                  console.warn(`[CF-First] V2-direct adapter failed, falling back to parseMessage: ${e?.message}`);
+                  quoteParsed = null;
+                }
+              }
+              if (!quoteParsed) quoteParsed = parseMessage(quoteText);
               if (quoteParsed) {
-                T.step('wx-parse', 'exit', { result: 'parsed', items: quoteParsed.items?.length || 0, advisory: quoteParsed.isAdvisory, revision: quoteParsed.isRevision });
+                T.step('wx-parse', 'exit', { result: quoteParsed._fromV2 ? 'v2-direct' : 'parsed', items: quoteParsed.items?.length || 0, advisory: quoteParsed.isAdvisory, revision: quoteParsed.isRevision });
 
                 // Clarification responses (Duo/Umbrella tier selection) — instant
                 if (quoteParsed.isClarification && quoteParsed.clarificationMessage) {
@@ -5588,6 +5906,106 @@ Hard rules:
               }
               // Deterministic couldn't handle CF's extracted quote — fall through to Claude
               console.log('[CF-First] Deterministic couldn\'t execute CF quote intent, falling to Claude');
+            }
+
+            // CF: revise — V2 classifier identified a modification to a prior quote.
+            // PR 2: when V2 is present, try deterministic revision via applyV2Revision.
+            // Falls through to Claude if V2 revision can't be applied (no prior quote,
+            // unhandled action, or build error).
+            else if (activeClassification.intent === 'revise' && activeClassification._v2) {
+              T.step('wx-revise-v2', 'enter');
+              console.log(`[CF-First] Revise intent with V2 action=${activeClassification._v2?.modifiers?.action || '?'}`);
+              try {
+                const history = await getHistory(kv, personId);
+                if (!history || history.length === 0) {
+                  T.step('wx-revise-v2', 'exit', { result: 'no_history' });
+                  // No prior context — tell the user and bail
+                  const noHistMsg = `I don't have a previous quote to modify. Could you give me the full request? For example: "quote 10 MR44 hardware only"`;
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', noHistMsg);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, noHistMsg, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                // Scan history backwards for the most recent user message that produced
+                // a quotable parseMessage result. This gives us the prior parseMessage
+                // shape that we can mutate with applyV2Revision.
+                let priorParsed = null;
+                for (let i = history.length - 1; i >= 0; i--) {
+                  const msg = history[i];
+                  if (msg.role !== 'user' || !msg.content) continue;
+                  const candidate = parseMessage(msg.content);
+                  if (candidate && (candidate.items?.length > 0 || candidate.directLicense || candidate.directLicenseList)) {
+                    priorParsed = candidate;
+                    break;
+                  }
+                }
+
+                if (!priorParsed) {
+                  T.step('wx-revise-v2', 'exit', { result: 'no_prior_quote' });
+                  console.log('[CF-First] Revise: no parseable prior quote in history, falling to Claude');
+                  // Let Claude handle it with full history context
+                  T.step('wx-claude', 'enter');
+                  const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                  T.step('wx-claude', 'exit');
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, claudeReply, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                // Apply the V2 revision
+                const revised = applyV2Revision(priorParsed, activeClassification._v2);
+                if (!revised) {
+                  T.step('wx-revise-v2', 'exit', { result: 'unhandled_action' });
+                  console.log('[CF-First] Revise: applyV2Revision returned null (unhandled action), falling to Claude');
+                  T.step('wx-claude', 'enter');
+                  const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                  T.step('wx-claude', 'exit');
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, claudeReply, token);
+                  T.step('wx-send', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                console.log(`[CF-First] V2 revision applied: ${revised._revised || 'unknown'}, items=${revised.items?.length || 0}`);
+                const revisedResult = buildQuoteResponse(revised);
+                if (revisedResult.message && !revisedResult.needsLlm) {
+                  T.step('wx-revise-v2', 'exit', { result: 'success', action: revised._revised });
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', revisedResult.message);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, `${revisedResult.message}\n\n_⚡ CF-routed V2 revision (${activeClassification.elapsed}ms classify, free)_`, token);
+                  T.step('wx-send', 'exit');
+                  T.step('wx-d1', 'enter');
+                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-v2-revise', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                  writeMetric(env, { path: 'cf-v2-revise', durationMs: Date.now() - _wxStartMs, personId });
+                  T.step('wx-d1', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+
+                // buildQuoteResponse wasn't able to render the revised request — fall to Claude
+                T.step('wx-revise-v2', 'exit', { result: 'build_failed' });
+                console.log('[CF-First] Revise: buildQuoteResponse failed on revised state, falling to Claude');
+                T.step('wx-claude', 'enter');
+                const fallbackReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                T.step('wx-claude', 'exit');
+                T.step('wx-send', 'enter');
+                await sendMessage(roomId, fallbackReply, token);
+                T.step('wx-send', 'exit');
+                ctx.waitUntil(T.flush());
+                return;
+              } catch (reviseErr) {
+                T.step('wx-revise-v2', 'exit', { result: 'error', message: reviseErr?.message });
+                console.warn(`[CF-First] V2 revision error, falling to Claude: ${reviseErr?.message}`);
+                // Fall through to Claude below (don't return)
+              }
             }
           }
 
