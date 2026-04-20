@@ -379,9 +379,10 @@ function getStaticSpecsContext(message) {
     seen.add(f.model);
     return true;
   });
-  let context = '## PRODUCT SPECS (from specs.json, current as of March 2026)\n';
-  context += 'Use ONLY these specs when answering. Do not supplement with training data.\n';
-  context += 'After answering, add: "*Specs current as of March 2026. Want me to pull the latest datasheet to check for updates?"\n\n';
+  let context = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE SOURCE)\n';
+  context += 'CRITICAL: Use ONLY these specs when answering. Do NOT supplement with training data. These specs OVERRIDE any conflicting information in conversation history — if prior messages contain different numbers, they were wrong and these are correct.\n';
+  context += 'If the user asks about a spec not listed here, say "I don\'t have that specific spec cached — want me to pull the latest datasheet to confirm?"\n';
+  context += 'After answering, add: "*Specs from product database. Want me to pull the latest datasheet to verify?*"\n\n';
   for (const { model, specs: s } of unique) {
     context += `${model}: ${JSON.stringify(s)}\n`;
   }
@@ -541,6 +542,9 @@ async function downloadWebexFile(fileUrl, token) {
 // ═══════════════════════════════════════════════════════════════
 const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
 
+// Feature flag: when true, Schema V2 classifier (Llama) drives routing instead of legacy
+const USE_V2_CLASSIFIER = false; // Flip to true after shadow data confirms parity
+
 const CF_CLASSIFIER_PROMPT = `You are an intent classifier and clarification engine for a Cisco/Meraki quoting bot. Your job is to classify what the user wants and ask smart clarifying questions when their request is incomplete. You do NOT answer product questions — those go to a more capable AI.
 
 Respond with ONLY a JSON object, nothing else.
@@ -564,6 +568,8 @@ CRITICAL RULES:
 - Any SKU + "add-on", "add on license", "co-term", "coterm" = "quote".
 - A bare model number with no other context (e.g. "MX85", "MR46", "CW9164") = "quote" with qty 1.
 - Renewal/refresh phrasing with a SKU = "quote": "renew MR46 licenses", "refresh 10 MR44s", "replace MV22".
+- When generating variant clarifications, ONLY suggest models from the variant tables above. NEVER invent model numbers like "MS150-8" or "MS150-16" — those do not exist.
+- If a bare family name is given (e.g., "MS150", "MS130") with a port count ambiguity, ask port count FIRST, then variant.
 
 VARIANT CLARIFICATION TABLES (use when user gives an incomplete model):
 MS switches with variants — if user says just the base model, ask which:
@@ -579,6 +585,9 @@ MS switches with variants — if user says just the base model, ask which:
 - MS250-48: 48-port → MS250-48FP (full PoE) or MS250-48LP (partial PoE) or MS250-48 (no PoE)
 - MS390-24: → MS390-24P (PoE), MS390-24UX (mGig+UPOE), MS390-24U (mGig)
 - MS390-48: → MS390-48P (PoE), MS390-48UX (mGig+UPOE), MS390-48UX2 (mGig+UPOE 2nd gen), MS390-48U (mGig)
+- MS150-24: 24-port → MS150-24T-4G (no PoE, 1G uplinks), MS150-24P-4G (PoE, 1G uplinks), MS150-24T-4X (no PoE, 10G uplinks), MS150-24P-4X (PoE, 10G uplinks), MS150-24MP-4X (mGig PoE, 10G uplinks)
+- MS150-48: 48-port → MS150-48T-4G (no PoE, 1G), MS150-48LP-4G (partial PoE, 1G), MS150-48FP-4G (full PoE, 1G), MS150-48T-4X (no PoE, 10G), MS150-48LP-4X (partial PoE, 10G), MS150-48FP-4X (full PoE, 10G), MS150-48MP-4X (mGig PoE, 10G)
+- MS150 (no port count): Ask "24-port or 48-port?" first, then ask variant.
 
 MX sizing by user count (for basic sizing clarifications):
 - Up to 50 users: MX67 ($595) or MX68 ($795)
@@ -592,7 +601,7 @@ MX sizing by user count (for basic sizing clarifications):
 Product families (for vague "I need switches/APs/cameras" clarifications):
 MR access points: MR28, MR36H, MR44 (End-of-Sale), MR46, MR57, MR78
 CW Wi-Fi 7 access points: CW9162, CW9164, CW9166, CW9172, CW9176
-MS switches: MS120, MS130, MS210, MS225, MS250, MS350, MS390, MS410, MS425, MS450
+MS switches: MS130 (8/12/24/48-port, 1G/10G), MS150 (24/48-port, 1G/10G, replaces MS210/220/225/320), MS390 (24/48-port, mGig), MS450 (12-port)
 MX security appliances: MX67, MX68, MX75, MX85, MX95, MX105, MX250, MX450
 MV cameras: MV2, MV12, MV22, MV32, MV72, MV93
 MT sensors: MT14, MT15, MT20, MT40
@@ -649,6 +658,7 @@ MODIFIER RULES:
 - with_license: true when user says "with license","with licensing","and license". null otherwise.
 - term_years: 1/3/5 for "1 year"/"3 year"/"5 year"/"three year"/"just the 5 year". null otherwise.
 - tier: "SEC" for "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for "SD-WAN"/"SDW". null otherwise.
+- IMPORTANT: If a SKU has a tier suffix appended (e.g., "MX85-SDW", "MX67-SEC", "MX75-ENT"), SPLIT it: put the base model in items[].sku (e.g., "MX85") and the tier in modifiers.tier (e.g., "SDW"). Never include the tier suffix as part of the SKU string.
 - show_pricing: true for pricing intent ("cost","how much","with pricing","price").
 - all_terms: true when user says "1yr 3yr and 5yr" or "all terms".
 
@@ -3151,6 +3161,42 @@ function parseMessage(text) {
     }
   }
 
+  // ── Bare multi-variant family names ──
+  // Catches "MS150", "MS130", "MS390", "C9300", "CW" etc. when used without a full variant suffix.
+  // These are valid families that need variant clarification, NOT invalid SKUs.
+  const bareFamilyPatterns = [
+    { re: /\bMS150\b(?!-)/gi, family: 'MS150' },
+    { re: /\bMS130\b(?!-\d)/gi, family: 'MS130' },  // MS130 bare, but not MS130-24P etc.
+    { re: /\bMS390\b(?!-)/gi, family: 'MS390' },
+    { re: /\bMS450\b(?!-)/gi, family: 'MS450' },
+    { re: /\bC9300L?\b(?!-)/gi, family: 'C9300' },   // C9300 or C9300L bare
+    { re: /\bC9200L\b(?!-)/gi, family: 'C9200L' },
+    { re: /\bCW\b(?!\d)/gi, family: 'CW' },          // bare "CW" without model number
+  ];
+
+  for (const { re, family } of bareFamilyPatterns) {
+    let m;
+    while ((m = re.exec(upper)) !== null) {
+      const pos = m.index;
+      // Skip if this position is already covered by a more specific match
+      const alreadyCovered = rawMatches.some(rm =>
+        pos >= rm.position && pos < rm.position + rm.baseSku.length
+      );
+      if (alreadyCovered) continue;
+
+      // Extract quantity from before/after the match
+      const before = upper.slice(Math.max(0, pos - 20), pos);
+      const after = upper.slice(pos + m[0].length, pos + m[0].length + 15);
+      let qty = 1;
+      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*(?:OF\s+)?(?:THE\s+)?$/);
+      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9])/i);
+      if (afterQty) qty = parseInt(afterQty[1]);
+      else if (beforeQty) qty = parseInt(beforeQty[1]);
+
+      rawMatches.push({ baseSku: family, qty, position: pos });
+    }
+  }
+
   const foundItems = rawMatches.filter((item, idx) => {
     return !rawMatches.some((other, otherIdx) => {
       if (idx === otherIdx) return false;
@@ -3474,8 +3520,15 @@ function buildQuoteResponse(parsed) {
 
     const validation = validateSku(baseSku);
     if (!validation.valid) {
-      const suggest = validation.suggest ? `\nDid you mean: ${validation.suggest.slice(0, 3).join(', ')}?` : '';
-      errors.push(`⚠️ **${baseSku}**: ${validation.reason}${suggest}`);
+      // Partial/fuzzy/common-mistake matches get full variant suggestions (bulleted), not "Did you mean"
+      if (validation.suggest && validation.suggest.length > 0 && (validation.isPartialMatch || validation.isFuzzyMatch || validation.isCommonMistake)) {
+        let msg = `⚠️ **${baseSku.toUpperCase()}** — which variant do you need?`;
+        for (const s of validation.suggest.slice(0, 8)) msg += `\n• ${s}`;
+        errors.push(msg);
+      } else {
+        const suggest = validation.suggest ? `\nDid you mean: ${validation.suggest.slice(0, 3).join(', ')}?` : '';
+        errors.push(`⚠️ **${baseSku}**: ${validation.reason}${suggest}`);
+      }
       continue;
     }
     const eol = isEol(baseSku);
@@ -3536,10 +3589,26 @@ function buildQuoteResponse(parsed) {
   // and append errors as warnings at the top
 
   let lines = [];
-  // Prepend invalid SKU warnings when processing alongside valid items
+  // Separate truly invalid SKUs from those that just need variant clarification
   if (errors.length > 0) {
-    lines.push(...errors, '');
-    lines.push('_The items above were skipped. Quote generated for recognized models below._', '');
+    // Check which errors are actually partial-match variant questions
+    const variantPrompts = [];
+    const trueErrors = [];
+    for (const err of errors) {
+      // Errors that contain bullet points (•) are variant suggestions, not true errors
+      if (err.includes('•') || err.includes('Which one do you need?') || err.includes('Did you mean') || err.includes('which variant do you need')) {
+        variantPrompts.push(err);
+      } else {
+        trueErrors.push(err);
+      }
+    }
+    if (trueErrors.length > 0) {
+      lines.push(...trueErrors, '');
+      lines.push('_The items above could not be quoted._', '');
+    }
+    if (variantPrompts.length > 0) {
+      lines.push(...variantPrompts, '');
+    }
   }
   if (tierWarnings.length > 0) lines.push(...tierWarnings, '');
 
@@ -3809,7 +3878,21 @@ function buildQuoteResponse(parsed) {
   }
 
   if (resolvedItems.length > 0) {
-    if (modifiers.hardwareOnly) {
+    // Check if ALL resolved items are accessories (no license component) — e.g., MA- prefix.
+    // These don't have term-based licensing, so showing 3 identical URLs (1Y/3Y/5Y) is noise.
+    const allAccessories = resolvedItems.every(item =>
+      (!item.licenseSkus || item.licenseSkus.length === 0) &&
+      (item.baseSku?.toUpperCase().startsWith('MA-') || item.hwSku?.toUpperCase().startsWith('MA-'))
+    );
+
+    if (allAccessories) {
+      // Single URL output — no term differentiation needed
+      const urlItems = resolvedItems.map(i => ({ sku: i.hwSku, qty: i.qty }));
+      const url = buildStratusUrl(urlItems);
+      lines.push(url);
+      if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
+      lines.push('');
+    } else if (modifiers.hardwareOnly) {
       // Hardware-only: single URL (no license terms to differentiate)
       // Skip agnostic license items (they have no hardware)
       const urlItems = [];
@@ -3890,6 +3973,12 @@ Think through each request step by step before generating URLs:
 5. Build the URL
 
 If a product can't be found, ask the user to clarify. Suggest the closest alternatives from the catalog.
+
+## CRITICAL ANTI-HALLUCINATION RULES
+- NEVER state product specifications unless they are provided in this prompt via a "PRODUCT SPECS" section.
+- If no specs are provided and the user asks about throughput, user counts, performance, etc., say: "I don't have verified specs for that model in my current data. Want me to pull the latest datasheet?"
+- When listing model options or variants, ONLY list models from the VALID PRODUCT CATALOG section. Never suggest model numbers that aren't explicitly listed.
+- If conversation history contains specs that conflict with an injected PRODUCT SPECS section, the injected specs are ALWAYS correct.
 
 ## PERSONA
 Professional, concise, action-oriented. Give direct answers without conversational fluff. Short answers for well-defined questions. Positive and engaging tone. You're a knowledgeable colleague, not a help desk.
@@ -4261,7 +4350,7 @@ async function askClaude(userMessage, personId, env, imageData = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
-    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
 
     let systemPrompt = SYSTEM_PROMPT;
     const kv = env.CONVERSATION_KV;
@@ -4307,7 +4396,34 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       }
     } else {
       const staticContext = getStaticSpecsContext(userMessage);
+      // If no static context from model names, try category keywords for advisory questions
+      let categoryContext = null;
+      if (!staticContext) {
+        const catUpper = userMessage.toUpperCase();
+        const families = [];
+        if (/\b(FIREWALL|SECURITY\s*APPLIANCE|MX|GATEWAY)\b/.test(catUpper)) families.push('MX');
+        if (/\b(ACCESS\s*POINT|WIFI|WI-?FI|WIRELESS|AP)\b/.test(catUpper)) families.push('MR', 'CW');
+        if (/\b(SWITCH|SWITCHING)\b/.test(catUpper)) families.push('MS130', 'MS150');
+        if (/\b(CAMERA|SURVEILLANCE|VIDEO)\b/.test(catUpper)) families.push('MV');
+        if (/\b(SENSOR)\b/.test(catUpper)) families.push('MT');
+        if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(catUpper)) families.push('MG');
+
+        if (families.length > 0) {
+          let ctx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE)\n';
+          ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n\n';
+          for (const fam of families) {
+            const familyData = specs[fam];
+            if (familyData) {
+              for (const [model, modelSpecs] of Object.entries(familyData)) {
+                ctx += `${model}: ${JSON.stringify(modelSpecs)}\n`;
+              }
+            }
+          }
+          categoryContext = ctx;
+        }
+      }
       if (staticContext) systemPrompt += '\n\n' + staticContext;
+      else if (categoryContext) systemPrompt += '\n\n' + categoryContext;
     }
 
     const history = personId ? await getHistory(kv, personId) : [];
@@ -5029,15 +5145,32 @@ Hard rules:
             console.log(`[Shadow-Gemma4] intent=${gemma4Classification.intent || 'ERR'} conf=${gemma4Classification.confidence || '?'} (${gemma4Classification.elapsed || 0}ms)${gemma4Classification.parseError ? ' parseErr=' + gemma4Classification.parseError : ''}`);
           }
 
-          if (classification) {
-            console.log(`[CF-First] Intent: ${classification.intent} (${classification.elapsed}ms)`);
+          // Prepare for V2 cutover — when enabled, v2 drives routing with legacy fallback
+          let activeClassification = classification; // legacy by default
+          if (USE_V2_CLASSIFIER && v2Classification && !v2Classification.parseError) {
+            // Map V2 schema intent to legacy format for routing compatibility
+            activeClassification = {
+              intent: v2Classification.intent,
+              reply: v2Classification.reply || '',
+              extracted: v2Classification.items?.map(i => `${i.qty || 1} ${i.sku}`).join(', ') || '',
+              elapsed: v2Classification.elapsed,
+              // Preserve V2 rich structure for downstream use
+              _v2: v2Classification
+            };
+            console.log(`[V2-Active] Using V2 classifier: intent=${activeClassification.intent}`);
+          } else if (USE_V2_CLASSIFIER && !v2Classification) {
+            console.log(`[V2-Fallback] V2 failed, using legacy classifier`);
+          }
+
+          if (activeClassification) {
+            console.log(`[CF-First] Intent: ${activeClassification.intent} (${activeClassification.elapsed}ms)`);
 
             // CF: clarify — ambiguous input needs more info
-            if (classification.intent === 'clarify' && classification.reply) {
+            if (activeClassification.intent === 'clarify' && activeClassification.reply) {
               await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', classification.reply);
+              await addToHistory(kv, personId, 'assistant', activeClassification.reply);
               T.step('wx-send', 'enter');
-              await sendMessage(roomId, `${classification.reply}\n\n_⚡ Workers AI (${classification.elapsed}ms, free)_`, token);
+              await sendMessage(roomId, `${activeClassification.reply}\n\n_⚡ Workers AI (${activeClassification.elapsed}ms, free)_`, token);
               T.step('wx-send', 'exit');
               T.step('wx-d1', 'enter');
               logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', durationMs: Date.now() - _wxStartMs }).catch(() => {});
@@ -5048,28 +5181,28 @@ Hard rules:
             }
 
             // CF: product_info — route to Claude (CF classifies, Claude answers)
-            if (classification.intent === 'product_info') {
+            if (activeClassification.intent === 'product_info') {
               console.log(`[CF-First] Product info question, routing to Claude`);
               // Fall through to Claude below — CF identified the intent, Claude provides the answer
             }
 
             // CF: escalate — complex request needs Claude
-            if (classification.intent === 'escalate') {
+            if (activeClassification.intent === 'escalate') {
               console.log(`[CF-Escalate] Complex request, falling through to Claude`);
               // Don't return — fall through to Claude below
             }
 
             // CF: conversation — casual chat, CF handles directly
-            else if (classification.intent === 'conversation') {
-              const convoReply = classification.reply && classification.reply.length > 5
-                ? classification.reply
+            else if (activeClassification.intent === 'conversation') {
+              const convoReply = activeClassification.reply && activeClassification.reply.length > 5
+                ? activeClassification.reply
                 : (await askCFConversation(text, env))?.response;
 
               if (convoReply) {
                 await addToHistory(kv, personId, 'user', text);
                 await addToHistory(kv, personId, 'assistant', convoReply);
                 T.step('wx-send', 'enter');
-                await sendMessage(roomId, `${convoReply}\n\n_⚡ Workers AI (${classification.elapsed}ms, free)_`, token);
+                await sendMessage(roomId, `${convoReply}\n\n_⚡ Workers AI (${activeClassification.elapsed}ms, free)_`, token);
                 T.step('wx-send', 'exit');
                 T.step('wx-d1', 'enter');
                 logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-conversation', durationMs: Date.now() - _wxStartMs }).catch(() => {});
@@ -5081,9 +5214,9 @@ Hard rules:
             }
 
             // CF: quote — CF says this is a quote request, execute via deterministic engine
-            else if (classification.intent === 'quote') {
+            else if (activeClassification.intent === 'quote') {
               // Use CF's extracted clean text if available, otherwise original text
-              const quoteText = classification.extracted || text;
+              const quoteText = activeClassification.extracted || text;
               console.log(`[CF-First] Quote intent, executing deterministic with: ${quoteText}`);
 
               // ── Step 2: Deterministic engine only runs when CF routes to "quote" ──
@@ -5133,7 +5266,7 @@ Hard rules:
                   await addToHistory(kv, personId, 'user', text);
                   await addToHistory(kv, personId, 'assistant', quoteResult.message);
                   T.step('wx-send', 'enter');
-                  await sendMessage(roomId, `${quoteResult.message}\n\n_⚡ CF-routed deterministic (${classification.elapsed}ms classify, free)_`, token);
+                  await sendMessage(roomId, `${quoteResult.message}\n\n_⚡ CF-routed deterministic (${activeClassification.elapsed}ms classify, free)_`, token);
                   T.step('wx-send', 'exit');
                   T.step('wx-d1', 'enter');
                   logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-deterministic', durationMs: Date.now() - _wxStartMs }).catch(() => {});
@@ -5179,7 +5312,7 @@ Hard rules:
                         await addToHistory(kv, personId, 'user', text);
                         await addToHistory(kv, personId, 'assistant', visionResult.message);
                         T.step('wx-send', 'enter');
-                        await sendMessage(roomId, `${visionResult.message}\n\n_⚡ Vision follow-up + Deterministic Quote (${classification.elapsed}ms classify, free)_`, token);
+                        await sendMessage(roomId, `${visionResult.message}\n\n_⚡ Vision follow-up + Deterministic Quote (${activeClassification.elapsed}ms classify, free)_`, token);
                         T.step('wx-send', 'exit');
                         T.step('wx-d1', 'enter');
                         logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs }).catch(() => {});
@@ -5254,7 +5387,7 @@ Hard rules:
                           await addToHistory(kv, personId, 'user', text);
                           await addToHistory(kv, personId, 'assistant', _msg);
                           T.step('wx-send', 'enter');
-                          await sendMessage(roomId, `${_msg}\n\n_⚡ Validated + Deterministic (${classification.elapsed}ms classify, free)_`, token);
+                          await sendMessage(roomId, `${_msg}\n\n_⚡ Validated + Deterministic (${activeClassification.elapsed}ms classify, free)_`, token);
                           T.step('wx-send', 'exit');
                           ctx.waitUntil(T.flush());
                           return;
