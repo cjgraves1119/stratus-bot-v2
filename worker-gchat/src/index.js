@@ -2224,22 +2224,41 @@ function parseMessage(text) {
   }
 
   // Direct License SKU Input (single line)
-  const licDirectMatch = upper.match(/^\s*((?:LIC-[A-Z0-9-]+?)(?:\s+[X×]?\s*(\d+))?)\s*$/);
-  if (licDirectMatch) {
-    const fullInput = licDirectMatch[0].trim();
-    const qtyAfter = fullInput.match(/\s+[X×]?\s*(\d+)\s*$/);
-    let licSku = fullInput;
-    let qty = 1;
-    if (qtyAfter) {
-      qty = parseInt(qtyAfter[1]);
-      licSku = fullInput.slice(0, fullInput.length - qtyAfter[0].length).trim();
+  // Tolerates natural-language preambles ("quote", "get me", "price for"), trailing
+  // qualifiers ("licenses", "license renewals"), and both qty-before and qty-after
+  // orderings with or without the literal 'x' separator. This matters because the CF
+  // classifier often re-phrases user input (e.g. "lic-mv-1yr x 30" -> "30 LIC-MV-1YR"
+  // or "quote LIC-MV-1YR qty 30") before handing it to parseMessage. The old regex
+  // was strictly anchored to LIC- at the start, so any preamble killed the match and
+  // downstream fallbacks dropped the qty.
+  {
+    // Strip preamble + trailing qualifier words iteratively so multi-word
+    // phrases like "price for", "get me", "can you quote" all collapse away.
+    // Order the alternation from longest to shortest to avoid "PRICE" eating
+    // half of "PRICE FOR" and leaving "FOR" behind.
+    const PREAMBLE_RE = /^\s*(?:PLEASE\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE)\s+/i;
+    const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
+    let stripped = upper.replace(/\s+(?:QTY|QUANTITY)\s+(\d+)\s*$/i, ' $1').trim();  // "qty 30" -> " 30"
+    // Apply preamble + trailer strips repeatedly until stable (handles stacked modifiers)
+    for (let i = 0; i < 4; i++) {
+      const before = stripped;
+      stripped = stripped.replace(PREAMBLE_RE, '').replace(TRAILER_RE, '').trim();
+      if (stripped === before) break;
     }
-    const qtyBefore = upper.match(/^\s*(\d+)\s*[X×]?\s*(LIC-[A-Z0-9-]+)\s*$/);
-    if (qtyBefore) {
-      qty = parseInt(qtyBefore[1]);
-      licSku = qtyBefore[2];
-    }
-    if (licSku.startsWith('LIC-')) {
+
+    // qty-first: "30 LIC-MV-1YR", "30 x LIC-MV-1YR", "30x LIC-MV-1YR"
+    const qtyFirst = stripped.match(/^(\d+)\s*[X×]?\s*(LIC-[A-Z0-9-]+)\s*$/);
+    // SKU-first with qty: "LIC-MV-1YR 30", "LIC-MV-1YR x 30", "LIC-MV-1YR x30"
+    const skuFirst = !qtyFirst && stripped.match(/^(LIC-[A-Z0-9-]+?)(?:\s*[X×]\s*|\s+)(\d+)\s*$/);
+    // Bare SKU: "LIC-MV-1YR"
+    const skuOnly = !qtyFirst && !skuFirst && stripped.match(/^(LIC-[A-Z0-9-]+)\s*$/);
+
+    let licSku = null, qty = 1;
+    if (qtyFirst) { qty = parseInt(qtyFirst[1]); licSku = qtyFirst[2]; }
+    else if (skuFirst) { licSku = skuFirst[1]; qty = parseInt(skuFirst[2]); }
+    else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
+
+    if (licSku && licSku.startsWith('LIC-')) {
       return {
         items: [],
         directLicense: { sku: licSku, qty },
@@ -2254,8 +2273,15 @@ function parseMessage(text) {
   }
 
   let requestedTerm = null;
+  // Term detection — catches "just 3 year", "only 1yr", but also
+  // bare "3 year", "5yr", "3-year" with term-keyword suffix. Uses
+  // negative lookbehind [\w-] to avoid matching the "3YR" in
+  // SKU-embedded terms like "LIC-ENT-3YR".
+  const TERM_RE = /(?<![\w-])([135])\s*-?\s*Y(?:R|EAR|EARS)?\b/i;
+  const tm = upper.match(TERM_RE);
+  if (tm) requestedTerm = parseInt(tm[1]);
   const hasJust = /\b(JUST|ONLY)\b/.test(upper);
-  if (hasJust) {
+  if (hasJust && !requestedTerm) {
     if (/\b1[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 1;
     else if (/\b3[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 3;
     else if (/\b5[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 5;
@@ -2521,13 +2547,25 @@ function parseMessage(text) {
         const fullValid = VALID_SKUS.has(sku);
         if (strippedValid && !fullValid) sku = stripped;
       }
+      // Handle "MR36x10" shorthand: the case-insensitive SKU regex greedily eats
+      // the 'x' separator producing invalid SKUs like "MR36X". If the stripped
+      // form is a valid family and the full form isn't, strip the X. Safe because
+      // legit X-ending SKUs (MS150-48FP-4X) validate as fullValid and short-circuit.
+      if (sku.endsWith('X') && sku.length > 3) {
+        const stripped = sku.slice(0, -1);
+        const strippedValid = VALID_SKUS.has(stripped) || detectFamily(stripped) !== null;
+        const fullValid = VALID_SKUS.has(sku);
+        if (strippedValid && !fullValid) sku = stripped;
+      }
       if (matched.has(sku)) continue;
       matched.add(sku);
       const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
       const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
-      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
+      // Negative lookahead rejects qty followed by term keywords like "3 YEAR",
+      // "3YR", "3-YEAR", "5 Y" — these are term specifiers, not quantities.
+      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-|\s*-?Y(?:R|EAR|EARS)?\b)/i);
       // For inline format (SKU1 qty1 SKU2 qty2...), prefer afterQty to avoid picking up previous SKU's quantity
       if (afterQty) qty = parseInt(afterQty[1]);
       else if (beforeQty) qty = parseInt(beforeQty[1]);

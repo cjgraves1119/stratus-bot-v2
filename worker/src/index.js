@@ -2842,22 +2842,41 @@ function parseMessage(text) {
   }
 
   // Direct License SKU Input (single line)
-  const licDirectMatch = upper.match(/^\s*((?:LIC-[A-Z0-9-]+?)(?:\s+[X×]?\s*(\d+))?)\s*$/);
-  if (licDirectMatch) {
-    const fullInput = licDirectMatch[0].trim();
-    const qtyAfter = fullInput.match(/\s+[X×]?\s*(\d+)\s*$/);
-    let licSku = fullInput;
-    let qty = 1;
-    if (qtyAfter) {
-      qty = parseInt(qtyAfter[1]);
-      licSku = fullInput.slice(0, fullInput.length - qtyAfter[0].length).trim();
+  // Tolerates natural-language preambles ("quote", "get me", "price for"), trailing
+  // qualifiers ("licenses", "license renewals"), and both qty-before and qty-after
+  // orderings with or without the literal 'x' separator. This matters because the CF
+  // classifier often re-phrases user input (e.g. "lic-mv-1yr x 30" -> "30 LIC-MV-1YR"
+  // or "quote LIC-MV-1YR qty 30") before handing it to parseMessage. The old regex
+  // was strictly anchored to LIC- at the start, so any preamble killed the match and
+  // downstream fallbacks dropped the qty.
+  {
+    // Strip preamble + trailing qualifier words iteratively so multi-word
+    // phrases like "price for", "get me", "can you quote" all collapse away.
+    // Order the alternation from longest to shortest to avoid "PRICE" eating
+    // half of "PRICE FOR" and leaving "FOR" behind.
+    const PREAMBLE_RE = /^\s*(?:PLEASE\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE)\s+/i;
+    const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
+    let stripped = upper.replace(/\s+(?:QTY|QUANTITY)\s+(\d+)\s*$/i, ' $1').trim();  // "qty 30" -> " 30"
+    // Apply preamble + trailer strips repeatedly until stable (handles stacked modifiers)
+    for (let i = 0; i < 4; i++) {
+      const before = stripped;
+      stripped = stripped.replace(PREAMBLE_RE, '').replace(TRAILER_RE, '').trim();
+      if (stripped === before) break;
     }
-    const qtyBefore = upper.match(/^\s*(\d+)\s*[X×]?\s*(LIC-[A-Z0-9-]+)\s*$/);
-    if (qtyBefore) {
-      qty = parseInt(qtyBefore[1]);
-      licSku = qtyBefore[2];
-    }
-    if (licSku.startsWith('LIC-')) {
+
+    // qty-first: "30 LIC-MV-1YR", "30 x LIC-MV-1YR", "30x LIC-MV-1YR"
+    const qtyFirst = stripped.match(/^(\d+)\s*[X×]?\s*(LIC-[A-Z0-9-]+)\s*$/);
+    // SKU-first with qty: "LIC-MV-1YR 30", "LIC-MV-1YR x 30", "LIC-MV-1YR x30"
+    const skuFirst = !qtyFirst && stripped.match(/^(LIC-[A-Z0-9-]+?)(?:\s*[X×]\s*|\s+)(\d+)\s*$/);
+    // Bare SKU: "LIC-MV-1YR"
+    const skuOnly = !qtyFirst && !skuFirst && stripped.match(/^(LIC-[A-Z0-9-]+)\s*$/);
+
+    let licSku = null, qty = 1;
+    if (qtyFirst) { qty = parseInt(qtyFirst[1]); licSku = qtyFirst[2]; }
+    else if (skuFirst) { licSku = skuFirst[1]; qty = parseInt(skuFirst[2]); }
+    else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
+
+    if (licSku && licSku.startsWith('LIC-')) {
       return {
         items: [],
         directLicense: { sku: licSku, qty },
@@ -2872,12 +2891,13 @@ function parseMessage(text) {
   }
 
   let requestedTerm = null;
-  const hasJust = /\b(JUST|ONLY)\b/.test(upper);
-  if (hasJust) {
-    if (/\b1[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 1;
-    else if (/\b3[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 3;
-    else if (/\b5[\s-]?Y(EAR)?\b/.test(upper)) requestedTerm = 5;
-  }
+  // Term detection — catches "just 3 year", "only 1yr", but also
+  // bare "3 year", "5yr", "3-year" with term-keyword suffix. Uses
+  // negative lookbehind [\w-] to avoid matching the "3YR" in
+  // SKU-embedded terms like "LIC-ENT-3YR".
+  const TERM_RE = /(?<![\w-])([135])\s*-?\s*Y(?:R|EAR|EARS)?\b/i;
+  const tm = upper.match(TERM_RE);
+  if (tm) requestedTerm = parseInt(tm[1]);
 
   const modifiers = { hardwareOnly: false, licenseOnly: false };
   if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper) && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
@@ -3147,13 +3167,26 @@ function parseMessage(text) {
         const fullValid = VALID_SKUS.has(sku);
         if (strippedValid && !fullValid) sku = stripped;
       }
+      // Handle "MR36x10" shorthand: the case-insensitive SKU regex greedily eats
+      // the 'x' separator (MR36 + X*) producing invalid SKUs like "MR36X". If the
+      // stripped form is a valid family and the full form isn't, strip the X.
+      // Safe because SKUs legitimately ending in X (MS150-48FP-4X etc.) validate
+      // as fullValid and short-circuit.
+      if (sku.endsWith('X') && sku.length > 3) {
+        const stripped = sku.slice(0, -1);
+        const strippedValid = VALID_SKUS.has(stripped) || detectFamily(stripped) !== null;
+        const fullValid = VALID_SKUS.has(sku);
+        if (strippedValid && !fullValid) sku = stripped;
+      }
       if (matched.has(sku)) continue;
       matched.add(sku);
       const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
       const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*(?:OF\s+)?(?:THE\s+)?$/);
-      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-)/i);
+      // Negative lookahead rejects qty followed by term keywords like "3 YEAR",
+      // "3YR", "3-YEAR", "5 Y" — these are term specifiers, not quantities.
+      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-|\s*-?Y(?:R|EAR|EARS)?\b)/i);
       // For inline format (SKU1 qty1 SKU2 qty2...), prefer afterQty to avoid picking up previous SKU's quantity
       if (afterQty) qty = parseInt(afterQty[1]);
       else if (beforeQty) qty = parseInt(beforeQty[1]);
@@ -3189,7 +3222,8 @@ function parseMessage(text) {
       const after = upper.slice(pos + m[0].length, pos + m[0].length + 15);
       let qty = 1;
       const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*(?:OF\s+)?(?:THE\s+)?$/);
-      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9])/i);
+      // Same term-keyword exclusion as variant-match afterQty (see above)
+      const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|\s*-?Y(?:R|EAR|EARS)?\b)/i);
       if (afterQty) qty = parseInt(afterQty[1]);
       else if (beforeQty) qty = parseInt(beforeQty[1]);
 
@@ -5123,27 +5157,39 @@ Hard rules:
             if (lastAsst) priorCtxForV2 = String(lastAsst.content || '').substring(0, 1500);
           } catch {}
           T.step('wx-cfclassify', 'enter');
-          const [classification, v2Classification, gemma4Classification] = await Promise.all([
-            classifyWithCF(text, env),
+          // CRITICAL PATH: only the legacy classifier blocks the response. The two
+          // shadow classifiers (Schema v2 + Gemma 4) are kicked off here but awaited
+          // inside a ctx.waitUntil below, so they never delay user-visible latency.
+          // Before this change Promise.all was waiting for Gemma 4 (~12s) on every
+          // message even though legacy (~500ms) already had the routing answer.
+          const classification = await classifyWithCF(text, env);
+          T.step('wx-cfclassify', 'exit');
+
+          // Shadow classifiers + D1 logging — run after response, non-blocking.
+          // If USE_V2_CLASSIFIER is ever flipped true, the shadow path still
+          // populates the comparison log; but for routing we keep legacy on the
+          // hot path. A separate cutover flag can swap this when ready.
+          const _shadowPromise = Promise.all([
             classifyWithCFv2(text, priorCtxForV2, env).catch(e => ({ error: e.message })),
             classifyWithGemma4(text, priorCtxForV2, env).catch(e => ({ error: e.message }))
           ]);
-          T.step('wx-cfclassify', 'exit');
-          // Fire-and-forget: log three-way shadow comparison to D1 (non-blocking)
-          ctx.waitUntil(logShadowClassification(env, {
-            personId,
-            requestText: text,
-            priorContext: priorCtxForV2,
-            legacy: classification,
-            v2: v2Classification,
-            gemma4: gemma4Classification
-          }));
-          if (v2Classification) {
-            console.log(`[Shadow-V2] intent=${v2Classification.intent || 'ERR'} conf=${v2Classification.confidence || '?'} (${v2Classification.elapsed || 0}ms)${v2Classification.parseError ? ' parseErr=' + v2Classification.parseError : ''}`);
-          }
-          if (gemma4Classification) {
-            console.log(`[Shadow-Gemma4] intent=${gemma4Classification.intent || 'ERR'} conf=${gemma4Classification.confidence || '?'} (${gemma4Classification.elapsed || 0}ms)${gemma4Classification.parseError ? ' parseErr=' + gemma4Classification.parseError : ''}`);
-          }
+          ctx.waitUntil((async () => {
+            try {
+              const [v2c, g4c] = await _shadowPromise;
+              if (v2c) console.log(`[Shadow-V2] intent=${v2c.intent || 'ERR'} conf=${v2c.confidence || '?'} (${v2c.elapsed || 0}ms)${v2c.parseError ? ' parseErr=' + v2c.parseError : ''}`);
+              if (g4c) console.log(`[Shadow-Gemma4] intent=${g4c.intent || 'ERR'} conf=${g4c.confidence || '?'} (${g4c.elapsed || 0}ms)${g4c.parseError ? ' parseErr=' + g4c.parseError : ''}`);
+              await logShadowClassification(env, {
+                personId, requestText: text, priorContext: priorCtxForV2,
+                legacy: classification, v2: v2c, gemma4: g4c
+              });
+            } catch (e) { console.warn('[Shadow] error:', e?.message); }
+          })());
+          // These stay referenced for the (currently disabled) V2-active branch
+          // below — they'll be undefined at that point and USE_V2_CLASSIFIER is
+          // false, so the branch is a no-op. When we cut over, we'll either flip
+          // the waterfall to V2 on the critical path or keep legacy as primary.
+          const v2Classification = null;
+          const gemma4Classification = null;
 
           // Prepare for V2 cutover — when enabled, v2 drives routing with legacy fallback
           let activeClassification = classification; // legacy by default
@@ -5333,31 +5379,51 @@ Hard rules:
               // Before falling to Claude, try to validate raw SKU tokens from the text.
               // This catches typos (CW9172IH → CW9172I) and mixed hw+lic comma input.
               {
-                const _valText = (quoteText || text).toUpperCase();
-                // Extract all SKU-like tokens: hardware models AND license SKUs
+                // Prefer the ORIGINAL user text when extracting tokens + qty. The
+                // CF classifier's rewritten `extracted` field sometimes drops
+                // quantities (e.g. "lic-mv-1yr x 30" → "LIC-MV-1YR"), and rebuilding
+                // with just the SKU would silently collapse qty to 1.
+                const _rawSourceText = text || quoteText || '';
+                const _valText = _rawSourceText.toUpperCase();
+                // Extract all SKU-like tokens: hardware models AND license SKUs, and
+                // detect an adjacent quantity (either "N SKU", "SKU N", or "SKU x N").
                 const _allTokens = [];
-                const _hwRe = /\b((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/gi;
-                const _licRe = /\b(LIC-[A-Z0-9-]+)\b/gi;
+                const _hwRe = /\b(\d+)?\s*[xX×]?\s*((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)(?:\s*[xX×]?\s*(\d+))?\b/gi;
+                const _licRe = /\b(\d+)?\s*[xX×]?\s*(LIC-[A-Z0-9-]+)(?:\s*[xX×]?\s*(\d+))?\b/gi;
                 let _m;
-                while ((_m = _hwRe.exec(_valText)) !== null) _allTokens.push(_m[1].toUpperCase());
-                while ((_m = _licRe.exec(_valText)) !== null) _allTokens.push(_m[1].toUpperCase());
-                // Strip -RTG, -MR, -HW suffixes from hardware tokens for validation (these are ordering suffixes, not model names)
-                const _cleanTokens = [...new Set(_allTokens)].map(t => {
-                  if (t.startsWith('LIC-')) return { raw: t, clean: t, isLicense: true };
-                  return { raw: t, clean: t.replace(/-(RTG|MR|HW)$/i, ''), isLicense: false };
-                });
+                while ((_m = _hwRe.exec(_valText)) !== null) {
+                  const qty = parseInt(_m[1] || _m[3] || '1');
+                  _allTokens.push({ sku: _m[2].toUpperCase(), qty, isLicense: false });
+                }
+                while ((_m = _licRe.exec(_valText)) !== null) {
+                  const qty = parseInt(_m[1] || _m[3] || '1');
+                  _allTokens.push({ sku: _m[2].toUpperCase(), qty, isLicense: true });
+                }
+                // Deduplicate by SKU (keep highest qty if same SKU appears twice),
+                // then strip -RTG/-MR/-HW suffixes from hardware for catalog lookup.
+                const _byKey = new Map();
+                for (const t of _allTokens) {
+                  const prev = _byKey.get(t.sku);
+                  if (!prev || t.qty > prev.qty) _byKey.set(t.sku, t);
+                }
+                const _cleanTokens = [..._byKey.values()].map(t => ({
+                  raw: t.sku,
+                  clean: t.isLicense ? t.sku : t.sku.replace(/-(RTG|MR|HW)$/i, ''),
+                  isLicense: t.isLicense,
+                  qty: t.qty
+                }));
 
                 if (_cleanTokens.length > 0) {
                   const _suggestions = [];
-                  const _validItems = [];
+                  const _validItems = [];  // array of { raw, qty }
                   for (const tk of _cleanTokens) {
                     if (tk.isLicense) {
-                      // License SKUs are valid by nature — pass through
-                      _validItems.push(tk.raw);
+                      // License SKUs are valid by nature — pass through with qty
+                      _validItems.push({ raw: tk.raw, qty: tk.qty });
                     } else {
                       const val = validateSku(tk.clean);
                       if (val.valid) {
-                        _validItems.push(tk.raw);
+                        _validItems.push({ raw: tk.raw, qty: tk.qty });
                       } else {
                         _suggestions.push({ input: tk.raw, reason: val.reason || `${tk.raw} is not a recognized model`, suggest: val.suggest || [] });
                       }
@@ -5373,9 +5439,10 @@ Hard rules:
                       if (s.suggest.length > 0) _msg += `Did you mean: ${s.suggest.join(', ')}?\n`;
                       _msg += '\n';
                     }
-                    // If we have valid items, try to build a quote for them
+                    // If we have valid items, try to build a quote for them.
+                    // Preserve qty by building "N SKU, N SKU, ..." instead of bare SKU list.
                     if (_validItems.length > 0) {
-                      const _validText = _validItems.join(', ');
+                      const _validText = _validItems.map(it => `${it.qty} ${it.raw}`).join(', ');
                       const _reParsed = parseMessage(_validText);
                       if (_reParsed) {
                         const _reResult = buildQuoteResponse(_reParsed);
