@@ -3265,13 +3265,78 @@ function parseMessage(text) {
   ];
   const isRevision = revisionPatterns.some(p => p.test(upper));
 
+  // ── Unresolved AP category phrases (Wi-Fi 6 / 6E / 7) ──
+  // Catches "wifi 7 ap", "wi-fi 6e aps", "2 wifi 7 access points" — phrases that
+  // reference an AP generation without specifying a model. These typically follow
+  // Claude recommending Wi-Fi options and the user replying "go with the wifi 7
+  // AP". Captured here so buildQuoteResponse can append an AP-choice clarify
+  // alongside any other items resolved from the same message. If a CW model was
+  // already matched for the same generation (e.g., "CW9172I"), the category is
+  // considered already resolved and dropped.
+  const unresolvedCategories = [];
+  const WIFI_CAT_RE = /(?:(\d+)\s*[x×]?\s*)?(?:the\s+)?(?:meraki\s+|cisco\s+)?(?:wi[\s-]?fi|wifi)\s*(7|6e|6)\s*(?:ap|aps|access\s*points?)\b/gi;
+  let _wcm;
+  const _seenCats = new Set();
+  while ((_wcm = WIFI_CAT_RE.exec(text)) !== null) {
+    const qty = _wcm[1] ? parseInt(_wcm[1]) : 1;
+    const gen = _wcm[2].toUpperCase();  // "7" | "6E" | "6"
+    const key = `${gen}:${qty}`;
+    if (_seenCats.has(key)) continue;
+    _seenCats.add(key);
+    // Skip if a matching CW/MR model already resolved this generation
+    const alreadyResolved = items.some(({ baseSku }) => {
+      const bu = baseSku.toUpperCase();
+      if (gen === '7')  return /^CW917/.test(bu);
+      if (gen === '6E') return /^CW916/.test(bu);
+      if (gen === '6')  return /^MR/.test(bu);
+      return false;
+    });
+    if (alreadyResolved) continue;
+    unresolvedCategories.push({ kind: 'ap', generation: gen, qty });
+  }
+
+  // Bare category request with no SKUs — emit as clarification so the bot
+  // prompts the user to pick a specific model instead of returning nothing.
+  if (items.length === 0 && unresolvedCategories.length > 0 && !isAdvisory && !isRevision) {
+    const msg = _formatUnresolvedCategoryPrompt(unresolvedCategories, { preamble: true });
+    return {
+      items: [],
+      isQuote: false,
+      isClarification: true,
+      clarificationMessage: msg,
+      unresolvedCategories
+    };
+  }
+
   if (items.length === 0) {
     if (isRevision || isAdvisory) {
-      return { items: [], requestedTerm, modifiers, requestedTier, isAdvisory, isRevision, showPricing };
+      return { items: [], requestedTerm, modifiers, requestedTier, isAdvisory, isRevision, showPricing, unresolvedCategories };
     }
     return null;
   }
-  return { items, requestedTerm, modifiers, requestedTier, isAdvisory, isRevision, showPricing };
+  return { items, requestedTerm, modifiers, requestedTier, isAdvisory, isRevision, showPricing, unresolvedCategories };
+}
+
+// ─── Unresolved AP category → clarify-text helper ───────────────────────────
+// Given an array of { kind, generation, qty }, build a human-readable prompt
+// listing top SKU choices for each generation. Used by parseMessage (bare
+// category request) and buildQuoteResponse (items + category combo).
+function _formatUnresolvedCategoryPrompt(cats, { preamble = false } = {}) {
+  const GEN_OPTIONS = {
+    '7':  { label: 'Wi-Fi 7',  skus: ['CW9172I', 'CW9174I', 'CW9176D1', 'CW9176I', 'CW9178I'], note: 'indoor enterprise' },
+    '6E': { label: 'Wi-Fi 6E', skus: ['CW9162I', 'CW9164I', 'CW9166D1', 'CW9166I', 'CW9167I'], note: 'indoor enterprise' },
+    '6':  { label: 'Wi-Fi 6',  skus: ['MR36', 'MR44', 'MR46', 'MR57', 'MR76'], note: 'indoor enterprise' }
+  };
+  const lines = [];
+  if (preamble) lines.push(`Which access point model do you want?`);
+  for (const { generation, qty } of cats) {
+    const opt = GEN_OPTIONS[generation];
+    if (!opt) continue;
+    const qtyStr = qty > 1 ? ` (qty: ${qty})` : '';
+    lines.push(`**${opt.label} AP${qtyStr}** — ${opt.skus.join(', ')}`);
+  }
+  lines.push(`Reply with the specific model (e.g., "${GEN_OPTIONS[cats[0].generation]?.skus[0] || 'CW9172I'}") and I'll add it to the quote.`);
+  return lines.join('\n');
 }
 
 // ─── Price Formatting ────────────────────────────────────────────────────────
@@ -3987,6 +4052,12 @@ function buildQuoteResponse(parsed) {
         lines.push(`💡 **Uplink Module:** ${profile.family} ships without uplink module. Popular choice: ${mods.modules[0].sku} (${mods.modules[0].ports}x ${mods.modules[0].speed} ${mods.modules[0].type}).`);
       }
     }
+  }
+
+  // Unresolved AP category phrases — append clarify prompt alongside the quote
+  if (parsed.unresolvedCategories && parsed.unresolvedCategories.length > 0) {
+    lines.push('');
+    lines.push(`⚠️ **AP model not specified** — the quote above covers the other items. ${_formatUnresolvedCategoryPrompt(parsed.unresolvedCategories, { preamble: false })}`);
   }
 
   return { message: lines.join('\n').trim(), needsLlm: false };
@@ -5306,6 +5377,16 @@ Hard rules:
                   return;
                 }
 
+                // If CF stripped a Wi-Fi category phrase during extraction,
+                // re-detect from the original input and merge so the bot
+                // still prompts for an AP choice alongside the quote.
+                if (quoteText !== text && (!quoteParsed.unresolvedCategories || quoteParsed.unresolvedCategories.length === 0)) {
+                  const fromOriginal = parseMessage(text);
+                  if (fromOriginal && fromOriginal.unresolvedCategories && fromOriginal.unresolvedCategories.length > 0) {
+                    quoteParsed.unresolvedCategories = fromOriginal.unresolvedCategories;
+                  }
+                }
+
                 // Normal quote — build the response
                 const quoteResult = buildQuoteResponse(quoteParsed);
                 if (quoteResult.message && !quoteResult.needsLlm) {
@@ -5618,6 +5699,17 @@ Hard rules:
             const quoteText = classification.extracted || input;
             const quoteParsed = parseMessage(quoteText);
             if (quoteParsed && !quoteParsed.isClarification) {
+              // If the CF classifier stripped a Wi-Fi category phrase during
+              // extraction (e.g., "MX75 with the Wifi 7 AP, and 3 years" →
+              // "MX75 3 year"), re-detect from the original input and merge.
+              // This ensures the AP clarify prompt fires even when the
+              // classifier is terse.
+              if (quoteText !== input && (!quoteParsed.unresolvedCategories || quoteParsed.unresolvedCategories.length === 0)) {
+                const fromOriginal = parseMessage(input);
+                if (fromOriginal && fromOriginal.unresolvedCategories && fromOriginal.unresolvedCategories.length > 0) {
+                  quoteParsed.unresolvedCategories = fromOriginal.unresolvedCategories;
+                }
+              }
               const quoteResult = buildQuoteResponse(quoteParsed);
               if (quoteResult.message && !quoteResult.needsLlm) {
                 result.layer = 'cf-deterministic';

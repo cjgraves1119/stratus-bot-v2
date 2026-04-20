@@ -21,6 +21,56 @@ const PRICES = catalog.prices || {};
 const _pricesJson = require('./src/data/prices.json');
 const prices = _pricesJson.prices || {};
 
+// ─── Real parseMessage loader (CJS shim of src/index.js) ─────────────────────
+// Rationale: testParseItems() below is a simplified mini-parser that does NOT
+// exercise the real parseMessage(). Every parser bug fixed in recent sessions
+// (preamble strip, qty-term collision, unicode ×, X-greedy absorption,
+// requestedTerm detection) lives in the real parseMessage and would pass
+// silently in the mini-parser. This shim transforms the ES-module worker
+// source into a CJS module so Node can require() it directly.
+function buildParserShim() {
+  const path = require('path');
+  const os = require('os');
+  const here = __dirname;
+  let src = fs.readFileSync(path.join(here, 'src/index.js'), 'utf8');
+
+  const escPath = p => path.join(here, p).replace(/\\/g, '\\\\');
+  src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m,
+    `const pricesData = require('${escPath('src/data/prices.json')}');`);
+  src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m,
+    `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
+  src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m,
+    `const specsData = require('${escPath('src/data/specs.json')}');`);
+  src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m,
+    `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+
+  // Strip `export default { ... };` (the Worker handler) — its fetch/scheduled
+  // bodies pull in classes/globals that don't exist under plain Node.
+  const edIdx = src.indexOf('export default');
+  if (edIdx > -1) {
+    let depth = 0, started = false, end = edIdx;
+    for (let i = edIdx; i < src.length; i++) {
+      if (src[i] === '{') { depth++; started = true; }
+      if (src[i] === '}') { depth--; if (started && depth === 0) { end = i + 1; break; } }
+    }
+    src = src.slice(0, edIdx) + src.slice(end + 1);
+  }
+
+  src += '\nmodule.exports = { parseMessage, buildStratusUrl: typeof buildStratusUrl !== "undefined" ? buildStratusUrl : null, getLicenseSkus: typeof getLicenseSkus !== "undefined" ? getLicenseSkus : null, validateSku: typeof validateSku !== "undefined" ? validateSku : null, applySuffix: typeof applySuffix !== "undefined" ? applySuffix : null };\n';
+
+  const shimPath = path.join(os.tmpdir(), `stratus-parser-shim-${process.pid}.cjs`);
+  fs.writeFileSync(shimPath, src);
+  return require(shimPath);
+}
+
+let _realParseMessage = null;
+try {
+  _realParseMessage = buildParserShim().parseMessage;
+} catch (e) {
+  console.warn(`⚠️  Could not build parseMessage shim: ${e.message}`);
+  console.warn('   Parser integration tests will be skipped.');
+}
+
 // ─── Sync Verification ──────────────────────────────────────────────────────
 // Extracts a function body from source code and returns a normalized hash.
 // This catches drift between test-local.js and index.js.
@@ -2111,6 +2161,273 @@ for (const test of allTests) {
   } else {
     console.log(`❌ FAIL — ${detail}`);
     failed++;
+  }
+}
+
+// ─── parseMessage integration tests (uses REAL parseMessage via CJS shim) ───
+// These fixtures are the regression suite for the real parser. Every entry
+// here corresponds to a bug that actually shipped to prod at some point.
+// If you touch parseMessage in src/index.js, these must stay green.
+if (_realParseMessage) {
+  console.log('\n─── parseMessage integration tests (real src/index.js) ───');
+
+  const parserFixtures = [
+    // ═══════════════════════════════════════════════════════════════════════
+    // Session regression fixtures — bugs fixed on 2026-04-20
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      name: '[PARSER] lic-mv-1yr x 30 → qty=30 (preamble/trailer tolerance)',
+      run: () => {
+        const r = _realParseMessage('lic-mv-1yr x 30');
+        return {
+          pass: r?.directLicense?.sku === 'LIC-MV-1YR' && r?.directLicense?.qty === 30,
+          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+        };
+      },
+    },
+    {
+      name: '[PARSER] LIC-MV-1YR × 30 (unicode ×) → qty=30',
+      run: () => {
+        const r = _realParseMessage('LIC-MV-1YR \u00D7 30');
+        return {
+          pass: r?.directLicense?.sku === 'LIC-MV-1YR' && r?.directLicense?.qty === 30,
+          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "pricing on LIC-MV-1YR x 30" → qty=30 (CF rewrite shape)',
+      run: () => {
+        const r = _realParseMessage('pricing on LIC-MV-1YR x 30');
+        return {
+          pass: r?.directLicense?.sku === 'LIC-MV-1YR' && r?.directLicense?.qty === 30,
+          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "quote me LIC-ENT-3YR x 50" → qty=50',
+      run: () => {
+        const r = _realParseMessage('quote me LIC-ENT-3YR x 50');
+        return {
+          pass: r?.directLicense?.sku === 'LIC-ENT-3YR' && r?.directLicense?.qty === 50,
+          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "LIC-MV-3YR qty 12" → qty=12',
+      run: () => {
+        const r = _realParseMessage('LIC-MV-3YR qty 12');
+        return {
+          pass: r?.directLicense?.sku === 'LIC-MV-3YR' && r?.directLicense?.qty === 12,
+          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "5 MR36 3 year" → qty=5, term=3 (not MR36x3)',
+      run: () => {
+        const r = _realParseMessage('5 MR36 3 year');
+        const it = r?.items?.[0];
+        return {
+          pass: it?.baseSku === 'MR36' && it?.qty === 5 && r?.requestedTerm === 3,
+          actual: `items=${JSON.stringify(r?.items?.map(i => ({ sku: i.baseSku, qty: i.qty })))} term=${r?.requestedTerm}`,
+        };
+      },
+    },
+    {
+      name: '[PARSER] "10 MR44 5yr" → qty=10, term=5 (no qty-term collision)',
+      run: () => {
+        const r = _realParseMessage('10 MR44 5yr');
+        const it = r?.items?.[0];
+        return {
+          pass: it?.baseSku === 'MR44' && it?.qty === 10 && r?.requestedTerm === 5,
+          actual: `items=${JSON.stringify(r?.items?.map(i => ({ sku: i.baseSku, qty: i.qty })))} term=${r?.requestedTerm}`,
+        };
+      },
+    },
+    {
+      name: '[PARSER] "MR36x10" → baseSku=MR36, qty=10 (not MR36X)',
+      run: () => {
+        const r = _realParseMessage('MR36x10');
+        const it = r?.items?.[0];
+        return {
+          pass: it?.baseSku === 'MR36' && it?.qty === 10,
+          actual: JSON.stringify(r?.items?.map(i => ({ sku: i.baseSku, qty: i.qty }))),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "quote 10 MR36 just 3yr" → requestedTerm=3',
+      run: () => {
+        const r = _realParseMessage('quote 10 MR36 just 3yr');
+        const it = r?.items?.[0];
+        return {
+          pass: it?.baseSku === 'MR36' && it?.qty === 10 && r?.requestedTerm === 3,
+          actual: `items=${JSON.stringify(r?.items?.map(i => ({ sku: i.baseSku, qty: i.qty })))} term=${r?.requestedTerm}`,
+        };
+      },
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // General parseMessage coverage — not session-specific but high-value
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      name: '[PARSER] single "MR44" → qty=1',
+      run: () => {
+        const r = _realParseMessage('MR44');
+        const it = r?.items?.[0];
+        return {
+          pass: it?.baseSku === 'MR44' && it?.qty === 1,
+          actual: JSON.stringify(r?.items?.map(i => ({ sku: i.baseSku, qty: i.qty }))),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "2x MR57" → qty=2 (x-shorthand with space)',
+      run: () => {
+        const r = _realParseMessage('2x MR57');
+        const it = r?.items?.[0];
+        return {
+          pass: it?.baseSku === 'MR57' && it?.qty === 2,
+          actual: JSON.stringify(r?.items?.map(i => ({ sku: i.baseSku, qty: i.qty }))),
+        };
+      },
+    },
+    {
+      name: '[PARSER] mixed "5 MR46 and 2 MS225-24P" → two items',
+      run: () => {
+        const r = _realParseMessage('quote 5 MR46 and 2 MS225-24P');
+        const skus = (r?.items || []).map(i => i.baseSku);
+        const qtys = (r?.items || []).map(i => i.qty);
+        return {
+          pass: skus.includes('MR46') && skus.includes('MS225-24P') &&
+                qtys.includes(5) && qtys.includes(2),
+          actual: JSON.stringify(r?.items?.map(i => ({ sku: i.baseSku, qty: i.qty }))),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "LIC-ENT-3YR" bare → qty=1 directLicense',
+      run: () => {
+        const r = _realParseMessage('LIC-ENT-3YR');
+        return {
+          pass: r?.directLicense?.sku === 'LIC-ENT-3YR' && r?.directLicense?.qty === 1,
+          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+        };
+      },
+    },
+    {
+      name: '[PARSER] multi-line licenses CSV → directLicenseList',
+      run: () => {
+        const r = _realParseMessage('LIC-ENT-3YR,10\nLIC-MS225-24P-3YR,3');
+        return {
+          pass: Array.isArray(r?.directLicenseList) && r.directLicenseList.length === 2 &&
+                r.directLicenseList[0].qty === 10 && r.directLicenseList[1].qty === 3,
+          actual: JSON.stringify(r?.directLicenseList ?? null),
+        };
+      },
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Wi-Fi category phrase detection (2026-04-20)
+    // Bug: "MX75 with the Wifi 7 AP, and 3 years" produced a quote with only
+    // MX75 — silently dropped the AP reference that Claude had previously
+    // recommended as CW9172I. Fix: parseMessage now flags unresolved AP
+    // category phrases in `unresolvedCategories` so buildQuoteResponse can
+    // append an AP-choice clarify prompt alongside the quote.
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      name: '[PARSER] "MX75 with the Wifi 7 AP, and 3 years" → MX75 + wifi-7 unresolved',
+      run: () => {
+        const r = _realParseMessage('MX75 with the Wifi 7 AP, and 3 years');
+        const it = r?.items?.[0];
+        const cat = r?.unresolvedCategories?.[0];
+        return {
+          pass: it?.baseSku === 'MX75' && r?.requestedTerm === 3 &&
+                cat?.kind === 'ap' && cat?.generation === '7' && cat?.qty === 1,
+          actual: `items=${JSON.stringify(r?.items)} term=${r?.requestedTerm} cats=${JSON.stringify(r?.unresolvedCategories)}`,
+        };
+      },
+    },
+    {
+      name: '[PARSER] "MX75 and 5 wifi 6 aps" → MX75 + wifi-6 qty=5 unresolved',
+      run: () => {
+        const r = _realParseMessage('MX75 and 5 wifi 6 aps');
+        const it = r?.items?.[0];
+        const cat = r?.unresolvedCategories?.[0];
+        return {
+          pass: it?.baseSku === 'MX75' && cat?.generation === '6' && cat?.qty === 5,
+          actual: `items=${JSON.stringify(r?.items?.map(i => i.baseSku))} cats=${JSON.stringify(r?.unresolvedCategories)}`,
+        };
+      },
+    },
+    {
+      name: '[PARSER] "MX75 and 10 wi-fi 6e access points" → 6E qty=10 unresolved',
+      run: () => {
+        const r = _realParseMessage('MX75 and 10 wi-fi 6e access points');
+        const cat = r?.unresolvedCategories?.[0];
+        return {
+          pass: cat?.generation === '6E' && cat?.qty === 10,
+          actual: JSON.stringify(r?.unresolvedCategories),
+        };
+      },
+    },
+    {
+      name: '[PARSER] "MX75 with CW9172I and 3 years" → no category (resolved by SKU)',
+      run: () => {
+        const r = _realParseMessage('MX75 with CW9172I and 3 years');
+        const skus = (r?.items || []).map(i => i.baseSku);
+        const cats = r?.unresolvedCategories || [];
+        return {
+          pass: skus.includes('MX75') && skus.includes('CW9172I') && cats.length === 0,
+          actual: `items=${JSON.stringify(skus)} cats=${JSON.stringify(cats)}`,
+        };
+      },
+    },
+    {
+      name: '[PARSER] bare "wifi 7 ap" → isClarification with wifi-7 prompt',
+      run: () => {
+        const r = _realParseMessage('wifi 7 ap');
+        const cat = r?.unresolvedCategories?.[0];
+        return {
+          pass: r?.isClarification === true &&
+                /CW9172I/.test(r?.clarificationMessage || '') &&
+                cat?.generation === '7',
+          actual: `isClarification=${r?.isClarification} msg="${(r?.clarificationMessage||'').substring(0,80)}" cat=${JSON.stringify(cat)}`,
+        };
+      },
+    },
+    {
+      name: '[PARSER] bare "5 wifi 6 aps" → isClarification with wifi-6 qty=5',
+      run: () => {
+        const r = _realParseMessage('5 wifi 6 aps');
+        const cat = r?.unresolvedCategories?.[0];
+        return {
+          pass: r?.isClarification === true && cat?.generation === '6' && cat?.qty === 5 &&
+                /MR36/.test(r?.clarificationMessage || ''),
+          actual: `isClarification=${r?.isClarification} cat=${JSON.stringify(cat)}`,
+        };
+      },
+    },
+  ];
+
+  for (const t of parserFixtures) {
+    process.stdout.write(`  ${t.name}... `);
+    try {
+      const res = t.run();
+      if (res.pass) {
+        console.log('✅ PASS');
+        passed++;
+      } else {
+        console.log(`❌ FAIL — ${res.actual}`);
+        failed++;
+      }
+    } catch (e) {
+      console.log(`❌ THROW — ${e.message}`);
+      failed++;
+    }
   }
 }
 
