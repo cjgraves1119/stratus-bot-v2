@@ -6523,18 +6523,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!record_id && !quote_number) {
           return { success: false, error: 'record_id or quote_number is required' };
         }
-        // ── Confirm-consent inference from user prompt ─────────────────────
-        // Llama sometimes refuses to propagate confirm:true into the tool
-        // call even when the user's prompt explicitly said "with confirm:true"
-        // or "confirm true". Detect that in env.__USER_PROMPT_RAW and treat
-        // it as an explicit confirmation so the delete actually runs.
-        if (confirm !== true && env && typeof env.__USER_PROMPT_RAW === 'string') {
-          const raw = env.__USER_PROMPT_RAW;
-          if (/\bconfirm\s*[:=]?\s*true\b/i.test(raw) || /\bwith\s+confirm\s+true\b/i.test(raw)) {
-            console.log('[DELETE] Inferred confirm:true from user prompt — user said "confirm true" explicitly');
-            confirm = true;
-          }
-        }
+        // NOTE: Earlier revisions inferred confirm:true from env.__USER_PROMPT_RAW
+        // when the user prompt included "confirm:true". That caused test 25
+        // (mismatch detection) to actually delete the seed quote, cascading
+        // failures through downstream tests that depended on that seed data.
+        // We now require the model to propagate confirm:true into the tool call
+        // explicitly — the safer posture and what the prompt rules instruct.
         if (confirm !== true) {
           return {
             success: false,
