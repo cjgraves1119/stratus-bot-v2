@@ -4942,8 +4942,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const createStart = Date.now();
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
         const parsed = parseZohoResponse(createResult, `${module_name} record creation`);
-        const createdId = parsed?.data?.[0]?.details?.id || parsed?.data?.[0]?.id || null;
-        const createIsError = parsed?.data?.[0]?.status === 'error';
+        // parseZohoResponse returns { success, message, record_id, data: <single record> }
+        // — not an array. Pull from parsed.record_id (success path) or parsed.data.details.id.
+        const createdId = parsed?.record_id
+          || parsed?.data?.details?.id
+          || parsed?.data?.id
+          || createResult?.data?.[0]?.details?.id
+          || null;
+        const createIsError = parsed?.success === false || parsed?.data?.status === 'error';
         const createRecordName = recordData.Subject || recordData.Deal_Name || recordData.Last_Name || recordData.Account_Name || null;
         let createUndoToken = null;
         let createUrl = null;
@@ -4962,7 +4968,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           recordName: createRecordName,
           status: createIsError ? 'error' : 'success',
           durationMs: Date.now() - createStart,
-          errorMessage: createIsError ? parsed.data[0].message : null,
+          errorMessage: createIsError ? (parsed?.message || parsed?.data?.message || 'unknown') : null,
           details: { fields: Object.keys(recordData) },
           preState: null,
           postState: createdId ? { id: createdId, ...recordData } : null,
@@ -5042,7 +5048,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.log(`[GCHAT] Quote update response:`, JSON.stringify(updateResult)?.substring(0, 500));
         }
         const updateParsed = parseZohoResponse(updateResult, `${module_name} record update`);
-        const updateIsError = updateParsed?.data?.[0]?.status === 'error';
+        // parseZohoResponse normalizes .data to a single record (not array).
+        const updateIsError = updateParsed?.success === false || updateParsed?.data?.status === 'error';
         let updateUndoToken = null;
         let updateUrl = null;
         let updateUserSummary = null;
@@ -5061,7 +5068,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           recordName: preUpdateSnapshot?.Subject || preUpdateSnapshot?.Deal_Name || preUpdateSnapshot?.Account_Name || null,
           status: updateIsError ? 'error' : 'success',
           durationMs: Date.now() - updateStart,
-          errorMessage: updateIsError ? updateParsed.data[0].message : null,
+          errorMessage: updateIsError ? (updateParsed?.message || updateParsed?.data?.message || 'unknown') : null,
           details: { fields: Object.keys(data) },
           preState: preUpdateSnapshot,
           postState: { id: record_id, ...data },
@@ -14056,7 +14063,10 @@ Return ONLY a JSON object (no markdown, no explanation):
               bot: _botDb,
               personId: _pid,
               requestText: apiBody.text,
-              responsePath: apiResult?.handlerType || 'api-quote',
+              // CHECK constraint: response_path must be in
+              //   ('deterministic', 'claude', 'crm_agent', 'pricing', 'image', 'error')
+              responsePath: apiResult?.error ? 'error'
+                : (apiResult?.handlerType === 'quote' ? 'pricing' : 'deterministic'),
               responseText: typeof apiResult === 'string' ? apiResult : JSON.stringify(apiResult || ''),
               durationMs: null,
               errorMessage: apiResult?.error || null
@@ -14074,9 +14084,13 @@ Return ONLY a JSON object (no markdown, no explanation):
               bot: _botDb,
               personId: _pid,
               requestText: apiBody.text,
-              responsePath: url.pathname === '/api/chat-waterfall'
-                ? (`waterfall:${apiResult?.tierUsed || 'unknown'}`)
-                : 'api-chat',
+              // response_path is CHECK-constrained to:
+              //   ('deterministic', 'claude', 'crm_agent', 'pricing', 'image', 'error')
+              // Map waterfall tiers: deterministic stays, llama/gemma/claude map to 'crm_agent'
+              // (tool-use CRM loop), errors map to 'error'. Raw tier goes into model.
+              responsePath: apiResult?.error
+                ? 'error'
+                : (apiResult?.tierUsed === 'deterministic' ? 'deterministic' : 'crm_agent'),
               model: apiResult?.model || null,
               durationMs: apiResult?.totalMs || null,
               responseText: typeof apiResult === 'string'
