@@ -2749,11 +2749,13 @@ function buildQuoteFromV2(v2, rawText) {
   // deterministic handlers for all of them.
   const rawStr = typeof rawText === 'string' ? rawText : '';
 
-  // 1. Duo / Umbrella / short-form security licenses — V2 compresses SKUs
-  //    (e.g. "DUO-E-3YR" instead of "LIC-DUO-ESSENTIALS-3YR"). parseMessage
-  //    has full handlers at LIC-DUO-{TIER}-{1,3,5}YR and
-  //    LIC-UMB-{DNS|SIG}-{ESS|ADV}-K9-{1,3,5}YR.
-  if (/\b(DUO|UMBRELLA|UMB)\b/i.test(rawStr)) return null;
+  // 1. Duo / Umbrella — no longer short-circuited.
+  //    The V2 prompt now teaches the canonical SKU format
+  //    (LIC-DUO-{TIER}-{1,3,5}YR, LIC-UMB-{DNS|SIG}-{ESS|ADV}-K9-{1,3,5}YR)
+  //    AND the "all duo"/"all umbrella" cartesian expansion rule with
+  //    separate_quotes=true. Items are still validated against prices.json
+  //    below, so hallucinated SKUs still bounce to parseMessage as a
+  //    safety net.
 
   // 2. Catalyst M-series (C9300, C9300L, C9300X, C9200L, C8111, C8455) —
   //    V2 prompt only teaches Meraki families. parseMessage + validateSku
@@ -6108,10 +6110,16 @@ Hard rules:
                   quoteParsed = null;
                 }
               }
-              // Fallback: if V2 adapter produced nothing, parse the extracted
-              // text (or the original when no extraction was provided). This
-              // mirrors the pre-V2 path.
-              if (!quoteParsed) quoteParsed = parseMessage(quoteText);
+              // Fallback: if V2 adapter produced nothing, parse the ORIGINAL
+              // message text — NOT V2's stripped `extracted` string. The
+              // extracted field is just a SKU+qty list (e.g. "1 LIC-DUO-ESSENTIALS-3YR,
+              // 1 LIC-DUO-ADVANTAGE-3YR, ...") and loses the NL signals
+              // parseMessage relies on ("all duo", "as separate links",
+              // "license only", pronoun refs, etc.). Using the original text
+              // lets the existing parseMessage NL handlers do their job when
+              // the V2 adapter returns null for any reason (short-circuit,
+              // hallucinated SKU, pronoun reference, etc.).
+              if (!quoteParsed) quoteParsed = parseMessage(text);
               if (quoteParsed) {
                 T.step('wx-parse', 'exit', { result: quoteParsed._fromV2 ? 'v2-direct' : 'parsed', items: quoteParsed.items?.length || 0, advisory: quoteParsed.isAdvisory, revision: quoteParsed.isRevision });
 
