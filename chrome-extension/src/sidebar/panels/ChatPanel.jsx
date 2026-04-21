@@ -400,7 +400,7 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
       }));
 
       // Build effective context: if user selected a specific email, override customerEmail
-      const effectiveContext = selectedContextEmail === '__none__'
+      let effectiveContext = selectedContextEmail === '__none__'
         ? null
         : selectedContextEmail && emailContext
           ? { ...emailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
@@ -419,6 +419,31 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
         const source = manualRecord ? 'pinned by user' : 'currently viewing';
         textToSend = `${zohoHint}\n(Source: ${source})\n\nUser message: ${messageText}`;
       }
+
+      // ── Structured context flags passed to the worker ──
+      // `source: 'chat-tab'` tells /api/chat-waterfall to SKIP the Tier 0
+      // deterministic engine pre-check — URL quotes live in the Quote tab,
+      // Chat tab quote requests always go through Zoho.
+      // `pinnedAccount` gives the worker a resolved Account id so it skips the
+      // 4-tier account waterfall entirely and uses the user's manual pick.
+      const pinnedAccount = (() => {
+        if (!activeRecord) return null;
+        // Accounts: the record IS the account
+        if (activeRecord.module === 'Accounts') {
+          return { id: activeRecord.recordId, name: activeRecord.recordName || activeRecord.accountName, module: 'Accounts' };
+        }
+        // Contacts/Deals/Quotes: use the parent account if we captured it
+        if (activeRecord.accountId) {
+          return { id: activeRecord.accountId, name: activeRecord.accountName || null, module: activeRecord.module };
+        }
+        return null;
+      })();
+
+      effectiveContext = {
+        ...(effectiveContext || {}),
+        source: 'chat-tab',
+        ...(pinnedAccount ? { pinnedAccount } : {}),
+      };
 
       // ── Progress tracking ────────────────────────────────────────────────
       // Generate a short id, send it with the chat request, and poll the
@@ -528,32 +553,45 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
       if (typeof obj === 'object' && obj.name) return obj.name;
       return null;
     };
+    // Zoho returns lookup fields like Account_Name as {id, name} objects.
+    // Capture the id so we can pass pinnedAccount.id to the worker and skip
+    // the account resolution waterfall entirely.
+    const getId = (obj) => {
+      if (obj && typeof obj === 'object' && obj.id) return String(obj.id);
+      return null;
+    };
     let recordName = null;
     let accountName = null;
+    let accountId = null;
     let email = null;
     if (mod === 'Accounts') {
       recordName = getV(record.name) || getV(record.Account_Name);
       accountName = recordName;
+      accountId = record.id; // the record IS the account
     } else if (mod === 'Contacts') {
       const fn = getV(record.First_Name) || '';
       const ln = getV(record.Last_Name) || '';
       recordName = `${fn} ${ln}`.trim() || null;
       accountName = getV(record.Account_Name);
+      accountId = getId(record.Account_Name);
       email = getV(record.Email);
     } else if (mod === 'Deals') {
       recordName = getV(record.Deal_Name);
       accountName = getV(record.Account_Name);
+      accountId = getId(record.Account_Name);
     } else if (mod === 'Quotes') {
       const subject = getV(record.Subject);
       const quoteNum = getV(record.Quote_Number);
       recordName = quoteNum ? `${subject || 'Quote'} #${quoteNum}` : subject;
       accountName = getV(record.Account_Name);
+      accountId = getId(record.Account_Name);
     }
     setManualRecord({
       module: mod,
       recordId: record.id,
       recordName: recordName || record.id,
       accountName: accountName || null,
+      accountId: accountId || null,
       email: email || null,
     });
     // Collapse dropdown + search UI
@@ -779,6 +817,11 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
                             recordId: zohoPageContext.recordId,
                             recordName: zohoPageContext.recordName,
                             accountName: zohoPageContext.accountName,
+                            // If the current page IS an Account, the recordId is the accountId.
+                            // Otherwise preserve any accountId the page context captured.
+                            accountId: zohoPageContext.module === 'Accounts'
+                              ? zohoPageContext.recordId
+                              : (zohoPageContext.accountId || null),
                             email: zohoPageContext.email,
                           });
                           setContextDropdownOpen(false);

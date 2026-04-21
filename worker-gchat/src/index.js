@@ -4276,16 +4276,151 @@ async function resolveAccountByDomain(domain, env) {
 }
 
 // Look up a Contact by the exact customerEmail from email context.
+// Checks BOTH the primary Email field and the Secondary_Email field so we catch
+// customers who have migrated email domains (e.g. Jack Shy @ Bekum America:
+// current email j.shy@bekum.com, legacy/primary still on the Contact record
+// as jshy@bekumamerica.com).
 async function resolveContactByEmail(email, env) {
   if (!email || typeof email !== 'string') return null;
   const e = email.trim().toLowerCase();
   if (!e.includes('@')) return null;
+  const fields = 'id,Full_Name,Email,Secondary_Email,Account_Name,Title,Phone';
+  // Try primary Email first, then Secondary_Email as a fallback.
+  const criteria = [`(Email:equals:${e})`, `(Secondary_Email:equals:${e})`];
+  for (const c of criteria) {
+    try {
+      const r = await zohoApiCall('GET',
+        `Contacts/search?criteria=${encodeURIComponent(c)}&fields=${fields}&per_page=1`, env);
+      if (r?.data?.[0]) return r.data[0];
+    } catch (_) {}
+  }
+  return null;
+}
+
+// ─── Account Resolution Waterfall ─────────────────────────────────────────────
+// Four-tier resolver used when the extension surfaces an email or the user
+// mentions an account by name. Returns the first match with a `source` tag so
+// callers can prompt the LLM with confidence ("website match" vs "fuzzy match
+// — please confirm"). Tiers:
+//   1. website     — Account.Website equals the email domain (fast + exact)
+//   2. contact     — Contact.Email or Secondary_Email equals the sender →
+//                    hop to Account (handles rebrands like bekumamerica.com
+//                    → bekum.com where the Account website never got updated)
+//   3. alias-kv    — manual domain→accountId map in CONVERSATION_KV
+//                    (key prefix `acct-alias:{domain}`). Managed via
+//                    /api/account-alias POST endpoint.
+//   4. fuzzy-name  — Account_Name starts_with tokens extracted from sender
+//                    display name or a user-provided nameHint. Low confidence.
+async function getAccountAlias(domain, env) {
+  if (!env || !env.CONVERSATION_KV) return null;
+  const d = normalizeDomain(domain);
+  if (!d) return null;
   try {
-    const r = await zohoApiCall('GET',
-      `Contacts/search?criteria=(Email:equals:${encodeURIComponent(e)})&fields=id,Full_Name,Email,Account_Name,Title,Phone&per_page=1`, env);
-    if (r?.data?.[0]) return r.data[0];
+    const stored = await env.CONVERSATION_KV.get(`acct-alias:${d}`, 'json');
+    if (stored?.accountId) return stored; // { accountId, accountName, createdAt }
   } catch (_) {}
   return null;
+}
+
+async function setAccountAlias(domain, accountId, accountName, env) {
+  if (!env || !env.CONVERSATION_KV) return false;
+  const d = normalizeDomain(domain);
+  if (!d || !accountId) return false;
+  try {
+    await env.CONVERSATION_KV.put(
+      `acct-alias:${d}`,
+      JSON.stringify({ accountId, accountName: accountName || null, createdAt: new Date().toISOString() }),
+      { expirationTtl: 60 * 60 * 24 * 365 * 5 } // 5 years
+    );
+    return true;
+  } catch (_) { return false; }
+}
+
+async function fetchAccountById(accountId, env) {
+  if (!accountId) return null;
+  const fields = 'id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Phone,Website';
+  try {
+    const r = await zohoApiCall('GET', `Accounts/${encodeURIComponent(accountId)}?fields=${fields}`, env);
+    return r?.data?.[0] || null;
+  } catch (_) { return null; }
+}
+
+async function fuzzyAccountSearch(nameHint, env) {
+  if (!nameHint || typeof nameHint !== 'string') return null;
+  // Extract the most distinctive token (longest word, skip common suffixes).
+  const SKIP = new Set(['inc', 'corp', 'llc', 'ltd', 'company', 'co', 'the', 'and', 'of', 'a', 'an', 'corporation', 'group', 'services', 'solutions', 'systems']);
+  const tokens = nameHint.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length >= 3 && !SKIP.has(t));
+  if (!tokens.length) return null;
+  // Sort by length (longer = more distinctive) and take top 1.
+  tokens.sort((a, b) => b.length - a.length);
+  const token = tokens[0];
+  const fields = 'id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Phone,Website';
+  try {
+    const r = await zohoApiCall('GET',
+      `Accounts/search?criteria=(Account_Name:starts_with:${encodeURIComponent(token)})&fields=${fields}&per_page=3`, env);
+    if (r?.data?.length) {
+      // Return the first hit but flag as fuzzy so the LLM asks for confirmation.
+      return { candidates: r.data, token };
+    }
+  } catch (_) {}
+  return null;
+}
+
+// Main resolver. Accepts any combination of { domain, email, nameHint }.
+// Returns { account, contact, source, confidence, fuzzyCandidates } or null.
+async function resolveAccountWaterfall({ domain, email, nameHint } = {}, env) {
+  const normDomain = normalizeDomain(domain);
+  const normEmail = email ? email.trim().toLowerCase() : null;
+  const effectiveDomain = normDomain || (normEmail ? normEmail.split('@')[1] : null);
+
+  // Tier 1 + 2 fire in parallel for speed — they use independent queries.
+  const [t1Account, t2Contact] = await Promise.all([
+    effectiveDomain ? resolveAccountByDomain(effectiveDomain, env) : Promise.resolve(null),
+    normEmail ? resolveContactByEmail(normEmail, env) : Promise.resolve(null),
+  ]);
+
+  // Tier 1 hit.
+  if (t1Account) {
+    // Promote contact if we also found one tied to the same Account, else null.
+    const contact = t2Contact && t2Contact.Account_Name?.id === t1Account.id ? t2Contact : t2Contact || null;
+    return { account: t1Account, contact, source: 'website', confidence: 'high' };
+  }
+
+  // Tier 2 hit.
+  if (t2Contact && t2Contact.Account_Name?.id) {
+    const account = await fetchAccountById(t2Contact.Account_Name.id, env);
+    if (account) {
+      return { account, contact: t2Contact, source: 'contact-email', confidence: 'high' };
+    }
+  }
+
+  // Tier 3: domain alias KV.
+  if (effectiveDomain) {
+    const alias = await getAccountAlias(effectiveDomain, env);
+    if (alias?.accountId) {
+      const account = await fetchAccountById(alias.accountId, env);
+      if (account) {
+        return { account, contact: t2Contact || null, source: 'alias-kv', confidence: 'high' };
+      }
+    }
+  }
+
+  // Tier 4: fuzzy Account name match, only if we have a hint.
+  if (nameHint) {
+    const fuzzy = await fuzzyAccountSearch(nameHint, env);
+    if (fuzzy?.candidates?.length) {
+      return {
+        account: fuzzy.candidates[0],
+        contact: t2Contact || null,
+        source: 'fuzzy-name',
+        confidence: 'low',
+        fuzzyCandidates: fuzzy.candidates
+      };
+    }
+  }
+
+  // No match. Return any Contact we found (useful info) with source=null.
+  return t2Contact ? { account: null, contact: t2Contact, source: 'contact-orphan', confidence: 'low' } : null;
 }
 
 // ─── Gmail API Client ─────────────────────────────────────────────────────────
@@ -13322,7 +13457,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           // Called by the gateway worker (stratus-ai-bot-gateway) for all /api/chat requests.
           // Accepts: { text, emailContext, history, forceModel: 'gemma'|'claude'|undefined, dryRun }
           case '/api/chat-waterfall': {
-            const { text: wText, emailContext: wEc, history: wHistory, forceModel, dryRun: wDryRun, progressId: wProgressId } = apiBody;
+            const { text: wText, emailContext: wEc, history: wHistory, forceModel, dryRun: wDryRun, progressId: wProgressId, source: wSource } = apiBody;
             if (!wText) {
               apiResult = { error: 'text is required' };
               break;
@@ -13365,38 +13500,78 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 wEnrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${wText}`;
               }
 
-              // ── PRE-RESOLVE Account + Contact by customerDomain ──
-              // Added 2026-04-21 (Skty Trading LLC forensic fix).
-              // When the Chrome extension surfaces an email with a customerDomain,
-              // search Zoho Accounts by Website=<domain> BEFORE handing to Llama.
-              // If a matching Account exists, inject its id + completeness status
-              // so Llama skips the search entirely and re-uses the correct record
-              // instead of creating a duplicate by Account_Name:equals:<domain>.
-              if (wEc && (wEc.customerDomain || wEc.customerEmail)) {
+              // ── PRE-RESOLVE Account + Contact (4-tier waterfall) ──
+              // Added 2026-04-21 (Skty Trading LLC) then expanded 2026-04-22 to
+              // handle cross-domain customers like Jack Shy @ Bekum America
+              // (email bekum.com / Account Website bekumamerica.com).
+              //
+              // Priority order:
+              //   0. Pinned account from Chrome extension (user manually selected)
+              //   1. Website equals domain (exact)
+              //   2. Contact email equals (primary OR Secondary_Email) → Account
+              //   3. Domain alias KV lookup
+              //   4. Fuzzy Account name match (low confidence, ask user to confirm)
+              const pinnedAccount = wEc && wEc.pinnedAccount ? wEc.pinnedAccount : null;
+              if (wEc && (pinnedAccount?.id || wEc.customerDomain || wEc.customerEmail || wEc.nameHint)) {
                 try {
-                  const [matchedAcct, matchedContact] = await Promise.all([
-                    wEc.customerDomain ? resolveAccountByDomain(wEc.customerDomain, env) : Promise.resolve(null),
-                    wEc.customerEmail ? resolveContactByEmail(wEc.customerEmail, env) : Promise.resolve(null)
-                  ]);
                   const crmParts = [];
-                  if (matchedAcct) {
-                    const missing = getMissingAccountFields(matchedAcct);
+                  let resolvedAcct = null;
+                  let resolvedContact = null;
+                  let resolvedSource = null;
+
+                  if (pinnedAccount?.id) {
+                    // Tier 0: user manually pinned this record. Fetch full fields and trust it.
+                    const full = await fetchAccountById(pinnedAccount.id, env);
+                    if (full) {
+                      resolvedAcct = full;
+                      resolvedSource = 'pinned';
+                      // Still try to resolve contact separately if email provided.
+                      if (wEc.customerEmail) {
+                        resolvedContact = await resolveContactByEmail(wEc.customerEmail, env);
+                      }
+                    }
+                  }
+
+                  if (!resolvedAcct) {
+                    const result = await resolveAccountWaterfall({
+                      domain: wEc.customerDomain,
+                      email: wEc.customerEmail,
+                      nameHint: wEc.nameHint || wEc.senderName || null
+                    }, env);
+                    if (result) {
+                      resolvedAcct = result.account;
+                      resolvedContact = result.contact;
+                      resolvedSource = result.source;
+                    }
+                  }
+
+                  if (resolvedAcct) {
+                    const missing = getMissingAccountFields(resolvedAcct);
                     const status = missing.length === 0 ? 'COMPLETE' : `INCOMPLETE (missing: ${missing.join(', ')})`;
+                    const sourceLabel = {
+                      'pinned': 'manually pinned by user',
+                      'website': 'matched by website domain',
+                      'contact-email': 'matched via Contact email (handles domain migration)',
+                      'alias-kv': 'matched via domain alias map',
+                      'fuzzy-name': 'fuzzy name match — LOW CONFIDENCE, confirm with user before creating records'
+                    }[resolvedSource] || resolvedSource;
                     crmParts.push(
-                      `Existing Account: "${matchedAcct.Account_Name}" (id: ${matchedAcct.id}). ` +
-                      `Website matches. Fields: ${status}. ` +
-                      `Use THIS account id for all creations — do NOT search by Account_Name, do NOT create a new Account.`
+                      `Existing Account: "${resolvedAcct.Account_Name}" (id: ${resolvedAcct.id}). ` +
+                      `Source: ${sourceLabel}. Fields: ${status}. ` +
+                      (resolvedSource === 'fuzzy-name'
+                        ? `ASK the user "Should I use this account?" before creating any records.`
+                        : `Use THIS account id for all creations — do NOT search by Account_Name, do NOT create a new Account.`)
                     );
-                  } else if (wEc.customerDomain) {
+                  } else if (wEc.customerDomain || wEc.customerEmail) {
                     crmParts.push(
-                      `No existing Account found for domain "${wEc.customerDomain}". ` +
+                      `No existing Account found for domain "${wEc.customerDomain || ''}" or email "${wEc.customerEmail || ''}". ` +
                       `If the user asks to create a quote/deal, you MUST first ask them for the full Account Name (not just a domain), Billing Street, City, State, Zip, Country, and Contact First+Last+Email. ` +
                       `NEVER create an Account with just a domain as the name. NEVER leave billing fields blank.`
                     );
                   }
-                  if (matchedContact) {
+                  if (resolvedContact && !pinnedAccount?.id) {
                     crmParts.push(
-                      `Existing Contact: "${matchedContact.Full_Name}" <${matchedContact.Email}> (id: ${matchedContact.id}). ` +
+                      `Existing Contact: "${resolvedContact.Full_Name}" <${resolvedContact.Email}> (id: ${resolvedContact.id}). ` +
                       `Use THIS contact id — do NOT search or create a new contact.`
                     );
                   }
@@ -13411,9 +13586,12 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               // ── TIER 0: Deterministic Engine Pre-Check ──
               // If the message is a pure SKU/quote request, skip the LLMs entirely.
               // Uses CF Llama for intent classification, then parseMessage for SKU extraction.
-              // Only triggers when forceModel isn't set (respects manual overrides).
+              // Only triggers when forceModel isn't set AND source !== 'chat-tab'.
+              // Chrome Extension Chat tab always wants Zoho quotes, never URL quotes —
+              // URL quoting lives in the dedicated Quote tab instead.
               let deterministicResult = null;
-              if (!forceModel) {
+              const skipDeterministic = wSource === 'chat-tab' || (wEc && wEc.source === 'chat-tab');
+              if (!forceModel && !skipDeterministic) {
                 try {
                   const classification = await classifyWithCF(wText, env);
                   if (classification?.intent === 'quote') {
@@ -13527,6 +13705,28 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
+          // ── Account Alias Management ──
+          // POST { domain, accountId, accountName? } → stores domain→accountId
+          // mapping so future lookups for customers whose email domain differs
+          // from their Zoho Account.Website hit immediately via Tier 3.
+          // GET ?domain=... → returns stored alias if any.
+          case '/api/account-alias': {
+            if (request.method === 'GET') {
+              const domain = url.searchParams.get('domain');
+              const alias = domain ? await getAccountAlias(domain, env) : null;
+              apiResult = alias || { exists: false };
+              break;
+            }
+            const { domain: aDomain, accountId: aId, accountName: aName } = apiBody;
+            if (!aDomain || !aId) {
+              apiResult = { error: 'domain and accountId are required' };
+              break;
+            }
+            const ok = await setAccountAlias(aDomain, aId, aName || null, env);
+            apiResult = { success: ok, domain: normalizeDomain(aDomain), accountId: aId, accountName: aName || null };
+            break;
+          }
+
           // ── Chat: CRM-aware Claude agent for Chrome Extension sidebar ──
           // Routes through the same askClaude() tool-use loop as the GChat bot,
           // giving the extension chat full Zoho CRM capabilities.
@@ -13575,34 +13775,69 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 enrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${chatText}`;
               }
 
-              // Pre-resolve Account + Contact by customerDomain / customerEmail.
-              // Symmetric with /api/chat-waterfall — prevents Claude from duplicating
-              // Accounts when the Chrome extension surfaces an email from a known domain.
-              if (chatEc && (chatEc.customerDomain || chatEc.customerEmail)) {
+              // Pre-resolve Account + Contact (4-tier waterfall — see chat-waterfall).
+              // Symmetric with /api/chat-waterfall — handles cross-domain customers
+              // (e.g. Jack Shy @ Bekum America: email bekum.com / Account Website bekumamerica.com)
+              // and respects manually-pinned records from the Chrome extension.
+              const chatPinnedAccount = chatEc && chatEc.pinnedAccount ? chatEc.pinnedAccount : null;
+              if (chatEc && (chatPinnedAccount?.id || chatEc.customerDomain || chatEc.customerEmail || chatEc.nameHint)) {
                 try {
-                  const [matchedAcct, matchedContact] = await Promise.all([
-                    chatEc.customerDomain ? resolveAccountByDomain(chatEc.customerDomain, env) : Promise.resolve(null),
-                    chatEc.customerEmail ? resolveContactByEmail(chatEc.customerEmail, env) : Promise.resolve(null)
-                  ]);
                   const crmParts = [];
-                  if (matchedAcct) {
-                    const missing = getMissingAccountFields(matchedAcct);
+                  let resolvedAcct = null;
+                  let resolvedContact = null;
+                  let resolvedSource = null;
+
+                  if (chatPinnedAccount?.id) {
+                    const full = await fetchAccountById(chatPinnedAccount.id, env);
+                    if (full) {
+                      resolvedAcct = full;
+                      resolvedSource = 'pinned';
+                      if (chatEc.customerEmail) {
+                        resolvedContact = await resolveContactByEmail(chatEc.customerEmail, env);
+                      }
+                    }
+                  }
+
+                  if (!resolvedAcct) {
+                    const result = await resolveAccountWaterfall({
+                      domain: chatEc.customerDomain,
+                      email: chatEc.customerEmail,
+                      nameHint: chatEc.nameHint || chatEc.senderName || null
+                    }, env);
+                    if (result) {
+                      resolvedAcct = result.account;
+                      resolvedContact = result.contact;
+                      resolvedSource = result.source;
+                    }
+                  }
+
+                  if (resolvedAcct) {
+                    const missing = getMissingAccountFields(resolvedAcct);
                     const status = missing.length === 0 ? 'COMPLETE' : `INCOMPLETE (missing: ${missing.join(', ')})`;
+                    const sourceLabel = {
+                      'pinned': 'manually pinned by user',
+                      'website': 'matched by website domain',
+                      'contact-email': 'matched via Contact email (handles domain migration)',
+                      'alias-kv': 'matched via domain alias map',
+                      'fuzzy-name': 'fuzzy name match — LOW CONFIDENCE, confirm with user before creating records'
+                    }[resolvedSource] || resolvedSource;
                     crmParts.push(
-                      `Existing Account: "${matchedAcct.Account_Name}" (id: ${matchedAcct.id}). ` +
-                      `Website matches. Fields: ${status}. ` +
-                      `Use THIS account id for all creations — do NOT search by Account_Name, do NOT create a new Account.`
+                      `Existing Account: "${resolvedAcct.Account_Name}" (id: ${resolvedAcct.id}). ` +
+                      `Source: ${sourceLabel}. Fields: ${status}. ` +
+                      (resolvedSource === 'fuzzy-name'
+                        ? `ASK the user "Should I use this account?" before creating any records.`
+                        : `Use THIS account id for all creations — do NOT search by Account_Name, do NOT create a new Account.`)
                     );
-                  } else if (chatEc.customerDomain) {
+                  } else if (chatEc.customerDomain || chatEc.customerEmail) {
                     crmParts.push(
-                      `No existing Account found for domain "${chatEc.customerDomain}". ` +
+                      `No existing Account found for domain "${chatEc.customerDomain || ''}" or email "${chatEc.customerEmail || ''}". ` +
                       `If the user asks to create a quote/deal, first ask for the full Account Name (not a domain), Billing Street, City, State, Zip, Country, and Contact First+Last+Email. ` +
                       `NEVER create an Account with just a domain as the name. NEVER leave billing fields blank.`
                     );
                   }
-                  if (matchedContact) {
+                  if (resolvedContact && !chatPinnedAccount?.id) {
                     crmParts.push(
-                      `Existing Contact: "${matchedContact.Full_Name}" <${matchedContact.Email}> (id: ${matchedContact.id}). ` +
+                      `Existing Contact: "${resolvedContact.Full_Name}" <${resolvedContact.Email}> (id: ${resolvedContact.id}). ` +
                       `Use THIS contact id — do NOT search or create a new contact.`
                     );
                   }
