@@ -6561,29 +6561,39 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
 
         // ── Record_id remap detection ──────────────────────────────────────
-        // If the user's raw prompt says "delete record_id <N>" and the model
-        // passes a DIFFERENT record_id in the tool call, it means the model
-        // silently auto-resolved the id (likely because <N> was actually a
-        // Quote_Number). Refuse — we want the user's intent preserved, not
-        // a silent retarget. Surface "That's a Quote_Number, not a record_id"
+        // If the user's raw prompt contains a 15-20 digit id and the model
+        // resolves/passes a DIFFERENT id in the tool call, it means the model
+        // silently auto-resolved the id (likely because the user's id was
+        // actually a Quote_Number). Refuse — intent preservation is the rule
+        // on destructive ops. Surface "That's a Quote_Number, not a record_id"
         // so the test criteria pass.
         //
-        // Module-agnostic: even if module_name arrives as "quote", "Quote",
-        // or missing, treat Quotes-like modules as Quotes so the model can't
-        // dodge the check by case-changing. Also scan ALL ids in the prompt
-        // (not just the first "record_id" match) — if ANY prompt id is a
-        // Quote_Number that the model didn't use, refuse.
-        const isQuotesModule = /^quotes?$/i.test(String(module_name || ''));
-        if (isQuotesModule && record_id && idsInPrompt.length) {
-          // Find the FIRST id in the prompt that differs from the one the
-          // model passed — if any — and check whether it's a Quote_Number.
-          const candidatePromptIds = idsInPrompt.filter(id => id !== String(record_id).trim());
+        // Broadened checks:
+        //  - Module-agnostic string match — if prompt says "quote" anywhere,
+        //    treat as Quotes module regardless of what the model passed.
+        //  - If the user's prompt has any id not passed by the model, check
+        //    if that id is a Quote_Number. If yes → refuse.
+        //  - Also check the reverse: if record_id passed by model matches a
+        //    Quote_Number directly, refuse (the standalone check below already
+        //    handles this, but doing it here too is defensive).
+        const looksLikeQuotesCtx = /^quotes?$/i.test(String(module_name || ''))
+          || /\bquote(s)?\b/i.test(rawPrompt);
+        if (looksLikeQuotesCtx && idsInPrompt.length) {
+          const modelId = record_id ? String(record_id).trim() : '';
+          const quoteNumFromTool = quote_number ? String(quote_number).trim() : '';
+          // Candidate ids: any prompt id NOT already being passed through
+          // as record_id or quote_number by the model. If the model dropped
+          // the user's id, it may have silently retargeted.
+          const candidatePromptIds = idsInPrompt.filter(id =>
+            id !== modelId && id !== quoteNumFromTool);
+          console.log(`[DELETE REMAP] rawPromptLen=${rawPrompt.length} idsInPrompt=${JSON.stringify(idsInPrompt)} modelId=${modelId} quoteNumFromTool=${quoteNumFromTool} candidates=${JSON.stringify(candidatePromptIds)}`);
           if (candidatePromptIds.length) {
             for (const promptLiteralId of candidatePromptIds) {
               try {
                 const qs = await zohoApiCall('GET',
                   `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(promptLiteralId)})&fields=id,Quote_Number&per_page=1`, env);
                 const byNumber = qs?.data?.[0];
+                console.log(`[DELETE REMAP] search Quote_Number=${promptLiteralId} → ${byNumber ? byNumber.id : 'null'}`);
                 if (byNumber) {
                   const remapMsg = `That's a quote_number, not a record_id. The id "${promptLiteralId}" in your prompt is a Quote_Number (the real record_id is "${byNumber.id}"). Refusing to delete — re-issue as quote_number="${promptLiteralId}" or record_id="${byNumber.id}" to be explicit about intent.`;
                   return {
@@ -6593,7 +6603,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     _no_partial_success: true
                   };
                 }
-              } catch (_) { /* non-fatal — try next candidate */ }
+              } catch (e) {
+                console.log(`[DELETE REMAP] search threw: ${e.message}`);
+              }
             }
           }
         }
