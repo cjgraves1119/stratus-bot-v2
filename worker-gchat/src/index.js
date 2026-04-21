@@ -9439,22 +9439,62 @@ function extractCfResponse(cfResponse) {
   // calling channel. Recover by scanning for inline JSON blocks of the form
   //   {"name": "<tool>", "parameters": {...}}       (Llama-style)
   //   {"name": "<tool>", "arguments":  {...}}       (OpenAI-style)
-  // Accept BOTH `parameters` and `arguments` as the arg key.
+  //   {"name": "<tool>"}                             (bare, no-arg tools)
+  //
+  // Uses a proper brace-balanced scanner (not lazy regex) so nested objects
+  // like Account_Name: {id: "..."} don't truncate the args. Also attempts
+  // a "missing-close-brace repair" for replies that were cut off at max_tokens.
   if (text && typeof text === 'string') {
-    const jsonBlockRe = /\{\s*"name"\s*:\s*"([a-zA-Z_][a-zA-Z0-9_]*)"\s*,\s*"(?:parameters|arguments)"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
-    let m;
     const seen = new Set();
-    while ((m = jsonBlockRe.exec(text)) !== null) {
+
+    // Scan for {"name": "x", "parameters"|"arguments": {...}} with depth-balanced args
+    const openRe = /\{\s*"name"\s*:\s*"([a-zA-Z_][a-zA-Z0-9_]*)"\s*,\s*"(?:parameters|arguments)"\s*:\s*\{/g;
+    let m;
+    while ((m = openRe.exec(text)) !== null) {
       const name = m[1];
-      const argsRaw = m[2];
-      // Dedupe identical (name + args) pairs that appear twice in the same reply
+      const argStart = m.index + m[0].length - 1; // position of args opening {
+      let depth = 1, i = argStart + 1, inStr = false, esc = false;
+      for (; i < text.length; i++) {
+        const c = text[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (c === '\\') esc = true;
+          else if (c === '"') inStr = false;
+        } else {
+          if (c === '"') inStr = true;
+          else if (c === '{') depth++;
+          else if (c === '}') { depth--; if (depth === 0) break; }
+        }
+      }
+      let argsRaw;
+      if (depth === 0) {
+        argsRaw = text.slice(argStart, i + 1);
+      } else {
+        // Truncated reply — try a repair by appending the missing closing braces
+        argsRaw = text.slice(argStart) + '}'.repeat(depth);
+      }
       const dedupeKey = name + '|' + argsRaw;
       if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
-      let args = {};
+      let args;
       try { args = JSON.parse(argsRaw); } catch { continue; }
       calls.push({ id: null, name, arguments: args });
       if (calls.length >= 4) break; // safety cap
+    }
+
+    // Also catch bare {"name": "x"} with no parameters (zero-arg tools like
+    // undo_crm_action). Only add if that name hasn't already been captured above.
+    if (calls.length < 4) {
+      const bareRe = /\{\s*"name"\s*:\s*"([a-zA-Z_][a-zA-Z0-9_]*)"\s*\}/g;
+      while ((m = bareRe.exec(text)) !== null) {
+        const name = m[1];
+        if (calls.some(c => c.name === name)) continue;
+        const dedupeKey = name + '|{}';
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        calls.push({ id: null, name, arguments: {} });
+        if (calls.length >= 4) break;
+      }
     }
   }
   return { text, calls };
@@ -9825,6 +9865,19 @@ CLONE QUOTE (use the dedicated tool):
 - If the user says "clone", "copy", or "duplicate" a quote — CALL clone_quote({quote_id: "<id>", new_subject?: "<optional>"}). The server uses Zoho's native clone endpoint which preserves every line item's Discount verbatim.
 - Do NOT simulate a clone by calling zoho_get_record + zoho_create_record. That recomputes pricing and produces a different Grand_Total — a financial defect.
 
+DELETE VALIDATION (CRITICAL — refuse bad deletes):
+- If the user passes an ID to delete, FIRST determine whether it's a record_id or a Quote_Number. Quote_Number is a FIELD; record_id is the internal key in URLs. If the user says "delete record_id <N>" but <N> matches the Quote_Number pattern on a quote, REFUSE with "That's a quote_number, not a record_id — did you mean quote_number <N>?" and do NOT call zoho_delete_record.
+- If the user provides BOTH a record_id AND a quote_number and asks to delete, FIRST zoho_get_record(Quotes, record_id) and verify its Quote_Number field matches the provided quote_number. If they do NOT match, REFUSE with "Those identifiers don't match the same record — which one should I use?" and do NOT call zoho_delete_record. Under no circumstance call delete when the two identifiers conflict.
+- If a delete target does NOT exist (zoho_get_record returns not found), reply "No record found for <id>" and STOP. Do NOT invent an "deleted successfully" narration.
+- NEVER call zoho_delete_record on a Quoted_Items subform line. Subform rows are modified via zoho_update_record on the parent Quote with Quoted_Items: [{id, _delete: null}]. If asked to delete a Quoted_Items row directly, refuse with "That's a subform line, use the parent quote's Quoted_Items array instead."
+- If the user says "delete the last quote I made" without providing a record_id or quote_number, ASK for the specific record_id or quote_number. Do NOT guess.
+
+REFUSAL ON BAD INPUT (do NOT call tools):
+- Lead_Source must be EXACTLY one of: "Stratus Referal", "Meraki ISR Referal", "Meraki ADR Referal", "VDC", "Website", "-None-". If the user provides "Referral" (two Rs), refuse with "Stratus uses 'Referal' (one R) — did you mean 'Stratus Referal' or 'Meraki ISR Referal'?" and do NOT create the deal.
+- If Lead_Source is "Meraki ISR Referal", the Cisco rep MUST be validated against Meraki_ISRs module. If the user names a rep, search Meraki_ISRs first; if zero hits, refuse with "No Cisco rep named <X> found in Meraki_ISRs — please confirm the exact name or email" and DO NOT create the deal.
+- If the user asks to create a deal WITHOUT Lead_Source, refuse and ask "What's the Lead Source? (Stratus Referal, Meraki ISR Referal, etc.)" — do NOT default to "-None-" and do NOT create the deal.
+- Stage value "Closed Lost" (no parens) is INVALID — the valid value is "Closed (Lost)" with parentheses. If the user says "Closed Lost", ask "Did you mean 'Closed (Lost)' with parentheses?" and do NOT update.
+
 Respond in 1-3 short paragraphs maximum. End with a direct answer, not another question.`;
 
 // Llama 4 Scout-specific prompt. Targets its observed failure modes from the
@@ -9888,6 +9941,19 @@ QUOTE DISCOUNT / LINE-ITEM UPDATES (CRITICAL — fire the tool, do NOT narrate):
 
 CLONE QUOTE:
 - User says "clone", "copy", or "duplicate" a quote → CALL clone_quote({quote_id}). Do NOT read+re-create — that recomputes pricing and breaks the Grand_Total.
+
+DELETE VALIDATION (CRITICAL — refuse bad deletes):
+- ID TYPE CHECK: When the user passes an ID to delete, FIRST determine whether it is a record_id or a Quote_Number. Quote_Number is a FIELD value (user-visible, appears on PDFs); record_id is Zoho's internal key (appears in URLs). These are DIFFERENT values even when they look similar. If the user says "delete record_id <N>" but <N> is actually a Quote_Number, REFUSE with "That's a quote_number, not a record_id — did you mean to look up the quote by Quote_Number <N>?" and do NOT call zoho_delete_record.
+- MISMATCH REFUSAL: When the user provides BOTH a record_id AND a quote_number in the same delete request, FIRST zoho_get_record(Quotes, record_id) and verify its Quote_Number field EXACTLY matches the provided quote_number. If they do NOT match the same record, REFUSE with "Those identifiers don't match the same record — which one should I use?" and do NOT call zoho_delete_record. This is a hard rule: NEVER execute a delete when two identifiers in the same message point to different records.
+- NONEXISTENT TARGETS: If zoho_get_record returns not found for the delete target, reply "No record found for <id>" and STOP. Do NOT claim "deleted successfully".
+- QUOTED_ITEMS SUBFORM: NEVER call zoho_delete_record on a Quoted_Items (line item) ID. Subform rows are deleted via zoho_update_record on the parent Quote with Quoted_Items: [{id: "<line_id>", _delete: null}]. If asked to delete a Quoted_Items record directly, refuse with "That's a subform line, use the parent quote's Quoted_Items array instead."
+- AMBIGUOUS TARGET: If the user says "delete the last quote I made" without providing a record_id or quote_number, ASK "Which quote? Please give me the record_id or Quote_Number." Do NOT guess or look up "most recent".
+
+REFUSAL ON BAD INPUT (NO TOOL CALL):
+- Lead_Source valid values ONLY: "Stratus Referal", "Meraki ISR Referal", "Meraki ADR Referal", "VDC", "Website", "-None-". If the user writes "Referral" (two Rs), REFUSE with "Stratus uses 'Referal' (one R) — did you mean 'Stratus Referal' or 'Meraki ISR Referal'?" and do NOT call zoho_create_record.
+- Missing Lead_Source: If asked to create a deal without a Lead_Source value, REFUSE and ask "What's the Lead Source? (Stratus Referal, Meraki ISR Referal, etc.)". Do NOT default to "-None-" and do NOT create the deal.
+- Cisco rep validation: If Lead_Source = "Meraki ISR Referal", the rep MUST exist in the Meraki_ISRs module. Search Meraki_ISRs first with zoho_search_records; if zero hits (e.g. "Joe Schmoe" → no match), REFUSE with "No Cisco rep named <X> found — please confirm the exact name or email" and do NOT call zoho_create_record.
+- Stage value "Closed Lost" (no parens) is INVALID. The valid value is "Closed (Lost)" with parentheses. If the user writes "Closed Lost", ASK "Did you mean 'Closed (Lost)' with parentheses?" and do NOT call zoho_update_record.
 
 Respond in 1-3 short paragraphs. End with a direct answer, not a clarifying question.`;
 
