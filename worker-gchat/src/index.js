@@ -9381,9 +9381,9 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
       description: t.description,
       parameters: t.input_schema
     }));
-  // Llama 4 Scout, Gemma 4, and Mistral reject flat tools — require OpenAI-wrapped format.
+  // Llama 4 Scout, Gemma 4, Mistral, and Kimi K2.6 reject flat tools — require OpenAI-wrapped format.
   // Llama 3.3 70B and Hermes accept flat.
-  const needsOpenAiWrap = /gemma|mistral|llama-4/i.test(modelId);
+  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi/i.test(modelId);
   if (needsOpenAiWrap) {
     return flat.map(t => ({ type: 'function', function: t }));
   }
@@ -9817,6 +9817,7 @@ const BENCHMARK_MODELS = [
   { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
   { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
   { id: '@cf/meta/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout 17B (CF)', type: 'cf' },
+  { id: '@cf/moonshotai/kimi-k2.6', label: 'Kimi K2.6 (CF)', type: 'cf' },
   { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B (CF)', type: 'cf' },
   { id: '@hf/nousresearch/hermes-2-pro-mistral-7b', label: 'Hermes 2 Pro 7B (CF)', type: 'cf' },
   { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1 24B (CF)', type: 'cf' }
@@ -9958,8 +9959,10 @@ REFUSAL ON BAD INPUT (NO TOOL CALL):
 Respond in 1-3 short paragraphs. End with a direct answer, not a clarifying question.`;
 
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
+// Kimi K2.6 is an agentic tool-use-heavy MoE (similar profile to Llama 4 Scout)
+// so it rides on the Llama 4 prompt for now — will iterate if benchmarks show drift.
 function pickOptimizedPrompt(modelId) {
-  if (/llama-4/i.test(modelId)) return LLAMA4_OPTIMIZED_PROMPT;
+  if (/llama-4|kimi/i.test(modelId)) return LLAMA4_OPTIMIZED_PROMPT;
   return GEMMA_OPTIMIZED_PROMPT;
 }
 
@@ -10248,10 +10251,12 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const useClaudeOnly = options.forceClaude === true;
   const useGemmaOnly = options.forceGemma === true;
   const useLlamaOnly = options.forceLlama === true;
+  const useKimiOnly = options.forceKimi === true;
   const dryRun = options.dryRun === true;
 
   const LLAMA = '@cf/meta/llama-4-scout-17b-16e-instruct';
   const GEMMA = '@cf/google/gemma-4-26b-a4b-it';
+  const KIMI = '@cf/moonshotai/kimi-k2.6';
 
   // Force-Claude mode
   if (useClaudeOnly) {
@@ -10268,6 +10273,25 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       tierUsed: t.winner ? 'llama' : 'llama-forced',
       llamaResult: t.result,
       gemmaResult: null,
+      claudeResult: null,
+      stallReason: t.winner ? null : t.reason,
+      toolCalls: t.result?.toolCalls || [],
+      iterations: t.result?.iterations || 0,
+      elapsedMs: t.result?.elapsedMs || 0,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // Force-Kimi mode (Moonshot AI K2.6 — 1T MoE, 262k ctx, agentic tool-use)
+  if (useKimiOnly) {
+    const t = await tryCfTier(KIMI, userMessage, env, personId, dryRun);
+    return {
+      reply: t.result?.reply || `Kimi failed: ${t.reason || 'unknown'}`,
+      model: KIMI,
+      tierUsed: t.winner ? 'kimi' : 'kimi-forced',
+      llamaResult: null,
+      gemmaResult: null,
+      kimiResult: t.result,
       claudeResult: null,
       stallReason: t.winner ? null : t.reason,
       toolCalls: t.result?.toolCalls || [],
@@ -12813,6 +12837,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
                   forceLlama: forceModel === 'llama',
                   forceGemma: forceModel === 'gemma',
+                  forceKimi:  forceModel === 'kimi',
                   forceClaude: forceModel === 'claude',
                   dryRun: wDryRun === true
                 });
@@ -12831,6 +12856,8 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 'gemma-fallback': `🔷 Gemma 4 26B (fell back from Llama — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
                 'gemma': `🔷 Gemma 4 26B (forced) · ${outcome.elapsedMs}ms`,
                 'gemma-forced': `🔷 Gemma 4 26B (forced, stalled: ${outcome.stallReason || 'none'})`,
+                'kimi': `🟣 Kimi K2.6 (forced, Moonshot AI 1T MoE) · ${outcome.elapsedMs}ms`,
+                'kimi-forced': `🟣 Kimi K2.6 (forced, stalled: ${outcome.stallReason || 'none'})`,
                 'claude-fallback': `🔶 Claude Sonnet 4.6 (fell back — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
                 'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`
               };
