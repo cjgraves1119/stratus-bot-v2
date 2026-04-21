@@ -2160,6 +2160,14 @@ function parseMessage(text) {
   text = convertWordNumbers(text);
   const upper = text.toUpperCase();
 
+  // ── separate_quotes early detection ──
+  // Emitted by user phrases like "separate quotes", "individual URLs", "one quote per",
+  // "break these out", "split into separate", "each as its own quote", etc.
+  // This flag propagates into modifiers.separateQuotes so buildQuoteResponse can
+  // emit one URL per item/tier instead of concatenating.
+  const SEPARATE_QUOTES_RE = /\b(SEPARATE\s+(QUOTES?|URLS?|LINKS?)|INDIVIDUAL\s+(QUOTES?|URLS?|LINKS?)|EACH\s+(AS\s+)?(ITS\s+)?OWN\s+(QUOTES?|URLS?|LINKS?)|ONE\s+(QUOTE|URL|LINK)\s+(PER|EACH|APIECE|FOR\s+EACH)|BREAK\s+(THESE|THEM|IT)\s+OUT|SPLIT\s+(INTO|UP\s+INTO)\s+SEPARATE|AS\s+(THEIR|ITS)\s+OWN\s+(QUOTES?|URLS?|LINKS?))\b/;
+  const __separateQuotes = SEPARATE_QUOTES_RE.test(upper);
+
   // Multi-line License SKU Input (CSV/list from dashboard export)
   // Handles formats like:
   //   LIC-ENT-3YR,26\nLIC-MS120-8FP-3YR,4\n...
@@ -2427,17 +2435,27 @@ function parseMessage(text) {
   // ── Duo natural language handler ──
   // License-only product (no hardware). If tier is specified, return URLs directly.
   // If tier is NOT specified, prompt the user to choose (Essentials/Advantage/Premier).
+  // Multi-tier: "duo essentials, advantage, premier" emits all three tiers × 3 terms.
   const isDuo = /\b(?:DUO|CISCO\s*DUO)\b/i.test(upper);
   if (isDuo && !isAdvisory) {
-    // Extract tier and qty with explicit checks (avoids regex group-shifting bugs)
-    let duoTier = null;
-    if (/ADVANTAGE/i.test(upper)) duoTier = 'ADVANTAGE';
-    else if (/PREMIER/i.test(upper)) duoTier = 'PREMIER';
-    else if (/ESSENTIAL/i.test(upper)) duoTier = 'ESSENTIALS';
+    // Collect ALL tiers mentioned, in order of appearance
+    const duoTiers = [];
+    const tierOrderRe = /\b(ADVANTAGE|PREMIER|ESSENTIAL(?:S)?)\b/gi;
+    let tm;
+    while ((tm = tierOrderRe.exec(upper)) !== null) {
+      const raw = tm[1].toUpperCase();
+      const canon = raw === 'ADVANTAGE' ? 'ADVANTAGE' : raw === 'PREMIER' ? 'PREMIER' : 'ESSENTIALS';
+      if (!duoTiers.includes(canon)) duoTiers.push(canon);
+    }
+
     const duoQtyMatch = upper.match(/\b(\d+)\b/);
     const duoQty = duoQtyMatch ? parseInt(duoQtyMatch[1]) : 1;
 
-    if (!duoTier) {
+    // Detect explicit term request (e.g. "3 year duo")
+    const duoTermMatch = upper.match(/\b([135])\s*(?:YR|YEAR|YEARS)\b/);
+    const requestedTerm = duoTermMatch ? parseInt(duoTermMatch[1]) : null;
+
+    if (duoTiers.length === 0) {
       return {
         items: [],
         isQuote: false,
@@ -2449,38 +2467,68 @@ function parseMessage(text) {
           `Just reply with the tier name (e.g. "Duo Advantage") or "Duo Essentials ${duoQty}".`
       };
     }
+
+    // Build items: every tier × every term (1/3/5YR)
+    const duoItems = [];
+    for (const tier of duoTiers) {
+      for (const t of [1, 3, 5]) {
+        duoItems.push({ baseSku: `LIC-DUO-${tier}-${t}YR`, qty: duoQty, isLicenseOnly: true });
+      }
+    }
+
+    // Narrow to requested term ONLY if single tier AND not separateQuotes
+    let duoFinalItems = duoItems;
+    if (requestedTerm && duoTiers.length === 1 && !__separateQuotes) {
+      duoFinalItems = duoItems.filter(it => it.baseSku.endsWith(`-${requestedTerm}YR`));
+    }
+
     return {
-      items: [
-        { baseSku: `LIC-DUO-${duoTier}-1YR`, qty: duoQty, isLicenseOnly: true },
-        { baseSku: `LIC-DUO-${duoTier}-3YR`, qty: duoQty, isLicenseOnly: true },
-        { baseSku: `LIC-DUO-${duoTier}-5YR`, qty: duoQty, isLicenseOnly: true }
-      ],
+      items: duoFinalItems,
       isQuote: true,
-      isTermOptionQuote: true
+      isTermOptionQuote: true,
+      modifiers: { separateQuotes: __separateQuotes || duoTiers.length > 1 }
     };
   }
 
   // ── Umbrella natural language handler ──
   // License-only product. If type+tier specified, return URLs directly.
   // If missing, prompt user to choose type (DNS/SIG) and tier (Essentials/Advantage).
+  // Multi-type/multi-tier: "umbrella DNS essentials, DNS advantage, SIG advantage" emits all combinations.
   const isUmb = /\b(?:UMBRELLA|UMB)\b/i.test(upper);
   if (isUmb && !isAdvisory) {
-    // Extract type, tier, qty with explicit checks
-    let umbType = null;
-    if (/\bSIG\b/i.test(upper)) umbType = 'SIG';
-    else if (/\bDNS\b/i.test(upper)) umbType = 'DNS';
-    let umbTier = null;
-    if (/ADV(?:ANCED)?/i.test(upper)) umbTier = 'ADV';
-    else if (/ESS(?:ENTIALS?)?/i.test(upper)) umbTier = 'ESS';
+    // Collect ALL types (DNS, SIG) mentioned, in order of appearance
+    const umbTypes = [];
+    const typeRe = /\b(DNS|SIG)\b/gi;
+    let tym;
+    while ((tym = typeRe.exec(upper)) !== null) {
+      const canon = tym[1].toUpperCase();
+      if (!umbTypes.includes(canon)) umbTypes.push(canon);
+    }
+
+    // Collect ALL tiers (ESS, ADV) mentioned, in order of appearance
+    // Must match both literal spellings ("advantage", "essentials") and short forms ("adv", "ess").
+    const umbTiers = [];
+    const tierRe = /\b(ADV(?:ANTAGE|ANCED)?|ESS(?:ENTIALS?)?)\b/gi;
+    let trm;
+    while ((trm = tierRe.exec(upper)) !== null) {
+      const raw = trm[1].toUpperCase();
+      const canon = raw.startsWith('ADV') ? 'ADV' : 'ESS';
+      if (!umbTiers.includes(canon)) umbTiers.push(canon);
+    }
+
     const umbQtyMatch = upper.match(/\b(\d+)\b/);
     const umbQty = umbQtyMatch ? parseInt(umbQtyMatch[1]) : 1;
 
-    if (!umbType || !umbTier) {
+    // Detect explicit term request (e.g. "3 year umbrella")
+    const umbTermMatch = upper.match(/\b([135])\s*(?:YR|YEAR|YEARS)\b/);
+    const umbRequestedTerm = umbTermMatch ? parseInt(umbTermMatch[1]) : null;
+
+    if (umbTypes.length === 0 || umbTiers.length === 0) {
       let prompt = `Which Umbrella package do you need? (qty: ${umbQty})\n\n`;
-      if (!umbType) {
+      if (umbTypes.length === 0) {
         prompt += `**Type:**\n• **DNS Security** — DNS-layer protection\n• **SIG** (Secure Internet Gateway) — full web proxy + DNS\n\n`;
       }
-      if (!umbTier) {
+      if (umbTiers.length === 0) {
         prompt += `**Tier:**\n• **Essentials** — core protection\n• **Advantage** — Essentials + advanced features\n\n`;
       }
       prompt += `Reply with the full package, e.g. "Umbrella DNS Essentials ${umbQty}" or "Umbrella SIG Advantage".`;
@@ -2491,14 +2539,29 @@ function parseMessage(text) {
         clarificationMessage: prompt
       };
     }
+
+    // Build items: cartesian product of types × tiers × all three terms (1/3/5YR)
+    const umbItems = [];
+    for (const type of umbTypes) {
+      for (const tier of umbTiers) {
+        for (const t of [1, 3, 5]) {
+          umbItems.push({ baseSku: `LIC-UMB-${type}-${tier}-K9-${t}YR`, qty: umbQty, isLicenseOnly: true });
+        }
+      }
+    }
+
+    // Narrow to requested term ONLY if single type+tier AND not separateQuotes
+    const combos = umbTypes.length * umbTiers.length;
+    let umbFinalItems = umbItems;
+    if (umbRequestedTerm && combos === 1 && !__separateQuotes) {
+      umbFinalItems = umbItems.filter(it => it.baseSku.endsWith(`-${umbRequestedTerm}YR`));
+    }
+
     return {
-      items: [
-        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-1YR`, qty: umbQty, isLicenseOnly: true },
-        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-3YR`, qty: umbQty, isLicenseOnly: true },
-        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-5YR`, qty: umbQty, isLicenseOnly: true }
-      ],
+      items: umbFinalItems,
       isQuote: true,
-      isTermOptionQuote: true
+      isTermOptionQuote: true,
+      modifiers: { separateQuotes: __separateQuotes || combos > 1 }
     };
   }
 
@@ -2733,6 +2796,7 @@ function buildQuoteResponse(parsed) {
 
   // Duo / Umbrella license-only products — return 1Y/3Y/5Y URLs directly
   if (parsed.isTermOptionQuote && parsed.items) {
+    const separateQuotes = Boolean(parsed.modifiers && parsed.modifiers.separateQuotes);
     const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
     for (const item of parsed.items) {
       const termMatch = item.baseSku.match(/(\d)YR?$/i);
@@ -2742,6 +2806,43 @@ function buildQuoteResponse(parsed) {
       }
     }
     const lines = [];
+    // separateQuotes: emit one URL per (tier, term) pair. We detect distinct
+    // tier families by stripping the term suffix from each SKU.
+    if (separateQuotes) {
+      const tierFamilies = new Map(); // tierKey → tier label
+      for (const item of parsed.items) {
+        const tierKey = item.baseSku.replace(/-(\d)YR?$/i, '');
+        if (!tierFamilies.has(tierKey)) {
+          // Friendly label: LIC-DUO-ESSENTIALS → "Duo Essentials"
+          let label = tierKey
+            .replace(/^LIC-/, '')
+            .replace(/-K9$/, '')
+            .replace(/-/g, ' ')
+            .replace(/\bDUO\b/, 'Duo')
+            .replace(/\bUMB\b/, 'Umbrella')
+            .replace(/\bESSENTIALS\b/i, 'Essentials')
+            .replace(/\bADVANTAGE\b/i, 'Advantage')
+            .replace(/\bPREMIER\b/i, 'Premier')
+            .replace(/\bESS\b/i, 'Essentials')
+            .replace(/\bADV\b/i, 'Advantage')
+            .replace(/\bDNS\b/i, 'DNS')
+            .replace(/\bSIG\b/i, 'SIG');
+          tierFamilies.set(tierKey, label.trim());
+        }
+      }
+      for (const [tierKey, label] of tierFamilies) {
+        lines.push(`**${label}:**`);
+        for (const term of ['1YR', '3YR', '5YR']) {
+          const matching = termGroups[term].filter(s => s.sku.replace(/-(\d)YR?$/i, '') === tierKey);
+          if (matching.length > 0) {
+            const url = buildStratusUrl(matching);
+            lines.push(`${term.replace('YR', '-Year')} Co-Term: ${url}`);
+          }
+        }
+        lines.push('');
+      }
+      return { message: lines.join('\n').trim(), needsLlm: false };
+    }
     for (const [term, skus] of Object.entries(termGroups)) {
       if (skus.length > 0) {
         const url = buildStratusUrl(skus);
