@@ -10146,6 +10146,18 @@ PRICING MODE CONFIRMATION (CRITICAL):
 - When you ADD a line item to an existing quote, the new line inherits the quote's existing pricing mode — mention that the line was added "at ecomm pricing (13% off)" (or list, whichever the quote uses).
 - When you bump quantity on an existing line, the Discount dollar amount auto-scales server-side. Confirm the ecomm pricing is preserved in your reply.
 
+TERM CHANGE REPLY FORMAT (CRITICAL):
+- When you change a license term (e.g. 3y → 5y, 5y → 1y, 1y → 5y), your reply MUST explicitly state the target term and the new license SKU. Example: "Updated licenses to 5 year term (LIC-ENT-5YR)" or "Extended everything to 5 years".
+- When the user says "change the term" WITHOUT specifying a target term (e.g. "change the term on quote X"), ASK "To what term? (1 year, 3 year, or 5 year?)" and do NOT call update_record. Ambiguous term changes require clarification.
+- After bulk term extension, confirm the new term in reply: "Extended all licenses to 5 years" or "All 3 MR46 licenses now on LIC-ENT-5YR".
+
+SKU DISPLAY IN REPLIES (CRITICAL):
+- MS switches (MS125, MS150, MS210, MS220, MS225, MS250, MS350, MS410, MS425) have NO -HW suffix in the catalog. Do NOT append "-HW" to MS switch SKUs in your reply text. Write "MS125-24P" not "MS125-24P-HW".
+- C9 and C8 routing SKUs also have no suffix. Do NOT add -HW to those in reply text either.
+
+CAPABILITY SUMMARY FORMAT:
+- When the user asks "what can you do", "your capabilities", "list your features", respond with markdown BULLET points (lines beginning with "- "), NOT numbered items ("1. ", "2. "). The chat renderer converts "- " into proper HTML <ul><li> lists.
+
 Respond in 1-3 short paragraphs maximum. End with a direct answer plus the CRM URL when a record was touched.`;
 
 // Llama 4 Scout-specific prompt. Targets its observed failure modes from the
@@ -10245,6 +10257,18 @@ PRICING MODE CONFIRMATION (CRITICAL):
 - When the user requested "ecomm", "ecom", "stratus pricing", "13% discount", or "discounted", confirm in the reply: "Applied ecomm pricing (13% discount)".
 - When you ADD a line item to an existing quote (e.g. "add 1x MS125-24P to that quote"), the new line inherits the quote's existing pricing mode. Mention that the line was added "at ecomm pricing (13% off)" (or list, whichever the quote uses).
 - When you BUMP quantity on an existing line, the Discount dollar amount auto-scales server-side. Confirm ecomm pricing is preserved: "MX67 qty updated to 5, ecomm (13%) discount scaled accordingly".
+
+TERM CHANGE REPLY FORMAT (CRITICAL):
+- When you change a license term (e.g. 3y → 5y, 5y → 1y, 1y → 5y), your reply MUST explicitly state the target term and the new license SKU. Example: "Updated licenses to 5 year term (LIC-ENT-5YR)" or "Extended everything to 5 years".
+- When the user says "change the term" WITHOUT specifying a target term (e.g. "change the term on quote X"), ASK "To what term? (1 year, 3 year, or 5 year?)" and do NOT call zoho_update_record. Ambiguous term changes require clarification.
+- After bulk term extension, confirm the new term in reply: "Extended all licenses to 5 years" or "All 3 MR46 licenses now on LIC-ENT-5YR".
+
+SKU DISPLAY IN REPLIES (CRITICAL):
+- MS switches (MS125, MS150, MS210, MS220, MS225, MS250, MS350, MS410, MS425) have NO -HW suffix in the catalog. Do NOT append "-HW" to MS switch SKUs in your reply text. Write "MS125-24P" not "MS125-24P-HW".
+- C9 and C8 routing SKUs also have no suffix. Do NOT add -HW to those in reply text either.
+
+CAPABILITY SUMMARY FORMAT:
+- When the user asks "what can you do", "your capabilities", "list your features", respond with markdown BULLET points (lines beginning with "- "), NOT numbered items ("1. ", "2. "). The chat renderer converts "- " into proper HTML <ul><li> lists.
 
 Respond in 1-3 short paragraphs. End with a direct answer (plus the CRM URL when a record was touched), not a clarifying question.`;
 
