@@ -9526,6 +9526,10 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
 
   // Detect OpenAI-style response (Gemma 4 uses max_completion_tokens, Mistral uses max_tokens)
   const isGemma = /gemma/i.test(modelId);
+  // Kimi K2.6 has reasoning-on by default, which burns the token budget before
+  // emitting content. For deterministic CRM workloads we want the action, not
+  // chain-of-thought — disable thinking via chat_template_kwargs.
+  const isKimi = /kimi/i.test(modelId);
 
   while (iteration < maxIterations) {
     iteration++;
@@ -9542,6 +9546,10 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
         requestBody.max_completion_tokens = 2048;
       } else {
         requestBody.max_tokens = 2048;
+      }
+      // Kimi: disable reasoning so content isn't starved by thinking tokens.
+      if (isKimi) {
+        requestBody.chat_template_kwargs = { enable_thinking: false };
       }
 
       const cfResponse = await env.AI.run(modelId, requestBody);
@@ -10556,6 +10564,43 @@ export default {
         }), { headers: { 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: err.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // ── /_debug-kimi: Inspect raw CF Workers AI response shape for Kimi K2.6 ──
+    //    GET /_debug-kimi?prompt=hello  → { modelId, raw, extracted }
+    if (request.method === 'GET' && url.pathname === '/_debug-kimi') {
+      const prompt = url.searchParams.get('prompt') || 'Say hi in one sentence.';
+      const withTools = url.searchParams.get('tools') === '1';
+      const withThinking = url.searchParams.get('thinking') === '1';
+      const modelId = '@cf/moonshotai/kimi-k2.6';
+      const body = {
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant. Reply with a short sentence.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 2048
+      };
+      if (!withThinking) {
+        body.chat_template_kwargs = { enable_thinking: false };
+      }
+      if (withTools) {
+        body.tools = anthropicToolsToCfFormat(CRM_EMAIL_TOOLS.slice(0, 2), modelId);
+        body.tool_choice = 'auto';
+      }
+      try {
+        const raw = await env.AI.run(modelId, body);
+        const extracted = extractCfResponse(raw);
+        return new Response(JSON.stringify({ modelId, raw, extracted }, null, 2), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message, stack: err.stack }, null, 2), {
           status: 500,
           headers: { 'Content-Type': 'application/json' }
         });
