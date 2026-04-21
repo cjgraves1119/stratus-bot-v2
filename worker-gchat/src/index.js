@@ -8623,11 +8623,66 @@ Default defaults for new deals:
 
 Respond in 1-3 short paragraphs maximum. End with a direct answer, not another question.`;
 
+// Llama 4 Scout-specific prompt. Targets its observed failure modes from the
+// 2026-04-20 benchmark: narrating tool calls instead of firing them, double-
+// encoding array args as JSON strings, firing write tools on hypothetical
+// questions, and over-calling batch_product_lookup on pure knowledge Q&A.
+const LLAMA4_OPTIMIZED_PROMPT = `You are a Stratus sales assistant with Zoho CRM tools.
+
+EXECUTION RULES:
+1. If an action requires a tool, CALL THE TOOL. Do NOT describe what you would do — execute it. "I will search..." without a tool call is a failure.
+2. One tool call per turn when possible. After a successful tool call, summarize the result and STOP — do not keep calling tools.
+3. For find/lookup: call zoho_search_records ONCE, summarize, stop.
+4. For create deal or quote: call create_deal_and_quote ONCE, report result, stop.
+5. If search returns 0 records, reply "No records found" and STOP. Do not create anything.
+
+TOOL ARGUMENT FORMAT (CRITICAL):
+- Pass arrays as actual JSON arrays, NEVER as strings. Correct: {"skus": [{"sku": "MR46-HW"}]}. Wrong: {"skus": "[{\\"sku\\": \\"MR46-HW\\"}]"}.
+- Do not wrap string values in {"type": "string", "value": "..."} objects. Just pass the raw string: "account_name": "Acme Corp".
+
+WRITE TOOLS — ONLY WHEN USER EXPLICITLY ASKS:
+- create_deal_and_quote, zoho_update_record, and any create/update/clone tool fire ONLY when the user asks to create, update, or clone something.
+- "How many APs do I need for a warehouse?" is a design question — answer from knowledge, do NOT call create_deal_and_quote.
+- "What license do I need?" is a rules question — answer from knowledge, do NOT call any tool.
+
+ANSWER FROM KNOWLEDGE (NO TOOL CALL) for these patterns:
+- Product spec comparisons (MR44 vs MR46, MS150 vs MS250)
+- EOL / end-of-life status and replacement recommendations
+- SKU suffix rules (why -HW, when -RTG, MR-ENT vs LIC-ENT)
+- Hypothetical design questions (warehouse sizing, AP density)
+- License-to-hardware pairing rules
+- Approximate pricing using list-price knowledge (no tool needed for estimates)
+
+ZOHO TOOL IS FOR CUSTOMER DATA ONLY:
+- Use zoho_search_records only when looking up a SPECIFIC customer, account, deal, contact, or quote by name/email/ID.
+- batch_product_lookup is only for verifying a Zoho product record exists — not for answering pricing or spec questions.
+
+QUOTE NUMBER vs RECORD ID:
+- Quote_Number is a FIELD on the quote record. id is Zoho's internal key used in URLs. Different values.
+- User says "quote <number>" → search by Quote_Number: zoho_search_records(Quotes, criteria=(Quote_Number:equals:<number>)).
+- URL format: https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>.
+
+ACTIVE ZOHO PAGE:
+- If the message starts with "[Active Zoho page: ... <Module> <recordId>]", use zoho_get_record(module, recordId) directly. Skip searches.
+
+DEAL DEFAULTS:
+- Lead_Source: "Stratus Referal"
+- Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
+- Chris Graves owner ID: 2570562000141711002
+
+Respond in 1-3 short paragraphs. End with a direct answer, not a clarifying question.`;
+
+// Pick the right prompt for the model. Llama 4 has its own tuned version.
+function pickOptimizedPrompt(modelId) {
+  if (/llama-4/i.test(modelId)) return LLAMA4_OPTIMIZED_PROMPT;
+  return GEMMA_OPTIMIZED_PROMPT;
+}
+
 // Run a single benchmark task against a single model.
 async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full') {
   let systemPrompt;
   if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
-    systemPrompt = GEMMA_OPTIMIZED_PROMPT;
+    systemPrompt = pickOptimizedPrompt(modelConfig.id);
   } else {
     systemPrompt = typeof buildCrmSystemPrompt === 'function'
       ? buildCrmSystemPrompt(task.prompt)
@@ -11337,40 +11392,6 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           // ── A/B Benchmark: list available tasks and models ──
           case '/api/benchmark/list': {
             apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
-            break;
-          }
-
-          // ── A/B Benchmark: probe a CF model with different tool formats ──
-          // Diagnostic endpoint — isolates whether a model accepts the tools
-          // schema we're sending. Tries no-tools, flat tools, OpenAI-wrapped.
-          case '/api/benchmark/probe': {
-            const { modelId: pModel } = apiBody;
-            if (!pModel) { apiResult = { error: 'modelId required' }; break; }
-            const probeTools = [{
-              name: 'get_weather',
-              description: 'Get current weather for a city',
-              parameters: {
-                type: 'object',
-                properties: { city: { type: 'string', description: 'City name' } },
-                required: ['city']
-              }
-            }];
-            const probeTrials = [
-              { label: 'no_tools', body: { messages: [{ role: 'user', content: "What's the weather in Paris?" }], max_tokens: 256 } },
-              { label: 'flat_tools', body: { messages: [{ role: 'user', content: "What's the weather in Paris?" }], tools: probeTools, max_tokens: 256, tool_choice: 'auto' } },
-              { label: 'wrapped_tools', body: { messages: [{ role: 'user', content: "What's the weather in Paris?" }], tools: probeTools.map(t => ({ type: 'function', function: t })), max_tokens: 256, tool_choice: 'auto' } },
-            ];
-            const probeResults = [];
-            for (const trial of probeTrials) {
-              const t0 = Date.now();
-              try {
-                const r = await env.AI.run(pModel, trial.body);
-                probeResults.push({ trial: trial.label, ok: true, ms: Date.now() - t0, response: r });
-              } catch (e) {
-                probeResults.push({ trial: trial.label, ok: false, ms: Date.now() - t0, error: String(e?.message || e) });
-              }
-            }
-            apiResult = { modelId: pModel, trials: probeResults };
             break;
           }
 
