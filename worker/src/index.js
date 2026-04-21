@@ -644,7 +644,7 @@ function extractAIResponse(result) {
 const CF_CLASSIFIER_PROMPT_V2 = `You are an intent classifier for a Cisco/Meraki quoting bot. Output a single JSON object — no prose, no markdown.
 
 SCHEMA:
-{"intent":"quote|revise|price_lookup|dashboard_parse|clarify|product_info|escalate|conversation","confidence":0.0-1.0,"reply":"","items":[{"sku":"...","qty":1,"sku_type":"hardware|license|accessory"}],"modifiers":{"hardware_only":false,"license_only":false,"with_license":null,"term_years":null,"tier":null,"show_pricing":false,"all_terms":false},"revision":{"action":null,"target_sku":null,"add_items":[],"new_term":null,"new_tier":null,"new_qty":null,"hw_lic_toggle":null},"reference":{"is_pronoun_ref":false,"option_ref":null,"resolve_from_history":false},"dashboard":{"is_meraki_license_page":false}}
+{"intent":"quote|revise|price_lookup|dashboard_parse|clarify|product_info|escalate|conversation","confidence":0.0-1.0,"reply":"","items":[{"sku":"...","qty":1,"sku_type":"hardware|license|accessory"}],"modifiers":{"hardware_only":false,"license_only":false,"with_license":null,"term_years":null,"tier":null,"show_pricing":false,"all_terms":false,"separate_quotes":false},"revision":{"action":null,"target_sku":null,"add_items":[],"new_term":null,"new_tier":null,"new_qty":null,"hw_lic_toggle":null},"reference":{"is_pronoun_ref":false,"option_ref":null,"resolve_from_history":false},"dashboard":{"is_meraki_license_page":false}}
 
 INTENT RULES:
 - "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1. "renewal for [SKU list]" or "renew N [SKU]" = quote with license_only=true (NOT revise — renewals with explicit SKUs are fresh license quotes).
@@ -666,6 +666,7 @@ MODIFIER RULES:
 - TIER SUFFIX SPLITTING: If a SKU has a tier suffix or space-separated tier word appended — examples: "MX85-SDW", "MX85 SDW", "MX85 sdwan", "MX85-SD-WAN", "MX67-SEC", "MX67 SEC", "MX75-ENT", "MX75 enterprise" — SPLIT it: put the base model in items[].sku (e.g., "MX85") and the tier in modifiers.tier (e.g., "SDW"). Never include the tier suffix as part of the SKU string. Never leave the tier as null when you've stripped a tier suffix.
 - show_pricing: true for pricing intent ("cost","how much","with pricing","price").
 - all_terms: true when user says "1yr 3yr and 5yr" or "all terms".
+- separate_quotes: true when user asks for distinct quote URLs per item/tier — phrases include "separate quotes", "separate URLs", "individual quotes", "each as its own quote", "one per line", "break these out", "split into separate", "X URL, Y URL, Z URL". Default false (all items combined in one URL).
 
 REVISION RULES:
 - CRITICAL: Only use intent="revise" when prior_context is provided. If prior_context is empty or absent, the message is standalone — classify as "quote", "clarify", or another intent instead.
@@ -689,6 +690,8 @@ REFERENCE RULES:
 SKU KNOWLEDGE:
 Valid Meraki families: MR (APs), MX (firewalls), MS (switches), MV (cameras), MT (sensors), MG (cellular), Z (teleworker), CW (Wi-Fi 6E/7).
 Bare license SKUs like "LIC-ENT-3YR","LIC-MX64-SEC-3YR" → items with sku_type="license".
+Cisco Duo licenses: format is LIC-DUO-{ESSENTIALS|ADVANTAGE|PREMIER}-{1|3|5}YR. Examples: "duo essentials 3 year" → LIC-DUO-ESSENTIALS-3YR; "duo advantage" → LIC-DUO-ADVANTAGE-{term}YR; "duo premier" → LIC-DUO-PREMIER-{term}YR. NEVER emit short forms like "DUO-E-3YR", "DUO-A", or "DUO-ESS" — always the full LIC-DUO-{TIER}-{TERM}YR string. If you aren't sure of the exact canonical SKU, leave items[] empty (the backend will resolve it) rather than hallucinating a short form.
+Cisco Umbrella licenses: format is LIC-UMB-{DNS|SIG}-{ESS|ADV}-K9-{1|3|5}YR. Examples: "umbrella DNS essentials 3 year" → LIC-UMB-DNS-ESS-K9-3YR; "umbrella SIG advantage" → LIC-UMB-SIG-ADV-K9-{term}YR. NEVER emit short forms like "UMB-DNS-3YR" — always include -K9- and the full LIC-UMB-{TYPE}-{TIER}-K9-{TERM}YR format.
 If a model looks valid but you don't recognize it (EOL or new), still emit as quote — the backend validates.
 Word numbers: "one"=1,"two"=2,...,"ten"=10,"a couple"=2,"a few"=3.
 
@@ -2726,6 +2729,58 @@ function buildQuoteFromV2(v2, rawText) {
   if (!v2 || typeof v2 !== 'object') return null;
   if (v2.intent !== 'quote') return null;
 
+  // ─── Short-circuits: route around V2 when parseMessage knows better ────
+  // Each of these covers a family or pattern the V2 Llama prompt does NOT
+  // teach, where V2 is likely to hallucinate or drop features. Returning
+  // null bounces the caller to parseMessage(), which has correct
+  // deterministic handlers for all of them.
+  const rawStr = typeof rawText === 'string' ? rawText : '';
+
+  // 1. Duo / Umbrella / short-form security licenses — V2 compresses SKUs
+  //    (e.g. "DUO-E-3YR" instead of "LIC-DUO-ESSENTIALS-3YR"). parseMessage
+  //    has full handlers at LIC-DUO-{TIER}-{1,3,5}YR and
+  //    LIC-UMB-{DNS|SIG}-{ESS|ADV}-K9-{1,3,5}YR.
+  if (/\b(DUO|UMBRELLA|UMB)\b/i.test(rawStr)) return null;
+
+  // 2. Catalyst M-series (C9300, C9300L, C9300X, C9200L, C8111, C8455) —
+  //    V2 prompt only teaches Meraki families. parseMessage + validateSku
+  //    have the full Catalyst regex and license map (LIC-C9300-{port}E-1Y
+  //    etc.).
+  if (/\b(C9[23]\d{2}[LX]?|C8[14]\d{2})\b/i.test(rawStr)) return null;
+
+  // 3. Meraki accessories (MA-* — transceivers, cables, PSUs, mounts,
+  //    stacking kits). V2 prompt doesn't teach MA-. parseMessage has
+  //    /MA-[A-Z0-9-]+/gi and validateSku passes them through.
+  if (/\bMA-[A-Z0-9]/i.test(rawStr)) return null;
+
+  // 4. Model-agnostic license phrasing ("5 MR licenses", "10 MV renewal",
+  //    "quote MT license"). parseMessage injects virtual MR-AGN / MV-AGN /
+  //    MT-AGN items that produce 1Y/3Y/5Y URLs with the right co-term SKU
+  //    (LIC-ENT / LIC-MV / LIC-MT). V2 has no concept of this.
+  if (/\b\d+\s*(MR|MV|MT)(?:'?S)?\s+(LICENSE|LICENCE|LISCENSE|LIC|RENEWAL)/i.test(rawStr)) return null;
+  if (/\b(LICENSE|LICENCE|LIC|RENEWAL)S?\s+(FOR\s+)?(MR|MV|MT)\b(?!\d)/i.test(rawStr)) return null;
+  if (/^(?:QUOTE\s+)?(MR|MV|MT)\s+(LICENSE|LICENCE|LIC|RENEWAL)/i.test(rawStr.trim())) return null;
+
+  // 5. Bare family mentions that should trigger variant-choice clarify —
+  //    MS150, MS130 (bare, no variant), MS390, MS450, C9300L, C9200L,
+  //    bare "CW" without a digit. parseMessage returns a clarify message
+  //    with the available variants.
+  if (/\b(MS150|MS130|MS390|MS450)\b(?!-)/i.test(rawStr)) return null;
+  if (/\b(C9300L?|C9200L)\b(?!-)/i.test(rawStr)) return null;
+  if (/\bCW\b(?!\d)/i.test(rawStr)) return null;
+
+  // 6. Wi-Fi generation category clarify ("wifi 7 AP", "6E aps",
+  //    "2 wi-fi 6 access points"). parseMessage emits unresolvedCategories
+  //    with model suggestions. V2 prompt has no concept of this.
+  if (/\b(WI[-\s]?FI|WIFI)\s*(6E|6|7)\s+(AP|APS|ACCESS)/i.test(rawStr)) return null;
+
+  // 7. Pronoun / history references ("quote this", "requote that") — let
+  //    the vision-SKU KV bridge handle these. If V2 hallucinates items
+  //    while the ref flag is set, returning non-null would bypass the KV
+  //    lookup at the Webex handler's parseMessage==null branch.
+  const ref = (v2.reference && typeof v2.reference === 'object') ? v2.reference : {};
+  if (ref.is_pronoun_ref === true || ref.resolve_from_history === true) return null;
+
   const items = Array.isArray(v2.items) ? v2.items.filter(i => i && i.sku) : [];
   if (items.length === 0) return null;
 
@@ -2745,6 +2800,15 @@ function buildQuoteFromV2(v2, rawText) {
     else hwItems.push({ sku, qty });
   }
 
+  // Validate every V2 license SKU against the live prices catalog. If ANY
+  // license SKU is hallucinated (not in prices), return null so parseMessage
+  // can take over — it produces the correct canonical SKU deterministically.
+  for (const lic of licItems) {
+    if (!(lic.sku in prices)) return null;
+  }
+
+  const separateQuotes = Boolean(mods.separate_quotes);
+
   // Pure license path — caller renders via directLicense / directLicenseList
   if (hwItems.length === 0 && licItems.length > 0) {
     if (licItems.length === 1) {
@@ -2752,7 +2816,7 @@ function buildQuoteFromV2(v2, rawText) {
         items: [],
         directLicense: { sku: licItems[0].sku, qty: licItems[0].qty },
         requestedTerm: null,
-        modifiers: { hardwareOnly: false, licenseOnly: true },
+        modifiers: { hardwareOnly: false, licenseOnly: true, separateQuotes },
         requestedTier: null,
         isAdvisory: false,
         isRevision: false,
@@ -2772,7 +2836,7 @@ function buildQuoteFromV2(v2, rawText) {
       items: [],
       directLicenseList: dedup,
       requestedTerm: null,
-      modifiers: { hardwareOnly: false, licenseOnly: true },
+      modifiers: { hardwareOnly: false, licenseOnly: true, separateQuotes },
       requestedTier: null,
       isAdvisory: false,
       isRevision: false,
@@ -2842,7 +2906,8 @@ function buildQuoteFromV2(v2, rawText) {
     requestedTerm,
     modifiers: {
       hardwareOnly: Boolean(mods.hardware_only),
-      licenseOnly: Boolean(mods.license_only)
+      licenseOnly: Boolean(mods.license_only),
+      separateQuotes
     },
     requestedTier,
     isAdvisory: false,
@@ -3188,6 +3253,13 @@ function parseMessage(text) {
   text = convertWordNumbers(text);
   const upper = text.toUpperCase();
 
+  // ── separate_quotes early detection ──
+  // Detected early so the Duo/Umbrella handlers (which early-return before
+  // the main modifier block) can carry this flag through to the renderer.
+  // Deliberately tolerant — missing a phrasing just defaults to combined.
+  const SEPARATE_QUOTES_RE = /\b(SEPARATE\s+(QUOTES?|URLS?|LINKS?)|INDIVIDUAL\s+(QUOTES?|URLS?|LINKS?)|EACH\s+(AS\s+)?(ITS\s+)?OWN\s+(QUOTES?|URLS?|LINKS?)|ONE\s+(QUOTE|URL|LINK)\s+(PER|EACH|APIECE|FOR\s+EACH)|BREAK\s+(THESE|THEM|IT)\s+OUT|SPLIT\s+(INTO|UP\s+INTO)\s+SEPARATE|AS\s+(THEIR|ITS)\s+OWN\s+(QUOTES?|URLS?|LINKS?))\b/;
+  const __separateQuotes = SEPARATE_QUOTES_RE.test(upper);
+
   // Multi-line License SKU Input (CSV/list from dashboard export)
   // Handles formats like:
   //   LIC-ENT-3YR,26\nLIC-MS120-8FP-3YR,4\n...
@@ -3418,6 +3490,9 @@ function parseMessage(text) {
 
   const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
 
+  // separate_quotes (detected early, top of parseMessage). Plumb into modifiers.
+  modifiers.separateQuotes = __separateQuotes;
+
   let requestedTier = null;
   if (/\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/.test(upper) && !/\bENTERPRISE\b/.test(upper)) {
     requestedTier = 'SEC';
@@ -3455,19 +3530,25 @@ function parseMessage(text) {
   const isAdvisory = advisoryPatterns.some(p => p.test(upper));
 
   // ── Duo natural language handler ──
-  // License-only product (no hardware). If tier is specified, return URLs directly.
+  // License-only product (no hardware). Supports multi-tier detection:
+  // "duo essentials, premier, and advantage" → all three tiers emitted.
   // If tier is NOT specified, prompt the user to choose (Essentials/Advantage/Premier).
   const isDuo = /\b(?:DUO|CISCO\s*DUO)\b/i.test(upper);
   if (isDuo && !isAdvisory) {
-    // Extract tier and qty with explicit checks (avoids regex group-shifting bugs)
-    let duoTier = null;
-    if (/ADVANTAGE/i.test(upper)) duoTier = 'ADVANTAGE';
-    else if (/PREMIER/i.test(upper)) duoTier = 'PREMIER';
-    else if (/ESSENTIAL/i.test(upper)) duoTier = 'ESSENTIALS';
+    // Collect ALL tiers mentioned in the message (order-preserving).
+    const duoTiers = [];
+    // Step through the message to preserve the user's stated order.
+    const tierOrderRe = /\b(ADVANTAGE|PREMIER|ESSENTIAL(?:S)?)\b/gi;
+    let tm;
+    while ((tm = tierOrderRe.exec(upper)) !== null) {
+      const raw = tm[1].toUpperCase();
+      const canon = raw === 'ADVANTAGE' ? 'ADVANTAGE' : raw === 'PREMIER' ? 'PREMIER' : 'ESSENTIALS';
+      if (!duoTiers.includes(canon)) duoTiers.push(canon);
+    }
     const duoQtyMatch = upper.match(/\b(\d+)\b/);
     const duoQty = duoQtyMatch ? parseInt(duoQtyMatch[1]) : 1;
 
-    if (!duoTier) {
+    if (duoTiers.length === 0) {
       return {
         items: [],
         isQuote: false,
@@ -3479,38 +3560,69 @@ function parseMessage(text) {
           `Just reply with the tier name (e.g. "Duo Advantage") or "Duo Essentials ${duoQty}".`
       };
     }
+    // Build items for every tier × every term. The isTermOptionQuote renderer
+    // groups by tier when separateQuotes is set, or by term otherwise.
+    const duoItems = [];
+    for (const tier of duoTiers) {
+      for (const t of [1, 3, 5]) {
+        duoItems.push({ baseSku: `LIC-DUO-${tier}-${t}YR`, qty: duoQty, isLicenseOnly: true });
+      }
+    }
+    // If the user specified a single term AND a single tier, narrow to just that
+    // term (preserves legacy single-tier behavior). When separate_quotes or
+    // multiple tiers are in play, always emit all terms so the renderer can
+    // group correctly.
+    let duoFinalItems = duoItems;
+    if (requestedTerm && duoTiers.length === 1 && !__separateQuotes) {
+      duoFinalItems = duoItems.filter(it => it.baseSku.endsWith(`-${requestedTerm}YR`));
+    }
     return {
-      items: [
-        { baseSku: `LIC-DUO-${duoTier}-1YR`, qty: duoQty, isLicenseOnly: true },
-        { baseSku: `LIC-DUO-${duoTier}-3YR`, qty: duoQty, isLicenseOnly: true },
-        { baseSku: `LIC-DUO-${duoTier}-5YR`, qty: duoQty, isLicenseOnly: true }
-      ],
+      items: duoFinalItems,
       isQuote: true,
-      isTermOptionQuote: true
+      isTermOptionQuote: true,
+      modifiers: { separateQuotes: __separateQuotes || duoTiers.length > 1 }
     };
   }
 
   // ── Umbrella natural language handler ──
   // License-only product. If type+tier specified, return URLs directly.
   // If missing, prompt user to choose type (DNS/SIG) and tier (Essentials/Advantage).
+  // Multi-type/multi-tier: "umbrella DNS essentials, DNS advantage, SIG advantage" emits all combinations.
   const isUmb = /\b(?:UMBRELLA|UMB)\b/i.test(upper);
   if (isUmb && !isAdvisory) {
-    // Extract type, tier, qty with explicit checks
-    let umbType = null;
-    if (/\bSIG\b/i.test(upper)) umbType = 'SIG';
-    else if (/\bDNS\b/i.test(upper)) umbType = 'DNS';
-    let umbTier = null;
-    if (/ADV(?:ANCED)?/i.test(upper)) umbTier = 'ADV';
-    else if (/ESS(?:ENTIALS?)?/i.test(upper)) umbTier = 'ESS';
+    // Collect ALL types (DNS, SIG) mentioned, in order of appearance
+    const umbTypes = [];
+    const typeRe = /\b(DNS|SIG)\b/gi;
+    let tym;
+    while ((tym = typeRe.exec(upper)) !== null) {
+      const canon = tym[1].toUpperCase();
+      if (!umbTypes.includes(canon)) umbTypes.push(canon);
+    }
+
+    // Collect ALL tiers (ESS, ADV) mentioned, in order of appearance
+    // Must match both literal spellings ("advantage", "essentials") and short forms ("adv", "ess").
+    const umbTiers = [];
+    const tierRe = /\b(ADV(?:ANTAGE|ANCED)?|ESS(?:ENTIALS?)?)\b/gi;
+    let trm;
+    while ((trm = tierRe.exec(upper)) !== null) {
+      const raw = trm[1].toUpperCase();
+      const canon = raw.startsWith('ADV') ? 'ADV' : 'ESS';
+      if (!umbTiers.includes(canon)) umbTiers.push(canon);
+    }
+
     const umbQtyMatch = upper.match(/\b(\d+)\b/);
     const umbQty = umbQtyMatch ? parseInt(umbQtyMatch[1]) : 1;
 
-    if (!umbType || !umbTier) {
+    // Detect explicit term request (e.g. "3 year umbrella")
+    const umbTermMatch = upper.match(/\b([135])\s*(?:YR|YEAR|YEARS)\b/);
+    const umbRequestedTerm = umbTermMatch ? parseInt(umbTermMatch[1]) : null;
+
+    if (umbTypes.length === 0 || umbTiers.length === 0) {
       let prompt = `Which Umbrella package do you need? (qty: ${umbQty})\n\n`;
-      if (!umbType) {
+      if (umbTypes.length === 0) {
         prompt += `**Type:**\n• **DNS Security** — DNS-layer protection\n• **SIG** (Secure Internet Gateway) — full web proxy + DNS\n\n`;
       }
-      if (!umbTier) {
+      if (umbTiers.length === 0) {
         prompt += `**Tier:**\n• **Essentials** — core protection\n• **Advantage** — Essentials + advanced features\n\n`;
       }
       prompt += `Reply with the full package, e.g. "Umbrella DNS Essentials ${umbQty}" or "Umbrella SIG Advantage".`;
@@ -3521,14 +3633,29 @@ function parseMessage(text) {
         clarificationMessage: prompt
       };
     }
+
+    // Build items: cartesian product of types × tiers × all three terms (1/3/5YR)
+    const umbItems = [];
+    for (const type of umbTypes) {
+      for (const tier of umbTiers) {
+        for (const t of [1, 3, 5]) {
+          umbItems.push({ baseSku: `LIC-UMB-${type}-${tier}-K9-${t}YR`, qty: umbQty, isLicenseOnly: true });
+        }
+      }
+    }
+
+    // Narrow to requested term ONLY if single type+tier AND not separateQuotes
+    const combos = umbTypes.length * umbTiers.length;
+    let umbFinalItems = umbItems;
+    if (umbRequestedTerm && combos === 1 && !__separateQuotes) {
+      umbFinalItems = umbItems.filter(it => it.baseSku.endsWith(`-${umbRequestedTerm}YR`));
+    }
+
     return {
-      items: [
-        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-1YR`, qty: umbQty, isLicenseOnly: true },
-        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-3YR`, qty: umbQty, isLicenseOnly: true },
-        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-5YR`, qty: umbQty, isLicenseOnly: true }
-      ],
+      items: umbFinalItems,
       isQuote: true,
-      isTermOptionQuote: true
+      isTermOptionQuote: true,
+      modifiers: { separateQuotes: __separateQuotes || combos > 1 }
     };
   }
 
@@ -3866,6 +3993,7 @@ function buildQuoteResponse(parsed) {
 
   // Duo / Umbrella license-only products — return 1Y/3Y/5Y URLs directly
   if (parsed.isTermOptionQuote && parsed.items) {
+    const separateQuotes = Boolean(parsed.modifiers && parsed.modifiers.separateQuotes);
     const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
     for (const item of parsed.items) {
       const termMatch = item.baseSku.match(/(\d)YR?$/i);
@@ -3875,6 +4003,44 @@ function buildQuoteResponse(parsed) {
       }
     }
     const lines = [];
+    // separateQuotes: emit one URL per (tier, term) pair. We detect distinct
+    // tier families by stripping the term suffix from each SKU.
+    if (separateQuotes) {
+      // Group SKUs by their tier family (the SKU minus the trailing term).
+      const tierFamilies = new Map(); // tierKey → tier label
+      for (const item of parsed.items) {
+        const tierKey = item.baseSku.replace(/-(\d)YR?$/i, '');
+        if (!tierFamilies.has(tierKey)) {
+          // Friendly label: LIC-DUO-ESSENTIALS → "Duo Essentials"
+          let label = tierKey
+            .replace(/^LIC-/, '')
+            .replace(/-K9$/, '')
+            .replace(/-/g, ' ')
+            .replace(/\bDUO\b/, 'Duo')
+            .replace(/\bUMB\b/, 'Umbrella')
+            .replace(/\bESSENTIALS\b/i, 'Essentials')
+            .replace(/\bADVANTAGE\b/i, 'Advantage')
+            .replace(/\bPREMIER\b/i, 'Premier')
+            .replace(/\bESS\b/i, 'Essentials')
+            .replace(/\bADV\b/i, 'Advantage')
+            .replace(/\bDNS\b/i, 'DNS')
+            .replace(/\bSIG\b/i, 'SIG');
+          tierFamilies.set(tierKey, label.trim());
+        }
+      }
+      for (const [tierKey, label] of tierFamilies) {
+        lines.push(`**${label}:**`);
+        for (const term of ['1YR', '3YR', '5YR']) {
+          const matching = termGroups[term].filter(s => s.sku.replace(/-(\d)YR?$/i, '') === tierKey);
+          if (matching.length > 0) {
+            const url = buildStratusUrl(matching);
+            lines.push(`${term.replace('YR', '-Year')} Co-Term: ${url}`);
+          }
+        }
+        lines.push('');
+      }
+      return { message: lines.join('\n').trim(), needsLlm: false };
+    }
     for (const [term, skus] of Object.entries(termGroups)) {
       if (skus.length > 0) {
         const url = buildStratusUrl(skus);
@@ -4475,6 +4641,30 @@ function buildQuoteResponse(parsed) {
         const url = buildStratusUrl(urlItems);
         lines.push(url);
         if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
+        lines.push('');
+      }
+    } else if (modifiers.separateQuotes && resolvedItems.length > 1) {
+      // separate_quotes: emit a labeled URL block per item, one URL per term
+      // within each block. Each item carries its own license so each quote is
+      // self-contained.
+      for (const item of resolvedItems) {
+        const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense } = item;
+        const label = baseSku || hwSku || 'Quote';
+        lines.push(`**${label} × ${qty}:**`);
+        for (const term of terms) {
+          const urlItems = [];
+          if (!modifiers.licenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+          if (licenseSkus) {
+            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+            if (licSku) urlItems.push({ sku: licSku, qty });
+          }
+          if (urlItems.length > 0) {
+            const url = buildStratusUrl(urlItems);
+            const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
+            lines.push(`${termLabel}: ${url}`);
+            if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
+          }
+        }
         lines.push('');
       }
     } else {
