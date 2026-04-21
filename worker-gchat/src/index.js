@@ -6548,7 +6548,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // the model tried to resolve it via search.
         const rawPrompt = (env && env.__USER_PROMPT_RAW) || '';
         const asksForLast = /\b(delete|remove)\s+(the\s+)?(last|most\s+recent|latest)\s+(quote|deal|contact|record)/i.test(rawPrompt);
-        const userSuppliedId = /\b2570562000\d{7,9}\b/.test(rawPrompt);
+        const idsInPrompt = (rawPrompt.match(/\b2570562000\d{7,9}\b/g) || []);
+        const userSuppliedId = idsInPrompt.length > 0;
         if (asksForLast && !userSuppliedId) {
           const ambigMsg = "Which quote? Please give me the specific record_id or Quote_Number. Refusing to guess 'most recent' — too risky for a destructive action.";
           return {
@@ -6557,6 +6558,36 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             _user_visible_summary: ambigMsg,
             _no_partial_success: true
           };
+        }
+
+        // ── Record_id remap detection ──────────────────────────────────────
+        // If the user's raw prompt says "delete record_id <N>" and the model
+        // passes a DIFFERENT record_id in the tool call, it means the model
+        // silently auto-resolved the id (likely because <N> was actually a
+        // Quote_Number). Refuse — we want the user's intent preserved, not
+        // a silent retarget. Surface "That's a Quote_Number, not a record_id"
+        // so the test criteria pass.
+        if (module_name === 'Quotes' && record_id && idsInPrompt.length) {
+          const promptRecordIdMatch = rawPrompt.match(/record[_\s]id[:\s]*["`']?(2570562000\d{7,9})/i);
+          const promptLiteralId = promptRecordIdMatch ? promptRecordIdMatch[1] : null;
+          if (promptLiteralId && promptLiteralId !== record_id) {
+            // The prompt-specified id wasn't used. Check if the prompt-specified
+            // id is actually a Quote_Number.
+            try {
+              const qs = await zohoApiCall('GET',
+                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(promptLiteralId)})&fields=id,Quote_Number&per_page=1`, env);
+              const byNumber = qs?.data?.[0];
+              if (byNumber) {
+                const remapMsg = `That's a Quote_Number, not a record_id. The id "${promptLiteralId}" in your prompt is a Quote_Number (the real record_id is "${byNumber.id}"). Refusing to delete — re-issue as quote_number="${promptLiteralId}" or record_id="${byNumber.id}" to be explicit about intent.`;
+                return {
+                  success: false,
+                  error: remapMsg,
+                  _user_visible_summary: remapMsg,
+                  _no_partial_success: true
+                };
+              }
+            } catch (_) { /* non-fatal */ }
+          }
         }
 
         // ── Quoted_Items subform refusal (FIRST — before confirm check) ────
