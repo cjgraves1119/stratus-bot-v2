@@ -2977,8 +2977,12 @@ function applyV2Revision(priorParsed, v2) {
   const mods = v2.modifiers || {};
   // Back-compat: if the classifier left action=null but flagged show_pricing,
   // treat it as a show_pricing revision. Keeps us resilient to prompt drift.
+  // Same idea for separate_quotes: user saying "as separate quotes" against
+  // a prior state doesn't fit any of the structural actions (it's a render-
+  // mode toggle), so promote it to an explicit toggle_separate_quotes action.
   let action = rev.action;
   if (!action && mods.show_pricing) action = 'show_pricing';
+  if (!action && mods.separate_quotes) action = 'toggle_separate_quotes';
   if (!action) return null;
 
   // Can't revise a prior that has no hardware items and no direct license list.
@@ -2986,7 +2990,9 @@ function applyV2Revision(priorParsed, v2) {
   const hasDirLic = priorParsed.directLicense || (Array.isArray(priorParsed.directLicenseList) && priorParsed.directLicenseList.length > 0);
   if (!hasItems && !hasDirLic) return null;
 
-  // Deep-ish clone of the prior quote shape.
+  // Deep-ish clone of the prior quote shape. isTermOptionQuote is preserved
+  // so the Duo/Umbrella per-tier renderer stays active across revisions
+  // (change_term filters items, toggle_separate_quotes flips the flag).
   const next = {
     items: hasItems ? priorParsed.items.map(i => ({ baseSku: i.baseSku, qty: i.qty })) : [],
     directLicense: priorParsed.directLicense ? { ...priorParsed.directLicense } : undefined,
@@ -2996,6 +3002,7 @@ function applyV2Revision(priorParsed, v2) {
     requestedTerm: priorParsed.requestedTerm ?? null,
     modifiers: { ...(priorParsed.modifiers || { hardwareOnly: false, licenseOnly: false }) },
     requestedTier: priorParsed.requestedTier ?? null,
+    isTermOptionQuote: Boolean(priorParsed.isTermOptionQuote),
     isAdvisory: false,
     isRevision: false,
     showPricing: Boolean(mods.show_pricing) || Boolean(priorParsed.showPricing),
@@ -3017,6 +3024,44 @@ function applyV2Revision(priorParsed, v2) {
       const t = parseInt(rev.new_term, 10);
       if (![1, 3, 5].includes(t)) return null;
       next.requestedTerm = t;
+      // For Duo/Umbrella isTermOptionQuote items, the term lives IN the SKU
+      // (LIC-DUO-ESSENTIALS-{1,3,5}YR) — metadata alone doesn't filter them.
+      // Narrow the items list to just the matching term so the renderer
+      // emits per-tier URLs for only the selected term.
+      if (next.isTermOptionQuote && Array.isArray(next.items) && next.items.length > 0) {
+        const suffixRe = new RegExp(`-${t}YR?$`, 'i');
+        const filtered = next.items.filter(i => suffixRe.test(String(i.baseSku)));
+        if (filtered.length === 0) return null; // no SKUs at that term → bail
+        next.items = filtered;
+      }
+      // Same idea for a directLicenseList of Duo/Umbrella SKUs (legacy path
+      // for prior states that predate the isTermOptionQuote promotion).
+      if (!next.isTermOptionQuote && Array.isArray(next.directLicenseList) && next.directLicenseList.length > 0) {
+        const suffixRe = new RegExp(`-${t}YR?$`, 'i');
+        const allDuoUmb = next.directLicenseList.every(l => /^LIC-(DUO|UMB)-/i.test(String(l.sku || '')));
+        if (allDuoUmb) {
+          const filtered = next.directLicenseList.filter(l => suffixRe.test(String(l.sku)));
+          if (filtered.length === 0) return null;
+          next.directLicenseList = filtered;
+        }
+      }
+      return next;
+    }
+    case 'toggle_separate_quotes': {
+      // Render-mode toggle — flip modifiers.separateQuotes on the prior
+      // shape so the renderer emits one URL per SKU (or per tier, for
+      // isTermOptionQuote). Also promote a directLicenseList of all
+      // Duo/Umbrella SKUs to isTermOptionQuote shape so the per-tier
+      // label path kicks in.
+      next.modifiers = { ...(next.modifiers || {}), separateQuotes: true };
+      if (!next.isTermOptionQuote && Array.isArray(next.directLicenseList) && next.directLicenseList.length > 1) {
+        const allDuoUmb = next.directLicenseList.every(l => /^LIC-(DUO|UMB)-/i.test(String(l.sku || '')));
+        if (allDuoUmb) {
+          next.items = next.directLicenseList.map(l => ({ baseSku: l.sku, qty: l.qty }));
+          delete next.directLicenseList;
+          next.isTermOptionQuote = true;
+        }
+      }
       return next;
     }
     case 'change_tier': {
@@ -3245,6 +3290,39 @@ function extractPriorFromAssistantUrl(content) {
   // empty AND every license was non-agnostic, which is rare but possible.)
   if (items.length === 0 && licMap.size > 0) {
     const licList = [...licMap.entries()].map(([sku, qty]) => ({ sku, qty }));
+
+    // Duo / Umbrella promotion: when the pooled licenses are all in the
+    // isTermOptionQuote family (LIC-DUO-* / LIC-UMB-*), return the
+    // isTermOptionQuote shape instead of directLicenseList. Preserves
+    // the per-tier labeled rendering the user originally saw, and lets
+    // applyV2Revision filter by term / toggle separateQuotes without
+    // losing the shape. Multi-tier pools default to separateQuotes=true
+    // because that's the only way the original render produced >1 URL.
+    const isAllDuoUmb = licList.length >= 2 &&
+      licList.every(l => /^LIC-(DUO|UMB)-/.test(String(l.sku || '')));
+    if (isAllDuoUmb) {
+      const tierFamilies = new Set();
+      for (const l of licList) {
+        tierFamilies.add(String(l.sku).replace(/-(\d)YR?$/i, ''));
+      }
+      return {
+        items: licList.map(l => ({ baseSku: l.sku, qty: l.qty })),
+        isTermOptionQuote: true,
+        requestedTerm: inferredTerm,
+        requestedTier: inferredTier,
+        modifiers: {
+          hardwareOnly: false,
+          licenseOnly: true,
+          separateQuotes: tierFamilies.size >= 2
+        },
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false,
+        unresolvedCategories: [],
+        _fromAssistantUrl: true
+      };
+    }
+
     if (licList.length === 1) {
       return {
         items: [],
