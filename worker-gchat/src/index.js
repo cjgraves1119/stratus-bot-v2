@@ -6540,28 +6540,101 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!record_id && !quote_number) {
           return { success: false, error: 'record_id or quote_number is required' };
         }
-        // NOTE: Earlier revisions inferred confirm:true from env.__USER_PROMPT_RAW
-        // when the user prompt included "confirm:true". That caused test 25
-        // (mismatch detection) to actually delete the seed quote, cascading
-        // failures through downstream tests that depended on that seed data.
-        // We now require the model to propagate confirm:true into the tool call
-        // explicitly — the safer posture and what the prompt rules instruct.
-        if (confirm !== true) {
+
+        // ── Ambiguous-target guard ─────────────────────────────────────────
+        // If the user's raw prompt asks to delete "the last quote" / "most
+        // recent quote" / "latest quote" WITHOUT providing a specific 15-20
+        // digit id, the delete target is ambiguous by policy. Refuse even if
+        // the model tried to resolve it via search.
+        const rawPrompt = (env && env.__USER_PROMPT_RAW) || '';
+        const asksForLast = /\b(delete|remove)\s+(the\s+)?(last|most\s+recent|latest)\s+(quote|deal|contact|record)/i.test(rawPrompt);
+        const userSuppliedId = /\b2570562000\d{7,9}\b/.test(rawPrompt);
+        if (asksForLast && !userSuppliedId) {
+          const ambigMsg = "Which quote? Please give me the specific record_id or Quote_Number. Refusing to guess 'most recent' — too risky for a destructive action.";
           return {
             success: false,
-            error: 'Delete not executed — confirm:true is required to prevent accidental deletion. Set confirm:true in the tool call after verifying the record.',
+            error: ambigMsg,
+            _user_visible_summary: ambigMsg,
             _no_partial_success: true
           };
         }
-        // ── Quoted_Items subform refusal ───────────────────────────────────
-        // Zoho rejects direct deletes on subform modules ("record not approved").
-        // Surface a clear refusal instead of letting the Zoho error bubble up.
+
+        // ── Quoted_Items subform refusal (FIRST — before confirm check) ────
+        // Even a confirm-missing call should surface the subform refusal so
+        // the user knows WHY the call is invalid, not just that they forgot
+        // confirm.
         if (module_name === 'Quoted_Items') {
           const qiMsg = 'Cannot delete Quoted_Items subrecords directly — line items are a subform on a Quote and cannot be deleted via zoho_delete_record. To remove a line item, call zoho_update_record on the parent Quote with Quoted_Items=[{id: "<line_id>", _delete: null}]. Refusing to delete.';
           return {
             success: false,
             error: qiMsg,
             _user_visible_summary: qiMsg,
+            _no_partial_success: true
+          };
+        }
+
+        // ── Module-agnostic Quote_Number-as-record_id check (BEFORE confirm) ─
+        // If the caller passed record_id that actually matches a Quote_Number,
+        // we surface the mismatch immediately — the model should not be told
+        // "forgot to pass confirm:true" when the real problem is that the id
+        // they supplied is a Quote_Number. This lets the model give a useful
+        // answer even when it forgets confirm.
+        if (record_id && /^\d{15,20}$/.test(record_id) && !quote_number) {
+          try {
+            const qs = await zohoApiCall('GET',
+              `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(record_id)})&fields=id,Quote_Number&per_page=1`, env);
+            const byNumber = qs?.data?.[0];
+            if (byNumber && byNumber.id !== record_id) {
+              const qnErr = `That's a Quote_Number, not a record_id. The value "${record_id}" is a Quote_Number — the real record_id is "${byNumber.id}". Re-call with record_id="${byNumber.id}" or quote_number="${record_id}" if you intended to delete this quote.`;
+              return {
+                success: false,
+                error: qnErr,
+                _user_visible_summary: qnErr,
+                _no_partial_success: true
+              };
+            }
+          } catch (_) { /* non-fatal — fall through */ }
+        }
+
+        // ── confirm check (after the deterministic refusals above) ─────────
+        // NOTE: Earlier revisions inferred confirm:true from env.__USER_PROMPT_RAW
+        // when the user prompt included "confirm:true". That caused test 25
+        // (mismatch detection) to actually delete the seed quote, cascading
+        // failures through downstream tests that depended on that seed data.
+        // We now require the model to propagate confirm:true into the tool call
+        // explicitly — the safer posture and what the prompt rules instruct.
+        // confirm === false is a DRY RUN: return a preview without deleting.
+        if (confirm === false) {
+          // Build a dry-run preview by fetching the current record state (no
+          // delete call against Zoho).
+          let target = { module: module_name, record_id: record_id || null, quote_number: quote_number || null };
+          let previewRecord = null;
+          try {
+            if (module_name === 'Quotes' && quote_number && !record_id) {
+              const qs = await zohoApiCall('GET',
+                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(quote_number)})&fields=id,Quote_Number,Subject,Grand_Total&per_page=1`, env);
+              previewRecord = qs?.data?.[0] || null;
+              if (previewRecord) target.record_id = previewRecord.id;
+            } else if (record_id) {
+              const pre = await zohoApiCall('GET', `${module_name}/${record_id}`, env);
+              previewRecord = pre?.data?.[0] || null;
+            }
+          } catch (_) { /* non-fatal */ }
+          const msg = previewRecord
+            ? `confirm:false — this was a dry run, nothing was deleted. Would delete ${module_name}/${target.record_id} (${previewRecord.Subject || previewRecord.Deal_Name || previewRecord.Full_Name || previewRecord.Account_Name || 'record'}${previewRecord.Quote_Number ? ', Quote_Number=' + previewRecord.Quote_Number : ''}${previewRecord.Grand_Total ? ', Grand_Total=$' + previewRecord.Grand_Total : ''}). Pass confirm:true to actually delete.`
+            : `confirm:false — this was a dry run, nothing was deleted. Would delete ${module_name} with ${record_id ? 'record_id=' + record_id : 'quote_number=' + quote_number} if confirm:true were passed.`;
+          return {
+            success: true,
+            dry_run: true,
+            preview: previewRecord,
+            _user_visible_summary: msg,
+            message: msg
+          };
+        }
+        if (confirm !== true) {
+          return {
+            success: false,
+            error: 'Delete not executed — confirm:true is required to prevent accidental deletion. Set confirm:true in the tool call after verifying the record.',
             _no_partial_success: true
           };
         }
@@ -6593,25 +6666,6 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           } catch (resolveErr) {
             return { success: false, error: `Quote_Number resolution failed: ${resolveErr.message}. Refusing to delete.`, _no_partial_success: true };
           }
-        }
-        // ── Module-agnostic Quote_Number-as-record_id check ───────────────
-        // If caller passed record_id that actually matches a Quote_Number
-        // (regardless of module), refuse and surface the mismatch verbatim.
-        if (record_id && /^\d{15,20}$/.test(record_id) && !quote_number) {
-          try {
-            const qs = await zohoApiCall('GET',
-              `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(record_id)})&fields=id,Quote_Number&per_page=1`, env);
-            const byNumber = qs?.data?.[0];
-            if (byNumber && byNumber.id !== record_id) {
-              const qnErr = `That's a Quote_Number, not a record_id. The value "${record_id}" is a Quote_Number — the real record_id is "${byNumber.id}". Re-call with record_id="${byNumber.id}" or quote_number="${record_id}" if you intended to delete this quote.`;
-              return {
-                success: false,
-                error: qnErr,
-                _user_visible_summary: qnErr,
-                _no_partial_success: true
-              };
-            }
-          } catch (_) { /* non-fatal — fall through */ }
         }
 
         // ── Pre-state snapshot (enables undo-restore) ──────────────────────
