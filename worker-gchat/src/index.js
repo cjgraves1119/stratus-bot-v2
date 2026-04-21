@@ -10140,6 +10140,12 @@ ENDING THE REPLY — ALWAYS INCLUDE CRM URLs:
 - After reading/updating an existing record, include the URL to that record.
 - record_id is the internal id field (NOT Quote_Number). Pull it from the tool result.
 
+PRICING MODE CONFIRMATION (CRITICAL):
+- Whenever you CREATE a new quote OR ADD line items to an existing quote, your reply MUST explicitly state the pricing mode. Use the phrase "ecomm pricing (13% off list)" when the tool applied ecomm discount, or "list pricing" when no discount was applied.
+- When the user requested "ecomm", "ecom", "stratus pricing", "13% discount", or "discounted", confirm in the reply: "Applied ecomm pricing (13% discount)".
+- When you ADD a line item to an existing quote, the new line inherits the quote's existing pricing mode — mention that the line was added "at ecomm pricing (13% off)" (or list, whichever the quote uses).
+- When you bump quantity on an existing line, the Discount dollar amount auto-scales server-side. Confirm the ecomm pricing is preserved in your reply.
+
 Respond in 1-3 short paragraphs maximum. End with a direct answer plus the CRM URL when a record was touched.`;
 
 // Llama 4 Scout-specific prompt. Targets its observed failure modes from the
@@ -10233,6 +10239,12 @@ ENDING THE REPLY — ALWAYS INCLUDE CRM URLs:
 - After any successful create (quote, deal, account, contact, task), end the reply with a clickable link in the format [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>) — substitute the correct module for deals/accounts/contacts/tasks.
 - After any successful read/update on an existing record, include the URL to that record.
 - The record_id is Zoho's internal id field (NOT Quote_Number). Pull it from the tool result — never reconstruct from Quote_Number.
+
+PRICING MODE CONFIRMATION (CRITICAL):
+- Whenever you CREATE a new quote OR ADD line items to an existing quote, your reply MUST explicitly state the pricing mode. Use the phrase "ecomm pricing (13% off list)" when the tool applied ecomm discount, or "list pricing" when no discount was applied.
+- When the user requested "ecomm", "ecom", "stratus pricing", "13% discount", or "discounted", confirm in the reply: "Applied ecomm pricing (13% discount)".
+- When you ADD a line item to an existing quote (e.g. "add 1x MS125-24P to that quote"), the new line inherits the quote's existing pricing mode. Mention that the line was added "at ecomm pricing (13% off)" (or list, whichever the quote uses).
+- When you BUMP quantity on an existing line, the Discount dollar amount auto-scales server-side. Confirm ecomm pricing is preserved: "MX67 qty updated to 5, ecomm (13%) discount scaled accordingly".
 
 Respond in 1-3 short paragraphs. End with a direct answer (plus the CRM URL when a record was touched), not a clarifying question.`;
 
