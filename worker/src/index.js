@@ -649,7 +649,7 @@ SCHEMA:
 INTENT RULES:
 - "quote": fresh quote or license request with ≥1 explicit SKU. Bare SKU ("MR46") = quote qty 1. "renewal for [SKU list]" or "renew N [SKU]" = quote with license_only=true (NOT revise — renewals with explicit SKUs are fresh license quotes).
 - "price_lookup": standalone pricing question naming a SPECIFIC SKU with NO prior quote context — "cost of MR44", "how much is MR44", "price for MR44". If prior_context is present AND the user is asking to see pricing on the prior quote (e.g. "what is the cost", "how much", "with pricing"), use intent="revise" with action="show_pricing" instead.
-- "revise": message modifies a prior quote — "license only", "hardware only", "3 year only", "add X", "remove X", "swap X for Y", "make it N", "change to SEC". HARD RULE: "revise" requires prior_context to be present. If prior_context is empty/null, NEVER output "revise" — use "quote" or "clarify" instead.
+- "revise": message modifies a prior quote using a REVISION VERB or PRONOUN REFERENCE — "add X", "remove X", "swap X for Y", "replace X", "change X", "make it N", "license only", "hardware only", "3 year only", "convert to", "toggle", "with pricing on that", "show me pricing". HARD RULE #1: "revise" requires prior_context to be present. If prior_context is empty/null, NEVER output "revise" — use "quote" or "clarify" instead. HARD RULE #2: even when prior_context IS present, a message that opens with a FRESH QUOTING VERB ("quote", "price", "send me", "give me", "get me", "I need", "can you quote", "let me see", "pull up", "build me") followed by an explicit product family, SKU, or quantity is intent="quote", NOT revise. Revise requires either a revision verb (add/remove/swap/replace/change/make it/convert/toggle) OR a pronoun/demonstrative referencing the prior quote (it/that/these/those/the quote/the switches/the APs). Examples that ARE quote even with prior_context: "quote MR44", "quote all duo licenses", "quote 10 duo essentials as separate quotes", "price me a MX85", "can you quote 3 MS130-24". Examples that ARE revise: "add 2 MR44", "swap them for MR46", "make it 5 year", "with pricing", "change to SEC".
 - "dashboard_parse": image of Meraki license dashboard. NEVER use for messages containing stratusinfosystems.com URLs — those are the bot's own quote output, not dashboards.
 - "clarify": quote request too vague — "some switches", "need APs", "pricing" alone, "5 MS130-24" (missing variant). Also use when a bare product category name is given without quantity or context (e.g. "DNS security").
 - "product_info": spec, compare, size, capability, EOL-status, or sizing/recommendation question — NOT a quote. Includes: "what do I need for X users", "what do you recommend for X", "which firewall for X employees", "what's the best AP for a warehouse". If the user is asking WHAT to buy (not quoting a specific SKU), it's product_info.
@@ -666,7 +666,11 @@ MODIFIER RULES:
 - TIER SUFFIX SPLITTING: If a SKU has a tier suffix or space-separated tier word appended — examples: "MX85-SDW", "MX85 SDW", "MX85 sdwan", "MX85-SD-WAN", "MX67-SEC", "MX67 SEC", "MX75-ENT", "MX75 enterprise" — SPLIT it: put the base model in items[].sku (e.g., "MX85") and the tier in modifiers.tier (e.g., "SDW"). Never include the tier suffix as part of the SKU string. Never leave the tier as null when you've stripped a tier suffix.
 - show_pricing: true for pricing intent ("cost","how much","with pricing","price").
 - all_terms: true when user says "1yr 3yr and 5yr" or "all terms".
-- separate_quotes: true when user asks for distinct quote URLs per item/tier — phrases include "separate quotes", "separate URLs", "individual quotes", "each as its own quote", "one per line", "break these out", "split into separate", "X URL, Y URL, Z URL". Default false (all items combined in one URL).
+- CRITICAL — separate_quotes: Set modifiers.separate_quotes=true whenever the user asks for one URL/quote/link PER item, tier, or line. Trigger phrases (case-insensitive, match anywhere in the message): "separate quote[s]", "separate url[s]", "separate link[s]", "individual quote[s]/url[s]/link[s]", "each as its own quote/url/link", "each separately", "as separate ...", "one per line", "one per tier", "break (these|them|it) out", "split (into|up into) separate", "X url, Y url, Z url". CRITICAL: NEVER leave separate_quotes=false when any of the above appears. When separate_quotes=true, items[] MUST contain EVERY distinct thing the user named so the renderer can produce one URL per item — never collapse multi-tier or multi-item requests into a single item. Examples:
+  * "quote 10 duo essentials and advantage as separate quotes" → items=[{sku:"LIC-DUO-ESSENTIALS-3YR",qty:10,sku_type:"license"},{sku:"LIC-DUO-ADVANTAGE-3YR",qty:10,sku_type:"license"}], separate_quotes=true
+  * "MR44 and MS130-24 as separate links" → items=[{sku:"MR44",qty:1},{sku:"MS130-24",qty:1}], separate_quotes=true
+  * "all duo licenses as separate quotes" → (see "all DUO/UMBRELLA" expansion rule below), separate_quotes=true
+  * "give me separate URLs for 5 MR46 and 5 MR56" → items=[{sku:"MR46",qty:5},{sku:"MR56",qty:5}], separate_quotes=true
 
 REVISION RULES:
 - CRITICAL: Only use intent="revise" when prior_context is provided. If prior_context is empty or absent, the message is standalone — classify as "quote", "clarify", or another intent instead.
@@ -692,6 +696,15 @@ Valid Meraki families: MR (APs), MX (firewalls), MS (switches), MV (cameras), MT
 Bare license SKUs like "LIC-ENT-3YR","LIC-MX64-SEC-3YR" → items with sku_type="license".
 Cisco Duo licenses: format is LIC-DUO-{ESSENTIALS|ADVANTAGE|PREMIER}-{1|3|5}YR. Examples: "duo essentials 3 year" → LIC-DUO-ESSENTIALS-3YR; "duo advantage" → LIC-DUO-ADVANTAGE-{term}YR; "duo premier" → LIC-DUO-PREMIER-{term}YR. NEVER emit short forms like "DUO-E-3YR", "DUO-A", or "DUO-ESS" — always the full LIC-DUO-{TIER}-{TERM}YR string. If you aren't sure of the exact canonical SKU, leave items[] empty (the backend will resolve it) rather than hallucinating a short form.
 Cisco Umbrella licenses: format is LIC-UMB-{DNS|SIG}-{ESS|ADV}-K9-{1|3|5}YR. Examples: "umbrella DNS essentials 3 year" → LIC-UMB-DNS-ESS-K9-3YR; "umbrella SIG advantage" → LIC-UMB-SIG-ADV-K9-{term}YR. NEVER emit short forms like "UMB-DNS-3YR" — always include -K9- and the full LIC-UMB-{TYPE}-{TIER}-K9-{TERM}YR format.
+
+CRITICAL — "ALL DUO" / "ALL UMBRELLA" expansion:
+When the user says "all duo" / "all duo licenses" / "all duo quotes" / "every duo tier" (case-insensitive, with or without "cisco"), intent="quote" and items[] must expand to ALL three Duo tiers at the user-stated term (or all three terms when no term stated). Set modifiers.separate_quotes=true — the user wants one URL per tier/item. Default qty=1 unless user states a number.
+  * "all duo licenses" (no term) → items = 9 entries: LIC-DUO-{ESSENTIALS|ADVANTAGE|PREMIER}-{1|3|5}YR (qty=1 each), separate_quotes=true
+  * "all duo licenses as separate links" → same 9 entries, separate_quotes=true
+  * "50 of all duo 3 year" → 3 entries: LIC-DUO-{ESSENTIALS|ADVANTAGE|PREMIER}-3YR qty=50 each, separate_quotes=true
+Same rule for "all umbrella" / "all umbrella licenses" — expand to all 4 type×tier combos (LIC-UMB-{DNS|SIG}-{ESS|ADV}-K9-{term}YR) at the stated term (or all 3 terms = 12 combos when no term stated), separate_quotes=true.
+NEVER collapse "all duo" to a single tier or "all umbrella" to a single type. NEVER classify "all duo" / "all umbrella" as clarify — the user is being explicit, they want every tier priced.
+
 If a model looks valid but you don't recognize it (EOL or new), still emit as quote — the backend validates.
 Word numbers: "one"=1,"two"=2,...,"ten"=10,"a couple"=2,"a few"=3.
 
@@ -6067,29 +6080,24 @@ Hard rules:
 
               // ── Step 2: Deterministic engine only runs when CF routes to "quote" ──
               T.step('wx-parse', 'enter');
-              // Pre-V2 natural-language short-circuit:
-              // "all duo" / "all umbrella" phrasing carries critical product-family
-              // intent that V2 can mangle (e.g. Llama returns a single tier or a
-              // SKU list without the NL context). `extracted` is built from V2's
-              // items — if it fails validation and we fall back to parseMessage
-              // on `extracted`, the SKU-list text no longer contains "all duo",
-              // so the parser's NL handler never fires and we emit a combined URL.
-              // Catch this BEFORE V2 and route straight to parseMessage on the
-              // original `text` so the NL handler wins every time.
-              const NL_OVERRIDE_RE = /\bALL\s+(?:CISCO\s+)?(?:DUO|UMBRELLA)\b/i;
-              const useOriginalText = NL_OVERRIDE_RE.test(text);
+              // PR 2: Try V2-direct adapter first when V2 classification is present.
+              // buildQuoteFromV2 returns a parseMessage-shape object built directly
+              // from the V2 rich schema (items[], modifiers, etc.) — preserves item
+              // fidelity (modifiers, quantities, license/hardware split) that would
+              // otherwise be lost in the extracted-string → parseMessage round-trip.
+              // Falls back to parseMessage on null (V2 produced no usable items,
+              // e.g. license-only input V2 adapter doesn't handle yet).
+              //
+              // Per Chris's architectural feedback ("the LLM should figure out the
+              // intent itself") the prior NL_OVERRIDE_RE short-circuit for
+              // "all duo/umbrella" has been REMOVED. The V2 prompt now carries
+              // "all duo/umbrella" expansion + separate_quotes detection as
+              // CRITICAL rules with explicit examples. If V2 still misses, the
+              // belt-and-suspenders regex inside buildQuoteFromV2 catches
+              // separate_quotes phrasing at the adapter layer (not the routing
+              // layer) so the renderer gets the right flag.
               let quoteParsed = null;
-              if (useOriginalText) {
-                console.log(`[CF-First] NL override: "all duo/umbrella" detected — bypassing V2 adapter`);
-                quoteParsed = parseMessage(text);
-              } else if (activeClassification._v2) {
-                // PR 2: Try V2-direct adapter first when V2 classification is present.
-                // buildQuoteFromV2 returns a parseMessage-shape object built directly
-                // from the V2 rich schema (items[], modifiers, etc.) — preserves item
-                // fidelity (modifiers, quantities, license/hardware split) that would
-                // otherwise be lost in the extracted-string → parseMessage round-trip.
-                // Falls back to parseMessage on null (V2 produced no usable items,
-                // e.g. license-only input V2 adapter doesn't handle yet).
+              if (activeClassification._v2) {
                 try {
                   quoteParsed = buildQuoteFromV2(activeClassification._v2, text);
                   if (quoteParsed) {
@@ -6100,10 +6108,10 @@ Hard rules:
                   quoteParsed = null;
                 }
               }
-              // Fallback: if V2 adapter produced nothing, parse the original text
-              // when NL override is hot (keeps product-family NL intact), else
-              // the extracted-text round-trip path. This mirrors the pre-V2 path.
-              if (!quoteParsed) quoteParsed = parseMessage(useOriginalText ? text : quoteText);
+              // Fallback: if V2 adapter produced nothing, parse the extracted
+              // text (or the original when no extraction was provided). This
+              // mirrors the pre-V2 path.
+              if (!quoteParsed) quoteParsed = parseMessage(quoteText);
               if (quoteParsed) {
                 T.step('wx-parse', 'exit', { result: quoteParsed._fromV2 ? 'v2-direct' : 'parsed', items: quoteParsed.items?.length || 0, advisory: quoteParsed.isAdvisory, revision: quoteParsed.isRevision });
 
