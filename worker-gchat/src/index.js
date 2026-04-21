@@ -4781,6 +4781,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 parsed.data.forEach(rec => {
                   if (rec?.id) rec._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${rec.id}`;
                 });
+                parsed._url_hint = `When narrating this quote, INCLUDE the record id (${parsed.data[0].id}) in the reply AND cite the _url as a markdown link [Subject](url). The record id is REQUIRED — customers need both Quote_Number and record_id to locate the quote in Zoho.`;
                 return JSON.stringify(parsed);
               }
             }
@@ -7340,6 +7341,8 @@ These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
 4. If the tool returns an error saying "that value is a Quote_Number, not a record_id," re-call with \`record_id\` set to the value the server gave you.
 5. NEVER tell the user a record was deleted unless the tool returned \`success: true\`. Saying "deleted" when nothing happened is a critical accuracy failure.
 6. AMBIGUITY RULE — if the user asks to delete "the last one", "the one I just made", "that quote", or anything without a specific id or Quote_Number, DO NOT search and DO NOT guess. Ask the user: "Which one? Please specify the record id or Quote_Number." Refuse to delete until they provide a specific identifier.
+7. IMPORTANT — when the user prompt already says "with confirm true" or "confirm:true" or "with confirm:true", the user HAS given confirmation. DO NOT ask the user to confirm AGAIN. Call \`zoho_delete_record\` directly with \`confirm: true\`. Asking for a second confirmation when the user already gave one is a bug.
+8. For chained operations ("do X then do Y"), EXECUTE each step — do not stop after step 1 and ask for separate confirmation for step 2. Pass through all parameters the user provided.
 
 ---
 
