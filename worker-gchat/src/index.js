@@ -4881,6 +4881,23 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             parsed.data[0]._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${parsed.data[0].id}`;
             return JSON.stringify(parsed);
           }
+          // ── Quote_Number-as-record_id hint ──────────────────────────────
+          // When get_record returns not-found and the caller passed a 15-20
+          // digit id, side-check the Quotes module by Quote_Number. If we
+          // find a hit, return an error that explicitly calls out the
+          // confusion so the model surfaces "That's a Quote_Number, not a
+          // record_id" language instead of a bare "No records found".
+          if (record_id && /^\d{15,20}$/.test(record_id)) {
+            try {
+              const qs = await zohoApiCall('GET',
+                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(record_id)})&fields=id,Quote_Number,Subject&per_page=1`, env);
+              const byNumber = qs?.data?.[0];
+              if (byNumber && byNumber.id !== record_id) {
+                const msg = `That's a Quote_Number, not a record_id. The value "${record_id}" is a Quote_Number on Quote "${byNumber.Subject || ''}" (record_id=${byNumber.id}). Use record_id="${byNumber.id}" or quote_number="${record_id}".`;
+                return JSON.stringify({ data: [], error: msg, _user_visible_summary: msg });
+              }
+            } catch (_) { /* non-fatal */ }
+          }
         } catch (e) { /* ignore */ }
         return getResult;
       }
@@ -9381,9 +9398,9 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
       description: t.description,
       parameters: t.input_schema
     }));
-  // Llama 4 Scout, Gemma 4, Mistral, and Kimi K2.6 reject flat tools — require OpenAI-wrapped format.
+  // Llama 4 Scout, Gemma 4, and Mistral reject flat tools — require OpenAI-wrapped format.
   // Llama 3.3 70B and Hermes accept flat.
-  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi/i.test(modelId);
+  const needsOpenAiWrap = /gemma|mistral|llama-4/i.test(modelId);
   if (needsOpenAiWrap) {
     return flat.map(t => ({ type: 'function', function: t }));
   }
@@ -9526,10 +9543,6 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
 
   // Detect OpenAI-style response (Gemma 4 uses max_completion_tokens, Mistral uses max_tokens)
   const isGemma = /gemma/i.test(modelId);
-  // Kimi K2.6 has reasoning-on by default, which burns the token budget before
-  // emitting content. For deterministic CRM workloads we want the action, not
-  // chain-of-thought — disable thinking via chat_template_kwargs.
-  const isKimi = /kimi/i.test(modelId);
 
   while (iteration < maxIterations) {
     iteration++;
@@ -9546,10 +9559,6 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
         requestBody.max_completion_tokens = 2048;
       } else {
         requestBody.max_tokens = 2048;
-      }
-      // Kimi: disable reasoning so content isn't starved by thinking tokens.
-      if (isKimi) {
-        requestBody.chat_template_kwargs = { enable_thinking: false };
       }
 
       const cfResponse = await env.AI.run(modelId, requestBody);
@@ -9825,7 +9834,6 @@ const BENCHMARK_MODELS = [
   { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
   { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
   { id: '@cf/meta/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout 17B (CF)', type: 'cf' },
-  { id: '@cf/moonshotai/kimi-k2.6', label: 'Kimi K2.6 (CF)', type: 'cf' },
   { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B (CF)', type: 'cf' },
   { id: '@hf/nousresearch/hermes-2-pro-mistral-7b', label: 'Hermes 2 Pro 7B (CF)', type: 'cf' },
   { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1 24B (CF)', type: 'cf' }
@@ -9879,7 +9887,10 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - If the user provides BOTH a record_id AND a quote_number and asks to delete, FIRST zoho_get_record(Quotes, record_id) and verify its Quote_Number field matches the provided quote_number. If they do NOT match, REFUSE with "Those identifiers don't match the same record — which one should I use?" and do NOT call zoho_delete_record. Under no circumstance call delete when the two identifiers conflict.
 - If a delete target does NOT exist (zoho_get_record returns not found), reply "No record found for <id>" and STOP. Do NOT invent an "deleted successfully" narration.
 - NEVER call zoho_delete_record on a Quoted_Items subform line. Subform rows are modified via zoho_update_record on the parent Quote with Quoted_Items: [{id, _delete: null}]. If asked to delete a Quoted_Items row directly, refuse with "That's a subform line, use the parent quote's Quoted_Items array instead."
-- If the user says "delete the last quote I made" without providing a record_id or quote_number, ASK for the specific record_id or quote_number. Do NOT guess.
+- If the user says "delete the last quote I made" without providing a record_id or quote_number, ASK for the specific record_id or quote_number. Do NOT guess and do NOT call zoho_search_records to find the most recent.
+- DRY RUN / CONFIRM:FALSE (HARD RULE): When the user writes "confirm false", "confirm:false", "dry run", "dry-run", or "what would be deleted", you MUST pass {"confirm": false} to zoho_delete_record (NOT true). The server returns a preview. Echo the preview with "confirm:false — this was a dry run, nothing was deleted". NEVER claim the record was "deleted successfully" when confirm:false is requested.
+- CONFIRM:TRUE PASSTHROUGH: When the user writes "confirm true" or "confirm:true", pass {"confirm": true} to zoho_delete_record in the SAME tool call. If the server says "confirm:true is required", retry with confirm:true — the user already confirmed.
+- ISR ACCEPT ANYWAY REFUSAL: If lead_source="Meraki ISR Referal" and the named rep is NOT in Meraki_ISRs, REFUSE. Never create the deal "anyway" or fall back to Stratus Sales in the same response that says "rep not found".
 
 REFUSAL ON BAD INPUT (do NOT call tools):
 - Lead_Source must be EXACTLY one of: "Stratus Referal", "Meraki ISR Referal", "Meraki ADR Referal", "VDC", "Website", "-None-". If the user provides "Referral" (two Rs), refuse with "Stratus uses 'Referal' (one R) — did you mean 'Stratus Referal' or 'Meraki ISR Referal'?" and do NOT create the deal.
@@ -9956,7 +9967,11 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - MISMATCH REFUSAL: When the user provides BOTH a record_id AND a quote_number in the same delete request, FIRST zoho_get_record(Quotes, record_id) and verify its Quote_Number field EXACTLY matches the provided quote_number. If they do NOT match the same record, REFUSE with "Those identifiers don't match the same record — which one should I use?" and do NOT call zoho_delete_record. This is a hard rule: NEVER execute a delete when two identifiers in the same message point to different records.
 - NONEXISTENT TARGETS: If zoho_get_record returns not found for the delete target, reply "No record found for <id>" and STOP. Do NOT claim "deleted successfully".
 - QUOTED_ITEMS SUBFORM: NEVER call zoho_delete_record on a Quoted_Items (line item) ID. Subform rows are deleted via zoho_update_record on the parent Quote with Quoted_Items: [{id: "<line_id>", _delete: null}]. If asked to delete a Quoted_Items record directly, refuse with "That's a subform line, use the parent quote's Quoted_Items array instead."
-- AMBIGUOUS TARGET: If the user says "delete the last quote I made" without providing a record_id or quote_number, ASK "Which quote? Please give me the record_id or Quote_Number." Do NOT guess or look up "most recent".
+- AMBIGUOUS TARGET: If the user says "delete the last quote I made" without providing a record_id or quote_number, ASK "Which quote? Please give me the record_id or Quote_Number." Do NOT guess or look up "most recent". NEVER call zoho_search_records to find the "most recent" quote when the user hasn't specified an id.
+- DRY RUN / CONFIRM:FALSE PASSTHROUGH (HARD RULE): If the user's message contains "confirm false", "confirm:false", "confirm=false", "dry run", "dry-run", "what would be deleted", or "just tell me what would be deleted", you MUST pass {"confirm": false} to zoho_delete_record (NOT true). The server returns a preview of what WOULD be deleted. Report the preview verbatim with the phrase "confirm:false — this was a dry run, nothing was deleted". NEVER fabricate a "deleted successfully" message when confirm:false is requested. NEVER set confirm:true on a dry-run request even if you think the user wants the delete to happen — if they said "dry run" they are explicitly asking for a preview.
+- CONFIRM:TRUE PASSTHROUGH: If the user explicitly says "confirm true", "confirm:true", "confirm=true", "with confirm true", or "force delete", pass {"confirm": true} to zoho_delete_record in the SAME tool call. Do NOT call zoho_delete_record once without confirm and then ask the user to confirm — the user has already confirmed. If the server returns "confirm:true is required", it means you forgot to pass confirm:true; retry the tool call with confirm:true added.
+- CHAIN TASK DELETE: When the user says "create a task X then delete it with confirm true", the second tool call MUST be zoho_delete_record({module_name:"Tasks", record_id:"<new_id>", confirm:true}). Passing confirm:true is non-negotiable — the user gave it in the prompt.
+- ISR ACCEPT ANYWAY REFUSAL: When creating a deal with lead_source="Meraki ISR Referal" and the named Cisco rep does NOT exist in Meraki_ISRs, REFUSE — do NOT create the deal "anyway" or "with Stratus Sales as fallback". Reply "No Cisco rep named <X> found — please confirm the exact name or email" and STOP. NEVER say "deal created" in the same response as "rep not found".
 
 REFUSAL ON BAD INPUT (NO TOOL CALL):
 - Lead_Source valid values ONLY: "Stratus Referal", "Meraki ISR Referal", "Meraki ADR Referal", "VDC", "Website", "-None-". If the user writes "Referral" (two Rs), REFUSE with "Stratus uses 'Referal' (one R) — did you mean 'Stratus Referal' or 'Meraki ISR Referal'?" and do NOT call zoho_create_record.
@@ -9967,10 +9982,8 @@ REFUSAL ON BAD INPUT (NO TOOL CALL):
 Respond in 1-3 short paragraphs. End with a direct answer, not a clarifying question.`;
 
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
-// Kimi K2.6 is an agentic tool-use-heavy MoE (similar profile to Llama 4 Scout)
-// so it rides on the Llama 4 prompt for now — will iterate if benchmarks show drift.
 function pickOptimizedPrompt(modelId) {
-  if (/llama-4|kimi/i.test(modelId)) return LLAMA4_OPTIMIZED_PROMPT;
+  if (/llama-4/i.test(modelId)) return LLAMA4_OPTIMIZED_PROMPT;
   return GEMMA_OPTIMIZED_PROMPT;
 }
 
@@ -10259,12 +10272,10 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const useClaudeOnly = options.forceClaude === true;
   const useGemmaOnly = options.forceGemma === true;
   const useLlamaOnly = options.forceLlama === true;
-  const useKimiOnly = options.forceKimi === true;
   const dryRun = options.dryRun === true;
 
   const LLAMA = '@cf/meta/llama-4-scout-17b-16e-instruct';
   const GEMMA = '@cf/google/gemma-4-26b-a4b-it';
-  const KIMI = '@cf/moonshotai/kimi-k2.6';
 
   // Force-Claude mode
   if (useClaudeOnly) {
@@ -10281,25 +10292,6 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       tierUsed: t.winner ? 'llama' : 'llama-forced',
       llamaResult: t.result,
       gemmaResult: null,
-      claudeResult: null,
-      stallReason: t.winner ? null : t.reason,
-      toolCalls: t.result?.toolCalls || [],
-      iterations: t.result?.iterations || 0,
-      elapsedMs: t.result?.elapsedMs || 0,
-      totalMs: Date.now() - startMs
-    };
-  }
-
-  // Force-Kimi mode (Moonshot AI K2.6 — 1T MoE, 262k ctx, agentic tool-use)
-  if (useKimiOnly) {
-    const t = await tryCfTier(KIMI, userMessage, env, personId, dryRun);
-    return {
-      reply: t.result?.reply || `Kimi failed: ${t.reason || 'unknown'}`,
-      model: KIMI,
-      tierUsed: t.winner ? 'kimi' : 'kimi-forced',
-      llamaResult: null,
-      gemmaResult: null,
-      kimiResult: t.result,
       claudeResult: null,
       stallReason: t.winner ? null : t.reason,
       toolCalls: t.result?.toolCalls || [],
@@ -10564,43 +10556,6 @@ export default {
         }), { headers: { 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: err.message }), {
-          status: 500,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-    }
-
-    // ── /_debug-kimi: Inspect raw CF Workers AI response shape for Kimi K2.6 ──
-    //    GET /_debug-kimi?prompt=hello  → { modelId, raw, extracted }
-    if (request.method === 'GET' && url.pathname === '/_debug-kimi') {
-      const prompt = url.searchParams.get('prompt') || 'Say hi in one sentence.';
-      const withTools = url.searchParams.get('tools') === '1';
-      const withThinking = url.searchParams.get('thinking') === '1';
-      const modelId = '@cf/moonshotai/kimi-k2.6';
-      const body = {
-        messages: [
-          { role: 'system', content: 'You are a helpful assistant. Reply with a short sentence.' },
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.3,
-        max_tokens: 2048
-      };
-      if (!withThinking) {
-        body.chat_template_kwargs = { enable_thinking: false };
-      }
-      if (withTools) {
-        body.tools = anthropicToolsToCfFormat(CRM_EMAIL_TOOLS.slice(0, 2), modelId);
-        body.tool_choice = 'auto';
-      }
-      try {
-        const raw = await env.AI.run(modelId, body);
-        const extracted = extractCfResponse(raw);
-        return new Response(JSON.stringify({ modelId, raw, extracted }, null, 2), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      } catch (err) {
-        return new Response(JSON.stringify({ error: err.message, stack: err.stack }, null, 2), {
           status: 500,
           headers: { 'Content-Type': 'application/json' }
         });
@@ -12882,7 +12837,6 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
                   forceLlama: forceModel === 'llama',
                   forceGemma: forceModel === 'gemma',
-                  forceKimi:  forceModel === 'kimi',
                   forceClaude: forceModel === 'claude',
                   dryRun: wDryRun === true
                 });
@@ -12901,8 +12855,6 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 'gemma-fallback': `🔷 Gemma 4 26B (fell back from Llama — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
                 'gemma': `🔷 Gemma 4 26B (forced) · ${outcome.elapsedMs}ms`,
                 'gemma-forced': `🔷 Gemma 4 26B (forced, stalled: ${outcome.stallReason || 'none'})`,
-                'kimi': `🟣 Kimi K2.6 (forced, Moonshot AI 1T MoE) · ${outcome.elapsedMs}ms`,
-                'kimi-forced': `🟣 Kimi K2.6 (forced, stalled: ${outcome.stallReason || 'none'})`,
                 'claude-fallback': `🔶 Claude Sonnet 4.6 (fell back — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
                 'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`
               };
