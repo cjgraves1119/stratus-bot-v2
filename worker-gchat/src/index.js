@@ -2476,9 +2476,11 @@ function parseMessage(text) {
       }
     }
 
-    // Narrow to requested term ONLY if single tier AND not separateQuotes
+    // Narrow to the requested term whenever the user specified one, regardless
+    // of tier count or separate_quotes. The 1/3/5YR cartesian only applies
+    // when NO term is stated — the renderer then emits one URL per term.
     let duoFinalItems = duoItems;
-    if (requestedTerm && duoTiers.length === 1 && !__separateQuotes) {
+    if (requestedTerm) {
       duoFinalItems = duoItems.filter(it => it.baseSku.endsWith(`-${requestedTerm}YR`));
     }
 
@@ -2550,10 +2552,12 @@ function parseMessage(text) {
       }
     }
 
-    // Narrow to requested term ONLY if single type+tier AND not separateQuotes
+    // Narrow to the requested term whenever the user specified one. The
+    // 1/3/5YR cartesian only applies when NO term is stated — the renderer
+    // then emits one URL per term.
     const combos = umbTypes.length * umbTiers.length;
     let umbFinalItems = umbItems;
-    if (umbRequestedTerm && combos === 1 && !__separateQuotes) {
+    if (umbRequestedTerm) {
       umbFinalItems = umbItems.filter(it => it.baseSku.endsWith(`-${umbRequestedTerm}YR`));
     }
 
