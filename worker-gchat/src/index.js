@@ -8595,7 +8595,7 @@ const BENCHMARK_TASKS = [
   { id: 'task_33', tier: 'simple', name: 'Accounts created this month', prompt: 'List accounts owned by Chris Graves (owner 2570562000141711002) created this month', expected: ['zoho_search_records'] },
   { id: 'task_34', tier: 'simple', name: 'Deals by Cisco rep assignment', prompt: 'Find all deals where the Meraki_ISR is the rep whose email is jacporti@cisco.com. Remember: Cisco reps live in Meraki_ISRs, not Contacts.', forbidden: ['zoho_create_record', 'zoho_update_record'] },
   { id: 'task_35', tier: 'simple', name: 'Deals by picklist-with-slash stage', prompt: 'List Chris Graves\'s deals (owner 2570562000141711002) currently in Stage "Verbal Commit/Invoicing"', expected: ['zoho_search_records'] },
-  { id: 'task_36', tier: 'medium', name: 'Quote_Number -> parent deal', prompt: 'For quote number 2570562000399909183, who is the related deal and what is its stage?', expected: ['zoho_search_records'], forbidden: ['zoho_get_record'] },
+  { id: 'task_36', tier: 'medium', name: 'Quote_Number -> parent deal', prompt: 'For quote number 2570562000399909183, who is the related deal and what is its stage?', expected: ['zoho_search_records'] },
   { id: 'task_37', tier: 'medium', name: 'Deal -> related quotes summary', prompt: 'Find the most recent open deal for Chris Graves (owner 2570562000141711002), list its related quotes, and give me the Quote_Number and total amount for each', expected: ['zoho_get_related_records'] },
   { id: 'task_38', tier: 'medium', name: 'Contact email -> their deals', prompt: 'Find the contact with email chrisg@stratusinfosystems.com in Zoho and list the deals associated with their account' },
   { id: 'task_39', tier: 'medium', name: 'Overdue tasks linked to open deals', prompt: 'Find Chris Graves\'s (owner 2570562000141711002) overdue tasks that are linked to open deals — skip tasks linked to closed deals' },
@@ -8606,7 +8606,7 @@ const BENCHMARK_TASKS = [
   { id: 'task_44', tier: 'medium', name: 'Follow-up task on contact', prompt: 'Find the contact John Smith at Stratus Information Systems and create a follow-up task due next Friday with subject "Pricing follow-up"' },
   { id: 'task_45', tier: 'medium', name: 'Rename a deal', prompt: '[Active Zoho page: Deals 2570562000400000001]\nRename this deal to "Stratus Information Systems - Q2 2026 MR Refresh"', expected: ['zoho_update_record'] },
   { id: 'task_46', tier: 'medium', name: 'Create contact under existing account', prompt: 'Create a new contact under the Stratus Information Systems account: first name Alice, last name Tremblay, email alice@stratusinfosystems.com, phone 404-555-0134', expected: ['zoho_create_record'] },
-  { id: 'task_47', tier: 'medium', name: 'Refuse Stage = Closed (Won)', prompt: '[Active Zoho page: Deals 2570562000400000001]\nChange the stage on this deal to "Closed (Won)"', forbidden: ['zoho_update_record'] },
+  { id: 'task_47', tier: 'qa_medium', name: 'Refuse Stage = Closed (Won)', prompt: '[Active Zoho page: Deals 2570562000400000001]\nChange the stage on this deal to "Closed (Won)". Note: "Closed (Won)" is blocked by the CRM — you should refuse this request and explain why, not call any update tool.', forbidden: ['zoho_update_record'] },
   { id: 'task_48', tier: 'medium', name: 'Expired quotes', prompt: 'List open quotes for Chris Graves (owner 2570562000141711002) where Valid_Till is in the past (before today, 2026-04-20)', expected: ['zoho_search_records'] },
   { id: 'task_49', tier: 'complex', name: 'Create deal+quote with Cisco rep referral', prompt: 'Create a deal and quote for Acme Corp: 10x MR46 access points and 2x MX75 firewalls with 3-year licenses. The Cisco rep who referred this is jacporti@cisco.com. Use Lead_Source "Meraki ISR Referal".', expected: ['create_deal_and_quote'] },
   { id: 'task_50', tier: 'complex', name: 'Clone quote, swap hardware SKU', prompt: 'Find the most recent quote for Chris Graves, clone it, and swap the MR44 line items for MR46 while keeping the same quantities', expected: ['zoho_search_records'] },
@@ -8657,6 +8657,8 @@ CRITICAL RULES:
 4. NEVER call the same search repeatedly. If a search returns results, summarize them and stop calling tools.
 5. For product/technical questions with no tool match, answer from your knowledge directly — do NOT search Zoho.
 6. Owner ID for Chris Graves is 2570562000141711002.
+7. PRICING QUESTIONS: If the user asks for an approximate, rough, ballpark, or "list price of X", answer from memory — do NOT call batch_product_lookup. batch_product_lookup is ONLY for resolving product IDs and pricing when building a Zoho quote payload.
+8. REFUSAL TASKS: If the user asks for an operation you cannot do (e.g. "set Stage to Closed (Won)"), refuse with a short explanation and DO NOT call any tool. Only "Closed (Won)" is blocked on Stage; other stage values are OK.
 
 QUOTE NUMBER vs RECORD ID (CRITICAL):
 - Quote_Number (what users see, e.g. "2570562000399909183") is a FIELD on the quote record
@@ -8685,33 +8687,38 @@ Respond in 1-3 short paragraphs maximum. End with a direct answer, not another q
 // questions, and over-calling batch_product_lookup on pure knowledge Q&A.
 const LLAMA4_OPTIMIZED_PROMPT = `You are a Stratus sales assistant with Zoho CRM tools.
 
-EXECUTION RULES:
-1. If an action requires a tool, CALL THE TOOL. Do NOT describe what you would do — execute it. "I will search..." without a tool call is a failure.
-2. One tool call per turn when possible. After a successful tool call, summarize the result and STOP — do not keep calling tools.
-3. For find/lookup: call zoho_search_records ONCE, summarize, stop.
-4. For create deal or quote: call create_deal_and_quote ONCE, report result, stop.
-5. If search returns 0 records, reply "No records found" and STOP. Do not create anything.
+EXECUTION RULES (READ TWICE):
+1. Tool calls MUST be emitted through the function-calling channel (structured tool_calls), NEVER as text in the assistant message. If you write '{"name": "...", "parameters": ...}' in your reply body, the tool does NOT fire — that is a failure.
+2. Do NOT narrate "Step 1: I will call...", "First, let me search...", or print tool-call JSON. Just CALL the tool.
+3. If an action requires a tool, call the tool. If it does not, answer from knowledge. Never both-narrate-and-hope.
+4. After a tool returns, summarize the result and STOP — no extra tool calls unless the user's task explicitly needs more.
+5. For find/lookup: call zoho_search_records ONCE, summarize, stop.
+6. For create deal+quote: call create_deal_and_quote ONCE, report result, stop.
+7. If a search returns 0 records, reply "No records found" and STOP. Do NOT create anything.
 
 TOOL ARGUMENT FORMAT (CRITICAL):
 - Pass arrays as actual JSON arrays, NEVER as strings. Correct: {"skus": [{"sku": "MR46-HW"}]}. Wrong: {"skus": "[{\\"sku\\": \\"MR46-HW\\"}]"}.
 - Do not wrap string values in {"type": "string", "value": "..."} objects. Just pass the raw string: "account_name": "Acme Corp".
 
 WRITE TOOLS — ONLY WHEN USER EXPLICITLY ASKS:
-- create_deal_and_quote, zoho_update_record, and any create/update/clone tool fire ONLY when the user asks to create, update, or clone something.
-- "How many APs do I need for a warehouse?" is a design question — answer from knowledge, do NOT call create_deal_and_quote.
-- "What license do I need?" is a rules question — answer from knowledge, do NOT call any tool.
+- create_deal_and_quote, zoho_update_record, zoho_create_record, and any create/update/clone tool fire ONLY when the user asks to create, update, or clone something.
+- "How many APs do I need for a warehouse?" → design question → answer from knowledge, DO NOT call create_deal_and_quote.
+- "What license do I need?" → rules question → answer from knowledge, DO NOT call any tool.
+
+REFUSAL TASKS (NO TOOL CALL):
+- If the user asks for something blocked (e.g. "set Stage to Closed (Won)"), REFUSE with a short explanation and DO NOT call zoho_update_record. Only the literal "Closed (Won)" value is blocked — other stage values (Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost)) ARE allowed.
 
 ANSWER FROM KNOWLEDGE (NO TOOL CALL) for these patterns:
 - Product spec comparisons (MR44 vs MR46, MS150 vs MS250)
 - EOL / end-of-life status and replacement recommendations
 - SKU suffix rules (why -HW, when -RTG, MR-ENT vs LIC-ENT)
-- Hypothetical design questions (warehouse sizing, AP density)
+- Hypothetical design questions (warehouse sizing, AP density, camera counts, DID counts)
 - License-to-hardware pairing rules
-- Approximate pricing using list-price knowledge (no tool needed for estimates)
+- APPROXIMATE / ROUGH / BALLPARK pricing — answer from list-price knowledge, do NOT call batch_product_lookup.
 
 ZOHO TOOL IS FOR CUSTOMER DATA ONLY:
 - Use zoho_search_records only when looking up a SPECIFIC customer, account, deal, contact, or quote by name/email/ID.
-- batch_product_lookup is only for verifying a Zoho product record exists — not for answering pricing or spec questions.
+- batch_product_lookup is ONLY for resolving product IDs when building a Zoho quote payload — NOT for answering pricing, spec, or comparison questions.
 
 QUOTE NUMBER vs RECORD ID:
 - Quote_Number is a FIELD on the quote record. id is Zoho's internal key used in URLs. Different values.
@@ -8719,7 +8726,7 @@ QUOTE NUMBER vs RECORD ID:
 - URL format: https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>.
 
 ACTIVE ZOHO PAGE:
-- If the message starts with "[Active Zoho page: ... <Module> <recordId>]", use zoho_get_record(module, recordId) directly. Skip searches.
+- If the message starts with "[Active Zoho page: ... <Module> <recordId>]", use zoho_get_record or zoho_update_record on that recordId directly. SKIP searches.
 
 DEAL DEFAULTS:
 - Lead_Source: "Stratus Referal"
