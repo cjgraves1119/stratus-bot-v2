@@ -2166,7 +2166,7 @@ function parseMessage(text) {
   // This flag propagates into modifiers.separateQuotes so buildQuoteResponse can
   // emit one URL per item/tier instead of concatenating.
   const SEPARATE_QUOTES_RE = /\b(SEPARATE\s+(QUOTES?|URLS?|LINKS?)|INDIVIDUAL\s+(QUOTES?|URLS?|LINKS?)|EACH\s+(AS\s+)?(ITS\s+)?OWN\s+(QUOTES?|URLS?|LINKS?)|ONE\s+(QUOTE|URL|LINK)\s+(PER|EACH|APIECE|FOR\s+EACH)|BREAK\s+(THESE|THEM|IT)\s+OUT|SPLIT\s+(INTO|UP\s+INTO)\s+SEPARATE|AS\s+(THEIR|ITS)\s+OWN\s+(QUOTES?|URLS?|LINKS?))\b/;
-  const __separateQuotes = SEPARATE_QUOTES_RE.test(upper);
+  let __separateQuotes = SEPARATE_QUOTES_RE.test(upper);
 
   // Multi-line License SKU Input (CSV/list from dashboard export)
   // Handles formats like:
@@ -2446,6 +2446,13 @@ function parseMessage(text) {
       const raw = tm[1].toUpperCase();
       const canon = raw === 'ADVANTAGE' ? 'ADVANTAGE' : raw === 'PREMIER' ? 'PREMIER' : 'ESSENTIALS';
       if (!duoTiers.includes(canon)) duoTiers.push(canon);
+    }
+    // "all duo" / "all duo quotes" / "all duo licenses" → all three tiers,
+    // auto-treat as separate quotes (user wants one URL per tier).
+    const isAllDuo = /\bALL\s+(?:CISCO\s+)?DUO\b/i.test(upper);
+    if (isAllDuo && duoTiers.length === 0) {
+      duoTiers.push('ESSENTIALS', 'ADVANTAGE', 'PREMIER');
+      __separateQuotes = true;
     }
 
     const duoQtyMatch = upper.match(/\b(\d+)\b/);
