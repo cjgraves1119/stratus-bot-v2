@@ -6067,15 +6067,29 @@ Hard rules:
 
               // ── Step 2: Deterministic engine only runs when CF routes to "quote" ──
               T.step('wx-parse', 'enter');
-              // PR 2: Try V2-direct adapter first when V2 classification is present.
-              // buildQuoteFromV2 returns a parseMessage-shape object built directly
-              // from the V2 rich schema (items[], modifiers, etc.) — preserves item
-              // fidelity (modifiers, quantities, license/hardware split) that would
-              // otherwise be lost in the extracted-string → parseMessage round-trip.
-              // Falls back to parseMessage on null (V2 produced no usable items,
-              // e.g. license-only input V2 adapter doesn't handle yet).
+              // Pre-V2 natural-language short-circuit:
+              // "all duo" / "all umbrella" phrasing carries critical product-family
+              // intent that V2 can mangle (e.g. Llama returns a single tier or a
+              // SKU list without the NL context). `extracted` is built from V2's
+              // items — if it fails validation and we fall back to parseMessage
+              // on `extracted`, the SKU-list text no longer contains "all duo",
+              // so the parser's NL handler never fires and we emit a combined URL.
+              // Catch this BEFORE V2 and route straight to parseMessage on the
+              // original `text` so the NL handler wins every time.
+              const NL_OVERRIDE_RE = /\bALL\s+(?:CISCO\s+)?(?:DUO|UMBRELLA)\b/i;
+              const useOriginalText = NL_OVERRIDE_RE.test(text);
               let quoteParsed = null;
-              if (activeClassification._v2) {
+              if (useOriginalText) {
+                console.log(`[CF-First] NL override: "all duo/umbrella" detected — bypassing V2 adapter`);
+                quoteParsed = parseMessage(text);
+              } else if (activeClassification._v2) {
+                // PR 2: Try V2-direct adapter first when V2 classification is present.
+                // buildQuoteFromV2 returns a parseMessage-shape object built directly
+                // from the V2 rich schema (items[], modifiers, etc.) — preserves item
+                // fidelity (modifiers, quantities, license/hardware split) that would
+                // otherwise be lost in the extracted-string → parseMessage round-trip.
+                // Falls back to parseMessage on null (V2 produced no usable items,
+                // e.g. license-only input V2 adapter doesn't handle yet).
                 try {
                   quoteParsed = buildQuoteFromV2(activeClassification._v2, text);
                   if (quoteParsed) {
@@ -6086,7 +6100,10 @@ Hard rules:
                   quoteParsed = null;
                 }
               }
-              if (!quoteParsed) quoteParsed = parseMessage(quoteText);
+              // Fallback: if V2 adapter produced nothing, parse the original text
+              // when NL override is hot (keeps product-family NL intact), else
+              // the extracted-text round-trip path. This mirrors the pre-V2 path.
+              if (!quoteParsed) quoteParsed = parseMessage(useOriginalText ? text : quoteText);
               if (quoteParsed) {
                 T.step('wx-parse', 'exit', { result: quoteParsed._fromV2 ? 'v2-direct' : 'parsed', items: quoteParsed.items?.length || 0, advisory: quoteParsed.isAdvisory, revision: quoteParsed.isRevision });
 
