@@ -8345,7 +8345,9 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
       description: t.description,
       parameters: t.input_schema
     }));
-  const needsOpenAiWrap = /gemma|mistral/i.test(modelId);
+  // Llama 4 Scout, Gemma 4, and Mistral reject flat tools — require OpenAI-wrapped format.
+  // Llama 3.3 70B and Hermes accept flat.
+  const needsOpenAiWrap = /gemma|mistral|llama-4/i.test(modelId);
   if (needsOpenAiWrap) {
     return flat.map(t => ({ type: 'function', function: t }));
   }
