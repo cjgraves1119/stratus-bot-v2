@@ -6567,26 +6567,34 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // Quote_Number). Refuse — we want the user's intent preserved, not
         // a silent retarget. Surface "That's a Quote_Number, not a record_id"
         // so the test criteria pass.
-        if (module_name === 'Quotes' && record_id && idsInPrompt.length) {
-          const promptRecordIdMatch = rawPrompt.match(/record[_\s]id[:\s]*["`']?(2570562000\d{7,9})/i);
-          const promptLiteralId = promptRecordIdMatch ? promptRecordIdMatch[1] : null;
-          if (promptLiteralId && promptLiteralId !== record_id) {
-            // The prompt-specified id wasn't used. Check if the prompt-specified
-            // id is actually a Quote_Number.
-            try {
-              const qs = await zohoApiCall('GET',
-                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(promptLiteralId)})&fields=id,Quote_Number&per_page=1`, env);
-              const byNumber = qs?.data?.[0];
-              if (byNumber) {
-                const remapMsg = `That's a Quote_Number, not a record_id. The id "${promptLiteralId}" in your prompt is a Quote_Number (the real record_id is "${byNumber.id}"). Refusing to delete — re-issue as quote_number="${promptLiteralId}" or record_id="${byNumber.id}" to be explicit about intent.`;
-                return {
-                  success: false,
-                  error: remapMsg,
-                  _user_visible_summary: remapMsg,
-                  _no_partial_success: true
-                };
-              }
-            } catch (_) { /* non-fatal */ }
+        //
+        // Module-agnostic: even if module_name arrives as "quote", "Quote",
+        // or missing, treat Quotes-like modules as Quotes so the model can't
+        // dodge the check by case-changing. Also scan ALL ids in the prompt
+        // (not just the first "record_id" match) — if ANY prompt id is a
+        // Quote_Number that the model didn't use, refuse.
+        const isQuotesModule = /^quotes?$/i.test(String(module_name || ''));
+        if (isQuotesModule && record_id && idsInPrompt.length) {
+          // Find the FIRST id in the prompt that differs from the one the
+          // model passed — if any — and check whether it's a Quote_Number.
+          const candidatePromptIds = idsInPrompt.filter(id => id !== String(record_id).trim());
+          if (candidatePromptIds.length) {
+            for (const promptLiteralId of candidatePromptIds) {
+              try {
+                const qs = await zohoApiCall('GET',
+                  `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(promptLiteralId)})&fields=id,Quote_Number&per_page=1`, env);
+                const byNumber = qs?.data?.[0];
+                if (byNumber) {
+                  const remapMsg = `That's a quote_number, not a record_id. The id "${promptLiteralId}" in your prompt is a Quote_Number (the real record_id is "${byNumber.id}"). Refusing to delete — re-issue as quote_number="${promptLiteralId}" or record_id="${byNumber.id}" to be explicit about intent.`;
+                  return {
+                    success: false,
+                    error: remapMsg,
+                    _user_visible_summary: remapMsg,
+                    _no_partial_success: true
+                  };
+                }
+              } catch (_) { /* non-fatal — try next candidate */ }
+            }
           }
         }
 
