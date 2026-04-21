@@ -11338,6 +11338,40 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
+          // ── A/B Benchmark: probe a CF model with different tool formats ──
+          // Diagnostic endpoint — isolates whether a model accepts the tools
+          // schema we're sending. Tries no-tools, flat tools, OpenAI-wrapped.
+          case '/api/benchmark/probe': {
+            const { modelId: pModel } = apiBody;
+            if (!pModel) { apiResult = { error: 'modelId required' }; break; }
+            const probeTools = [{
+              name: 'get_weather',
+              description: 'Get current weather for a city',
+              parameters: {
+                type: 'object',
+                properties: { city: { type: 'string', description: 'City name' } },
+                required: ['city']
+              }
+            }];
+            const probeTrials = [
+              { label: 'no_tools', body: { messages: [{ role: 'user', content: "What's the weather in Paris?" }], max_tokens: 256 } },
+              { label: 'flat_tools', body: { messages: [{ role: 'user', content: "What's the weather in Paris?" }], tools: probeTools, max_tokens: 256, tool_choice: 'auto' } },
+              { label: 'wrapped_tools', body: { messages: [{ role: 'user', content: "What's the weather in Paris?" }], tools: probeTools.map(t => ({ type: 'function', function: t })), max_tokens: 256, tool_choice: 'auto' } },
+            ];
+            const probeResults = [];
+            for (const trial of probeTrials) {
+              const t0 = Date.now();
+              try {
+                const r = await env.AI.run(pModel, trial.body);
+                probeResults.push({ trial: trial.label, ok: true, ms: Date.now() - t0, response: r });
+              } catch (e) {
+                probeResults.push({ trial: trial.label, ok: false, ms: Date.now() - t0, error: String(e?.message || e) });
+              }
+            }
+            apiResult = { modelId: pModel, trials: probeResults };
+            break;
+          }
+
           // ── Waterfall endpoint: Gemma-first with Claude fallback ──
           // Called by the gateway worker (stratus-ai-bot-gateway) for all /api/chat requests.
           // Accepts: { text, emailContext, history, forceModel: 'gemma'|'claude'|undefined, dryRun }
