@@ -9698,14 +9698,28 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   //    drop on tests 2/5/17). askClaude loads KV history automatically
   //    but askCfModel was skipping this, so follow-up prompts like
   //    "now add an MS125 to that quote" lost the just-created quote ID.
-  //    Keep a small window (last 6 turns ≈ 3 exchanges) to stay under
+  //    Keep a small window (last 4 turns ≈ 2 exchanges) to stay under
   //    the CF Workers AI context budget for tool-use runs. ──
+  //
+  //    STRIP FAILURE-PATTERN ASSISTANT TURNS: Llama 4 is highly susceptible
+  //    to pattern-priming from the last assistant turn. If the prior
+  //    assistant reply was an "inactive product / could not be created"
+  //    refusal, Llama will parrot that refusal on the next unrelated
+  //    request. Drop assistant turns that look like hard failures from
+  //    the injected window — keep the user turns for context, keep the
+  //    successful assistant turns (zoho URLs, quote numbers, confirmations).
+  const FAILURE_PATTERN = /(product issues|not active|could not be created|failed to create|product resolution failed|inactive product|not found.*product catalog|no records found)/i;
   const priorHistory = personId && env && env.CONVERSATION_KV
     ? await getHistory(env.CONVERSATION_KV, personId).catch(() => [])
     : [];
   const historyWindow = priorHistory
     .filter(h => h && h.role && h.content && (h.role === 'user' || h.role === 'assistant'))
-    .slice(-6)
+    .filter(h => {
+      if (h.role !== 'assistant') return true;
+      const txt = typeof h.content === 'string' ? h.content : JSON.stringify(h.content);
+      return !FAILURE_PATTERN.test(txt);
+    })
+    .slice(-4)
     .map(h => ({
       role: h.role,
       content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content)
@@ -12955,8 +12969,13 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               const wUserEmail = request.headers.get('x-user-email') || 'gateway-user';
               const wPersonId = `gw:${wUserEmail}`;
 
-              // Seed KV history (same as /api/chat)
-              if (wHistory && Array.isArray(wHistory) && wHistory.length > 0) {
+              // Seed KV history — always overwrite when caller passes history
+              // (including []), so a fresh session truly starts empty. Previous
+              // behavior left stale KV history in place for the same personId
+              // when wHistory=[], causing failure patterns from one test to
+              // prime the model on the next (e.g. test 15 EOL rejection
+              // bleeding into tests 27-32 as false "inactive product" flags).
+              if (wHistory && Array.isArray(wHistory)) {
                 const seedMessages = wHistory.slice(-10).map(msg => ({
                   role: msg.role,
                   content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
@@ -13107,10 +13126,12 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               const chatUserEmail = request.headers.get('x-user-email') || 'chrome-extension-user';
               const chatPersonId = `ext:${chatUserEmail}`;
 
-              // Seed conversation history from prior chat messages if provided.
-              // Write the full batch at once (replacing KV) instead of individual addToHistory
-              // calls, which caused duplicates and unnecessary KV round-trips.
-              if (chatHistory && Array.isArray(chatHistory) && chatHistory.length > 0) {
+              // Seed conversation history from prior chat messages.
+              // Always overwrite — passing [] explicitly means "start fresh",
+              // which must clear any stale KV for this personId. Previously
+              // we only wrote when length>0, which allowed leftover KV entries
+              // to leak failure patterns across independent sessions.
+              if (chatHistory && Array.isArray(chatHistory)) {
                 const seedMessages = chatHistory.slice(-10).map(msg => ({
                   role: msg.role,
                   content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
