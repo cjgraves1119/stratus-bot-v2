@@ -6586,14 +6586,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // the user's id, it may have silently retargeted.
           const candidatePromptIds = idsInPrompt.filter(id =>
             id !== modelId && id !== quoteNumFromTool);
-          console.log(`[DELETE REMAP] rawPromptLen=${rawPrompt.length} idsInPrompt=${JSON.stringify(idsInPrompt)} modelId=${modelId} quoteNumFromTool=${quoteNumFromTool} candidates=${JSON.stringify(candidatePromptIds)}`);
           if (candidatePromptIds.length) {
             for (const promptLiteralId of candidatePromptIds) {
               try {
                 const qs = await zohoApiCall('GET',
                   `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(promptLiteralId)})&fields=id,Quote_Number&per_page=1`, env);
                 const byNumber = qs?.data?.[0];
-                console.log(`[DELETE REMAP] search Quote_Number=${promptLiteralId} → ${byNumber ? byNumber.id : 'null'}`);
                 if (byNumber) {
                   const remapMsg = `That's a quote_number, not a record_id. The id "${promptLiteralId}" in your prompt is a Quote_Number (the real record_id is "${byNumber.id}"). Refusing to delete — re-issue as quote_number="${promptLiteralId}" or record_id="${byNumber.id}" to be explicit about intent.`;
                   return {
@@ -6603,9 +6601,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     _no_partial_success: true
                   };
                 }
-              } catch (e) {
-                console.log(`[DELETE REMAP] search threw: ${e.message}`);
-              }
+              } catch (_) { /* non-fatal — try next candidate */ }
             }
           }
         }
