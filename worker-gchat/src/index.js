@@ -9516,6 +9516,16 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     const last = mutationSummaries[mutationSummaries.length - 1];
     const replyHasToken = last.undoToken && finalReply.includes(last.undoToken);
     const replyHasUrl = last.recordUrl && finalReply.includes(last.recordUrl);
+    // Backticked form = what renders correctly as <code> via markdown. If the
+    // model narrated the raw token without backticks, wrap it inline so the
+    // test harness + Chrome extension get a proper <code>u_xxx</code> node.
+    if (replyHasToken && last.undoToken) {
+      const backtickedRegex = new RegExp('`' + last.undoToken.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '`');
+      if (!backtickedRegex.test(finalReply)) {
+        const bareRegex = new RegExp('(?<!`)' + last.undoToken.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&') + '(?!`)', 'g');
+        finalReply = finalReply.replace(bareRegex, '`' + last.undoToken + '`');
+      }
+    }
     const hasAnyToken = /`u_[a-z0-9_-]+`/i.test(finalReply) || /\bundo\s+token/i.test(finalReply);
     // If the reply is missing BOTH the undo token for this mutation AND the zoho URL,
     // append the full summary. Otherwise if only the token is missing but url present,
