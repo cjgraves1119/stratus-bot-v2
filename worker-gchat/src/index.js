@@ -4209,6 +4209,85 @@ async function zohoApiCall(method, path, env, body = null) {
   }
 }
 
+// ─── Account Resolution Helpers ──────────────────────────────────────────────
+// Added 2026-04-21 — Skty Trading LLC forensic fix.
+// Previously /api/chat-waterfall enriched the message with customerDomain but
+// never searched Zoho for an existing Account with Website=<domain>. Llama
+// then searched by Account_Name:equals:<domain> (no match) and created a
+// duplicate blank Account. These helpers give us a domain-first lookup path
+// and a completeness gate so nothing is ever created with empty fields.
+
+function isDomainLike(str) {
+  if (!str || typeof str !== 'string') return false;
+  const s = str.trim().toLowerCase();
+  // Strip protocol + www.
+  const bare = s.replace(/^https?:\/\//, '').replace(/^www\./, '');
+  // Must contain a dot, a valid TLD-ish suffix, no spaces
+  return /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(\.[a-z]{2,})?$/.test(bare) && !bare.includes(' ');
+}
+
+function normalizeDomain(d) {
+  if (!d) return null;
+  return d.trim().toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/.*$/, '')
+    .trim();
+}
+
+// Required billing fields for any Account that will be used to create a Deal+Quote.
+// Zoho auto-geocodes Country from City+State but the Quote create payload requires
+// an explicit Billing_Country, so we demand it here too. Phone is NOT required.
+const REQUIRED_ACCOUNT_FIELDS = [
+  'Account_Name', 'Billing_Street', 'Billing_City', 'Billing_State', 'Billing_Code', 'Billing_Country'
+];
+
+function getMissingAccountFields(account) {
+  if (!account || typeof account !== 'object') return [...REQUIRED_ACCOUNT_FIELDS];
+  const missing = [];
+  for (const f of REQUIRED_ACCOUNT_FIELDS) {
+    const v = account[f];
+    if (!v || (typeof v === 'string' && v.trim() === '')) missing.push(f);
+  }
+  // Account_Name must not be a bare domain (the Skty Trading LLC bug)
+  if (account.Account_Name && isDomainLike(account.Account_Name)) {
+    if (!missing.includes('Account_Name')) missing.push('Account_Name (cannot be a domain)');
+  }
+  return missing;
+}
+
+// Search Zoho Accounts by the customerDomain extracted from the Chrome Extension
+// email context. Returns the first Account whose Website equals the domain (with
+// or without www.). Returns null on no match.
+async function resolveAccountByDomain(domain, env) {
+  const d = normalizeDomain(domain);
+  if (!d) return null;
+  const fields = 'id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Phone,Website';
+  // Try each common variant: exact, www-prefixed, https-prefixed. Zoho search is
+  // exact-equals so we have to cover the encoding surface area.
+  const variants = [d, `www.${d}`, `https://${d}`, `https://www.${d}`, `http://${d}`, `http://www.${d}`];
+  for (const v of variants) {
+    try {
+      const r = await zohoApiCall('GET', `Accounts/search?criteria=(Website:equals:${encodeURIComponent(v)})&fields=${fields}&per_page=1`, env);
+      if (r?.data?.[0]) return r.data[0];
+    } catch (_) { /* keep trying */ }
+  }
+  return null;
+}
+
+// Look up a Contact by the exact customerEmail from email context.
+async function resolveContactByEmail(email, env) {
+  if (!email || typeof email !== 'string') return null;
+  const e = email.trim().toLowerCase();
+  if (!e.includes('@')) return null;
+  try {
+    const r = await zohoApiCall('GET',
+      `Contacts/search?criteria=(Email:equals:${encodeURIComponent(e)})&fields=id,Full_Name,Email,Account_Name,Title,Phone&per_page=1`, env);
+    if (r?.data?.[0]) return r.data[0];
+  } catch (_) {}
+  return null;
+}
+
 // ─── Gmail API Client ─────────────────────────────────────────────────────────
 async function gmailApiCall(method, path, env, body = null) {
   const token = await getGmailAccessToken(env);
@@ -5676,60 +5755,208 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, lead_source, billing_address } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address } = toolInput;
+        let { lead_source } = toolInput;
         const results = { steps: [], errors: [], records: {} };
         const _startMs = Date.now();
 
         try {
-          // STEP 1: Find or create Account
+          // ── HARD GATE #1: Account_Name must not be a bare domain ──
+          // Added 2026-04-21. Blocks the Skty Trading LLC class of bug where
+          // Llama passed "sktydev.com" as account_name after failing to find
+          // the real Account via Account_Name:equals.
+          if (!account_name || typeof account_name !== 'string' || account_name.trim() === '') {
+            return {
+              success: false,
+              needs_account_info: true,
+              error: 'account_name is required',
+              instruction: 'Ask the user for the full Account Name (the real company name, not a domain) plus Billing Street, City, State, Zip, Country, Contact First+Last Name, and Contact Email. Do NOT retry this tool until you have all of those.',
+              wall_ms: Date.now() - _startMs
+            };
+          }
+          if (isDomainLike(account_name)) {
+            return {
+              success: false,
+              needs_account_info: true,
+              error: `account_name "${account_name}" looks like a domain, not a company name`,
+              instruction: `Do NOT create an Account named "${account_name}". Ask the user for the real company name (e.g., "Skty Trading LLC" not "sktydev.com"), along with Billing Street, City, State, Zip, Country, Contact First+Last Name, and Contact Email. Then retry with account_name = the real company name.`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
+
+          // STEP 1: Find an Account — by Website (if caller passed a domain-ish email),
+          // then by Account_Name:equals. Never auto-create without complete billing info.
           let accountId = null;
           let accountData = null;
-          const acctSearch = await zohoApiCall('GET',
-            `Accounts/search?criteria=(Account_Name:equals:${encodeURIComponent(account_name)})&fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Phone,Website`,
-            env);
-          if (acctSearch?.data?.[0]) {
-            accountData = acctSearch.data[0];
-            accountId = accountData.id;
-            results.steps.push(`Found Account: ${accountData.Account_Name} (${accountId})`);
-          } else {
-            // Create new account
-            const newAcct = await zohoApiCall('POST', 'Accounts', env, {
-              data: [{ Account_Name: account_name, Owner: { id: '2570562000141711002' } }]
-            });
-            if (newAcct?.data?.[0]?.details?.id) {
-              accountId = newAcct.data[0].details.id;
-              results.steps.push(`Created Account: ${account_name} (${accountId})`);
-            } else {
-              results.errors.push('Failed to create Account');
-              return { success: false, ...results, wall_ms: Date.now() - _startMs };
+
+          // 1a: If we have a contact_email, try the domain first
+          if (contact_email && contact_email.includes('@')) {
+            const dom = contact_email.split('@')[1];
+            const byDomain = await resolveAccountByDomain(dom, env).catch(() => null);
+            if (byDomain) {
+              accountData = byDomain;
+              accountId = byDomain.id;
+              results.steps.push(`Found Account by domain "${dom}": ${accountData.Account_Name} (${accountId})`);
             }
           }
-          results.records.account = { id: accountId, name: account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
 
-          // STEP 2: Find Contact
-          let contactId = null;
-          if (contact_name || contact_email) {
-            const contactCriteria = contact_email
-              ? `(Email:equals:${encodeURIComponent(contact_email)})`
-              : `(Account_Name:equals:${encodeURIComponent(account_name)})`;
-            const contactSearch = await zohoApiCall('GET',
-              `Contacts/search?criteria=${contactCriteria}&fields=id,Full_Name,Email&per_page=5`, env);
-            if (contactSearch?.data?.[0]) {
-              contactId = contactSearch.data[0].id;
-              results.steps.push(`Found Contact: ${contactSearch.data[0].Full_Name || contact_name} (${contactId})`);
+          // 1b: Account_Name:equals fallback
+          if (!accountId) {
+            const acctSearch = await zohoApiCall('GET',
+              `Accounts/search?criteria=(Account_Name:equals:${encodeURIComponent(account_name)})&fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Phone,Website`,
+              env);
+            if (acctSearch?.data?.[0]) {
+              accountData = acctSearch.data[0];
+              accountId = accountData.id;
+              results.steps.push(`Found Account by name: ${accountData.Account_Name} (${accountId})`);
+            }
+          }
+
+          // ── HARD GATE #2: If no Account found, require full billing info + contact before creating ──
+          if (!accountId) {
+            const b = billing_address || {};
+            const missingCreateFields = [];
+            if (!b.street) missingCreateFields.push('Billing Street');
+            if (!b.city) missingCreateFields.push('Billing City');
+            if (!b.state) missingCreateFields.push('Billing State');
+            if (!b.zip) missingCreateFields.push('Billing Zip');
+            if (!b.country) missingCreateFields.push('Billing Country');
+            if (!contact_name) missingCreateFields.push('Contact Name');
+            if (!contact_email) missingCreateFields.push('Contact Email');
+
+            if (missingCreateFields.length > 0) {
+              return {
+                success: false,
+                needs_account_info: true,
+                error: `Account "${account_name}" not found in Zoho, and the required fields to create one are missing: ${missingCreateFields.join(', ')}`,
+                missing_fields: missingCreateFields,
+                instruction: `STOP. Do NOT retry this tool. Ask the user to provide: ${missingCreateFields.join(', ')}. Only retry create_deal_and_quote once you have ALL of these values. Creating a blank Account is not permitted.`,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+
+            // All fields present — create the Account with full billing info
+            const newAcctPayload = {
+              Account_Name: account_name,
+              Owner: { id: '2570562000141711002' },
+              Billing_Street: b.street,
+              Billing_City: b.city,
+              Billing_State: b.state,
+              Billing_Code: b.zip,
+              Billing_Country: b.country
+            };
+            const newAcct = await zohoApiCall('POST', 'Accounts', env, { data: [newAcctPayload] });
+            if (newAcct?.data?.[0]?.details?.id) {
+              accountId = newAcct.data[0].details.id;
+              accountData = { id: accountId, ...newAcctPayload };
+              results.steps.push(`Created Account with full billing: ${account_name} (${accountId})`);
+            } else {
+              results.errors.push('Failed to create Account: ' + JSON.stringify(newAcct?.data?.[0]));
+              return { success: false, ...results, wall_ms: Date.now() - _startMs };
             }
           } else {
-            // Search account contacts
+            // ── HARD GATE #3: Existing Account must have complete billing fields ──
+            // If any are missing, refuse to proceed so we don't generate a Quote
+            // on a blank-address Account.
+            const missing = getMissingAccountFields(accountData);
+            if (missing.length > 0) {
+              const b = billing_address || {};
+              // If caller supplied billing_address, patch the Account first
+              const patch = {};
+              if (!accountData.Billing_Street && b.street) patch.Billing_Street = b.street;
+              if (!accountData.Billing_City && b.city) patch.Billing_City = b.city;
+              if (!accountData.Billing_State && b.state) patch.Billing_State = b.state;
+              if (!accountData.Billing_Code && b.zip) patch.Billing_Code = b.zip;
+              if (!accountData.Billing_Country && b.country) patch.Billing_Country = b.country;
+              if (Object.keys(patch).length > 0) {
+                try {
+                  await zohoApiCall('PUT', `Accounts/${accountId}`, env, { data: [patch] });
+                  Object.assign(accountData, patch);
+                  results.steps.push(`Patched Account with billing fields: ${Object.keys(patch).join(', ')}`);
+                } catch (_) {}
+              }
+              // Re-check after patching
+              const stillMissing = getMissingAccountFields(accountData);
+              if (stillMissing.length > 0) {
+                return {
+                  success: false,
+                  needs_account_info: true,
+                  error: `Account "${accountData.Account_Name}" is missing required fields: ${stillMissing.join(', ')}`,
+                  missing_fields: stillMissing,
+                  account_id: accountId,
+                  instruction: `STOP. Do NOT retry this tool. The existing Account ${accountId} is incomplete. Ask the user to provide the missing fields: ${stillMissing.join(', ')}. Only retry once the user supplies ALL missing values (pass them in billing_address).`,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+            }
+          }
+          results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
+
+          // STEP 2: Find or create Contact — no placeholder fallback
+          let contactId = null;
+          let contactData = null;
+          if (contact_email) {
+            const contactSearch = await zohoApiCall('GET',
+              `Contacts/search?criteria=(Email:equals:${encodeURIComponent(contact_email)})&fields=id,Full_Name,Email,Account_Name&per_page=1`, env);
+            if (contactSearch?.data?.[0]) {
+              contactId = contactSearch.data[0].id;
+              contactData = contactSearch.data[0];
+              results.steps.push(`Found Contact by email: ${contactSearch.data[0].Full_Name} (${contactId})`);
+            }
+          }
+          if (!contactId) {
             const acctContacts = await zohoApiCall('GET',
-              `Contacts/search?criteria=(Account_Name:equals:${encodeURIComponent(account_name)})&fields=id,Full_Name,Email&per_page=3`, env);
+              `Contacts/search?criteria=(Account_Name:equals:${encodeURIComponent(accountData.Account_Name || account_name)})&fields=id,Full_Name,Email&per_page=3`, env);
             if (acctContacts?.data?.[0]) {
               contactId = acctContacts.data[0].id;
+              contactData = acctContacts.data[0];
               results.steps.push(`Found Contact on Account: ${acctContacts.data[0].Full_Name} (${contactId})`);
-            } else {
-              // Fallback: use Stratus Sales placeholder contact so quotes always have a contact
-              contactId = '2570562000116205038'; // Stratus Sales (info@stratusinfosystems.com)
-              results.steps.push('No contact found on Account — using Stratus Sales placeholder. Please update the contact on this quote.');
             }
+          }
+          // If still no contact and caller provided name+email, create one
+          if (!contactId && contact_name && contact_email) {
+            const nameParts = contact_name.trim().split(/\s+/);
+            const first = nameParts[0];
+            const last = nameParts.slice(1).join(' ') || nameParts[0];
+            const newContact = await zohoApiCall('POST', 'Contacts', env, {
+              data: [{
+                First_Name: first,
+                Last_Name: last,
+                Email: contact_email,
+                Account_Name: { id: accountId },
+                Owner: { id: '2570562000141711002' }
+              }]
+            });
+            if (newContact?.data?.[0]?.details?.id) {
+              contactId = newContact.data[0].details.id;
+              results.steps.push(`Created Contact: ${contact_name} <${contact_email}> (${contactId})`);
+            }
+          }
+          // ── HARD GATE #4: Contact required ──
+          if (!contactId) {
+            return {
+              success: false,
+              needs_account_info: true,
+              error: `No Contact found or provided for Account "${accountData.Account_Name || account_name}"`,
+              missing_fields: ['Contact Name', 'Contact Email'],
+              account_id: accountId,
+              instruction: `STOP. Do NOT retry this tool. Ask the user for the Contact First Name, Last Name, and Email. Retry only when all three are provided.`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
+          if (contactId) {
+            results.records.contact = { id: contactId, url: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contactId}` };
+          }
+
+          // ── Lead_Source validation (Fix #3) ──
+          // Coerce unknown / invalid values to "Stratus Referal". Explicitly
+          // rejects "Website" as a default when caller didn't mean it (the
+          // Skty bug where Llama guessed "Website" from email context).
+          const VALID_LS = ['Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website', '-None-', 'PharosIQ', 'Stratus ADR Referral', 'Stratus ISM'];
+          if (!lead_source || !VALID_LS.includes(lead_source)) {
+            const before = lead_source;
+            lead_source = 'Stratus Referal';
+            if (before) results.steps.push(`Lead_Source "${before}" invalid — coerced to "Stratus Referal"`);
           }
           if (contactId) {
             results.records.contact = { id: contactId, url: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contactId}` };
@@ -5915,6 +6142,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // STEP 4: Build SKU description for deal name (hardware only for cleaner name)
           const skuSummary = orderedPairs.map(p => `${p.hwQty > 1 ? p.hwQty + 'x ' : ''}${p.hw}`).join(', ');
           const closingDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+
+          // ── HARD GATE #5: Zero products resolved ──
+          // Added 2026-04-21 (Skty Trading LLC forensic fix).
+          // Before this guard, a failed SKU resolution would still run STEP 5/6
+          // and create an orphan Deal + Quote with empty Quoted_Items. Now we
+          // abort and report to the model without touching Zoho.
+          if (resolvedProducts.length === 0) {
+            return {
+              success: false,
+              error: 'no_products_resolved',
+              missing_products: missingProducts,
+              requested_skus: skus.map(s => typeof s === 'string' ? s : s.sku),
+              instruction: `STOP. No products could be resolved from ${JSON.stringify(skus)}. Missing: ${missingProducts.join(', ')}. Do NOT create any Deal or Quote. Report the missing SKUs to the user and ask them to clarify or correct them. NEVER fabricate a quote_id or record URL.`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
 
           // STEP 5: Create Deal
           const dealData = {
@@ -7999,6 +8242,20 @@ Show validation first: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT ch
 Run on Sales_Orders module (PO record), NOT Quotes. Search Sales_Orders by Deal_Name, then trigger on PO record.
 
 **Delinquency Gate:** If Delinquency_Score non-green after ConvertQuoteToSO, set Net_Terms="Cash" and re-run.
+
+## TOOL RESULT TRUTH (HARD RULE)
+
+Never state a record was created, updated, or deleted unless the tool result in this conversation includes success:true AND a real record_id pulled from that result. Zoho record IDs are 19 digits; never fabricate one.
+
+If create_deal_and_quote returns needs_account_info:true or any error field, do NOT retry the tool. Read the "instruction" field, relay it to the user verbatim, and wait for them to supply the missing fields. An error result is not a "maybe" — it means nothing was created.
+
+If, in a later turn, the user says "I can't find it" or "the link is wrong", check the actual tool history. If no successful create returned a record_id, tell them the record was not created instead of inventing one.
+
+## BLANK ACCOUNT PROTECTION (HARD RULE)
+
+Never pass a bare domain (e.g. "sktydev.com", "acmecorp.io") as account_name — the server will reject it. When the conversation prefix contains [CRM context: No existing Account found for domain X], your first response must be to ask the user for: the real company name (not a domain), Billing Street/City/State/Zip/Country, and Contact First+Last Name + Email. Do not call any creation tool until the user provides all of those values.
+
+When [CRM context: ...] shows "Existing Account: X (id: Y)", reuse Y directly; don't search by name.
 `;
 
 // Build CRM system prompt dynamically based on detected intent
@@ -10101,6 +10358,16 @@ Default defaults for new deals:
 - Lead_Source: "Stratus Referal"
 - Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
 
+TOOL RESULT TRUTH (HARD RULE):
+- NEVER claim a record was created, updated, or deleted unless the tool result in THIS conversation includes success:true AND a real record_id from that result. Never fabricate a 19-digit Zoho ID.
+- If create_deal_and_quote returns needs_account_info:true or any error, STOP and read the "instruction" field — relay it to the user verbatim and wait for their reply. Do NOT retry the tool. Do NOT invent a quote_id.
+- If a follow-up turn the user says "I can't find it" or "link is wrong", check the ACTUAL tool history. If no successful create tool returned a record_id, admit the record was not created instead of guessing.
+
+BLANK ACCOUNT PROTECTION:
+- NEVER pass a bare domain as account_name (e.g. "sktydev.com"). The server rejects domain-shaped names.
+- When [CRM context: ...] says "No existing Account found for domain X", FIRST ask for full Account Name, Billing Street/City/State/Zip/Country, Contact First+Last+Email. Do NOT call any creation tool until the user provides all of these.
+- When [CRM context: ...] shows "Existing Account: X (id: Y)", re-use that record — don't search again.
+
 QUOTE DISCOUNT / LINE-ITEM UPDATES (CRITICAL — do NOT narrate, CALL the tool):
 - When the user asks to change a discount to N%, change a quantity, remove a line, or swap a license — CALL zoho_update_record directly with the Quoted_Items payload. Do NOT write the JSON payload in your text response. Do NOT emit '{"Quoted_Items": [...]}' as prose — that is a raw_json_args_leak failure.
 - Discount is stored as a dollar amount. Compute: Discount = List_Price × Quantity × (pct / 100). The server also auto-scales discount on qty change, so if you ONLY change Quantity and leave Discount out, the server preserves the original percentage.
@@ -10213,6 +10480,19 @@ DEAL DEFAULTS:
 - Lead_Source: "Stratus Referal"
 - Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
 - Chris Graves owner ID: 2570562000141711002
+
+TOOL RESULT TRUTH (HARD RULE — violating this is the worst failure mode):
+- NEVER claim a record was created, updated, or deleted unless the tool result in THIS conversation includes success:true AND a real record_id pulled directly from that result.
+- If create_deal_and_quote returns success:false, needs_account_info:true, or any error, you MUST report the error verbatim and STOP. Do NOT invent a quote_id, quote_number, or URL. Do NOT claim "added to the deal" or "quote created" when the tool did not return a record_id.
+- NEVER fabricate a 19-digit Zoho record ID. If you don't have one from a tool result, you don't have one. Say "the quote was not created" rather than guessing.
+- NEVER carry forward a hallucinated record_id across multiple turns. If the user says "the link is wrong" or "I can't find it", check the ACTUAL tool history — if no successful create fired, admit it wasn't created.
+- When you call create_deal_and_quote and the result contains needs_account_info:true, DO NOT retry the tool. Your ONLY next step is to ask the user for the missing fields listed in the "instruction" field of the result, then wait for their reply.
+
+HARD STOP — BLANK ACCOUNT PROTECTION:
+- NEVER pass a bare domain (e.g. "sktydev.com", "acmecorp.io") as account_name. The server will reject it.
+- NEVER call create_deal_and_quote with a domain-like account_name hoping the server auto-fixes it.
+- When [CRM context: ...] shows "No existing Account found for domain X", your FIRST response MUST be to ask the user for: full Account Name (real company name), Billing Street, City, State, Zip, Country, Contact First+Last Name, Contact Email. Do NOT call any creation tool until the user provides all of these.
+- When [CRM context: ...] shows "Existing Account: X (id: Y)", use Y directly in create_deal_and_quote via account_name=X. Never search again.
 
 QUOTE DISCOUNT / LINE-ITEM UPDATES (CRITICAL — fire the tool, do NOT narrate):
 - User asks "change discount to 15%", "bump qty to 5", "remove line X" → CALL zoho_update_record via the structured tool-calling channel. Do NOT emit the JSON payload as prose. Do NOT write <|tool|> markers in your reply body.
@@ -13085,6 +13365,49 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 wEnrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${wText}`;
               }
 
+              // ── PRE-RESOLVE Account + Contact by customerDomain ──
+              // Added 2026-04-21 (Skty Trading LLC forensic fix).
+              // When the Chrome extension surfaces an email with a customerDomain,
+              // search Zoho Accounts by Website=<domain> BEFORE handing to Llama.
+              // If a matching Account exists, inject its id + completeness status
+              // so Llama skips the search entirely and re-uses the correct record
+              // instead of creating a duplicate by Account_Name:equals:<domain>.
+              if (wEc && (wEc.customerDomain || wEc.customerEmail)) {
+                try {
+                  const [matchedAcct, matchedContact] = await Promise.all([
+                    wEc.customerDomain ? resolveAccountByDomain(wEc.customerDomain, env) : Promise.resolve(null),
+                    wEc.customerEmail ? resolveContactByEmail(wEc.customerEmail, env) : Promise.resolve(null)
+                  ]);
+                  const crmParts = [];
+                  if (matchedAcct) {
+                    const missing = getMissingAccountFields(matchedAcct);
+                    const status = missing.length === 0 ? 'COMPLETE' : `INCOMPLETE (missing: ${missing.join(', ')})`;
+                    crmParts.push(
+                      `Existing Account: "${matchedAcct.Account_Name}" (id: ${matchedAcct.id}). ` +
+                      `Website matches. Fields: ${status}. ` +
+                      `Use THIS account id for all creations — do NOT search by Account_Name, do NOT create a new Account.`
+                    );
+                  } else if (wEc.customerDomain) {
+                    crmParts.push(
+                      `No existing Account found for domain "${wEc.customerDomain}". ` +
+                      `If the user asks to create a quote/deal, you MUST first ask them for the full Account Name (not just a domain), Billing Street, City, State, Zip, Country, and Contact First+Last+Email. ` +
+                      `NEVER create an Account with just a domain as the name. NEVER leave billing fields blank.`
+                    );
+                  }
+                  if (matchedContact) {
+                    crmParts.push(
+                      `Existing Contact: "${matchedContact.Full_Name}" <${matchedContact.Email}> (id: ${matchedContact.id}). ` +
+                      `Use THIS contact id — do NOT search or create a new contact.`
+                    );
+                  }
+                  if (crmParts.length) {
+                    wEnrichedMessage = `[CRM context: ${crmParts.join(' ')}]\n\n${wEnrichedMessage}`;
+                  }
+                } catch (crmErr) {
+                  console.log(`[WATERFALL] CRM pre-resolve skipped: ${crmErr.message}`);
+                }
+              }
+
               // ── TIER 0: Deterministic Engine Pre-Check ──
               // If the message is a pure SKU/quote request, skip the LLMs entirely.
               // Uses CF Llama for intent classification, then parseMessage for SKU extraction.
@@ -13250,6 +13573,45 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   ctxParts.push(`Domain: ${chatEc.customerDomain}`);
                 }
                 enrichedMessage = `[Email context: ${ctxParts.join(', ')}]\n\n${chatText}`;
+              }
+
+              // Pre-resolve Account + Contact by customerDomain / customerEmail.
+              // Symmetric with /api/chat-waterfall — prevents Claude from duplicating
+              // Accounts when the Chrome extension surfaces an email from a known domain.
+              if (chatEc && (chatEc.customerDomain || chatEc.customerEmail)) {
+                try {
+                  const [matchedAcct, matchedContact] = await Promise.all([
+                    chatEc.customerDomain ? resolveAccountByDomain(chatEc.customerDomain, env) : Promise.resolve(null),
+                    chatEc.customerEmail ? resolveContactByEmail(chatEc.customerEmail, env) : Promise.resolve(null)
+                  ]);
+                  const crmParts = [];
+                  if (matchedAcct) {
+                    const missing = getMissingAccountFields(matchedAcct);
+                    const status = missing.length === 0 ? 'COMPLETE' : `INCOMPLETE (missing: ${missing.join(', ')})`;
+                    crmParts.push(
+                      `Existing Account: "${matchedAcct.Account_Name}" (id: ${matchedAcct.id}). ` +
+                      `Website matches. Fields: ${status}. ` +
+                      `Use THIS account id for all creations — do NOT search by Account_Name, do NOT create a new Account.`
+                    );
+                  } else if (chatEc.customerDomain) {
+                    crmParts.push(
+                      `No existing Account found for domain "${chatEc.customerDomain}". ` +
+                      `If the user asks to create a quote/deal, first ask for the full Account Name (not a domain), Billing Street, City, State, Zip, Country, and Contact First+Last+Email. ` +
+                      `NEVER create an Account with just a domain as the name. NEVER leave billing fields blank.`
+                    );
+                  }
+                  if (matchedContact) {
+                    crmParts.push(
+                      `Existing Contact: "${matchedContact.Full_Name}" <${matchedContact.Email}> (id: ${matchedContact.id}). ` +
+                      `Use THIS contact id — do NOT search or create a new contact.`
+                    );
+                  }
+                  if (crmParts.length) {
+                    enrichedMessage = `[CRM context: ${crmParts.join(' ')}]\n\n${enrichedMessage}`;
+                  }
+                } catch (crmErr) {
+                  console.log(`[CHAT] CRM pre-resolve skipped: ${crmErr.message}`);
+                }
               }
 
               // NOTE: Do NOT inject the extension's systemContext (Zoho capability claims)
