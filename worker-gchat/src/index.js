@@ -9614,6 +9614,71 @@ function extractCfResponse(cfResponse) {
         if (calls.length >= 4) break;
       }
     }
+
+    // ── raw_json_args_leak recovery (Llama failure mode) ──
+    // Llama 4 Scout sometimes emits the bare arguments object for an intended
+    // zoho_update_record / zoho_create_record / zoho_search_records call
+    // as prose instead of wrapping it in the {"name": "...", "parameters": {...}}
+    // envelope. Detect when the text starts with a JSON object that has the
+    // telltale Zoho tool fields and synthesize the correct tool call.
+    if (calls.length === 0) {
+      const leadingJsonRe = /^\s*(\{[\s\S]*\})\s*$/;
+      const stripped = text.trim();
+      if (stripped.startsWith('{') && stripped.length < 8000) {
+        // Try to isolate the first balanced JSON object
+        let depth = 0, end = -1, inStr = false, esc = false;
+        for (let i = 0; i < stripped.length; i++) {
+          const c = stripped[i];
+          if (inStr) {
+            if (esc) esc = false;
+            else if (c === '\\') esc = true;
+            else if (c === '"') inStr = false;
+          } else {
+            if (c === '"') inStr = true;
+            else if (c === '{') depth++;
+            else if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
+          }
+        }
+        if (end > 0) {
+          const jsonSlice = stripped.slice(0, end + 1);
+          try {
+            const obj = JSON.parse(jsonSlice);
+            if (obj && typeof obj === 'object') {
+              const hasModule = typeof obj.module_name === 'string';
+              const hasRecordId = typeof obj.record_id === 'string';
+              const hasRecordData = obj.record_data && typeof obj.record_data === 'object';
+              const hasCriteria = typeof obj.criteria === 'string';
+              if (hasModule && hasRecordId && (obj.Quoted_Items || hasRecordData || Object.keys(obj).some(k => !['module_name','record_id'].includes(k)))) {
+                // Synthesize zoho_update_record
+                const recordData = hasRecordData ? obj.record_data : {};
+                for (const k of Object.keys(obj)) {
+                  if (!['module_name','record_id','record_data'].includes(k)) {
+                    recordData[k] = obj[k];
+                  }
+                }
+                calls.push({
+                  id: null,
+                  name: 'zoho_update_record',
+                  arguments: { module_name: obj.module_name, record_id: obj.record_id, record_data: recordData }
+                });
+              } else if (hasModule && hasCriteria) {
+                calls.push({
+                  id: null,
+                  name: 'zoho_search_records',
+                  arguments: { module_name: obj.module_name, criteria: obj.criteria, ...(obj.fields ? { fields: obj.fields } : {}) }
+                });
+              } else if (hasModule && hasRecordData && !hasRecordId) {
+                calls.push({
+                  id: null,
+                  name: 'zoho_create_record',
+                  arguments: { module_name: obj.module_name, record_data: obj.record_data }
+                });
+              }
+            }
+          } catch { /* not valid JSON — ignore */ }
+        }
+      }
+    }
   }
   return { text, calls };
 }
@@ -9625,11 +9690,30 @@ function parseCfToolCalls(cfResponse) {
 
 // CF Workers AI agentic loop — mirrors askClaude but uses CF models.
 // Returns { reply, toolCalls, iterations, elapsedMs, errors }.
-async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 10) {
+async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15) {
   const startMs = Date.now();
   const cfTools = anthropicToolsToCfFormat(anthropicTools, modelId);
+
+  // ── Inject prior conversation history from KV (fix: prior-turn context
+  //    drop on tests 2/5/17). askClaude loads KV history automatically
+  //    but askCfModel was skipping this, so follow-up prompts like
+  //    "now add an MS125 to that quote" lost the just-created quote ID.
+  //    Keep a small window (last 6 turns ≈ 3 exchanges) to stay under
+  //    the CF Workers AI context budget for tool-use runs. ──
+  const priorHistory = personId && env && env.CONVERSATION_KV
+    ? await getHistory(env.CONVERSATION_KV, personId).catch(() => [])
+    : [];
+  const historyWindow = priorHistory
+    .filter(h => h && h.role && h.content && (h.role === 'user' || h.role === 'assistant'))
+    .slice(-6)
+    .map(h => ({
+      role: h.role,
+      content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content)
+    }));
+
   const messages = [
     { role: 'system', content: systemPrompt },
+    ...historyWindow,
     { role: 'user', content: userMessage }
   ];
   const toolCallsLog = [];
@@ -10285,7 +10369,7 @@ function gemmaStallDetected(result) {
   if (reply.includes('max iterations reached')) return { stalled: true, reason: 'max_iter_loop' };
   if (reply.startsWith('API error:')) return { stalled: true, reason: 'api_error' };
   if (/I (don't|cannot|can't) have (access|the ability|tools)/i.test(reply)) return { stalled: true, reason: 'refusal' };
-  if ((result.iterations || 0) >= 10 && (result.toolCalls || []).length >= 10) return { stalled: true, reason: 'tool_loop' };
+  if ((result.iterations || 0) >= 15 && (result.toolCalls || []).length >= 15) return { stalled: true, reason: 'tool_loop' };
 
   // ── Raw tool-syntax leak: Gemma sometimes emits its special-token tool
   // syntax (<|tool|>call>:call:zoho_update_record(...)) as prose INSTEAD of
@@ -10348,7 +10432,7 @@ async function tryCfTier(modelId, userMessage, env, personId, dryRun) {
       env,
       personId,
       dryRun,
-      10
+      15
     );
   } catch (err) {
     callError = err.message;
