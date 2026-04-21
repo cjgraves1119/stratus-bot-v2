@@ -22,7 +22,7 @@ const SEED_DEAL_CLOSEDLOST = '2570562000401222755';
 let SEED_QUOTE = process.env.SEED_QUOTE || '2570562000401460084';
 let SEED_QUOTE_NUMBER = process.env.SEED_QUOTE_NUMBER || '2570562000401460086';
 let SEED_QUOTED_ITEM = process.env.SEED_QUOTED_ITEM || '2570562000401460085';
-const FORCE_MODEL = process.env.FORCE_MODEL || null; // 'llama' | 'gemma' | 'claude' | null (waterfall)
+const FORCE_MODEL = process.env.FORCE_MODEL || null; // 'llama' | 'gemma' | 'kimi' | 'claude' | null (waterfall)
 const RUN_LABEL = process.env.RUN_LABEL || (FORCE_MODEL || 'auto');
 const AUTO_RESEED = process.env.AUTO_RESEED !== '0'; // default on
 const SEED_CONTACT = '2570562000401235755';
