@@ -8398,13 +8398,28 @@ function extractCfResponse(cfResponse) {
     return { text, calls };
   }
 
-  // Variant 4: embedded JSON in text
-  const jsonMatch = text.match(/\{[\s\S]*"name"[\s\S]*"arguments"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.name) calls.push({ id: null, name: parsed.name, arguments: parseArgs(parsed.arguments) });
-    } catch {}
+  // Variant 4: embedded JSON in text (Llama 4 Scout failure mode).
+  // Llama sometimes narrates the call as text instead of using the function-
+  // calling channel. Recover by scanning for inline JSON blocks of the form
+  //   {"name": "<tool>", "parameters": {...}}       (Llama-style)
+  //   {"name": "<tool>", "arguments":  {...}}       (OpenAI-style)
+  // Accept BOTH `parameters` and `arguments` as the arg key.
+  if (text && typeof text === 'string') {
+    const jsonBlockRe = /\{\s*"name"\s*:\s*"([a-zA-Z_][a-zA-Z0-9_]*)"\s*,\s*"(?:parameters|arguments)"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
+    let m;
+    const seen = new Set();
+    while ((m = jsonBlockRe.exec(text)) !== null) {
+      const name = m[1];
+      const argsRaw = m[2];
+      // Dedupe identical (name + args) pairs that appear twice in the same reply
+      const dedupeKey = name + '|' + argsRaw;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      let args = {};
+      try { args = JSON.parse(argsRaw); } catch { continue; }
+      calls.push({ id: null, name, arguments: args });
+      if (calls.length >= 4) break; // safety cap
+    }
   }
   return { text, calls };
 }
@@ -8688,13 +8703,14 @@ Respond in 1-3 short paragraphs maximum. End with a direct answer, not another q
 const LLAMA4_OPTIMIZED_PROMPT = `You are a Stratus sales assistant with Zoho CRM tools.
 
 EXECUTION RULES (READ TWICE):
-1. Tool calls MUST be emitted through the function-calling channel (structured tool_calls), NEVER as text in the assistant message. If you write '{"name": "...", "parameters": ...}' in your reply body, the tool does NOT fire — that is a failure.
-2. Do NOT narrate "Step 1: I will call...", "First, let me search...", or print tool-call JSON. Just CALL the tool.
-3. If an action requires a tool, call the tool. If it does not, answer from knowledge. Never both-narrate-and-hope.
-4. After a tool returns, summarize the result and STOP — no extra tool calls unless the user's task explicitly needs more.
-5. For find/lookup: call zoho_search_records ONCE, summarize, stop.
-6. For create deal+quote: call create_deal_and_quote ONCE, report result, stop.
-7. If a search returns 0 records, reply "No records found" and STOP. Do NOT create anything.
+1. Tool calls MUST be emitted through the function-calling channel (structured tool_calls), NEVER as text in the assistant message. If you write '{"name": "...", "parameters": ...}' or '{"name": "...", "arguments": ...}' in your reply body, the tool does NOT fire — that is a failure.
+2. Do NOT narrate "## Step 1: ...", "First, let me search...", "I need to find...", or print tool-call JSON. Just CALL the tool via the function-calling channel.
+3. Do NOT output markdown headers like "## Step 1", "## Step 2", or numbered plans before acting. Either call the tool, or answer. Never plan out loud.
+4. If an action requires a tool, call the tool. If it does not, answer from knowledge. Never both-narrate-and-hope.
+5. After a tool returns, summarize the result and STOP — no extra tool calls unless the user's task explicitly needs more.
+6. For find/lookup: call zoho_search_records ONCE, summarize, stop.
+7. For create deal+quote: call create_deal_and_quote ONCE, report result, stop.
+8. If a search returns 0 records, reply "No records found" and STOP. Do NOT create anything.
 
 TOOL ARGUMENT FORMAT (CRITICAL):
 - Pass arrays as actual JSON arrays, NEVER as strings. Correct: {"skus": [{"sku": "MR46-HW"}]}. Wrong: {"skus": "[{\\"sku\\": \\"MR46-HW\\"}]"}.
@@ -8719,6 +8735,7 @@ ANSWER FROM KNOWLEDGE (NO TOOL CALL) for these patterns:
 ZOHO TOOL IS FOR CUSTOMER DATA ONLY:
 - Use zoho_search_records only when looking up a SPECIFIC customer, account, deal, contact, or quote by name/email/ID.
 - batch_product_lookup is ONLY for resolving product IDs when building a Zoho quote payload — NOT for answering pricing, spec, or comparison questions.
+- zoho_get_field is a CRM METADATA tool for validating picklist values during a real CRM update. NEVER call it for product Q&A, licensing math, or design questions. If the user is just asking how something works, answer from knowledge.
 
 QUOTE NUMBER vs RECORD ID:
 - Quote_Number is a FIELD on the quote record. id is Zoho's internal key used in URLs. Different values.
