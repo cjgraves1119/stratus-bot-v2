@@ -4175,6 +4175,31 @@ const VALID_TASK_STATUSES = [
 ];
 const BLOCKED_STAGE_VALUES = ['Closed (Won)']; // Must be set by PO automation, never manually
 
+// Valid Reason_For_Loss picklist values (cached from Zoho live picklist).
+// If a model produces a value outside this list, strip it rather than write literal garbage.
+const VALID_REASON_FOR_LOSS = [
+  'Lost to Competitor', 'Price', 'Lost to Cisco Direct', 'No Budget',
+  'Project Cancelled', 'No Response', 'Other'
+];
+
+// Strip any literal "<undefined>", "undefined", "null", or "[object Object]" garbage
+// that small models sometimes emit verbatim when a field wasn't resolved.
+function stripUndefinedLiterals(data) {
+  if (!data || typeof data !== 'object') return;
+  for (const key of Object.keys(data)) {
+    const v = data[key];
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if (trimmed === '<undefined>' || trimmed === 'undefined' ||
+          trimmed === '<null>' || trimmed === 'null' ||
+          trimmed === '[object Object]' || trimmed === 'NaN') {
+        console.log(`[VALIDATE] Stripped literal garbage on field "${key}": "${v}" → null`);
+        delete data[key];
+      }
+    }
+  }
+}
+
 // Common misspellings/wrong values → correct values for helpful error messages
 const PICKLIST_CORRECTIONS = {
   // Stage corrections — map common wrong values to actual Zoho picklist values
@@ -4224,6 +4249,45 @@ function getProductIdToSkuMap() {
   return _productIdToSku;
 }
 
+// ── Product_Active preflight for Quoted_Items ──
+// Blocks NEW line items that reference EOL / inactive products BEFORE hitting Zoho.
+// Rationale: Zoho silently rejects EOL products in Quoted_Items subforms with a generic
+// INVALID_DATA error that doesn't tell the model which SKU failed. This preflight gives
+// the model a clear error with the EOL replacement suggestion.
+//
+// Strategy:
+//   - Only checks NEW line items (items without an existing `id`).
+//   - Uses product_id → SKU reverse map, then isEol(sku) + EOL_REPLACEMENTS.
+//   - Returns { valid: true } or { valid: false, errors: [...], blocked_items: [...] }.
+function preflightQuotedItemsProductActive(quotedItems) {
+  if (!Array.isArray(quotedItems)) return { valid: true };
+  const idMap = getProductIdToSkuMap();
+  const errors = [];
+  const blocked = [];
+  for (const item of quotedItems) {
+    // Skip deletes and in-place modifies (existing ids)
+    if (item._delete !== undefined) continue;
+    if (item.id) continue;
+    const productId = item.Product_Name?.id;
+    if (!productId) continue;
+    const sku = idMap[productId];
+    if (!sku) continue;
+    if (typeof isEol === 'function' && isEol(sku)) {
+      const replacement = (typeof checkEol === 'function') ? checkEol(sku) : null;
+      blocked.push({ sku, product_id: productId, replacement: replacement || null });
+      if (replacement) {
+        errors.push(`❌ ${sku} is EOL. Use ${replacement} instead.`);
+      } else {
+        errors.push(`❌ ${sku} is EOL and has no direct replacement. Ask the user for an alternative SKU.`);
+      }
+    }
+  }
+  if (errors.length > 0) {
+    return { valid: false, errors, blocked_items: blocked };
+  }
+  return { valid: true };
+}
+
 // ── Server-side discount correction for Quoted_Items ──
 // Prevents Claude from applying hallucinated discount percentages.
 // For each line item with a Product_Name.id, looks up the correct discount_per_unit
@@ -4262,6 +4326,23 @@ function correctQuotedItemDiscounts(quotedItems) {
 
 function validateCrmWrite(module_name, data, isCreate = false) {
   const errors = [];
+
+  // Universal garbage strip — runs before all module-specific validation
+  stripUndefinedLiterals(data);
+
+  if (module_name === 'Deals') {
+    // Validate Reason / Reason_For_Loss against picklist — strip if not valid
+    for (const reasonField of ['Reason', 'Reason_For_Loss']) {
+      if (data[reasonField] && typeof data[reasonField] === 'string') {
+        if (!VALID_REASON_FOR_LOSS.includes(data[reasonField]) &&
+            data[reasonField] !== 'Meraki ISR recommended' &&
+            data[reasonField] !== 'Test') {
+          console.log(`[VALIDATE] Invalid ${reasonField} "${data[reasonField]}" — stripping (not in picklist)`);
+          delete data[reasonField];
+        }
+      }
+    }
+  }
 
   if (module_name === 'Deals') {
     // Stage validation — auto-correct known wrong values, block invalid ones
@@ -4307,11 +4388,18 @@ function validateCrmWrite(module_name, data, isCreate = false) {
 
     // Required fields on create
     if (isCreate) {
-      const required = ['Deal_Name', 'Stage', 'Lead_Source', 'Owner', 'Closing_Date'];
+      const required = ['Deal_Name', 'Stage', 'Lead_Source', 'Owner', 'Closing_Date', 'Account_Name'];
       for (const field of required) {
         if (!data[field]) {
           errors.push(`❌ Missing required field "${field}" for Deal creation.`);
         }
+      }
+      // Account_Name must be {id: "..."} — string form triggers a special signal
+      // so the executor can auto-resolve by lookup rather than erroring.
+      if (data.Account_Name && typeof data.Account_Name === 'string') {
+        errors.push(`__AUTO_RESOLVE_ACCOUNT_NAME__${data.Account_Name}`);
+      } else if (data.Account_Name && data.Account_Name.name && !data.Account_Name.id) {
+        errors.push(`__AUTO_RESOLVE_ACCOUNT_NAME__${data.Account_Name.name}`);
       }
     }
     // Server-side Closing_Date enforcement: correct past/invalid dates
@@ -4446,6 +4534,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'zoho_create_record': { data: [{ code: 'SUCCESS', details: { id: mockId, Created_Time: new Date().toISOString() } }] },
         'zoho_update_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id || mockId, Modified_Time: new Date().toISOString() } }] },
         'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
+        'clone_quote': { success: true, source_quote_id: toolInput.quote_id, cloned_quote_id: `DRY_CLONE_${mockId}`, dry_run: true },
         'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
         'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
@@ -4720,10 +4809,76 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'zoho_create_record': {
         const { module_name, data } = toolInput;
         const recordData = Array.isArray(data) ? data[0] : data;
+
+        // ── AUTO-ENRICH for Deal creation ────────────────────────────────────
+        // If Account_Name is a string or {name: ...} without id, look up / create
+        // the Account and swap to {id}. Then auto-link a Contact if missing.
+        // This fixes the root cause of "Account_Name and Contact_Name on Deal null"
+        // when the model uses zoho_create_record directly instead of create_deal_and_quote.
+        if (module_name === 'Deals') {
+          let acctName = null;
+          if (typeof recordData.Account_Name === 'string') {
+            acctName = recordData.Account_Name;
+          } else if (recordData.Account_Name?.name && !recordData.Account_Name?.id) {
+            acctName = recordData.Account_Name.name;
+          }
+          if (acctName) {
+            console.log(`[DEAL-ENRICH] Resolving Account_Name "${acctName}"`);
+            try {
+              const acctSearch = await zohoApiCall('GET',
+                `Accounts/search?criteria=(Account_Name:equals:${encodeURIComponent(acctName)})&fields=id,Account_Name`, env);
+              let accountId = acctSearch?.data?.[0]?.id;
+              if (!accountId) {
+                const newAcct = await zohoApiCall('POST', 'Accounts', env, {
+                  data: [{ Account_Name: acctName, Owner: { id: '2570562000141711002' } }]
+                });
+                accountId = newAcct?.data?.[0]?.details?.id;
+                console.log(`[DEAL-ENRICH] Created Account ${acctName} → ${accountId}`);
+              } else {
+                console.log(`[DEAL-ENRICH] Found Account ${acctName} → ${accountId}`);
+              }
+              if (accountId) {
+                recordData.Account_Name = { id: accountId };
+                // Also auto-link a Contact if missing
+                if (!recordData.Contact_Name) {
+                  const cs = await zohoApiCall('GET',
+                    `Contacts/search?criteria=(Account_Name:equals:${encodeURIComponent(acctName)})&fields=id,Full_Name&per_page=1`, env);
+                  const contactId = cs?.data?.[0]?.id;
+                  if (contactId) {
+                    recordData.Contact_Name = { id: contactId };
+                    console.log(`[DEAL-ENRICH] Auto-linked Contact ${contactId}`);
+                  }
+                }
+              }
+            } catch (e) {
+              console.log(`[DEAL-ENRICH] Account lookup failed: ${e.message}`);
+            }
+          }
+        }
+
         // Pre-flight validation
         const createCheck = validateCrmWrite(module_name, recordData, true);
         if (!createCheck.valid) {
-          return { validation_error: true, message: createCheck.error, action: 'create_blocked' };
+          // Strip our internal auto-resolve signals — they were just advisory
+          const realErrors = createCheck.error
+            .split('\n')
+            .filter(l => !l.startsWith('__AUTO_RESOLVE_'))
+            .join('\n');
+          if (realErrors) {
+            return { validation_error: true, message: realErrors, action: 'create_blocked' };
+          }
+        }
+        // Product_Active preflight — reject EOL/inactive products before writing
+        if (module_name === 'Quotes' && recordData.Quoted_Items) {
+          const activeCheck = preflightQuotedItemsProductActive(recordData.Quoted_Items);
+          if (!activeCheck.valid) {
+            return {
+              validation_error: true,
+              action: 'create_blocked',
+              message: `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+              blocked_items: activeCheck.blocked_items
+            };
+          }
         }
         // Auto-correct Quoted_Items discounts using prices.json (prevents Claude from applying wrong discounts)
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
@@ -4758,6 +4913,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const updateCheck = validateCrmWrite(module_name, data, false);
         if (!updateCheck.valid) {
           return { validation_error: true, message: updateCheck.error, action: 'update_blocked' };
+        }
+        // Product_Active preflight — reject EOL/inactive products in Quoted_Items appends
+        if (module_name === 'Quotes' && data.Quoted_Items) {
+          const activeCheck = preflightQuotedItemsProductActive(data.Quoted_Items);
+          if (!activeCheck.valid) {
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              message: `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+              blocked_items: activeCheck.blocked_items
+            };
+          }
         }
         // Auto-correct Quoted_Items discounts using prices.json (prevents Claude from applying wrong discounts)
         if (module_name === 'Quotes' && data.Quoted_Items) {
@@ -5731,6 +5898,106 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
       }
 
+      // ── Clone Quote (native Zoho clone endpoint — preserves per-line Discount verbatim) ──
+      case 'clone_quote': {
+        const { quote_id, new_subject } = toolInput;
+        if (!quote_id) {
+          return { success: false, error: 'quote_id is required' };
+        }
+        try {
+          const token = await getZohoAccessToken(env);
+          // Zoho clone uses a dedicated action endpoint. v8 supports this on all module clone-enabled records.
+          const cloneUrl = `https://www.zohoapis.com/crm/v8/Quotes/${quote_id}/actions/clone`;
+          const cloneRes = await fetch(cloneUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Zoho-oauthtoken ${token}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ data: [{}] })
+          });
+          const cloneText = await cloneRes.text();
+          let cloneJson;
+          try { cloneJson = JSON.parse(cloneText); } catch { cloneJson = { error: cloneText, status: cloneRes.status }; }
+
+          const cloneRow = cloneJson?.data?.[0];
+          const cloneStatus = cloneRow?.status;
+          const clonedId = cloneRow?.details?.id;
+
+          if (cloneStatus !== 'success' || !clonedId) {
+            console.error('[CLONE-QUOTE] clone failed:', JSON.stringify(cloneJson)?.substring(0, 500));
+            return {
+              success: false,
+              error: cloneRow?.message || cloneJson?.message || 'Clone failed',
+              detail: cloneJson
+            };
+          }
+
+          // Optional Subject rename on the cloned record
+          if (new_subject && typeof new_subject === 'string') {
+            try {
+              await zohoApiCall('PUT', `Quotes/${clonedId}`, env, { data: [{ Subject: new_subject }] });
+            } catch (e) {
+              console.log(`[CLONE-QUOTE] subject rename failed (non-fatal): ${e.message}`);
+            }
+          }
+
+          // Fetch the cloned record to return its key details for verification
+          let cloneFacts = null;
+          try {
+            const verifyFields = 'id,Subject,Quote_Number,Grand_Total,Sub_Total,Deal_Name,Account_Name,Quoted_Items';
+            const verifyResult = await zohoApiCall('GET', `Quotes/${clonedId}?fields=${verifyFields}`, env);
+            const verifyRec = verifyResult?.data?.[0];
+            if (verifyRec) {
+              cloneFacts = {
+                id: verifyRec.id,
+                subject: verifyRec.Subject,
+                quote_number: verifyRec.Quote_Number,
+                grand_total: verifyRec.Grand_Total,
+                sub_total: verifyRec.Sub_Total,
+                line_item_count: Array.isArray(verifyRec.Quoted_Items) ? verifyRec.Quoted_Items.length : null,
+                line_items: (verifyRec.Quoted_Items || []).map(i => ({
+                  id: i.id,
+                  product_code: i.Product_Name?.Product_Code || null,
+                  quantity: i.Quantity,
+                  list_price: i.List_Price,
+                  discount: i.Discount,
+                  total: i.Total
+                }))
+              };
+            }
+          } catch (_) {}
+
+          logCrmOpToD1(env, {
+            personId: personId || null,
+            operation: 'clone',
+            module: 'Quotes',
+            recordId: clonedId,
+            recordName: cloneFacts?.subject || null,
+            status: 'success',
+            durationMs: null,
+            errorMessage: null,
+            details: { source_quote_id: quote_id, new_subject: new_subject || null }
+          });
+
+          return {
+            success: true,
+            source_quote_id: quote_id,
+            cloned_quote_id: clonedId,
+            cloned_quote_number: cloneFacts?.quote_number || null,
+            cloned_subject: cloneFacts?.subject || null,
+            cloned_grand_total: cloneFacts?.grand_total ?? null,
+            line_item_count: cloneFacts?.line_item_count ?? null,
+            url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`,
+            facts: cloneFacts,
+            message: `Cloned quote ${quote_id} → ${clonedId} via native Zoho clone endpoint. Line items and Discount values copied verbatim.`
+          };
+        } catch (err) {
+          console.error('[CLONE-QUOTE] error:', err.message);
+          return { success: false, error: err.message, source_quote_id: quote_id };
+        }
+      }
+
       // ── Velocity Hub ──
       case 'velocity_hub_submit': {
         const { deal_id, country } = toolInput;
@@ -5967,6 +6234,18 @@ const CRM_EMAIL_TOOLS = [
         data: { type: 'object', description: 'Fields to update' }
       },
       required: ['module_name', 'record_id', 'data']
+    }
+  },
+  {
+    name: 'clone_quote',
+    description: 'FAITHFULLY clone a Zoho Quote via the native Zoho CRM clone endpoint (POST /Quotes/{id}/actions/clone). Copies ALL line items with their EXACT Discount values verbatim — preserving percentage-based discounts regardless of quantity. Use this ANYTIME the user asks to duplicate, copy, or clone a quote — NEVER simulate a clone by reading + re-creating, that path recomputes pricing and produces a different Grand_Total. Optionally rename the new quote via new_subject. Returns the cloned record id, Quote_Number, Grand_Total, and URL. The original quote is unchanged.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string', description: 'Source Quote record ID to clone' },
+        new_subject: { type: 'string', description: 'Optional — overrides Subject on the cloned quote (e.g., "COPY - Acme Q3 Renewal")' }
+      },
+      required: ['quote_id']
     }
   },
   {
@@ -6619,6 +6898,15 @@ When the user asks to change license terms on an existing quote:
 - NEVER assume Quoted_Items in an update replaces the existing list — it is always additive
 - NEVER use zoho_delete_record on Quoted_Items module directly (returns "record not approved")
 - NEVER split a license term swap into two separate update calls (one for add, one for delete) — this ALWAYS creates duplicates
+
+### CLONING A QUOTE (CRITICAL)
+If the user asks to clone, copy, or duplicate an existing Quote — **always use the clone_quote tool**. Pass quote_id and optionally new_subject. Do NOT simulate a clone by reading the source and calling zoho_create_record — that path recomputes ecomm pricing and produces a different Grand_Total. The clone_quote tool uses Zoho's native clone action, which copies every line item (Product, Quantity, List_Price, Discount) **verbatim**. The resulting Grand_Total matches the source exactly.
+
+Example: "clone quote 2570562000401257768 and call it Copy of Acme Q3"
+→ clone_quote({quote_id: "2570562000401257768", new_subject: "Copy of Acme Q3"})
+
+### DISCOUNTS ARE STORED AS DOLLARS, PERCENTAGES ARE INFERRED
+Zoho's Discount field is a **dollar amount per line**, but always THINK in percentages. When the user asks for "10% off", compute Discount = List_Price × Quantity × 0.10. When the user changes Quantity on an existing line, do NOT keep the old Discount dollar amount — the server auto-scales it to preserve the same percentage. When in doubt, omit Discount on a qty change; the server will scale it for you from the pre-update snapshot.
 
 ---
 
@@ -8277,6 +8565,7 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'zoho_create_record',
   'zoho_update_record',
   'zoho_delete_record',
+  'clone_quote',
   'create_deal_and_quote',
   'velocity_hub_submit',
   'assign_cisco_rep_to_deal',
@@ -8313,6 +8602,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'zoho_create_record': { data: [{ code: 'SUCCESS', details: { id: mockId, Created_Time: new Date().toISOString() } }] },
       'zoho_update_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id || mockId, Modified_Time: new Date().toISOString() } }] },
       'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
+      'clone_quote': { success: true, source_quote_id: toolInput.quote_id, cloned_quote_id: `DRY_CLONE_${mockId}`, dry_run: true },
       'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
       'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
@@ -8694,6 +8984,16 @@ Default defaults for new deals:
 - Lead_Source: "Stratus Referal"
 - Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
 
+QUOTE DISCOUNT / LINE-ITEM UPDATES (CRITICAL — do NOT narrate, CALL the tool):
+- When the user asks to change a discount to N%, change a quantity, remove a line, or swap a license — CALL zoho_update_record directly with the Quoted_Items payload. Do NOT write the JSON payload in your text response. Do NOT emit '{"Quoted_Items": [...]}' as prose — that is a raw_json_args_leak failure.
+- Discount is stored as a dollar amount. Compute: Discount = List_Price × Quantity × (pct / 100). The server also auto-scales discount on qty change, so if you ONLY change Quantity and leave Discount out, the server preserves the original percentage.
+- Quoted_Items updates are ADDITIVE. To change an existing line: {id: "<line_id>", Quantity: <n>, Discount: <dollar_amount>}. To delete: {id: "<line_id>", _delete: null}. To add: {Product_Name: {id: "<product_id>"}, Quantity: <n>, Discount: <dollar_amount>}.
+- Do NOT send items you want to leave unchanged. Omission keeps them.
+
+CLONE QUOTE (use the dedicated tool):
+- If the user says "clone", "copy", or "duplicate" a quote — CALL clone_quote({quote_id: "<id>", new_subject?: "<optional>"}). The server uses Zoho's native clone endpoint which preserves every line item's Discount verbatim.
+- Do NOT simulate a clone by calling zoho_get_record + zoho_create_record. That recomputes pricing and produces a different Grand_Total — a financial defect.
+
 Respond in 1-3 short paragraphs maximum. End with a direct answer, not another question.`;
 
 // Llama 4 Scout-specific prompt. Targets its observed failure modes from the
@@ -8749,6 +9049,14 @@ DEAL DEFAULTS:
 - Lead_Source: "Stratus Referal"
 - Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
 - Chris Graves owner ID: 2570562000141711002
+
+QUOTE DISCOUNT / LINE-ITEM UPDATES (CRITICAL — fire the tool, do NOT narrate):
+- User asks "change discount to 15%", "bump qty to 5", "remove line X" → CALL zoho_update_record via the structured tool-calling channel. Do NOT emit the JSON payload as prose. Do NOT write <|tool|> markers in your reply body.
+- Discount is a dollar amount: Discount = List_Price × Quantity × (pct / 100). Server auto-scales Discount when ONLY Quantity changes, so you can omit Discount and it will preserve the percentage.
+- Quoted_Items payload is ADDITIVE: modify = {id, ...fields}, delete = {id, _delete: null}, add = {Product_Name: {id}, Quantity, Discount}. Items omitted remain unchanged.
+
+CLONE QUOTE:
+- User says "clone", "copy", or "duplicate" a quote → CALL clone_quote({quote_id}). Do NOT read+re-create — that recomputes pricing and breaks the Grand_Total.
 
 Respond in 1-3 short paragraphs. End with a direct answer, not a clarifying question.`;
 
