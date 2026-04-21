@@ -1262,6 +1262,25 @@ function getPrice(sku) {
   return null;
 }
 
+// ─── Catalog SKU Resolver ────────────────────────────────────────────────────
+// Catalog convention varies across license families: legacy MS (210, 220, 225,
+// 250, 350, 410, 425) uses -YR, but MS125/MX75/MX85/MX95/MX105/C8111/C8455
+// use -Y. The user (or model) may paste the "wrong" variant — LIC-MX75-ENT-3YR
+// instead of LIC-MX75-ENT-3Y. Flip the term suffix and try again before
+// falsely claiming the product is inactive/discontinued/not-in-catalog.
+function resolveCatalogSku(sku) {
+  if (!sku) return sku;
+  const upper = sku.toUpperCase();
+  if (prices[upper]) return upper;
+  if (!upper.startsWith('LIC-')) return upper;
+  // Flip -NY ↔ -NYR on the terminal term (avoid matching -CCW-, -SDW-, etc.)
+  const yToYr = upper.replace(/-(\d+)Y$/, '-$1YR');
+  if (yToYr !== upper && prices[yToYr]) return yToYr;
+  const yrToY = upper.replace(/-(\d+)YR$/, '-$1Y');
+  if (yrToY !== upper && prices[yrToY]) return yrToY;
+  return upper;
+}
+
 // ─── Pricing Calculator ──────────────────────────────────────────────────────
 
 /**
@@ -5402,16 +5421,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
           const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
           const suffixed = applySuffix(rawSku);
+          // Resolve -Y ↔ -YR license term variants against the catalog so
+          // a mis-typed term (LIC-MX75-ENT-3YR vs -3Y) doesn't falsely
+          // flag the product as inactive.
+          const resolved = resolveCatalogSku(suffixed);
           // Get cached price data (live KV → static prices.json via Proxy)
-          const cachedPrice = prices[suffixed] || null;
+          const cachedPrice = prices[resolved] || null;
           // If prices.json has zoho_product_id, skip the API call entirely
           if (cachedPrice?.zoho_product_id) {
             cacheHits++;
             const result = {
-              suffixed_sku: suffixed,
+              suffixed_sku: resolved,
               qty,
               product_id: cachedPrice.zoho_product_id,
-              product_name: suffixed,
+              product_name: resolved,
               list_price: cachedPrice.list || null,
               ecomm_price: cachedPrice.price || null,
               discount_per_unit: cachedPrice.discount_per_unit || 0,
@@ -5419,6 +5442,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               product_active: true,
               found: true
             };
+            if (resolved !== suffixed) {
+              result.normalized_from = suffixed;
+              result.note = `Resolved term-variant: "${suffixed}" → "${resolved}" (catalog has -${resolved.endsWith('YR') ? 'YR' : 'Y'}).`;
+            }
             // For hardware SKUs, suggest associated license SKUs so Claude doesn't need mapping knowledge
             if (!rawSku.startsWith('LIC-')) {
               const licOptions = getLicenseSkus(rawSku);
@@ -5433,22 +5460,25 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           apiLookups++;
           try {
             const prodResult = await zohoApiCall('GET',
-              `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+              `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(resolved)})&fields=id,Product_Code,Product_Name,Unit_Price`,
               env
             );
             const records = prodResult?.data || [];
-            const match = records.find(r => r.Product_Code === suffixed);
+            const match = records.find(r => r.Product_Code === resolved);
             const apiResult = {
-              suffixed_sku: suffixed,
+              suffixed_sku: resolved,
               qty,
               product_id: match?.id || null,
-              product_name: match?.Product_Name || suffixed,
+              product_name: match?.Product_Name || resolved,
               list_price: cachedPrice?.list || match?.Unit_Price || null,
               ecomm_price: cachedPrice?.price || null,
               discount_per_unit: cachedPrice?.discount_per_unit || 0,
               discount_pct: cachedPrice?.discount_pct || 0,
               found: !!match
             };
+            if (resolved !== suffixed) {
+              apiResult.normalized_from = suffixed;
+            }
             if (!rawSku.startsWith('LIC-')) {
               const licOptions = getLicenseSkus(rawSku);
               if (licOptions?.length) {
@@ -5461,7 +5491,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // "inactive" when the real reason is "SKU string mismatch" AND we
             // surface actual live alternatives rather than guesses.
             if (!match) {
-              apiResult.not_found_reason = `SKU "${suffixed}" was not found via Product_Code:equals search. This does NOT mean the product is inactive — it means this exact SKU string is not in the catalog.`;
+              apiResult.not_found_reason = `SKU "${resolved}" was not found via Product_Code:equals search. This does NOT mean the product is inactive — it means this exact SKU string is not in the catalog.`;
               if (rawSku.startsWith('LIC-')) {
                 try {
                   // Derive the license family prefix: LIC-MV-7YR → LIC-MV-
@@ -5490,7 +5520,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
             batchResults[rawSku] = apiResult;
           } catch (e) {
-            batchResults[rawSku] = { suffixed_sku: suffixed, qty, error: e.message, found: false };
+            batchResults[rawSku] = { suffixed_sku: resolved, qty, error: e.message, found: false };
           }
         });
         await Promise.all(lookupPromises);
@@ -10097,7 +10127,20 @@ REFUSAL ON BAD INPUT (do NOT call tools):
 - If the user asks to create a deal WITHOUT Lead_Source, refuse and ask "What's the Lead Source? (Stratus Referal, Meraki ISR Referal, etc.)" — do NOT default to "-None-" and do NOT create the deal.
 - Stage value "Closed Lost" (no parens) is INVALID — the valid value is "Closed (Lost)" with parentheses. If the user says "Closed Lost", ask "Did you mean 'Closed (Lost)' with parentheses?" and do NOT update.
 
-Respond in 1-3 short paragraphs maximum. End with a direct answer, not another question.`;
+TOOL CHOICE — EXISTING DEAL vs NEW DEAL (HARD RULE):
+- User gives an explicit deal id (e.g. "on deal 2570562000...") → CALL create_quote_on_deal with that deal_id. Do NOT call create_deal_and_quote — that would create a duplicate deal.
+- Only use create_deal_and_quote for a brand-new deal+quote combo where no deal_id is provided.
+
+LICENSE TERM VARIANTS (DO NOT FLAG AS INACTIVE):
+- Catalog convention: newer families (MS125, MX75/85/95/105, C8111, C8455) use -Y; legacy MS (210/220/225/250/350/410/425) and MX55/64/65/67 use -YR. batch_product_lookup auto-flips these and returns the catalog SKU in suffixed_sku. If the result includes a normalized_from field, use suffixed_sku from that point on — the product IS active.
+- A batch_product_lookup result of found:false on ONE line item means the exact SKU string is not in the catalog. Do NOT abort the whole quote, do NOT say "inactive"/"discontinued" unless Product_Active:false is explicitly returned. Ask the user which variant they want.
+
+ENDING THE REPLY — ALWAYS INCLUDE CRM URLs:
+- After any successful create (quote, deal, account, contact, task), end the reply with a clickable link: [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>). Swap the module for deals/accounts/contacts/tasks.
+- After reading/updating an existing record, include the URL to that record.
+- record_id is the internal id field (NOT Quote_Number). Pull it from the tool result.
+
+Respond in 1-3 short paragraphs maximum. End with a direct answer plus the CRM URL when a record was touched.`;
 
 // Llama 4 Scout-specific prompt. Targets its observed failure modes from the
 // 2026-04-20 benchmark: narrating tool calls instead of firing them, double-
@@ -10178,7 +10221,20 @@ REFUSAL ON BAD INPUT (NO TOOL CALL):
 - Cisco rep validation: If Lead_Source = "Meraki ISR Referal", the rep MUST exist in the Meraki_ISRs module. Search Meraki_ISRs first with zoho_search_records; if zero hits (e.g. "Joe Schmoe" → no match), REFUSE with "No Cisco rep named <X> found — please confirm the exact name or email" and do NOT call zoho_create_record.
 - Stage value "Closed Lost" (no parens) is INVALID. The valid value is "Closed (Lost)" with parentheses. If the user writes "Closed Lost", ASK "Did you mean 'Closed (Lost)' with parentheses?" and do NOT call zoho_update_record.
 
-Respond in 1-3 short paragraphs. End with a direct answer, not a clarifying question.`;
+TOOL CHOICE — EXISTING DEAL vs NEW DEAL (HARD RULE):
+- User gives an explicit deal id (e.g. "on deal 2570562000...") → CALL create_quote_on_deal with that deal_id. Do NOT call create_deal_and_quote — that creates a NEW deal and you'll end up with a duplicate.
+- Only call create_deal_and_quote when the user asks to create a brand-new deal AND quote together from scratch (no existing deal_id in the message).
+
+LICENSE TERM VARIANTS (DO NOT FLAG AS INACTIVE):
+- Catalog uses -Y on newer families (MS125, MX75/85/95/105, C8111, C8455) and -YR on legacy MS (210/220/225/250/350/410/425) and MX55/64/65/67. batch_product_lookup now auto-flips these, returning the catalog-correct SKU in suffixed_sku. If you see a "normalized_from" field in the result, use the suffixed_sku value going forward — the product IS active.
+- If batch_product_lookup returns found:false for a single SKU, quote the user the other lines and ask which replacement they want — do NOT abort the whole quote, do NOT say the product is "inactive" or "discontinued" unless the tool explicitly returns Product_Active:false.
+
+ENDING THE REPLY — ALWAYS INCLUDE CRM URLs:
+- After any successful create (quote, deal, account, contact, task), end the reply with a clickable link in the format [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>) — substitute the correct module for deals/accounts/contacts/tasks.
+- After any successful read/update on an existing record, include the URL to that record.
+- The record_id is Zoho's internal id field (NOT Quote_Number). Pull it from the tool result — never reconstruct from Quote_Number.
+
+Respond in 1-3 short paragraphs. End with a direct answer (plus the CRM URL when a record was touched), not a clarifying question.`;
 
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
 function pickOptimizedPrompt(modelId) {
