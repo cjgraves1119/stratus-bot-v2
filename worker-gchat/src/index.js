@@ -294,10 +294,11 @@ async function logBotUsageToD1(env, {
  */
 function botFromPersonId(personId) {
   if (!personId) return 'gchat';
-  const p = String(personId);
-  if (p.startsWith('chrome-ext-chat')) return 'chrome-chat';
-  if (p.startsWith('chrome-ext-quote')) return 'chrome-quote';
-  if (p.startsWith('chrome-ext')) return 'chrome-ext';
+  // Gateway wraps user emails as 'gw:<email>', so match on the substring too.
+  const p = String(personId).toLowerCase();
+  if (p.includes('chrome-ext-chat')) return 'chrome-chat';
+  if (p.includes('chrome-ext-quote')) return 'chrome-quote';
+  if (p.includes('chrome-ext')) return 'chrome-ext';
   if (p.startsWith('addon')) return 'addon';
   if (p.startsWith('webex')) return 'webex';
   return 'gchat';
@@ -4957,7 +4958,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!createIsError && createdId) {
           createUndoToken = generateUndoToken();
           createUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${createdId}`;
-          createUserSummary = `Created ${module_name.replace(/s$/, '')} "${createRecordName || createdId}" — ${createUrl}`;
+          // Markdown-link the URL so autolinkers don't capture a trailing period
+          // when the model echoes the summary into prose.
+          createUserSummary = `Created ${module_name.replace(/s$/, '')} "${createRecordName || createdId}" — [Open in Zoho](${createUrl}) — Undo token: \`${createUndoToken}\` (say "undo" to reverse).`;
         }
         await logCrmOpToD1(env, {
           personId: personId || null,
@@ -4981,6 +4984,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           parsed._undo_token = createUndoToken;
           parsed._record_url = createUrl;
           parsed._user_visible_summary = createUserSummary;
+          // Embed the undo token into the primary `message` Llama paraphrases.
+          // Llama has been observed skipping _undo_token when it's only in a
+          // side-channel field, so we force it into the message string itself.
+          parsed.message = createUserSummary;
         }
         return parsed;
       }
@@ -5057,7 +5064,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           updateUndoToken = generateUndoToken();
           updateUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${record_id}`;
           const changedFields = Object.keys(data).filter(k => k !== 'id').slice(0, 4).join(', ');
-          updateUserSummary = `Updated ${module_name.replace(/s$/, '')} ${record_id} — changed: ${changedFields || 'n/a'} — ${updateUrl}`;
+          // Markdown-link the URL so autolinkers don't swallow a trailing period
+          // when the model echoes the summary into prose. Embed the undo token
+          // directly in the summary so the model always surfaces it.
+          updateUserSummary = `Updated ${module_name.replace(/s$/, '')} ${record_id} — changed: ${changedFields || 'n/a'} — [Open in Zoho](${updateUrl}) — Undo token: \`${updateUndoToken}\` (say "undo" to reverse).`;
         }
         const updateOpId = await logCrmOpToD1(env, {
           personId: personId || null,
@@ -5082,6 +5092,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           updateParsed._record_url = updateUrl;
           updateParsed._user_visible_summary = updateUserSummary;
           updateParsed._operation_id = updateOpId || null;
+          // Force the undo token into the primary `message` string that Llama
+          // paraphrases — side-channel _undo_token alone is silently dropped on
+          // simple single-field updates. The message IS the summary.
+          updateParsed.message = updateUserSummary;
         }
 
         // ── SERVER-SIDE VERIFICATION for Quoted_Items updates ────────────────
@@ -6158,12 +6172,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           const cloneUndoToken = generateUndoToken();
           const cloneUrlLink = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
+          // Markdown-link the URL so autolinkers don't grab a trailing period.
+          // NOTE: the fallback flag is intentionally NOT surfaced in the
+          // user-visible summary — it's internal plumbing and the word
+          // "rejected" causes Llama to narrate success as failure (Bug B).
           const cloneUserSummary =
             `Cloned quote ${quote_id} → ${clonedId}` +
             (cloneFacts?.quote_number ? ` (${cloneFacts.quote_number})` : '') +
             (cloneFacts?.subject ? ` — "${cloneFacts.subject}"` : '') +
-            ` — ${cloneUrlLink}` +
-            (usedFallback ? ' [deep-clone fallback]' : '');
+            ` — [Open in Zoho](${cloneUrlLink})` +
+            ` — Undo token: \`${cloneUndoToken}\` (say "undo" to reverse).`;
 
           await logCrmOpToD1(env, {
             personId: personId || null,
@@ -6197,10 +6215,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             _undo_token: cloneUndoToken,
             _record_url: cloneUrlLink,
             _user_visible_summary: cloneUserSummary,
-            message:
-              `Cloned quote ${quote_id} → ${clonedId}` +
-              (usedFallback ? ' via deep-clone fallback (native endpoint rejected tax metadata)' : ' via native Zoho clone endpoint') +
-              '. Line items and Discount values copied.'
+            // Debug-only — internal plumbing, not for the user. Surface the
+            // fallback-path detail here so Llama can see it in the response
+            // without narrating the word "rejected" back to the user.
+            _debug_fallback: usedFallback ? 'deep_clone_fallback_used' : 'native_clone_used',
+            // The primary `message` is the user-visible summary. All line
+            // items + discounts WERE copied regardless of which code path ran.
+            message: cloneUserSummary
           };
         } catch (err) {
           console.error('[CLONE-QUOTE] error:', err.message);
@@ -6229,15 +6250,37 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Undo a prior CRM mutation via its _undo_token ──
       case 'undo_crm_action': {
-        const { undo_token } = toolInput;
-        if (!undo_token || !/^u_[a-f0-9]{4,}$/i.test(undo_token)) {
-          return { success: false, error: 'undo_token is required (looks like "u_xxxxxxxx")' };
-        }
+        let { undo_token } = toolInput;
         if (!env?.ANALYTICS_DB) {
           return { success: false, error: 'Undo log not available (ANALYTICS_DB not bound).' };
         }
         const undoStart = Date.now();
         try {
+          // ── "Undo last change" support ─────────────────────────────────────
+          // If the token is missing, the literal string "last" / "latest", or
+          // otherwise doesn't match the u_xxxxxxxx shape, look up the most
+          // recent un-undone mutation for this personId. This is what lets the
+          // user simply say "undo" in chat without having to remember the
+          // token Llama may have failed to surface.
+          const tokenShape = /^u_[a-f0-9]{4,}$/i;
+          if (!undo_token || !tokenShape.test(undo_token)) {
+            if (!personId) {
+              return { success: false, error: 'undo_token is required (looks like "u_xxxxxxxx") — no session personId available to look up the last mutation.' };
+            }
+            const latest = await env.ANALYTICS_DB.prepare(
+              `SELECT undo_token FROM crm_operations
+                WHERE person_id = ?
+                  AND undo_token IS NOT NULL
+                  AND undone_at IS NULL
+                  AND operation IN ('create','update','clone','delete')
+                ORDER BY id DESC LIMIT 1`
+            ).bind(personId).first();
+            if (!latest?.undo_token) {
+              return { success: false, error: 'No recent un-undone mutation found to reverse.' };
+            }
+            undo_token = latest.undo_token;
+            console.log(`[UNDO-CRM-ACTION] Resolved "undo last" → ${undo_token} for person=${personId}`);
+          }
           // Look up the original op. Guard against double-undo.
           const lookup = await env.ANALYTICS_DB.prepare(
             `SELECT id, operation, module, record_id, pre_state, post_state, undone_at
@@ -6268,6 +6311,54 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
             reversalResult = delRes;
             reversalSummary = `Undid ${lookup.operation} — deleted ${origModule.replace(/s$/, '')} ${origRecordId}.`;
+          } else if (lookup.operation === 'delete') {
+            // Reverse a delete by re-creating the record from captured pre_state.
+            // (Zoho recycle-bin restore is module-specific and requires the
+            // deleted record's id be active in the bin — we take the safer
+            // path of rebuilding from the snapshot we captured pre-DELETE.)
+            if (!preState) {
+              return { success: false, error: 'No pre-state captured for this delete; cannot restore the record.' };
+            }
+            reversalOperation = 'restore';
+            const STRIP_CREATE = new Set([
+              'id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By',
+              'Last_Activity_Time', '$editable', '$approval', '$approval_state',
+              '$review_process', '$review', '$state', '$has_more', '$in_merge',
+              '$orchestration', '$locked_for_me', '$zia_visions', '$pathfinder',
+              '$canvas_id', '$process_flow', '$line_tax', 'Quote_Number',
+              'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout'
+            ]);
+            const restoreData = {};
+            for (const [k, v] of Object.entries(preState)) {
+              if (STRIP_CREATE.has(k) || k.startsWith('$')) continue;
+              // Flatten Quoted_Items for a restore-create — keep only the
+              // writable subset Zoho accepts on POST.
+              if (k === 'Quoted_Items' && Array.isArray(v)) {
+                restoreData.Quoted_Items = v.map(it => ({
+                  Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
+                  Quantity: it.Quantity,
+                  List_Price: it.List_Price,
+                  Discount: it.Discount,
+                  Description: it.Description,
+                  Sequence_Number: it.Sequence_Number
+                })).filter(it => it.Product_Name?.id);
+                continue;
+              }
+              restoreData[k] = v;
+            }
+            if (preState.Owner?.id) restoreData.Owner = { id: preState.Owner.id };
+            if (origModule === 'Quotes' && restoreData.Quoted_Items) {
+              restoreData.Do_Not_Auto_Update_Prices = true;
+            }
+            const recreateRes = await zohoApiCall('POST', origModule, env, { data: [restoreData] });
+            const newId = recreateRes?.data?.[0]?.details?.id || null;
+            const newStatus = recreateRes?.data?.[0]?.status;
+            if (newStatus !== 'success' || !newId) {
+              return { success: false, error: `Undo restore failed: ${recreateRes?.data?.[0]?.message || 'unknown'}`, detail: recreateRes };
+            }
+            reversalResult = recreateRes;
+            reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${newId}`;
+            reversalSummary = `Undid delete on ${origModule.replace(/s$/, '')} — recreated as ${newId} — [Open in Zoho](${reversalUrl})`;
           } else if (lookup.operation === 'update') {
             // Reverse an update by PUT-ing the captured pre-state.
             if (!preState) {
@@ -6289,7 +6380,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             reversalResult = putRes;
             reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId}`;
             const restoredFields = Object.keys(restorePayload).slice(0, 4).join(', ');
-            reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — ${reversalUrl}`;
+            reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
           } else {
             return { success: false, error: `Operation type "${lookup.operation}" is not undo-able.` };
           }
@@ -6331,6 +6422,154 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.error('[UNDO-CRM-ACTION] error:', undoErr.message);
           return { success: false, error: undoErr.message };
         }
+      }
+
+      // ── Real delete tool — previously HALLUCINATED by Llama because no
+      // dispatcher existed. Now requires quote_number → record_id resolution
+      // for Quotes to prevent wrong-record deletion. Full pre_state is captured
+      // into D1 so `undo_crm_action` can rebuild the record on reversal.
+      case 'zoho_delete_record': {
+        let { module_name, record_id, quote_number, confirm } = toolInput;
+        if (!module_name) {
+          return { success: false, error: 'module_name is required' };
+        }
+        if (!record_id && !quote_number) {
+          return { success: false, error: 'record_id or quote_number is required' };
+        }
+        if (confirm !== true) {
+          return {
+            success: false,
+            error: 'Delete not executed — confirm:true is required to prevent accidental deletion. Set confirm:true in the tool call after verifying the record.',
+            _no_partial_success: true
+          };
+        }
+
+        // ── Quote_Number → record_id resolution ────────────────────────────
+        // The Quote_Number field is what the customer sees on the page; it is
+        // a DIFFERENT long numeric from the record_id used in URLs. If the
+        // caller supplied quote_number, always resolve it via search. If they
+        // supplied record_id on a Quotes module, double-check it's not really
+        // a Quote_Number by a side search.
+        if (module_name === 'Quotes') {
+          if (quote_number) {
+            try {
+              const qs = await zohoApiCall('GET',
+                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(quote_number)})&fields=id,Quote_Number,Subject&per_page=1`, env);
+              const resolvedId = qs?.data?.[0]?.id;
+              if (!resolvedId) {
+                return { success: false, error: `No Quote found with Quote_Number=${quote_number}. Refusing to delete.`, _no_partial_success: true };
+              }
+              if (record_id && record_id !== resolvedId) {
+                return {
+                  success: false,
+                  error: `quote_number=${quote_number} resolves to record_id=${resolvedId}, which does NOT match the supplied record_id=${record_id}. Refusing to delete the wrong record.`,
+                  _no_partial_success: true
+                };
+              }
+              record_id = resolvedId;
+            } catch (resolveErr) {
+              return { success: false, error: `Quote_Number resolution failed: ${resolveErr.message}. Refusing to delete.`, _no_partial_success: true };
+            }
+          } else if (record_id) {
+            // Heuristic safety check: if the supplied record_id is actually a
+            // Quote_Number, Zoho will return a record with a DIFFERENT id.
+            try {
+              const qs = await zohoApiCall('GET',
+                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(record_id)})&fields=id,Quote_Number&per_page=1`, env);
+              const byNumber = qs?.data?.[0];
+              if (byNumber && byNumber.id !== record_id) {
+                return {
+                  success: false,
+                  error: `The value "${record_id}" is a Quote_Number, not a record_id. The real record_id is "${byNumber.id}". Re-call with record_id="${byNumber.id}" or quote_number="${record_id}" if you intended to delete this quote.`,
+                  _no_partial_success: true
+                };
+              }
+            } catch (_) { /* non-fatal — fall through */ }
+          }
+        }
+
+        // ── Pre-state snapshot (enables undo-restore) ──────────────────────
+        const delStart = Date.now();
+        let preDeleteSnapshot = null;
+        try {
+          const pre = await zohoApiCall('GET', `${module_name}/${record_id}`, env);
+          preDeleteSnapshot = pre?.data?.[0] || null;
+        } catch (snapErr) {
+          console.warn(`[DELETE] Pre-delete snapshot failed for ${module_name}/${record_id}:`, snapErr.message);
+        }
+        if (!preDeleteSnapshot) {
+          return { success: false, error: `Record ${module_name}/${record_id} not found — cannot delete (or refusing to delete without a readable snapshot).`, _no_partial_success: true };
+        }
+
+        const delRes = await zohoApiCall('DELETE', `${module_name}/${record_id}`, env);
+        const delStatus = delRes?.data?.[0]?.status;
+        const delIsError = delStatus !== 'success';
+        if (delIsError) {
+          await logCrmOpToD1(env, {
+            personId: personId || null,
+            bot: botFromPersonId(personId),
+            operation: 'delete',
+            module: module_name,
+            recordId: record_id,
+            recordName: preDeleteSnapshot?.Subject || preDeleteSnapshot?.Deal_Name || preDeleteSnapshot?.Account_Name || null,
+            status: 'error',
+            durationMs: Date.now() - delStart,
+            errorMessage: delRes?.data?.[0]?.message || 'Delete failed',
+            details: { supplied_quote_number: quote_number || null },
+            preState: preDeleteSnapshot,
+            requestPayload: { module: module_name, record_id },
+            responsePayload: delRes
+          });
+          return {
+            success: false,
+            error: `Delete failed: ${delRes?.data?.[0]?.message || 'unknown'}`,
+            detail: delRes,
+            _no_partial_success: true,
+            message: `Delete did NOT succeed. Do not claim ${module_name}/${record_id} was deleted.`
+          };
+        }
+
+        const delUndoToken = generateUndoToken();
+        const delRecordName =
+          preDeleteSnapshot?.Subject ||
+          preDeleteSnapshot?.Deal_Name ||
+          preDeleteSnapshot?.Account_Name ||
+          preDeleteSnapshot?.Last_Name ||
+          null;
+        const delUserSummary =
+          `Deleted ${module_name.replace(/s$/, '')} ${record_id}` +
+          (preDeleteSnapshot?.Quote_Number ? ` (Quote #${preDeleteSnapshot.Quote_Number})` : '') +
+          (delRecordName ? ` — "${delRecordName}"` : '') +
+          ` — Undo token: \`${delUndoToken}\` (say "undo" to restore).`;
+        await logCrmOpToD1(env, {
+          personId: personId || null,
+          bot: botFromPersonId(personId),
+          operation: 'delete',
+          module: module_name,
+          recordId: record_id,
+          recordName: delRecordName,
+          status: 'success',
+          durationMs: Date.now() - delStart,
+          errorMessage: null,
+          details: { supplied_quote_number: quote_number || null, quote_number: preDeleteSnapshot?.Quote_Number || null },
+          preState: preDeleteSnapshot,
+          postState: null,
+          requestPayload: { module: module_name, record_id },
+          responsePayload: delRes,
+          undoToken: delUndoToken,
+          userVisibleSummary: delUserSummary
+        });
+
+        return {
+          success: true,
+          module: module_name,
+          record_id,
+          record_name: delRecordName,
+          quote_number: preDeleteSnapshot?.Quote_Number || null,
+          _undo_token: delUndoToken,
+          _user_visible_summary: delUserSummary,
+          message: delUserSummary
+        };
       }
 
       // ── Velocity Hub ──
@@ -6585,13 +6824,26 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'undo_crm_action',
-    description: 'REVERT a previous CRM mutation to its exact prior state. Use this ONLY when the user asks to undo, revert, roll back, or "change it back". Pass the _undo_token that was returned by the earlier tool call (looks like "u_a3f9b2c1"). For updates, this restores the exact field values as they were before the change. For creates, this deletes the record. For clones, this deletes the cloned quote. The original (source) record of a clone is never touched. Always confirm the restoration with a fresh GET and report back the actual restored state.',
+    description: 'REVERT a previous CRM mutation to its exact prior state. Use this ONLY when the user asks to undo, revert, roll back, or "change it back". Pass the _undo_token that was returned by the earlier tool call (looks like "u_a3f9b2c1"). For updates, this restores the exact field values as they were before the change. For creates, this deletes the record. For clones, this deletes the cloned quote. For deletes, this re-creates the record from its pre-delete snapshot. The original (source) record of a clone is never touched. If the user says "undo" or "undo last" without a specific token, you MAY omit undo_token and the server will resolve to the most recent un-reversed mutation in this session. Always confirm the restoration with a fresh GET and report back the actual restored state.',
     input_schema: {
       type: 'object',
       properties: {
-        undo_token: { type: 'string', description: 'The _undo_token returned by the tool call you want to reverse (e.g., "u_a3f9b2c1")' }
+        undo_token: { type: 'string', description: 'Optional. The _undo_token returned by the tool call you want to reverse (e.g., "u_a3f9b2c1"). If omitted, the server reverses the most recent un-reversed mutation in this session.' }
+      }
+    }
+  },
+  {
+    name: 'zoho_delete_record',
+    description: 'Delete a record in Zoho CRM. REQUIRES confirm:true to prevent accidental deletion. For Quotes, you MUST supply quote_number (the customer-visible number) OR a known record_id — but Quote_Number and record_id are DIFFERENT long numerics. If you pass a Quote_Number as record_id by mistake, the server will refuse and tell you the real record_id. Server captures a full pre-delete snapshot and returns an _undo_token — say "undo" to restore. NEVER claim a record was deleted unless this tool returned success:true.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        module_name: { type: 'string', description: 'CRM module API name (Quotes, Deals, Contacts, Accounts, Tasks, etc.)' },
+        record_id: { type: 'string', description: 'Zoho record ID (long numeric, from URL or search results). For Quotes, this is NOT the Quote_Number.' },
+        quote_number: { type: 'string', description: 'ONLY for Quotes — the customer-visible Quote_Number. Server will resolve this to the record_id before deleting. Use this if the user referenced the quote by its visible number.' },
+        confirm: { type: 'boolean', description: 'Must be true. Safety gate to prevent accidental deletion from model hallucination.' }
       },
-      required: ['undo_token']
+      required: ['module_name', 'confirm']
     }
   },
   {
@@ -6987,9 +7239,16 @@ These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
 2. The direct Zoho CRM URL to the record, in \`https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}\` form. When the tool response already contains \`_record_url\` or \`_user_visible_summary\`, use those verbatim — do not reconstruct them.
 3. The \`_undo_token\` if one was returned, in the form: "Undo token: \`u_xxxxxxxx\` (say 'undo' to reverse)."
 
-**Rule 3 — Restate the undo token for every mutation.** Every \`zoho_create_record\`, \`zoho_update_record\`, and \`clone_quote\` response that succeeds now returns \`_undo_token\`. You MUST surface this token to the user alongside the confirmation. Undo tokens never expire within the evaluation period.
+**Rule 3 — Restate the undo token for every mutation.** Every \`zoho_create_record\`, \`zoho_update_record\`, \`zoho_delete_record\`, and \`clone_quote\` response that succeeds now returns \`_undo_token\` AND embeds it directly in the \`message\` field. Your reply to the user MUST echo the \`message\` verbatim (or include the token as "Undo token: \`u_xxxxxxxx\`") — do NOT silently drop the token even for single-field updates like renames. Undo tokens never expire within the evaluation period.
 
-**Rule 4 — Parse "undo", "revert", "roll back", "change it back", "put it back" → call \`undo_crm_action\`.** The user will usually say "undo" or "revert that" after seeing a confirmation. When they do, look up the most recent \`_undo_token\` you showed and call \`undo_crm_action({ undo_token: "u_xxxxxxxx" })\`. Then confirm the reversal with the result's \`_user_visible_summary\`. If the user is ambiguous about WHICH action to undo and multiple tokens exist from the current conversation, ask which one — don't guess.
+**Rule 4 — Parse "undo", "revert", "roll back", "change it back", "put it back" → call \`undo_crm_action\`.** The user will usually say "undo" or "revert that" after seeing a confirmation. Call \`undo_crm_action({ undo_token: "u_xxxxxxxx" })\` with the most recent token you showed. If you cannot find the token (e.g. it was never surfaced), call \`undo_crm_action({})\` with no token — the server will resolve to the most recent un-reversed mutation. Then confirm the reversal with the result's \`_user_visible_summary\` or \`message\`. If the user is ambiguous about WHICH action to undo and multiple tokens exist, ask which one — don't guess.
+
+**Rule 5 — Deletes require \`confirm: true\` and the REAL record_id, not the Quote_Number.** Before calling \`zoho_delete_record\`:
+1. If the user referenced a quote by its visible Quote_Number (e.g. "delete quote 2570562000399909183"), pass that value as \`quote_number\` and omit \`record_id\` — the server will resolve it for you.
+2. If you already have the internal record_id (from search/get/URL), pass it as \`record_id\`.
+3. ALWAYS pass \`confirm: true\`. The server will refuse the delete otherwise.
+4. If the tool returns an error saying "that value is a Quote_Number, not a record_id," re-call with \`record_id\` set to the value the server gave you.
+5. NEVER tell the user a record was deleted unless the tool returned \`success: true\`. Saying "deleted" when nothing happened is a critical accuracy failure.
 
 ---
 
@@ -7556,6 +7815,11 @@ function toolProgressMessage(toolName, toolInput) {
       const mod = toolInput.module_name || 'record';
       const stageNote = (toolInput.data?.Stage) ? ` (Stage → ${toolInput.data.Stage})` : '';
       return `✏️ Validating & updating ${mod}${stageNote}...`;
+    }
+    case 'zoho_delete_record': {
+      const mod = toolInput.module_name || 'record';
+      const ref = toolInput.quote_number ? `Quote #${toolInput.quote_number}` : (toolInput.record_id || '');
+      return `🗑️ Deleting ${mod} ${ref}...`;
     }
     case 'zoho_get_field':
       return `🔍 Validating ${toolInput.field_name || 'field'} picklist values...`;
