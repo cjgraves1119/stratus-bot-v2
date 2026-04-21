@@ -9000,45 +9000,20 @@ function shouldForceClaudeForWrite(userMessage) {
   return writePatterns.some(p => p.test(userMessage));
 }
 
-// Main waterfall function: try Gemma first, escalate to Claude if stalled.
-// Returns { reply, model, tierUsed, gemmaResult, claudeResult, totalMs }.
-async function askWithWaterfall(userMessage, env, personId, options = {}) {
-  const startMs = Date.now();
-  const useClaudeOnly = options.forceClaude === true;
-  const useGemmaOnly = options.forceGemma === true;
-  const dryRun = options.dryRun === true;
-  const maxGemmaWaitMs = options.maxGemmaWaitMs || 45000; // Give Gemma up to 45s
+// Alias: the stall detector is model-agnostic now that Llama is tier 1.
+// Legacy callers still reference `gemmaStallDetected` — keep it working.
+const cfStallDetected = gemmaStallDetected;
 
-  // Force-Claude mode: skip straight to Claude path
-  if (useClaudeOnly) {
-    const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
-    return { ...r, model: 'claude-sonnet-4-6', tierUsed: 'claude', totalMs: Date.now() - startMs };
-  }
-
-  // Pre-emptive write-intent bypass: quote/deal modifications go straight to
-  // Claude. Gemma's tool-calling reliability for writes is not acceptable
-  // (raw-syntax leaks, missing fields, skipped verification re-fetches).
-  // Save Gemma for what it does reliably: read/lookup queries.
-  if (!useGemmaOnly && shouldForceClaudeForWrite(userMessage)) {
-    console.log(`[WATERFALL] Write-intent detected — routing directly to Claude (skipping Gemma)`);
-    const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
-    return {
-      ...r,
-      model: 'claude-sonnet-4-6',
-      tierUsed: 'claude',
-      stallReason: 'write_intent_skip_gemma',
-      totalMs: Date.now() - startMs
-    };
-  }
-
-  // Tier 1: Gemma 4 with optimized prompt
-  let gemmaResult = null;
-  let gemmaError = null;
+// Try a CF model tier inside the waterfall. Returns either a winning result
+// ({ winner: true, payload }) or a failure reason ({ winner: false, reason, result }).
+async function tryCfTier(modelId, userMessage, env, personId, dryRun) {
+  let result = null;
+  let callError = null;
   try {
-    gemmaResult = await askCfModel(
-      '@cf/google/gemma-4-26b-a4b-it',
+    result = await askCfModel(
+      modelId,
       userMessage,
-      GEMMA_OPTIMIZED_PROMPT,
+      pickOptimizedPrompt(modelId),
       CRM_EMAIL_TOOLS,
       env,
       personId,
@@ -9046,55 +9021,123 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       10
     );
   } catch (err) {
-    gemmaError = err.message;
+    callError = err.message;
+  }
+  const stall = result ? cfStallDetected(result) : { stalled: true, reason: callError ? 'exception' : 'no_response' };
+  if (!stall.stalled) return { winner: true, result };
+  return { winner: false, reason: stall.reason, result };
+}
+
+// Main waterfall function. Order post-V3 benchmark cutover (2026-04-20):
+//   Tier 1: Llama 4 Scout optimized  — 100% on V3, 2.5× faster than Claude
+//   Tier 2: Gemma 4 optimized        — 98% on V3, catches what Llama drops
+//   Tier 3: Claude Sonnet 4.6        — final fallback for stall/rate-limit
+//
+// Previous implementation was Gemma → Claude with a write-intent bypass.
+// The bypass was removed because Llama hit 34/34 on CRM writes in V3 —
+// including line-item adds/removes, discount changes, stage updates, clones.
+//
+// Returns { reply, model, tierUsed, llamaResult, gemmaResult, claudeResult, stallReason, totalMs }.
+async function askWithWaterfall(userMessage, env, personId, options = {}) {
+  const startMs = Date.now();
+  const useClaudeOnly = options.forceClaude === true;
+  const useGemmaOnly = options.forceGemma === true;
+  const useLlamaOnly = options.forceLlama === true;
+  const dryRun = options.dryRun === true;
+
+  const LLAMA = '@cf/meta/llama-4-scout-17b-16e-instruct';
+  const GEMMA = '@cf/google/gemma-4-26b-a4b-it';
+
+  // Force-Claude mode
+  if (useClaudeOnly) {
+    const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
+    return { ...r, model: 'claude-sonnet-4-6', tierUsed: 'claude', totalMs: Date.now() - startMs };
   }
 
-  // Check if Gemma stalled
-  const stallCheck = gemmaResult ? gemmaStallDetected(gemmaResult) : { stalled: true, reason: gemmaError ? 'exception' : 'no_response' };
-
-  if (!stallCheck.stalled) {
-    // Gemma succeeded — return its result
+  // Force-Llama mode
+  if (useLlamaOnly) {
+    const t = await tryCfTier(LLAMA, userMessage, env, personId, dryRun);
     return {
-      reply: gemmaResult.reply,
-      model: '@cf/google/gemma-4-26b-a4b-it',
-      tierUsed: 'gemma',
-      gemmaResult,
+      reply: t.result?.reply || `Llama failed: ${t.reason || 'unknown'}`,
+      model: LLAMA,
+      tierUsed: t.winner ? 'llama' : 'llama-forced',
+      llamaResult: t.result,
+      gemmaResult: null,
+      claudeResult: null,
+      stallReason: t.winner ? null : t.reason,
+      toolCalls: t.result?.toolCalls || [],
+      iterations: t.result?.iterations || 0,
+      elapsedMs: t.result?.elapsedMs || 0,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // Force-Gemma mode
+  if (useGemmaOnly) {
+    const t = await tryCfTier(GEMMA, userMessage, env, personId, dryRun);
+    return {
+      reply: t.result?.reply || `Gemma failed: ${t.reason || 'unknown'}`,
+      model: GEMMA,
+      tierUsed: t.winner ? 'gemma' : 'gemma-forced',
+      llamaResult: null,
+      gemmaResult: t.result,
+      claudeResult: null,
+      stallReason: t.winner ? null : t.reason,
+      toolCalls: t.result?.toolCalls || [],
+      iterations: t.result?.iterations || 0,
+      elapsedMs: t.result?.elapsedMs || 0,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // ── Tier 1: Llama 4 Scout (primary) ──
+  const llamaT = await tryCfTier(LLAMA, userMessage, env, personId, dryRun);
+  if (llamaT.winner) {
+    return {
+      reply: llamaT.result.reply,
+      model: LLAMA,
+      tierUsed: 'llama',
+      llamaResult: llamaT.result,
+      gemmaResult: null,
       claudeResult: null,
       stallReason: null,
-      toolCalls: gemmaResult.toolCalls,
-      iterations: gemmaResult.iterations,
-      elapsedMs: gemmaResult.elapsedMs,
+      toolCalls: llamaT.result.toolCalls,
+      iterations: llamaT.result.iterations,
+      elapsedMs: llamaT.result.elapsedMs,
       totalMs: Date.now() - startMs
     };
   }
 
-  // Force-Gemma mode: return the stalled Gemma result anyway
-  if (useGemmaOnly) {
+  // ── Tier 2: Gemma 4 (fallback) ──
+  console.log(`[WATERFALL] Llama stalled (${llamaT.reason}), trying Gemma for personId=${personId}`);
+  const gemmaT = await tryCfTier(GEMMA, userMessage, env, personId, dryRun);
+  if (gemmaT.winner) {
     return {
-      reply: gemmaResult?.reply || `Gemma failed: ${stallCheck.reason}`,
-      model: '@cf/google/gemma-4-26b-a4b-it',
-      tierUsed: 'gemma-forced',
-      gemmaResult,
+      reply: gemmaT.result.reply,
+      model: GEMMA,
+      tierUsed: 'gemma-fallback',
+      llamaResult: llamaT.result,
+      gemmaResult: gemmaT.result,
       claudeResult: null,
-      stallReason: stallCheck.reason,
-      toolCalls: gemmaResult?.toolCalls || [],
-      iterations: gemmaResult?.iterations || 0,
-      elapsedMs: gemmaResult?.elapsedMs || 0,
+      stallReason: llamaT.reason,
+      toolCalls: gemmaT.result.toolCalls,
+      iterations: gemmaT.result.iterations,
+      elapsedMs: gemmaT.result.elapsedMs,
       totalMs: Date.now() - startMs
     };
   }
 
-  // Tier 2: Claude fallback
-  console.log(`[WATERFALL] Gemma stalled (${stallCheck.reason}), escalating to Claude for personId=${personId}`);
+  // ── Tier 3: Claude (final fallback) ──
+  console.log(`[WATERFALL] Llama + Gemma both stalled (${llamaT.reason}/${gemmaT.reason}), escalating to Claude for personId=${personId}`);
   const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
-
   return {
     reply: claudeResult.reply,
     model: 'claude-sonnet-4-6',
     tierUsed: 'claude-fallback',
-    gemmaResult,
+    llamaResult: llamaT.result,
+    gemmaResult: gemmaT.result,
     claudeResult,
-    stallReason: stallCheck.reason,
+    stallReason: `llama:${llamaT.reason}|gemma:${gemmaT.reason}`,
     toolCalls: claudeResult.toolCalls,
     iterations: claudeResult.iterations,
     elapsedMs: claudeResult.elapsedMs,
@@ -11557,8 +11600,9 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   totalMs: Date.now() - (typeof t0 !== 'undefined' ? t0 : Date.now())
                 };
               } else {
-                // Run the waterfall (Gemma → Claude)
+                // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
+                  forceLlama: forceModel === 'llama',
                   forceGemma: forceModel === 'gemma',
                   forceClaude: forceModel === 'claude',
                   dryRun: wDryRun === true
@@ -11572,10 +11616,13 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               //    which tier handled each request during the testing phase. ──
               const tierBadges = {
                 'deterministic': `⚡ Deterministic engine (free, instant)`,
-                'gemma': `🔷 Gemma 4 26B (CF Workers AI, free) · ${outcome.elapsedMs}ms`,
-                'claude-fallback': `🔶 Claude Sonnet 4.6 (fell back from Gemma — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
-                'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`,
-                'gemma-forced': `🔷 Gemma 4 26B (forced, stalled: ${outcome.stallReason || 'none'})`
+                'llama': `🟢 Llama 4 Scout 17B (CF Workers AI, free) · ${outcome.elapsedMs}ms`,
+                'llama-forced': `🟢 Llama 4 Scout (forced, stalled: ${outcome.stallReason || 'none'})`,
+                'gemma-fallback': `🔷 Gemma 4 26B (fell back from Llama — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
+                'gemma': `🔷 Gemma 4 26B (forced) · ${outcome.elapsedMs}ms`,
+                'gemma-forced': `🔷 Gemma 4 26B (forced, stalled: ${outcome.stallReason || 'none'})`,
+                'claude-fallback': `🔶 Claude Sonnet 4.6 (fell back — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
+                'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`
               };
               const badge = tierBadges[outcome.tierUsed] || `model: ${outcome.model}`;
               const replyWithBadge = `${outcome.reply}\n\n---\n_${badge}_`;
