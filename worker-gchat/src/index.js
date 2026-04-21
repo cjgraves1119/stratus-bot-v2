@@ -8582,6 +8582,7 @@ const BENCHMARK_TASKS = [
 const BENCHMARK_MODELS = [
   { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
   { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
+  { id: '@cf/meta/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout 17B (CF)', type: 'cf' },
   { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B (CF)', type: 'cf' },
   { id: '@hf/nousresearch/hermes-2-pro-mistral-7b', label: 'Hermes 2 Pro 7B (CF)', type: 'cf' },
   { id: '@cf/mistralai/mistral-small-3.1-24b-instruct', label: 'Mistral Small 3.1 24B (CF)', type: 'cf' }
