@@ -200,13 +200,19 @@ async function logQuoteToD1(env, { bot, personId, accountName, skus, totalList, 
 
 /**
  * Log a CRM operation to D1 crm_operations table.
+ * Returns the inserted row id so callers can reference it via undo or reverses_operation_id.
  */
-async function logCrmOpToD1(env, { personId, operation, module, recordId, recordName, status, durationMs, errorMessage, details }) {
-  if (!env?.ANALYTICS_DB) return;
+async function logCrmOpToD1(env, {
+  personId, operation, module, recordId, recordName, status, durationMs, errorMessage, details,
+  bot, preState, postState, requestPayload, responsePayload, undoToken, reversesOperationId, userVisibleSummary
+}) {
+  if (!env?.ANALYTICS_DB) return null;
   try {
-    await env.ANALYTICS_DB.prepare(
-      `INSERT INTO crm_operations (person_id, operation, module, record_id, record_name, status, duration_ms, error_message, details)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    const result = await env.ANALYTICS_DB.prepare(
+      `INSERT INTO crm_operations (
+        person_id, operation, module, record_id, record_name, status, duration_ms, error_message, details,
+        bot, pre_state, post_state, request_payload, response_payload, undo_token, reverses_operation_id, user_visible_summary
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       personId || null,
       operation,
@@ -216,10 +222,20 @@ async function logCrmOpToD1(env, { personId, operation, module, recordId, record
       status,
       durationMs || null,
       errorMessage || null,
-      details ? JSON.stringify(details) : null
+      details ? JSON.stringify(details) : null,
+      bot || null,
+      preState ? JSON.stringify(preState) : null,
+      postState ? JSON.stringify(postState) : null,
+      requestPayload ? JSON.stringify(requestPayload) : null,
+      responsePayload ? JSON.stringify(responsePayload) : null,
+      undoToken || null,
+      reversesOperationId || null,
+      userVisibleSummary || null
     ).run();
+    return result?.meta?.last_row_id || null;
   } catch (err) {
     console.error('[D1] crm_operations insert error:', err.message);
+    return null;
   }
 }
 
@@ -243,27 +259,61 @@ async function logPriceChangeToD1(env, { sku, oldPrice, newPrice, listPrice }) {
 /**
  * Log a bot interaction to D1 bot_usage table (for non-Claude paths like deterministic).
  */
-async function logBotUsageToD1(env, { bot, personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage }) {
+async function logBotUsageToD1(env, {
+  bot, personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage,
+  responseText, toolCallsJson
+}) {
   if (!env?.ANALYTICS_DB) return;
   try {
     await env.ANALYTICS_DB.prepare(
-      `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message, response_text, tool_calls_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       bot || 'gchat',
       personId || null,
-      (requestText || '').substring(0, 500),
+      (requestText || '').substring(0, 2000),
       responsePath,
       model || null,
       inputTokens || 0,
       outputTokens || 0,
       costUsd || 0,
       durationMs || null,
-      errorMessage || null
+      errorMessage || null,
+      responseText ? String(responseText).substring(0, 8000) : null,
+      toolCallsJson ? (typeof toolCallsJson === 'string' ? toolCallsJson : JSON.stringify(toolCallsJson)).substring(0, 8000) : null
     ).run();
   } catch (err) {
     console.error('[D1] bot_usage insert error:', err.message);
   }
+}
+
+/**
+ * Infer the bot channel from a person_id.
+ * Chrome extension uses 'chrome-ext-chat-*' and 'chrome-ext-quote-*' prefixes
+ * to distinguish between the Chat tab and Quote tab.
+ */
+function botFromPersonId(personId) {
+  if (!personId) return 'gchat';
+  const p = String(personId);
+  if (p.startsWith('chrome-ext-chat')) return 'chrome-chat';
+  if (p.startsWith('chrome-ext-quote')) return 'chrome-quote';
+  if (p.startsWith('chrome-ext')) return 'chrome-ext';
+  if (p.startsWith('addon')) return 'addon';
+  if (p.startsWith('webex')) return 'webex';
+  return 'gchat';
+}
+
+/**
+ * Generate a short, user-friendly undo token (e.g. "u_a3f9b2c1").
+ * Used to reference a CRM mutation for later reversal via undo_crm_action.
+ */
+function generateUndoToken() {
+  try {
+    const uuid = crypto.randomUUID ? crypto.randomUUID() : '';
+    const hex = uuid.replace(/-/g, '').substring(0, 8);
+    if (hex) return 'u_' + hex;
+  } catch (_) {}
+  return 'u_' + Date.now().toString(36).substring(-8);
 }
 
 // ── Workflow Trace Helper (live flow visualization) ─────────────────────────
@@ -4893,17 +4943,39 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
         const parsed = parseZohoResponse(createResult, `${module_name} record creation`);
         const createdId = parsed?.data?.[0]?.details?.id || parsed?.data?.[0]?.id || null;
-        logCrmOpToD1(env, {
+        const createIsError = parsed?.data?.[0]?.status === 'error';
+        const createRecordName = recordData.Subject || recordData.Deal_Name || recordData.Last_Name || recordData.Account_Name || null;
+        let createUndoToken = null;
+        let createUrl = null;
+        let createUserSummary = null;
+        if (!createIsError && createdId) {
+          createUndoToken = generateUndoToken();
+          createUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${createdId}`;
+          createUserSummary = `Created ${module_name.replace(/s$/, '')} "${createRecordName || createdId}" — ${createUrl}`;
+        }
+        await logCrmOpToD1(env, {
           personId: personId || null,
+          bot: botFromPersonId(personId),
           operation: 'create',
           module: module_name,
           recordId: createdId,
-          recordName: recordData.Subject || recordData.Deal_Name || recordData.Last_Name || null,
-          status: parsed?.data?.[0]?.status === 'error' ? 'error' : 'success',
+          recordName: createRecordName,
+          status: createIsError ? 'error' : 'success',
           durationMs: Date.now() - createStart,
-          errorMessage: parsed?.data?.[0]?.status === 'error' ? parsed.data[0].message : null,
-          details: { fields: Object.keys(recordData) }
+          errorMessage: createIsError ? parsed.data[0].message : null,
+          details: { fields: Object.keys(recordData) },
+          preState: null,
+          postState: createdId ? { id: createdId, ...recordData } : null,
+          requestPayload: { module: module_name, data: recordData },
+          responsePayload: parsed,
+          undoToken: createUndoToken,
+          userVisibleSummary: createUserSummary
         });
+        if (createUndoToken) {
+          parsed._undo_token = createUndoToken;
+          parsed._record_url = createUrl;
+          parsed._user_visible_summary = createUserSummary;
+        }
         return parsed;
       }
 
@@ -4949,16 +5021,19 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.log(`[GCHAT] First item sample:`, JSON.stringify(data.Quoted_Items[0]));
         }
 
-        // ── PRE-UPDATE SNAPSHOT for Quoted_Items ─────────────────────────────
-        // Grab the current state BEFORE we PUT so we can detect silent no-ops
-        // (e.g. model sends the existing values unchanged, so Grand_Total stays
-        // identical — API returns SUCCESS but nothing changed).
+        // ── PRE-UPDATE SNAPSHOT — all modules ────────────────────────────────
+        // Capture the current record state BEFORE we PUT. For Quotes this also
+        // powers the silent-no-op detector (line-item diff); for all modules it
+        // enables undo_crm_action to restore the exact prior field values.
         let preUpdateSnapshot = null;
-        if (module_name === 'Quotes' && data.Quoted_Items) {
-          try {
-            const pre = await zohoApiCall('GET', `Quotes/${record_id}?fields=id,Grand_Total,Sub_Total,Quoted_Items`, env);
-            preUpdateSnapshot = pre?.data?.[0] || null;
-          } catch (_) {}
+        try {
+          // Only request the fields we're about to modify (plus id + a name field)
+          // to keep the snapshot small.
+          const fieldsToSnap = ['id', ...Object.keys(data)].join(',');
+          const pre = await zohoApiCall('GET', `${module_name}/${record_id}?fields=${encodeURIComponent(fieldsToSnap)}`, env);
+          preUpdateSnapshot = pre?.data?.[0] || null;
+        } catch (snapErr) {
+          console.warn(`[GCHAT] Pre-update snapshot failed for ${module_name}/${record_id}:`, snapErr.message);
         }
 
         const updateStart = Date.now();
@@ -4967,17 +5042,40 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.log(`[GCHAT] Quote update response:`, JSON.stringify(updateResult)?.substring(0, 500));
         }
         const updateParsed = parseZohoResponse(updateResult, `${module_name} record update`);
-        logCrmOpToD1(env, {
+        const updateIsError = updateParsed?.data?.[0]?.status === 'error';
+        let updateUndoToken = null;
+        let updateUrl = null;
+        let updateUserSummary = null;
+        if (!updateIsError) {
+          updateUndoToken = generateUndoToken();
+          updateUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${record_id}`;
+          const changedFields = Object.keys(data).filter(k => k !== 'id').slice(0, 4).join(', ');
+          updateUserSummary = `Updated ${module_name.replace(/s$/, '')} ${record_id} — changed: ${changedFields || 'n/a'} — ${updateUrl}`;
+        }
+        const updateOpId = await logCrmOpToD1(env, {
           personId: personId || null,
+          bot: botFromPersonId(personId),
           operation: 'update',
           module: module_name,
           recordId: record_id,
-          recordName: null,
-          status: updateParsed?.data?.[0]?.status === 'error' ? 'error' : 'success',
+          recordName: preUpdateSnapshot?.Subject || preUpdateSnapshot?.Deal_Name || preUpdateSnapshot?.Account_Name || null,
+          status: updateIsError ? 'error' : 'success',
           durationMs: Date.now() - updateStart,
-          errorMessage: updateParsed?.data?.[0]?.status === 'error' ? updateParsed.data[0].message : null,
-          details: { fields: Object.keys(data) }
+          errorMessage: updateIsError ? updateParsed.data[0].message : null,
+          details: { fields: Object.keys(data) },
+          preState: preUpdateSnapshot,
+          postState: { id: record_id, ...data },
+          requestPayload: { module: module_name, record_id, data },
+          responsePayload: updateParsed,
+          undoToken: updateUndoToken,
+          userVisibleSummary: updateUserSummary
         });
+        if (updateUndoToken) {
+          updateParsed._undo_token = updateUndoToken;
+          updateParsed._record_url = updateUrl;
+          updateParsed._user_visible_summary = updateUserSummary;
+          updateParsed._operation_id = updateOpId || null;
+        }
 
         // ── SERVER-SIDE VERIFICATION for Quoted_Items updates ────────────────
         // Zoho returns SUCCESS even for malformed Quoted_Items payloads that
@@ -5904,6 +6002,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!quote_id) {
           return { success: false, error: 'quote_id is required' };
         }
+        const cloneStart = Date.now();
         try {
           const token = await getZohoAccessToken(env);
           // Zoho clone uses a dedicated action endpoint. v8 supports this on all module clone-enabled records.
@@ -5920,21 +6019,103 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let cloneJson;
           try { cloneJson = JSON.parse(cloneText); } catch { cloneJson = { error: cloneText, status: cloneRes.status }; }
 
-          const cloneRow = cloneJson?.data?.[0];
-          const cloneStatus = cloneRow?.status;
-          const clonedId = cloneRow?.details?.id;
+          let cloneRow = cloneJson?.data?.[0];
+          let cloneStatus = cloneRow?.status;
+          let clonedId = cloneRow?.details?.id;
+          let usedFallback = false;
+
+          // ── Tax-fallback: native clone endpoint sometimes rejects with INVALID_DATA
+          // referencing "Tax" when the source Quote has line-item tax metadata that
+          // Zoho's clone action can't round-trip. In that case, deep-clone manually:
+          //   1. GET the full source Quote + Quoted_Items
+          //   2. Strip Tax-related fields off each item
+          //   3. POST a fresh Quote
+          const looksLikeTaxError =
+            cloneStatus !== 'success' &&
+            JSON.stringify(cloneJson).toLowerCase().includes('tax');
+          if (looksLikeTaxError) {
+            console.log('[CLONE-QUOTE] Native clone rejected (tax). Falling back to deep-clone.');
+            try {
+              const src = await zohoApiCall('GET', `Quotes/${quote_id}`, env);
+              const srcRec = src?.data?.[0];
+              if (srcRec) {
+                // Build a minimal, writable payload from the source quote
+                const STRIP_FIELDS = new Set([
+                  'id', 'Quote_Number', 'Created_Time', 'Modified_Time', 'Created_By',
+                  'Modified_By', 'Approval', 'Approval_State', '$editable', '$approval',
+                  '$review_process', '$review', '$approval_state', '$line_tax',
+                  '$has_more', '$in_merge', '$orchestration', '$locked_for_me',
+                  '$zia_visions', '$pathfinder', '$canvas_id', '$process_flow',
+                  '$state', 'Tax', 'Discount', 'Grand_Total', 'Sub_Total',
+                  'Adjustment', 'Last_Activity_Time', 'Owner', 'Layout'
+                ]);
+                const cleanPayload = {};
+                for (const [k, v] of Object.entries(srcRec)) {
+                  if (STRIP_FIELDS.has(k)) continue;
+                  if (k === 'Quoted_Items' && Array.isArray(v)) {
+                    cleanPayload.Quoted_Items = v.map(it => ({
+                      Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
+                      Quantity: it.Quantity,
+                      List_Price: it.List_Price,
+                      Discount: it.Discount,
+                      Description: it.Description,
+                      Sequence_Number: it.Sequence_Number
+                    })).filter(it => it.Product_Name?.id);
+                    continue;
+                  }
+                  cleanPayload[k] = v;
+                }
+                // Preserve owner + layout from source if present
+                if (srcRec.Owner?.id) cleanPayload.Owner = { id: srcRec.Owner.id };
+                if (new_subject) cleanPayload.Subject = new_subject;
+                else if (srcRec.Subject) cleanPayload.Subject = `${srcRec.Subject} (Copy)`;
+                cleanPayload.Do_Not_Auto_Update_Prices = true;
+
+                const fallbackResult = await zohoApiCall('POST', 'Quotes', env, { data: [cleanPayload] });
+                const fbParsed = parseZohoResponse(fallbackResult, 'Quote deep-clone fallback');
+                const fbId = fbParsed?.data?.[0]?.details?.id || fbParsed?.data?.[0]?.id || null;
+                if (fbId) {
+                  clonedId = fbId;
+                  cloneStatus = 'success';
+                  usedFallback = true;
+                  console.log(`[CLONE-QUOTE] Fallback deep-clone succeeded → ${fbId}`);
+                } else {
+                  console.error('[CLONE-QUOTE] Fallback deep-clone also failed:', JSON.stringify(fbParsed)?.substring(0, 400));
+                }
+              }
+            } catch (fbErr) {
+              console.error('[CLONE-QUOTE] Fallback deep-clone threw:', fbErr.message);
+            }
+          }
 
           if (cloneStatus !== 'success' || !clonedId) {
             console.error('[CLONE-QUOTE] clone failed:', JSON.stringify(cloneJson)?.substring(0, 500));
+            await logCrmOpToD1(env, {
+              personId: personId || null,
+              bot: botFromPersonId(personId),
+              operation: 'clone',
+              module: 'Quotes',
+              recordId: null,
+              recordName: null,
+              status: 'error',
+              durationMs: Date.now() - cloneStart,
+              errorMessage: cloneRow?.message || cloneJson?.message || 'Clone failed',
+              details: { source_quote_id: quote_id, new_subject: new_subject || null, fallback_attempted: looksLikeTaxError },
+              requestPayload: { source_quote_id: quote_id, new_subject: new_subject || null },
+              responsePayload: cloneJson
+            });
             return {
               success: false,
+              source_quote_id: quote_id,
               error: cloneRow?.message || cloneJson?.message || 'Clone failed',
-              detail: cloneJson
+              detail: cloneJson,
+              _no_partial_success: true,
+              message: 'Clone did NOT succeed. Do not claim the quote was cloned.'
             };
           }
 
-          // Optional Subject rename on the cloned record
-          if (new_subject && typeof new_subject === 'string') {
+          // Optional Subject rename on the cloned record (only if not already handled in fallback)
+          if (new_subject && typeof new_subject === 'string' && !usedFallback) {
             try {
               await zohoApiCall('PUT', `Quotes/${clonedId}`, env, { data: [{ Subject: new_subject }] });
             } catch (e) {
@@ -5968,16 +6149,31 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
           } catch (_) {}
 
-          logCrmOpToD1(env, {
+          const cloneUndoToken = generateUndoToken();
+          const cloneUrlLink = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
+          const cloneUserSummary =
+            `Cloned quote ${quote_id} → ${clonedId}` +
+            (cloneFacts?.quote_number ? ` (${cloneFacts.quote_number})` : '') +
+            (cloneFacts?.subject ? ` — "${cloneFacts.subject}"` : '') +
+            ` — ${cloneUrlLink}` +
+            (usedFallback ? ' [deep-clone fallback]' : '');
+
+          await logCrmOpToD1(env, {
             personId: personId || null,
+            bot: botFromPersonId(personId),
             operation: 'clone',
             module: 'Quotes',
             recordId: clonedId,
             recordName: cloneFacts?.subject || null,
             status: 'success',
-            durationMs: null,
+            durationMs: Date.now() - cloneStart,
             errorMessage: null,
-            details: { source_quote_id: quote_id, new_subject: new_subject || null }
+            details: { source_quote_id: quote_id, new_subject: new_subject || null, used_fallback: usedFallback },
+            requestPayload: { source_quote_id: quote_id, new_subject: new_subject || null },
+            responsePayload: { cloned_id: clonedId, facts: cloneFacts },
+            postState: { id: clonedId, ...cloneFacts },
+            undoToken: cloneUndoToken,
+            userVisibleSummary: cloneUserSummary
           });
 
           return {
@@ -5988,13 +6184,145 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             cloned_subject: cloneFacts?.subject || null,
             cloned_grand_total: cloneFacts?.grand_total ?? null,
             line_item_count: cloneFacts?.line_item_count ?? null,
-            url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`,
+            url: cloneUrlLink,
             facts: cloneFacts,
-            message: `Cloned quote ${quote_id} → ${clonedId} via native Zoho clone endpoint. Line items and Discount values copied verbatim.`
+            used_deep_clone_fallback: usedFallback,
+            _undo_token: cloneUndoToken,
+            _record_url: cloneUrlLink,
+            _user_visible_summary: cloneUserSummary,
+            message:
+              `Cloned quote ${quote_id} → ${clonedId}` +
+              (usedFallback ? ' via deep-clone fallback (native endpoint rejected tax metadata)' : ' via native Zoho clone endpoint') +
+              '. Line items and Discount values copied.'
           };
         } catch (err) {
           console.error('[CLONE-QUOTE] error:', err.message);
-          return { success: false, error: err.message, source_quote_id: quote_id };
+          await logCrmOpToD1(env, {
+            personId: personId || null,
+            bot: botFromPersonId(personId),
+            operation: 'clone',
+            module: 'Quotes',
+            recordId: null,
+            recordName: null,
+            status: 'error',
+            durationMs: Date.now() - cloneStart,
+            errorMessage: err.message,
+            details: { source_quote_id: quote_id, new_subject: new_subject || null },
+            requestPayload: { source_quote_id: quote_id, new_subject: new_subject || null }
+          });
+          return {
+            success: false,
+            source_quote_id: quote_id,
+            error: err.message,
+            _no_partial_success: true,
+            message: 'Clone threw an exception and did NOT succeed. Do not claim the quote was cloned.'
+          };
+        }
+      }
+
+      // ── Undo a prior CRM mutation via its _undo_token ──
+      case 'undo_crm_action': {
+        const { undo_token } = toolInput;
+        if (!undo_token || !/^u_[a-f0-9]{4,}$/i.test(undo_token)) {
+          return { success: false, error: 'undo_token is required (looks like "u_xxxxxxxx")' };
+        }
+        if (!env?.ANALYTICS_DB) {
+          return { success: false, error: 'Undo log not available (ANALYTICS_DB not bound).' };
+        }
+        const undoStart = Date.now();
+        try {
+          // Look up the original op. Guard against double-undo.
+          const lookup = await env.ANALYTICS_DB.prepare(
+            `SELECT id, operation, module, record_id, pre_state, post_state, undone_at
+             FROM crm_operations WHERE undo_token = ? LIMIT 1`
+          ).bind(undo_token).first();
+          if (!lookup) {
+            return { success: false, error: `No CRM operation found for undo token ${undo_token}.` };
+          }
+          if (lookup.undone_at) {
+            return { success: false, error: `That action was already undone at ${lookup.undone_at}.`, original_op: lookup };
+          }
+          const origModule = lookup.module;
+          const origRecordId = lookup.record_id;
+          const preState = lookup.pre_state ? JSON.parse(lookup.pre_state) : null;
+
+          let reversalResult = null;
+          let reversalOperation = null;
+          let reversalUrl = null;
+          let reversalSummary = null;
+
+          if (lookup.operation === 'create' || lookup.operation === 'clone') {
+            // Reverse a create/clone by deleting the record.
+            reversalOperation = 'delete';
+            const delRes = await zohoApiCall('DELETE', `${origModule}/${origRecordId}`, env);
+            const delStatus = delRes?.data?.[0]?.status;
+            if (delStatus !== 'success') {
+              return { success: false, error: `Undo delete failed: ${delRes?.data?.[0]?.message || 'unknown'}`, detail: delRes };
+            }
+            reversalResult = delRes;
+            reversalSummary = `Undid ${lookup.operation} — deleted ${origModule.replace(/s$/, '')} ${origRecordId}.`;
+          } else if (lookup.operation === 'update') {
+            // Reverse an update by PUT-ing the captured pre-state.
+            if (!preState) {
+              return { success: false, error: 'No pre-state captured for this update; cannot restore exact prior values.' };
+            }
+            reversalOperation = 'restore';
+            // Strip read-only / system fields
+            const STRIP = new Set(['id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By', 'Last_Activity_Time', 'Owner', '$editable']);
+            const restorePayload = {};
+            for (const [k, v] of Object.entries(preState)) {
+              if (STRIP.has(k) || k.startsWith('$')) continue;
+              restorePayload[k] = v;
+            }
+            const putRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [restorePayload] });
+            const putStatus = putRes?.data?.[0]?.status;
+            if (putStatus !== 'success') {
+              return { success: false, error: `Undo restore failed: ${putRes?.data?.[0]?.message || 'unknown'}`, detail: putRes };
+            }
+            reversalResult = putRes;
+            reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId}`;
+            const restoredFields = Object.keys(restorePayload).slice(0, 4).join(', ');
+            reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — ${reversalUrl}`;
+          } else {
+            return { success: false, error: `Operation type "${lookup.operation}" is not undo-able.` };
+          }
+
+          // Mark the original op as undone and log the reversal itself.
+          try {
+            await env.ANALYTICS_DB.prepare(
+              `UPDATE crm_operations SET undone_at = CURRENT_TIMESTAMP WHERE id = ?`
+            ).bind(lookup.id).run();
+          } catch (_) {}
+          await logCrmOpToD1(env, {
+            personId: personId || null,
+            bot: botFromPersonId(personId),
+            operation: reversalOperation,
+            module: origModule,
+            recordId: origRecordId,
+            recordName: null,
+            status: 'success',
+            durationMs: Date.now() - undoStart,
+            errorMessage: null,
+            details: { reverses_undo_token: undo_token },
+            reversesOperationId: lookup.id,
+            userVisibleSummary: reversalSummary,
+            responsePayload: reversalResult
+          });
+
+          return {
+            success: true,
+            undo_token,
+            original_operation: lookup.operation,
+            module: origModule,
+            record_id: origRecordId,
+            reversal_operation: reversalOperation,
+            url: reversalUrl,
+            _user_visible_summary: reversalSummary,
+            message: reversalSummary
+          };
+        } catch (undoErr) {
+          console.error('[UNDO-CRM-ACTION] error:', undoErr.message);
+          return { success: false, error: undoErr.message };
         }
       }
 
@@ -6238,7 +6566,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'clone_quote',
-    description: 'FAITHFULLY clone a Zoho Quote via the native Zoho CRM clone endpoint (POST /Quotes/{id}/actions/clone). Copies ALL line items with their EXACT Discount values verbatim — preserving percentage-based discounts regardless of quantity. Use this ANYTIME the user asks to duplicate, copy, or clone a quote — NEVER simulate a clone by reading + re-creating, that path recomputes pricing and produces a different Grand_Total. Optionally rename the new quote via new_subject. Returns the cloned record id, Quote_Number, Grand_Total, and URL. The original quote is unchanged.',
+    description: 'FAITHFULLY clone a Zoho Quote via the native Zoho CRM clone endpoint (POST /Quotes/{id}/actions/clone). Copies ALL line items with their EXACT Discount values verbatim — preserving percentage-based discounts regardless of quantity. Use this ANYTIME the user asks to duplicate, copy, or clone a quote — NEVER simulate a clone by reading + re-creating, that path recomputes pricing and produces a different Grand_Total. Optionally rename the new quote via new_subject. Returns the cloned record id, Quote_Number, Grand_Total, URL, and an _undo_token. The original quote is unchanged.',
     input_schema: {
       type: 'object',
       properties: {
@@ -6246,6 +6574,17 @@ const CRM_EMAIL_TOOLS = [
         new_subject: { type: 'string', description: 'Optional — overrides Subject on the cloned quote (e.g., "COPY - Acme Q3 Renewal")' }
       },
       required: ['quote_id']
+    }
+  },
+  {
+    name: 'undo_crm_action',
+    description: 'REVERT a previous CRM mutation to its exact prior state. Use this ONLY when the user asks to undo, revert, roll back, or "change it back". Pass the _undo_token that was returned by the earlier tool call (looks like "u_a3f9b2c1"). For updates, this restores the exact field values as they were before the change. For creates, this deletes the record. For clones, this deletes the cloned quote. The original (source) record of a clone is never touched. Always confirm the restoration with a fresh GET and report back the actual restored state.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        undo_token: { type: 'string', description: 'The _undo_token returned by the tool call you want to reverse (e.g., "u_a3f9b2c1")' }
+      },
+      required: ['undo_token']
     }
   },
   {
@@ -6627,6 +6966,23 @@ const CRM_SYSTEM_PROMPT = `
 ## ZOHO CRM ALWAYS AVAILABLE
 
 You ALWAYS have full Zoho CRM access. NEVER say "I don't have the ability to..." or "I cannot access Zoho" for any CRM operation. These statements are false. Execute CRM operations immediately without disclaimers.
+
+---
+
+## ACTION CONFIRMATION + UNDO — HIGHEST PRIORITY RULES
+
+These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
+
+**Rule 1 — No partial-success narration.** A tool result either has \`success: true\` OR it has \`success: false\` / \`status: "error"\` / an \`error\` field. There is no in-between. If the result indicates failure, NEVER tell the user "X was cloned but with a tax error" or "it was created but…". Say plainly: "That did not succeed — here is the error," then propose a concrete next step. If the tool result contains \`_no_partial_success: true\`, this rule is being flagged explicitly — do not hedge.
+
+**Rule 2 — Always confirm the exact action with the record URL.** After any successful CRM mutation (create, update, clone, delete), your reply to the user MUST include:
+1. A one-sentence confirmation of what was changed (module, record name/id, specific fields or action).
+2. The direct Zoho CRM URL to the record, in \`https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}\` form. When the tool response already contains \`_record_url\` or \`_user_visible_summary\`, use those verbatim — do not reconstruct them.
+3. The \`_undo_token\` if one was returned, in the form: "Undo token: \`u_xxxxxxxx\` (say 'undo' to reverse)."
+
+**Rule 3 — Restate the undo token for every mutation.** Every \`zoho_create_record\`, \`zoho_update_record\`, and \`clone_quote\` response that succeeds now returns \`_undo_token\`. You MUST surface this token to the user alongside the confirmation. Undo tokens never expire within the evaluation period.
+
+**Rule 4 — Parse "undo", "revert", "roll back", "change it back", "put it back" → call \`undo_crm_action\`.** The user will usually say "undo" or "revert that" after seeing a confirmation. When they do, look up the most recent \`_undo_token\` you showed and call \`undo_crm_action({ undo_token: "u_xxxxxxxx" })\`. Then confirm the reversal with the result's \`_user_visible_summary\`. If the user is ambiguous about WHICH action to undo and multiple tokens exist from the current conversation, ask which one — don't guess.
 
 ---
 
@@ -8573,7 +8929,8 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'gmail_send_email',
   'webex_send_message',
   'zoho_create_note',
-  'zoho_update_note'
+  'zoho_update_note',
+  'undo_crm_action'
 ]);
 
 // Tools that READ — always execute against real CRM
@@ -13684,6 +14041,45 @@ Return ONLY a JSON object (no markdown, no explanation):
             });
         }
 
+        // ── D1 logging for Chrome extension API endpoints ───────────────────
+        // /api/quote powers the Chrome extension's Quote tab. The personId is
+        // passed in from the extension as 'chrome-ext-quote-*' (or derived by
+        // the handler as 'chrome-ext-*'). Log the raw request text + response
+        // so we can reconstruct every Quote tab exchange from D1.
+        try {
+          if (url.pathname === '/api/quote' && apiBody?.text) {
+            const _pid = apiBody.personId || null;
+            const _bot = botFromPersonId(_pid);
+            const _botDb = (_bot === 'chrome-chat' || _bot === 'chrome-quote' || _bot === 'chrome-ext')
+              ? 'addon' : _bot;
+            ctx.waitUntil(logBotUsageToD1(env, {
+              bot: _botDb,
+              personId: _pid,
+              requestText: apiBody.text,
+              responsePath: apiResult?.handlerType || 'api-quote',
+              responseText: typeof apiResult === 'string' ? apiResult : JSON.stringify(apiResult || ''),
+              durationMs: null,
+              errorMessage: apiResult?.error || null
+            }));
+          } else if (url.pathname === '/api/chat' && apiBody?.text) {
+            const _pid = apiBody.personId || null;
+            const _bot = botFromPersonId(_pid);
+            const _botDb = (_bot === 'chrome-chat' || _bot === 'chrome-quote' || _bot === 'chrome-ext')
+              ? 'addon' : _bot;
+            ctx.waitUntil(logBotUsageToD1(env, {
+              bot: _botDb,
+              personId: _pid,
+              requestText: apiBody.text,
+              responsePath: 'api-chat',
+              responseText: typeof apiResult === 'string' ? apiResult : JSON.stringify(apiResult || ''),
+              durationMs: null,
+              errorMessage: apiResult?.error || null
+            }));
+          }
+        } catch (_logErr) {
+          // Never let logging break a real response.
+        }
+
         return new Response(JSON.stringify(apiResult), { headers: jsonHeaders });
       } catch (apiErr) {
         console.error(`[API] Error on ${url.pathname}: ${apiErr.message}`);
@@ -14726,12 +15122,15 @@ Return ONLY a JSON object (no markdown, no explanation):
         const _requestEndMs = Date.now();
         const _responsePath = (typeof useTools !== 'undefined' && useTools) ? 'crm_agent_advisor' : (reply && !imageData ? 'cf-deterministic' : 'claude');
         const _durationMs = _requestEndMs - (_requestStartMs || _requestEndMs);
+        const _botChannel = botFromPersonId(personId) || (isAddon ? 'addon' : 'gchat');
         ctx.waitUntil(logBotUsageToD1(env, {
-          bot: isAddon ? 'addon' : 'gchat',
+          bot: _botChannel === 'chrome-chat' || _botChannel === 'chrome-quote' || _botChannel === 'chrome-ext' ? 'addon' : _botChannel,
           personId,
           requestText: text,
           responsePath: _responsePath,
-          durationMs: _durationMs
+          durationMs: _durationMs,
+          responseText: typeof reply === 'string' ? reply : JSON.stringify(reply || ''),
+          toolCallsJson: globalThis.__lastToolCalls ? JSON.stringify(globalThis.__lastToolCalls).substring(0, 8000) : null
         }));
         writeMetric(env, {
           bot: isAddon ? 'addon' : 'gchat',
