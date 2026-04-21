@@ -154,6 +154,16 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
   const [selectedContextEmail, setSelectedContextEmail] = useState(null);
   const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
   const [zohoPageContext, setZohoPageContext] = useState(null);
+  // Manually-pinned CRM record from search (overrides zohoPageContext when set)
+  // Shape: { module, recordId, recordName, accountName, email }
+  const [manualRecord, setManualRecord] = useState(null);
+  // Manual CRM search state (rendered inside the context dropdown)
+  const [searchMode, setSearchMode] = useState(false);
+  const [searchModule, setSearchModule] = useState('Accounts');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(null);
   // Progress steps — populated via polling while a chat request is in flight
   const [progressSteps, setProgressSteps] = useState([]);
   const messagesEndRef = useRef(null);
@@ -401,10 +411,13 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
       // The hint is prepended to the user message so the LLM sees it as part of
       // the query context — not injected into system prompt (which Claude flags as
       // prompt injection when it looks like capability claims).
+      // Priority: manually-pinned record > auto-detected Zoho page context.
       let textToSend = messageText;
-      const zohoHint = buildZohoPageContextHint(zohoPageContext);
+      const activeRecord = manualRecord || zohoPageContext;
+      const zohoHint = buildZohoPageContextHint(activeRecord);
       if (zohoHint) {
-        textToSend = `${zohoHint}\n\nUser message: ${messageText}`;
+        const source = manualRecord ? 'pinned by user' : 'currently viewing';
+        textToSend = `${zohoHint}\n(Source: ${source})\n\nUser message: ${messageText}`;
       }
 
       // ── Progress tracking ────────────────────────────────────────────────
@@ -482,7 +495,77 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
         setTimeout(() => setProgressSteps([]), 1500);
       }
     }
-  }, [input, loading, messages, emailContext, onMessagesChange]);
+  }, [input, loading, messages, emailContext, onMessagesChange, zohoPageContext, manualRecord, selectedContextEmail]);
+
+  // ── Manual CRM search (inside context dropdown) ──
+  const handleCrmSearch = useCallback(async () => {
+    const q = searchQuery.trim();
+    if (!q) return;
+    setSearchLoading(true);
+    setSearchError(null);
+    setSearchResults(null);
+    try {
+      const result = await sendToBackground(MSG.CRM_SEARCH, {
+        query: q,
+        module: searchModule,
+      });
+      setSearchResults(result);
+    } catch (err) {
+      setSearchError(err?.message || 'Search failed');
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [searchQuery, searchModule]);
+
+  // Pin a result from the search as the active CRM record for this chat
+  const handlePinRecord = useCallback((record, mod) => {
+    if (!record || !record.id) return;
+    // Normalize module: backend uses "Deals" but Zoho URL tab is "Potentials"
+    // We preserve the search module so URLs resolve correctly
+    const getV = (obj) => {
+      if (obj == null) return null;
+      if (typeof obj === 'string' || typeof obj === 'number') return String(obj);
+      if (typeof obj === 'object' && obj.name) return obj.name;
+      return null;
+    };
+    let recordName = null;
+    let accountName = null;
+    let email = null;
+    if (mod === 'Accounts') {
+      recordName = getV(record.name) || getV(record.Account_Name);
+      accountName = recordName;
+    } else if (mod === 'Contacts') {
+      const fn = getV(record.First_Name) || '';
+      const ln = getV(record.Last_Name) || '';
+      recordName = `${fn} ${ln}`.trim() || null;
+      accountName = getV(record.Account_Name);
+      email = getV(record.Email);
+    } else if (mod === 'Deals') {
+      recordName = getV(record.Deal_Name);
+      accountName = getV(record.Account_Name);
+    } else if (mod === 'Quotes') {
+      const subject = getV(record.Subject);
+      const quoteNum = getV(record.Quote_Number);
+      recordName = quoteNum ? `${subject || 'Quote'} #${quoteNum}` : subject;
+      accountName = getV(record.Account_Name);
+    }
+    setManualRecord({
+      module: mod,
+      recordId: record.id,
+      recordName: recordName || record.id,
+      accountName: accountName || null,
+      email: email || null,
+    });
+    // Collapse dropdown + search UI
+    setSearchMode(false);
+    setSearchResults(null);
+    setSearchQuery('');
+    setContextDropdownOpen(false);
+  }, []);
+
+  const handleClearPinned = useCallback(() => {
+    setManualRecord(null);
+  }, []);
 
   const handleStop = useCallback(() => {
     if (abortRef.current) abortRef.current.aborted = true;
@@ -532,92 +615,9 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
                 </button>
               ))}
             </div>
-            {zohoPageContext && zohoPageContext.recordId && (
-              <div style={{
-                marginTop: 12, padding: '6px 10px', background: '#e8f4f8',
-                border: `1px solid ${COLORS.STRATUS_BLUE}55`, borderRadius: 6,
-                fontSize: 11, color: COLORS.STRATUS_BLUE, display: 'flex',
-                alignItems: 'center', gap: 6
-              }}>
-                <span>📄</span>
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  Viewing {({Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact',Tasks:'Task',SalesOrders:'Sales Order',Invoices:'Invoice'}[zohoPageContext.module] || zohoPageContext.module)}
-                  {zohoPageContext.recordName ? ': ' + zohoPageContext.recordName : ' ' + zohoPageContext.recordId}
-                </span>
-                <span style={{ fontSize: 10, opacity: 0.7 }}>— referenced by "this"</span>
-              </div>
-            )}
-            {participantOptions.length > 0 && (
-              <div style={{ marginTop: 12, position: 'relative' }}>
-                <button
-                  onClick={(e) => { e.stopPropagation(); setContextDropdownOpen(v => !v); }}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    padding: '5px 10px', background: activeContextEmail ? COLORS.STRATUS_LIGHT : COLORS.BG_SECONDARY,
-                    border: `1px solid ${activeContextEmail ? COLORS.STRATUS_BLUE + '55' : COLORS.BORDER}`,
-                    borderRadius: 6, fontSize: 11, color: activeContextEmail ? COLORS.STRATUS_BLUE : COLORS.TEXT_SECONDARY,
-                    cursor: 'pointer', width: '100%', textAlign: 'left',
-                  }}
-                  title="Select which thread participant to use as CRM context"
-                >
-                  <span style={{ opacity: 0.7 }}>Context:</span>
-                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: activeContextEmail ? 600 : 400 }}>
-                    {activeContextEmail
-                      ? (activeContact?.name || activeContextEmail)
-                      : 'None (no CRM context)'}
-                  </span>
-                  <span style={{ opacity: 0.6, fontSize: 9 }}>▼</span>
-                </button>
-                {contextDropdownOpen && (
-                  <div onClick={(e) => e.stopPropagation()} style={{
-                    position: 'absolute', bottom: '100%', left: 0, right: 0,
-                    background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
-                    borderRadius: 6, boxShadow: '0 -4px 12px rgba(0,0,0,0.12)',
-                    zIndex: 999, overflow: 'hidden', marginBottom: 4,
-                  }}>
-                    <div style={{ padding: '4px 0' }}>
-                      {/* No context option */}
-                      <button
-                        onClick={() => { setSelectedContextEmail('__none__'); setContextDropdownOpen(false); }}
-                        style={{
-                          display: 'block', width: '100%', textAlign: 'left',
-                          padding: '6px 12px', background: selectedContextEmail === '__none__' ? COLORS.BG_SECONDARY : 'transparent',
-                          border: 'none', cursor: 'pointer', fontSize: 11, color: COLORS.TEXT_SECONDARY,
-                        }}
-                      >
-                        No context (general chat)
-                      </button>
-                      {/* Participant options */}
-                      {participantOptions.map((p) => (
-                        <button
-                          key={p.email}
-                          onClick={() => { setSelectedContextEmail(p.email); setContextDropdownOpen(false); }}
-                          style={{
-                            display: 'block', width: '100%', textAlign: 'left',
-                            padding: '6px 12px',
-                            background: (selectedContextEmail === p.email || (!selectedContextEmail && p.email === emailContext?.customerEmail)) ? COLORS.STRATUS_LIGHT : 'transparent',
-                            border: 'none', cursor: 'pointer', fontSize: 11,
-                            color: COLORS.TEXT_PRIMARY,
-                          }}
-                        >
-                          <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {p.name || p.email}
-                          </div>
-                          {p.name && (
-                            <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {p.email}
-                            </div>
-                          )}
-                          {p.role && (
-                            <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 10, textTransform: 'capitalize' }}>{p.role}</div>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+            {/* Context + Zoho-page-context chips are now rendered in the persistent
+                bar above the input (see ContextBar below) so they stay visible
+                after the first message is sent. */}
           </div>
         )}
 
@@ -694,8 +694,330 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Persistent Context Bar — always visible so Chris can change the
+          Related Record (thread participant, Zoho page, or manually-searched
+          record) at any point in the conversation, not just the first message. */}
+      <div style={{ borderTop: `1px solid ${COLORS.BORDER}`, padding: '8px 16px 0 16px', background: COLORS.BG_PRIMARY, position: 'relative' }}>
+        {/* Summary of what's currently driving CRM context */}
+        <div style={{ position: 'relative' }}>
+          <button
+            onClick={(e) => { e.stopPropagation(); setContextDropdownOpen(v => !v); if (!contextDropdownOpen) { setSearchMode(false); } }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '5px 10px',
+              background: (manualRecord || activeContextEmail || (zohoPageContext && zohoPageContext.recordId)) ? COLORS.STRATUS_LIGHT : COLORS.BG_SECONDARY,
+              border: `1px solid ${(manualRecord || activeContextEmail || (zohoPageContext && zohoPageContext.recordId)) ? COLORS.STRATUS_BLUE + '55' : COLORS.BORDER}`,
+              borderRadius: 6, fontSize: 11,
+              color: (manualRecord || activeContextEmail || (zohoPageContext && zohoPageContext.recordId)) ? COLORS.STRATUS_BLUE : COLORS.TEXT_SECONDARY,
+              cursor: 'pointer', width: '100%', textAlign: 'left',
+            }}
+            title="Change which record or contact is attached as CRM context for this chat"
+          >
+            <span style={{ opacity: 0.75 }}>
+              {manualRecord ? '📌' : (zohoPageContext && zohoPageContext.recordId ? '📄' : '📎')}
+            </span>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
+              {(() => {
+                if (manualRecord) {
+                  const modLabel = ({Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact'}[manualRecord.module] || manualRecord.module);
+                  return `${modLabel}: ${manualRecord.recordName || manualRecord.recordId}`;
+                }
+                if (zohoPageContext && zohoPageContext.recordId) {
+                  const modLabel = ({Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact',Tasks:'Task',SalesOrders:'Sales Order',Invoices:'Invoice'}[zohoPageContext.module] || zohoPageContext.module);
+                  return `Viewing ${modLabel}: ${zohoPageContext.recordName || zohoPageContext.recordId}`;
+                }
+                if (activeContextEmail) {
+                  return `Contact: ${activeContact?.name || activeContextEmail}`;
+                }
+                return 'No CRM context — click to pick a record';
+              })()}
+            </span>
+            {manualRecord && (
+              <span
+                onClick={(e) => { e.stopPropagation(); handleClearPinned(); }}
+                style={{ fontSize: 11, opacity: 0.7, padding: '0 4px', cursor: 'pointer' }}
+                title="Unpin this record"
+              >
+                ✕
+              </span>
+            )}
+            <span style={{ opacity: 0.6, fontSize: 9 }}>▼</span>
+          </button>
+          {contextDropdownOpen && (
+            <div onClick={(e) => e.stopPropagation()} style={{
+              position: 'absolute', bottom: '100%', left: 0, right: 0,
+              background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              borderRadius: 6, boxShadow: '0 -4px 12px rgba(0,0,0,0.12)',
+              zIndex: 999, overflow: 'hidden', marginBottom: 4,
+              maxHeight: 360, overflowY: 'auto',
+            }}>
+              {!searchMode ? (
+                <div style={{ padding: '4px 0' }}>
+                  {/* No context option */}
+                  <button
+                    onClick={() => { setSelectedContextEmail('__none__'); setManualRecord(null); setContextDropdownOpen(false); }}
+                    style={{
+                      display: 'block', width: '100%', textAlign: 'left',
+                      padding: '6px 12px',
+                      background: (selectedContextEmail === '__none__' && !manualRecord) ? COLORS.BG_SECONDARY : 'transparent',
+                      border: 'none', cursor: 'pointer', fontSize: 11, color: COLORS.TEXT_SECONDARY,
+                    }}
+                  >
+                    No context (general chat)
+                  </button>
+
+                  {/* Current Zoho page record — click to pin it explicitly */}
+                  {zohoPageContext && zohoPageContext.recordId && (
+                    <>
+                      <div style={{ padding: '4px 12px 2px', fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.TEXT_SECONDARY, opacity: 0.7 }}>
+                        Current Zoho Page
+                      </div>
+                      <button
+                        onClick={() => {
+                          setManualRecord({
+                            module: zohoPageContext.module,
+                            recordId: zohoPageContext.recordId,
+                            recordName: zohoPageContext.recordName,
+                            accountName: zohoPageContext.accountName,
+                            email: zohoPageContext.email,
+                          });
+                          setContextDropdownOpen(false);
+                        }}
+                        style={{
+                          display: 'block', width: '100%', textAlign: 'left',
+                          padding: '6px 12px', background: 'transparent',
+                          border: 'none', cursor: 'pointer', fontSize: 11, color: COLORS.TEXT_PRIMARY,
+                        }}
+                      >
+                        <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          📄 {({Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact',Tasks:'Task',SalesOrders:'Sales Order',Invoices:'Invoice'}[zohoPageContext.module] || zohoPageContext.module)}
+                        </div>
+                        <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {zohoPageContext.recordName || zohoPageContext.recordId}
+                        </div>
+                      </button>
+                    </>
+                  )}
+
+                  {/* Email thread participants */}
+                  {participantOptions.length > 0 && (
+                    <>
+                      <div style={{ padding: '6px 12px 2px', fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.5, color: COLORS.TEXT_SECONDARY, opacity: 0.7 }}>
+                        Thread Participants
+                      </div>
+                      {participantOptions.map((p) => (
+                        <button
+                          key={p.email}
+                          onClick={() => { setSelectedContextEmail(p.email); setManualRecord(null); setContextDropdownOpen(false); }}
+                          style={{
+                            display: 'block', width: '100%', textAlign: 'left',
+                            padding: '6px 12px',
+                            background: (!manualRecord && (selectedContextEmail === p.email || (!selectedContextEmail && p.email === emailContext?.customerEmail))) ? COLORS.STRATUS_LIGHT : 'transparent',
+                            border: 'none', cursor: 'pointer', fontSize: 11,
+                            color: COLORS.TEXT_PRIMARY,
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {p.name || p.email}
+                          </div>
+                          {p.name && (
+                            <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {p.email}
+                            </div>
+                          )}
+                          {p.role && (
+                            <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 10, textTransform: 'capitalize' }}>{p.role}</div>
+                          )}
+                        </button>
+                      ))}
+                    </>
+                  )}
+
+                  {/* Open the inline CRM search */}
+                  <div style={{ borderTop: `1px solid ${COLORS.BORDER}`, marginTop: 4 }}>
+                    <button
+                      onClick={() => { setSearchMode(true); setSearchResults(null); setSearchError(null); }}
+                      style={{
+                        display: 'block', width: '100%', textAlign: 'left',
+                        padding: '8px 12px', background: 'transparent',
+                        border: 'none', cursor: 'pointer', fontSize: 11, color: COLORS.STRATUS_BLUE, fontWeight: 600,
+                      }}
+                    >
+                      🔍 Search CRM for Account, Contact, Deal, Quote...
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ padding: '8px 10px' }}>
+                  {/* Search header + back */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                    <button
+                      onClick={() => { setSearchMode(false); setSearchResults(null); setSearchError(null); }}
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        fontSize: 11, color: COLORS.TEXT_SECONDARY, padding: '2px 4px',
+                      }}
+                      title="Back to context list"
+                    >
+                      ← Back
+                    </button>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_PRIMARY }}>
+                      Search Zoho CRM
+                    </span>
+                  </div>
+
+                  {/* Module selector */}
+                  <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
+                    {['Accounts', 'Contacts', 'Deals', 'Quotes'].map(m => (
+                      <button
+                        key={m}
+                        onClick={() => { setSearchModule(m); setSearchResults(null); }}
+                        style={{
+                          flex: 1, padding: '4px 0', fontSize: 10, fontWeight: 600,
+                          background: searchModule === m ? COLORS.STRATUS_BLUE : COLORS.BG_SECONDARY,
+                          color: searchModule === m ? 'white' : COLORS.TEXT_SECONDARY,
+                          border: `1px solid ${searchModule === m ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
+                          borderRadius: 4, cursor: 'pointer',
+                        }}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Search input */}
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleCrmSearch(); }}
+                      autoFocus
+                      placeholder={`Search ${searchModule.toLowerCase()}...`}
+                      style={{
+                        flex: 1, padding: '5px 8px',
+                        border: `1px solid ${COLORS.BORDER}`, borderRadius: 4,
+                        fontSize: 11, color: COLORS.TEXT_PRIMARY, backgroundColor: COLORS.BG_PRIMARY,
+                        outline: 'none',
+                      }}
+                    />
+                    <button
+                      onClick={handleCrmSearch}
+                      disabled={!searchQuery.trim() || searchLoading}
+                      style={{
+                        padding: '5px 10px',
+                        background: !searchQuery.trim() || searchLoading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+                        color: 'white', border: 'none', borderRadius: 4, fontSize: 11, fontWeight: 600,
+                        cursor: !searchQuery.trim() || searchLoading ? 'not-allowed' : 'pointer',
+                        opacity: !searchQuery.trim() || searchLoading ? 0.5 : 1,
+                      }}
+                    >
+                      {searchLoading ? '...' : 'Go'}
+                    </button>
+                  </div>
+
+                  {searchError && (
+                    <div style={{
+                      padding: '6px 8px', background: '#fce8e6', color: COLORS.ERROR,
+                      fontSize: 11, borderRadius: 4, marginBottom: 6,
+                    }}>
+                      {searchError}
+                    </div>
+                  )}
+
+                  {/* Results */}
+                  {searchResults && (() => {
+                    const recs = searchResults.results || searchResults.records || [];
+                    if (!recs.length) {
+                      return (
+                        <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, padding: '8px 4px', textAlign: 'center' }}>
+                          No {searchModule.toLowerCase()} found for "{searchQuery}".
+                        </div>
+                      );
+                    }
+                    const getV = (obj) => {
+                      if (obj == null) return null;
+                      if (typeof obj === 'string' || typeof obj === 'number') return String(obj);
+                      if (typeof obj === 'object' && obj.name) return obj.name;
+                      return null;
+                    };
+                    return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+                        {recs.slice(0, 20).map((r, idx) => {
+                          let title = 'Unnamed';
+                          let subtitle = '';
+                          let meta = '';
+                          if (searchModule === 'Accounts') {
+                            title = getV(r.name) || getV(r.Account_Name) || 'Unnamed Account';
+                            const city = getV(r.billingCity) || getV(r.Billing_City);
+                            const state = getV(r.billingState) || getV(r.Billing_State);
+                            subtitle = getV(r.website) || getV(r.Website) || '';
+                            meta = [city, state].filter(Boolean).join(', ');
+                          } else if (searchModule === 'Contacts') {
+                            const fn = getV(r.First_Name) || '';
+                            const ln = getV(r.Last_Name) || '';
+                            title = `${fn} ${ln}`.trim() || 'Unnamed Contact';
+                            subtitle = getV(r.Email) || '';
+                            meta = getV(r.Account_Name) || '';
+                          } else if (searchModule === 'Deals') {
+                            title = getV(r.Deal_Name) || 'Unnamed Deal';
+                            subtitle = getV(r.Account_Name) || '';
+                            const stage = getV(r.Stage);
+                            const amount = getV(r.Amount);
+                            meta = [stage, amount ? `$${Number(amount).toLocaleString()}` : null].filter(Boolean).join(' • ');
+                          } else if (searchModule === 'Quotes') {
+                            title = getV(r.Subject) || 'Unnamed Quote';
+                            const qn = getV(r.Quote_Number);
+                            subtitle = qn ? `#${qn}` : '';
+                            const total = getV(r.Grand_Total);
+                            meta = [getV(r.Deal_Name), total ? `$${Number(total).toLocaleString()}` : null].filter(Boolean).join(' • ');
+                          }
+                          return (
+                            <button
+                              key={idx}
+                              onClick={() => handlePinRecord(r, searchModule)}
+                              style={{
+                                display: 'block', width: '100%', textAlign: 'left',
+                                padding: '6px 8px', background: COLORS.BG_SECONDARY,
+                                border: `1px solid ${COLORS.BORDER}`, borderRadius: 4,
+                                cursor: 'pointer', fontSize: 11, color: COLORS.TEXT_PRIMARY,
+                              }}
+                              onMouseEnter={(e) => { e.currentTarget.style.borderColor = COLORS.STRATUS_BLUE; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.borderColor = COLORS.BORDER; }}
+                            >
+                              <div style={{ fontWeight: 600, color: COLORS.STRATUS_BLUE, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {title}
+                              </div>
+                              {subtitle && (
+                                <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {subtitle}
+                                </div>
+                              )}
+                              {meta && (
+                                <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {meta}
+                                </div>
+                              )}
+                            </button>
+                          );
+                        })}
+                        {recs.length > 20 && (
+                          <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, textAlign: 'center', padding: '4px 0' }}>
+                            Showing first 20 of {recs.length} — refine search for more.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Input Area */}
-      <div style={{ borderTop: `1px solid ${COLORS.BORDER}`, padding: '10px 16px', background: COLORS.BG_PRIMARY }}>
+      <div style={{ padding: '8px 16px 10px 16px', background: COLORS.BG_PRIMARY }}>
         {/* Top action row */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
           <span style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY }}>
