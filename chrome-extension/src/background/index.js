@@ -315,13 +315,14 @@ registerMessageHandlers({
 
   [MSG.GET_PAGE_CONTEXT]: async () => {
     // Determine current page type from the active tab URL
+    let activeUrl = '';
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      const url = tab?.url || '';
+      activeUrl = tab?.url || '';
 
-      if (url.startsWith('https://mail.google.com/')) {
+      if (activeUrl.startsWith('https://mail.google.com/')) {
         currentPageType = 'gmail';
-      } else if (url.startsWith('https://crm.zoho.com/')) {
+      } else if (activeUrl.startsWith('https://crm.zoho.com/')) {
         currentPageType = 'zoho';
       } else {
         currentPageType = 'other';
@@ -330,8 +331,11 @@ registerMessageHandlers({
       // Fallback if tabs query fails
     }
 
-    // Recover Zoho context from LOCAL storage (survives service worker restarts)
-    if (!currentZohoPageContext) {
+    // Only recover Zoho context from storage if the active tab is actually Zoho.
+    // Otherwise a stale record left behind from a previous Zoho tab would leak
+    // into Gmail/other pages as "the record the user is currently viewing".
+    const onZoho = activeUrl.startsWith('https://crm.zoho.com/');
+    if (onZoho && !currentZohoPageContext) {
       try {
         const stored = await chrome.storage.local.get('zohoPageContext');
         if (stored?.zohoPageContext) {
@@ -342,7 +346,9 @@ registerMessageHandlers({
 
     return {
       pageType: currentPageType,
-      zohoContext: currentZohoPageContext,
+      // Gate zohoContext on actually being on a Zoho tab. This is the
+      // belt-and-suspenders fix so no stale storage value can leak through.
+      zohoContext: onZoho ? currentZohoPageContext : null,
       emailContext: currentEmailContext,
     };
   },
@@ -391,6 +397,15 @@ chrome.notifications.onClicked.addListener(handleNotificationClick);
 // Side Panel
 // ─────────────────────────────────────────────
 
+// Helper: clear Zoho context from both in-memory cache AND chrome.storage.local.
+// Previously the in-memory variable was nulled but storage was left stale, so
+// the sidebar's path-2 fallback (direct storage read) kept serving the old
+// record as "the page the user is currently viewing" on Gmail/other tabs.
+function clearZohoContext() {
+  currentZohoPageContext = null;
+  chrome.storage.local.remove('zohoPageContext').catch(() => {});
+}
+
 // Enable side panel for all tabs (Gmail, Zoho CRM, and everything else for search)
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tab.url) {
@@ -404,15 +419,46 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete') {
       if (tab.url.startsWith('https://mail.google.com/')) {
         currentPageType = 'gmail';
-        currentZohoPageContext = null;
+        clearZohoContext();
       } else if (tab.url.startsWith('https://crm.zoho.com/')) {
         currentPageType = 'zoho';
         currentEmailContext = null;
       } else {
         currentPageType = 'other';
         currentEmailContext = null;
-        currentZohoPageContext = null;
+        clearZohoContext();
       }
     }
   }
+});
+
+// Tab switch — user flips between already-loaded tabs (no onUpdated fires).
+// If the new active tab is not Zoho, clear the in-memory Zoho context AND
+// storage so the sidebar stops resolving "this quote" to the old record.
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab?.url || '';
+    if (url.startsWith('https://mail.google.com/')) {
+      currentPageType = 'gmail';
+      clearZohoContext();
+    } else if (url.startsWith('https://crm.zoho.com/')) {
+      currentPageType = 'zoho';
+      // Don't clear anything — the Zoho content script will re-populate
+    } else {
+      currentPageType = 'other';
+      clearZohoContext();
+    }
+  } catch {}
+});
+
+// Tab closed — if it was a Zoho tab, no other Zoho tab may be open, so clear.
+// The next Zoho tab that opens will re-populate via the content script.
+chrome.tabs.onRemoved.addListener(async () => {
+  try {
+    const zohoTabs = await chrome.tabs.query({ url: 'https://crm.zoho.com/*' });
+    if (!zohoTabs || zohoTabs.length === 0) {
+      clearZohoContext();
+    }
+  } catch {}
 });

@@ -185,6 +185,22 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     async function refreshPageCtx() {
       let zohoCtx = null;
 
+      // Gate everything on the active tab actually being a Zoho record page.
+      // Without this check, a stale zohoPageContext left in chrome.storage.local
+      // from a previously-open Zoho tab would leak into Gmail / other pages as
+      // "the record the user is currently viewing".
+      let onZoho = false;
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        onZoho = (activeTab?.url || '').startsWith('https://crm.zoho.com/');
+      } catch (_) { /* no tabs permission or query failed — treat as not-on-zoho */ }
+
+      if (!onZoho) {
+        if (cancelled) return;
+        setZohoPageContext(null);
+        return;
+      }
+
       // Path 1: background message (best-effort — worker may be sleeping)
       try {
         const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT, {});

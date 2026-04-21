@@ -111,14 +111,27 @@ export default function App() {
         console.warn('[Stratus App] GET_PAGE_CONTEXT via background failed:', err?.message);
       }
 
-      // Path 2: direct storage read (fallback when worker is sleeping)
+      // Path 2: direct storage read (fallback when worker is sleeping).
+      // IMPORTANT: storage presence does NOT imply we're on Zoho — the user
+      // may have closed the Zoho tab or switched to Gmail. Verify against the
+      // actual active tab URL before trusting the stored context.
       if (!zohoCtx) {
         try {
-          const stored = await chrome.storage.local.get('zohoPageContext');
-          if (stored?.zohoPageContext?.recordId) {
-            zohoCtx = stored.zohoPageContext;
-            type = 'zoho'; // Storage presence implies we're on Zoho
-            console.log('[Stratus App] Zoho context recovered from storage:', zohoCtx);
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          const activeUrl = activeTab?.url || '';
+          const onZoho = activeUrl.startsWith('https://crm.zoho.com/');
+          if (onZoho) {
+            const stored = await chrome.storage.local.get('zohoPageContext');
+            if (stored?.zohoPageContext?.recordId) {
+              zohoCtx = stored.zohoPageContext;
+              type = 'zoho';
+              console.log('[Stratus App] Zoho context recovered from storage:', zohoCtx);
+            }
+          } else {
+            // Derive real page type from active tab URL so we don't end up
+            // stuck on 'other' just because the background worker was asleep.
+            if (activeUrl.startsWith('https://mail.google.com/')) type = 'gmail';
+            else type = 'other';
           }
         } catch (err) {
           console.warn('[Stratus App] chrome.storage.local read failed:', err?.message);
