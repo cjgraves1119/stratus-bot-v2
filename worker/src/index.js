@@ -2807,7 +2807,16 @@ function buildQuoteFromV2(v2, rawText) {
     if (!(lic.sku in prices)) return null;
   }
 
-  const separateQuotes = Boolean(mods.separate_quotes);
+  // separate_quotes: trust V2's detection OR fall back to a deterministic
+  // regex over the raw user text. V2 (Llama) misses this modifier often,
+  // especially when the phrase is sandwiched in a longer message, so we
+  // belt-and-suspenders override on any of these variants:
+  //   "as separate quotes", "separate URLs/links", "individual quotes",
+  //   "each as its own quote", "split into separate", "one per line",
+  //   "break these out", "X URL/link, Y URL/link, ..."
+  const rawForDetect = String(rawText || '');
+  const separateQuotesRegex = /\b(?:as\s+)?separate\s+(?:quote|quotes|url|urls|link|links)\b|\bindividual\s+(?:quote|quotes|url|urls|link|links)\b|\beach\s+as\s+(?:its|their)\s+own\s+(?:quote|url|link)\b|\bsplit\s+(?:these\s+|them\s+)?into\s+separate\b|\bone\s+per\s+line\b|\bbreak\s+(?:these|them)\s+out\b/i;
+  const separateQuotes = Boolean(mods.separate_quotes) || separateQuotesRegex.test(rawForDetect);
 
   // Pure license path — caller renders via directLicense / directLicenseList
   if (hwItems.length === 0 && licItems.length > 0) {
@@ -3277,7 +3286,7 @@ function parseMessage(text) {
   // the main modifier block) can carry this flag through to the renderer.
   // Deliberately tolerant — missing a phrasing just defaults to combined.
   const SEPARATE_QUOTES_RE = /\b(SEPARATE\s+(QUOTES?|URLS?|LINKS?)|INDIVIDUAL\s+(QUOTES?|URLS?|LINKS?)|EACH\s+(AS\s+)?(ITS\s+)?OWN\s+(QUOTES?|URLS?|LINKS?)|ONE\s+(QUOTE|URL|LINK)\s+(PER|EACH|APIECE|FOR\s+EACH)|BREAK\s+(THESE|THEM|IT)\s+OUT|SPLIT\s+(INTO|UP\s+INTO)\s+SEPARATE|AS\s+(THEIR|ITS)\s+OWN\s+(QUOTES?|URLS?|LINKS?))\b/;
-  const __separateQuotes = SEPARATE_QUOTES_RE.test(upper);
+  let __separateQuotes = SEPARATE_QUOTES_RE.test(upper);
 
   // Multi-line License SKU Input (CSV/list from dashboard export)
   // Handles formats like:
@@ -3563,6 +3572,13 @@ function parseMessage(text) {
       const raw = tm[1].toUpperCase();
       const canon = raw === 'ADVANTAGE' ? 'ADVANTAGE' : raw === 'PREMIER' ? 'PREMIER' : 'ESSENTIALS';
       if (!duoTiers.includes(canon)) duoTiers.push(canon);
+    }
+    // "all duo" / "all duo quotes" / "all duo licenses" → all three tiers,
+    // auto-treat as separate quotes (user wants one URL per tier).
+    const isAllDuo = /\bALL\s+(?:CISCO\s+)?DUO\b/i.test(upper);
+    if (isAllDuo && duoTiers.length === 0) {
+      duoTiers.push('ESSENTIALS', 'ADVANTAGE', 'PREMIER');
+      __separateQuotes = true;
     }
     const duoQtyMatch = upper.match(/\b(\d+)\b/);
     const duoQty = duoQtyMatch ? parseInt(duoQtyMatch[1]) : 1;
