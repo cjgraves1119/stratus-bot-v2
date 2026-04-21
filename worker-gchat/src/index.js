@@ -16520,7 +16520,14 @@ Return ONLY a JSON object (no markdown, no explanation):
 
               // CF: quote — deterministic engine executes the quote
               if (!reply && classification.intent === 'quote') {
-                const quoteText = classification.extracted || text;
+                // Pre-parse natural-language override: "all duo"/"all umbrella"
+                // phrasing carries product-family intent that V2/CF extraction can
+                // mangle. When present, run parseMessage on the ORIGINAL text so
+                // the NL handler fires with the full context intact.
+                const NL_OVERRIDE_RE = /\bALL\s+(?:CISCO\s+)?(?:DUO|UMBRELLA)\b/i;
+                const quoteText = NL_OVERRIDE_RE.test(text)
+                  ? text
+                  : (classification.extracted || text);
                 const quoteParsed = parseMessage(quoteText);
                 if (quoteParsed && !quoteParsed.isClarification) {
                   const quoteResult = buildQuoteResponse(quoteParsed);
