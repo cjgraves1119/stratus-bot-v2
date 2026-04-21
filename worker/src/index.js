@@ -2832,6 +2832,25 @@ function buildQuoteFromV2(v2, rawText) {
       if (!prev || it.qty > prev.qty) byKey.set(it.sku, it);
     }
     const dedup = [...byKey.values()];
+    // If separate_quotes is on, route multi-license through the
+    // isTermOptionQuote renderer so each license becomes its OWN URL with a
+    // friendly label (e.g. Duo Essentials / Duo Premier / Duo Advantage).
+    // Without this, the directLicenseList path concatenates every SKU into a
+    // single combined URL.
+    if (separateQuotes) {
+      return {
+        items: dedup.map(l => ({ baseSku: l.sku, qty: l.qty, isLicenseOnly: true })),
+        isQuote: true,
+        isTermOptionQuote: true,
+        modifiers: { hardwareOnly: false, licenseOnly: true, separateQuotes: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing,
+        unresolvedCategories: [],
+        _fromV2: true
+      };
+    }
     return {
       items: [],
       directLicenseList: dedup,
@@ -3568,12 +3587,14 @@ function parseMessage(text) {
         duoItems.push({ baseSku: `LIC-DUO-${tier}-${t}YR`, qty: duoQty, isLicenseOnly: true });
       }
     }
-    // If the user specified a single term AND a single tier, narrow to just that
-    // term (preserves legacy single-tier behavior). When separate_quotes or
-    // multiple tiers are in play, always emit all terms so the renderer can
-    // group correctly.
+    // Narrow to the requested term whenever the user specified one, regardless
+    // of tier count or separate_quotes. The cartesian 1/3/5YR expansion only
+    // applies when the user did NOT state a term — the renderer then emits
+    // one URL per term. When a term IS stated, respect it: one URL per tier
+    // (if separate_quotes or multi-tier) at that term, or one combined URL
+    // (single tier, no separate_quotes).
     let duoFinalItems = duoItems;
-    if (requestedTerm && duoTiers.length === 1 && !__separateQuotes) {
+    if (requestedTerm) {
       duoFinalItems = duoItems.filter(it => it.baseSku.endsWith(`-${requestedTerm}YR`));
     }
     return {
@@ -3644,10 +3665,14 @@ function parseMessage(text) {
       }
     }
 
-    // Narrow to requested term ONLY if single type+tier AND not separateQuotes
+    // Narrow to the requested term whenever the user specified one. The
+    // 1/3/5YR cartesian only applies when NO term is stated — the renderer
+    // then emits one URL per term. When a term IS stated, respect it: one
+    // URL per combo (if separate_quotes or multi-combo) at that term, or
+    // one combined URL for a single combo.
     const combos = umbTypes.length * umbTiers.length;
     let umbFinalItems = umbItems;
-    if (umbRequestedTerm && combos === 1 && !__separateQuotes) {
+    if (umbRequestedTerm) {
       umbFinalItems = umbItems.filter(it => it.baseSku.endsWith(`-${umbRequestedTerm}YR`));
     }
 
