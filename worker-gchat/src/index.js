@@ -4958,9 +4958,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!createIsError && createdId) {
           createUndoToken = generateUndoToken();
           createUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${createdId}`;
+          // Surface key picklist values (post-validation-correction) so models
+          // can't paraphrase the user's original input back verbatim when
+          // we've auto-corrected e.g. "Referral" → "Stratus Referal".
+          const CREATE_SUMMARY_KEYS = ['Stage', 'Lead_Source', 'Status', 'Due_Date', 'Subject'];
+          const createKV = CREATE_SUMMARY_KEYS
+            .filter(k => recordData[k] != null)
+            .map(k => {
+              const v = recordData[k];
+              const s = typeof v === 'object' ? (v?.name || v?.id || JSON.stringify(v)) : String(v);
+              return `${k}="${s}"`;
+            }).slice(0, 3).join(', ');
+          const fieldPart = createKV ? ` (${createKV})` : '';
           // Markdown-link the URL so autolinkers don't capture a trailing period
           // when the model echoes the summary into prose.
-          createUserSummary = `Created ${module_name.replace(/s$/, '')} "${createRecordName || createdId}" — [Open in Zoho](${createUrl}) — Undo token: \`${createUndoToken}\` (say "undo" to reverse).`;
+          createUserSummary = `Created ${module_name.replace(/s$/, '')} "${createRecordName || createdId}"${fieldPart} — [Open in Zoho](${createUrl}) — Undo token: \`${createUndoToken}\` (say "undo" to reverse).`;
         }
         await logCrmOpToD1(env, {
           personId: personId || null,
@@ -5063,11 +5075,27 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!updateIsError) {
           updateUndoToken = generateUndoToken();
           updateUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${record_id}`;
-          const changedFields = Object.keys(data).filter(k => k !== 'id').slice(0, 4).join(', ');
+          // Embed key field VALUES (post-validation-correction) so models can't
+          // paraphrase away the corrected picklist value. E.g. if user asked for
+          // Stage "Closed Lost", the validator auto-corrected to "Closed (Lost)"
+          // and we want the corrected value surfaced in the reply.
+          const SUMMARY_KEYS = ['Stage', 'Lead_Source', 'Amount', 'Deal_Name', 'Subject', 'Terms_and_Conditions', 'Phone', 'Email', 'Status', 'Last_Name'];
+          const updatedKV = Object.keys(data)
+            .filter(k => k !== 'id' && SUMMARY_KEYS.includes(k))
+            .slice(0, 4)
+            .map(k => {
+              const v = data[k];
+              const s = typeof v === 'object' ? (v?.name || v?.id || JSON.stringify(v)) : String(v);
+              return `${k}="${s}"`;
+            }).join(', ');
+          const otherFields = Object.keys(data)
+            .filter(k => k !== 'id' && !SUMMARY_KEYS.includes(k))
+            .slice(0, 3).join(', ');
+          const changeSummary = [updatedKV, otherFields].filter(Boolean).join(', ') || 'n/a';
           // Markdown-link the URL so autolinkers don't swallow a trailing period
           // when the model echoes the summary into prose. Embed the undo token
           // directly in the summary so the model always surfaces it.
-          updateUserSummary = `Updated ${module_name.replace(/s$/, '')} ${record_id} — changed: ${changedFields || 'n/a'} — [Open in Zoho](${updateUrl}) — Undo token: \`${updateUndoToken}\` (say "undo" to reverse).`;
+          updateUserSummary = `Updated ${module_name.replace(/s$/, '')} ${record_id} — changed: ${changeSummary} — [Open in Zoho](${updateUrl}) — Undo token: \`${updateUndoToken}\` (say "undo" to reverse).`;
         }
         const updateOpId = await logCrmOpToD1(env, {
           personId: personId || null,
@@ -9358,6 +9386,11 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   ];
   const toolCallsLog = [];
   const errors = [];
+  // Track _user_visible_summary + _undo_token from each successful mutation so
+  // we can deterministically inject them into the final reply if the model
+  // paraphrased them away. Keyed by order; we keep only the LAST mutation's
+  // summary by default (the one the user most recently made).
+  const mutationSummaries = [];
   let iteration = 0;
   let finalReply = '';
 
@@ -9403,6 +9436,20 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
         toolCallsLog.push({ iteration, name: call.name, arguments: call.arguments });
         try {
           const { result, mocked } = await executeToolCallDryRun(call.name, call.arguments, env, personId, dryRun);
+          // Capture user-visible summaries for deterministic post-injection
+          // (Llama often paraphrases these away on simple single-field updates).
+          if (result && typeof result === 'object') {
+            const summary = result._user_visible_summary;
+            const undoToken = result._undo_token;
+            if (summary && typeof summary === 'string') {
+              mutationSummaries.push({
+                toolName: call.name,
+                summary,
+                undoToken: undoToken || null,
+                recordUrl: result._record_url || null,
+              });
+            }
+          }
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           messages.push({
             role: 'tool',
@@ -9431,12 +9478,38 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     finalReply = '(max iterations reached without final response)';
   }
 
+  // ── Bug A deterministic fix: inject missing undo token / zoho URL ──
+  // If a mutation produced an undo token but the model's final reply
+  // doesn't contain it, append the user-visible summary. This catches the
+  // Llama-paraphrase regression on simple updates and task/note creates
+  // where side-channel fields were dropped.
+  if (mutationSummaries.length > 0 && finalReply && !/^API error:/.test(finalReply)) {
+    const last = mutationSummaries[mutationSummaries.length - 1];
+    const replyHasToken = last.undoToken && finalReply.includes(last.undoToken);
+    const replyHasUrl = last.recordUrl && finalReply.includes(last.recordUrl);
+    const hasAnyToken = /`u_[a-z0-9_-]+`/i.test(finalReply) || /\bundo\s+token/i.test(finalReply);
+    // If the reply is missing BOTH the undo token for this mutation AND the zoho URL,
+    // append the full summary. Otherwise if only the token is missing but url present,
+    // just append the undo-token line.
+    if (last.undoToken && !replyHasToken && !hasAnyToken) {
+      if (!replyHasUrl && last.recordUrl) {
+        finalReply = `${finalReply.trim()}\n\n${last.summary}`;
+      } else {
+        finalReply = `${finalReply.trim()}\n\nUndo token: \`${last.undoToken}\` (say "undo" to reverse).`;
+      }
+    } else if (last.recordUrl && !replyHasUrl && !/\[Open in Zoho\]/i.test(finalReply) && !/https:\/\/crm\.zoho\.com/i.test(finalReply)) {
+      // Missing the Zoho link but has a token — append just the link.
+      finalReply = `${finalReply.trim()}\n\n[Open in Zoho](${last.recordUrl})`;
+    }
+  }
+
   return {
     reply: finalReply,
     toolCalls: toolCallsLog,
     iterations: iteration,
     elapsedMs: Date.now() - startMs,
-    errors
+    errors,
+    mutationSummaries,
   };
 }
 
