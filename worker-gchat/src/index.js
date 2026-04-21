@@ -14061,18 +14061,27 @@ Return ONLY a JSON object (no markdown, no explanation):
               durationMs: null,
               errorMessage: apiResult?.error || null
             }));
-          } else if (url.pathname === '/api/chat' && apiBody?.text) {
-            const _pid = apiBody.personId || null;
-            const _bot = botFromPersonId(_pid);
+          } else if ((url.pathname === '/api/chat' || url.pathname === '/api/chat-waterfall') && apiBody?.text) {
+            // Derive personId — body-supplied wins, else x-user-email, else anon.
+            // Chrome ext requests should set x-user-email to a 'chrome-ext-chat-*'
+            // value (or pass personId explicitly) so D1 can differentiate bot channel.
+            const _hdrEmail = request.headers.get('x-user-email') || null;
+            const _pid = apiBody.personId || (_hdrEmail ? `gw:${_hdrEmail}` : null);
+            const _bot = botFromPersonId(_pid || _hdrEmail);
             const _botDb = (_bot === 'chrome-chat' || _bot === 'chrome-quote' || _bot === 'chrome-ext')
               ? 'addon' : _bot;
             ctx.waitUntil(logBotUsageToD1(env, {
               bot: _botDb,
               personId: _pid,
               requestText: apiBody.text,
-              responsePath: 'api-chat',
-              responseText: typeof apiResult === 'string' ? apiResult : JSON.stringify(apiResult || ''),
-              durationMs: null,
+              responsePath: url.pathname === '/api/chat-waterfall'
+                ? (`waterfall:${apiResult?.tierUsed || 'unknown'}`)
+                : 'api-chat',
+              model: apiResult?.model || null,
+              durationMs: apiResult?.totalMs || null,
+              responseText: typeof apiResult === 'string'
+                ? apiResult
+                : (apiResult?.reply || JSON.stringify(apiResult || '')),
               errorMessage: apiResult?.error || null
             }));
           }
