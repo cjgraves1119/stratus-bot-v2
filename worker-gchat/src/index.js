@@ -6523,10 +6523,34 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!record_id && !quote_number) {
           return { success: false, error: 'record_id or quote_number is required' };
         }
+        // ── Confirm-consent inference from user prompt ─────────────────────
+        // Llama sometimes refuses to propagate confirm:true into the tool
+        // call even when the user's prompt explicitly said "with confirm:true"
+        // or "confirm true". Detect that in env.__USER_PROMPT_RAW and treat
+        // it as an explicit confirmation so the delete actually runs.
+        if (confirm !== true && env && typeof env.__USER_PROMPT_RAW === 'string') {
+          const raw = env.__USER_PROMPT_RAW;
+          if (/\bconfirm\s*[:=]?\s*true\b/i.test(raw) || /\bwith\s+confirm\s+true\b/i.test(raw)) {
+            console.log('[DELETE] Inferred confirm:true from user prompt — user said "confirm true" explicitly');
+            confirm = true;
+          }
+        }
         if (confirm !== true) {
           return {
             success: false,
             error: 'Delete not executed — confirm:true is required to prevent accidental deletion. Set confirm:true in the tool call after verifying the record.',
+            _no_partial_success: true
+          };
+        }
+        // ── Quoted_Items subform refusal ───────────────────────────────────
+        // Zoho rejects direct deletes on subform modules ("record not approved").
+        // Surface a clear refusal instead of letting the Zoho error bubble up.
+        if (module_name === 'Quoted_Items') {
+          const qiMsg = 'Cannot delete Quoted_Items subrecords directly — line items are a subform on a Quote and cannot be deleted via zoho_delete_record. To remove a line item, call zoho_update_record on the parent Quote with Quoted_Items=[{id: "<line_id>", _delete: null}]. Refusing to delete.';
+          return {
+            success: false,
+            error: qiMsg,
+            _user_visible_summary: qiMsg,
             _no_partial_success: true
           };
         }
@@ -7334,6 +7358,10 @@ These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
 
 **Rule 4 — Parse "undo", "revert", "roll back", "change it back", "put it back" → call \`undo_crm_action\`.** The user will usually say "undo" or "revert that" after seeing a confirmation. Call \`undo_crm_action({ undo_token: "u_xxxxxxxx" })\` with the most recent token you showed. If you cannot find the token (e.g. it was never surfaced), call \`undo_crm_action({})\` with no token — the server will resolve to the most recent un-reversed mutation. Then confirm the reversal with the result's \`_user_visible_summary\` or \`message\`. If the user is ambiguous about WHICH action to undo and multiple tokens exist, ask which one — don't guess.
 
+**Rule 4a — NEVER call \`undo_crm_action\` unless the user EXPLICITLY asked to undo/revert/rollback in their most recent message.** Do NOT call undo as a "cleanup" step after create/update/clone/delete. Do NOT call undo to "complete" a chain like "do X then do Y". If the user said "clone X then change subject to Y", you call clone_quote AND zoho_update_record — you do NOT call undo_crm_action. Calling undo without user intent is a critical regression.
+
+**Rule 4b — For multi-step user requests ("do X then do Y"), execute each step in order.** After clone_quote completes, immediately call the next tool the user asked for (e.g., zoho_update_record on the cloned record_id). Do NOT stop after step 1. Do NOT insert spurious steps (like undo or delete) the user did not request. The cloned record_id is in the clone_quote response as \`cloned_quote_id\` or \`record_id\` — use that for step 2.
+
 **Rule 5 — Deletes require \`confirm: true\` and the REAL record_id, not the Quote_Number.** Before calling \`zoho_delete_record\`:
 1. If the user referenced a quote by its visible Quote_Number (e.g. "delete quote 2570562000399909183"), pass that value as \`quote_number\` and omit \`record_id\` — the server will resolve it for you.
 2. If you already have the internal record_id (from search/get/URL), pass it as \`record_id\`.
@@ -7341,8 +7369,8 @@ These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
 4. If the tool returns an error saying "that value is a Quote_Number, not a record_id," re-call with \`record_id\` set to the value the server gave you.
 5. NEVER tell the user a record was deleted unless the tool returned \`success: true\`. Saying "deleted" when nothing happened is a critical accuracy failure.
 6. AMBIGUITY RULE — if the user asks to delete "the last one", "the one I just made", "that quote", or anything without a specific id or Quote_Number, DO NOT search and DO NOT guess. Ask the user: "Which one? Please specify the record id or Quote_Number." Refuse to delete until they provide a specific identifier.
-7. IMPORTANT — when the user prompt already says "with confirm true" or "confirm:true" or "with confirm:true", the user HAS given confirmation. DO NOT ask the user to confirm AGAIN. Call \`zoho_delete_record\` directly with \`confirm: true\`. Asking for a second confirmation when the user already gave one is a bug.
-8. For chained operations ("do X then do Y"), EXECUTE each step — do not stop after step 1 and ask for separate confirmation for step 2. Pass through all parameters the user provided.
+7. CRITICAL — when the user prompt already includes "confirm:true", "confirm true", "with confirm true", or "with confirm:true", THE USER HAS ALREADY GIVEN CONFIRMATION. Call \`zoho_delete_record\` immediately with \`confirm: true\` in the JSON arguments. DO NOT ask the user to confirm again. DO NOT echo back the server's "confirm:true is required" error. If the server returns that error, it means you forgot to pass confirm:true — retry the tool call with \`confirm: true\` added. Asking for a second confirmation when the user already said "confirm true" is a critical bug.
+8. The Quoted_Items module cannot be deleted directly via zoho_delete_record. If the user asks to delete a line item, either refuse (say "line items cannot be deleted directly — update the parent Quote with Quoted_Items=[{id, _delete: null}]") or update the parent Quote. Do NOT attempt zoho_delete_record on module_name="Quoted_Items".
 
 ---
 
@@ -12698,6 +12726,10 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   totalMs: Date.now() - (typeof t0 !== 'undefined' ? t0 : Date.now())
                 };
               } else {
+                // Smuggle raw user prompt into env so executeToolCall can
+                // detect in-prompt "confirm:true" phrases for destructive ops
+                // and auto-inject consent when Llama fails to propagate it.
+                env.__USER_PROMPT_RAW = wText || '';
                 // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
                   forceLlama: forceModel === 'llama',
@@ -12705,6 +12737,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   forceClaude: forceModel === 'claude',
                   dryRun: wDryRun === true
                 });
+                env.__USER_PROMPT_RAW = null;
               }
 
               // Log telemetry (async, non-blocking)
