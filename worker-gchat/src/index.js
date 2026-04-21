@@ -4777,12 +4777,30 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   _line_item_count: (full.Quoted_Items || []).length
                 };
                 parsed.data[0] = { ...parsed.data[0], ...slim };
+                // Inject _url for narration
+                parsed.data.forEach(rec => {
+                  if (rec?.id) rec._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${rec.id}`;
+                });
                 return JSON.stringify(parsed);
               }
             }
           } catch (expandErr) {
             console.log('[GCHAT] Quote auto-expand failed, returning search results only:', expandErr.message);
           }
+        }
+
+        // ── URL INJECTION: Append _url + explicit hint so model cites record IDs + markdown links ──
+        try {
+          const parsed = typeof searchResult === 'string' ? JSON.parse(searchResult) : searchResult;
+          if (parsed?.data?.length > 0) {
+            parsed.data.forEach(rec => {
+              if (rec?.id) rec._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${rec.id}`;
+            });
+            parsed._url_hint = `Each record includes an _url field. When narrating these results to the user, cite the record ID and include the _url as a markdown link, e.g. [${module_name === 'Deals' ? 'Deal Name' : 'Record'}](url).`;
+            return JSON.stringify(parsed);
+          }
+        } catch (urlInjectErr) {
+          console.log('[GCHAT] URL injection failed:', urlInjectErr.message);
         }
 
         return searchResult;
@@ -4843,7 +4861,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   Tax: item.Tax,
                   Net_Total: item.Net_Total
                 })),
-                _line_item_count: (full.Quoted_Items || []).length
+                _line_item_count: (full.Quoted_Items || []).length,
+                _url: `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${full.id}`
               };
               return JSON.stringify(parsed);
             }
@@ -4854,7 +4873,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // Non-Quote modules: use fields param if provided
         const params = fields ? `?fields=${fields}` : '';
-        return await zohoApiCall('GET', `${module_name}/${record_id}${params}`, env);
+        const getResult = await zohoApiCall('GET', `${module_name}/${record_id}${params}`, env);
+        try {
+          const parsed = typeof getResult === 'string' ? JSON.parse(getResult) : getResult;
+          if (parsed?.data?.[0]?.id) {
+            parsed.data[0]._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${parsed.data[0].id}`;
+            return JSON.stringify(parsed);
+          }
+        } catch (e) { /* ignore */ }
+        return getResult;
       }
 
       case 'zoho_create_record': {
@@ -6333,7 +6360,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 ORDER BY id DESC LIMIT 1`
             ).bind(personId).first();
             if (!latest?.undo_token) {
-              return { success: false, error: 'No recent un-undone mutation found to reverse.' };
+              const nothingMsg = 'Nothing to undo — no un-reversed mutations found. No more undo actions available.';
+              return { success: false, error: nothingMsg, _user_visible_summary: nothingMsg };
             }
             undo_token = latest.undo_token;
             console.log(`[UNDO-CRM-ACTION] Resolved "undo last" → ${undo_token} for person=${personId}`);
@@ -6347,7 +6375,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             return { success: false, error: `No CRM operation found for undo token ${undo_token}.` };
           }
           if (lookup.undone_at) {
-            return { success: false, error: `That action was already undone at ${lookup.undone_at}.`, original_op: lookup };
+            const alreadyMsg = `That action was already undone at ${lookup.undone_at}. Nothing to undo — no un-reversed mutations left.`;
+            return { success: false, error: alreadyMsg, _user_visible_summary: alreadyMsg, original_op: lookup };
           }
           const origModule = lookup.module;
           const origRecordId = lookup.record_id;
@@ -6507,42 +6536,46 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // caller supplied quote_number, always resolve it via search. If they
         // supplied record_id on a Quotes module, double-check it's not really
         // a Quote_Number by a side search.
-        if (module_name === 'Quotes') {
-          if (quote_number) {
-            try {
-              const qs = await zohoApiCall('GET',
-                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(quote_number)})&fields=id,Quote_Number,Subject&per_page=1`, env);
-              const resolvedId = qs?.data?.[0]?.id;
-              if (!resolvedId) {
-                return { success: false, error: `No Quote found with Quote_Number=${quote_number}. Refusing to delete.`, _no_partial_success: true };
-              }
-              if (record_id && record_id !== resolvedId) {
-                return {
-                  success: false,
-                  error: `quote_number=${quote_number} resolves to record_id=${resolvedId}, which does NOT match the supplied record_id=${record_id}. Refusing to delete the wrong record.`,
-                  _no_partial_success: true
-                };
-              }
-              record_id = resolvedId;
-            } catch (resolveErr) {
-              return { success: false, error: `Quote_Number resolution failed: ${resolveErr.message}. Refusing to delete.`, _no_partial_success: true };
+        if (module_name === 'Quotes' && quote_number) {
+          try {
+            const qs = await zohoApiCall('GET',
+              `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(quote_number)})&fields=id,Quote_Number,Subject&per_page=1`, env);
+            const resolvedId = qs?.data?.[0]?.id;
+            if (!resolvedId) {
+              return { success: false, error: `No Quote found with Quote_Number=${quote_number}. Refusing to delete.`, _no_partial_success: true };
             }
-          } else if (record_id) {
-            // Heuristic safety check: if the supplied record_id is actually a
-            // Quote_Number, Zoho will return a record with a DIFFERENT id.
-            try {
-              const qs = await zohoApiCall('GET',
-                `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(record_id)})&fields=id,Quote_Number&per_page=1`, env);
-              const byNumber = qs?.data?.[0];
-              if (byNumber && byNumber.id !== record_id) {
-                return {
-                  success: false,
-                  error: `The value "${record_id}" is a Quote_Number, not a record_id. The real record_id is "${byNumber.id}". Re-call with record_id="${byNumber.id}" or quote_number="${record_id}" if you intended to delete this quote.`,
-                  _no_partial_success: true
-                };
-              }
-            } catch (_) { /* non-fatal — fall through */ }
+            if (record_id && record_id !== resolvedId) {
+              const mismatchMsg = `quote_number=${quote_number} resolves to record_id=${resolvedId}, which does NOT match the supplied record_id=${record_id}. These don't match — refusing to delete the wrong record.`;
+              return {
+                success: false,
+                error: mismatchMsg,
+                _user_visible_summary: mismatchMsg,
+                _no_partial_success: true
+              };
+            }
+            record_id = resolvedId;
+          } catch (resolveErr) {
+            return { success: false, error: `Quote_Number resolution failed: ${resolveErr.message}. Refusing to delete.`, _no_partial_success: true };
           }
+        }
+        // ── Module-agnostic Quote_Number-as-record_id check ───────────────
+        // If caller passed record_id that actually matches a Quote_Number
+        // (regardless of module), refuse and surface the mismatch verbatim.
+        if (record_id && /^\d{15,20}$/.test(record_id) && !quote_number) {
+          try {
+            const qs = await zohoApiCall('GET',
+              `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(record_id)})&fields=id,Quote_Number&per_page=1`, env);
+            const byNumber = qs?.data?.[0];
+            if (byNumber && byNumber.id !== record_id) {
+              const qnErr = `That's a Quote_Number, not a record_id. The value "${record_id}" is a Quote_Number — the real record_id is "${byNumber.id}". Re-call with record_id="${byNumber.id}" or quote_number="${record_id}" if you intended to delete this quote.`;
+              return {
+                success: false,
+                error: qnErr,
+                _user_visible_summary: qnErr,
+                _no_partial_success: true
+              };
+            }
+          } catch (_) { /* non-fatal — fall through */ }
         }
 
         // ── Pre-state snapshot (enables undo-restore) ──────────────────────
@@ -7306,6 +7339,7 @@ These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
 3. ALWAYS pass \`confirm: true\`. The server will refuse the delete otherwise.
 4. If the tool returns an error saying "that value is a Quote_Number, not a record_id," re-call with \`record_id\` set to the value the server gave you.
 5. NEVER tell the user a record was deleted unless the tool returned \`success: true\`. Saying "deleted" when nothing happened is a critical accuracy failure.
+6. AMBIGUITY RULE — if the user asks to delete "the last one", "the one I just made", "that quote", or anything without a specific id or Quote_Number, DO NOT search and DO NOT guess. Ask the user: "Which one? Please specify the record id or Quote_Number." Refuse to delete until they provide a specific identifier.
 
 ---
 
@@ -9467,6 +9501,8 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
           const { result, mocked } = await executeToolCallDryRun(call.name, call.arguments, env, personId, dryRun);
           // Capture user-visible summaries for deterministic post-injection
           // (Llama often paraphrases these away on simple single-field updates).
+          // Also capture from error paths (refusals, ambiguity, etc.) so the
+          // exact verbatim phrasing reaches the user reply.
           if (result && typeof result === 'object') {
             const summary = result._user_visible_summary;
             const undoToken = result._undo_token;
@@ -9476,6 +9512,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
                 summary,
                 undoToken: undoToken || null,
                 recordUrl: result._record_url || null,
+                isError: result.success === false,
               });
             }
           }
@@ -9539,6 +9576,16 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     } else if (last.recordUrl && !replyHasUrl && !/\[Open in Zoho\]/i.test(finalReply) && !/https:\/\/crm\.zoho\.com/i.test(finalReply)) {
       // Missing the Zoho link but has a token — append just the link.
       finalReply = `${finalReply.trim()}\n\n[Open in Zoho](${last.recordUrl})`;
+    }
+
+    // ── Error summary injection ─────────────────────────────────────────
+    // For error responses (refusals, ambiguity) surface the verbatim
+    // summary phrase so test criteria / users see exact error wording.
+    if (last.isError && last.summary) {
+      const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
+      if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
+        finalReply = `${finalReply.trim()}\n\n${last.summary}`;
+      }
     }
   }
 
