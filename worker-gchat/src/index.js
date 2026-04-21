@@ -6082,6 +6082,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const looksLikeTaxError =
             cloneStatus !== 'success' &&
             JSON.stringify(cloneJson).toLowerCase().includes('tax');
+          let fallbackErrorDetail = null;
           if (looksLikeTaxError) {
             console.log('[CLONE-QUOTE] Native clone rejected (tax). Falling back to deep-clone.');
             try {
@@ -6096,20 +6097,35 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   '$has_more', '$in_merge', '$orchestration', '$locked_for_me',
                   '$zia_visions', '$pathfinder', '$canvas_id', '$process_flow',
                   '$state', 'Tax', 'Discount', 'Grand_Total', 'Sub_Total',
-                  'Adjustment', 'Last_Activity_Time', 'Owner', 'Layout'
+                  'Adjustment', 'Last_Activity_Time', 'Owner', 'Layout',
+                  'Tax_Rate', '$taxable', '$line_tax_detail', '$currency_symbol',
+                  '$editable_quote', 'Exchange_Rate', 'Currency'
                 ]);
+                const roundTax = (n) => {
+                  const v = typeof n === 'number' ? n : (n == null ? null : Number(n));
+                  if (v == null || Number.isNaN(v)) return null;
+                  return Math.round(v * 100) / 100;
+                };
                 const cleanPayload = {};
                 for (const [k, v] of Object.entries(srcRec)) {
                   if (STRIP_FIELDS.has(k)) continue;
                   if (k === 'Quoted_Items' && Array.isArray(v)) {
-                    cleanPayload.Quoted_Items = v.map(it => ({
-                      Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
-                      Quantity: it.Quantity,
-                      List_Price: it.List_Price,
-                      Discount: it.Discount,
-                      Description: it.Description,
-                      Sequence_Number: it.Sequence_Number
-                    })).filter(it => it.Product_Name?.id);
+                    cleanPayload.Quoted_Items = v.map(it => {
+                      const itemPayload = {
+                        Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
+                        Quantity: it.Quantity,
+                        List_Price: it.List_Price,
+                        Discount: it.Discount,
+                        Description: it.Description,
+                        Sequence_Number: it.Sequence_Number,
+                        Tax: 0
+                      };
+                      // Drop undefined values so Zoho doesn't reject "Tax":undefined
+                      Object.keys(itemPayload).forEach(key => {
+                        if (itemPayload[key] === undefined) delete itemPayload[key];
+                      });
+                      return itemPayload;
+                    }).filter(it => it.Product_Name?.id);
                     continue;
                   }
                   cleanPayload[k] = v;
@@ -6121,24 +6137,36 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 cleanPayload.Do_Not_Auto_Update_Prices = true;
 
                 const fallbackResult = await zohoApiCall('POST', 'Quotes', env, { data: [cleanPayload] });
+                // Zoho v8 returns { data: [ { code, details: { id, ... } } ] }.
+                // parseZohoResponse returns { success, record_id, data: record } (record = result.data[0]).
                 const fbParsed = parseZohoResponse(fallbackResult, 'Quote deep-clone fallback');
-                const fbId = fbParsed?.data?.[0]?.details?.id || fbParsed?.data?.[0]?.id || null;
+                const fbId =
+                  fbParsed?.record_id ||
+                  fbParsed?.data?.details?.id ||
+                  fallbackResult?.data?.[0]?.details?.id ||
+                  null;
                 if (fbId) {
                   clonedId = fbId;
                   cloneStatus = 'success';
                   usedFallback = true;
                   console.log(`[CLONE-QUOTE] Fallback deep-clone succeeded → ${fbId}`);
                 } else {
-                  console.error('[CLONE-QUOTE] Fallback deep-clone also failed:', JSON.stringify(fbParsed)?.substring(0, 400));
+                  fallbackErrorDetail = fbParsed?.message || JSON.stringify(fallbackResult)?.substring(0, 400);
+                  console.error('[CLONE-QUOTE] Fallback deep-clone also failed:', fallbackErrorDetail);
                 }
               }
             } catch (fbErr) {
+              fallbackErrorDetail = fbErr.message;
               console.error('[CLONE-QUOTE] Fallback deep-clone threw:', fbErr.message);
             }
           }
 
           if (cloneStatus !== 'success' || !clonedId) {
             console.error('[CLONE-QUOTE] clone failed:', JSON.stringify(cloneJson)?.substring(0, 500));
+            const combinedError =
+              fallbackErrorDetail
+                ? `native clone failed (${cloneRow?.message || cloneJson?.message || 'unknown'}); fallback also failed: ${fallbackErrorDetail}`
+                : (cloneRow?.message || cloneJson?.message || 'Clone failed');
             await logCrmOpToD1(env, {
               personId: personId || null,
               bot: botFromPersonId(personId),
@@ -6148,16 +6176,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               recordName: null,
               status: 'error',
               durationMs: Date.now() - cloneStart,
-              errorMessage: cloneRow?.message || cloneJson?.message || 'Clone failed',
-              details: { source_quote_id: quote_id, new_subject: new_subject || null, fallback_attempted: looksLikeTaxError },
+              errorMessage: combinedError,
+              details: { source_quote_id: quote_id, new_subject: new_subject || null, fallback_attempted: looksLikeTaxError, fallback_error: fallbackErrorDetail },
               requestPayload: { source_quote_id: quote_id, new_subject: new_subject || null },
               responsePayload: cloneJson
             });
             return {
               success: false,
               source_quote_id: quote_id,
-              error: cloneRow?.message || cloneJson?.message || 'Clone failed',
+              error: combinedError,
               detail: cloneJson,
+              fallback_error: fallbackErrorDetail,
               _no_partial_success: true,
               message: 'Clone did NOT succeed. Do not claim the quote was cloned.'
             };
