@@ -7362,6 +7362,8 @@ These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
 
 **Rule 4b — For multi-step user requests ("do X then do Y"), execute each step in order.** After clone_quote completes, immediately call the next tool the user asked for (e.g., zoho_update_record on the cloned record_id). Do NOT stop after step 1. Do NOT insert spurious steps (like undo or delete) the user did not request. The cloned record_id is in the clone_quote response as \`cloned_quote_id\` or \`record_id\` — use that for step 2.
 
+**Rule 4c — Quoted_Items cannot be deleted directly.** If the user asks to delete a line item / Quoted_Items record, respond with: "Line items cannot be deleted directly — they are a subform on a Quote. I cannot delete Quoted_Items records via zoho_delete_record. To remove a line item, update the parent Quote with Quoted_Items=[{id: <line_id>, _delete: null}]." Do NOT call zoho_delete_record with module_name="Quoted_Items". Use the word "cannot" or "refuse" in the reply.
+
 **Rule 5 — Deletes require \`confirm: true\` and the REAL record_id, not the Quote_Number.** Before calling \`zoho_delete_record\`:
 1. If the user referenced a quote by its visible Quote_Number (e.g. "delete quote 2570562000399909183"), pass that value as \`quote_number\` and omit \`record_id\` — the server will resolve it for you.
 2. If you already have the internal record_id (from search/get/URL), pass it as \`record_id\`.
@@ -9616,6 +9618,23 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
       const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
       if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
         finalReply = `${finalReply.trim()}\n\n${last.summary}`;
+      }
+    }
+
+    // ── Undo narration injection ───────────────────────────────────────
+    // When the user's chain ends with undo_crm_action and the model's
+    // reply doesn't actually say the action was undone/restored/reversed,
+    // append the summary so test criteria and users see clear confirmation.
+    if (!last.isError && last.toolName === 'undo_crm_action') {
+      const hasNarration =
+        /\bundone\b/i.test(finalReply) ||
+        /\brestored\b/i.test(finalReply) ||
+        /\brevers(ed|al)\b/i.test(finalReply) ||
+        /\bre-?created\b/i.test(finalReply);
+      if (!hasNarration && last.summary) {
+        finalReply = `${finalReply.trim()}\n\n${last.summary}`;
+      } else if (!hasNarration) {
+        finalReply = `${finalReply.trim()}\n\nThe previous action has been undone.`;
       }
     }
   }
