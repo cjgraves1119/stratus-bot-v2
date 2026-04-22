@@ -1,0 +1,1068 @@
+{
+  "fixtures": [
+    {
+      "id": "quote-001",
+      "input": "10 MR46",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 10
+          }
+        ],
+        "modifiers": {}
+      }
+    },
+    {
+      "id": "quote-002",
+      "input": "quote me 5 MX67",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX67",
+            "qty": 5
+          }
+        ]
+      }
+    },
+    {
+      "id": "quote-003",
+      "input": "2 MR44 and 3 MX67",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR44",
+            "qty": 2
+          },
+          {
+            "sku": "MX67",
+            "qty": 3
+          }
+        ]
+      }
+    },
+    {
+      "id": "quote-004",
+      "input": "need pricing on an MS130-24P",
+      "expected": {
+        "intent": "price_lookup",
+        "items": [
+          {
+            "sku": "MS130-24P",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "quote-005",
+      "input": "MX85-SDW 1yr, 3yr and 5yr",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX85",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "tier": "SDW",
+          "all_terms": true
+        }
+      }
+    },
+    {
+      "id": "quote-006-hw-only",
+      "input": "quote 10 MR44 hardware only",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR44",
+            "qty": 10
+          }
+        ],
+        "modifiers": {
+          "hardware_only": true
+        }
+      }
+    },
+    {
+      "id": "quote-007-hw-only-alt",
+      "input": "5 MX67 no license",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX67",
+            "qty": 5
+          }
+        ],
+        "modifiers": {
+          "hardware_only": true
+        }
+      }
+    },
+    {
+      "id": "quote-008-hw-only-alt2",
+      "input": "just the hardware for 3 MR46",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 3
+          }
+        ],
+        "modifiers": {
+          "hardware_only": true
+        }
+      }
+    },
+    {
+      "id": "quote-009-lic-only",
+      "input": "license only for 5 MR44",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR44",
+            "qty": 5
+          }
+        ],
+        "modifiers": {
+          "license_only": true
+        }
+      }
+    },
+    {
+      "id": "quote-010-lic-only-alt",
+      "input": "renewal for 2 MX67",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX67",
+            "qty": 2
+          }
+        ],
+        "modifiers": {
+          "license_only": true
+        }
+      }
+    },
+    {
+      "id": "quote-011-with-lic",
+      "input": "MS150-24P-4G with license",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MS150-24P-4G",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "with_license": true
+        }
+      }
+    },
+    {
+      "id": "quote-012-with-lic-term",
+      "input": "MR46 with 3 year license",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "with_license": true,
+          "term_years": 3
+        }
+      }
+    },
+    {
+      "id": "quote-013-with-lic-tier",
+      "input": "MX85 with 5 year SEC license",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX85",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "with_license": true,
+          "term_years": 5,
+          "tier": "SEC"
+        }
+      }
+    },
+    {
+      "id": "quote-014-bare-sku",
+      "input": "MR46",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "quote-015-eol",
+      "input": "MX64",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX64",
+            "qty": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "quote-016-bare-lic",
+      "input": "LIC-ENT-3YR",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "LIC-ENT-3YR",
+            "qty": 1,
+            "sku_type": "license"
+          }
+        ]
+      }
+    },
+    {
+      "id": "quote-017-multi-lic",
+      "input": "6 LIC-ENT-3YR and 1 LIC-MX64-SEC-3YR",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "LIC-ENT-3YR",
+            "qty": 6,
+            "sku_type": "license"
+          },
+          {
+            "sku": "LIC-MX64-SEC-3YR",
+            "qty": 1,
+            "sku_type": "license"
+          }
+        ]
+      }
+    },
+    {
+      "id": "quote-018-word-numbers",
+      "input": "quote two MR46s",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "quote-019-show-pricing",
+      "input": "5 MR44 with pricing",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR44",
+            "qty": 5
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "price-001-cost-of",
+      "input": "cost of MR46",
+      "expected": {
+        "intent": "price_lookup",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "price-002-how-much",
+      "input": "how much is an MX67",
+      "expected": {
+        "intent": "price_lookup",
+        "items": [
+          {
+            "sku": "MX67",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "price-003-reverse",
+      "input": "what does MR46 cost",
+      "expected": {
+        "intent": "price_lookup",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "price-004-qty",
+      "input": "cost of 2x MS150-48FP-4X",
+      "expected": {
+        "intent": "price_lookup",
+        "items": [
+          {
+            "sku": "MS150-48FP-4X",
+            "qty": 2
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "price-005-with-lic",
+      "input": "cost of MS150-24P-4G with license",
+      "expected": {
+        "intent": "price_lookup",
+        "items": [
+          {
+            "sku": "MS150-24P-4G",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true,
+          "with_license": true
+        }
+      }
+    },
+    {
+      "id": "price-006-with-3yr-lic",
+      "input": "cost of MS150-24P-4G with 3 year license",
+      "expected": {
+        "intent": "price_lookup",
+        "items": [
+          {
+            "sku": "MS150-24P-4G",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "show_pricing": true,
+          "with_license": true,
+          "term_years": 3
+        }
+      }
+    },
+    {
+      "id": "revise-001-license-only",
+      "input": "License only",
+      "prior_context": "**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-SDW-3Y&qty=1,1",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "toggle_hw_lic",
+          "hw_lic_toggle": "license_only"
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-002-hardware-only",
+      "input": "hardware only",
+      "prior_context": "**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR46-HW,LIC-ENT-3YR&qty=10,10",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "toggle_hw_lic",
+          "hw_lic_toggle": "hardware_only"
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-003-term",
+      "input": "just 3 year please",
+      "prior_context": "1-Year and 3-Year and 5-Year URLs for MR46",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "change_term",
+          "new_term": 3
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-004-term-alt",
+      "input": "make it 5 year",
+      "prior_context": "1-Year Co-Term URL for MR46",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "change_term",
+          "new_term": 5
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-005-add",
+      "input": "add 2 MX67",
+      "prior_context": "Quote for 10 MR46",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "add",
+          "add_items": [
+            {
+              "sku": "MX67",
+              "qty": 2
+            }
+          ]
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-006-add-alt",
+      "input": "also include 1 MS130-24P",
+      "prior_context": "Quote for 5 MR46",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "add",
+          "add_items": [
+            {
+              "sku": "MS130-24P",
+              "qty": 1
+            }
+          ]
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-007-remove",
+      "input": "remove the MR44s",
+      "prior_context": "Quote for 10 MR46 and 5 MR44",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "remove",
+          "target_sku": "MR44"
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-008-remove-alt",
+      "input": "take out MX67",
+      "prior_context": "Quote including MX67",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "remove",
+          "target_sku": "MX67"
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-009-swap",
+      "input": "swap MR44 for MR46",
+      "prior_context": "Quote for MR44",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "swap",
+          "target_sku": "MR44",
+          "add_items": [
+            {
+              "sku": "MR46",
+              "qty": null
+            }
+          ]
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-010-change-qty",
+      "input": "make it 5 instead",
+      "prior_context": "Quote for 10 MR46",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "change_qty",
+          "new_qty": 5
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-011-change-tier",
+      "input": "change to SEC license",
+      "prior_context": "Quote for MX85 with ENT license",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "change_tier",
+          "new_tier": "SEC"
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "revise-012-add-pricing",
+      "input": "add pricing",
+      "prior_context": "URL-only quote for MR46",
+      "expected": {
+        "intent": "revise",
+        "modifiers": {
+          "show_pricing": true
+        },
+        "reference": {
+          "resolve_from_history": true
+        }
+      }
+    },
+    {
+      "id": "pron-001",
+      "input": "what is the cost of that",
+      "prior_context": "Quote for MS150-24P-4G",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "show_pricing"
+        },
+        "reference": {
+          "resolve_from_history": true,
+          "is_pronoun_ref": true
+        },
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "pron-002",
+      "input": "how much is it",
+      "prior_context": "Quote for MX67",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "show_pricing"
+        },
+        "reference": {
+          "resolve_from_history": true,
+          "is_pronoun_ref": true
+        },
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "pron-003",
+      "input": "price those",
+      "prior_context": "Quote for 3 MR46",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "show_pricing"
+        },
+        "reference": {
+          "resolve_from_history": true,
+          "is_pronoun_ref": true
+        },
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "pron-004",
+      "input": "cost of the switch",
+      "prior_context": "Quote for MS150-48FP-4G",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "show_pricing"
+        },
+        "reference": {
+          "resolve_from_history": true,
+          "is_pronoun_ref": true
+        },
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "option-001",
+      "input": "what's the cost of Option 2",
+      "prior_context": "Quote with Option 1/2/3",
+      "expected": {
+        "intent": "revise",
+        "revision": {
+          "action": "show_pricing"
+        },
+        "reference": {
+          "resolve_from_history": true,
+          "option_ref": 2
+        },
+        "modifiers": {
+          "show_pricing": true
+        }
+      }
+    },
+    {
+      "id": "clarify-001-vague-switch",
+      "input": "quote me some switches",
+      "expected": {
+        "intent": "clarify"
+      }
+    },
+    {
+      "id": "clarify-002-vague-ap",
+      "input": "I need access points",
+      "expected": {
+        "intent": "clarify"
+      }
+    },
+    {
+      "id": "clarify-003-variant",
+      "input": "quote 5 MS130-24",
+      "expected": {
+        "intent": "clarify"
+      }
+    },
+    {
+      "id": "clarify-004-price-alone",
+      "input": "pricing",
+      "expected": {
+        "intent": "clarify"
+      }
+    },
+    {
+      "id": "info-001-sizing",
+      "input": "what firewall do I need for 300 users",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "info-002-compare",
+      "input": "difference between MR46 and CW9164",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "info-003-capability",
+      "input": "does MX67 support SD-WAN",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "info-004-eol-status",
+      "input": "is MR44 still sold",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "convo-001",
+      "input": "hey what's up",
+      "expected": {
+        "intent": "conversation"
+      }
+    },
+    {
+      "id": "convo-002",
+      "input": "thanks!",
+      "expected": {
+        "intent": "conversation"
+      }
+    },
+    {
+      "id": "convo-003",
+      "input": "who made you",
+      "expected": {
+        "intent": "conversation"
+      }
+    },
+    {
+      "id": "convo-004",
+      "input": "lol",
+      "expected": {
+        "intent": "conversation"
+      }
+    },
+    {
+      "id": "edge-001-typo",
+      "input": "quote 5 MR46 with liscense",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 5
+          }
+        ],
+        "modifiers": {
+          "with_license": true
+        }
+      }
+    },
+    {
+      "id": "edge-002-mixed-hw-lic",
+      "input": "5 MR46 and 3 LIC-ENT-3YR",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 5
+          },
+          {
+            "sku": "LIC-ENT-3YR",
+            "qty": 3,
+            "sku_type": "license"
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-003-renew-phrasing",
+      "input": "renew 10 MR44 licenses",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR44",
+            "qty": 10
+          }
+        ],
+        "modifiers": {
+          "license_only": true
+        }
+      }
+    },
+    {
+      "id": "edge-004-refresh-phrasing",
+      "input": "refresh 5 MX64",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX64",
+            "qty": 5
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-005-natural-and",
+      "input": "I need 10 MR46 and also a couple MX67s",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 10
+          },
+          {
+            "sku": "MX67",
+            "qty": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-006-five-year-only",
+      "input": "just show me the 5 year for 10 MR46",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR46",
+            "qty": 10
+          }
+        ],
+        "modifiers": {
+          "term_years": 5
+        }
+      }
+    },
+    {
+      "id": "edge-007-cw-wifi7",
+      "input": "quote 3 CW9172I",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "CW9172I",
+            "qty": 3
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-008-sensors",
+      "input": "5 MT14",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MT14",
+            "qty": 5
+          }
+        ]
+      }
+    },
+    {
+      "id": "shadow-001-renewal-multiline",
+      "input": "renewal for\n\nMS220-24P \u00d7 5\nMS225-48FP \u00d7 1\nMS350-48LP \u00d7 2\nMX85 \u00d7 1\nMR x 18",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MS220-24P",
+            "qty": 5
+          },
+          {
+            "sku": "MS225-48FP",
+            "qty": 1
+          },
+          {
+            "sku": "MS350-48LP",
+            "qty": 2
+          },
+          {
+            "sku": "MX85",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "license_only": true
+        }
+      }
+    },
+    {
+      "id": "shadow-002-renewal-inline",
+      "input": "renewal for 24 MR36, 1 MS120-8, 1 MS225-24P, 1 MS250-24P, 1 ms250-48FP, 1 MX64, 1 MX65, 1 mx84",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MR36",
+            "qty": 24
+          },
+          {
+            "sku": "MS120-8",
+            "qty": 1
+          },
+          {
+            "sku": "MS225-24P",
+            "qty": 1
+          },
+          {
+            "sku": "MS250-24P",
+            "qty": 1
+          },
+          {
+            "sku": "MS250-48FP",
+            "qty": 1
+          },
+          {
+            "sku": "MX64",
+            "qty": 1
+          },
+          {
+            "sku": "MX65",
+            "qty": 1
+          },
+          {
+            "sku": "MX84",
+            "qty": 1
+          }
+        ],
+        "modifiers": {
+          "license_only": true
+        }
+      }
+    },
+    {
+      "id": "shadow-003-recommend-firewall",
+      "input": "What do you recommend for a firewall for an office with 70 employees",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "shadow-004-recommend-ap",
+      "input": "what AP should I use for a 50000 sq ft warehouse",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "shadow-005-dns-bare",
+      "input": "DNS Security Essentials",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "shadow-006-url-echoback",
+      "input": "https://stratusinfosystems.com/order/?item=MX85,LIC-MX85-SEC-5Y&qty=1,1\n\u2022 MX85 - $2,132.00\n\u2022 LIC-MX85-SEC-5Y - $4,282.00",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "MX85",
+            "qty": 1
+          },
+          {
+            "sku": "LIC-MX85-SEC-5Y",
+            "qty": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "shadow-007-sme-license",
+      "input": "SME license, 1yr and 3yr",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "LIC-SME",
+            "qty": 1,
+            "sku_type": "license"
+          }
+        ],
+        "modifiers": {
+          "all_terms": true
+        }
+      }
+    },
+    {
+      "id": "shadow-008-lic-sme-all-terms",
+      "input": "Lic-sme 1yr, 3yr and 5yr",
+      "expected": {
+        "intent": "quote",
+        "items": [
+          {
+            "sku": "LIC-SME",
+            "qty": 1,
+            "sku_type": "license"
+          }
+        ],
+        "modifiers": {
+          "all_terms": true
+        }
+      }
+    },
+    {
+      "id": "shadow-009-duo-essentials",
+      "input": "Generate a quote for 4 Duo Essentials for 1 year",
+      "expected": {
+        "intent": "quote",
+        "modifiers": {
+          "term_years": 1
+        }
+      }
+    },
+    {
+      "id": "shadow-010-duo-advantage-all-terms",
+      "input": "35 duo advantage, 1yr, 3yr 5yr",
+      "expected": {
+        "intent": "quote",
+        "modifiers": {
+          "all_terms": true
+        }
+      }
+    },
+    {
+      "id": "shadow-011-which-switch",
+      "input": "which switch do I need for a 24 port PoE deployment",
+      "expected": {
+        "intent": "product_info"
+      }
+    },
+    {
+      "id": "shadow-012-best-camera",
+      "input": "what's the best camera for outdoor use",
+      "expected": {
+        "intent": "product_info"
+      }
+    }
+  ]
+}
