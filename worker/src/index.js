@@ -6032,46 +6032,76 @@ Hard rules:
           //     Total critical-path latency ≈ max(V2, legacy) ≈ 1.7s p50.
           //   - V2 OFF (rollback mode): legacy alone on hot path, V2+Gemma shadow
           //     only for D1 comparison logging. Latency ≈ 500ms p50.
-          let classification;          // legacy result (always fetched)
-          let v2Classification = null; // V2 result (fetched only when flag on)
-          let _gemmaShadowPromise;     // Gemma always runs, always shadow
+          // ── WATERFALL ROUTING (2026-04-22) ──
+          // Hot path: V2/Llama + legacy in parallel (unchanged). Unconditional
+          // Gemma shadow removed — saves ~$22/mo on the ~85% of traffic V2
+          // handles with high confidence. Gemma is now an on-demand escalation:
+          // only fires when V2 is low-confidence or lands on a known-weak intent
+          // (price_lookup, clarify), with a 5s Promise.race timeout so a Gemma
+          // tail-latency spike can't stall the hot path.
+          let classification;                  // legacy result (always fetched)
+          let v2Classification = null;         // V2 result (fetched only when flag on)
+          let gemma4Classification = null;     // Gemma result (null unless waterfall escalates)
+          let _rollbackShadowPromise = null;   // V2 shadow promise for rollback-mode logging only
 
           if (USE_V2_CLASSIFIER) {
-            // V2 + legacy in parallel, Gemma as async shadow
+            // V2 + legacy in parallel
             const _v2Promise = classifyWithCFv2(text, priorCtxForV2, env)
               .catch(e => ({ error: e.message, parseError: true }));
             const _legacyPromise = classifyWithCF(text, env)
               .catch(e => ({ error: e.message, intent: 'escalate' }));
-            _gemmaShadowPromise = classifyWithGemma4(text, priorCtxForV2, env)
-              .catch(e => ({ error: e.message }));
             [v2Classification, classification] = await Promise.all([_v2Promise, _legacyPromise]);
+
+            // ── Waterfall escalation decision ──
+            // Trigger Gemma when V2 is unusable, low-confidence, or fell into
+            // a known-weak bucket. Weak set sourced from the 2026-04-22 benchmark
+            // where all three V2 models misclassified pronoun/option inputs as
+            // revise instead of price_lookup — shared failure = prompt gap, and
+            // Gemma's larger model still scored better on ambiguous edges.
+            const WEAK_INTENTS = new Set(['price_lookup', 'clarify']);
+            const LOW_CONF_THRESHOLD = 0.7;
+            const GEMMA_TIMEOUT_MS = 5000;
+            const v2Intent = v2Classification?.intent;
+            const v2ConfRaw = v2Classification?.confidence;
+            const v2Conf = typeof v2ConfRaw === 'number' ? v2ConfRaw : Number(v2ConfRaw) || 0;
+            const v2Broken = !v2Intent || v2Classification?.parseError || v2Classification?.error;
+            const escalate = v2Broken || v2Conf < LOW_CONF_THRESHOLD || WEAK_INTENTS.has(v2Intent);
+
+            if (escalate) {
+              console.log(`[Waterfall] Escalating to Gemma 4: v2Intent=${v2Intent || 'ERR'} conf=${v2Conf} broken=${!!v2Broken}`);
+              gemma4Classification = await Promise.race([
+                classifyWithGemma4(text, priorCtxForV2, env).catch(e => ({ error: e.message })),
+                new Promise(resolve => setTimeout(() => resolve({ timeout: true, elapsed: GEMMA_TIMEOUT_MS }), GEMMA_TIMEOUT_MS))
+              ]);
+              if (gemma4Classification?.timeout) {
+                console.log(`[Waterfall] Gemma timed out at ${GEMMA_TIMEOUT_MS}ms, falling back to V2`);
+              }
+            } else {
+              console.log(`[Waterfall] Skipping Gemma: V2 confident (${v2Intent} conf=${v2Conf})`);
+            }
           } else {
-            // Rollback mode — legacy only on hot path
+            // Rollback mode — legacy only on hot path. V2 still shadows for D1
+            // parity logging. Gemma is fully disabled in rollback to save $.
             classification = await classifyWithCF(text, env);
-            const _v2Shadow = classifyWithCFv2(text, priorCtxForV2, env)
+            _rollbackShadowPromise = classifyWithCFv2(text, priorCtxForV2, env)
               .catch(e => ({ error: e.message }));
-            _gemmaShadowPromise = classifyWithGemma4(text, priorCtxForV2, env)
-              .catch(e => ({ error: e.message }));
-            // V2 shadow folds into the Gemma shadow await below
-            _gemmaShadowPromise = Promise.all([_v2Shadow, _gemmaShadowPromise])
-              .then(([v2c, g4c]) => ({ _v2Shadow: v2c, _gemma: g4c }));
           }
           T.step('wx-cfclassify', 'exit');
 
-          // Shadow await — non-blocking D1 logging of all classifiers
+          // Shadow logging — non-blocking D1 write. logShadowClassification
+          // handles null gemma4 gracefully (writes NULL to gemma4_* columns).
           ctx.waitUntil((async () => {
             try {
               let v2c, g4c;
               if (USE_V2_CLASSIFIER) {
                 v2c = v2Classification;
-                g4c = await _gemmaShadowPromise;
+                g4c = gemma4Classification; // null when waterfall skipped escalation
               } else {
-                const shadow = await _gemmaShadowPromise;
-                v2c = shadow._v2Shadow;
-                g4c = shadow._gemma;
+                v2c = _rollbackShadowPromise ? await _rollbackShadowPromise : null;
+                g4c = null; // Gemma disabled in rollback mode
               }
               if (v2c) console.log(`[Shadow-V2] intent=${v2c.intent || 'ERR'} conf=${v2c.confidence || '?'} (${v2c.elapsed || 0}ms)${v2c.parseError ? ' parseErr=' + v2c.parseError : ''}`);
-              if (g4c) console.log(`[Shadow-Gemma4] intent=${g4c.intent || 'ERR'} conf=${g4c.confidence || '?'} (${g4c.elapsed || 0}ms)${g4c.parseError ? ' parseErr=' + g4c.parseError : ''}`);
+              if (g4c) console.log(`[Shadow-Gemma4] intent=${g4c.intent || 'ERR'} conf=${g4c.confidence || '?'} (${g4c.elapsed || 0}ms)${g4c.parseError ? ' parseErr=' + g4c.parseError : ''}${g4c.timeout ? ' timeout=true' : ''}`);
               await logShadowClassification(env, {
                 personId, requestText: text, priorContext: priorCtxForV2,
                 legacy: classification, v2: v2c, gemma4: g4c
@@ -6079,7 +6109,11 @@ Hard rules:
             } catch (e) { console.warn('[Shadow] error:', e?.message); }
           })());
 
-          // Select active classification — V2 if valid, legacy otherwise
+          // Select active classification — V2 if valid, legacy otherwise.
+          // Gemma can override V2 if it returned successfully AND disagrees with
+          // V2 at high confidence. This is the accuracy win: when V2 confidently
+          // misroutes (e.g. pronoun cases scoring revise instead of price_lookup),
+          // Gemma's second opinion rescues the call.
           let activeClassification = classification; // legacy by default
           const v2Valid = USE_V2_CLASSIFIER
             && v2Classification
@@ -6099,6 +6133,37 @@ Hard rules:
             console.log(`[V2-Active] intent=${activeClassification.intent} (V2 ${v2Classification.elapsed}ms / legacy ${classification?.elapsed}ms)`);
           } else if (USE_V2_CLASSIFIER) {
             console.log(`[V2-Fallback] V2 failed (${v2Classification?.error || v2Classification?.parseError || 'null'}), using legacy classifier`);
+          }
+
+          // ── Waterfall merge: Gemma overrides V2 on high-conf disagreement ──
+          const GEMMA_WIN_CONF = 0.8;
+          const gemmaValid = gemma4Classification
+            && !gemma4Classification.timeout
+            && !gemma4Classification.error
+            && !gemma4Classification.parseError
+            && gemma4Classification.intent;
+          if (gemmaValid) {
+            const gemmaConfRaw = gemma4Classification.confidence;
+            const gemmaConf = typeof gemmaConfRaw === 'number' ? gemmaConfRaw : Number(gemmaConfRaw) || 0;
+            const gemmaIntent = String(gemma4Classification.intent).toLowerCase();
+            const activeIntentLower = activeClassification?.intent
+              ? String(activeClassification.intent).toLowerCase()
+              : null;
+            const disagrees = activeIntentLower && gemmaIntent !== activeIntentLower;
+            if (gemmaConf >= GEMMA_WIN_CONF && disagrees) {
+              const overriddenSource = v2Valid ? 'V2' : 'legacy';
+              console.log(`[Waterfall] Gemma overrides ${overriddenSource}: ${activeIntentLower} -> ${gemmaIntent} (gemmaConf=${gemmaConf}, gemmaMs=${gemma4Classification.elapsed})`);
+              activeClassification = {
+                intent: gemma4Classification.intent,
+                reply: gemma4Classification.reply || '',
+                extracted: gemma4Classification.items?.map(i => `${i.qty || 1} ${i.sku}`).join(', ') || '',
+                elapsed: gemma4Classification.elapsed,
+                _gemma: gemma4Classification,
+                _v2: v2Valid ? v2Classification : undefined
+              };
+            } else {
+              console.log(`[Waterfall] Gemma agrees or below win threshold: gemmaIntent=${gemmaIntent} conf=${gemmaConf} (keeping ${v2Valid ? 'V2' : 'legacy'}: ${activeIntentLower})`);
+            }
           }
 
           if (activeClassification) {
