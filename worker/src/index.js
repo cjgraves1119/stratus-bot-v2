@@ -406,7 +406,9 @@ function getStaticSpecsContext(message) {
   for (const { model, specs: s } of unique) {
     context += `${model}: ${JSON.stringify(s)}\n`;
   }
-  return context;
+  // Return object shape so askClaude can attribute sources in its transparency footer.
+  // `text` preserves the legacy string payload; `models` is the list of resolved keys.
+  return { text: context, models: unique.map(u => u.model) };
 }
 
 // ─── Datasheet Context ───────────────────────────────────────────────────────
@@ -429,12 +431,14 @@ async function getRelevantDatasheetContext(message) {
   if (models.size === 0) return null;
   const keys = [...models].slice(0, 3);
   const uniqueUrls = [...new Set(keys.map(k => DATASHEET_URLS[k]))];
-  const fetches = uniqueUrls.map(async url => {
+  const fetches = uniqueUrls.map(async (url, idx) => {
     const text = await fetchDatasheet(url);
-    return text ? `[Datasheet: ${url}]\n${text}` : null;
+    return text ? { idx, url, body: `[Datasheet: ${url}]\n${text}` } : null;
   });
-  const results = (await Promise.all(fetches)).filter(Boolean);
-  if (results.length === 0) return null;
+  const fetchRows = (await Promise.all(fetches)).filter(Boolean);
+  if (fetchRows.length === 0) return null;
+  const results = fetchRows.map(r => r.body);
+  const fetchedUrls = fetchRows.map(r => r.url);
   const staticSpecs = [];
   for (const key of keys) {
     for (const family of Object.keys(specs)) {
@@ -451,7 +455,8 @@ async function getRelevantDatasheetContext(message) {
     context += '\n\n## CACHED SPECS (fallback if datasheet content is unclear)\n' +
       staticSpecs.join('\n');
   }
-  return context;
+  // Return object shape so askClaude can attribute sources in its transparency footer.
+  return { text: context, models: keys, urls: fetchedUrls };
 }
 
 // ─── Valid SKU Set ────────────────────────────────────────────────────────────
@@ -5285,6 +5290,23 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     let systemPrompt = SYSTEM_PROMPT;
     const kv = env.CONVERSATION_KV;
 
+    // ─── Source Attribution Tracker ──────────────────────────────────────────
+    // Records where the spec context injected into Claude came from so we can
+    // tag every reply with a transparency footer. Options: live datasheet
+    // (successful fetch from documentation.meraki.com), cached specs.json
+    // (authoritative internal cache), category family fallback, or nothing
+    // (training-data-only warning).
+    const sources = {
+      liveModels: [],       // datasheet keys fetched live
+      liveUrls: [],         // URLs that returned content
+      fetchFailed: false,   // live fetch was attempted but returned no content
+      cachedModels: [],     // specs.json model keys resolved
+      categoryFamilies: [], // family-level fallback (MX, MR, MS150, etc.)
+    };
+    let showFooter = false;
+    // product_info intent is always a spec question → footer is always relevant
+    if (classification && classification.intent === 'product_info') showFooter = true;
+
     // Context-aware: bare "yes"/"yeah"/"sure" after bot offered datasheet check
     if (!wantsLiveDatasheet && /^\s*(yes|yeah|yep|yea|sure|please|go ahead|do it)\s*[.!]?\s*$/i.test(userMessage) && personId && kv) {
       const recentHistory = await getHistory(kv, personId);
@@ -5295,6 +5317,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     }
 
     if (wantsLiveDatasheet) {
+      showFooter = true;
       let datasheetFetched = false;
       const datasheetContext = await getRelevantDatasheetContext(userMessage);
       if (!datasheetContext && personId) {
@@ -5308,30 +5331,39 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
           if (historyContext) break;
         }
         if (historyContext) {
-          systemPrompt += '\n\n' + historyContext;
+          systemPrompt += '\n\n' + historyContext.text;
           systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences.';
           datasheetFetched = true;
+          sources.liveModels.push(...(historyContext.models || []));
+          sources.liveUrls.push(...(historyContext.urls || []));
         }
       } else if (datasheetContext) {
-        systemPrompt += '\n\n' + datasheetContext;
+        systemPrompt += '\n\n' + datasheetContext.text;
         systemPrompt += '\n\nThe user requested live datasheet verification. Use the live datasheet content above as the authoritative source.';
         datasheetFetched = true;
+        sources.liveModels.push(...(datasheetContext.models || []));
+        sources.liveUrls.push(...(datasheetContext.urls || []));
       }
       // If datasheet fetch failed, tell Claude it has the capability but the fetch failed
       if (!datasheetFetched) {
+        sources.fetchFailed = true;
         systemPrompt += '\n\nThe user asked to verify specs against the latest datasheet. The live datasheet fetch was attempted but failed (the page may be temporarily unavailable). Tell the user the datasheet check was attempted but the page was unreachable, and offer to try again. Do NOT say you lack the ability to fetch datasheets — you DO have this capability, but it failed this time. Fall back to the specs.json data you already have.';
         // Still inject static specs as fallback
         const recentHistory = await getHistory(kv, personId);
         const lastAssistant = [...recentHistory].reverse().find(h => h.role === 'assistant');
         if (lastAssistant) {
           const staticContext = getStaticSpecsContext(lastAssistant.content);
-          if (staticContext) systemPrompt += '\n\n' + staticContext;
+          if (staticContext) {
+            systemPrompt += '\n\n' + staticContext.text;
+            sources.cachedModels.push(...(staticContext.models || []));
+          }
         }
       }
     } else {
       const staticContext = getStaticSpecsContext(userMessage);
       // If no static context from model names, try category keywords for advisory questions
       let categoryContext = null;
+      let categoryFamilies = [];
       if (!staticContext) {
         const catUpper = userMessage.toUpperCase();
         const families = [];
@@ -5354,10 +5386,18 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
             }
           }
           categoryContext = ctx;
+          categoryFamilies = families;
         }
       }
-      if (staticContext) systemPrompt += '\n\n' + staticContext;
-      else if (categoryContext) systemPrompt += '\n\n' + categoryContext;
+      if (staticContext) {
+        systemPrompt += '\n\n' + staticContext.text;
+        sources.cachedModels.push(...(staticContext.models || []));
+        showFooter = true;
+      } else if (categoryContext) {
+        systemPrompt += '\n\n' + categoryContext;
+        sources.categoryFamilies.push(...categoryFamilies);
+        showFooter = true;
+      }
     }
 
     const history = personId ? await getHistory(kv, personId) : [];
@@ -5518,9 +5558,31 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
 
     const reply = accumulatedText.replace(/\n{3,}/g, '\n\n').trim() || 'Sorry, I could not generate a response.';
 
+    // ─── Source Attribution Footer ───────────────────────────────────────────
+    // Tag every spec-related reply with where the data came from so Chris can
+    // tell at a glance whether the bot pulled the live datasheet, fell back to
+    // the cached specs.json, or answered purely from training data (hallucination risk).
+    let sourceFooter = '';
+    if (showFooter) {
+      if (sources.liveModels.length > 0) {
+        const uniqModels = [...new Set(sources.liveModels)];
+        sourceFooter = `_📄 Source: live datasheet — ${uniqModels.join(', ')} (documentation.meraki.com)_`;
+      } else if (sources.cachedModels.length > 0) {
+        const uniqModels = [...new Set(sources.cachedModels)];
+        const fetchNote = sources.fetchFailed ? ' · live fetch failed, fell back to cache' : '';
+        sourceFooter = `_📊 Source: cached specs.json — ${uniqModels.join(', ')}${fetchNote}_`;
+      } else if (sources.categoryFamilies.length > 0) {
+        const uniqFams = [...new Set(sources.categoryFamilies)];
+        sourceFooter = `_📊 Source: cached specs.json — family-level (${uniqFams.join(', ')})_`;
+      } else {
+        sourceFooter = `_⚠️ Source: training data only — no verified spec source was referenced for this answer. Ask me to "pull the datasheet" to verify._`;
+      }
+    }
+    const finalReply = sourceFooter ? `${reply}\n\n${sourceFooter}` : reply;
+
     if (personId) {
       await addToHistory(kv, personId, 'user', userMessage);
-      await addToHistory(kv, personId, 'assistant', reply);
+      await addToHistory(kv, personId, 'assistant', finalReply);
     }
 
     // Log token usage + cost to D1 (previously missed — cost was always $0)
@@ -5538,7 +5600,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       }).catch(() => {});
     }
 
-    return reply;
+    return finalReply;
   } catch (err) {
     console.error('Claude API error:', err.message, err.stack);
     return `Sorry, I couldn't process that request. Try a specific SKU like "quote 10 MR44" or "5 MS150-48LP-4G".`;
