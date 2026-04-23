@@ -483,6 +483,11 @@ async function getHistory(kv, personId) {
   try {
     const data = await kv.get(`conv:${personId}`, 'json');
     if (!data) return [];
+    // Self-healing: accept both shapes.
+    //   {messages: [...]}  — canonical shape written by addToHistory
+    //   [...]              — raw array accidentally written by a prior bug
+    //                        (legacy Llama waterfall path kv.put, fixed 2026-04-23)
+    if (Array.isArray(data)) return data;
     return data.messages || [];
   } catch {
     return [];
@@ -5719,14 +5724,17 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       const llamaOut = await askLlamaProductInfo(userMessage, personId, env, classification);
       const elapsed = Date.now() - t0;
       if (llamaOut && llamaOut.reply) {
-        // Save to conversation history
+        // Save to conversation history using addToHistory — it writes the
+        // {messages: [...]} shape that getHistory expects. Previously this block
+        // wrote a raw array via kv.put directly, which getHistory would read back
+        // as [] (because arrayData.messages is undefined). That silently dropped
+        // conversation history after every waterfall reply, breaking follow-up
+        // questions like "pull the datasheet" that rely on prior-turn context.
         const kv = env.CONVERSATION_KV;
         if (kv && personId) {
           try {
-            const history = await getHistory(kv, personId);
-            history.push({ role: 'user', content: userMessage });
-            history.push({ role: 'assistant', content: llamaOut.reply });
-            await kv.put(`conv:${personId}`, JSON.stringify(history.slice(-40)), { expirationTtl: 60 * 60 * 24 * 7 });
+            await addToHistory(kv, personId, 'user', userMessage);
+            await addToHistory(kv, personId, 'assistant', llamaOut.reply);
           } catch (_) {}
         }
         // Log decision to D1
