@@ -3394,10 +3394,177 @@ function extractPriorFromAssistantUrl(content) {
   };
 }
 
+// ─── Family / Wi-Fi-Class Expansion (Additive) ──────────────────────────────
+// Turns a bare family SKU ("MS150", "C9200L", "MX"), a wifi-class AP request
+// ("all wifi 7 APs"), or a filtered family ("all 48 port PoE variants of
+// MS150") into a pre-filled items list so buildQuoteResponse can emit one
+// URL per variant per term. Accessories (stack kits, network modules,
+// MA-/PWR-/SFP- transceivers) are excluded automatically.
+//
+// Returns null when the request doesn't match, so parseMessage falls through
+// to its existing logic untouched. Nothing outside this function changes.
+function expandFamily(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return null;
+  const upper = text.toUpperCase();
+  const cleaned = upper.replace(/[.!?,;:"']+$/, '').trim();
+
+  // ── Guardrails: skip inputs better handled by existing logic ──
+  // 1. Multi-line input (CSV paste, dashboard export)
+  const nonEmptyLines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (nonEmptyLines.length > 1) return null;
+  // 2. License SKUs present anywhere in the message
+  if (/\bLIC-[A-Z0-9]/.test(cleaned)) return null;
+  // 3. Fully-qualified hardware SKU typed out (let validateSku handle it)
+  if (/\b(MS\d{2,3}-\d{1,3}[A-Z]{1,3}-\d+[GXY](?:-[A-Z]+)?|C9\d{3}L?X?-\d+[A-Z]{1,3}-\d+[GXY]-M|MR\d+[A-Z]*-HW|MX\d+[CW]{0,2}(?:-NA)?-HW(?:-NA)?|CW9\d{3}[A-Z0-9]*-(?:HW|MR|RTG))\b/.test(cleaned)) return null;
+  // 4. Quantity-prefixed bare family for MR/MV/MT → existing agnostic path
+  if (/^\s*\d+\s*(MR|MV|MT)S?\s*$/.test(cleaned)) return null;
+  // 5. Question / advisory phrases (lead time, compare, etc.)
+  if (/^(HOW|WHAT|WHICH|WHEN|WHERE|WHY|IS|ARE|DO|DOES|CAN|SHOULD|TELL|EXPLAIN|COMPARE|DIFFERENCE|RECOMMEND|INFO|INFORMATION|LEAD\s+TIME|NEED\s+HELP)\b/.test(cleaned)) return null;
+  // 6. Revision verbs targeting existing quotes
+  if (/\b(DROP|REMOVE|DELETE|REPLACE|CHANGE|REVISE)\s+(THE|THAT|IT|THOSE|THEM)\b/.test(cleaned)) return null;
+  // 7. Multi-SKU comma list (>2 parts) → user is explicitly listing SKUs
+  const commaParts = cleaned.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
+  if (commaParts.length > 2) return null;
+  // 8. Specific model number present (MX75, MR44, MV53, MT20, C9300-48P, …).
+  //    These are targeted requests or mixed quotes. The existing parser handles
+  //    them (often via unresolvedCategories for wifi-class placeholders), and
+  //    auto-expanding would hijack that flow.
+  if (/\b(MX\d+[A-Z]*|MR\d+[A-Z]*|MV\d+[A-Z]*|MT\d+[A-Z]*|MG\d+[A-Z]*|Z\d+[A-Z]*|MS\d{2,3}-\d+|C9\d{3}L?X?-\d+|CW9\d{3}[A-Z]+\d*)\b/.test(cleaned)) return null;
+
+  // ── Wi-Fi class detection ──
+  const wifiClass =
+    /\b(WI[-\s]?FI\s*7|WIFI7)\b/.test(cleaned) ? '7' :
+    /\b(WI[-\s]?FI\s*6E|WIFI6E)\b/.test(cleaned) ? '6E' :
+    /\b(WI[-\s]?FI\s*6|WIFI6)\b/.test(cleaned) ? '6' : null;
+
+  // ── Intent markers ──
+  const hasAll = /\b(ALL|EVERY|EACH)\b/.test(cleaned);
+
+  // ── Family-token detection (longest alternatives first) ──
+  // Allow optional trailing "S" plural (e.g. "MS150s", "MXs") by stripping one
+  // trailing S adjacent to the family token before matching. Apply only when the
+  // cleaned input is a bare token or token + qualifier phrase so we don't strip
+  // legitimate S suffixes inside a full SKU.
+  const FAMILY_TOKEN_RE = /\b(MS130|MS150|MS210|MS220|MS225|MS250|MS320|MS350|MS355|MS390|MS410|MS420|MS425|MS450|MS120|MS125|C9200L|C9300L|C9300X|C9300|MX|MR|MV|MT|MG|CW)S?\b/;
+  const fm = cleaned.match(FAMILY_TOKEN_RE);
+  let family = fm ? fm[1] : null;
+
+  // Wi-Fi-class-only request → resolve to catalog bucket
+  if (!family && wifiClass) {
+    family = (wifiClass === '6') ? 'MR' : 'CW';
+  }
+  if (!family) return null;
+
+  // ── Load variant pool from auto-catalog ──
+  let pool = Array.isArray(catalog[family]) ? catalog[family].slice() : null;
+  if (!pool || pool.length === 0) return null;
+
+  // ── Trigger gate ──
+  // Bare family shorthand: "MS150", "MX", "MS150s", "MX switches", "MR APs".
+  // Anything more complex must include "all/every", a Wi-Fi class, or a
+  // port/PoE/uplink filter keyword.
+  const bareFamilyRe = new RegExp(
+    `^${family}S?(\\s+(APS?|ACCESS\\s+POINTS?|SWITCH(?:ES)?|APPLIANCES?|CAMERAS?|SENSORS?|GATEWAYS?|VARIANTS?|MODELS?|OPTIONS?))?$`
+  );
+  const isBare = cleaned === family || bareFamilyRe.test(cleaned);
+  const filterWords = /\b(\d+[-\s]?PORTS?|NON[-\s]?POE|POE\+?|DATA[-\s]?ONLY|MULTIGIG|MGIG|FULL[-\s]?POE|LOW[-\s]?POE|UPOE|U[-\s]?POE|10G|25G|\b1G\b|UPLINK|NO\s+POE)\b/.test(cleaned);
+  // Wi-Fi class alone is a CATEGORY PLACEHOLDER (handled by existing
+  // unresolvedCategories clarification flow). Only expand when paired with
+  // explicit "all/every/each" or a port/PoE filter keyword.
+  if (wifiClass && !hasAll && !filterWords && !isBare) return null;
+  if (!isBare && !hasAll && !wifiClass && !filterWords) return null;
+
+  // ── Wi-Fi-class pruning (CW catalog → 917x or 916x, MR is already Wi-Fi 6) ──
+  if (wifiClass === '7') {
+    pool = pool.filter(s => /^CW917/.test(s));
+  } else if (wifiClass === '6E') {
+    pool = pool.filter(s => /^CW916/.test(s));
+  }
+
+  // ── Accessory / niche-SKU exclusion ──
+  pool = pool.filter(sku => {
+    const u = sku.toUpperCase();
+    if (/^MA-/.test(u)) return false;                 // transceivers, brackets
+    if (/^(PWR|GLC|SFP|QSFP|CAB)-/.test(u)) return false;
+    if (/-NM-/.test(u)) return false;                 // network modules
+    if (/-STA-?KIT|-STAK-?KIT/.test(u)) return false; // stacking kits
+    if (u === 'CW9163E') return false;                // outdoor extender
+    if (u === 'CW9800H1') return false;               // wireless controller
+    if (u === 'CW9179F') return false;                // specialty variant
+    return true;
+  });
+
+  // ── Port-count filter ("48 port", "24-port", "48 ports") ──
+  const portMatch = cleaned.match(/(\d{1,3})\s*[-]?\s*PORTS?\b/);
+  if (portMatch) {
+    const n = portMatch[1];
+    const portRe = new RegExp(`(^|[-])${n}[A-Z]{0,4}?(-|$)`);
+    pool = pool.filter(s => portRe.test(s.toUpperCase()));
+  }
+
+  // ── PoE-type filter ──
+  const wantsNoPoe = /\b(NON[-\s]?POE|NO\s*POE|DATA[-\s]?ONLY)\b/.test(cleaned);
+  const wantsFullPoe = /\b(FULL[-\s]?POE|\bFP\b)\b/.test(cleaned);
+  const wantsLowPoe = /\b(LOW[-\s]?POE|\bLP\b)\b/.test(cleaned);
+  const wantsMultigig = /\b(MULTIGIG|MGIG|\bMP\b)\b/.test(cleaned);
+  const wantsUpoe = /\b(UPOE|U[-\s]?POE)\b/.test(cleaned);
+  const wantsPoe = /\bPOE\+?\b/.test(cleaned) && !wantsNoPoe;
+
+  if (/^(MS\d|C9)/.test(family)) {
+    if (wantsNoPoe) pool = pool.filter(s => /-\d+T(-|$)/.test(s));
+    else if (wantsFullPoe) pool = pool.filter(s => /-\d+FP(-|$)/.test(s));
+    else if (wantsLowPoe) pool = pool.filter(s => /-\d+LP(-|$)/.test(s));
+    else if (wantsMultigig) pool = pool.filter(s => /-\d+(MP|UXM|UN|PXG)(-|$)/.test(s));
+    else if (wantsUpoe) pool = pool.filter(s => /-\d+(U|UN|UX|UXM)(-|$)/.test(s));
+    else if (wantsPoe) pool = pool.filter(s => /-\d+(P|FP|LP|MP|U|UN|UX|UXM|PL|PXG)(-|$)/.test(s));
+  }
+
+  // ── Uplink filter (1G = "4G" suffix, 10G/25G = "4X"/"2Y" suffix) ──
+  if (/\b(10G\s*UPLINK|SFP\+\s*UPLINK|TEN\s*G\s*UPLINK)\b/.test(cleaned) || (/\b10G\b/.test(cleaned) && /UPLINK/.test(cleaned))) {
+    if (/^(MS\d|C9)/.test(family)) pool = pool.filter(s => /-(4X|2Y)(-M)?$/.test(s));
+  } else if (/\b(1G\s*UPLINK|GIG\s*UPLINK)\b/.test(cleaned) && !/\b10G\b/.test(cleaned)) {
+    if (/^(MS\d|C9)/.test(family)) pool = pool.filter(s => /-4G(-M)?$/.test(s));
+  }
+
+  // Filter excluded everything → let existing logic respond naturally
+  if (pool.length === 0) return null;
+
+  // Deterministic ordering
+  pool.sort();
+
+  const items = pool.map(baseSku => ({ baseSku, qty: 1 }));
+  return {
+    items,
+    requestedTerm: null,
+    modifiers: { hardwareOnly: false, licenseOnly: false, separateQuotes: true },
+    requestedTier: null,
+    isAdvisory: false,
+    isRevision: false,
+    showPricing: false,
+    unresolvedCategories: [],
+    _fromFamilyExpansion: true,
+    _familyExpandedFrom: family,
+    _wifiClass: wifiClass || null
+  };
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   // Pre-process: convert written-out numbers to digits
   text = convertWordNumbers(text);
+
+  // ── Additive family-expansion hook ──
+  // Intercepts bare-family quotes ("MS150"), wifi-class AP requests
+  // ("all wifi 7 APs"), and filtered family expansions ("all 48 port PoE
+  // MS150 variants"). Emits one URL per variant per term via the existing
+  // separateQuotes branch of buildQuoteResponse. Returns null to fall
+  // through to existing logic when the request isn't a family expansion.
+  const _expandedFamily = expandFamily(text);
+  if (_expandedFamily && _expandedFamily.items && _expandedFamily.items.length > 0) {
+    return _expandedFamily;
+  }
+
   const upper = text.toUpperCase();
 
   // ── separate_quotes early detection ──
