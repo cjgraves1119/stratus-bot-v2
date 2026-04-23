@@ -2322,6 +2322,22 @@ function parseMessage(text) {
   // through to existing logic when the request isn't a family expansion.
   const _expandedFamily = expandFamily(text);
   if (_expandedFamily && _expandedFamily.items && _expandedFamily.items.length > 0) {
+    // Re-detect hardware-only / license-only on the raw request so trailing
+    // modifiers like "hardware only", "hw only", "no license" survive the
+    // family-expansion short-circuit.
+    const _upper = text.toUpperCase();
+    const _LIC_WORD  = `(?:LICENSE|LICENCE|LISCENSE|LISCENCE|LICESE|LIC)`;
+    const _LIC_WORDS = `(?:LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|LIC)`;
+    const _hwOnlyRe  = /\b(HARDWARE\s+ONLY|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/;
+    const _hwExcl    = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
+    const _licOnlyRe = new RegExp(`\\b(${_LIC_WORDS}\\s+ONLY|JUST\\s+THE\\s+${_LIC_WORD}|JUST\\s+${_LIC_WORD}|NO\\s+HARDWARE|RENEWAL\\s+ONLY|${_LIC_WORD}\\s+RENEWAL|RENEW\\s+(THE\\s+)?${_LIC_WORDS})\\b`);
+    if (_hwOnlyRe.test(_upper) && !_hwExcl.test(_upper)) {
+      _expandedFamily.modifiers.hardwareOnly = true;
+      _expandedFamily.modifiers.licenseOnly  = false;
+    } else if (_licOnlyRe.test(_upper)) {
+      _expandedFamily.modifiers.licenseOnly  = true;
+      _expandedFamily.modifiers.hardwareOnly = false;
+    }
     return _expandedFamily;
   }
 

@@ -217,6 +217,44 @@ console.log('\n── 6. parseMessage integration ──────────
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+console.log('\n── 6b. Hardware-only / license-only modifiers ─────────');
+
+{
+  const p = parseMessage('quote all 48 port PoE MS150 variants hardware only');
+  assertTrue(p && p._fromFamilyExpansion === true, 'HW-only phrasing still routes through expandFamily');
+  assertTrue(p.modifiers.hardwareOnly === true, 'HW-only phrasing → hardwareOnly=true');
+  assertTrue(p.modifiers.licenseOnly === false, 'HW-only phrasing → licenseOnly=false');
+  assertTrue(p.items.length >= 4, `HW-only phrasing → still expands to multiple SKUs (got ${p.items.length})`);
+}
+
+{
+  const p = parseMessage('all 48 port PoE MS150 no license');
+  assertTrue(p && p._fromFamilyExpansion === true, '"no license" phrasing routes through expandFamily');
+  assertTrue(p.modifiers.hardwareOnly === true, '"no license" → hardwareOnly=true');
+}
+
+{
+  const p = parseMessage('all 48 port PoE MS150 hw only');
+  assertTrue(p && p._fromFamilyExpansion === true, '"hw only" phrasing routes through expandFamily');
+  assertTrue(p.modifiers.hardwareOnly === true, '"hw only" → hardwareOnly=true');
+}
+
+{
+  const p = parseMessage('all wifi 7 APs license only');
+  assertTrue(p && p._fromFamilyExpansion === true, 'license-only wifi-7 routes through expandFamily');
+  assertTrue(p.modifiers.licenseOnly === true, 'license-only wifi-7 → licenseOnly=true');
+  assertTrue(p.modifiers.hardwareOnly === false, 'license-only wifi-7 → hardwareOnly=false');
+}
+
+{
+  const p = parseMessage('quote all 48 port PoE MS150 variants hardware only');
+  const q = buildQuoteResponse(p);
+  assertTrue(q && q.message, 'HW-only family → buildQuoteResponse returns a message');
+  assertTrue(!/LIC-MS150-48-/.test(q.message), 'HW-only family → no LIC-MS150-48-* SKUs in URLs');
+  assertTrue(/MS150-48FP-4G/.test(q.message), 'HW-only family → still includes MS150-48FP-4G');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 console.log('\n── 7. buildQuoteResponse end-to-end ────────────────────');
 
 {
