@@ -402,6 +402,7 @@ function getStaticSpecsContext(message) {
   let context = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE SOURCE)\n';
   context += 'CRITICAL: Use ONLY these specs when answering. Do NOT supplement with training data. These specs OVERRIDE any conflicting information in conversation history — if prior messages contain different numbers, they were wrong and these are correct.\n';
   context += 'If the user asks about a spec not listed here, say "I don\'t have that specific spec cached — want me to pull the latest datasheet to confirm?"\n';
+  context += 'FORMATTING: This renders in Webex, which does NOT render pipe-delimited markdown tables. NEVER output rows like "| col | col |" — they render as literal pipe characters. For multi-model comparisons, use grouped bullets per model (e.g. "**MX95** · FW: 3 Gbps · VPN: 2.5 Gbps · 500 users") or a stacked list with bolded model names as headers.\n';
   // NOTE: Do NOT instruct the model to append a "Specs from product database" footer.
   // The caller (askLlamaProductInfo / askClaude) owns the source-attribution footer
   // and appends it in code based on sources{}. Having the model also emit one caused
@@ -455,6 +456,7 @@ async function getRelevantDatasheetContext(message) {
     }
   }
   let context = '## LIVE DATASHEET CONTENT (use this as your primary source for specs)\n' +
+    'FORMATTING: This renders in Webex — NEVER output pipe-delimited markdown tables ("| col | col |"). They render as literal pipes. Use stacked bolded model headers followed by spec bullets per model.\n\n' +
     results.join('\n\n');
   if (staticSpecs.length > 0) {
     context += '\n\n## CACHED SPECS (fallback if datasheet content is unclear)\n' +
@@ -5645,7 +5647,8 @@ async function askLlamaProductInfo(userMessage, personId, env, classification = 
         if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(catUpper)) families.push('MG');
         if (families.length > 0) {
           let ctx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE)\n';
-          ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n\n';
+          ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n';
+          ctx += 'FORMATTING: Webex does NOT render pipe-delimited markdown tables ("| col | col |") — they show as literal pipes. For multi-model comparisons use grouped bullets under a bolded model header, not tables.\n\n';
           for (const fam of families) {
             const familyData = specs[fam];
             if (familyData) {
@@ -5712,18 +5715,6 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
   const waterfallFlag = String(env.USE_PRODUCT_INFO_WATERFALL || '').trim().toLowerCase();
   const waterfallOn = waterfallFlag === 'true' || waterfallFlag === '1' || waterfallFlag === 'yes';
   console.log(`[Waterfall] flag=${JSON.stringify(env.USE_PRODUCT_INFO_WATERFALL)} parsed=${waterfallOn} intent=${classification?.intent} hasImg=${!!imageData}`);
-
-  // Temporary D1 diagnostic row so we can read waterfall gate state without log tail.
-  // AWAIT this write so it definitely completes — fire-and-forget may get cancelled
-  // when askClaude returns early on waterfall hit.
-  try {
-    await logBotUsageToD1(env, {
-      personId,
-      requestText: `DIAG flag=${JSON.stringify(env.USE_PRODUCT_INFO_WATERFALL)} parsed=${waterfallOn} intent=${classification?.intent} hasImg=${!!imageData} msg=${String(userMessage).slice(0, 40)}`,
-      responsePath: 'waterfall-diag',
-      durationMs: 0
-    });
-  } catch (e) { console.error('[D1] diag insert error:', e?.message); }
   if (waterfallOn &&
       classification && classification.intent === 'product_info' &&
       !imageData) {
@@ -5876,7 +5867,8 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
 
         if (families.length > 0) {
           let ctx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE)\n';
-          ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n\n';
+          ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n';
+          ctx += 'FORMATTING: Webex does NOT render pipe-delimited markdown tables ("| col | col |") — they show as literal pipes. For multi-model comparisons use grouped bullets under a bolded model header, not tables.\n\n';
           for (const fam of families) {
             const familyData = specs[fam];
             if (familyData) {
@@ -5927,30 +5919,18 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
         return [...fams];
       };
       let fams = familyDetect(userMessage);
-      let diagHistLen = 0;
-      let diagAsstContentHead = '';
       if (fams.length === 0 && personId && kv) {
         const histForFam = await getHistory(kv, personId);
-        diagHistLen = histForFam.length;
         const recentAsst = [...histForFam].reverse().filter(h => h.role === 'assistant').slice(0, 2);
-        if (recentAsst.length > 0) diagAsstContentHead = String(recentAsst[0].content || '').slice(0, 120);
         for (const t of recentAsst) {
           fams = familyDetect(t.content);
           if (fams.length > 0) break;
         }
       }
-      // Temporary D1 telemetry so we can verify the fallback from outside the worker
-      try {
-        await logBotUsageToD1(env, {
-          personId,
-          requestText: `FAM-DIAG msg="${String(userMessage).slice(0,40)}" histLen=${diagHistLen} asstHead="${diagAsstContentHead}" fams=[${fams.join(',')}]`,
-          responsePath: 'family-fallback-diag',
-          durationMs: 0
-        });
-      } catch (_) {}
       if (fams.length > 0) {
         let famCtx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE, family-level fallback)\n';
-        famCtx += 'Use ONLY these specs. Do NOT supplement with training data. If the exact spec the user asked about is not listed, say so and offer to pull the live datasheet.\n\n';
+        famCtx += 'Use ONLY these specs. Do NOT supplement with training data. If the exact spec the user asked about is not listed, say so and offer to pull the live datasheet.\n';
+        famCtx += 'FORMATTING: Webex does NOT render pipe-delimited markdown tables ("| col | col |") — they show as literal pipes. For multi-model comparisons use grouped bullets under a bolded model header, not tables.\n\n';
         for (const fam of fams) {
           const famData = specs[fam];
           if (famData) {
@@ -6344,33 +6324,6 @@ export default {
       return new Response(JSON.stringify({ status: 'Stratus AI running', version: '2.0.0-cf', runtime: 'cloudflare-workers' }), {
         headers: { 'Content-Type': 'application/json' }
       });
-    }
-
-    // ── Debug: probe datasheet reachability from inside Cloudflare Worker env ──
-    if (request.method === 'GET' && url.pathname === '/debug-datasheet') {
-      const sku = (url.searchParams.get('sku') || 'MX95').toUpperCase();
-      const datasheetUrl = DATASHEET_URLS[sku];
-      if (!datasheetUrl) {
-        return new Response(JSON.stringify({ error: 'no URL mapped for ' + sku }), { headers: { 'content-type': 'application/json' } });
-      }
-      const t0 = Date.now();
-      try {
-        const res = await fetch(datasheetUrl, {
-          headers: { 'User-Agent': 'StratusAI-Bot/1.0 (spec-lookup)' },
-          signal: AbortSignal.timeout(5000)
-        });
-        const elapsed = Date.now() - t0;
-        const text = res.ok ? await res.text() : null;
-        return new Response(JSON.stringify({
-          sku, datasheetUrl, ok: res.ok, status: res.status, elapsed, bodyBytes: text?.length || 0,
-          bodyHead: text?.slice(0, 200) || null
-        }, null, 2), { headers: { 'content-type': 'application/json' } });
-      } catch (e) {
-        const elapsed = Date.now() - t0;
-        return new Response(JSON.stringify({
-          sku, datasheetUrl, error: e.message, errorName: e.name, elapsed
-        }, null, 2), { headers: { 'content-type': 'application/json' } });
-      }
     }
 
     // Webhook handler
@@ -7636,7 +7589,8 @@ Hard rules:
             if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(catUpper)) families.push('MG');
             if (families.length > 0) {
               let ctx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE)\n';
-              ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n\n';
+              ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n';
+          ctx += 'FORMATTING: Webex does NOT render pipe-delimited markdown tables ("| col | col |") — they show as literal pipes. For multi-model comparisons use grouped bullets under a bolded model header, not tables.\n\n';
               for (const fam of families) {
                 const familyData = specs[fam];
                 if (familyData) {
