@@ -509,7 +509,17 @@ async function addToHistory(kv, personId, role, content) {
     }
 
     let data = await kv.get(`conv:${personId}`, 'json');
-    if (!data) data = { messages: [] };
+    // Self-heal: a legacy bug wrote the record as a raw array.
+    // Normalize any non-canonical shape to {messages: [...]} before pushing,
+    // otherwise the push throws TypeError and the write is silently dropped
+    // by the try/catch, leaving the KV record stuck at its corrupted state.
+    if (!data) {
+      data = { messages: [] };
+    } else if (Array.isArray(data)) {
+      data = { messages: data };
+    } else if (!Array.isArray(data.messages)) {
+      data = { messages: [] };
+    }
     data.messages.push({ role, content: storable });
     while (data.messages.length > MAX_HISTORY) {
       data.messages.shift();
