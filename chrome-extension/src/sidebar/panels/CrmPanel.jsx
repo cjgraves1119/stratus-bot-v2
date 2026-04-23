@@ -98,12 +98,34 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     c => !c.email?.toLowerCase().includes('@stratusinfosystems.com')
   );
 
-  // Auto-lookup when email context changes
+  // Auto-lookup when email context changes.
+  // Always default to the external customer email — never Stratus (already
+  // filtered out upstream) and never a Cisco rep. If the sender is a Cisco
+  // rep emailing Chris about a customer opportunity, we still want the
+  // sidebar to look up the customer, not the rep. Fall back to senderEmail
+  // only when there is no better external participant on the thread.
   useEffect(() => {
     if (!emailContext) return;
-    const email = (emailContext.isOutbound && emailContext.customerEmail)
-      ? emailContext.customerEmail : emailContext.senderEmail;
-    const domain = email ? email.split('@')[1] : '';
+    const senderEmail = emailContext.senderEmail || '';
+    const senderDomain = (senderEmail.split('@')[1] || '').toLowerCase();
+    const senderIsInternal = senderEmail.toLowerCase().includes('@stratusinfosystems.com')
+      || senderDomain === 'cisco.com';
+
+    // Prefer customerEmail (already set to first non-Cisco participant by the
+    // content script). If customer email is missing AND sender is internal,
+    // scan threadContacts for any non-internal participant as a last resort.
+    let email = emailContext.customerEmail || '';
+    if (!email && senderIsInternal) {
+      const fallback = (emailContext.threadContacts || []).find(c => {
+        const d = (c.email?.split('@')[1] || '').toLowerCase();
+        return d && d !== 'cisco.com' && !c.email?.toLowerCase().includes('@stratusinfosystems.com');
+      });
+      if (fallback) email = fallback.email;
+    }
+    // Final fallback: use the sender only if it is NOT Stratus/Cisco
+    if (!email && !senderIsInternal) email = senderEmail;
+
+    const domain = email ? (email.split('@')[1] || '').toLowerCase() : '';
     setSelectedContact(email || '');
     setManualEmail('');
     // Auto-lookup only for business domains — consumer domains need manual action
@@ -289,11 +311,15 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setSuggestPreview(null);
     setSuggestResult(null);
     try {
-      // Use the best available customer email — never send Stratus's own email
+      // Use the best available customer email — never Stratus or Cisco rep
+      const senderForTask = emailContext?.senderEmail || '';
+      const senderLower = senderForTask.toLowerCase();
+      const senderDomain = (senderForTask.split('@')[1] || '').toLowerCase();
+      const senderIsInternal = senderLower.includes('@stratusinfosystems.com') || senderDomain === 'cisco.com';
       const customerEmail = selectedContact
         || data?.contact?.email
         || emailContext?.customerEmail
-        || (emailContext?.senderEmail?.includes('@stratusinfosystems.com') ? '' : emailContext?.senderEmail)
+        || (senderIsInternal ? '' : senderForTask)
         || '';
       const customerName = data?.contact?.name
         || emailContext?.customerName
@@ -326,8 +352,16 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     if (!suggestPreview) return;
     setSuggestConfirmLoading(true);
     try {
+      // Prefer the customer email (never Stratus or Cisco rep) for task assignment
+      const confirmSender = emailContext?.senderEmail || '';
+      const confirmSenderLower = confirmSender.toLowerCase();
+      const confirmSenderDomain = (confirmSender.split('@')[1] || '').toLowerCase();
+      const confirmSenderIsInternal = confirmSenderLower.includes('@stratusinfosystems.com') || confirmSenderDomain === 'cisco.com';
       const result = await sendToBackground(MSG.SUGGEST_TASK, {
-        senderEmail: suggestPreview.senderEmail || emailContext?.customerEmail || emailContext?.senderEmail || '',
+        senderEmail: suggestPreview.senderEmail
+          || emailContext?.customerEmail
+          || (confirmSenderIsInternal ? '' : confirmSender)
+          || '',
         senderName: suggestPreview.senderName || suggestPreview.contactName || emailContext?.customerName || '',
         subject: suggestEditSubject || suggestPreview.subject,
         hasAccount: !!suggestPreview.accountId,

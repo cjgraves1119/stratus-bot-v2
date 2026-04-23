@@ -2160,14 +2160,6 @@ function parseMessage(text) {
   text = convertWordNumbers(text);
   const upper = text.toUpperCase();
 
-  // ── separate_quotes early detection ──
-  // Emitted by user phrases like "separate quotes", "individual URLs", "one quote per",
-  // "break these out", "split into separate", "each as its own quote", etc.
-  // This flag propagates into modifiers.separateQuotes so buildQuoteResponse can
-  // emit one URL per item/tier instead of concatenating.
-  const SEPARATE_QUOTES_RE = /\b(SEPARATE\s+(QUOTES?|URLS?|LINKS?)|INDIVIDUAL\s+(QUOTES?|URLS?|LINKS?)|EACH\s+(AS\s+)?(ITS\s+)?OWN\s+(QUOTES?|URLS?|LINKS?)|ONE\s+(QUOTE|URL|LINK)\s+(PER|EACH|APIECE|FOR\s+EACH)|BREAK\s+(THESE|THEM|IT)\s+OUT|SPLIT\s+(INTO|UP\s+INTO)\s+SEPARATE|AS\s+(THEIR|ITS)\s+OWN\s+(QUOTES?|URLS?|LINKS?))\b/;
-  let __separateQuotes = SEPARATE_QUOTES_RE.test(upper);
-
   // Multi-line License SKU Input (CSV/list from dashboard export)
   // Handles formats like:
   //   LIC-ENT-3YR,26\nLIC-MS120-8FP-3YR,4\n...
@@ -2435,34 +2427,17 @@ function parseMessage(text) {
   // ── Duo natural language handler ──
   // License-only product (no hardware). If tier is specified, return URLs directly.
   // If tier is NOT specified, prompt the user to choose (Essentials/Advantage/Premier).
-  // Multi-tier: "duo essentials, advantage, premier" emits all three tiers × 3 terms.
   const isDuo = /\b(?:DUO|CISCO\s*DUO)\b/i.test(upper);
   if (isDuo && !isAdvisory) {
-    // Collect ALL tiers mentioned, in order of appearance
-    const duoTiers = [];
-    const tierOrderRe = /\b(ADVANTAGE|PREMIER|ESSENTIAL(?:S)?)\b/gi;
-    let tm;
-    while ((tm = tierOrderRe.exec(upper)) !== null) {
-      const raw = tm[1].toUpperCase();
-      const canon = raw === 'ADVANTAGE' ? 'ADVANTAGE' : raw === 'PREMIER' ? 'PREMIER' : 'ESSENTIALS';
-      if (!duoTiers.includes(canon)) duoTiers.push(canon);
-    }
-    // "all duo" / "all duo quotes" / "all duo licenses" → all three tiers,
-    // auto-treat as separate quotes (user wants one URL per tier).
-    const isAllDuo = /\bALL\s+(?:CISCO\s+)?DUO\b/i.test(upper);
-    if (isAllDuo && duoTiers.length === 0) {
-      duoTiers.push('ESSENTIALS', 'ADVANTAGE', 'PREMIER');
-      __separateQuotes = true;
-    }
-
+    // Extract tier and qty with explicit checks (avoids regex group-shifting bugs)
+    let duoTier = null;
+    if (/ADVANTAGE/i.test(upper)) duoTier = 'ADVANTAGE';
+    else if (/PREMIER/i.test(upper)) duoTier = 'PREMIER';
+    else if (/ESSENTIAL/i.test(upper)) duoTier = 'ESSENTIALS';
     const duoQtyMatch = upper.match(/\b(\d+)\b/);
     const duoQty = duoQtyMatch ? parseInt(duoQtyMatch[1]) : 1;
 
-    // Detect explicit term request (e.g. "3 year duo")
-    const duoTermMatch = upper.match(/\b([135])\s*(?:YR|YEAR|YEARS)\b/);
-    const requestedTerm = duoTermMatch ? parseInt(duoTermMatch[1]) : null;
-
-    if (duoTiers.length === 0) {
+    if (!duoTier) {
       return {
         items: [],
         isQuote: false,
@@ -2474,70 +2449,38 @@ function parseMessage(text) {
           `Just reply with the tier name (e.g. "Duo Advantage") or "Duo Essentials ${duoQty}".`
       };
     }
-
-    // Build items: every tier × every term (1/3/5YR)
-    const duoItems = [];
-    for (const tier of duoTiers) {
-      for (const t of [1, 3, 5]) {
-        duoItems.push({ baseSku: `LIC-DUO-${tier}-${t}YR`, qty: duoQty, isLicenseOnly: true });
-      }
-    }
-
-    // Narrow to the requested term whenever the user specified one, regardless
-    // of tier count or separate_quotes. The 1/3/5YR cartesian only applies
-    // when NO term is stated — the renderer then emits one URL per term.
-    let duoFinalItems = duoItems;
-    if (requestedTerm) {
-      duoFinalItems = duoItems.filter(it => it.baseSku.endsWith(`-${requestedTerm}YR`));
-    }
-
     return {
-      items: duoFinalItems,
+      items: [
+        { baseSku: `LIC-DUO-${duoTier}-1YR`, qty: duoQty, isLicenseOnly: true },
+        { baseSku: `LIC-DUO-${duoTier}-3YR`, qty: duoQty, isLicenseOnly: true },
+        { baseSku: `LIC-DUO-${duoTier}-5YR`, qty: duoQty, isLicenseOnly: true }
+      ],
       isQuote: true,
-      isTermOptionQuote: true,
-      modifiers: { separateQuotes: __separateQuotes || duoTiers.length > 1 }
+      isTermOptionQuote: true
     };
   }
 
   // ── Umbrella natural language handler ──
   // License-only product. If type+tier specified, return URLs directly.
   // If missing, prompt user to choose type (DNS/SIG) and tier (Essentials/Advantage).
-  // Multi-type/multi-tier: "umbrella DNS essentials, DNS advantage, SIG advantage" emits all combinations.
   const isUmb = /\b(?:UMBRELLA|UMB)\b/i.test(upper);
   if (isUmb && !isAdvisory) {
-    // Collect ALL types (DNS, SIG) mentioned, in order of appearance
-    const umbTypes = [];
-    const typeRe = /\b(DNS|SIG)\b/gi;
-    let tym;
-    while ((tym = typeRe.exec(upper)) !== null) {
-      const canon = tym[1].toUpperCase();
-      if (!umbTypes.includes(canon)) umbTypes.push(canon);
-    }
-
-    // Collect ALL tiers (ESS, ADV) mentioned, in order of appearance
-    // Must match both literal spellings ("advantage", "essentials") and short forms ("adv", "ess").
-    const umbTiers = [];
-    const tierRe = /\b(ADV(?:ANTAGE|ANCED)?|ESS(?:ENTIALS?)?)\b/gi;
-    let trm;
-    while ((trm = tierRe.exec(upper)) !== null) {
-      const raw = trm[1].toUpperCase();
-      const canon = raw.startsWith('ADV') ? 'ADV' : 'ESS';
-      if (!umbTiers.includes(canon)) umbTiers.push(canon);
-    }
-
+    // Extract type, tier, qty with explicit checks
+    let umbType = null;
+    if (/\bSIG\b/i.test(upper)) umbType = 'SIG';
+    else if (/\bDNS\b/i.test(upper)) umbType = 'DNS';
+    let umbTier = null;
+    if (/ADV(?:ANCED)?/i.test(upper)) umbTier = 'ADV';
+    else if (/ESS(?:ENTIALS?)?/i.test(upper)) umbTier = 'ESS';
     const umbQtyMatch = upper.match(/\b(\d+)\b/);
     const umbQty = umbQtyMatch ? parseInt(umbQtyMatch[1]) : 1;
 
-    // Detect explicit term request (e.g. "3 year umbrella")
-    const umbTermMatch = upper.match(/\b([135])\s*(?:YR|YEAR|YEARS)\b/);
-    const umbRequestedTerm = umbTermMatch ? parseInt(umbTermMatch[1]) : null;
-
-    if (umbTypes.length === 0 || umbTiers.length === 0) {
+    if (!umbType || !umbTier) {
       let prompt = `Which Umbrella package do you need? (qty: ${umbQty})\n\n`;
-      if (umbTypes.length === 0) {
+      if (!umbType) {
         prompt += `**Type:**\n• **DNS Security** — DNS-layer protection\n• **SIG** (Secure Internet Gateway) — full web proxy + DNS\n\n`;
       }
-      if (umbTiers.length === 0) {
+      if (!umbTier) {
         prompt += `**Tier:**\n• **Essentials** — core protection\n• **Advantage** — Essentials + advanced features\n\n`;
       }
       prompt += `Reply with the full package, e.g. "Umbrella DNS Essentials ${umbQty}" or "Umbrella SIG Advantage".`;
@@ -2548,31 +2491,14 @@ function parseMessage(text) {
         clarificationMessage: prompt
       };
     }
-
-    // Build items: cartesian product of types × tiers × all three terms (1/3/5YR)
-    const umbItems = [];
-    for (const type of umbTypes) {
-      for (const tier of umbTiers) {
-        for (const t of [1, 3, 5]) {
-          umbItems.push({ baseSku: `LIC-UMB-${type}-${tier}-K9-${t}YR`, qty: umbQty, isLicenseOnly: true });
-        }
-      }
-    }
-
-    // Narrow to the requested term whenever the user specified one. The
-    // 1/3/5YR cartesian only applies when NO term is stated — the renderer
-    // then emits one URL per term.
-    const combos = umbTypes.length * umbTiers.length;
-    let umbFinalItems = umbItems;
-    if (umbRequestedTerm) {
-      umbFinalItems = umbItems.filter(it => it.baseSku.endsWith(`-${umbRequestedTerm}YR`));
-    }
-
     return {
-      items: umbFinalItems,
+      items: [
+        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-1YR`, qty: umbQty, isLicenseOnly: true },
+        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-3YR`, qty: umbQty, isLicenseOnly: true },
+        { baseSku: `LIC-UMB-${umbType}-${umbTier}-K9-5YR`, qty: umbQty, isLicenseOnly: true }
+      ],
       isQuote: true,
-      isTermOptionQuote: true,
-      modifiers: { separateQuotes: __separateQuotes || combos > 1 }
+      isTermOptionQuote: true
     };
   }
 
@@ -2807,7 +2733,6 @@ function buildQuoteResponse(parsed) {
 
   // Duo / Umbrella license-only products — return 1Y/3Y/5Y URLs directly
   if (parsed.isTermOptionQuote && parsed.items) {
-    const separateQuotes = Boolean(parsed.modifiers && parsed.modifiers.separateQuotes);
     const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
     for (const item of parsed.items) {
       const termMatch = item.baseSku.match(/(\d)YR?$/i);
@@ -2817,43 +2742,6 @@ function buildQuoteResponse(parsed) {
       }
     }
     const lines = [];
-    // separateQuotes: emit one URL per (tier, term) pair. We detect distinct
-    // tier families by stripping the term suffix from each SKU.
-    if (separateQuotes) {
-      const tierFamilies = new Map(); // tierKey → tier label
-      for (const item of parsed.items) {
-        const tierKey = item.baseSku.replace(/-(\d)YR?$/i, '');
-        if (!tierFamilies.has(tierKey)) {
-          // Friendly label: LIC-DUO-ESSENTIALS → "Duo Essentials"
-          let label = tierKey
-            .replace(/^LIC-/, '')
-            .replace(/-K9$/, '')
-            .replace(/-/g, ' ')
-            .replace(/\bDUO\b/, 'Duo')
-            .replace(/\bUMB\b/, 'Umbrella')
-            .replace(/\bESSENTIALS\b/i, 'Essentials')
-            .replace(/\bADVANTAGE\b/i, 'Advantage')
-            .replace(/\bPREMIER\b/i, 'Premier')
-            .replace(/\bESS\b/i, 'Essentials')
-            .replace(/\bADV\b/i, 'Advantage')
-            .replace(/\bDNS\b/i, 'DNS')
-            .replace(/\bSIG\b/i, 'SIG');
-          tierFamilies.set(tierKey, label.trim());
-        }
-      }
-      for (const [tierKey, label] of tierFamilies) {
-        lines.push(`**${label}:**`);
-        for (const term of ['1YR', '3YR', '5YR']) {
-          const matching = termGroups[term].filter(s => s.sku.replace(/-(\d)YR?$/i, '') === tierKey);
-          if (matching.length > 0) {
-            const url = buildStratusUrl(matching);
-            lines.push(`${term.replace('YR', '-Year')} Co-Term: ${url}`);
-          }
-        }
-        lines.push('');
-      }
-      return { message: lines.join('\n').trim(), needsLlm: false };
-    }
     for (const [term, skus] of Object.entries(termGroups)) {
       if (skus.length > 0) {
         const url = buildStratusUrl(skus);
@@ -4345,6 +4233,50 @@ function normalizeDomain(d) {
     .replace(/^www\./, '')
     .replace(/\/.*$/, '')
     .trim();
+}
+
+// Consumer/free email domains. When the sender uses one of these, domain-based
+// Account lookups are meaningless (nobody has Website=gmail.com) so we fall back
+// to a word-search on the email local-part (e.g. "ericrochow" → "Eric Rochow
+// Residence"). Kept in sync with CONSUMER_DOMAINS in chrome-extension/src/lib/constants.js.
+const CONSUMER_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com',
+  'icloud.com', 'protonmail.com', 'live.com', 'msn.com', 'me.com', 'mac.com',
+  'comcast.net', 'att.net', 'verizon.net', 'sbcglobal.net', 'cox.net',
+]);
+
+// Fallback for consumer-domain emails (gmail, yahoo, etc.): search Accounts by
+// the email local-part as a word query. Catches small/residential customers
+// who appear in Zoho as "Eric Rochow Residence" rather than a company.
+// Returns raw Zoho Account object or null.
+async function resolveAccountByConsumerEmail(email, env) {
+  if (!email || typeof email !== 'string') return null;
+  const e = email.trim().toLowerCase();
+  const [localPart, domain] = e.split('@');
+  if (!localPart || !domain || localPart.length < 3) return null;
+  if (!CONSUMER_DOMAINS.has(domain)) return null;
+  const fields = 'id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Phone,Website';
+  try {
+    const r = await zohoApiCall('GET',
+      `Accounts/search?word=${encodeURIComponent(localPart)}&fields=${fields}&per_page=3`, env);
+    if (r?.data?.[0]) return r.data[0];
+  } catch (_) {}
+  return null;
+}
+
+// Pull the most recently modified Contact on an Account. Used when Tier 1
+// (website) or Tier 3 (alias-kv) resolves an Account but no Contact was
+// matched by the sender's email — gives the sidebar someone to display
+// instead of "No contact record" (e.g. Bekum America Corp → Jack Shy).
+async function fetchPrimaryContactForAccount(accountId, env) {
+  if (!accountId) return null;
+  const fields = 'id,First_Name,Last_Name,Full_Name,Email,Secondary_Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip';
+  try {
+    const r = await zohoApiCall('GET',
+      `Contacts/search?criteria=(Account_Name:equals:${encodeURIComponent(accountId)})&fields=${fields}&sort_by=Modified_Time&sort_order=desc&per_page=1`, env);
+    if (r?.data?.[0]) return r.data[0];
+  } catch (_) {}
+  return null;
 }
 
 // Required billing fields for any Account that will be used to create a Deal+Quote.
@@ -14352,7 +14284,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           // Returns { contact, account, deals, tasks, recentCompleted, quotes, found }.
           // All Zoho queries run in parallel via Promise.all for ~1s total response time.
           case '/api/crm-full': {
-            const { email: fullEmail, domain: fullDomain, include: fullInclude } = apiBody;
+            const { email: fullEmail, domain: fullDomain, include: fullInclude, nameHint: fullNameHint } = apiBody;
             if (!fullEmail && !fullDomain) {
               return new Response(JSON.stringify({ error: 'email or domain required' }), { status: 400, headers: jsonHeaders });
             }
@@ -14362,7 +14294,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
 
             try {
               // ── KV cache check (5-min TTL for full batch) ──
-              const fullCacheKey = `crm_full_${fullEmail || fullDomain}`;
+              const fullCacheKey = `crm_full_${(fullEmail || fullDomain).toLowerCase()}`;
               if (env.GCHAT_CONVERSATION_KV) {
                 try {
                   const cached = await env.GCHAT_CONVERSATION_KV.get(fullCacheKey, 'json');
@@ -14402,64 +14334,55 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 // Cisco reps: no account/deals/tasks/quotes
                 apiResult = { contact, account: null, deals: [], tasks: [], recentCompleted: [], quotes: [], weborders: [], found: !!contact, isCiscoRep: true };
               } else {
-                // Standard contact + account parallel lookup
-                const contactPromise = fullEmail
-                  ? zohoApiCall('GET',
-                      `Contacts/search?email=${encodeURIComponent(fullEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
-                    ).catch(() => null)
-                  : Promise.resolve(null);
+                // ── Waterfall + fallbacks (mirrors /api/crm-contact) ──
+                const waterfall = await resolveAccountWaterfall({
+                  domain: fullDomain,
+                  email: fullEmail,
+                  nameHint: fullNameHint || null,
+                }, env).catch(() => null);
 
-                const domainCore = fullDomain ? fullDomain.replace(/^(www\.)/i, '') : '';
-                const domainPromise = domainCore
-                  ? zohoApiCall('GET',
-                      `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domainCore)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
-                    ).catch(() => null)
-                  : Promise.resolve(null);
+                let rawAccount = waterfall?.account || null;
+                let rawContact = waterfall?.contact || null;
+                let fullMatchSource = waterfall?.source || null;
 
-                const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
+                if (!rawAccount && fullEmail) {
+                  const consumerAcct = await resolveAccountByConsumerEmail(fullEmail, env);
+                  if (consumerAcct) {
+                    rawAccount = consumerAcct;
+                    fullMatchSource = 'consumer-localpart';
+                  }
+                }
 
-                if (contactResp?.data?.[0]) {
-                  const c = contactResp.data[0];
+                if (rawAccount && !rawContact) {
+                  const primary = await fetchPrimaryContactForAccount(rawAccount.id, env);
+                  if (primary) rawContact = primary;
+                }
+
+                if (rawContact) {
                   contact = {
-                    id: c.id, firstName: c.First_Name || '', lastName: c.Last_Name || '',
-                    fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
-                    email: c.Email || fullEmail, phone: c.Phone || '', mobile: c.Mobile || '',
-                    title: c.Title || '', accountId: c.Account_Name?.id || null,
-                    accountName: c.Account_Name?.name || '',
-                    address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
+                    id: rawContact.id,
+                    firstName: rawContact.First_Name || '', lastName: rawContact.Last_Name || '',
+                    fullName: rawContact.Full_Name || ((rawContact.First_Name || '') + ' ' + (rawContact.Last_Name || '')).trim(),
+                    email: rawContact.Email || fullEmail,
+                    phone: rawContact.Phone || '', mobile: rawContact.Mobile || '',
+                    title: rawContact.Title || '',
+                    accountId: rawContact.Account_Name?.id || rawAccount?.id || null,
+                    accountName: rawContact.Account_Name?.name || rawAccount?.Account_Name || '',
+                    address: [rawContact.Mailing_Street, rawContact.Mailing_City, rawContact.Mailing_State, rawContact.Mailing_Zip].filter(Boolean).join(', '),
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${rawContact.id}`,
                   };
                 }
 
-                const acctId = contact?.accountId;
-                if (acctId) {
-                  try {
-                    const acctResp = await zohoApiCall('GET',
-                      `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry`, env
-                    );
-                    if (acctResp?.data?.[0]) {
-                      const a = acctResp.data[0];
-                      account = {
-                        id: a.id, name: a.Account_Name || '', phone: a.Phone || '',
-                        website: a.Website || '',
-                        address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
-                        industry: a.Industry || '',
-                        zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
-                      };
-                    }
-                  } catch (_) {}
-                } else if (domainResp?.data?.[0]) {
-                  const a = domainResp.data[0];
+                if (rawAccount) {
                   account = {
-                    id: a.id, name: a.Account_Name || '', phone: a.Phone || '',
-                    website: a.Website || '',
-                    address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
-                    industry: a.Industry || '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                    id: rawAccount.id,
+                    name: rawAccount.Account_Name || '',
+                    phone: rawAccount.Phone || '',
+                    website: rawAccount.Website || '',
+                    address: [rawAccount.Billing_Street, rawAccount.Billing_City, rawAccount.Billing_State, rawAccount.Billing_Code].filter(Boolean).join(', '),
+                    industry: rawAccount.Industry || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${rawAccount.id}`,
                   };
-                }
-
-                if (contact) {
-                  contact.zohoUrl = `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contact.id}`;
                 }
 
                 // ── Phase 2: Deals + Tasks + Quotes in PARALLEL ──
@@ -14648,7 +14571,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   }
                 }
 
-                apiResult = { contact, account, deals, tasks, recentCompleted, quotes, weborders, found: !!(contact || account) };
+                apiResult = { contact, account, deals, tasks, recentCompleted, quotes, weborders, found: !!(contact || account), matchSource: fullMatchSource };
               }
 
               // Cache in KV (5-min TTL)
@@ -14665,16 +14588,21 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           }
 
           // ── CRM Contact Lookup: Find contact + account by email/domain ──
-          // Optimized: parallel Zoho calls + server-side KV cache (10-min TTL)
+          // Uses the 4-tier account waterfall (Website equals → Contact Email/
+          // Secondary_Email → alias KV → fuzzy name) plus a consumer-domain
+          // local-part fallback for residential customers and a contact-by-
+          // account fallback when the waterfall resolves an account alone.
+          // Server-side KV cache (10-min TTL, positive results only).
           case '/api/crm-contact': {
-            const { email: contactEmail, domain: contactDomain } = apiBody;
+            const { email: contactEmail, domain: contactDomain, nameHint: contactNameHint } = apiBody;
             if (!contactEmail && !contactDomain) {
               return new Response(JSON.stringify({ error: 'email or domain required' }), { status: 400, headers: jsonHeaders });
             }
 
             try {
-              // Check KV cache first (10-min TTL)
-              const cacheKey = `crm_contact_${contactEmail || contactDomain}`;
+              // Check KV cache first (10-min TTL). Normalize key to lowercase so
+              // the same email with different casing shares a single cache entry.
+              const cacheKey = `crm_contact_${(contactEmail || contactDomain).toLowerCase()}`;
               if (env.GCHAT_CONVERSATION_KV) {
                 try {
                   const cached = await env.GCHAT_CONVERSATION_KV.get(cacheKey, 'json');
@@ -14727,83 +14655,75 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 apiResult = { contact, account: null, found: !!contact, isCiscoRep: true };
 
               } else {
-                // Standard flow: search Contacts + Accounts in parallel
+                // ── Standard flow: account-resolution waterfall ──
+                // Tier 1: Account.Website equals domain
+                // Tier 2: Contact.Email or Secondary_Email equals sender (hops
+                //         to Account; handles cross-domain like Jack Shy @ Bekum)
+                // Tier 3: domain alias KV (manually curated bekum.com → Bekum America)
+                // Tier 4: consumer-domain local-part word search on Accounts
+                //         (Eric Rochow <ericrochow@gmail.com> → "Eric Rochow Residence")
+                // Tier 5: contact-by-account fallback if we landed on an account
+                //         alone (surfaces primary contact for the sidebar).
+                const waterfall = await resolveAccountWaterfall({
+                  domain: contactDomain,
+                  email: contactEmail,
+                  nameHint: contactNameHint || null,
+                }, env).catch(() => null);
 
-                // PARALLEL: Search contact by email AND account by domain simultaneously
-                const contactPromise = contactEmail
-                  ? zohoApiCall('GET',
-                      `Contacts/search?email=${encodeURIComponent(contactEmail)}&fields=id,First_Name,Last_Name,Full_Name,Email,Phone,Mobile,Title,Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip`, env
-                    ).catch(() => null)
-                  : Promise.resolve(null);
+                let rawAccount = waterfall?.account || null;
+                let rawContact = waterfall?.contact || null;
+                let matchSource = waterfall?.source || null;
 
-                // Strip common prefixes for starts_with matching (easyice.com matches "https://www.easyice.com")
-                const domainCore = contactDomain ? contactDomain.replace(/^(www\.)/i, '') : '';
-                const domainPromise = domainCore
-                  ? zohoApiCall('GET',
-                      `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domainCore)}))&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry&per_page=3`, env
-                    ).catch(() => null)
-                  : Promise.resolve(null);
+                // Tier 4: consumer-domain local-part fallback.
+                // Fires only when the waterfall returned nothing and the sender
+                // domain is a known consumer domain (gmail, yahoo, etc.).
+                if (!rawAccount && contactEmail) {
+                  const consumerAcct = await resolveAccountByConsumerEmail(contactEmail, env);
+                  if (consumerAcct) {
+                    rawAccount = consumerAcct;
+                    matchSource = 'consumer-localpart';
+                  }
+                }
 
-                const [contactResp, domainResp] = await Promise.all([contactPromise, domainPromise]);
+                // Tier 5: contact-by-account fallback.
+                // Waterfall resolved an Account but no Contact tied back — surface
+                // the primary (most recently modified) contact on that account.
+                if (rawAccount && !rawContact) {
+                  const primary = await fetchPrimaryContactForAccount(rawAccount.id, env);
+                  if (primary) rawContact = primary;
+                }
 
-                // Process contact result
-                if (contactResp?.data?.[0]) {
-                  const c = contactResp.data[0];
+                // ── Normalize into the extension's expected shape ──
+                if (rawContact) {
                   contact = {
-                    id: c.id,
-                    firstName: c.First_Name || '',
-                    lastName: c.Last_Name || '',
-                    fullName: c.Full_Name || ((c.First_Name || '') + ' ' + (c.Last_Name || '')).trim(),
-                    email: c.Email || contactEmail,
-                    phone: c.Phone || '',
-                    mobile: c.Mobile || '',
-                    title: c.Title || '',
-                    accountId: c.Account_Name?.id || null,
-                    accountName: c.Account_Name?.name || '',
-                    address: [c.Mailing_Street, c.Mailing_City, c.Mailing_State, c.Mailing_Zip].filter(Boolean).join(', '),
+                    id: rawContact.id,
+                    firstName: rawContact.First_Name || '',
+                    lastName: rawContact.Last_Name || '',
+                    fullName: rawContact.Full_Name || ((rawContact.First_Name || '') + ' ' + (rawContact.Last_Name || '')).trim(),
+                    email: rawContact.Email || contactEmail,
+                    phone: rawContact.Phone || '',
+                    mobile: rawContact.Mobile || '',
+                    title: rawContact.Title || '',
+                    accountId: rawContact.Account_Name?.id || rawAccount?.id || null,
+                    accountName: rawContact.Account_Name?.name || rawAccount?.Account_Name || '',
+                    address: [rawContact.Mailing_Street, rawContact.Mailing_City, rawContact.Mailing_State, rawContact.Mailing_Zip].filter(Boolean).join(', '),
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${rawContact.id}`,
                   };
                 }
 
-                // Resolve account: prefer linked account from contact, fall back to domain search
-                const acctId = contact?.accountId;
-                if (acctId) {
-                  // Contact has linked account — fetch full details
-                  try {
-                    const acctResp = await zohoApiCall('GET',
-                      `Accounts/${acctId}?fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code,Industry`, env
-                    );
-                    if (acctResp?.data?.[0]) {
-                      const a = acctResp.data[0];
-                      account = {
-                        id: a.id,
-                        name: a.Account_Name || '',
-                        phone: a.Phone || '',
-                        website: a.Website || '',
-                        address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
-                        industry: a.Industry || '',
-                        zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
-                      };
-                    }
-                  } catch (_) {}
-                } else if (domainResp?.data?.[0]) {
-                  // Use the domain search result that ran in parallel
-                  const a = domainResp.data[0];
+                if (rawAccount) {
                   account = {
-                    id: a.id,
-                    name: a.Account_Name || '',
-                    phone: a.Phone || '',
-                    website: a.Website || '',
-                    address: [a.Billing_Street, a.Billing_City, a.Billing_State, a.Billing_Code].filter(Boolean).join(', '),
-                    industry: a.Industry || '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${a.id}`,
+                    id: rawAccount.id,
+                    name: rawAccount.Account_Name || '',
+                    phone: rawAccount.Phone || '',
+                    website: rawAccount.Website || '',
+                    address: [rawAccount.Billing_Street, rawAccount.Billing_City, rawAccount.Billing_State, rawAccount.Billing_Code].filter(Boolean).join(', '),
+                    industry: rawAccount.Industry || '',
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${rawAccount.id}`,
                   };
                 }
 
-                if (contact) {
-                  contact.zohoUrl = `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contact.id}`;
-                }
-
-                apiResult = { contact, account, found: !!(contact || account) };
+                apiResult = { contact, account, found: !!(contact || account), matchSource };
               }
 
               // Cache result in KV (10-min TTL)
@@ -16520,14 +16440,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 
               // CF: quote — deterministic engine executes the quote
               if (!reply && classification.intent === 'quote') {
-                // Pre-parse natural-language override: "all duo"/"all umbrella"
-                // phrasing carries product-family intent that V2/CF extraction can
-                // mangle. When present, run parseMessage on the ORIGINAL text so
-                // the NL handler fires with the full context intact.
-                const NL_OVERRIDE_RE = /\bALL\s+(?:CISCO\s+)?(?:DUO|UMBRELLA)\b/i;
-                const quoteText = NL_OVERRIDE_RE.test(text)
-                  ? text
-                  : (classification.extracted || text);
+                const quoteText = classification.extracted || text;
                 const quoteParsed = parseMessage(quoteText);
                 if (quoteParsed && !quoteParsed.isClarification) {
                   const quoteResult = buildQuoteResponse(quoteParsed);

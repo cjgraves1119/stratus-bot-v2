@@ -314,85 +314,10 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     const thisAbort = abortRef.current;
 
     try {
-      // ── Deterministic quoting intercept ──
-      // Detect if the user is asking for a URL quote (not a Zoho CRM quote)
-      // Route through worker API — same parseMessage + buildQuoteResponse as Webex/GChat bots
-      const isQuoteIntent = /^\s*(quote|price|cost|order|get me|give me|generate)\s/i.test(messageText) &&
-        /\b(MR|MS|MX|MV|MT|MG|CW|C9|C8|Z\d|LIC-)\w*/i.test(messageText) &&
-        !/\b(zoho|crm|deal|account)\b/i.test(messageText);
-      const isDirectSku = /^\s*\d+\s*(x\s*)?(MR|MS|MX|MV|MT|MG|CW|C9|Z\d)/i.test(messageText);
-
-      if (isQuoteIntent || isDirectSku) {
-        try {
-          const apiResult = await sendToBackground(MSG.GENERATE_QUOTE, { skuText: messageText.trim(), personId: 'chrome-ext-chat-' + Date.now() });
-          if (apiResult) {
-            const rawUrls = apiResult.quoteUrls || apiResult.urls || [];
-            const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
-            const eolArr = Array.isArray(apiResult.eolWarnings) ? apiResult.eolWarnings : [];
-            const suggestArr = Array.isArray(apiResult.suggestions) ? apiResult.suggestions : [];
-
-            let replyText = '';
-
-            // Suggestions (invalid/incomplete SKUs)
-            if (suggestArr.length > 0) {
-              replyText += '**⚠️ SKU Validation Issues:**\n\n';
-              for (const s of suggestArr) {
-                replyText += `• **${s.input}**: ${s.reason}`;
-                if (s.suggest && s.suggest.length > 0) {
-                  replyText += ` → Did you mean: ${s.suggest.join(', ')}?`;
-                }
-                replyText += '\n';
-              }
-              replyText += '\nPlease correct the SKUs and try again.\n';
-            }
-
-            // Pricing response
-            if (apiResult.pricingResponse) {
-              replyText += '**💰 Pricing:**\n\n' + apiResult.pricingResponse;
-            }
-
-            // EOL date response
-            if (apiResult.eolDateResponse) {
-              replyText += apiResult.eolDateResponse;
-            }
-
-            // Claude advisory response
-            if (apiResult.claudeResponse) {
-              replyText += apiResult.claudeResponse;
-            }
-
-            // Quote URLs
-            if (urlsArr.length > 0) {
-              if (replyText) replyText += '\n\n';
-              replyText += '**⚡ Deterministic Quote:**\n\n';
-              if (eolArr.length > 0) {
-                replyText += '**EOL Warnings:**\n';
-                for (const w of eolArr) replyText += `• ${w}\n`;
-                replyText += '\n';
-              }
-              for (const urlObj of urlsArr) {
-                const u = (typeof urlObj === 'object') ? urlObj : { url: String(urlObj), label: 'Quote' };
-                replyText += `**${u.label}:**\n[${u.url.length > 80 ? u.url.substring(0, 80) + '...' : u.url}](${u.url})\n\n`;
-              }
-            }
-
-            if (replyText.trim()) {
-              const assistantMsg = {
-                id: Date.now() + 1,
-                role: 'assistant',
-                content: replyText.trim(),
-                usedTools: false,
-                timestamp: new Date().toISOString(),
-              };
-              onMessagesChange([...updatedMessages, assistantMsg]);
-              setLoading(false);
-              return;
-            }
-          }
-        } catch (quoteErr) {
-          console.warn('[Stratus] Quote API intercept failed, falling back to chat:', quoteErr);
-        }
-      }
+      // NOTE: URL quote intercept removed in v1.11.7.
+      // Chat tab is now Zoho-only — every quote request routes through the
+      // Claude/Zoho handoff below so it picks up the pinned account or the
+      // active Zoho page record. URL quotes live in the Quote tab.
 
       const historyForApi = (messages || []).slice(-10).map(m => ({
         role: m.role,
@@ -412,8 +337,35 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
       // the query context — not injected into system prompt (which Claude flags as
       // prompt injection when it looks like capability claims).
       // Priority: manually-pinned record > auto-detected Zoho page context.
+      //
+      // Force a synchronous re-read of chrome.storage.local before building the
+      // hint so we capture the latest detected record even if the 2s poll in the
+      // mount effect hasn't cycled yet (first-message race fix, v1.11.7).
+      let freshZohoCtx = zohoPageContext;
+      if (!manualRecord) {
+        try {
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          const onZoho = (activeTab?.url || '').startsWith('https://crm.zoho.com/');
+          if (onZoho) {
+            const stored = await chrome.storage.local.get('zohoPageContext');
+            if (stored?.zohoPageContext?.recordId) {
+              freshZohoCtx = stored.zohoPageContext;
+              // Sync state so the context bar label updates too
+              if (!zohoPageContext || zohoPageContext.recordId !== freshZohoCtx.recordId) {
+                setZohoPageContext(freshZohoCtx);
+              }
+            }
+          } else {
+            // Tab isn't on Zoho — don't leak stale context into Gmail/other pages
+            freshZohoCtx = null;
+          }
+        } catch (err) {
+          console.warn('[Stratus Chat] Pre-send page context refresh failed:', err?.message);
+        }
+      }
+
       let textToSend = messageText;
-      const activeRecord = manualRecord || zohoPageContext;
+      const activeRecord = manualRecord || freshZohoCtx;
       const zohoHint = buildZohoPageContextHint(activeRecord);
       if (zohoHint) {
         const source = manualRecord ? 'pinned by user' : 'currently viewing';

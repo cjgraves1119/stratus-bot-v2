@@ -216,16 +216,30 @@ function extractEmailData() {
 
   const isOutbound = senderEmail.toLowerCase().includes('@stratusinfosystems.com');
 
-  // Find customer email (first non-Stratus, non-consumer-domain participant)
+  // Find customer email — prefer non-Cisco, non-Stratus participants.
+  // Stratus emails are already filtered out during extraction. Cisco reps
+  // still appear in threadContacts (for the dropdown/ciscoEmails list) but
+  // should never be the default customerEmail. Fall back to first Cisco
+  // rep only if literally no other external participant is present.
   let customerEmail = '';
   let customerName = '';
   let customerDomain = '';
+  let fallbackCiscoContact = null;
   for (const contact of threadContacts) {
-    const domain = contact.email.split('@')[1] || '';
+    const domain = (contact.email.split('@')[1] || '').toLowerCase();
+    if (domain === 'cisco.com') {
+      if (!fallbackCiscoContact) fallbackCiscoContact = contact;
+      continue;
+    }
     customerEmail = contact.email;
     customerName = contact.name;
     customerDomain = domain;
     break;
+  }
+  if (!customerEmail && fallbackCiscoContact) {
+    customerEmail = fallbackCiscoContact.email;
+    customerName = fallbackCiscoContact.name;
+    customerDomain = (fallbackCiscoContact.email.split('@')[1] || '').toLowerCase();
   }
 
   // CCW Deal ID detection from subject line (Cisco Commerce notification emails)
