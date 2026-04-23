@@ -7,6 +7,11 @@ compatibility_date = "2024-01-01"
 # WEBEX_BOT_TOKEN = set via wrangler secret
 # ANTHROPIC_API_KEY = set via wrangler secret
 
+# Product_info waterfall feature flag. Plain-text env var (not secret) so the value
+# is guaranteed clean — stdin-uploaded secrets can pick up trailing newlines that
+# break strict equality checks. Toggle "true"/"false" here, push to redeploy.
+USE_PRODUCT_INFO_WATERFALL = "true"
+
 # ── D1 Database: Analytics & history ─────────────────────────────────
 # Quote history, bot usage analytics, CRM operation log, pricing history
 [[d1_databases]]
