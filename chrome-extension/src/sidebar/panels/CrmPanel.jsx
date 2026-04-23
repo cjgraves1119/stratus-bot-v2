@@ -128,10 +128,12 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     const domain = email ? (email.split('@')[1] || '').toLowerCase() : '';
     setSelectedContact(email || '');
     setManualEmail('');
-    // Auto-lookup only for business domains — consumer domains need manual action
-    if (!domain || CONSUMER_DOMAINS.has(domain)) {
+    // Auto-lookup for both business and consumer domains.
+    // Consumer-domain support: worker-gchat waterfall now skips Website-match
+    // Tier 1 (polluted-data safe) and adds Tier 4 consumer local-part fallback.
+    if (!domain) {
       setData(null); setDeals(null); setTasks(null);
-      return; // Dropdown still shows (user can click a different participant or use manual search)
+      return;
     }
     lookupCrm(email, domain);
   }, [emailContext?.senderEmail, emailContext?.customerEmail]);
@@ -642,11 +644,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               color: 'white', fontWeight: 700, fontSize: 16, flexShrink: 0,
             }}>
-              {(contact.name || contact.firstName || 'U')[0].toUpperCase()}
+              {(contact.fullName || contact.name || contact.firstName || contact.email || 'U')[0].toUpperCase()}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.TEXT_PRIMARY, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {contact.name || `${contact.firstName || ''} ${contact.lastName || ''}`.trim()}
+                {contact.fullName || contact.name || `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email}
               </div>
               {contact.title && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>{contact.title}</div>}
             </div>
@@ -882,7 +884,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
               <Card>
                 <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 6 }}>Contact Details</div>
                 <div style={{ fontSize: 13, color: COLORS.TEXT_PRIMARY }}>
-                  <div style={{ fontWeight: 500 }}>{contact.name || `${contact.firstName || ''} ${contact.lastName || ''}`}</div>
+                  <div style={{ fontWeight: 500 }}>{contact.fullName || contact.name || `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || contact.email}</div>
                   {contact.title && <div style={{ color: COLORS.TEXT_SECONDARY, fontSize: 12 }}>{contact.title}</div>}
                   <div style={{ fontSize: 12, marginTop: 4 }}>{contact.email}</div>
                   {contact.phone && <div style={{ fontSize: 12 }}>{contact.phone}</div>}

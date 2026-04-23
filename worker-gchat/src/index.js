@@ -4328,7 +4328,7 @@ async function resolveContactByEmail(email, env) {
   if (!email || typeof email !== 'string') return null;
   const e = email.trim().toLowerCase();
   if (!e.includes('@')) return null;
-  const fields = 'id,Full_Name,Email,Secondary_Email,Account_Name,Title,Phone';
+  const fields = 'id,First_Name,Last_Name,Full_Name,Email,Secondary_Email,Account_Name,Title,Phone,Mobile,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip';
   // Try primary Email first, then Secondary_Email as a fallback.
   const criteria = [`(Email:equals:${e})`, `(Secondary_Email:equals:${e})`];
   for (const c of criteria) {
