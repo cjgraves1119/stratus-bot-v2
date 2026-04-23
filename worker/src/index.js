@@ -591,24 +591,36 @@ const CF_GROUNDING_RULES = `
 4. MULTI-PRODUCT ORDER URLS. When the user asks about multiple distinct products and you output Stratus order links, produce ONE URL per product. Never concatenate SKUs from different products into a single item list. Format: https://stratusinfosystems.com/order/?item={SKU}&qty={N}
 
 5. UNCERTAINTY. If a requested spec, SKU, or price is not in the context above, say so plainly. Do NOT invent SKUs that are not in the SPECS / PRICING / DATASHEET blocks.
+
+6. WEBEX FORMATTING. This response renders in Webex chat, which does NOT render markdown tables (| col | col |). For multi-product comparisons, use grouped bullets per model instead. Format:
+**ModelA**
+• Spec1: value
+• Spec2: value
+
+**ModelB**
+• Spec1: value
+• Spec2: value
+
+Followed by a short **Summary:** paragraph naming the practical difference. Keep bolding for model names and spec categories only. Never output a pipe-delimited table row.
 `;
 
 // ═══ PRODUCT_INFO WATERFALL CLASSIFIER ═══
 // Cheap regex-based router called after V2 classifier returns intent=product_info.
 // Decides which model handles the answer-generation step:
 //
-//   'simple_lookup' → Llama 4 Scout + CF_GROUNDING_RULES (fast, free, 3/3 on these intents)
+//   'simple_lookup' → Llama 4 Scout + CF_GROUNDING_RULES (fast, free, grounded-datasheet)
 //     • Single-model spec: "specs of the MS150-24P", "what does the MR44 do"
 //     • License: "what license does X need", "license term for Y"
 //     • EOL: "what replaces the MR42", "is MX67 EOL"
 //     • Datasheet followup (prior_context present): "get specifics from datasheet"
+//     • Multi-model spec comparison: "MX95 vs MX105", "difference between MR46 and CW9164"
+//       (injected specs block contains both — Llama reads, tabulates, no judgment needed)
 //
 //   'advisory' → Claude Sonnet 4.6 (keeps current accuracy)
 //     • Category superlatives: "highest-end", "flagship", "best", "most powerful", "top"
-//     • Comparisons: "compare", "vs", "versus", "difference between"
 //     • Pricing: "cost", "price", "how much", "budget", "breakdown"
 //     • Recommendations: "recommend", "what should I use", "what do I need for X"
-//     • Any multi-product request
+//     • Single-model comparison against non-Meraki gear (no multi-Meraki-model in message)
 //
 // Default on ambiguity: 'advisory' (Claude). Bias toward accuracy — the waterfall
 // only wins if it never regresses quality. Flag: USE_PRODUCT_INFO_WATERFALL=true
@@ -625,11 +637,19 @@ function classifyProductInfoSubtype(userMessage, hasImage) {
   const RECOMMEND = /\b(RECOMMEND|SUGGEST|WHAT\s+SHOULD\s+I|WHAT\s+DO\s+I\s+NEED|WHICH\s+(FIREWALL|SWITCH|AP|ACCESS\s+POINT|CAMERA|DEVICE|PRODUCT)|SIZE\s+(FOR|A)|FOR\s+A?\s*(SCHOOL|HOSPITAL|OFFICE|WAREHOUSE|CAMPUS)\s+(OF|WITH)?)\b/;
   const MULTI_MODEL = /\b(MR\d+|CW\d+|MX\d+|MS\d+|MV\d+|MT\d+|MG\d+|Z\d)\D+?(MR\d+|CW\d+|MX\d+|MS\d+|MV\d+|MT\d+|MG\d+|Z\d)\b/i;
 
+  // Hard advisory gates — these require Claude's judgment
   if (SUPERLATIVE.test(upper)) return 'advisory';
-  if (COMPARISON.test(upper)) return 'advisory';
   if (PRICING.test(upper)) return 'advisory';
   if (RECOMMEND.test(upper)) return 'advisory';
-  if (MULTI_MODEL.test(m)) return 'advisory';
+
+  // Spec comparison path — multi-model + comparison intent with NO superlative/pricing/recommend
+  // above. Pure datasheet lookups ("MX95 vs MX105", "difference between MR46 and CW9164")
+  // are well within Llama's grounded-spec ability per bench v2 (20/24 with CF_GROUNDING_RULES).
+  if (MULTI_MODEL.test(m) && COMPARISON.test(upper)) return 'simple_lookup';
+  if (MULTI_MODEL.test(m)) return 'simple_lookup';
+
+  // Single-model comparisons against non-Meraki gear (e.g. "MR46 vs Ubiquiti U7") stay advisory
+  if (COMPARISON.test(upper)) return 'advisory';
 
   // Simple-lookup signals
   const SINGLE_MODEL_SPEC = /\b(SPECS?|SPECIFICATIONS?|DETAILS?|FEATURES?|CAPABILIT|WHAT\s+IS\s+(THE\s+)?(MR|CW|MX|MS|MV|MT|MG|Z)\d+|TELL\s+ME\s+ABOUT|WHAT\s+DOES\s+(THE\s+)?(MR|CW|MX|MS|MV|MT|MG|Z)\d+\s+DO|INFO\s+ON)\b/;
