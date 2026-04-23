@@ -6054,22 +6054,51 @@ Hard rules:
             [v2Classification, classification] = await Promise.all([_v2Promise, _legacyPromise]);
 
             // ── Waterfall escalation decision ──
-            // Trigger Gemma when V2 is unusable, low-confidence, or fell into
-            // a known-weak bucket. Weak set sourced from the 2026-04-22 benchmark
-            // where all three V2 models misclassified pronoun/option inputs as
-            // revise instead of price_lookup — shared failure = prompt gap, and
-            // Gemma's larger model still scored better on ambiguous edges.
-            const WEAK_INTENTS = new Set(['price_lookup', 'clarify']);
+            // Trigger Gemma when V2 is unusable, low-confidence, in a known-weak
+            // bucket, OR its output has structural inconsistencies. Tuned from the
+            // 2026-04-23 waterfall audit (74-fixture benchmark): Llama's self-
+            // reported confidence is useless (wrong answers came back at conf=1.0
+            // every time) so we bolt on structural gates that catch the real
+            // failure modes — empty items[] on a "quote", an ambiguous SKU stem
+            // without variant suffix, and "revise" intent without prior_context.
+            // price_lookup is only escalated when prior_context is present, since
+            // standalone pricing questions on an explicit SKU are Llama's strong
+            // suit and escalating them burns a Gemma call for nothing.
             const LOW_CONF_THRESHOLD = 0.7;
             const GEMMA_TIMEOUT_MS = 5000;
+            // SKU stems that require a variant/port suffix before they can be quoted.
+            // Matches family + base model number with NO trailing -\d suffix (e.g.
+            // MS130-24 needs -4G / -2X; MS250 needs -24P/-48P etc.). If Llama emits
+            // one of these as a hard "quote" item, the user actually wants clarify.
+            const AMBIGUOUS_STEM = /^(MS130-24|MS150-24|MS150-48|MS250-24|MS250-48|MS350-24|MS350-48|MS425-16|MS425-32|MS130|MS150|MS250|MS350|MS425|MR|MX|MV|MT|MG|CW)$/i;
             const v2Intent = v2Classification?.intent;
             const v2ConfRaw = v2Classification?.confidence;
             const v2Conf = typeof v2ConfRaw === 'number' ? v2ConfRaw : Number(v2ConfRaw) || 0;
             const v2Broken = !v2Intent || v2Classification?.parseError || v2Classification?.error;
-            const escalate = v2Broken || v2Conf < LOW_CONF_THRESHOLD || WEAK_INTENTS.has(v2Intent);
+            const v2Items = Array.isArray(v2Classification?.items) ? v2Classification.items : [];
+            const hasPriorCtx = !!(priorCtxForV2 && String(priorCtxForV2).trim());
+            // Structural checks — catch confidently-wrong outputs the confidence gate misses.
+            const structQuoteEmptyItems = v2Intent === 'quote' && v2Items.length === 0;
+            const structReviseNoPrior = v2Intent === 'revise' && !hasPriorCtx;
+            const structAmbiguousStem = v2Intent === 'quote'
+              && v2Items.some(i => i && typeof i.sku === 'string' && AMBIGUOUS_STEM.test(i.sku.trim()));
+            const structuralEscalate = structQuoteEmptyItems || structReviseNoPrior || structAmbiguousStem;
+            // Weak-intent bucket — only escalate price_lookup when prior_context exists
+            // (pronoun/ambiguity territory); bare clarify always benefits from Gemma's
+            // second opinion. Both are cheap: Llama resolves clarify in ~2s, so an
+            // extra Gemma call is only ~3s added budget.
+            const weakHit = (v2Intent === 'price_lookup' && hasPriorCtx) || v2Intent === 'clarify';
+            const escalate = v2Broken || v2Conf < LOW_CONF_THRESHOLD || weakHit || structuralEscalate;
 
             if (escalate) {
-              console.log(`[Waterfall] Escalating to Gemma 4: v2Intent=${v2Intent || 'ERR'} conf=${v2Conf} broken=${!!v2Broken}`);
+              const reason = v2Broken ? 'broken'
+                : v2Conf < LOW_CONF_THRESHOLD ? `low-conf(${v2Conf})`
+                : structQuoteEmptyItems ? 'struct:quote-empty-items'
+                : structReviseNoPrior ? 'struct:revise-no-prior'
+                : structAmbiguousStem ? 'struct:ambiguous-sku-stem'
+                : weakHit ? `weak:${v2Intent}`
+                : 'unknown';
+              console.log(`[Waterfall] Escalating to Gemma 4: v2Intent=${v2Intent || 'ERR'} conf=${v2Conf} reason=${reason}`);
               gemma4Classification = await Promise.race([
                 classifyWithGemma4(text, priorCtxForV2, env).catch(e => ({ error: e.message })),
                 new Promise(resolve => setTimeout(() => resolve({ timeout: true, elapsed: GEMMA_TIMEOUT_MS }), GEMMA_TIMEOUT_MS))
