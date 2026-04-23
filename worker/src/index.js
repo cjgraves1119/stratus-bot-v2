@@ -662,10 +662,17 @@ function classifyProductInfoSubtype(userMessage, hasImage) {
   const EOL_Q = /\b(EOL|END[\s-]OF[\s-]LIFE|REPLACES?|REPLACEMENT|SUCCESSOR|MIGRATION\s+PATH|WHAT\s+(TO|SHOULD|DO)\s+(I\s+)?REPLACE|UPGRADE\s+PATH)\b/;
   const DATASHEET_FOLLOWUP = /\b(DATASHEET|SPEC\s+SHEET|SPECIFICS|MORE\s+DETAILS?|RADIO\s+COUNT|PORT\s+COUNT|THROUGHPUT)\b/;
 
-  if (SINGLE_MODEL_SPEC.test(upper)) return 'simple_lookup';
-  if (LICENSE_Q.test(upper)) return 'simple_lookup';
-  if (EOL_Q.test(upper)) return 'simple_lookup';
-  if (DATASHEET_FOLLOWUP.test(upper)) return 'simple_lookup';
+  // Model-name gate for followup-style signals. Without a Meraki model in the message,
+  // phrases like "pull the datasheet" or "more details" are pronoun followups that need
+  // conversation history to resolve the referent — Claude has history loaded, the
+  // waterfall's askLlamaProductInfo does not. Route those to Claude. (2026-04-23 fix.)
+  const MODEL_IN_MSG = /\b(MR|CW|MX|MS|MV|MT|MG|Z)\d+[A-Z0-9-]*\b/i;
+  const hasModel = MODEL_IN_MSG.test(m);
+
+  if (SINGLE_MODEL_SPEC.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
+  if (LICENSE_Q.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
+  if (EOL_Q.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
+  if (DATASHEET_FOLLOWUP.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
 
   // Default: advisory (Claude) — bias toward accuracy
   return 'advisory';
