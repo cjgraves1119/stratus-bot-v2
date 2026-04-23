@@ -5681,10 +5681,15 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
   // When USE_PRODUCT_INFO_WATERFALL=true, route simple spec lookups to Llama (free, 83% acc
   // on these intents per 2026-04-23 benchmark). Advisory/flagship/pricing/comparison/image
   // stay on Claude. On Llama failure → falls through to Claude for full redundancy.
-  if (env.USE_PRODUCT_INFO_WATERFALL === 'true' &&
+  // Trim flag value defensively — secret stdin may include trailing newlines.
+  const waterfallFlag = String(env.USE_PRODUCT_INFO_WATERFALL || '').trim().toLowerCase();
+  const waterfallOn = waterfallFlag === 'true' || waterfallFlag === '1' || waterfallFlag === 'yes';
+  console.log(`[Waterfall] flag=${JSON.stringify(env.USE_PRODUCT_INFO_WATERFALL)} parsed=${waterfallOn} intent=${classification?.intent} hasImg=${!!imageData}`);
+  if (waterfallOn &&
       classification && classification.intent === 'product_info' &&
       !imageData) {
     const subtype = classifyProductInfoSubtype(userMessage, false);
+    console.log(`[Waterfall] subtype=${subtype} for: ${userMessage.substring(0, 60)}`);
     if (subtype === 'simple_lookup') {
       const t0 = Date.now();
       const llamaOut = await askLlamaProductInfo(userMessage, personId, env, classification);
