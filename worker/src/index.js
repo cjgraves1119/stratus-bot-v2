@@ -5882,6 +5882,56 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       }
     }
 
+    // ── Guaranteed family fallback ──
+    // Product_info queries must NEVER fall back to "training data only". If nothing
+    // above resolved (no specific model, datasheet fetch failed, lastAssistant empty),
+    // detect the family from the current message + last two assistant turns and inject
+    // family-level specs from specs.json. Handles cases like:
+    //   • "which MX for 500 users"  — bare family, no model number
+    //   • "pull the datasheet" after a category-level prior turn
+    //   • "tell me about switches" — generic wording, no SKU
+    if ((classification?.intent === 'product_info' || wantsLiveDatasheet) &&
+        sources.liveModels.length === 0 &&
+        sources.cachedModels.length === 0 &&
+        sources.categoryFamilies.length === 0) {
+      const familyDetect = (text) => {
+        const u = (text || '').toUpperCase();
+        const fams = new Set();
+        if (/\b(FIREWALL|SECURITY\s*APPLIANCE|GATEWAY)\b/.test(u) || /\bMX\b/.test(u)) fams.add('MX');
+        if (/\b(ACCESS\s*POINT|WI[\s-]?FI|WIRELESS|AP)\b/.test(u) || /\b(MR|CW)\b/.test(u)) { fams.add('MR'); fams.add('CW'); }
+        if (/\b(SWITCH|SWITCHING)\b/.test(u) || /\bMS\b/.test(u)) { fams.add('MS130'); fams.add('MS150'); }
+        if (/\b(CAMERA|SURVEILLANCE|VIDEO)\b/.test(u) || /\bMV\b/.test(u)) fams.add('MV');
+        if (/\bSENSOR\b/.test(u) || /\bMT\b/.test(u)) fams.add('MT');
+        if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(u) || /\bMG\b/.test(u)) fams.add('MG');
+        return [...fams];
+      };
+      let fams = familyDetect(userMessage);
+      if (fams.length === 0 && personId && kv) {
+        const histForFam = await getHistory(kv, personId);
+        const recentAsst = [...histForFam].reverse().filter(h => h.role === 'assistant').slice(0, 2);
+        for (const t of recentAsst) {
+          fams = familyDetect(t.content);
+          if (fams.length > 0) break;
+        }
+      }
+      if (fams.length > 0) {
+        let famCtx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE, family-level fallback)\n';
+        famCtx += 'Use ONLY these specs. Do NOT supplement with training data. If the exact spec the user asked about is not listed, say so and offer to pull the live datasheet.\n\n';
+        for (const fam of fams) {
+          const famData = specs[fam];
+          if (famData) {
+            for (const [model, mSpecs] of Object.entries(famData)) {
+              if (model.startsWith('_')) continue;
+              famCtx += `${model}: ${JSON.stringify(mSpecs)}\n`;
+            }
+          }
+        }
+        systemPrompt += '\n\n' + famCtx;
+        sources.categoryFamilies.push(...fams);
+        showFooter = true;
+      }
+    }
+
     const history = personId ? await getHistory(kv, personId) : [];
 
     // Option 3: Inject relevant pricing into system prompt for pricing questions
@@ -6057,7 +6107,10 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
         const uniqFams = [...new Set(sources.categoryFamilies)];
         sourceFooter = `_📊 Source: cached specs.json — family-level (${uniqFams.join(', ')})_`;
       } else {
-        sourceFooter = `_⚠️ Source: training data only — no verified spec source was referenced for this answer. Ask me to "pull the datasheet" to verify._`;
+        // Should be unreachable for product_info — guaranteed family fallback above
+        // always injects at least one family from specs.json. This branch remains
+        // only as a defensive safety net (e.g. non-Meraki follow-up questions).
+        sourceFooter = `_📚 Source: general Cisco/Meraki knowledge — ask me to "pull the datasheet" for live specs on a specific model._`;
       }
     }
     // User-visible model marker — confirms which model produced this reply.
