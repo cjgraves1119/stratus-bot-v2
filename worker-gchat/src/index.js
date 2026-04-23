@@ -4342,19 +4342,27 @@ async function resolveContactByEmail(email, env) {
 }
 
 // ─── Account Resolution Waterfall ─────────────────────────────────────────────
-// Four-tier resolver used when the extension surfaces an email or the user
+// Five-tier resolver used when the extension surfaces an email or the user
 // mentions an account by name. Returns the first match with a `source` tag so
 // callers can prompt the LLM with confidence ("website match" vs "fuzzy match
 // — please confirm"). Tiers:
-//   1. website     — Account.Website equals the email domain (fast + exact)
-//   2. contact     — Contact.Email or Secondary_Email equals the sender →
-//                    hop to Account (handles rebrands like bekumamerica.com
-//                    → bekum.com where the Account website never got updated)
-//   3. alias-kv    — manual domain→accountId map in CONVERSATION_KV
-//                    (key prefix `acct-alias:{domain}`). Managed via
-//                    /api/account-alias POST endpoint.
-//   4. fuzzy-name  — Account_Name starts_with tokens extracted from sender
-//                    display name or a user-provided nameHint. Low confidence.
+//   1. website        — Account.Website equals the email domain (fast + exact).
+//                       SKIPPED for consumer domains (gmail.com, yahoo.com,
+//                       etc.) because polluted Website fields like
+//                       "www.gmail.com" on unrelated accounts cause false
+//                       positives (e.g. JIM MEINEL CPA PC matching any
+//                       *@gmail.com sender).
+//   2. contact        — Contact.Email or Secondary_Email equals the sender →
+//                       hop to Account (handles rebrands like bekumamerica.com
+//                       → bekum.com where the Account website never got updated)
+//   3. alias-kv       — manual domain→accountId map in CONVERSATION_KV
+//                       (key prefix `acct-alias:{domain}`). Managed via
+//                       /api/account-alias POST endpoint.
+//   4. consumer-email — For consumer domains only, search Accounts by the
+//                       email local-part (e.g. "ericrochow" → "Eric Rochow
+//                       Residence"). Catches residential/small customers.
+//   5. fuzzy-name     — Account_Name starts_with tokens extracted from sender
+//                       display name or a user-provided nameHint. Low confidence.
 async function getAccountAlias(domain, env) {
   if (!env || !env.CONVERSATION_KV) return null;
   const d = normalizeDomain(domain);
@@ -4416,26 +4424,35 @@ async function resolveAccountWaterfall({ domain, email, nameHint } = {}, env) {
   const normDomain = normalizeDomain(domain);
   const normEmail = email ? email.trim().toLowerCase() : null;
   const effectiveDomain = normDomain || (normEmail ? normEmail.split('@')[1] : null);
+  const isConsumer = effectiveDomain ? CONSUMER_DOMAINS.has(effectiveDomain) : false;
 
   // Tier 1 + 2 fire in parallel for speed — they use independent queries.
+  // Tier 1 is SKIPPED for consumer domains because Website=gmail.com pollution
+  // on unrelated accounts causes false positives (Eric Rochow bug).
   const [t1Account, t2Contact] = await Promise.all([
-    effectiveDomain ? resolveAccountByDomain(effectiveDomain, env) : Promise.resolve(null),
+    (!isConsumer && effectiveDomain) ? resolveAccountByDomain(effectiveDomain, env) : Promise.resolve(null),
     normEmail ? resolveContactByEmail(normEmail, env) : Promise.resolve(null),
   ]);
 
-  // Tier 1 hit.
-  if (t1Account) {
-    // Promote contact if we also found one tied to the same Account, else null.
-    const contact = t2Contact && t2Contact.Account_Name?.id === t1Account.id ? t2Contact : t2Contact || null;
-    return { account: t1Account, contact, source: 'website', confidence: 'high' };
+  // Tier 2 PRIORITY: if the sender has an exact Contact-email hit AND that
+  // Contact is tied to a different Account than Tier 1 found, trust the
+  // Contact. The exact-email match is always more specific than a Website
+  // heuristic. (For consumer domains Tier 1 is already null, so this mostly
+  // protects business domains where the Website field is stale.)
+  if (t2Contact && t2Contact.Account_Name?.id) {
+    const sameAccount = t1Account && t1Account.id === t2Contact.Account_Name.id;
+    if (!t1Account || !sameAccount) {
+      const account = await fetchAccountById(t2Contact.Account_Name.id, env);
+      if (account) {
+        return { account, contact: t2Contact, source: 'contact-email', confidence: 'high' };
+      }
+    }
   }
 
-  // Tier 2 hit.
-  if (t2Contact && t2Contact.Account_Name?.id) {
-    const account = await fetchAccountById(t2Contact.Account_Name.id, env);
-    if (account) {
-      return { account, contact: t2Contact, source: 'contact-email', confidence: 'high' };
-    }
+  // Tier 1 hit (business domain, no conflicting Tier 2).
+  if (t1Account) {
+    const contact = t2Contact && t2Contact.Account_Name?.id === t1Account.id ? t2Contact : t2Contact || null;
+    return { account: t1Account, contact, source: 'website', confidence: 'high' };
   }
 
   // Tier 3: domain alias KV.
@@ -4449,7 +4466,16 @@ async function resolveAccountWaterfall({ domain, email, nameHint } = {}, env) {
     }
   }
 
-  // Tier 4: fuzzy Account name match, only if we have a hint.
+  // Tier 4: consumer-email local-part fallback (gmail/yahoo/etc only).
+  // Catches residential customers: ericrochow@gmail.com → "Eric Rochow Residence".
+  if (isConsumer && normEmail) {
+    const consumerAccount = await resolveAccountByConsumerEmail(normEmail, env);
+    if (consumerAccount) {
+      return { account: consumerAccount, contact: t2Contact || null, source: 'consumer-email', confidence: 'medium' };
+    }
+  }
+
+  // Tier 5: fuzzy Account name match, only if we have a hint.
   if (nameHint) {
     const fuzzy = await fuzzyAccountSearch(nameHint, env);
     if (fuzzy?.candidates?.length) {
