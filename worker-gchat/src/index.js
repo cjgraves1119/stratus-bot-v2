@@ -3818,7 +3818,8 @@ We also quote these Cisco security licenses. They are per-user, per-year license
 - Duo MFA: LIC-DUO-ESSENTIALS, LIC-DUO-ADVANTAGE, LIC-DUO-PREMIER (1YR/3YR/5YR each)
 - Umbrella DNS: LIC-UMB-DNS-ESS-K9, LIC-UMB-DNS-ADV-K9 (1YR/3YR/5YR each)
 - Umbrella SIG: LIC-UMB-SIG-ESS-K9, LIC-UMB-SIG-ADV-K9 (1YR/3YR/5YR each)
-When a user asks about Duo or Umbrella licensing, provide quote URLs with 1Y/3Y/5Y options just like hardware quotes.
+- Cisco AnyConnect / Cisco Secure Client / Cisco VPN: LIC-L-AC-APX-{1,3,5}Y-S1 (Apex tier) and LIC-L-AC-PLS-{1,3,5}Y-S1 (Plus tier). Note -Y suffix (not -YR) and -S1 is required. 25-user minimum. Alias triggers: "AnyConnect", "Any Connect", "Cisco Secure Client", "Secure Client", "Cisco VPN" all map to these SKUs. When tier unspecified, show BOTH Apex and Plus side-by-side so the user can compare features/price.
+When a user asks about Duo, Umbrella, or AnyConnect/Secure Client/Cisco VPN licensing, provide quote URLs with 1Y/3Y/5Y options just like hardware quotes. NEVER tell the user AnyConnect is outside our catalog — it's explicitly supported above.
 
 ## LICENSE DASHBOARD SCREENSHOT HANDLING
 When a user sends a screenshot of a Meraki license dashboard, ALWAYS use this exact response format:
@@ -9301,7 +9302,7 @@ IMPORTANT — Unknown/EOL model rule: If a user mentions a model number that fol
 Respond with ONLY this JSON:
 {"intent":"<category>","reply":"<for clarify or conversation only. MUST be empty for quote, product_info, escalate>","extracted":"<for quote only: extract clean request like 'quote 10 MR46 with 3 year license'. Empty for all other intents>"}`;
 
-const CF_CONVO_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products. Be friendly, concise, and professional. Keep responses under 4 sentences.
+const CF_CONVO_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products. We also quote Cisco security licenses: Duo MFA, Umbrella DNS/SIG, and AnyConnect/Cisco Secure Client/Cisco VPN (APX and PLS tiers). Be friendly, concise, and professional. Keep responses under 4 sentences.
 
 Key product knowledge:
 - MX security appliances: MX67 ($595, 50 users), MX68 ($795, 50), MX75 ($2,195, 200), MX85 ($3,995, 600), MX95 ($7,995, 2000), MX105 ($12,995, 5000), MX250 ($19,995, 10000), MX450 ($34,995, unlimited)

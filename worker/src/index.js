@@ -764,7 +764,7 @@ IMPORTANT — Unknown/EOL model rule: If a user mentions a model number that fol
 Respond with ONLY this JSON:
 {"intent":"<category>","reply":"<for clarify or conversation only. MUST be empty for quote, product_info, escalate>","extracted":"<for quote only: extract clean request like 'quote 10 MR46 with 3 year license'. Empty for all other intents>"}`;
 
-const CF_CONVO_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products. Be friendly, concise, and professional. Keep responses under 4 sentences.
+const CF_CONVO_PROMPT = `You are Stratus AI, the internal quoting assistant for Stratus Information Systems, a Cisco-exclusive reseller specializing in Meraki networking products. We also quote Cisco security licenses: Duo MFA, Umbrella DNS/SIG, and AnyConnect/Cisco Secure Client/Cisco VPN (APX and PLS tiers). Be friendly, concise, and professional. Keep responses under 4 sentences.
 
 Key product knowledge:
 - MX security appliances: MX67 ($595, 50 users), MX68 ($795, 50), MX75 ($2,195, 200), MX85 ($3,995, 600), MX95 ($7,995, 2000), MX105 ($12,995, 5000), MX250 ($19,995, 10000), MX450 ($34,995, unlimited)
@@ -845,6 +845,7 @@ Valid Meraki families: MR (APs), MX (firewalls), MS (switches), MV (cameras), MT
 Bare license SKUs like "LIC-ENT-3YR","LIC-MX64-SEC-3YR" → items with sku_type="license".
 Cisco Duo licenses: format is LIC-DUO-{ESSENTIALS|ADVANTAGE|PREMIER}-{1|3|5}YR. Examples: "duo essentials 3 year" → LIC-DUO-ESSENTIALS-3YR; "duo advantage" → LIC-DUO-ADVANTAGE-{term}YR; "duo premier" → LIC-DUO-PREMIER-{term}YR. NEVER emit short forms like "DUO-E-3YR", "DUO-A", or "DUO-ESS" — always the full LIC-DUO-{TIER}-{TERM}YR string. If you aren't sure of the exact canonical SKU, leave items[] empty (the backend will resolve it) rather than hallucinating a short form.
 Cisco Umbrella licenses: format is LIC-UMB-{DNS|SIG}-{ESS|ADV}-K9-{1|3|5}YR. Examples: "umbrella DNS essentials 3 year" → LIC-UMB-DNS-ESS-K9-3YR; "umbrella SIG advantage" → LIC-UMB-SIG-ADV-K9-{term}YR. NEVER emit short forms like "UMB-DNS-3YR" — always include -K9- and the full LIC-UMB-{TYPE}-{TIER}-K9-{TERM}YR format.
+Cisco AnyConnect / Cisco Secure Client / Cisco VPN licenses: format is LIC-L-AC-{APX|PLS}-{1|3|5}Y-S1 (note: -Y suffix, NOT -YR, and -S1 is required). Two tiers: APX (Apex, full-featured) and PLS (Plus, baseline). 25-user MINIMUM qty — if user states qty < 25, still emit the item (backend clamps to 25 and warns). When the user says "AnyConnect", "Any Connect", "Cisco Secure Client", "Secure Client", or "Cisco VPN" WITHOUT naming a tier, emit BOTH tiers and set separate_quotes=true so the user can compare. When a tier IS named ("AnyConnect Plus", "Apex", "Cisco VPN Premier/Advantage" — note there is NO Premier/Advantage for AnyConnect, only APX/PLS), emit only that tier. Examples: "10 AnyConnect Plus" → items=[{sku:"LIC-L-AC-PLS-1Y-S1",qty:10,sku_type:"license"},{sku:"LIC-L-AC-PLS-3Y-S1",qty:10,sku_type:"license"},{sku:"LIC-L-AC-PLS-5Y-S1",qty:10,sku_type:"license"}]; "50 Cisco VPN" → 6 items (APX + PLS × 1Y/3Y/5Y) with separate_quotes=true; "AnyConnect Apex 3 year 100 users" → [{sku:"LIC-L-AC-APX-3Y-S1",qty:100,sku_type:"license"}]. CRITICAL: AnyConnect IS in our catalog — never classify AnyConnect/Secure Client/Cisco VPN messages as "conversation" or tell the user we don't sell it.
 
 CRITICAL — "ALL DUO" / "ALL UMBRELLA" expansion:
 When the user says "all duo" / "all duo licenses" / "all duo quotes" / "every duo tier" (case-insensitive, with or without "cisco"), intent="quote" and items[] must expand to ALL three Duo tiers at the user-stated term (or all three terms when no term stated). Set modifiers.separate_quotes=true — the user wants one URL per tier/item. Default qty=1 unless user states a number.
@@ -5445,7 +5446,8 @@ We also quote these Cisco security licenses. They are per-user, per-year license
 - Duo MFA: LIC-DUO-ESSENTIALS, LIC-DUO-ADVANTAGE, LIC-DUO-PREMIER (1YR/3YR/5YR each)
 - Umbrella DNS: LIC-UMB-DNS-ESS-K9, LIC-UMB-DNS-ADV-K9 (1YR/3YR/5YR each)
 - Umbrella SIG: LIC-UMB-SIG-ESS-K9, LIC-UMB-SIG-ADV-K9 (1YR/3YR/5YR each)
-When a user asks about Duo or Umbrella licensing, provide quote URLs with 1Y/3Y/5Y options just like hardware quotes.
+- Cisco AnyConnect / Cisco Secure Client / Cisco VPN: LIC-L-AC-APX-{1,3,5}Y-S1 (Apex tier) and LIC-L-AC-PLS-{1,3,5}Y-S1 (Plus tier). Note -Y suffix (not -YR) and -S1 is required. 25-user minimum. Alias triggers: "AnyConnect", "Any Connect", "Cisco Secure Client", "Secure Client", "Cisco VPN" all map to these SKUs. When tier unspecified, show BOTH Apex and Plus side-by-side so the user can compare features/price.
+When a user asks about Duo, Umbrella, or AnyConnect/Secure Client/Cisco VPN licensing, provide quote URLs with 1Y/3Y/5Y options just like hardware quotes. NEVER tell the user AnyConnect is outside our catalog — it's explicitly supported above.
 
 ## LICENSE DASHBOARD SCREENSHOT HANDLING
 When a user sends a screenshot of a Meraki license dashboard, ALWAYS use this exact response format:
