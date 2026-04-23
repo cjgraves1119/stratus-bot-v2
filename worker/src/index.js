@@ -572,6 +572,80 @@ const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
 // To rollback: flip this to false and redeploy (or git revert the cutover commit).
 const USE_V2_CLASSIFIER = true;
 
+// ═══ CF_GROUNDING_RULES ═══
+// System-prompt addendum applied to Llama/Gemma on product_info requests.
+// Targets failure modes from 2026-04-23 benchmark: flagship hallucination,
+// multi-product URL concatenation, ignored injected PRICE lines, training-data drift.
+// Round 2 (Claude 4.6 vs CF with these rules): Llama 67%→83%, Gemma 75%→79%.
+// Reused by both /api/benchmark-product-info and the product_info waterfall in askClaude.
+const CF_GROUNDING_RULES = `
+
+## CRITICAL RULES — FOLLOW EXACTLY (these override any conflicting instruction above)
+
+1. GROUNDING. Every factual claim must be directly supported by the PRODUCT SPECS, DATASHEET, PRICING, or ACCESSORIES context provided in this system prompt. Do NOT supplement with training-data facts. If a spec is missing, say "I do not have that data" — never guess.
+
+2. FLAGSHIP / HIGHEST-END / BEST. Do NOT call any product a "flagship", "highest-end", "top-tier", "best", or equivalent UNLESS that model has the single highest value on the relevant spec (throughput Gbps, port count, radio generation) among every product listed in the injected specs above. When the user asks for the flagship and the true flagship is not in context, explicitly say the highest-end model in that family (MX450 for MX, MS450 for MS, CW9176 for CW Wi-Fi 7) and note you can pull its full specs on request.
+
+3. PRICING. If the injected context contains a PRICING section or lines starting with "PRICE:", you MUST use those exact prices. Never respond "I don't have pricing" when pricing is present above. Copy the price values verbatim — do not round, estimate, or re-derive.
+
+4. MULTI-PRODUCT ORDER URLS. When the user asks about multiple distinct products and you output Stratus order links, produce ONE URL per product. Never concatenate SKUs from different products into a single item list. Format: https://stratusinfosystems.com/order/?item={SKU}&qty={N}
+
+5. UNCERTAINTY. If a requested spec, SKU, or price is not in the context above, say so plainly. Do NOT invent SKUs that are not in the SPECS / PRICING / DATASHEET blocks.
+`;
+
+// ═══ PRODUCT_INFO WATERFALL CLASSIFIER ═══
+// Cheap regex-based router called after V2 classifier returns intent=product_info.
+// Decides which model handles the answer-generation step:
+//
+//   'simple_lookup' → Llama 4 Scout + CF_GROUNDING_RULES (fast, free, 3/3 on these intents)
+//     • Single-model spec: "specs of the MS150-24P", "what does the MR44 do"
+//     • License: "what license does X need", "license term for Y"
+//     • EOL: "what replaces the MR42", "is MX67 EOL"
+//     • Datasheet followup (prior_context present): "get specifics from datasheet"
+//
+//   'advisory' → Claude Sonnet 4.6 (keeps current accuracy)
+//     • Category superlatives: "highest-end", "flagship", "best", "most powerful", "top"
+//     • Comparisons: "compare", "vs", "versus", "difference between"
+//     • Pricing: "cost", "price", "how much", "budget", "breakdown"
+//     • Recommendations: "recommend", "what should I use", "what do I need for X"
+//     • Any multi-product request
+//
+// Default on ambiguity: 'advisory' (Claude). Bias toward accuracy — the waterfall
+// only wins if it never regresses quality. Flag: USE_PRODUCT_INFO_WATERFALL=true
+function classifyProductInfoSubtype(userMessage, hasImage) {
+  if (hasImage) return 'advisory';
+  const m = (userMessage || '').trim();
+  if (!m) return 'advisory';
+  const upper = m.toUpperCase();
+
+  // Advisory signals — any match forces advisory path
+  const SUPERLATIVE = /\b(HIGHEST[\s-]?END|FLAGSHIP|TOP[\s-]?(TIER|OF[\s-]THE[\s-]LINE|END)|BEST|MOST\s+POWERFUL|BIGGEST|FASTEST|LARGEST|MOST\s+CAPABLE)\b/;
+  const COMPARISON = /\b(COMPARE|COMPARISON|VS\.?|VERSUS|DIFFERENCE\s+BETWEEN|DIFFER|BETTER\s+THAN)\b/;
+  const PRICING = /\b(COSTS?|PRICES?|PRICING|HOW\s+MUCH|BUDGET|BREAKDOWN|ESTIMATE|TOTAL|QUOTE\s+THE\s+COST|SPEND)\b/;
+  const RECOMMEND = /\b(RECOMMEND|SUGGEST|WHAT\s+SHOULD\s+I|WHAT\s+DO\s+I\s+NEED|WHICH\s+(FIREWALL|SWITCH|AP|ACCESS\s+POINT|CAMERA|DEVICE|PRODUCT)|SIZE\s+(FOR|A)|FOR\s+A?\s*(SCHOOL|HOSPITAL|OFFICE|WAREHOUSE|CAMPUS)\s+(OF|WITH)?)\b/;
+  const MULTI_MODEL = /\b(MR\d+|CW\d+|MX\d+|MS\d+|MV\d+|MT\d+|MG\d+|Z\d)\D+?(MR\d+|CW\d+|MX\d+|MS\d+|MV\d+|MT\d+|MG\d+|Z\d)\b/i;
+
+  if (SUPERLATIVE.test(upper)) return 'advisory';
+  if (COMPARISON.test(upper)) return 'advisory';
+  if (PRICING.test(upper)) return 'advisory';
+  if (RECOMMEND.test(upper)) return 'advisory';
+  if (MULTI_MODEL.test(m)) return 'advisory';
+
+  // Simple-lookup signals
+  const SINGLE_MODEL_SPEC = /\b(SPECS?|SPECIFICATIONS?|DETAILS?|FEATURES?|CAPABILIT|WHAT\s+IS\s+(THE\s+)?(MR|CW|MX|MS|MV|MT|MG|Z)\d+|TELL\s+ME\s+ABOUT|WHAT\s+DOES\s+(THE\s+)?(MR|CW|MX|MS|MV|MT|MG|Z)\d+\s+DO|INFO\s+ON)\b/;
+  const LICENSE_Q = /\b(LICENS(E|ING)|WHAT\s+LICENSE|LICENSE\s+(TERM|TYPE|DOES)|LIC-ENT|LIC-MS|LIC-MX|LIC-MV|LIC-MT|LIC-MG)\b/;
+  const EOL_Q = /\b(EOL|END[\s-]OF[\s-]LIFE|REPLACES?|REPLACEMENT|SUCCESSOR|MIGRATION\s+PATH|WHAT\s+(TO|SHOULD|DO)\s+(I\s+)?REPLACE|UPGRADE\s+PATH)\b/;
+  const DATASHEET_FOLLOWUP = /\b(DATASHEET|SPEC\s+SHEET|SPECIFICS|MORE\s+DETAILS?|RADIO\s+COUNT|PORT\s+COUNT|THROUGHPUT)\b/;
+
+  if (SINGLE_MODEL_SPEC.test(upper)) return 'simple_lookup';
+  if (LICENSE_Q.test(upper)) return 'simple_lookup';
+  if (EOL_Q.test(upper)) return 'simple_lookup';
+  if (DATASHEET_FOLLOWUP.test(upper)) return 'simple_lookup';
+
+  // Default: advisory (Claude) — bias toward accuracy
+  return 'advisory';
+}
+
 const CF_CLASSIFIER_PROMPT = `You are an intent classifier and clarification engine for a Cisco/Meraki quoting bot. Your job is to classify what the user wants and ask smart clarifying questions when their request is incomplete. You do NOT answer product questions — those go to a more capable AI.
 
 Respond with ONLY a JSON object, nothing else.
@@ -5457,8 +5531,180 @@ function handleQuoteUrlTool(params) {
   return { url, label: label || `${term}-Year Co-Term`, items_count: items.length };
 }
 
+// ═══ PRODUCT_INFO WATERFALL — Llama handler ═══
+// Handles product_info requests classified as 'simple_lookup' by classifyProductInfoSubtype.
+// Mirrors askClaude's context-building (static specs → datasheet → category fallback) but
+// substitutes Llama 4 Scout + CF_GROUNDING_RULES for the answer generation.
+//
+// Return: { reply: string } on success, or null on empty/error (caller falls back to Claude).
+// Caller is responsible for history save + D1 logging.
+async function askLlamaProductInfo(userMessage, personId, env, classification = null) {
+  if (!env.AI) return null;
+  try {
+    const kv = env.CONVERSATION_KV;
+
+    // Datasheet-intent detection (shared with askClaude)
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|READ\s+(THE\s+)?DATASHEET|FETCH\s+(THE\s+)?DATASHEET)\b/i.test(userMessage);
+    if (!wantsLiveDatasheet && classification && classification.intent === 'product_info') {
+      // product_info followups often reference a prior turn that named a model
+      const FOLLOWUP = /\b(SPECIFICS|MORE\s+DETAILS?|TELL\s+ME\s+MORE|KEEP\s+GOING|CONTINUE)\b/i;
+      if (FOLLOWUP.test(userMessage)) wantsLiveDatasheet = true;
+    }
+
+    // Build context identically to askClaude: static specs → datasheet → category family
+    let systemPrompt = SYSTEM_PROMPT;
+    const sources = { liveModels: [], liveUrls: [], fetchFailed: false, cachedModels: [], categoryFamilies: [] };
+
+    if (wantsLiveDatasheet) {
+      let datasheetContext = await getRelevantDatasheetContext(userMessage);
+      // If no model in current message, scan recent history for a model mention
+      if (!datasheetContext && personId && kv) {
+        const history = await getHistory(kv, personId);
+        const recentTurns = [...history].reverse().slice(0, 6);
+        for (const turn of recentTurns) {
+          if (turn && turn.content) {
+            const ctx = await getRelevantDatasheetContext(turn.content);
+            if (ctx) { datasheetContext = ctx; break; }
+          }
+        }
+      }
+      if (datasheetContext) {
+        systemPrompt += '\n\n' + datasheetContext.text;
+        systemPrompt += '\n\nThe user is asking for spec details. Use the datasheet content above as the authoritative source.';
+        sources.liveModels.push(...(datasheetContext.models || []));
+        sources.liveUrls.push(...(datasheetContext.urls || []));
+      } else {
+        sources.fetchFailed = true;
+        const staticContext = getStaticSpecsContext(userMessage);
+        if (staticContext) {
+          systemPrompt += '\n\n' + staticContext.text;
+          sources.cachedModels.push(...(staticContext.models || []));
+        }
+      }
+    } else {
+      const staticContext = getStaticSpecsContext(userMessage);
+      if (staticContext) {
+        systemPrompt += '\n\n' + staticContext.text;
+        sources.cachedModels.push(...(staticContext.models || []));
+      } else {
+        // Category family fallback (same logic as askClaude + benchmark endpoint)
+        const catUpper = userMessage.toUpperCase();
+        const families = [];
+        if (/\b(FIREWALL|SECURITY\s*APPLIANCE|MX|GATEWAY)\b/.test(catUpper)) families.push('MX');
+        if (/\b(ACCESS\s*POINT|WIFI|WI-?FI|WIRELESS|AP)\b/.test(catUpper)) families.push('MR', 'CW');
+        if (/\b(SWITCH|SWITCHING)\b/.test(catUpper)) families.push('MS130', 'MS150');
+        if (/\b(CAMERA|SURVEILLANCE|VIDEO)\b/.test(catUpper)) families.push('MV');
+        if (/\b(SENSOR)\b/.test(catUpper)) families.push('MT');
+        if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(catUpper)) families.push('MG');
+        if (families.length > 0) {
+          let ctx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE)\n';
+          ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n\n';
+          for (const fam of families) {
+            const familyData = specs[fam];
+            if (familyData) {
+              for (const [model, modelSpecs] of Object.entries(familyData)) {
+                ctx += `${model}: ${JSON.stringify(modelSpecs)}\n`;
+              }
+            }
+          }
+          systemPrompt += '\n\n' + ctx;
+          sources.categoryFamilies.push(...families);
+        }
+      }
+    }
+
+    // Accessories injection (skip pricing — advisory path owns those)
+    const accessoriesContext = getAccessoriesContext(userMessage);
+    if (accessoriesContext) systemPrompt += '\n\n' + accessoriesContext;
+
+    // Append grounding rules (bench v2: +16pp on Llama with these)
+    systemPrompt += CF_GROUNDING_RULES;
+
+    // Include last few history turns so followups work
+    const history = (personId && kv) ? await getHistory(kv, personId) : [];
+    const cfHistory = history.slice(-6).map(h => ({ role: h.role, content: h.content }));
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...cfHistory,
+      { role: 'user', content: userMessage }
+    ];
+
+    const result = await env.AI.run('@cf/meta/llama-4-scout-17b-16e-instruct', {
+      messages,
+      max_tokens: 1024
+    });
+    const reply = result?.response ?? result?.choices?.[0]?.message?.content ?? null;
+    if (!reply || reply.trim().length < 20) return null;
+
+    // Build source attribution footer (identical format to askClaude's footer)
+    let footer = '';
+    if (sources.liveModels.length) {
+      footer = `\n\n*Live datasheet: ${sources.liveModels.join(', ')}*`;
+    } else if (sources.fetchFailed && sources.cachedModels.length) {
+      footer = `\n\n*Specs from product database (live datasheet fetch failed). Want me to retry?*`;
+    } else if (sources.cachedModels.length) {
+      footer = `\n\n*Specs from product database. Want me to pull the latest datasheet to verify?*`;
+    } else if (sources.categoryFamilies.length) {
+      footer = `\n\n*Specs from product database (${sources.categoryFamilies.join(', ')} family).*`;
+    }
+    return { reply: reply.trim() + footer, sources };
+  } catch (e) {
+    console.error('askLlamaProductInfo error:', e && e.message);
+    return null;
+  }
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, classification = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
+
+  // ═══ PRODUCT_INFO WATERFALL GATE ═══
+  // When USE_PRODUCT_INFO_WATERFALL=true, route simple spec lookups to Llama (free, 83% acc
+  // on these intents per 2026-04-23 benchmark). Advisory/flagship/pricing/comparison/image
+  // stay on Claude. On Llama failure → falls through to Claude for full redundancy.
+  if (env.USE_PRODUCT_INFO_WATERFALL === 'true' &&
+      classification && classification.intent === 'product_info' &&
+      !imageData) {
+    const subtype = classifyProductInfoSubtype(userMessage, false);
+    if (subtype === 'simple_lookup') {
+      const t0 = Date.now();
+      const llamaOut = await askLlamaProductInfo(userMessage, personId, env, classification);
+      const elapsed = Date.now() - t0;
+      if (llamaOut && llamaOut.reply) {
+        // Save to conversation history
+        const kv = env.CONVERSATION_KV;
+        if (kv && personId) {
+          try {
+            const history = await getHistory(kv, personId);
+            history.push({ role: 'user', content: userMessage });
+            history.push({ role: 'assistant', content: llamaOut.reply });
+            await kv.put(`conv:${personId}`, JSON.stringify(history.slice(-40)), { expirationTtl: 60 * 60 * 24 * 7 });
+          } catch (_) {}
+        }
+        // Log decision to D1
+        if (env.ctx && env.ctx.waitUntil) {
+          env.ctx.waitUntil(logBotUsageToD1(env, {
+            personId,
+            requestText: userMessage,
+            responsePath: 'waterfall-llama-product-info',
+            model: '@cf/meta/llama-4-scout-17b-16e-instruct',
+            durationMs: elapsed
+          }).catch(() => {}));
+        } else {
+          logBotUsageToD1(env, {
+            personId,
+            requestText: userMessage,
+            responsePath: 'waterfall-llama-product-info',
+            model: '@cf/meta/llama-4-scout-17b-16e-instruct',
+            durationMs: elapsed
+          }).catch(() => {});
+        }
+        return llamaOut.reply;
+      }
+      // Llama returned null/empty → fall through to Claude (logged as waterfall-fallthrough)
+      console.log('Waterfall: Llama returned empty, falling through to Claude');
+    }
+  }
+
   try {
     const upper = userMessage.toUpperCase();
     let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|LOOK\s+(IT\s+)?UP|PULL\s+(IT\s+)?UP|DIG\s+INTO|READ\s+(THE\s+)?DATASHEET|FETCH\s+(THE\s+)?DATASHEET)\b/i.test(userMessage);
@@ -7180,26 +7426,7 @@ Hard rules:
         const promptVariant = (body.prompt_variant || 'baseline').toLowerCase();
         if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
 
-        // ── CF_GROUNDING_RULES ── appended for prompt_variant='revised'
-        // Targets specific Llama/Gemma failure modes observed in 2026-04-23 benchmark:
-        //   (a) Llama called MX105 the "flagship" when MX450 was in injected context
-        //   (b) Llama concatenated multi-product SKUs into a single order URL
-        //   (c) Gemma ignored injected PRICE: lines and claimed "no pricing available"
-        //   (d) Both drifted from specs when context was thin → filled in from training data
-        const CF_GROUNDING_RULES = `
-
-## CRITICAL RULES — FOLLOW EXACTLY (these override any conflicting instruction above)
-
-1. GROUNDING. Every factual claim must be directly supported by the PRODUCT SPECS, DATASHEET, PRICING, or ACCESSORIES context provided in this system prompt. Do NOT supplement with training-data facts. If a spec is missing, say "I do not have that data" — never guess.
-
-2. FLAGSHIP / HIGHEST-END / BEST. Do NOT call any product a "flagship", "highest-end", "top-tier", "best", or equivalent UNLESS that model has the single highest value on the relevant spec (throughput Gbps, port count, radio generation) among every product listed in the injected specs above. When the user asks for the flagship and the true flagship is not in context, explicitly say the highest-end model in that family (MX450 for MX, MS450 for MS, CW9176 for CW Wi-Fi 7) and note you can pull its full specs on request.
-
-3. PRICING. If the injected context contains a PRICING section or lines starting with "PRICE:", you MUST use those exact prices. Never respond "I don't have pricing" when pricing is present above. Copy the price values verbatim — do not round, estimate, or re-derive.
-
-4. MULTI-PRODUCT ORDER URLS. When the user asks about multiple distinct products and you output Stratus order links, produce ONE URL per product. Never concatenate SKUs from different products into a single item list. Format: https://stratusinfosystems.com/order/?item={SKU}&qty={N}
-
-5. UNCERTAINTY. If a requested spec, SKU, or price is not in the context above, say so plainly. Do NOT invent SKUs that are not in the SPECS / PRICING / DATASHEET blocks.
-`;
+        // CF_GROUNDING_RULES is defined at module scope; appended below for prompt_variant='revised'.
 
         // ── Build injected context identically to askClaude ──
         let systemPrompt = SYSTEM_PROMPT;
