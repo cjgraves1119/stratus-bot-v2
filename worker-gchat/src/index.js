@@ -4604,20 +4604,31 @@ function getProductIdToSkuMap() {
 }
 
 // ── Product_Active preflight for Quoted_Items ──
-// Blocks NEW line items that reference EOL / inactive products BEFORE hitting Zoho.
+// Blocks NEW line items that reference EOL / inactive products OR fabricated
+// product_ids BEFORE hitting Zoho.
 // Rationale: Zoho silently rejects EOL products in Quoted_Items subforms with a generic
 // INVALID_DATA error that doesn't tell the model which SKU failed. This preflight gives
 // the model a clear error with the EOL replacement suggestion.
 //
+// ALSO catches hallucinated 19-digit product_ids (e.g. Llama fabricating
+// "2570562000271100009" when real MR44-HW id is "2570562000045149737"). Zoho
+// returns "NOT_ALLOWED — can't add inactive product in the inventory" which
+// the model paraphrases as "the product is not active", leading to confusing
+// failures. We detect these by checking the product_id against our reverse
+// cache map AND the live KV prices — if neither has it, it's almost certainly
+// fabricated and we block with an actionable error.
+//
 // Strategy:
 //   - Only checks NEW line items (items without an existing `id`).
 //   - Uses product_id → SKU reverse map, then isEol(sku) + EOL_REPLACEMENTS.
+//   - Unknown product_ids: fail-fast with guidance to call batch_product_lookup.
 //   - Returns { valid: true } or { valid: false, errors: [...], blocked_items: [...] }.
 function preflightQuotedItemsProductActive(quotedItems) {
   if (!Array.isArray(quotedItems)) return { valid: true };
   const idMap = getProductIdToSkuMap();
   const errors = [];
   const blocked = [];
+  const hallucinated = [];
   for (const item of quotedItems) {
     // Skip deletes and in-place modifies (existing ids)
     if (item._delete !== undefined) continue;
@@ -4625,7 +4636,15 @@ function preflightQuotedItemsProductActive(quotedItems) {
     const productId = item.Product_Name?.id;
     if (!productId) continue;
     const sku = idMap[productId];
-    if (!sku) continue;
+    if (!sku) {
+      // Unknown product_id — not in our reverse cache. This is almost always
+      // a hallucinated/fabricated 19-digit id. The prices.json cache covers
+      // every active SKU we sell, so if the id isn't here, Zoho will reject
+      // it with "NOT_ALLOWED can't add inactive product in the inventory".
+      // Block pre-flight with actionable guidance instead of letting it round-trip.
+      hallucinated.push({ product_id: productId });
+      continue;
+    }
     if (typeof isEol === 'function' && isEol(sku)) {
       const replacement = (typeof checkEol === 'function') ? checkEol(sku) : null;
       blocked.push({ sku, product_id: productId, replacement: replacement || null });
@@ -4636,8 +4655,25 @@ function preflightQuotedItemsProductActive(quotedItems) {
       }
     }
   }
+  if (hallucinated.length > 0) {
+    const idsList = hallucinated.map(h => h.product_id).join(', ');
+    // Observability — surfaces in CF Worker logs so we can track hallucination frequency by model/session.
+    console.log(`[PREFLIGHT-HALLUCINATION] Blocked ${hallucinated.length} fabricated product_id(s): ${idsList}`);
+    errors.unshift(
+      `❌ FABRICATED PRODUCT ID(S): ${idsList}. These product_ids were not returned by batch_product_lookup in this conversation. ` +
+      `Do NOT invent 19-digit Zoho product IDs and do NOT reuse ids from memory. ` +
+      `Call batch_product_lookup({skus: ["<sku-you-want-to-add>"]}) FIRST to get the real product_id, ` +
+      `then retry zoho_update_record with the returned product_id. ` +
+      `If you didn't call batch_product_lookup for this SKU in THIS conversation, the id is fake.`
+    );
+  }
   if (errors.length > 0) {
-    return { valid: false, errors, blocked_items: blocked };
+    return {
+      valid: false,
+      errors,
+      blocked_items: blocked,
+      hallucinated_ids: hallucinated.length > 0 ? hallucinated : undefined
+    };
   }
   return { valid: true };
 }
@@ -4874,6 +4910,63 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
     }
   } catch (_) {}
+
+  // ── Universal correctness preflight (runs BEFORE dry-run mock) ──
+  // Fabricated product_ids in Quoted_Items MUST be caught regardless of whether
+  // we're in benchmark/dry-run mode or live production. If we only check in the
+  // real-Zoho path, benchmarks pass with fake ids and give us false confidence.
+  try {
+    if (toolName === 'zoho_update_record' || toolName === 'zoho_create_record') {
+      const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
+      const isQuotesModule = toolInput?.module_name === 'Quotes';
+      if (isQuotesModule && Array.isArray(items)) {
+        const activeCheck = preflightQuotedItemsProductActive(items);
+        if (!activeCheck.valid) {
+          const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+          const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';
+          return {
+            validation_error: true,
+            action: blockAction,
+            message: hasHallucination
+              ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
+              : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+            blocked_items: activeCheck.blocked_items,
+            hallucinated_ids: activeCheck.hallucinated_ids
+          };
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[PREFLIGHT] pre-mock check threw: ${e.message}`);
+  }
+
+  // ── Truncated Zoho record_id preflight (runs BEFORE dry-run mock) ──
+  // Llama occasionally outputs just the org prefix "2570562000" (10 digits)
+  // instead of a full 19-digit Zoho record id. In live prod, Zoho rejects
+  // with INVALID_DATA — but in dry-run the mock returns SUCCESS, so the
+  // fake id propagates into the reply's View URL (→ broken link for users).
+  // Block these early and tell the model exactly how to recover.
+  //
+  // Zoho record ids in this org are 18-19 digits, all starting with the
+  // well-known "2570562000" prefix. Anything shorter is truncated.
+  // Non-numeric ids (mock DRY_RUN_*, prefixed test ids) are allowed through.
+  try {
+    const idBearingTools = new Set(['zoho_get_record', 'zoho_update_record', 'zoho_delete_record']);
+    if (idBearingTools.has(toolName)) {
+      const rid = toolInput?.record_id;
+      if (typeof rid === 'string' && /^\d+$/.test(rid) && rid.length < 18) {
+        console.log(`[PREFLIGHT-TRUNCATED-ID] Blocked ${toolName} with truncated record_id: ${rid} (${rid.length} digits)`);
+        return {
+          validation_error: true,
+          action: 'truncated_record_id',
+          message: `❌ TRUNCATED RECORD ID: "${rid}" (${rid.length} digits). Zoho record IDs in this org are 18–19 digits and start with "2570562000". You appear to have output just the org prefix. Do NOT invent or truncate record ids. Re-read the most recent zoho_search_records result and copy the FULL id (exactly 19 characters) before retrying.`,
+          truncated_record_id: rid
+        };
+      }
+    }
+  } catch (e) {
+    console.log(`[PREFLIGHT-TRUNCATED-ID] check threw: ${e.message}`);
+  }
 
   // ── Benchmark dry-run interception ──
   // When askClaudeForBenchmark sets env.__BENCHMARK_DRY_RUN, mock write ops
@@ -5267,15 +5360,19 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             return { validation_error: true, message: realErrors, action: 'create_blocked' };
           }
         }
-        // Product_Active preflight — reject EOL/inactive products before writing
+        // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids before writing
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
           const activeCheck = preflightQuotedItemsProductActive(recordData.Quoted_Items);
           if (!activeCheck.valid) {
+            const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
             return {
               validation_error: true,
               action: 'create_blocked',
-              message: `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
-              blocked_items: activeCheck.blocked_items
+              message: hasHallucination
+                ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
+                : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+              blocked_items: activeCheck.blocked_items,
+              hallucinated_ids: activeCheck.hallucinated_ids
             };
           }
         }
@@ -5359,15 +5456,19 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (!updateCheck.valid) {
           return { validation_error: true, message: updateCheck.error, action: 'update_blocked' };
         }
-        // Product_Active preflight — reject EOL/inactive products in Quoted_Items appends
+        // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids in Quoted_Items appends
         if (module_name === 'Quotes' && data.Quoted_Items) {
           const activeCheck = preflightQuotedItemsProductActive(data.Quoted_Items);
           if (!activeCheck.valid) {
+            const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
             return {
               validation_error: true,
               action: 'update_blocked',
-              message: `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
-              blocked_items: activeCheck.blocked_items
+              message: hasHallucination
+                ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
+                : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+              blocked_items: activeCheck.blocked_items,
+              hallucinated_ids: activeCheck.hallucinated_ids
             };
           }
         }
@@ -9952,6 +10053,65 @@ const BENCHMARK_READ_TOOLS = new Set([
 // Returns { result, mocked, payloadPreview }.
 async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun) {
   if (dryRun && BENCHMARK_WRITE_TOOLS.has(toolName)) {
+    // ── Universal correctness preflight (runs BEFORE dry-run mock) ──
+    // Without this, CF-model dry-run tests mock a SUCCESS response even when
+    // the model fabricated a product_id, giving false-positive benchmark passes.
+    // Live production catches this via the preflight inside executeToolCall's
+    // switch-case, but that path is bypassed when the dry-run mock fires first.
+    try {
+      if (toolName === 'zoho_update_record' || toolName === 'zoho_create_record') {
+        const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
+        const isQuotesModule = toolInput?.module_name === 'Quotes';
+        if (isQuotesModule && Array.isArray(items)) {
+          const activeCheck = preflightQuotedItemsProductActive(items);
+          if (!activeCheck.valid) {
+            const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';
+            return {
+              result: {
+                validation_error: true,
+                action: blockAction,
+                message: hasHallucination
+                  ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
+                  : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+                blocked_items: activeCheck.blocked_items,
+                hallucinated_ids: activeCheck.hallucinated_ids
+              },
+              mocked: true,
+              payloadPreview: JSON.stringify(toolInput).substring(0, 500)
+            };
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[PREFLIGHT-DRYRUN] pre-mock check threw: ${e.message}`);
+    }
+
+    // ── Truncated record_id preflight (dry-run path) ──
+    // Without this, dry-run mocks return SUCCESS with a truncated id,
+    // which Llama then embeds in the user-facing View URL → broken link.
+    try {
+      const idBearingWriteTools = new Set(['zoho_update_record', 'zoho_delete_record']);
+      if (idBearingWriteTools.has(toolName)) {
+        const rid = toolInput?.record_id;
+        if (typeof rid === 'string' && /^\d+$/.test(rid) && rid.length < 18) {
+          console.log(`[PREFLIGHT-DRYRUN-TRUNCATED] Blocked ${toolName} with truncated record_id: ${rid} (${rid.length} digits)`);
+          return {
+            result: {
+              validation_error: true,
+              action: 'truncated_record_id',
+              message: `❌ TRUNCATED RECORD ID: "${rid}" (${rid.length} digits). Zoho record IDs in this org are 18–19 digits and start with "2570562000". You appear to have output just the org prefix. Do NOT invent or truncate record ids. Re-read the most recent zoho_search_records result and copy the FULL id (exactly 19 characters) before retrying.`,
+              truncated_record_id: rid
+            },
+            mocked: true,
+            payloadPreview: JSON.stringify(toolInput).substring(0, 500)
+          };
+        }
+      }
+    } catch (e) {
+      console.log(`[PREFLIGHT-DRYRUN-TRUNCATED] check threw: ${e.message}`);
+    }
+
     // Mock successful write — log payload for manual review
     const mockId = `DRY_RUN_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
     const mockResults = {
@@ -10565,6 +10725,9 @@ Default defaults for new deals:
 
 TOOL RESULT TRUTH (HARD RULE):
 - NEVER claim a record was created, updated, or deleted unless the tool result in THIS conversation includes success:true AND a real record_id from that result. Never fabricate a 19-digit Zoho ID.
+- RECORD IDs ARE EXACTLY 18–19 DIGITS and start with "2570562000". NEVER truncate a record_id. If you output just "2570562000" (10 digits — the org prefix) or any numeric string shorter than 18 digits for record_id, the preflight will reject your tool call with "TRUNCATED RECORD ID". When you need a record_id, copy the FULL id verbatim from the most recent zoho_search_records or zoho_get_record result — never reconstruct it, never guess the remaining digits, never stop after the prefix. Same rule applies when building View URLs: the URL path must end with the full 19-digit id, not just the org prefix.
+- NEVER fabricate a 19-digit product_id for Quoted_Items. Before adding ANY new line item to a quote, you MUST call batch_product_lookup({skus: ["<sku>"]}) and use the product_id returned in THAT tool result. Do NOT guess, invent, or copy product_ids from memory. If you didn't call batch_product_lookup for the SKU in this conversation, the id you're about to use is fake and the server will reject it with "FABRICATED PRODUCT ID".
+- When the server returns "FABRICATED PRODUCT ID(S): <ids>" in a validation_error, your ONLY next step is to call batch_product_lookup for the SKU the user asked for, then retry zoho_update_record / zoho_create_record with the real product_id from that lookup. Do NOT tell the user the product is "inactive" or "not in the catalog" — it's active, you just used a fake id.
 - If create_deal_and_quote returns needs_account_info:true or any error, STOP and read the "instruction" field — relay it to the user verbatim and wait for their reply. Do NOT retry the tool. Do NOT invent a quote_id.
 - If a follow-up turn the user says "I can't find it" or "link is wrong", check the ACTUAL tool history. If no successful create tool returned a record_id, admit the record was not created instead of guessing.
 
@@ -10690,6 +10853,9 @@ TOOL RESULT TRUTH (HARD RULE — violating this is the worst failure mode):
 - NEVER claim a record was created, updated, or deleted unless the tool result in THIS conversation includes success:true AND a real record_id pulled directly from that result.
 - If create_deal_and_quote returns success:false, needs_account_info:true, or any error, you MUST report the error verbatim and STOP. Do NOT invent a quote_id, quote_number, or URL. Do NOT claim "added to the deal" or "quote created" when the tool did not return a record_id.
 - NEVER fabricate a 19-digit Zoho record ID. If you don't have one from a tool result, you don't have one. Say "the quote was not created" rather than guessing.
+- RECORD IDs ARE EXACTLY 18–19 DIGITS and start with "2570562000" (org prefix). NEVER truncate a record_id. If you output just "2570562000" (10 digits — the org prefix) or any numeric string shorter than 18 digits as record_id, the preflight will block the tool call with "TRUNCATED RECORD ID" and force you to re-lookup. When a tool call needs a record_id, copy the FULL id verbatim from the most recent zoho_search_records or zoho_get_record result — never reconstruct it, never guess the remaining 9 digits after the prefix, never stop typing after "2570562000". The same rule applies to the View URL you include at the end of the reply: the URL path MUST end with the full 19-digit id, not the org prefix alone.
+- NEVER fabricate a 19-digit product_id for Quoted_Items. Before adding ANY new line item to a quote, you MUST call batch_product_lookup({skus: ["<sku>"]}) and use the product_id returned in that tool result. Do NOT guess, invent, or copy product_ids from memory. If you write a product_id that wasn't just returned from batch_product_lookup in THIS conversation, the server will reject it as "FABRICATED PRODUCT ID" — this is a hard rule enforced by preflight.
+- When the server returns "FABRICATED PRODUCT ID(S): <ids>" in a validation_error, your ONLY next step is to call batch_product_lookup for the SKU the user asked for, then retry zoho_update_record / zoho_create_record with the real product_id from that lookup. Do NOT claim the product is "inactive" or "not in the catalog" — it's active, you just used a fake id.
 - NEVER carry forward a hallucinated record_id across multiple turns. If the user says "the link is wrong" or "I can't find it", check the ACTUAL tool history — if no successful create fired, admit it wasn't created.
 - When you call create_deal_and_quote and the result contains needs_account_info:true, DO NOT retry the tool. Your ONLY next step is to ask the user for the missing fields listed in the "instruction" field of the result, then wait for their reply.
 
@@ -13741,7 +13907,9 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 elapsedMs: outcome.elapsedMs,
                 totalMs: outcome.totalMs,
                 iterations: outcome.iterations,
-                toolCallCount: (outcome.toolCalls || []).length
+                toolCallCount: (outcome.toolCalls || []).length,
+                // Debug: surface tool call details when dryRun + debugEcho enabled
+                toolCalls: (wDryRun === true && apiBody.debugEcho === true) ? (outcome.toolCalls || []) : undefined
               };
             } catch (wErr) {
               console.error(`[WATERFALL] Error: ${wErr.message}`);
