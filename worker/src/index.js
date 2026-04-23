@@ -402,7 +402,12 @@ function getStaticSpecsContext(message) {
   let context = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE SOURCE)\n';
   context += 'CRITICAL: Use ONLY these specs when answering. Do NOT supplement with training data. These specs OVERRIDE any conflicting information in conversation history — if prior messages contain different numbers, they were wrong and these are correct.\n';
   context += 'If the user asks about a spec not listed here, say "I don\'t have that specific spec cached — want me to pull the latest datasheet to confirm?"\n';
-  context += 'After answering, add: "*Specs from product database. Want me to pull the latest datasheet to verify?*"\n\n';
+  // NOTE: Do NOT instruct the model to append a "Specs from product database" footer.
+  // The caller (askLlamaProductInfo / askClaude) owns the source-attribution footer
+  // and appends it in code based on sources{}. Having the model also emit one caused
+  // a duplicate "Specs from product database. Want me to pull the latest datasheet to
+  // verify?" line on every reply. Fixed 2026-04-23.
+
   for (const { model, specs: s } of unique) {
     context += `${model}: ${JSON.stringify(s)}\n`;
   }
@@ -5735,13 +5740,17 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
             durationMs: elapsed
           }).catch(() => {});
         }
-        return llamaOut.reply;
+        // User-visible model marker — confirms which model produced this reply.
+        // Matches the Claude-path marker added below for at-a-glance observability.
+        const elapsedSec = (elapsed / 1000).toFixed(1);
+        return `${llamaOut.reply}\n\n_🦙 Llama 4 Scout · CF Workers AI · ${elapsedSec}s · free_`;
       }
       // Llama returned null/empty → fall through to Claude (logged as waterfall-fallthrough)
       console.log('Waterfall: Llama returned empty, falling through to Claude');
     }
   }
 
+  const claudeStartMs = Date.now();
   try {
     const upper = userMessage.toUpperCase();
     let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|LOOK\s+(IT\s+)?UP|PULL\s+(IT\s+)?UP|DIG\s+INTO|READ\s+(THE\s+)?DATASHEET|FETCH\s+(THE\s+)?DATASHEET)\b/i.test(userMessage);
@@ -6044,7 +6053,13 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
         sourceFooter = `_⚠️ Source: training data only — no verified spec source was referenced for this answer. Ask me to "pull the datasheet" to verify._`;
       }
     }
-    const finalReply = sourceFooter ? `${reply}\n\n${sourceFooter}` : reply;
+    // User-visible model marker — confirms which model produced this reply.
+    // Matches the Llama-path marker above for at-a-glance observability.
+    const claudeSec = ((Date.now() - claudeStartMs) / 1000).toFixed(1);
+    const modelMarker = `_💎 Claude Sonnet 4.6 · ${claudeSec}s_`;
+    const finalReply = sourceFooter
+      ? `${reply}\n\n${sourceFooter}\n\n${modelMarker}`
+      : `${reply}\n\n${modelMarker}`;
 
     if (personId) {
       await addToHistory(kv, personId, 'user', userMessage);
