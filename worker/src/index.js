@@ -5610,7 +5610,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     // Include quote URL tool for all requests (lightweight, only called when Claude needs URLs)
     // Image analysis + tool-use needs more tokens than text-only (2048 for tool calls)
     const apiBody = {
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: imageData ? 4096 : 1024,
       system: systemPrompt,
       messages,
@@ -5770,12 +5770,12 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
 
     // Log token usage + cost to D1 (previously missed — cost was always $0)
     if (data?.usage) {
-      const MODEL_COST = { input: 3.0, output: 15.0 }; // sonnet-4 per 1M tokens
+      const MODEL_COST = { input: 3.0, output: 15.0 }; // sonnet-4-6 per 1M tokens
       const costUsd = ((data.usage.input_tokens || 0) / 1e6) * MODEL_COST.input +
                       ((data.usage.output_tokens || 0) / 1e6) * MODEL_COST.output;
       logBotUsageToD1(env, {
         personId, requestText: userMessage, responsePath: 'claude',
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         inputTokens: data.usage.input_tokens || 0,
         outputTokens: data.usage.output_tokens || 0,
         costUsd,
@@ -7153,15 +7153,19 @@ Hard rules:
       }
     }
 
-    // ── /api/benchmark-product-info ── POST with {input, model, prior_context?, want_live_datasheet?}
-    // Runs the askClaude product_info path against the named model (Claude Sonnet 4, Llama 4 Scout,
+    // ── /api/benchmark-product-info ── POST with {input, model, prior_context?, want_live_datasheet?, prompt_variant?}
+    // Runs the askClaude product_info path against the named model (Claude Sonnet 4.6, Llama 4 Scout,
     // Gemma 4 26B) with identical injected context. Used to A/B whether CF Workers AI can replace
     // Claude for spec-lookup / comparison / advisory questions.
     //
     // Supported model values:
-    //   "claude"  → claude-sonnet-4-20250514 via ANTHROPIC_API_URL
+    //   "claude"  → claude-sonnet-4-6 via ANTHROPIC_API_URL
     //   "llama"   → @cf/meta/llama-4-scout-17b-16e-instruct via env.AI
     //   "gemma"   → @cf/google/gemma-4-26b-a4b-it via env.AI
+    //
+    // Supported prompt_variant values (default: "baseline"):
+    //   "baseline" → SYSTEM_PROMPT only (matches production askClaude)
+    //   "revised"  → SYSTEM_PROMPT + CF_GROUNDING_RULES (targets Llama/Gemma failure modes)
     if (url.pathname === '/api/benchmark-product-info') {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key' } });
       if (request.method !== 'POST') return new Response('POST required', { status: 405 });
@@ -7173,7 +7177,29 @@ Hard rules:
         const modelKey = (body.model || 'claude').toLowerCase();
         const priorCtx = body.prior_context || '';
         const wantLiveDatasheet = !!body.want_live_datasheet;
+        const promptVariant = (body.prompt_variant || 'baseline').toLowerCase();
         if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
+
+        // ── CF_GROUNDING_RULES ── appended for prompt_variant='revised'
+        // Targets specific Llama/Gemma failure modes observed in 2026-04-23 benchmark:
+        //   (a) Llama called MX105 the "flagship" when MX450 was in injected context
+        //   (b) Llama concatenated multi-product SKUs into a single order URL
+        //   (c) Gemma ignored injected PRICE: lines and claimed "no pricing available"
+        //   (d) Both drifted from specs when context was thin → filled in from training data
+        const CF_GROUNDING_RULES = `
+
+## CRITICAL RULES — FOLLOW EXACTLY (these override any conflicting instruction above)
+
+1. GROUNDING. Every factual claim must be directly supported by the PRODUCT SPECS, DATASHEET, PRICING, or ACCESSORIES context provided in this system prompt. Do NOT supplement with training-data facts. If a spec is missing, say "I do not have that data" — never guess.
+
+2. FLAGSHIP / HIGHEST-END / BEST. Do NOT call any product a "flagship", "highest-end", "top-tier", "best", or equivalent UNLESS that model has the single highest value on the relevant spec (throughput Gbps, port count, radio generation) among every product listed in the injected specs above. When the user asks for the flagship and the true flagship is not in context, explicitly say the highest-end model in that family (MX450 for MX, MS450 for MS, CW9176 for CW Wi-Fi 7) and note you can pull its full specs on request.
+
+3. PRICING. If the injected context contains a PRICING section or lines starting with "PRICE:", you MUST use those exact prices. Never respond "I don't have pricing" when pricing is present above. Copy the price values verbatim — do not round, estimate, or re-derive.
+
+4. MULTI-PRODUCT ORDER URLS. When the user asks about multiple distinct products and you output Stratus order links, produce ONE URL per product. Never concatenate SKUs from different products into a single item list. Format: https://stratusinfosystems.com/order/?item={SKU}&qty={N}
+
+5. UNCERTAINTY. If a requested spec, SKU, or price is not in the context above, say so plainly. Do NOT invent SKUs that are not in the SPECS / PRICING / DATASHEET blocks.
+`;
 
         // ── Build injected context identically to askClaude ──
         let systemPrompt = SYSTEM_PROMPT;
@@ -7241,6 +7267,10 @@ Hard rules:
         const accessoriesContext = getAccessoriesContext(input);
         if (accessoriesContext) systemPrompt += '\n\n' + accessoriesContext;
 
+        // Append CF grounding rules for revised variant (appears AFTER injected context so the
+        // model sees the specs/pricing/datasheet block first, then the rules that reference it)
+        if (promptVariant === 'revised') systemPrompt += CF_GROUNDING_RULES;
+
         // Build messages — prior_context becomes a fake prior assistant turn for followup tests
         const messages = [];
         if (priorCtx) messages.push({ role: 'assistant', content: priorCtx });
@@ -7256,7 +7286,7 @@ Hard rules:
             const resp = await fetch(ANTHROPIC_API_URL, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-              body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1024, system: systemPrompt, messages })
+              body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: systemPrompt, messages })
             });
             if (!resp.ok) {
               err = `Anthropic ${resp.status}: ${await resp.text()}`;
@@ -7294,6 +7324,7 @@ Hard rules:
         const elapsed = Date.now() - start;
         return new Response(JSON.stringify({
           model: modelKey,
+          prompt_variant: promptVariant,
           input,
           elapsed,
           reply,

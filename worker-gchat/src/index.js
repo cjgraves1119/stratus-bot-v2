@@ -374,7 +374,7 @@ function createTracer(env, bot) {
 // Schema:
 //   blobs[0] = bot ('webex'|'gchat'|'addon')
 //   blobs[1] = response_path ('deterministic'|'claude'|'crm_agent'|'pricing'|'error')
-//   blobs[2] = model (e.g. 'claude-sonnet-4-20250514' or 'none')
+//   blobs[2] = model (e.g. 'claude-sonnet-4-6' or 'none')
 //   doubles[0] = duration_ms
 //   doubles[1] = input_tokens
 //   doubles[2] = output_tokens
