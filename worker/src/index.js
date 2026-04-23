@@ -365,9 +365,29 @@ function getStaticSpecsContext(message) {
         if (familyData[model]) {
           found.push({ model, specs: familyData[model] });
         }
-        const baseMatch = model.match(/^(MS\d{3}|MX\d+|MR\d+|MV\d+|MG\d+|MT\d+|CW\d+[A-Z]*\d*|Z4)/);
+        // Base extraction now includes Catalyst C9xxx so bare "C9300" / "C9200L" resolve.
+        const baseMatch = model.match(/^(MS\d{3}|MX\d+|MR\d+|MV\d+|MG\d+|MT\d+|CW\d+[A-Z]*\d*|Z4|C9\d{3}[A-Z]*)/);
         if (baseMatch && familyData[baseMatch[1]] && !found.some(f => f.model === baseMatch[1])) {
           found.push({ model: baseMatch[1], specs: familyData[baseMatch[1]] });
+        }
+        // Family-level fallback: user asked about a family stem (C9300, MS150, etc.) that is
+        // NOT a variant key. Surface the _family summary + variant names so Claude has context
+        // instead of defaulting to "I don't have verified specs."
+        const familyStem = baseMatch ? baseMatch[1] : model;
+        const familyMatches = (family === familyStem) ||
+                              (family === `${familyStem}-M`) ||
+                              family.startsWith(`${familyStem}-`) ||
+                              family.startsWith(`${familyStem}`);
+        if (familyMatches && familyData._family && !found.some(f => f.model === family)) {
+          const variantList = Object.keys(familyData).filter(k => !k.startsWith('_'));
+          found.push({
+            model: family,
+            specs: {
+              family: familyData._family,
+              variants: variantList,
+              _stacking: familyData._stacking || undefined
+            }
+          });
         }
       }
     }
@@ -5249,11 +5269,18 @@ function handleQuoteUrlTool(params) {
   return { url, label: label || `${term}-Year Co-Term`, items_count: items.length };
 }
 
-async function askClaude(userMessage, personId, env, imageData = null) {
+async function askClaude(userMessage, personId, env, imageData = null, classification = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
-    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|LOOK\s+(IT\s+)?UP|PULL\s+(IT\s+)?UP|DIG\s+INTO|READ\s+(THE\s+)?DATASHEET|FETCH\s+(THE\s+)?DATASHEET)\b/i.test(userMessage);
+
+    // V2 classifier: product_info intent → treat as datasheet-lookup request
+    // This lets followup questions like "get specifics from datasheet" or "tell me more"
+    // trigger live fetch even when the narrow regex above doesn't match.
+    if (!wantsLiveDatasheet && classification && classification.intent === 'product_info') {
+      wantsLiveDatasheet = true;
+    }
 
     let systemPrompt = SYSTEM_PROMPT;
     const kv = env.CONVERSATION_KV;
@@ -5272,14 +5299,18 @@ async function askClaude(userMessage, personId, env, imageData = null) {
       const datasheetContext = await getRelevantDatasheetContext(userMessage);
       if (!datasheetContext && personId) {
         const history = await getHistory(kv, personId);
-        const lastAssistant = [...history].reverse().find(h => h.role === 'assistant');
-        if (lastAssistant) {
-          const historyContext = await getRelevantDatasheetContext(lastAssistant.content);
-          if (historyContext) {
-            systemPrompt += '\n\n' + historyContext;
-            systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences.';
-            datasheetFetched = true;
-          }
+        // Scan recent history (not just last assistant) for any model mention.
+        // Followups like "get specifics from datasheet" may come several turns after the model was named.
+        const recentTurns = [...history].reverse().slice(0, 6);
+        let historyContext = null;
+        for (const turn of recentTurns) {
+          historyContext = await getRelevantDatasheetContext(turn.content);
+          if (historyContext) break;
+        }
+        if (historyContext) {
+          systemPrompt += '\n\n' + historyContext;
+          systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences.';
+          datasheetFetched = true;
         }
       } else if (datasheetContext) {
         systemPrompt += '\n\n' + datasheetContext;
@@ -6631,8 +6662,11 @@ Hard rules:
           }
 
           // Full fallback to Claude API (Tier 3)
+          // Pass activeClassification so product_info intent triggers the datasheet path
+          // even when the narrow wantsLiveDatasheet regex doesn't match (e.g., followups like
+          // "get specifics from datasheet" or "what does the datasheet say about ports").
           T.step('wx-claude', 'enter');
-          const claudeReply = await askClaude(text, personId, env);
+          const claudeReply = await askClaude(text, personId, env, null, activeClassification);
           T.step('wx-claude', 'exit');
           T.step('wx-send', 'enter');
           await sendMessage(roomId, claudeReply, token);
