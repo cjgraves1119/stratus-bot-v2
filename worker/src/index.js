@@ -5687,14 +5687,16 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
   console.log(`[Waterfall] flag=${JSON.stringify(env.USE_PRODUCT_INFO_WATERFALL)} parsed=${waterfallOn} intent=${classification?.intent} hasImg=${!!imageData}`);
 
   // Temporary D1 diagnostic row so we can read waterfall gate state without log tail.
+  // AWAIT this write so it definitely completes — fire-and-forget may get cancelled
+  // when askClaude returns early on waterfall hit.
   try {
-    logBotUsageToD1(env, {
+    await logBotUsageToD1(env, {
       personId,
       requestText: `DIAG flag=${JSON.stringify(env.USE_PRODUCT_INFO_WATERFALL)} parsed=${waterfallOn} intent=${classification?.intent} hasImg=${!!imageData} msg=${String(userMessage).slice(0, 40)}`,
       responsePath: 'waterfall-diag',
       durationMs: 0
-    }).catch(() => {});
-  } catch (_) {}
+    });
+  } catch (e) { console.error('[D1] diag insert error:', e?.message); }
   if (waterfallOn &&
       classification && classification.intent === 'product_info' &&
       !imageData) {
