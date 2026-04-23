@@ -14321,9 +14321,9 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             try {
               // ── KV cache check (5-min TTL for full batch) ──
               const fullCacheKey = `crm_full_${(fullEmail || fullDomain).toLowerCase()}`;
-              if (env.GCHAT_CONVERSATION_KV) {
+              if (env.CONVERSATION_KV) {
                 try {
-                  const cached = await env.GCHAT_CONVERSATION_KV.get(fullCacheKey, 'json');
+                  const cached = await env.CONVERSATION_KV.get(fullCacheKey, 'json');
                   if (cached) {
                     console.log(`[CRM-FULL] Cache hit for ${fullEmail || fullDomain}`);
                     apiResult = cached;
@@ -14601,9 +14601,9 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               }
 
               // Cache in KV (5-min TTL)
-              if (env.GCHAT_CONVERSATION_KV && apiResult.found) {
+              if (env.CONVERSATION_KV && apiResult.found) {
                 ctx.waitUntil(
-                  env.GCHAT_CONVERSATION_KV.put(fullCacheKey, JSON.stringify(apiResult), { expirationTtl: 300 })
+                  env.CONVERSATION_KV.put(fullCacheKey, JSON.stringify(apiResult), { expirationTtl: 300 })
                     .catch(() => {})
                 );
               }
@@ -14629,9 +14629,9 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               // Check KV cache first (10-min TTL). Normalize key to lowercase so
               // the same email with different casing shares a single cache entry.
               const cacheKey = `crm_contact_${(contactEmail || contactDomain).toLowerCase()}`;
-              if (env.GCHAT_CONVERSATION_KV) {
+              if (env.CONVERSATION_KV) {
                 try {
-                  const cached = await env.GCHAT_CONVERSATION_KV.get(cacheKey, 'json');
+                  const cached = await env.CONVERSATION_KV.get(cacheKey, 'json');
                   if (cached) {
                     console.log(`[CRM-CONTACT] Cache hit for ${contactEmail || contactDomain}`);
                     apiResult = cached;
@@ -14753,9 +14753,9 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               }
 
               // Cache result in KV (10-min TTL)
-              if (env.GCHAT_CONVERSATION_KV && apiResult.found) {
+              if (env.CONVERSATION_KV && apiResult.found) {
                 ctx.waitUntil(
-                  env.GCHAT_CONVERSATION_KV.put(cacheKey, JSON.stringify(apiResult), { expirationTtl: 600 })
+                  env.CONVERSATION_KV.put(cacheKey, JSON.stringify(apiResult), { expirationTtl: 600 })
                     .catch(() => {})
                 );
               }
