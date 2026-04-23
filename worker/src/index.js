@@ -5685,6 +5685,16 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
   const waterfallFlag = String(env.USE_PRODUCT_INFO_WATERFALL || '').trim().toLowerCase();
   const waterfallOn = waterfallFlag === 'true' || waterfallFlag === '1' || waterfallFlag === 'yes';
   console.log(`[Waterfall] flag=${JSON.stringify(env.USE_PRODUCT_INFO_WATERFALL)} parsed=${waterfallOn} intent=${classification?.intent} hasImg=${!!imageData}`);
+
+  // Temporary D1 diagnostic row so we can read waterfall gate state without log tail.
+  try {
+    logBotUsageToD1(env, {
+      personId,
+      requestText: `DIAG flag=${JSON.stringify(env.USE_PRODUCT_INFO_WATERFALL)} parsed=${waterfallOn} intent=${classification?.intent} hasImg=${!!imageData} msg=${String(userMessage).slice(0, 40)}`,
+      responsePath: 'waterfall-diag',
+      durationMs: 0
+    }).catch(() => {});
+  } catch (_) {}
   if (waterfallOn &&
       classification && classification.intent === 'product_info' &&
       !imageData) {
