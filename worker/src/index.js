@@ -6315,6 +6315,33 @@ export default {
       });
     }
 
+    // ── Debug: probe datasheet reachability from inside Cloudflare Worker env ──
+    if (request.method === 'GET' && url.pathname === '/debug-datasheet') {
+      const sku = (url.searchParams.get('sku') || 'MX95').toUpperCase();
+      const datasheetUrl = DATASHEET_URLS[sku];
+      if (!datasheetUrl) {
+        return new Response(JSON.stringify({ error: 'no URL mapped for ' + sku }), { headers: { 'content-type': 'application/json' } });
+      }
+      const t0 = Date.now();
+      try {
+        const res = await fetch(datasheetUrl, {
+          headers: { 'User-Agent': 'StratusAI-Bot/1.0 (spec-lookup)' },
+          signal: AbortSignal.timeout(5000)
+        });
+        const elapsed = Date.now() - t0;
+        const text = res.ok ? await res.text() : null;
+        return new Response(JSON.stringify({
+          sku, datasheetUrl, ok: res.ok, status: res.status, elapsed, bodyBytes: text?.length || 0,
+          bodyHead: text?.slice(0, 200) || null
+        }, null, 2), { headers: { 'content-type': 'application/json' } });
+      } catch (e) {
+        const elapsed = Date.now() - t0;
+        return new Response(JSON.stringify({
+          sku, datasheetUrl, error: e.message, errorName: e.name, elapsed
+        }, null, 2), { headers: { 'content-type': 'application/json' } });
+      }
+    }
+
     // Webhook handler
     if (request.method === 'POST' && url.pathname === '/webhook') {
       // Respond 200 immediately (Webex requires fast response)
