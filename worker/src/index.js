@@ -5917,14 +5917,27 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
         return [...fams];
       };
       let fams = familyDetect(userMessage);
+      let diagHistLen = 0;
+      let diagAsstContentHead = '';
       if (fams.length === 0 && personId && kv) {
         const histForFam = await getHistory(kv, personId);
+        diagHistLen = histForFam.length;
         const recentAsst = [...histForFam].reverse().filter(h => h.role === 'assistant').slice(0, 2);
+        if (recentAsst.length > 0) diagAsstContentHead = String(recentAsst[0].content || '').slice(0, 120);
         for (const t of recentAsst) {
           fams = familyDetect(t.content);
           if (fams.length > 0) break;
         }
       }
+      // Temporary D1 telemetry so we can verify the fallback from outside the worker
+      try {
+        await logBotUsageToD1(env, {
+          personId,
+          requestText: `FAM-DIAG msg="${String(userMessage).slice(0,40)}" histLen=${diagHistLen} asstHead="${diagAsstContentHead}" fams=[${fams.join(',')}]`,
+          responsePath: 'family-fallback-diag',
+          durationMs: 0
+        });
+      } catch (_) {}
       if (fams.length > 0) {
         let famCtx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE, family-level fallback)\n';
         famCtx += 'Use ONLY these specs. Do NOT supplement with training data. If the exact spec the user asked about is not listed, say so and offer to pull the live datasheet.\n\n';
