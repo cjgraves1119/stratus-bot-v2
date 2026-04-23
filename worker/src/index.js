@@ -5214,6 +5214,17 @@ If a product can't be found, ask the user to clarify. Suggest the closest altern
 - When listing model options or variants, ONLY list models from the VALID PRODUCT CATALOG section. Never suggest model numbers that aren't explicitly listed.
 - If conversation history contains specs that conflict with an injected PRODUCT SPECS section, the injected specs are ALWAYS correct.
 
+## WEBEX FORMATTING — ABSOLUTE RULE (applies to EVERY reply, no exceptions)
+Your reply renders in Webex, which does NOT render pipe-delimited markdown tables. ANY row that uses pipe characters as column separators — including 2-column comparison tables, "winners" tables, pros/cons tables, summary tables, bottom-line tables, or any other table — will render as literal "|" characters and look broken.
+**NEVER output a line that starts and ends with a pipe character.** NEVER output a separator row like "|---|---|".
+
+Replace tables with one of these formats:
+- Grouped bullets under a bolded header: "**MS150** — wins on per-port PoE (60W), cost"
+- Inline bullet pairs: "• High per-port PoE: MS150   • 25G uplinks: C9200L"
+- Prose sentences with bolded keywords.
+
+This rule is non-negotiable and overrides any instinct to use tables for "clarity" — tables are not clear in Webex, they are broken.
+
 ## PERSONA
 Professional, concise, action-oriented. Give direct answers without conversational fluff. Short answers for well-defined questions. Positive and engaging tone. You're a knowledgeable colleague, not a help desk.
 
@@ -6102,7 +6113,33 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       }
     }
 
-    const reply = accumulatedText.replace(/\n{3,}/g, '\n\n').trim() || 'Sorry, I could not generate a response.';
+    let reply = accumulatedText.replace(/\n{3,}/g, '\n\n').trim() || 'Sorry, I could not generate a response.';
+    // ── Webex table sanitizer ──
+    // Belt-and-suspenders: Claude occasionally emits pipe-delimited tables
+    // despite the absolute rule in the system prompt. Webex renders these as
+    // literal pipes, so we detect and rewrite them to inline bullets here.
+    // Matches any contiguous block of lines where each line starts + ends with
+    // "|". Header row -> bolded prefix. Separator row (|---|---|) -> dropped.
+    // Data rows -> "• col1 — col2 — col3".
+    reply = reply.replace(
+      /(?:^|\n)((?:\|[^\n]*\|\s*\n){2,})/g,
+      (match, block) => {
+        const lines = block.trim().split('\n').map(l => l.trim());
+        // Skip blocks that look intentional (e.g. code fences) by checking for pipe rows only
+        const rows = lines
+          .map(l => l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()))
+          .filter(cells => cells.length >= 2);
+        if (rows.length < 2) return match; // not actually a table
+        // Drop markdown separator rows (---)
+        const dataRows = rows.filter(r => !r.every(c => /^-+$/.test(c) || c === ''));
+        if (dataRows.length === 0) return match;
+        const header = dataRows[0];
+        const body = dataRows.slice(1);
+        // Emit: blank line, then one bullet per data row joined by em-dash
+        const bullets = body.map(r => `• ${r.map((c, i) => header[i] ? `**${header[i]}:** ${c}` : c).join(' · ')}`);
+        return '\n\n' + bullets.join('\n') + '\n';
+      }
+    );
 
     // ─── Source Attribution Footer ───────────────────────────────────────────
     // Tag every spec-related reply with where the data came from so Chris can
