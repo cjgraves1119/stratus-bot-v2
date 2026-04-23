@@ -5894,15 +5894,18 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
         sources.liveModels.length === 0 &&
         sources.cachedModels.length === 0 &&
         sources.categoryFamilies.length === 0) {
+      // Family-prefix regexes intentionally omit the trailing \b so they also match
+      // model numbers like "MX95" (where MX is followed by digits, not a boundary).
+      // "\bMX" matches both bare "MX" and "MX95".
       const familyDetect = (text) => {
         const u = (text || '').toUpperCase();
         const fams = new Set();
-        if (/\b(FIREWALL|SECURITY\s*APPLIANCE|GATEWAY)\b/.test(u) || /\bMX\b/.test(u)) fams.add('MX');
-        if (/\b(ACCESS\s*POINT|WI[\s-]?FI|WIRELESS|AP)\b/.test(u) || /\b(MR|CW)\b/.test(u)) { fams.add('MR'); fams.add('CW'); }
-        if (/\b(SWITCH|SWITCHING)\b/.test(u) || /\bMS\b/.test(u)) { fams.add('MS130'); fams.add('MS150'); }
-        if (/\b(CAMERA|SURVEILLANCE|VIDEO)\b/.test(u) || /\bMV\b/.test(u)) fams.add('MV');
-        if (/\bSENSOR\b/.test(u) || /\bMT\b/.test(u)) fams.add('MT');
-        if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(u) || /\bMG\b/.test(u)) fams.add('MG');
+        if (/\b(FIREWALL|SECURITY\s*APPLIANCE|GATEWAY)\b/.test(u) || /\bMX/.test(u)) fams.add('MX');
+        if (/\b(ACCESS\s*POINT|WI[\s-]?FI|WIRELESS|\bAP\b)/.test(u) || /\b(MR|CW)/.test(u)) { fams.add('MR'); fams.add('CW'); }
+        if (/\b(SWITCH|SWITCHING)\b/.test(u) || /\bMS/.test(u)) { fams.add('MS130'); fams.add('MS150'); }
+        if (/\b(CAMERA|SURVEILLANCE|VIDEO)\b/.test(u) || /\bMV/.test(u)) fams.add('MV');
+        if (/\bSENSOR\b/.test(u) || /\bMT/.test(u)) fams.add('MT');
+        if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(u) || /\bMG/.test(u)) fams.add('MG');
         return [...fams];
       };
       let fams = familyDetect(userMessage);
