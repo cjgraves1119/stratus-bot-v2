@@ -8319,6 +8319,54 @@
       "zoho_product_id": "2570562000010523428",
       "discount_per_unit": 243.0,
       "discount_pct": 30
+    },
+    "LIC-L-AC-APX-1Y-S1": {
+      "list": 15,
+      "price": 15,
+      "discount": 42,
+      "zoho_product_id": "2570562000030344805",
+      "discount_per_unit": 0,
+      "discount_pct": 3
+    },
+    "LIC-L-AC-APX-3Y-S1": {
+      "list": 34,
+      "price": 34,
+      "discount": 39,
+      "zoho_product_id": "2570562000076283685",
+      "discount_per_unit": 0,
+      "discount_pct": 1
+    },
+    "LIC-L-AC-APX-5Y-S1": {
+      "list": 43,
+      "price": 43,
+      "discount": 42,
+      "zoho_product_id": "2570562000117689945",
+      "discount_per_unit": 0,
+      "discount_pct": 0
+    },
+    "LIC-L-AC-PLS-1Y-S1": {
+      "list": 6,
+      "price": 6,
+      "discount": 22,
+      "zoho_product_id": "2570562000012866813",
+      "discount_per_unit": 0,
+      "discount_pct": 7
+    },
+    "LIC-L-AC-PLS-3Y-S1": {
+      "list": 15,
+      "price": 15,
+      "discount": 42,
+      "zoho_product_id": "2570562000019014661",
+      "discount_per_unit": 0,
+      "discount_pct": 3
+    },
+    "LIC-L-AC-PLS-5Y-S1": {
+      "list": 23,
+      "price": 22,
+      "discount": 38,
+      "zoho_product_id": "2570562000152273117",
+      "discount_per_unit": 1,
+      "discount_pct": 3
     }
   },
   "_meta": {

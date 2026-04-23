@@ -4924,6 +4924,36 @@
       "list": 1398,
       "price": 941,
       "discount": 41
+    },
+    "LIC-L-AC-APX-1Y-S1": {
+      "list": 15,
+      "price": 15,
+      "discount": 42
+    },
+    "LIC-L-AC-APX-3Y-S1": {
+      "list": 34,
+      "price": 34,
+      "discount": 39
+    },
+    "LIC-L-AC-APX-5Y-S1": {
+      "list": 43,
+      "price": 43,
+      "discount": 42
+    },
+    "LIC-L-AC-PLS-1Y-S1": {
+      "list": 6,
+      "price": 6,
+      "discount": 22
+    },
+    "LIC-L-AC-PLS-3Y-S1": {
+      "list": 15,
+      "price": 15,
+      "discount": 42
+    },
+    "LIC-L-AC-PLS-5Y-S1": {
+      "list": 23,
+      "price": 22,
+      "discount": 38
     }
   },
   "_meta": {

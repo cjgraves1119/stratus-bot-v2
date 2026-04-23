@@ -1526,10 +1526,11 @@ async function handlePricingRequest(text, personId, kv) {
   if (/\b(total cost of ownership|TCO|vs\s+\w+|versus|compared?\s+to|ROI)\b/i.test(text)) return null;
   if (/\b(pricing for|how much for|cost of)\s+(meraki|cisco|switches|aps?|access points?|cameras?|sensors?|firewalls?|routers?|networking)\s*$/i.test(text)) return null;
 
-  // Pattern 0: Duo / Umbrella natural language pricing (e.g. "cost of Duo Advantage", "price of 10 Umbrella DNS Essentials")
+  // Pattern 0: Duo / Umbrella / AnyConnect natural language pricing (e.g. "cost of Duo Advantage", "price of 10 Umbrella DNS Essentials", "cost of 50 AnyConnect Plus")
   const isDuoPricing = /\b(?:DUO|CISCO\s*DUO)\b/i.test(upper);
   const isUmbPricing = /\bUMBRELLA\b/i.test(upper);
-  if (isDuoPricing || isUmbPricing) {
+  const isAnyConnectPricing = /\b(ANY\s*CONNECT|ANYCONNECT|CISCO\s+SECURE\s+CLIENT|SECURE\s+CLIENT|CISCO\s+VPN)\b/i.test(upper);
+  if (isDuoPricing || isUmbPricing || isAnyConnectPricing) {
     // Extract quantity (default 1)
     const qtyMatch = upper.match(/\b(\d+)\b/);
     const qty = qtyMatch ? parseInt(qtyMatch[1]) : 1;
@@ -1566,6 +1567,32 @@ async function handlePricingRequest(text, personId, kv) {
         const resp = formatPricingResponse(label, skus, qtys);
         if (resp) return resp;
       }
+    }
+
+    if (isAnyConnectPricing) {
+      // Tier detection — Apex (APX) vs Plus (PLS). If neither specified, show both.
+      const isApx = /\b(APEX|APX)\b/i.test(upper);
+      const isPls = /\b(PLUS|PLS)\b/i.test(upper);
+      // Minimum 25-user enforcement
+      let acQty = qty;
+      let clampNote = '';
+      if (acQty < 25) {
+        clampNote = ` (min 25, bumped from ${acQty})`;
+        acQty = 25;
+      }
+      const tiers = (isApx && !isPls) ? ['APX'] : (isPls && !isApx) ? ['PLS'] : ['APX', 'PLS'];
+      const skus = [];
+      const qtys = [];
+      for (const tier of tiers) {
+        for (const t of [1, 3, 5]) {
+          skus.push(`LIC-L-AC-${tier}-${t}Y-S1`);
+          qtys.push(acQty);
+        }
+      }
+      const tierLabel = tiers.length === 2 ? 'Apex + Plus' : tiers[0] === 'APX' ? 'Apex' : 'Plus';
+      const label = `Cisco AnyConnect ${tierLabel} — ${acQty} license${acQty > 1 ? 's' : ''}${clampNote}`;
+      const resp = formatPricingResponse(label, skus, qtys);
+      if (resp) return resp;
     }
   }
 
@@ -2683,6 +2710,51 @@ function parseMessage(text) {
       isQuote: true,
       isTermOptionQuote: true
     };
+  }
+
+  // ── AnyConnect / Cisco Secure Client natural language handler ──
+  // License-only product. Two tiers: Apex (APX) and Plus (PLS). Minimum 25 users.
+  // Triggers on: AnyConnect, Any Connect, Cisco Secure Client, Secure Client, Cisco VPN.
+  // If tier missing → quote BOTH tiers side-by-side.
+  // If qty < 25 → clamp to 25 and surface a clarificationNote.
+  const isAnyConnect = /\b(ANY\s*CONNECT|ANYCONNECT|CISCO\s+SECURE\s+CLIENT|SECURE\s+CLIENT|CISCO\s+VPN)\b/i.test(upper);
+  if (isAnyConnect && !isAdvisory) {
+    const acTiers = [];
+    const acTierRe = /\b(APEX|APX|PLUS|PLS)\b/gi;
+    let atm;
+    while ((atm = acTierRe.exec(upper)) !== null) {
+      const raw = atm[1].toUpperCase();
+      const canon = (raw === 'APEX' || raw === 'APX') ? 'APX' : 'PLS';
+      if (!acTiers.includes(canon)) acTiers.push(canon);
+    }
+    if (acTiers.length === 0) {
+      acTiers.push('APX', 'PLS');
+    }
+
+    const acQtyMatch = upper.match(/\b(\d+)\b/);
+    let acQty = acQtyMatch ? parseInt(acQtyMatch[1]) : 25;
+    let acQtyClamped = false;
+    if (acQty < 25) {
+      acQty = 25;
+      acQtyClamped = true;
+    }
+
+    const acItems = [];
+    for (const tier of acTiers) {
+      for (const t of [1, 3, 5]) {
+        acItems.push({ baseSku: `LIC-L-AC-${tier}-${t}Y-S1`, qty: acQty, isLicenseOnly: true });
+      }
+    }
+
+    const result = {
+      items: acItems,
+      isQuote: true,
+      isTermOptionQuote: true
+    };
+    if (acQtyClamped) {
+      result.clarificationNote = `AnyConnect has a 25-user minimum — bumped quantity to 25.`;
+    }
+    return result;
   }
 
   // ── Model-agnostic license handler (MR, MV, MT) ──
@@ -17486,8 +17558,10 @@ Return ONLY a JSON object (no markdown, no explanation):
           'GR10-', 'GR60-', 'LIC-GR-', 'GA-',
           // Legacy Meraki Cloud (MC) phone
           'LIC-MC-',
-          // Legacy Lobby Ambassador licensing
-          'LIC-L-AC-',
+          // NOTE: LIC-L-AC- was previously blacklisted as "legacy Lobby Ambassador"
+          // but that prefix is actually AnyConnect / Cisco Secure Client (LIC-L-AC-APX-*,
+          // LIC-L-AC-PLS-*). Removed from blacklist 2026-04-23 so AnyConnect SKUs
+          // survive the Phase 2 WooProducts price sync.
           // Discontinued MA- accessories/mounts already in prices.json or obsolete
           'MA-MNT-MR-', 'MA-MNT-MV-', 'MA-INJ-4', 'MA-INJ-5', 'MA-PWR-18W',
           'MA-SFP-1GB-LX100', 'MA-MOD-4X10G',

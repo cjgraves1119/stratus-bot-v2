@@ -4125,6 +4125,63 @@ function parseMessage(text) {
     };
   }
 
+  // ── AnyConnect / Cisco Secure Client natural language handler ──
+  // License-only product. Two tiers: Apex (APX) and Plus (PLS). Minimum 25 users.
+  // Triggers on: AnyConnect, Any Connect, Cisco Secure Client, Secure Client, Cisco VPN.
+  // If tier missing → quote BOTH tiers side-by-side (separate_quotes style).
+  // If qty < 25 → clamp to 25 and surface a note via clarificationNote.
+  // If no term stated → return 1Y/3Y/5Y for each selected tier.
+  const isAnyConnect = /\b(ANY\s*CONNECT|ANYCONNECT|CISCO\s+SECURE\s+CLIENT|SECURE\s+CLIENT|CISCO\s+VPN)\b/i.test(upper);
+  if (isAnyConnect && !isAdvisory) {
+    // Collect tiers mentioned (order-preserving, matching Duo handler style)
+    const acTiers = [];
+    const acTierRe = /\b(APEX|APX|PLUS|PLS)\b/gi;
+    let atm;
+    while ((atm = acTierRe.exec(upper)) !== null) {
+      const raw = atm[1].toUpperCase();
+      const canon = (raw === 'APEX' || raw === 'APX') ? 'APX' : 'PLS';
+      if (!acTiers.includes(canon)) acTiers.push(canon);
+    }
+    // No tier specified → quote BOTH tiers side-by-side so user can compare
+    if (acTiers.length === 0) {
+      acTiers.push('APX', 'PLS');
+      __separateQuotes = true;
+    }
+
+    // Extract quantity (default to 25 — the minimum)
+    const acQtyMatch = upper.match(/\b(\d+)\b/);
+    let acQty = acQtyMatch ? parseInt(acQtyMatch[1]) : 25;
+    let acQtyClamped = false;
+    if (acQty < 25) {
+      acQty = 25;
+      acQtyClamped = true;
+    }
+
+    // Build items for every tier × every term (1Y/3Y/5Y)
+    const acItems = [];
+    for (const tier of acTiers) {
+      for (const t of [1, 3, 5]) {
+        acItems.push({ baseSku: `LIC-L-AC-${tier}-${t}Y-S1`, qty: acQty, isLicenseOnly: true });
+      }
+    }
+    // Respect explicit requested term
+    let acFinalItems = acItems;
+    if (requestedTerm) {
+      acFinalItems = acItems.filter(it => it.baseSku.endsWith(`-${requestedTerm}Y-S1`));
+    }
+
+    const result = {
+      items: acFinalItems,
+      isQuote: true,
+      isTermOptionQuote: true,
+      modifiers: { separateQuotes: __separateQuotes || acTiers.length > 1 }
+    };
+    if (acQtyClamped) {
+      result.clarificationNote = `AnyConnect has a 25-user minimum — bumped quantity to 25.`;
+    }
+    return result;
+  }
+
   // ── Model-agnostic license handler (MR, MV, MT) ──
   // These families use a single license SKU regardless of specific model.
   // "MR license", "5 MV licenses", "quote MT renewal", "licenses for MR", etc.
