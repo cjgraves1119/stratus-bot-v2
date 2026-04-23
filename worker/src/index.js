@@ -6970,6 +6970,159 @@ Hard rules:
       }
     }
 
+    // ── /api/benchmark-product-info ── POST with {input, model, prior_context?, want_live_datasheet?}
+    // Runs the askClaude product_info path against the named model (Claude Sonnet 4, Llama 4 Scout,
+    // Gemma 4 26B) with identical injected context. Used to A/B whether CF Workers AI can replace
+    // Claude for spec-lookup / comparison / advisory questions.
+    //
+    // Supported model values:
+    //   "claude"  → claude-sonnet-4-20250514 via ANTHROPIC_API_URL
+    //   "llama"   → @cf/meta/llama-4-scout-17b-16e-instruct via env.AI
+    //   "gemma"   → @cf/google/gemma-4-26b-a4b-it via env.AI
+    if (url.pathname === '/api/benchmark-product-info') {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key' } });
+      if (request.method !== 'POST') return new Response('POST required', { status: 405 });
+      const key = request.headers.get('X-Bench-Key') || new URL(request.url).searchParams.get('key');
+      if (key !== 'Biscuit4') return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
+      try {
+        const body = await request.json();
+        const input = body.input;
+        const modelKey = (body.model || 'claude').toLowerCase();
+        const priorCtx = body.prior_context || '';
+        const wantLiveDatasheet = !!body.want_live_datasheet;
+        if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
+
+        // ── Build injected context identically to askClaude ──
+        let systemPrompt = SYSTEM_PROMPT;
+        const sources = { liveModels: [], liveUrls: [], fetchFailed: false, cachedModels: [], categoryFamilies: [] };
+
+        if (wantLiveDatasheet) {
+          let datasheetContext = await getRelevantDatasheetContext(input);
+          if (!datasheetContext && priorCtx) datasheetContext = await getRelevantDatasheetContext(priorCtx);
+          if (datasheetContext) {
+            systemPrompt += '\n\n' + datasheetContext.text;
+            systemPrompt += '\n\nThe user requested live datasheet verification. Use the live datasheet content above as the authoritative source.';
+            sources.liveModels.push(...(datasheetContext.models || []));
+            sources.liveUrls.push(...(datasheetContext.urls || []));
+          } else {
+            sources.fetchFailed = true;
+            const staticContext = getStaticSpecsContext(priorCtx || input);
+            if (staticContext) {
+              systemPrompt += '\n\n' + staticContext.text;
+              sources.cachedModels.push(...(staticContext.models || []));
+            }
+          }
+        } else {
+          const staticContext = getStaticSpecsContext(input);
+          let categoryContext = null;
+          let categoryFamilies = [];
+          if (!staticContext) {
+            const catUpper = input.toUpperCase();
+            const families = [];
+            if (/\b(FIREWALL|SECURITY\s*APPLIANCE|MX|GATEWAY)\b/.test(catUpper)) families.push('MX');
+            if (/\b(ACCESS\s*POINT|WIFI|WI-?FI|WIRELESS|AP)\b/.test(catUpper)) families.push('MR', 'CW');
+            if (/\b(SWITCH|SWITCHING)\b/.test(catUpper)) families.push('MS130', 'MS150');
+            if (/\b(CAMERA|SURVEILLANCE|VIDEO)\b/.test(catUpper)) families.push('MV');
+            if (/\b(SENSOR)\b/.test(catUpper)) families.push('MT');
+            if (/\b(CELLULAR|LTE|5G|WAN\s*GATEWAY)\b/.test(catUpper)) families.push('MG');
+            if (families.length > 0) {
+              let ctx = '## PRODUCT SPECS (from specs.json — AUTHORITATIVE)\n';
+              ctx += 'Use ONLY these specs. Do NOT supplement with training data. If a spec is not listed here, say you do not have that data and offer to check the datasheet.\n\n';
+              for (const fam of families) {
+                const familyData = specs[fam];
+                if (familyData) {
+                  for (const [model, modelSpecs] of Object.entries(familyData)) {
+                    ctx += `${model}: ${JSON.stringify(modelSpecs)}\n`;
+                  }
+                }
+              }
+              categoryContext = ctx;
+              categoryFamilies = families;
+            }
+          }
+          if (staticContext) {
+            systemPrompt += '\n\n' + staticContext.text;
+            sources.cachedModels.push(...(staticContext.models || []));
+          } else if (categoryContext) {
+            systemPrompt += '\n\n' + categoryContext;
+            sources.categoryFamilies.push(...categoryFamilies);
+          }
+        }
+
+        // Pricing + accessories injection (same as askClaude)
+        const pricingIntent = /\b(COSTS?|PRICES?|PRICING|HOW MUCH|TOTAL|CART TOTAL|BREAKDOWN|ESTIMATE|INCLUDE\s+(COST|COSTS|PRICE|PRICES|PRICING)|WITH\s+(COST|COSTS|PRICE|PRICES|PRICING))\b/i.test(input);
+        if (pricingIntent) {
+          const priceContext = getRelevantPriceContext(input, []);
+          if (priceContext) systemPrompt += '\n\n' + priceContext;
+        }
+        const accessoriesContext = getAccessoriesContext(input);
+        if (accessoriesContext) systemPrompt += '\n\n' + accessoriesContext;
+
+        // Build messages — prior_context becomes a fake prior assistant turn for followup tests
+        const messages = [];
+        if (priorCtx) messages.push({ role: 'assistant', content: priorCtx });
+        messages.push({ role: 'user', content: input });
+
+        // ── Run target model ──
+        const start = Date.now();
+        let reply = null, err = null, rawResult = null;
+
+        if (modelKey === 'claude') {
+          if (!env.ANTHROPIC_API_KEY) return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
+          try {
+            const resp = await fetch(ANTHROPIC_API_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+              body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1024, system: systemPrompt, messages })
+            });
+            if (!resp.ok) {
+              err = `Anthropic ${resp.status}: ${await resp.text()}`;
+            } else {
+              const data = await resp.json();
+              rawResult = data;
+              reply = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+            }
+          } catch (e) { err = e.message; }
+        } else if (modelKey === 'llama') {
+          if (!env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
+          try {
+            const result = await env.AI.run('@cf/meta/llama-4-scout-17b-16e-instruct', {
+              messages: [{ role: 'system', content: systemPrompt }, ...messages],
+              max_tokens: 1024
+            });
+            rawResult = result;
+            reply = result?.response ?? result?.choices?.[0]?.message?.content ?? null;
+          } catch (e) { err = e.message; }
+        } else if (modelKey === 'gemma') {
+          if (!env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
+          try {
+            const result = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
+              messages: [{ role: 'system', content: systemPrompt }, ...messages],
+              max_completion_tokens: 2048,
+              thinking: { type: 'disabled' }
+            });
+            rawResult = result;
+            reply = result?.choices?.[0]?.message?.content ?? result?.response ?? null;
+          } catch (e) { err = e.message; }
+        } else {
+          return new Response(JSON.stringify({ error: `unknown model "${modelKey}" — use claude|llama|gemma` }), { status: 400, headers: { 'content-type':'application/json' } });
+        }
+
+        const elapsed = Date.now() - start;
+        return new Response(JSON.stringify({
+          model: modelKey,
+          input,
+          elapsed,
+          reply,
+          sources,
+          system_prompt_chars: systemPrompt.length,
+          err
+        }, null, 2), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message, stack: e.stack }), { status: 500, headers: { 'content-type':'application/json' } });
+      }
+    }
+
     return new Response('Not Found', { status: 404 });
   }
 };
