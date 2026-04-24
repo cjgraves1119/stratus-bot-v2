@@ -748,7 +748,12 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
+  // Wi-Fi 7 CW917X APs — only known-good variant stems get -RTG.
+  // Valid letter variants: I (internal), H (hospitality), D (directional).
+  // Catalog stems: CW9171I, CW9172I, CW9172H, CW9174I, CW9176I, CW9176D1, CW9178I.
+  // Typos like CW9172L / CW9172O / bare CW9172 fall through unchanged so the
+  // downstream catalog lookup fails cleanly instead of constructing a fake -RTG SKU.
+  if (/^CW917\d[IHD]/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
@@ -6554,6 +6559,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // Also accept explicit license SKUs if passed.
           const resolvedProducts = [];
           const missingProducts = [];
+          // missingUserHardware tracks SKUs the USER explicitly named (non-LIC-* inputs)
+          // that failed cache resolution. Used to hard-block silent partial quote creation
+          // (e.g. "2 CW9172l" typo silently dropped while MX75/MX85 succeed).
+          const missingUserHardware = [];
           const defaultTerm = license_term || '1';
 
           function resolveFromCache(sku) {
@@ -6598,6 +6607,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // It's a hardware SKU — stage the hardware
             if (!stageProduct(rawSku, qty)) {
               missingProducts.push(rawSku);
+              missingUserHardware.push(rawSku);
               continue;
             }
 
@@ -6678,6 +6688,29 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           await Promise.all(apiLookupPromises);
           results.steps.push(`Resolved ${resolvedProducts.length}/${skus.length} products from cache` +
             (missingProducts.length ? ` (missing: ${missingProducts.join(', ')})` : ''));
+
+          // ── HARD GATE #6: Any user-named hardware SKU unresolved → refuse ──
+          // Added 2026-04-24 (CW9172l forensic fix). Previously missing_products
+          // was a soft warning appended to the success payload; successful partial
+          // creates would omit user-typed hardware and the model rarely surfaced it.
+          // Now, if the user typed a hardware SKU that didn't resolve, we hard-abort
+          // before touching Zoho and ask for clarification. Licenses can still auto-skip.
+          if (missingUserHardware.length > 0) {
+            // Detect the common CW9172 ambiguity (bare CW9172, or L/O typos) and
+            // emit a specific disambiguation hint alongside the generic refusal.
+            const cw9172Ambig = missingUserHardware.filter(s => /^CW9172(L|O|$|[^IHD])/i.test(s));
+            const disambigHint = cw9172Ambig.length > 0
+              ? ` Note: ${cw9172Ambig.join(', ')} is ambiguous — valid CW9172 variants are CW9172I (mid-range, default) or CW9172H (hospitality). Ask the user which they want.`
+              : '';
+            return {
+              success: false,
+              error: 'unresolved_user_hardware',
+              missing_user_hardware: missingUserHardware,
+              resolved_so_far: resolvedProducts.map(p => p.sku),
+              instruction: `STOP. The user requested hardware SKU(s) that do not exist in the catalog: ${missingUserHardware.join(', ')}. Do NOT create any Deal or Quote. Do NOT silently omit the missing SKUs. Report to the user and ask them to clarify or correct them.${disambigHint}`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
 
           // STEP 3c: Reorder resolved products — hardware then license underneath
           // For shared licenses (e.g., multiple APs using LIC-ENT-*), list all hardware first, then license with totaled qty
@@ -7324,26 +7357,102 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${newId}`;
             reversalSummary = `Undid delete on ${origModule.replace(/s$/, '')} — recreated as ${newId} — [Open in Zoho](${reversalUrl})`;
           } else if (lookup.operation === 'update') {
-            // Reverse an update by PUT-ing the captured pre-state.
+            // Reverse an update by restoring the captured pre-state.
             if (!preState) {
               return { success: false, error: 'No pre-state captured for this update; cannot restore exact prior values.' };
             }
             reversalOperation = 'restore';
-            // Strip read-only / system fields
-            const STRIP = new Set(['id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By', 'Last_Activity_Time', 'Owner', '$editable']);
-            const restorePayload = {};
-            for (const [k, v] of Object.entries(preState)) {
-              if (STRIP.has(k) || k.startsWith('$')) continue;
-              restorePayload[k] = v;
+            // Strip read-only / system / derived fields. For Quotes we also strip
+            // totals (Zoho recomputes) and Quote_Number (auto-generated).
+            const STRIP = new Set([
+              'id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By',
+              'Last_Activity_Time', 'Owner', '$editable',
+              'Quote_Number', 'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout'
+            ]);
+
+            if (origModule !== 'Quotes') {
+              // Non-Quote modules: single-PUT restore is safe — no subform id issue.
+              const restorePayload = {};
+              for (const [k, v] of Object.entries(preState)) {
+                if (STRIP.has(k) || k.startsWith('$')) continue;
+                restorePayload[k] = v;
+              }
+              const putRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [restorePayload] });
+              const putStatus = putRes?.data?.[0]?.status;
+              if (putStatus !== 'success') {
+                return { success: false, error: `Undo restore failed: ${putRes?.data?.[0]?.message || 'unknown'}`, detail: putRes };
+              }
+              reversalResult = putRes;
+            } else {
+              // Quotes — two-step dance to avoid stale subform row id errors.
+              // Zoho regenerates Quoted_Items row ids on every update, so PUTing
+              // preState.Quoted_Items raw fails with "the subform id given seems
+              // to be invalid". Instead:
+              //   Step 1: fetch current Quote, build a PUT that deletes every
+              //           live Quoted_Items row ({id, _delete: null}) and restores
+              //           scalar fields. Do_Not_Auto_Update_Prices prevents reprice.
+              //   Step 2: PUT flattened preState rows (no subform ids) to repopulate.
+              //   Verify: re-fetch and confirm item count matches preState.
+              const currentRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Quoted_Items`, env);
+              const currentItems = currentRes?.data?.[0]?.Quoted_Items || [];
+
+              // Step 1: clear current items + restore scalars in one PUT
+              const clearPayload = { Do_Not_Auto_Update_Prices: true };
+              if (currentItems.length > 0) {
+                clearPayload.Quoted_Items = currentItems.map(it => ({ id: it.id, _delete: null }));
+              }
+              for (const [k, v] of Object.entries(preState)) {
+                if (STRIP.has(k) || k.startsWith('$') || k === 'Quoted_Items') continue;
+                clearPayload[k] = v;
+              }
+              const clearRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [clearPayload] });
+              const clearStatus = clearRes?.data?.[0]?.status;
+              if (clearStatus !== 'success') {
+                return { success: false, error: `Undo restore failed at clear step: ${clearRes?.data?.[0]?.message || 'unknown'}`, detail: clearRes };
+              }
+
+              // Step 2: re-add preState items as fresh rows (no subform ids)
+              const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
+              if (preStateItems.length > 0) {
+                const addPayload = {
+                  Do_Not_Auto_Update_Prices: true,
+                  Quoted_Items: preStateItems.map(it => ({
+                    Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
+                    Quantity: it.Quantity,
+                    List_Price: it.List_Price,
+                    Discount: it.Discount,
+                    Description: it.Description,
+                    Sequence_Number: it.Sequence_Number
+                  })).filter(it => it.Product_Name?.id)
+                };
+                const addRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [addPayload] });
+                const addStatus = addRes?.data?.[0]?.status;
+                if (addStatus !== 'success') {
+                  return { success: false, error: `Undo restore failed at re-add step: ${addRes?.data?.[0]?.message || 'unknown'}`, detail: addRes };
+                }
+                reversalResult = addRes;
+              } else {
+                reversalResult = clearRes;
+              }
+
+              // Verify line count matches preState (guards against silent Zoho no-ops)
+              try {
+                const verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
+                const verifyItems = verifyRes?.data?.[0]?.Quoted_Items || [];
+                if (verifyItems.length !== preStateItems.length) {
+                  return {
+                    success: false,
+                    error: `Undo restore verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
+                    detail: verifyRes
+                  };
+                }
+              } catch (verifyErr) {
+                console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
+              }
             }
-            const putRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [restorePayload] });
-            const putStatus = putRes?.data?.[0]?.status;
-            if (putStatus !== 'success') {
-              return { success: false, error: `Undo restore failed: ${putRes?.data?.[0]?.message || 'unknown'}`, detail: putRes };
-            }
-            reversalResult = putRes;
+
             reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId}`;
-            const restoredFields = Object.keys(restorePayload).slice(0, 4).join(', ');
+            const restoredFields = Object.keys(preState).filter(k => !STRIP.has(k)).slice(0, 4).join(', ');
             reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
           } else {
             return { success: false, error: `Operation type "${lookup.operation}" is not undo-able.` };

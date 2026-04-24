@@ -1268,11 +1268,15 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  // CW Wi-Fi 7 (917x): add -RTG suffix
+  // CW Wi-Fi 7 (917x): add -RTG suffix on recognized stems only.
+  // Valid letter variants: I (internal), H (hospitality), D (directional).
+  // Typos like CW9172L fall through unchanged so downstream lookup fails cleanly.
   if (/^CW917\d/.test(upper)) {
-    // Auto-append I if bare model number (CW9172→CW9172I, but not CW9172H or CW9176 which are already full)
     let cwBase = upper;
+    // Bare stem (e.g. "CW9172") → auto-promote to I variant (CW9172I)
     if (/^CW917\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    // Only recognized letter variants get -RTG; anything else returns unchanged.
+    if (!/^CW917\d[IHD]/.test(cwBase)) return upper;
     return cwBase.endsWith('-RTG') ? cwBase : `${cwBase}-RTG`;
   }
   // CW Wi-Fi 6E (916x): auto-append I for standard internal-antenna model, add -MR suffix

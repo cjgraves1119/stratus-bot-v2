@@ -157,11 +157,15 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  // CW Wi-Fi 7 (917x): add -RTG suffix
+  // CW Wi-Fi 7 (917x): add -RTG suffix on recognized stems only.
+  // Valid letter variants: I (internal), H (hospitality), D (directional).
+  // Typos like CW9172L fall through unchanged so downstream lookup fails cleanly.
   if (/^CW917\d/.test(upper)) {
-    // Auto-append I if bare model number (CW9172→CW9172I, but not CW9172H or CW9176 which are already full)
     let cwBase = upper;
+    // Bare stem (e.g. "CW9172") → auto-promote to I variant (CW9172I)
     if (/^CW917\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    // Only recognized letter variants get -RTG; anything else returns unchanged.
+    if (!/^CW917\d[IHD]/.test(cwBase)) return upper;
     return cwBase.endsWith('-RTG') ? cwBase : `${cwBase}-RTG`;
   }
   // CW Wi-Fi 6E (916x): auto-append I for standard internal-antenna model, add -MR suffix
@@ -668,6 +672,32 @@ const tests = [
     ['CW9178I', 'CW9178I-RTG'],
   ].map(([input, expected]) => ({
     name: `[SUFFIX] ${input} → ${expected}`,
+    customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
+  })),
+
+  // CW Wi-Fi 7 auto-I promotion for bare stems (2026-04-24 forensic — CW9172l typo fix)
+  ...[
+    ['CW9172', 'CW9172I-RTG'],  // bare stem auto-promotes to I variant
+    ['CW9171', 'CW9171I-RTG'],
+    ['CW9174', 'CW9174I-RTG'],
+    ['CW9176', 'CW9176I-RTG'],
+    ['CW9178', 'CW9178I-RTG'],
+  ].map(([input, expected]) => ({
+    name: `[SUFFIX] ${input} (bare) → ${expected} (auto-I promote)`,
+    customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
+  })),
+
+  // CW Wi-Fi 7 typo guards — invalid letter variants fall through unchanged
+  // so downstream catalog lookup fails cleanly instead of fabricating a fake -RTG SKU.
+  // Reproduces the CW9172l (lowercase L typo for I) Braun Intertec incident.
+  ...[
+    ['CW9172L', 'CW9172L'],    // L is not a recognized variant
+    ['CW9172l', 'CW9172L'],    // lowercase l — uppers to CW9172L, still invalid
+    ['CW9172O', 'CW9172O'],    // O typo for 0 or I
+    ['CW9172Q', 'CW9172Q'],    // arbitrary invalid letter
+    ['CW91720', 'CW91720'],    // trailing 0, no letter variant
+  ].map(([input, expected]) => ({
+    name: `[SUFFIX] ${input} → ${expected} (invalid variant, unchanged)`,
     customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
   })),
 
