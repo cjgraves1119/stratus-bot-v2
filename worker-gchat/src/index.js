@@ -12043,14 +12043,31 @@ ${(data.recentRequests || []).map(r => {
     // agent rather than duplicating any logic.
     // ══════════════════════════════════════════════════════════════
     if (url.pathname.startsWith('/api/')) {
-      // Benchmark + waterfall endpoints are intentionally auth-free:
-      // - Benchmark: hardcoded tasks, dry-run default, spam-safe
-      // - Waterfall: called by the gateway worker via service binding
-      //   (the gateway adds its own auth at the edge)
+      // Auth policy per endpoint:
+      //   /api/benchmark/*   — auth-free (hardcoded tasks, dry-run default,
+      //                        spam-safe)
+      //   /api/chat-waterfall — requires EITHER gateway secret (service
+      //                        binding callers) OR GMAIL_ADDON_API_KEY
+      //                        (direct callers like the Chrome extension)
+      //   everything else    — requires GMAIL_ADDON_API_KEY
       const isBenchmark = url.pathname.startsWith('/api/benchmark/');
       const isWaterfall = url.pathname === '/api/chat-waterfall';
       const apiKey = request.headers.get('X-API-Key');
-      if (!isBenchmark && !isWaterfall && (!apiKey || apiKey !== env.GMAIL_ADDON_API_KEY)) {
+      const gwSecret = request.headers.get('X-Gateway-Secret');
+      const gwSecretOk = !!env.GATEWAY_INTERNAL_SECRET && gwSecret === env.GATEWAY_INTERNAL_SECRET;
+      const apiKeyOk = !!env.GMAIL_ADDON_API_KEY && apiKey === env.GMAIL_ADDON_API_KEY;
+
+      if (isWaterfall) {
+        // Accept service-binding callers (gateway secret) OR direct API-key
+        // callers. Reject everything else.
+        if (!gwSecretOk && !apiKeyOk) {
+          console.warn('[AUTH] /api/chat-waterfall rejected: no valid secret or key');
+          return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+      } else if (!isBenchmark && !apiKeyOk) {
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
@@ -12063,7 +12080,7 @@ ${(data.recentRequests || []).map(r => {
           headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-Gateway-Secret',
           }
         });
       }

@@ -60,14 +60,18 @@ async function logGatewayHit(env, record) {
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 // Forward a request to the main worker via service binding.
-// The main worker treats service-binding requests the same as external ones.
+// The main worker treats service-binding requests the same as external
+// HTTP, so we stamp X-Gateway-Secret on every outbound call. The main
+// worker validates that secret on /api/chat-waterfall before running.
 async function forwardToMain(env, pathname, body, extraHeaders = {}) {
-  // The main worker is reached via env.MAIN_WORKER.fetch() — same host,
-  // zero latency cost, no auth required for whitelisted endpoints.
   const url = `https://stratus-ai-bot-gchat.internal${pathname}`;
+  const baseHeaders = { 'Content-Type': 'application/json' };
+  if (env.GATEWAY_INTERNAL_SECRET) {
+    baseHeaders['X-Gateway-Secret'] = env.GATEWAY_INTERNAL_SECRET;
+  }
   const req = new Request(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+    headers: { ...baseHeaders, ...extraHeaders },
     body: JSON.stringify(body)
   });
   const resp = await env.MAIN_WORKER.fetch(req);
@@ -228,6 +232,13 @@ export default {
 
     // Main chat endpoint — drop-in replacement for main worker /api/chat
     if (request.method === 'POST' && pathname === '/api/chat') {
+      // Require X-API-Key at the gateway edge. Without this, the internal
+      // gateway→main-worker secret would let any public caller run chat.
+      const apiKey = request.headers.get('X-API-Key');
+      if (!env.GATEWAY_API_KEY || apiKey !== env.GATEWAY_API_KEY) {
+        return jsonResponse({ error: 'Unauthorized' }, 401);
+      }
+
       let body;
       try {
         body = await request.json();
@@ -271,12 +282,20 @@ export default {
     // their entire API_BASE at the gateway. Only /api/chat gets the waterfall;
     // everything else is pass-through with zero modification.
     if (pathname.startsWith('/api/') && pathname !== '/api/chat') {
+      // Same API-key gate on passthrough routes.
+      const apiKey = request.headers.get('X-API-Key');
+      if (!env.GATEWAY_API_KEY || apiKey !== env.GATEWAY_API_KEY) {
+        return jsonResponse({ error: 'Unauthorized' }, 401);
+      }
       try {
         const forwardHeaders = {};
         for (const [k, v] of request.headers.entries()) {
           // Skip hop-by-hop headers that service binding handles itself
           if (['host', 'content-length', 'cf-connecting-ip', 'cf-ray'].includes(k.toLowerCase())) continue;
           forwardHeaders[k] = v;
+        }
+        if (env.GATEWAY_INTERNAL_SECRET) {
+          forwardHeaders['X-Gateway-Secret'] = env.GATEWAY_INTERNAL_SECRET;
         }
         const init = {
           method: request.method,
