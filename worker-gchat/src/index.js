@@ -5743,6 +5743,41 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // side-channel field, so we force it into the message string itself.
           parsed.message = createUserSummary;
         }
+
+        // ── Post-create verification for Quotes (2026-04-24 Codex council) ──
+        // Zoho can return success + id from POST while the record isn't
+        // durably persisted (race conditions, transactional rollbacks, or
+        // perm issues surface this way). Re-fetch once. If GET fails or
+        // returns no record, downgrade to a structured failure so the
+        // response-truth guard upstream strips the View Quote link and
+        // the model cannot claim creation.
+        if (!createIsError && createdId && module_name === 'Quotes') {
+          try {
+            const verifyRes = await zohoApiCall('GET', `Quotes/${createdId}?fields=id,Quote_Number,Grand_Total`, env);
+            const verifyRec = verifyRes?.data?.[0];
+            if (!verifyRec?.id) {
+              console.warn(`[QUOTE-VERIFY] POST reported Quote ${createdId} created but GET returned no record.`);
+              return {
+                success: false,
+                error: 'quote_create_verify_failed',
+                created_id_unverified: createdId,
+                message: `Zoho reported Quote ${createdId} was created but a verification fetch returned no record. Treat this as a FAILED create — do NOT claim the quote was created, do NOT render any quote URL, and do NOT include [Open in Zoho] links.`,
+              };
+            }
+            // Attach verification markers for downstream guards / logging.
+            parsed._quote_verified = true;
+            parsed._quote_verified_number = verifyRec.Quote_Number || null;
+          } catch (verifyErr) {
+            console.warn(`[QUOTE-VERIFY] Exception verifying Quote ${createdId}: ${verifyErr.message}`);
+            return {
+              success: false,
+              error: 'quote_create_verify_exception',
+              created_id_unverified: createdId,
+              message: `Zoho reported Quote ${createdId} was created but the verification fetch threw: ${verifyErr.message}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render the quote URL.`,
+            };
+          }
+        }
+
         return parsed;
       }
 
@@ -10862,6 +10897,13 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   // paraphrased them away. Keyed by order; we keep only the LAST mutation's
   // summary by default (the one the user most recently made).
   const mutationSummaries = [];
+  // Response-truth guard (2026-04-24 TestCo forensic fix):
+  // Track every Zoho record id that appeared in a successful tool result
+  // this turn. Any View Quote / Zoho CRM URL in finalReply whose record id
+  // is NOT in this set is a hallucination and gets stripped before returning.
+  // Built from both get_record-style reads and create/update/clone mutations
+  // so legitimate lookups still surface links cleanly.
+  const verifiedRecordIds = new Set();
   let iteration = 0;
   let finalReply = '';
 
@@ -10922,6 +10964,16 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
                 recordUrl: result._record_url || null,
                 isError: result.success === false,
               });
+            }
+            // Response-truth guard: harvest any Zoho record id from this
+            // successful tool result. Only SUCCESSFUL results contribute —
+            // error payloads may echo the id the model was trying to act on
+            // but we don't want the guard to whitelist that id for link use.
+            const resultIsError = result.success === false || !!result.error || !!result.validation_error;
+            if (!resultIsError) {
+              const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+              const idMatches = resultStr.match(/\b\d{15,19}\b/g);
+              if (idMatches) for (const id of idMatches) verifiedRecordIds.add(id);
             }
           }
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
@@ -11011,6 +11063,64 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
       } else if (!hasNarration) {
         finalReply = `${finalReply.trim()}\n\nThe previous action has been undone.`;
       }
+    }
+  }
+
+  // ── Planning / reasoning leak stripping (2026-04-24 TestCo forensic fix) ──
+  // Llama and other CF Workers AI models occasionally leak internal
+  // tool-use planning text into the user-facing response. Strip known
+  // leak patterns so the user never sees meta-commentary like
+  // "No tool call were made during this conversation. I can now respond."
+  if (finalReply) {
+    const LEAK_PATTERNS = [
+      // "No tool call were made during this conversation. I can now respond."
+      /\b[Nn]o\s+tool\s+calls?\s+(?:were|was)\s+made[^.\n]*\.?\s*(?:I\s+can\s+(?:now\s+)?respond[^.\n]*\.?)?\s*/g,
+      // "[thinking] ... [/thinking]" / "[planning] ... [/planning]" leak tags
+      /\[(?:thinking|internal|reasoning|planning)\][\s\S]*?\[\/(?:thinking|internal|reasoning|planning)\]\s*/gi,
+      // "I should/will call <tool>" meta-narration at line start
+      /^\s*I\s+(?:should|will|need to|am going to)\s+call\s+(?:the\s+)?\w+(?:_\w+)*\s+(?:tool|function)[^.\n]*\.?\s*$/gim,
+    ];
+    for (const pat of LEAK_PATTERNS) finalReply = finalReply.replace(pat, '');
+    finalReply = finalReply.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // ── Response truth guard (2026-04-24 TestCo forensic fix, Codex council) ──
+  // Block hallucinated "View Quote"/"View Deal" links and success claims
+  // that aren't backed by a verified tool result this turn. Two checks:
+  //   (a) Any Zoho CRM URL in finalReply whose record id wasn't returned
+  //       by a successful tool call is stripped — the model invented it.
+  //   (b) If the reply contains record-creation language but zero create/
+  //       update/clone mutations succeeded this turn, prepend a warning.
+  if (finalReply && !/^API error:/.test(finalReply)) {
+    const zohoUrlRegex = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+    const urlsFound = [];
+    let m;
+    while ((m = zohoUrlRegex.exec(finalReply)) !== null) {
+      urlsFound.push({ full: m[0], module: m[1], id: m[2] });
+    }
+    const unverified = urlsFound.filter(u => !verifiedRecordIds.has(u.id));
+
+    if (unverified.length > 0) {
+      console.warn(`[TRUTH-GUARD] finalReply contains ${unverified.length} unverified Zoho URL(s): ${unverified.map(u => u.full).join(', ')}`);
+      for (const u of unverified) {
+        const urlEsc = u.full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Strip markdown-link form first: [label](URL) → "[label removed: unverified]"
+        finalReply = finalReply.replace(
+          new RegExp(`\\[([^\\]]*)\\]\\(${urlEsc}\\)`, 'g'),
+          '[link removed: unverified]'
+        );
+        // Then any bare occurrence of the URL itself
+        finalReply = finalReply.replace(new RegExp(urlEsc, 'g'), '[URL removed: unverified]');
+      }
+    }
+
+    // Detect success-claim language paired with ZERO successful mutations.
+    const successfulMutation = mutationSummaries.some(s => !s.isError);
+    const claimsSuccess = /\b(quote|deal|task|record|contact|account)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made)\b/i.test(finalReply)
+      || /\bcreated\s+(?:a\s+new\s+)?(?:quote|deal|task|contact|account)\b/i.test(finalReply);
+    if (claimsSuccess && !successfulMutation) {
+      console.warn(`[TRUTH-GUARD] Response claims creation/update but no mutation tool succeeded this turn`);
+      finalReply = `⚠️ The assistant claimed a record was created or updated, but no verified CRM write tool ran successfully this turn. Any record references above have been stripped. Please retry — if the problem persists, the model may be hallucinating success.\n\n${finalReply}`;
     }
   }
 
