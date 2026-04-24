@@ -12057,17 +12057,11 @@ ${(data.recentRequests || []).map(r => {
       const gwSecretOk = !!env.GATEWAY_INTERNAL_SECRET && gwSecret === env.GATEWAY_INTERNAL_SECRET;
       const apiKeyOk = !!env.GMAIL_ADDON_API_KEY && apiKey === env.GMAIL_ADDON_API_KEY;
 
-      if (isWaterfall) {
-        // Accept service-binding callers (gateway secret) OR direct API-key
-        // callers. Reject everything else.
-        if (!gwSecretOk && !apiKeyOk) {
-          console.warn('[AUTH] /api/chat-waterfall rejected: no valid secret or key');
-          return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-            status: 401,
-            headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-          });
-        }
-      } else if (!isBenchmark && !apiKeyOk) {
+      // Accept EITHER gateway secret (service-binding or passthrough from
+      // the gateway worker) OR direct API key (Gmail add-on, backend tools).
+      // Benchmark routes are the only auth-free paths.
+      if (!isBenchmark && !gwSecretOk && !apiKeyOk) {
+        console.warn(`[AUTH] ${url.pathname} rejected: no valid secret or key`);
         return new Response(JSON.stringify({ error: 'Unauthorized' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
