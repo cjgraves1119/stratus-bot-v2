@@ -17361,7 +17361,20 @@ Return ONLY a JSON object (no markdown, no explanation):
         console.log(`[GCHAT-QUEUE] Completed in ${Date.now() - queueStart}ms total`);
       } catch (err) {
         console.error(`[GCHAT-QUEUE] Error: ${err.message}`);
-        const errMsg = `❌ Sorry, I ran into an issue processing that request.\n\n_Error: ${err.message.substring(0, 200)}_`;
+        // Classify terminal errors that retries won't help with. These
+        // should ack (fall through) so the user gets the error message
+        // and the message isn't re-processed. Everything else retries
+        // via msg.retry() and ultimately lands in the DLQ after
+        // max_retries exhaustion.
+        const terminalPatterns = [
+          /^No spaceName/i,
+          /invalid payload/i,
+          /validation failed/i,
+          /unauthorized/i,    // 401s — retrying won't fix auth misconfig
+          /forbidden/i        // 403s
+        ];
+        const isTerminal = terminalPatterns.some(p => p.test(err.message || ''));
+        const errMsg = `❌ Sorry, I ran into an issue processing that request.\n\n_Error: ${(err.message || '').substring(0, 200)}_`;
         try {
           if (_progressMsgName) {
             await updateGChatMessage(_progressMsgName, errMsg, env);
@@ -17369,6 +17382,12 @@ Return ONLY a JSON object (no markdown, no explanation):
             await sendAsyncGChatMessage(spaceName, errMsg, null, env);
           }
         } catch (_) {}
+        if (!isTerminal) {
+          // Retryable failure — let Cloudflare Queue retry + DLQ handle it.
+          // Delay helps avoid hammering Zoho/Anthropic on transient 429/5xx.
+          try { msg.retry({ delaySeconds: 30 }); } catch (_) { msg.retry(); }
+          continue;
+        }
       }
       msg.ack();
     }
