@@ -1,15 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Stratus AI",
-  "version": "1.11.9",
-  "description": "Cisco/Meraki sales assistant for Gmail — CRM integration, quoting, email analysis, and task management.",
+  "version": "1.11.10",
+  "description": "Cisco/Meraki sales assistant for Gmail \u2014 CRM integration, quoting, email analysis, and task management.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-
   "permissions": [
     "activeTab",
     "storage",
@@ -21,40 +20,47 @@
     "identity",
     "tabs"
   ],
-
   "host_permissions": [
-    "<all_urls>",
     "https://mail.google.com/*",
+    "https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev/*",
     "https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev/*",
     "https://accounts.zoho.com/*",
     "https://www.zohoapis.com/*",
     "https://crm.zoho.com/*"
   ],
-
   "background": {
     "service_worker": "background.bundle.js",
     "type": "module"
   },
-
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*"],
-      "js": ["content.bundle.js"],
-      "css": ["content.css"],
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "js": [
+        "content.bundle.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://crm.zoho.com/*"],
-      "js": ["zoho-content.bundle.js"],
-      "css": ["content.css"],
+      "matches": [
+        "https://crm.zoho.com/*"
+      ],
+      "js": [
+        "zoho-content.bundle.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     }
   ],
-
   "side_panel": {
     "default_path": "sidebar.html"
   },
-
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -63,12 +69,10 @@
     },
     "default_title": "Stratus AI"
   },
-
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
   },
-
   "commands": {
     "open-sidebar": {
       "suggested_key": {
@@ -95,16 +99,19 @@
       "description": "AI analysis of current email"
     }
   },
-
   "web_accessible_resources": [
     {
-      "resources": ["icons/*", "sidebar.html"],
-      "matches": ["https://mail.google.com/*", "https://crm.zoho.com/*", "<all_urls>"]
+      "resources": [
+        "icons/*",
+        "sidebar.html"
+      ],
+      "matches": [
+        "https://mail.google.com/*",
+        "https://crm.zoho.com/*"
+      ]
     }
   ],
-
   "update_url": "https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml",
-
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   }
