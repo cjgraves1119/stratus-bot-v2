@@ -10078,50 +10078,122 @@ function adaptMarkdownForGChat(text) {
 }
 
 // ─── Google Chat JWT Verification ─────────────────────────────────────────────
-// Google Chat sends a Bearer token in the Authorization header.
-// For Google Workspace apps, we verify the token against Google's OIDC certs.
-// Simplified: we verify the token audience matches our project number.
-async function verifyGoogleChatToken(request, env) {
-  // If no GOOGLE_PROJECT_NUMBER is set, skip verification (development mode)
-  if (!env.GOOGLE_PROJECT_NUMBER) return true;
-  
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
-  
-  const token = authHeader.slice(7);
-  
+// Google Chat sends a Bearer RS256 JWT in the Authorization header signed by
+// chat@system.gserviceaccount.com. Full verification requires:
+//   1. Claim validation (aud, iss, exp, iat) — catches trivial spoofs.
+//   2. Signature validation against Google's rotating JWKS — catches
+//      sophisticated forgeries.
+//
+// JWKS are cached in CONVERSATION_KV for 1 hour to avoid hammering Google.
+const GCHAT_JWKS_URL = 'https://www.googleapis.com/service_accounts/v1/jwk/chat@system.gserviceaccount.com';
+
+function base64UrlDecode(str) {
+  const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+  return atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+}
+
+function base64UrlToUint8Array(str) {
+  const bin = base64UrlDecode(str);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function getGoogleChatJwks(env) {
+  const KV = env.CONVERSATION_KV;
+  const cacheKey = 'gchat_jwks_v1';
+  if (KV) {
+    try {
+      const cached = await KV.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    } catch (_) {}
+  }
   try {
-    // Decode JWT payload (middle segment) without full signature verification
-    // Full verification would require fetching Google's JWKS and validating the signature
-    // For Cloudflare Workers, we do a lightweight check on claims
-    const parts = token.split('.');
-    if (parts.length !== 3) return false;
-    
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-    
-    // Check audience matches our project number
-    if (payload.aud !== env.GOOGLE_PROJECT_NUMBER) {
-      console.error('JWT audience mismatch:', payload.aud, '!==', env.GOOGLE_PROJECT_NUMBER);
+    const res = await fetch(GCHAT_JWKS_URL);
+    if (!res.ok) return null;
+    const jwks = await res.json();
+    if (KV) {
+      try { await KV.put(cacheKey, JSON.stringify(jwks), { expirationTtl: 3600 }); } catch (_) {}
+    }
+    return jwks;
+  } catch (err) {
+    console.error('[JWT] JWKS fetch failed:', err.message);
+    return null;
+  }
+}
+
+async function verifyJwtSignature(token, jwks) {
+  try {
+    const [headerB64, payloadB64, sigB64] = token.split('.');
+    if (!headerB64 || !payloadB64 || !sigB64) return false;
+    const header = JSON.parse(base64UrlDecode(headerB64));
+    const key = (jwks?.keys || []).find(k => k.kid === header.kid);
+    if (!key) {
+      console.error('[JWT] No matching JWK for kid:', header.kid);
       return false;
     }
-    
-    // Check issuer is Google
-    if (payload.iss !== 'chat@system.gserviceaccount.com') {
-      console.error('JWT issuer mismatch:', payload.iss);
-      return false;
-    }
-    
-    // Check expiration
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-      console.error('JWT expired');
-      return false;
-    }
-    
-    return true;
-  } catch (e) {
-    console.error('JWT verification error:', e.message);
+    const publicKey = await crypto.subtle.importKey(
+      'jwk',
+      key,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+    const sig = base64UrlToUint8Array(sigB64);
+    const signedData = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+    return await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, sig, signedData);
+  } catch (err) {
+    console.error('[JWT] Signature verify error:', err.message);
     return false;
   }
+}
+
+// Returns { valid, reason, payload }. Reasons:
+//   'no-project-number'    — verification skipped (dev mode)
+//   'no-auth-header'       — no Authorization: Bearer <token>
+//   'malformed'            — token not 3 segments / not parseable
+//   'bad-audience' / 'bad-issuer' / 'expired' — failed claim checks
+//   'bad-signature'        — signature did not verify against JWKS
+//   'jwks-unavailable'     — could not load Google public keys
+//   'ok'                   — verified end-to-end
+async function verifyGoogleChatToken(request, env) {
+  if (!env.GOOGLE_PROJECT_NUMBER) {
+    return { valid: true, reason: 'no-project-number' };
+  }
+
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return { valid: false, reason: 'no-auth-header' };
+  }
+  const token = authHeader.slice(7);
+  const parts = token.split('.');
+  if (parts.length !== 3) return { valid: false, reason: 'malformed' };
+
+  let payload;
+  try {
+    payload = JSON.parse(base64UrlDecode(parts[1]));
+  } catch (_) {
+    return { valid: false, reason: 'malformed' };
+  }
+
+  if (payload.aud !== env.GOOGLE_PROJECT_NUMBER) {
+    return { valid: false, reason: 'bad-audience', payload };
+  }
+  if (payload.iss !== 'chat@system.gserviceaccount.com') {
+    return { valid: false, reason: 'bad-issuer', payload };
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.exp && payload.exp < nowSec - 30) {
+    return { valid: false, reason: 'expired', payload };
+  }
+
+  // Signature check
+  const jwks = await getGoogleChatJwks(env);
+  if (!jwks) return { valid: false, reason: 'jwks-unavailable', payload };
+  const sigOk = await verifyJwtSignature(token, jwks);
+  if (!sigOk) return { valid: false, reason: 'bad-signature', payload };
+
+  return { valid: true, reason: 'ok', payload };
 }
 
 // ─── Main Worker Entry Point (Google Chat) ────────────────────────────────────
@@ -16565,6 +16637,35 @@ Return ONLY a JSON object (no markdown, no explanation):
 
     // Google Chat webhook handler - match ANY POST request
     if (request.method === 'POST') {
+      // ── JWT verification gate ─────────────────────────────────────────
+      // Validates the Google Chat bearer token's claims AND signature.
+      // Two-phase rollout controlled by JWT_VERIFY_ENFORCE:
+      //   unset / "false" => log outcome, allow all requests (safe default)
+      //   "true"          => reject invalid tokens with 401
+      // Flip the flag to "true" once logs confirm clean verifications.
+      try {
+        const jwtResult = await verifyGoogleChatToken(request, env);
+        if (!jwtResult.valid) {
+          console.warn(`[JWT] webhook rejected reason=${jwtResult.reason} enforce=${env.JWT_VERIFY_ENFORCE}`);
+          if (env.JWT_VERIFY_ENFORCE === 'true') {
+            return new Response(JSON.stringify({ error: 'unauthorized', reason: jwtResult.reason }), {
+              status: 401,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+        } else if (jwtResult.reason !== 'no-project-number' && jwtResult.reason !== 'ok') {
+          console.log(`[JWT] webhook verified reason=${jwtResult.reason}`);
+        }
+      } catch (jwtErr) {
+        console.error('[JWT] verification threw:', jwtErr.message);
+        if (env.JWT_VERIFY_ENFORCE === 'true') {
+          return new Response(JSON.stringify({ error: 'unauthorized', reason: 'verify-threw' }), {
+            status: 401,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+
       try {
         const rawBody = await request.text();
 
