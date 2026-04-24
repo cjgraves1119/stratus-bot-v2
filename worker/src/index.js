@@ -1268,11 +1268,15 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  // CW Wi-Fi 7 (917x): add -RTG suffix
+  // CW Wi-Fi 7 (917x): add -RTG suffix on recognized stems only.
+  // Valid letter variants: I (internal), H (hospitality), D (directional).
+  // Typos like CW9172L fall through unchanged so downstream lookup fails cleanly.
   if (/^CW917\d/.test(upper)) {
-    // Auto-append I if bare model number (CW9172→CW9172I, but not CW9172H or CW9176 which are already full)
     let cwBase = upper;
+    // Bare stem (e.g. "CW9172") → auto-promote to I variant (CW9172I)
     if (/^CW917\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    // Only recognized letter variants get -RTG; anything else returns unchanged.
+    if (!/^CW917\d[IHD]/.test(cwBase)) return upper;
     return cwBase.endsWith('-RTG') ? cwBase : `${cwBase}-RTG`;
   }
   // CW Wi-Fi 6E (916x): auto-append I for standard internal-antenna model, add -MR suffix
@@ -1281,6 +1285,16 @@ function applySuffix(sku) {
     // CW9162→CW9162I, CW9164→CW9164I, CW9166→CW9166I (but not CW9163E, CW9166D1, etc.)
     if (/^CW916\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
     return cwBase.endsWith('-MR') ? cwBase : `${cwBase}-MR`;
+  }
+  // Cisco Catalyst switches (C9200L/C9300/C9300L/C9300X) — Stratus catalog
+  // stocks only Meraki-managed (-M) variants. Auto-promote unsuffixed inputs
+  // when `${upper}-M` actually exists in the price catalog; otherwise leave
+  // unchanged so the hard-block / clarification path catches it. Skip -A
+  // (IOS-XE, not stocked) and -M-O (STA-KIT special-case) as canonical.
+  if (/^C9(200L|300L|300X|300)-/.test(upper)
+      && !upper.endsWith('-M') && !upper.endsWith('-A') && !upper.endsWith('-M-O')) {
+    const mCandidate = `${upper}-M`;
+    if (prices[mCandidate]) return mCandidate;
   }
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;

@@ -748,8 +748,24 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  if (/^CW917\d/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
+  // Wi-Fi 7 CW917X APs — only known-good variant stems get -RTG.
+  // Valid letter variants: I (internal), H (hospitality), D (directional).
+  // Catalog stems: CW9171I, CW9172I, CW9172H, CW9174I, CW9176I, CW9176D1, CW9178I.
+  // Typos like CW9172L / CW9172O / bare CW9172 fall through unchanged so the
+  // downstream catalog lookup fails cleanly instead of constructing a fake -RTG SKU.
+  if (/^CW917\d[IHD]/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
+  // Cisco Catalyst switches (C9200L/C9300/C9300L/C9300X) — Stratus catalog
+  // stocks only Meraki-managed (-M) variants. Auto-promote unsuffixed inputs
+  // when `${upper}-M` actually exists in the price catalog; otherwise leave
+  // unchanged so the hard-block / clarification path catches it. Skip -A
+  // (IOS-XE, not stocked) and -M-O (STA-KIT special-case) as canonical.
+  // Same pattern as CW9172 auto-I promote (2026-04-24 Codex council).
+  if (/^C9(200L|300L|300X|300)-/.test(upper)
+      && !upper.endsWith('-M') && !upper.endsWith('-A') && !upper.endsWith('-M-O')) {
+    const mCandidate = `${upper}-M`;
+    if (prices[mCandidate]) return mCandidate;
+  }
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MX\d+C[W]?(-HW)?-NA$/i.test(upper)) return upper;
@@ -5727,6 +5743,41 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // side-channel field, so we force it into the message string itself.
           parsed.message = createUserSummary;
         }
+
+        // ── Post-create verification for Quotes (2026-04-24 Codex council) ──
+        // Zoho can return success + id from POST while the record isn't
+        // durably persisted (race conditions, transactional rollbacks, or
+        // perm issues surface this way). Re-fetch once. If GET fails or
+        // returns no record, downgrade to a structured failure so the
+        // response-truth guard upstream strips the View Quote link and
+        // the model cannot claim creation.
+        if (!createIsError && createdId && module_name === 'Quotes') {
+          try {
+            const verifyRes = await zohoApiCall('GET', `Quotes/${createdId}?fields=id,Quote_Number,Grand_Total`, env);
+            const verifyRec = verifyRes?.data?.[0];
+            if (!verifyRec?.id) {
+              console.warn(`[QUOTE-VERIFY] POST reported Quote ${createdId} created but GET returned no record.`);
+              return {
+                success: false,
+                error: 'quote_create_verify_failed',
+                created_id_unverified: createdId,
+                message: `Zoho reported Quote ${createdId} was created but a verification fetch returned no record. Treat this as a FAILED create — do NOT claim the quote was created, do NOT render any quote URL, and do NOT include [Open in Zoho] links.`,
+              };
+            }
+            // Attach verification markers for downstream guards / logging.
+            parsed._quote_verified = true;
+            parsed._quote_verified_number = verifyRec.Quote_Number || null;
+          } catch (verifyErr) {
+            console.warn(`[QUOTE-VERIFY] Exception verifying Quote ${createdId}: ${verifyErr.message}`);
+            return {
+              success: false,
+              error: 'quote_create_verify_exception',
+              created_id_unverified: createdId,
+              message: `Zoho reported Quote ${createdId} was created but the verification fetch threw: ${verifyErr.message}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render the quote URL.`,
+            };
+          }
+        }
+
         return parsed;
       }
 
@@ -6554,6 +6605,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // Also accept explicit license SKUs if passed.
           const resolvedProducts = [];
           const missingProducts = [];
+          // missingUserHardware tracks SKUs the USER explicitly named (non-LIC-* inputs)
+          // that failed cache resolution. Used to hard-block silent partial quote creation
+          // (e.g. "2 CW9172l" typo silently dropped while MX75/MX85 succeed).
+          const missingUserHardware = [];
           const defaultTerm = license_term || '1';
 
           function resolveFromCache(sku) {
@@ -6598,6 +6653,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // It's a hardware SKU — stage the hardware
             if (!stageProduct(rawSku, qty)) {
               missingProducts.push(rawSku);
+              missingUserHardware.push(rawSku);
               continue;
             }
 
@@ -6678,6 +6734,29 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           await Promise.all(apiLookupPromises);
           results.steps.push(`Resolved ${resolvedProducts.length}/${skus.length} products from cache` +
             (missingProducts.length ? ` (missing: ${missingProducts.join(', ')})` : ''));
+
+          // ── HARD GATE #6: Any user-named hardware SKU unresolved → refuse ──
+          // Added 2026-04-24 (CW9172l forensic fix). Previously missing_products
+          // was a soft warning appended to the success payload; successful partial
+          // creates would omit user-typed hardware and the model rarely surfaced it.
+          // Now, if the user typed a hardware SKU that didn't resolve, we hard-abort
+          // before touching Zoho and ask for clarification. Licenses can still auto-skip.
+          if (missingUserHardware.length > 0) {
+            // Detect the common CW9172 ambiguity (bare CW9172, or L/O typos) and
+            // emit a specific disambiguation hint alongside the generic refusal.
+            const cw9172Ambig = missingUserHardware.filter(s => /^CW9172(L|O|$|[^IHD])/i.test(s));
+            const disambigHint = cw9172Ambig.length > 0
+              ? ` Note: ${cw9172Ambig.join(', ')} is ambiguous — valid CW9172 variants are CW9172I (mid-range, default) or CW9172H (hospitality). Ask the user which they want.`
+              : '';
+            return {
+              success: false,
+              error: 'unresolved_user_hardware',
+              missing_user_hardware: missingUserHardware,
+              resolved_so_far: resolvedProducts.map(p => p.sku),
+              instruction: `STOP. The user requested hardware SKU(s) that do not exist in the catalog: ${missingUserHardware.join(', ')}. Do NOT create any Deal or Quote. Do NOT silently omit the missing SKUs. Report to the user and ask them to clarify or correct them.${disambigHint}`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
 
           // STEP 3c: Reorder resolved products — hardware then license underneath
           // For shared licenses (e.g., multiple APs using LIC-ENT-*), list all hardware first, then license with totaled qty
@@ -6810,14 +6889,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
           results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
 
-          // STEP 7: Fetch the created quote to get actual line items, Grand_Total, and Quote_Number
-          // Quote_Number is a Zoho auto-generated field (different from the record ID) — always
-          // surface it so the user and Claude can reference it in follow-up messages.
+          // STEP 7: Fetch the created quote to confirm durability and pull Quote_Number / totals.
+          // 2026-04-24 Codex council hardening: if the GET fails or returns no record, treat
+          // the create as FAILED and scrub the quote record from results so the response-truth
+          // guard upstream strips the URL and no success claim reaches the user.
           let quoteVerification = null;
+          let quoteVerifyFailed = false;
+          let quoteVerifyError = null;
           try {
             const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Quoted_Items`, env);
-            if (fetchedQuote?.data?.[0]) {
-              const fq = fetchedQuote.data[0];
+            const fq = fetchedQuote?.data?.[0];
+            if (fq?.id) {
               quoteVerification = {
                 Quote_Number: fq.Quote_Number || null,
                 Grand_Total: fq.Grand_Total,
@@ -6831,14 +6913,38 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   total: item.total
                 }))
               };
-              // Attach Quote_Number to the top-level quote record so Claude surfaces it
               if (fq.Quote_Number) {
                 results.records.quote.quote_number = fq.Quote_Number;
               }
               results.steps.push(`Verified: ${quoteVerification.item_count} items, Grand Total: $${quoteVerification.Grand_Total}${fq.Quote_Number ? ', Quote #' + fq.Quote_Number : ''}`);
+            } else {
+              quoteVerifyFailed = true;
+              quoteVerifyError = 'GET returned no record';
             }
           } catch (e) {
-            results.steps.push('Quote verification fetch failed (quote was created successfully)');
+            quoteVerifyFailed = true;
+            quoteVerifyError = e.message;
+          }
+          if (quoteVerifyFailed) {
+            console.warn(`[QUOTE-VERIFY] create_deal_and_quote: POST reported Quote ${quoteId} created but verification failed (${quoteVerifyError}). Scrubbing id/url from response.`);
+            // Strip the quote record so neither verifiedRecordsByModule nor the
+            // response sanitizer will allow a View Quote link through.
+            delete results.records.quote;
+            results.errors.push(`Quote verification failed after create: ${quoteVerifyError}`);
+            // Force results into a failure shape BEFORE the spread so that if
+            // a future refactor sets results.success = true earlier in the flow,
+            // the spread can't clobber our success:false. Codex pre-merge fix
+            // 2026-04-24 — the old `{ success:false, ...results }` ordering was
+            // a silent-success trap waiting for a refactor.
+            results.success = false;
+            return {
+              ...results,
+              success: false,
+              error: 'quote_create_verify_failed',
+              created_id_unverified: quoteId,
+              instruction: `Zoho reported Quote ${quoteId} was created but the verification fetch ${quoteVerifyError}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render any quote URL.`,
+              wall_ms: Date.now() - _startMs
+            };
           }
           results.records.quote.verification = quoteVerification;
 
@@ -7106,13 +7212,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
           }
 
-          // Fetch the cloned record to return its key details for verification
+          // Fetch the cloned record to return its key details AND prove durability.
+          // 2026-04-24 Codex council hardening: if the GET fails or returns no record
+          // treat the clone as FAILED — do NOT expose clonedId / cloneUrl so the
+          // response-truth guard can strip any link claim.
           let cloneFacts = null;
+          let cloneVerifyFailed = false;
+          let cloneVerifyError = null;
           try {
             const verifyFields = 'id,Subject,Quote_Number,Grand_Total,Sub_Total,Deal_Name,Account_Name,Quoted_Items';
             const verifyResult = await zohoApiCall('GET', `Quotes/${clonedId}?fields=${verifyFields}`, env);
             const verifyRec = verifyResult?.data?.[0];
-            if (verifyRec) {
+            if (verifyRec?.id) {
               cloneFacts = {
                 id: verifyRec.id,
                 subject: verifyRec.Subject,
@@ -7129,8 +7240,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   total: i.Total
                 }))
               };
+            } else {
+              cloneVerifyFailed = true;
+              cloneVerifyError = 'GET returned no record';
             }
-          } catch (_) {}
+          } catch (verifyErr) {
+            cloneVerifyFailed = true;
+            cloneVerifyError = verifyErr.message;
+          }
+          if (cloneVerifyFailed) {
+            console.warn(`[QUOTE-VERIFY] clone_quote: reported clone id ${clonedId} but verification failed (${cloneVerifyError}). Scrubbing id/url from response.`);
+            return {
+              success: false,
+              error: 'quote_clone_verify_failed',
+              source_quote_id: quote_id,
+              cloned_id_unverified: clonedId,
+              message: `Zoho reported a clone produced id ${clonedId} but the verification fetch ${cloneVerifyError}. Treat this as a FAILED clone — do NOT claim the quote was cloned and do NOT render any quote URL.`,
+            };
+          }
 
           const cloneUndoToken = generateUndoToken();
           const cloneUrlLink = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
@@ -7324,26 +7451,102 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${newId}`;
             reversalSummary = `Undid delete on ${origModule.replace(/s$/, '')} — recreated as ${newId} — [Open in Zoho](${reversalUrl})`;
           } else if (lookup.operation === 'update') {
-            // Reverse an update by PUT-ing the captured pre-state.
+            // Reverse an update by restoring the captured pre-state.
             if (!preState) {
               return { success: false, error: 'No pre-state captured for this update; cannot restore exact prior values.' };
             }
             reversalOperation = 'restore';
-            // Strip read-only / system fields
-            const STRIP = new Set(['id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By', 'Last_Activity_Time', 'Owner', '$editable']);
-            const restorePayload = {};
-            for (const [k, v] of Object.entries(preState)) {
-              if (STRIP.has(k) || k.startsWith('$')) continue;
-              restorePayload[k] = v;
+            // Strip read-only / system / derived fields. For Quotes we also strip
+            // totals (Zoho recomputes) and Quote_Number (auto-generated).
+            const STRIP = new Set([
+              'id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By',
+              'Last_Activity_Time', 'Owner', '$editable',
+              'Quote_Number', 'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout'
+            ]);
+
+            if (origModule !== 'Quotes') {
+              // Non-Quote modules: single-PUT restore is safe — no subform id issue.
+              const restorePayload = {};
+              for (const [k, v] of Object.entries(preState)) {
+                if (STRIP.has(k) || k.startsWith('$')) continue;
+                restorePayload[k] = v;
+              }
+              const putRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [restorePayload] });
+              const putStatus = putRes?.data?.[0]?.status;
+              if (putStatus !== 'success') {
+                return { success: false, error: `Undo restore failed: ${putRes?.data?.[0]?.message || 'unknown'}`, detail: putRes };
+              }
+              reversalResult = putRes;
+            } else {
+              // Quotes — two-step dance to avoid stale subform row id errors.
+              // Zoho regenerates Quoted_Items row ids on every update, so PUTing
+              // preState.Quoted_Items raw fails with "the subform id given seems
+              // to be invalid". Instead:
+              //   Step 1: fetch current Quote, build a PUT that deletes every
+              //           live Quoted_Items row ({id, _delete: null}) and restores
+              //           scalar fields. Do_Not_Auto_Update_Prices prevents reprice.
+              //   Step 2: PUT flattened preState rows (no subform ids) to repopulate.
+              //   Verify: re-fetch and confirm item count matches preState.
+              const currentRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Quoted_Items`, env);
+              const currentItems = currentRes?.data?.[0]?.Quoted_Items || [];
+
+              // Step 1: clear current items + restore scalars in one PUT
+              const clearPayload = { Do_Not_Auto_Update_Prices: true };
+              if (currentItems.length > 0) {
+                clearPayload.Quoted_Items = currentItems.map(it => ({ id: it.id, _delete: null }));
+              }
+              for (const [k, v] of Object.entries(preState)) {
+                if (STRIP.has(k) || k.startsWith('$') || k === 'Quoted_Items') continue;
+                clearPayload[k] = v;
+              }
+              const clearRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [clearPayload] });
+              const clearStatus = clearRes?.data?.[0]?.status;
+              if (clearStatus !== 'success') {
+                return { success: false, error: `Undo restore failed at clear step: ${clearRes?.data?.[0]?.message || 'unknown'}`, detail: clearRes };
+              }
+
+              // Step 2: re-add preState items as fresh rows (no subform ids)
+              const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
+              if (preStateItems.length > 0) {
+                const addPayload = {
+                  Do_Not_Auto_Update_Prices: true,
+                  Quoted_Items: preStateItems.map(it => ({
+                    Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
+                    Quantity: it.Quantity,
+                    List_Price: it.List_Price,
+                    Discount: it.Discount,
+                    Description: it.Description,
+                    Sequence_Number: it.Sequence_Number
+                  })).filter(it => it.Product_Name?.id)
+                };
+                const addRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [addPayload] });
+                const addStatus = addRes?.data?.[0]?.status;
+                if (addStatus !== 'success') {
+                  return { success: false, error: `Undo restore failed at re-add step: ${addRes?.data?.[0]?.message || 'unknown'}`, detail: addRes };
+                }
+                reversalResult = addRes;
+              } else {
+                reversalResult = clearRes;
+              }
+
+              // Verify line count matches preState (guards against silent Zoho no-ops)
+              try {
+                const verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
+                const verifyItems = verifyRes?.data?.[0]?.Quoted_Items || [];
+                if (verifyItems.length !== preStateItems.length) {
+                  return {
+                    success: false,
+                    error: `Undo restore verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
+                    detail: verifyRes
+                  };
+                }
+              } catch (verifyErr) {
+                console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
+              }
             }
-            const putRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [restorePayload] });
-            const putStatus = putRes?.data?.[0]?.status;
-            if (putStatus !== 'success') {
-              return { success: false, error: `Undo restore failed: ${putRes?.data?.[0]?.message || 'unknown'}`, detail: putRes };
-            }
-            reversalResult = putRes;
+
             reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId}`;
-            const restoredFields = Object.keys(restorePayload).slice(0, 4).join(', ');
+            const restoredFields = Object.keys(preState).filter(k => !STRIP.has(k)).slice(0, 4).join(', ');
             reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
           } else {
             return { success: false, error: `Operation type "${lookup.operation}" is not undo-able.` };
@@ -10742,6 +10945,22 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   // paraphrased them away. Keyed by order; we keep only the LAST mutation's
   // summary by default (the one the user most recently made).
   const mutationSummaries = [];
+  // Response-truth guard (2026-04-24 TestCo forensic fix + Codex pre-merge hardening):
+  // Track every {module, record_id} pair that appeared in a SUCCESSFUL tool
+  // result this turn. Any Zoho CRM URL in finalReply whose (module, id) pair
+  // is NOT in this map gets stripped. Module-tagged so a successful Task
+  // mutation can't whitelist a fake Quote URL that reuses the Task id.
+  // Populated from: URLs inside serialized results, tool-call {module_name,
+  // record_id} args on success, zoho_search_records data arrays, and
+  // zoho_create_record responses (module_name + result.record_id).
+  const verifiedRecordsByModule = new Map();
+  function addVerifiedRef(module, id) {
+    if (!module || id == null) return;
+    const key = String(module);
+    const val = String(id);
+    if (!verifiedRecordsByModule.has(key)) verifiedRecordsByModule.set(key, new Set());
+    verifiedRecordsByModule.get(key).add(val);
+  }
   let iteration = 0;
   let finalReply = '';
 
@@ -10802,6 +11021,33 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
                 recordUrl: result._record_url || null,
                 isError: result.success === false,
               });
+            }
+            // Response-truth guard: harvest {module, id} refs from this
+            // successful tool result. Only SUCCESSFUL results contribute.
+            const resultIsError = result.success === false || !!result.error || !!result.validation_error;
+            if (!resultIsError) {
+              const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+              // (1) Any Zoho CRM URL embedded in the serialized result
+              const urlRe = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+              let _mm;
+              while ((_mm = urlRe.exec(resultStr)) !== null) {
+                addVerifiedRef(_mm[1], _mm[2]);
+              }
+              // (2) Tool args that address a specific module+record — whitelist that pair on success.
+              const args = call.arguments || {};
+              if (args.module_name && args.record_id) {
+                addVerifiedRef(args.module_name, args.record_id);
+              }
+              // (3) zoho_search_records / list-style results under a given module_name
+              if (args.module_name && Array.isArray(result.data)) {
+                for (const rec of result.data) {
+                  if (rec && rec.id) addVerifiedRef(args.module_name, rec.id);
+                }
+              }
+              // (4) zoho_create_record responses carry the created id structurally
+              if (args.module_name && result.record_id) {
+                addVerifiedRef(args.module_name, result.record_id);
+              }
             }
           }
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
@@ -10891,6 +11137,70 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
       } else if (!hasNarration) {
         finalReply = `${finalReply.trim()}\n\nThe previous action has been undone.`;
       }
+    }
+  }
+
+  // ── Planning / reasoning leak stripping (2026-04-24 TestCo forensic fix) ──
+  // Llama and other CF Workers AI models occasionally leak internal
+  // tool-use planning text into the user-facing response. Strip known
+  // leak patterns so the user never sees meta-commentary like
+  // "No tool call were made during this conversation. I can now respond."
+  if (finalReply) {
+    const LEAK_PATTERNS = [
+      // "No tool call were made during this conversation. I can now respond."
+      /\b[Nn]o\s+tool\s+calls?\s+(?:were|was)\s+made[^.\n]*\.?\s*(?:I\s+can\s+(?:now\s+)?respond[^.\n]*\.?)?\s*/g,
+      // "[thinking] ... [/thinking]" / "[planning] ... [/planning]" leak tags
+      /\[(?:thinking|internal|reasoning|planning)\][\s\S]*?\[\/(?:thinking|internal|reasoning|planning)\]\s*/gi,
+      // "I should/will call <tool>" meta-narration at line start
+      /^\s*I\s+(?:should|will|need to|am going to)\s+call\s+(?:the\s+)?\w+(?:_\w+)*\s+(?:tool|function)[^.\n]*\.?\s*$/gim,
+    ];
+    for (const pat of LEAK_PATTERNS) finalReply = finalReply.replace(pat, '');
+    finalReply = finalReply.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // ── Response truth guard (2026-04-24 TestCo forensic fix, Codex council) ──
+  // Block hallucinated "View Quote"/"View Deal" links and success claims
+  // that aren't backed by a verified tool result this turn. Two checks:
+  //   (a) Any Zoho CRM URL in finalReply whose record id wasn't returned
+  //       by a successful tool call is stripped — the model invented it.
+  //   (b) If the reply contains record-creation language but zero create/
+  //       update/clone mutations succeeded this turn, prepend a warning.
+  if (finalReply && !/^API error:/.test(finalReply)) {
+    const zohoUrlRegex = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+    const urlsFound = [];
+    let m;
+    while ((m = zohoUrlRegex.exec(finalReply)) !== null) {
+      urlsFound.push({ full: m[0], module: m[1], id: m[2] });
+    }
+    // Module-aware check: URL's (module, id) pair must be in verifiedRecordsByModule.
+    // Prevents cross-module attacks where a successful Task mutation whitelists a
+    // Quote URL reusing the Task id.
+    const unverified = urlsFound.filter(u => {
+      const set = verifiedRecordsByModule.get(u.module);
+      return !(set && set.has(u.id));
+    });
+
+    if (unverified.length > 0) {
+      console.warn(`[TRUTH-GUARD] finalReply contains ${unverified.length} unverified Zoho URL(s): ${unverified.map(u => u.full).join(', ')}`);
+      for (const u of unverified) {
+        const urlEsc = u.full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Strip markdown-link form first: [label](URL) → "[label removed: unverified]"
+        finalReply = finalReply.replace(
+          new RegExp(`\\[([^\\]]*)\\]\\(${urlEsc}\\)`, 'g'),
+          '[link removed: unverified]'
+        );
+        // Then any bare occurrence of the URL itself
+        finalReply = finalReply.replace(new RegExp(urlEsc, 'g'), '[URL removed: unverified]');
+      }
+    }
+
+    // Detect success-claim language paired with ZERO successful mutations.
+    const successfulMutation = mutationSummaries.some(s => !s.isError);
+    const claimsSuccess = /\b(quote|deal|task|record|contact|account)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made)\b/i.test(finalReply)
+      || /\bcreated\s+(?:a\s+new\s+)?(?:quote|deal|task|contact|account)\b/i.test(finalReply);
+    if (claimsSuccess && !successfulMutation) {
+      console.warn(`[TRUTH-GUARD] Response claims creation/update but no mutation tool succeeded this turn`);
+      finalReply = `⚠️ The assistant claimed a record was created or updated, but no verified CRM write tool ran successfully this turn. Any record references above have been stripped. Please retry — if the problem persists, the model may be hallucinating success.\n\n${finalReply}`;
     }
   }
 

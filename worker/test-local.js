@@ -157,11 +157,15 @@ function applySuffix(sku) {
   const upper = sku.toUpperCase();
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
-  // CW Wi-Fi 7 (917x): add -RTG suffix
+  // CW Wi-Fi 7 (917x): add -RTG suffix on recognized stems only.
+  // Valid letter variants: I (internal), H (hospitality), D (directional).
+  // Typos like CW9172L fall through unchanged so downstream lookup fails cleanly.
   if (/^CW917\d/.test(upper)) {
-    // Auto-append I if bare model number (CW9172→CW9172I, but not CW9172H or CW9176 which are already full)
     let cwBase = upper;
+    // Bare stem (e.g. "CW9172") → auto-promote to I variant (CW9172I)
     if (/^CW917\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
+    // Only recognized letter variants get -RTG; anything else returns unchanged.
+    if (!/^CW917\d[IHD]/.test(cwBase)) return upper;
     return cwBase.endsWith('-RTG') ? cwBase : `${cwBase}-RTG`;
   }
   // CW Wi-Fi 6E (916x): auto-append I for standard internal-antenna model, add -MR suffix
@@ -170,6 +174,16 @@ function applySuffix(sku) {
     // CW9162→CW9162I, CW9164→CW9164I, CW9166→CW9166I (but not CW9163E, CW9166D1, etc.)
     if (/^CW916\dI?$/.test(cwBase) && !cwBase.endsWith('I')) cwBase = `${cwBase}I`;
     return cwBase.endsWith('-MR') ? cwBase : `${cwBase}-MR`;
+  }
+  // Cisco Catalyst switches (C9200L/C9300/C9300L/C9300X) — Stratus catalog
+  // stocks only Meraki-managed (-M) variants. Auto-promote unsuffixed inputs
+  // when `${upper}-M` actually exists in the price catalog; otherwise leave
+  // unchanged so the hard-block / clarification path catches it. Skip -A
+  // (IOS-XE, not stocked) and -M-O (STA-KIT special-case) as canonical.
+  if (/^C9(200L|300L|300X|300)-/.test(upper)
+      && !upper.endsWith('-M') && !upper.endsWith('-A') && !upper.endsWith('-M-O')) {
+    const mCandidate = `${upper}-M`;
+    if (prices[mCandidate]) return mCandidate;
   }
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
@@ -670,6 +684,91 @@ const tests = [
     name: `[SUFFIX] ${input} → ${expected}`,
     customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
   })),
+
+  // CW Wi-Fi 7 auto-I promotion for bare stems (2026-04-24 forensic — CW9172l typo fix)
+  ...[
+    ['CW9172', 'CW9172I-RTG'],  // bare stem auto-promotes to I variant
+    ['CW9171', 'CW9171I-RTG'],
+    ['CW9174', 'CW9174I-RTG'],
+    ['CW9176', 'CW9176I-RTG'],
+    ['CW9178', 'CW9178I-RTG'],
+  ].map(([input, expected]) => ({
+    name: `[SUFFIX] ${input} (bare) → ${expected} (auto-I promote)`,
+    customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
+  })),
+
+  // CW Wi-Fi 7 typo guards — invalid letter variants fall through unchanged
+  // so downstream catalog lookup fails cleanly instead of fabricating a fake -RTG SKU.
+  // Reproduces the CW9172l (lowercase L typo for I) Braun Intertec incident.
+  ...[
+    ['CW9172L', 'CW9172L'],    // L is not a recognized variant
+    ['CW9172l', 'CW9172L'],    // lowercase l — uppers to CW9172L, still invalid
+    ['CW9172O', 'CW9172O'],    // O typo for 0 or I
+    ['CW9172Q', 'CW9172Q'],    // arbitrary invalid letter
+    ['CW91720', 'CW91720'],    // trailing 0, no letter variant
+  ].map(([input, expected]) => ({
+    name: `[SUFFIX] ${input} → ${expected} (invalid variant, unchanged)`,
+    customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
+  })),
+
+  // Cisco Catalyst C9xxx auto-M promotion (2026-04-24 Codex council, JCC Kansas City transcript).
+  // Catalog stocks only Meraki-managed (-M) variants. Auto-promote unsuffixed
+  // inputs when `${upper}-M` actually exists in prices; otherwise leave unchanged
+  // so the hard-block path catches it. Skip -A (IOS-XE) and -M-O (STA-KIT) as canonical.
+  ...[
+    ['C9300L-48P-4X', 'C9300L-48P-4X-M'],   // transcript case — 48-port PoE+, 4x10G
+    ['C9300L-24P-4X', 'C9300L-24P-4X-M'],   // transcript case — 24-port PoE+, 4x10G
+    ['C9300L-48P-4X-M', 'C9300L-48P-4X-M'], // already canonical, unchanged
+    ['C9200L-24P-4G', 'C9200L-24P-4G-M'],   // different family, same pattern
+    ['C9300-48P', 'C9300-48P-M'],           // C9300 non-L
+    ['C9300X-48HX', 'C9300X-48HX-M'],       // C9300X
+    ['C9300-NM-2Q', 'C9300-NM-2Q-M'],       // network module
+    ['C9200L-STAK-KIT', 'C9200L-STAK-KIT-M'],  // stack kit that HAS -M in catalog
+  ].map(([input, expected]) => ({
+    name: `[SUFFIX] ${input} → ${expected} (auto-M promote)`,
+    customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
+  })),
+
+  // Catalyst guard cases — do NOT promote when no -M variant exists or when canonical.
+  ...[
+    ['C9300L-48P-4X-A', 'C9300L-48P-4X-A'], // IOS-XE preserved (-A guard)
+    ['C9200L-STA-KIT-M-O', 'C9200L-STA-KIT-M-O'], // already canonical (-M-O guard)
+    ['C9200L-STA-KIT', 'C9200L-STA-KIT'],   // catalog only has -M-O, not -M → unchanged
+    ['C9500-40X', 'C9500-40X'],             // out-of-family, unchanged by existing passthrough
+    ['C9300L', 'C9300L'],                   // bare stem no hyphen, unchanged
+    ['C9800-L-C-K9', 'C9800-L-C-K9'],       // controller, not a Catalyst switch family
+  ].map(([input, expected]) => ({
+    name: `[SUFFIX] ${input} → ${expected} (Catalyst guard, unchanged)`,
+    customTest: () => ({ pass: applySuffix(input) === expected, actual: applySuffix(input) })
+  })),
+
+  // End-to-end: auto-promoted C9300L SKU resolves getLicenseSkus to C9300 family
+  // license SKUs that exist in prices.json (LIC-C9300-{portCount}E-{term}).
+  {
+    name: '[E2E] C9300L-48P-4X → auto-M + getLicenseSkus yields LIC-C9300-48E-1Y/3Y/5Y',
+    customTest: () => {
+      const suffixed = applySuffix('C9300L-48P-4X');
+      if (suffixed !== 'C9300L-48P-4X-M') return { pass: false, actual: `applySuffix → ${suffixed}` };
+      const licenses = getLicenseSkus(suffixed);
+      if (!Array.isArray(licenses) || licenses.length === 0) return { pass: false, actual: `getLicenseSkus → ${JSON.stringify(licenses)}` };
+      const skus = licenses.map(l => l.sku);
+      const want = ['LIC-C9300-48E-1Y', 'LIC-C9300-48E-3Y', 'LIC-C9300-48E-5Y'];
+      const pass = want.every(s => skus.includes(s));
+      return { pass, actual: `licenses: ${skus.join(', ')}` };
+    }
+  },
+  {
+    name: '[E2E] C9300L-24P-4X → auto-M + getLicenseSkus yields LIC-C9300-24E-1Y/3Y/5Y',
+    customTest: () => {
+      const suffixed = applySuffix('C9300L-24P-4X');
+      if (suffixed !== 'C9300L-24P-4X-M') return { pass: false, actual: `applySuffix → ${suffixed}` };
+      const licenses = getLicenseSkus(suffixed);
+      const skus = (licenses || []).map(l => l.sku);
+      const want = ['LIC-C9300-24E-1Y', 'LIC-C9300-24E-3Y', 'LIC-C9300-24E-5Y'];
+      const pass = want.every(s => skus.includes(s));
+      return { pass, actual: `licenses: ${skus.join(', ')}` };
+    }
+  },
 
   // CW special cases — no suffix
   ...[
