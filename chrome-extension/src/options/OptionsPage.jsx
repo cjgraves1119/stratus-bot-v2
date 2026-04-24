@@ -1,3 +1,4 @@
+import { API_BASE } from '../lib/constants';
 /**
  * Options / Settings Page
  *
@@ -85,25 +86,9 @@ export default function OptionsPage() {
       {!settings.apiKey && (
         <Section title="Quick Setup">
           <p style={{ fontSize: 13, color: COLORS.TEXT_SECONDARY, marginBottom: 12 }}>
-            Stratus team member? Click below to auto-fill your settings.
+            Stratus team member? Paste the API key below and fill in your name + email.
+            (Ask an admin or check 1Password for the current key.)
           </p>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {[
-              { name: 'Chris Graves', email: 'chrisg@stratusinfosystems.com' },
-            ].map(user => (
-              <button key={user.email} onClick={() => {
-                updateSetting('userName', user.name);
-                updateSetting('userEmail', user.email);
-                updateSetting('apiKey', 'stratus-gao-55688852246aaea36c36b49f7a35c8f2');
-              }} style={{
-                padding: '8px 16px', background: COLORS.STRATUS_LIGHT,
-                border: `1px solid ${COLORS.STRATUS_BLUE}33`, borderRadius: 8,
-                fontSize: 13, cursor: 'pointer', color: COLORS.STRATUS_DARK, fontWeight: 500,
-              }}>
-                {user.name}
-              </button>
-            ))}
-          </div>
         </Section>
       )}
 
@@ -124,7 +109,7 @@ export default function OptionsPage() {
             <span style={{ fontSize: 12, color: COLORS.SUCCESS }}>✓ API key configured</span>
             <button onClick={async () => {
               try {
-                const res = await fetch(`${settings.apiKey ? 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev' : ''}/api/crm-search`, {
+                const res = await fetch(`${API_BASE}/api/crm-search`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json', 'X-API-Key': settings.apiKey },
                   body: JSON.stringify({ query: 'test', module: 'Accounts' }),
