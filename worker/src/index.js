@@ -3218,7 +3218,7 @@ function applyV2Revision(priorParsed, v2) {
       // Narrow the items list to just the matching term so the renderer
       // emits per-tier URLs for only the selected term.
       if (next.isTermOptionQuote && Array.isArray(next.items) && next.items.length > 0) {
-        const suffixRe = new RegExp(`-${t}YR?$`, 'i');
+        const suffixRe = new RegExp(`-${t}Y(?:R|-S\\d+)?$`, 'i');
         const filtered = next.items.filter(i => suffixRe.test(String(i.baseSku)));
         if (filtered.length === 0) return null; // no SKUs at that term → bail
         next.items = filtered;
@@ -3226,8 +3226,8 @@ function applyV2Revision(priorParsed, v2) {
       // Same idea for a directLicenseList of Duo/Umbrella SKUs (legacy path
       // for prior states that predate the isTermOptionQuote promotion).
       if (!next.isTermOptionQuote && Array.isArray(next.directLicenseList) && next.directLicenseList.length > 0) {
-        const suffixRe = new RegExp(`-${t}YR?$`, 'i');
-        const allDuoUmb = next.directLicenseList.every(l => /^LIC-(DUO|UMB)-/i.test(String(l.sku || '')));
+        const suffixRe = new RegExp(`-${t}Y(?:R|-S\\d+)?$`, 'i');
+        const allDuoUmb = next.directLicenseList.every(l => /^LIC-(DUO|UMB|L-AC)-/i.test(String(l.sku || '')));
         if (allDuoUmb) {
           const filtered = next.directLicenseList.filter(l => suffixRe.test(String(l.sku)));
           if (filtered.length === 0) return null;
@@ -3244,7 +3244,7 @@ function applyV2Revision(priorParsed, v2) {
       // label path kicks in.
       next.modifiers = { ...(next.modifiers || {}), separateQuotes: true };
       if (!next.isTermOptionQuote && Array.isArray(next.directLicenseList) && next.directLicenseList.length > 1) {
-        const allDuoUmb = next.directLicenseList.every(l => /^LIC-(DUO|UMB)-/i.test(String(l.sku || '')));
+        const allDuoUmb = next.directLicenseList.every(l => /^LIC-(DUO|UMB|L-AC)-/i.test(String(l.sku || '')));
         if (allDuoUmb) {
           next.items = next.directLicenseList.map(l => ({ baseSku: l.sku, qty: l.qty }));
           delete next.directLicenseList;
@@ -3280,6 +3280,19 @@ function applyV2Revision(priorParsed, v2) {
           if (newSku !== next.directLicense.sku) { next.directLicense.sku = newSku; touched = true; }
         }
         if (touched) {
+          // After tier swap, ensure the result renders via isTermOptionQuote
+          // (per-term URLs with labels) rather than directLicenseList
+          // ("Option 1 — Renew Existing Licenses" combined URL). If the prior
+          // state was reconstructed as directLicenseList (e.g. from an
+          // assistant-URL extractPrior path), promote to items + isTermOptionQuote.
+          if (!next.isTermOptionQuote && Array.isArray(next.directLicenseList) && next.directLicenseList.length >= 2) {
+            next.items = next.directLicenseList.map(l => ({ baseSku: l.sku, qty: l.qty, isLicenseOnly: true }));
+            delete next.directLicenseList;
+            next.isTermOptionQuote = true;
+            // Single tier after swap (all APX or all PLS) → separateQuotes=false
+            // so renderer emits one URL per term, not per tier.
+            next.modifiers = { ...(next.modifiers || {}), separateQuotes: false };
+          }
           next.clarificationNote = `Swapped to AnyConnect ${acTier === 'APX' ? 'Apex' : 'Plus'}.`;
           return next;
         }
@@ -3518,11 +3531,11 @@ function extractPriorFromAssistantUrl(content) {
     // losing the shape. Multi-tier pools default to separateQuotes=true
     // because that's the only way the original render produced >1 URL.
     const isAllDuoUmb = licList.length >= 2 &&
-      licList.every(l => /^LIC-(DUO|UMB)-/.test(String(l.sku || '')));
+      licList.every(l => /^LIC-(DUO|UMB|L-AC)-/.test(String(l.sku || '')));
     if (isAllDuoUmb) {
       const tierFamilies = new Set();
       for (const l of licList) {
-        tierFamilies.add(String(l.sku).replace(/-(\d)YR?$/i, ''));
+        tierFamilies.add(String(l.sku).replace(/-(\d)Y(?:R|-S\d+)?$/i, ''));
       }
       return {
         items: licList.map(l => ({ baseSku: l.sku, qty: l.qty })),
