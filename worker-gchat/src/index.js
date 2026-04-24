@@ -6889,14 +6889,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
           results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
 
-          // STEP 7: Fetch the created quote to get actual line items, Grand_Total, and Quote_Number
-          // Quote_Number is a Zoho auto-generated field (different from the record ID) — always
-          // surface it so the user and Claude can reference it in follow-up messages.
+          // STEP 7: Fetch the created quote to confirm durability and pull Quote_Number / totals.
+          // 2026-04-24 Codex council hardening: if the GET fails or returns no record, treat
+          // the create as FAILED and scrub the quote record from results so the response-truth
+          // guard upstream strips the URL and no success claim reaches the user.
           let quoteVerification = null;
+          let quoteVerifyFailed = false;
+          let quoteVerifyError = null;
           try {
             const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Quoted_Items`, env);
-            if (fetchedQuote?.data?.[0]) {
-              const fq = fetchedQuote.data[0];
+            const fq = fetchedQuote?.data?.[0];
+            if (fq?.id) {
               quoteVerification = {
                 Quote_Number: fq.Quote_Number || null,
                 Grand_Total: fq.Grand_Total,
@@ -6910,14 +6913,32 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   total: item.total
                 }))
               };
-              // Attach Quote_Number to the top-level quote record so Claude surfaces it
               if (fq.Quote_Number) {
                 results.records.quote.quote_number = fq.Quote_Number;
               }
               results.steps.push(`Verified: ${quoteVerification.item_count} items, Grand Total: $${quoteVerification.Grand_Total}${fq.Quote_Number ? ', Quote #' + fq.Quote_Number : ''}`);
+            } else {
+              quoteVerifyFailed = true;
+              quoteVerifyError = 'GET returned no record';
             }
           } catch (e) {
-            results.steps.push('Quote verification fetch failed (quote was created successfully)');
+            quoteVerifyFailed = true;
+            quoteVerifyError = e.message;
+          }
+          if (quoteVerifyFailed) {
+            console.warn(`[QUOTE-VERIFY] create_deal_and_quote: POST reported Quote ${quoteId} created but verification failed (${quoteVerifyError}). Scrubbing id/url from response.`);
+            // Strip the quote record so neither verifiedRecordsByModule nor the
+            // response sanitizer will allow a View Quote link through.
+            delete results.records.quote;
+            results.errors.push(`Quote verification failed after create: ${quoteVerifyError}`);
+            return {
+              success: false,
+              error: 'quote_create_verify_failed',
+              ...results,
+              created_id_unverified: quoteId,
+              instruction: `Zoho reported Quote ${quoteId} was created but the verification fetch ${quoteVerifyError}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render any quote URL.`,
+              wall_ms: Date.now() - _startMs
+            };
           }
           results.records.quote.verification = quoteVerification;
 
@@ -7185,13 +7206,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
           }
 
-          // Fetch the cloned record to return its key details for verification
+          // Fetch the cloned record to return its key details AND prove durability.
+          // 2026-04-24 Codex council hardening: if the GET fails or returns no record
+          // treat the clone as FAILED — do NOT expose clonedId / cloneUrl so the
+          // response-truth guard can strip any link claim.
           let cloneFacts = null;
+          let cloneVerifyFailed = false;
+          let cloneVerifyError = null;
           try {
             const verifyFields = 'id,Subject,Quote_Number,Grand_Total,Sub_Total,Deal_Name,Account_Name,Quoted_Items';
             const verifyResult = await zohoApiCall('GET', `Quotes/${clonedId}?fields=${verifyFields}`, env);
             const verifyRec = verifyResult?.data?.[0];
-            if (verifyRec) {
+            if (verifyRec?.id) {
               cloneFacts = {
                 id: verifyRec.id,
                 subject: verifyRec.Subject,
@@ -7208,8 +7234,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   total: i.Total
                 }))
               };
+            } else {
+              cloneVerifyFailed = true;
+              cloneVerifyError = 'GET returned no record';
             }
-          } catch (_) {}
+          } catch (verifyErr) {
+            cloneVerifyFailed = true;
+            cloneVerifyError = verifyErr.message;
+          }
+          if (cloneVerifyFailed) {
+            console.warn(`[QUOTE-VERIFY] clone_quote: reported clone id ${clonedId} but verification failed (${cloneVerifyError}). Scrubbing id/url from response.`);
+            return {
+              success: false,
+              error: 'quote_clone_verify_failed',
+              source_quote_id: quote_id,
+              cloned_id_unverified: clonedId,
+              message: `Zoho reported a clone produced id ${clonedId} but the verification fetch ${cloneVerifyError}. Treat this as a FAILED clone — do NOT claim the quote was cloned and do NOT render any quote URL.`,
+            };
+          }
 
           const cloneUndoToken = generateUndoToken();
           const cloneUrlLink = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
@@ -10897,13 +10939,22 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   // paraphrased them away. Keyed by order; we keep only the LAST mutation's
   // summary by default (the one the user most recently made).
   const mutationSummaries = [];
-  // Response-truth guard (2026-04-24 TestCo forensic fix):
-  // Track every Zoho record id that appeared in a successful tool result
-  // this turn. Any View Quote / Zoho CRM URL in finalReply whose record id
-  // is NOT in this set is a hallucination and gets stripped before returning.
-  // Built from both get_record-style reads and create/update/clone mutations
-  // so legitimate lookups still surface links cleanly.
-  const verifiedRecordIds = new Set();
+  // Response-truth guard (2026-04-24 TestCo forensic fix + Codex pre-merge hardening):
+  // Track every {module, record_id} pair that appeared in a SUCCESSFUL tool
+  // result this turn. Any Zoho CRM URL in finalReply whose (module, id) pair
+  // is NOT in this map gets stripped. Module-tagged so a successful Task
+  // mutation can't whitelist a fake Quote URL that reuses the Task id.
+  // Populated from: URLs inside serialized results, tool-call {module_name,
+  // record_id} args on success, zoho_search_records data arrays, and
+  // zoho_create_record responses (module_name + result.record_id).
+  const verifiedRecordsByModule = new Map();
+  function addVerifiedRef(module, id) {
+    if (!module || id == null) return;
+    const key = String(module);
+    const val = String(id);
+    if (!verifiedRecordsByModule.has(key)) verifiedRecordsByModule.set(key, new Set());
+    verifiedRecordsByModule.get(key).add(val);
+  }
   let iteration = 0;
   let finalReply = '';
 
@@ -10965,15 +11016,32 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
                 isError: result.success === false,
               });
             }
-            // Response-truth guard: harvest any Zoho record id from this
-            // successful tool result. Only SUCCESSFUL results contribute —
-            // error payloads may echo the id the model was trying to act on
-            // but we don't want the guard to whitelist that id for link use.
+            // Response-truth guard: harvest {module, id} refs from this
+            // successful tool result. Only SUCCESSFUL results contribute.
             const resultIsError = result.success === false || !!result.error || !!result.validation_error;
             if (!resultIsError) {
               const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-              const idMatches = resultStr.match(/\b\d{15,19}\b/g);
-              if (idMatches) for (const id of idMatches) verifiedRecordIds.add(id);
+              // (1) Any Zoho CRM URL embedded in the serialized result
+              const urlRe = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+              let _mm;
+              while ((_mm = urlRe.exec(resultStr)) !== null) {
+                addVerifiedRef(_mm[1], _mm[2]);
+              }
+              // (2) Tool args that address a specific module+record — whitelist that pair on success.
+              const args = call.arguments || {};
+              if (args.module_name && args.record_id) {
+                addVerifiedRef(args.module_name, args.record_id);
+              }
+              // (3) zoho_search_records / list-style results under a given module_name
+              if (args.module_name && Array.isArray(result.data)) {
+                for (const rec of result.data) {
+                  if (rec && rec.id) addVerifiedRef(args.module_name, rec.id);
+                }
+              }
+              // (4) zoho_create_record responses carry the created id structurally
+              if (args.module_name && result.record_id) {
+                addVerifiedRef(args.module_name, result.record_id);
+              }
             }
           }
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
@@ -11098,7 +11166,13 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     while ((m = zohoUrlRegex.exec(finalReply)) !== null) {
       urlsFound.push({ full: m[0], module: m[1], id: m[2] });
     }
-    const unverified = urlsFound.filter(u => !verifiedRecordIds.has(u.id));
+    // Module-aware check: URL's (module, id) pair must be in verifiedRecordsByModule.
+    // Prevents cross-module attacks where a successful Task mutation whitelists a
+    // Quote URL reusing the Task id.
+    const unverified = urlsFound.filter(u => {
+      const set = verifiedRecordsByModule.get(u.module);
+      return !(set && set.has(u.id));
+    });
 
     if (unverified.length > 0) {
       console.warn(`[TRUTH-GUARD] finalReply contains ${unverified.length} unverified Zoho URL(s): ${unverified.map(u => u.full).join(', ')}`);
