@@ -831,6 +831,7 @@ REVISION RULES:
 - SWAP — any of "swap X for Y", "replace X with Y", "change X to Y", "substitute X with Y", "exchange X for Y" → action="swap", target_sku="X", add_items=[{sku:"Y", qty: if given}]. Examples: "swap MR44 for MR46" → swap, target MR44, add MR46; "replace the MR44s with MR46" → swap, target MR44, add MR46; "change MX75 to MX85" → swap, target MX75, add MX85. CRITICAL: Swap is ONE atomic action. NEVER split "swap X for Y" into separate action="remove" (X) + action="add" (Y) — that loses the swap semantics. Always emit a single revise with action="swap".
 - "make it 5" → action=change_qty, new_qty=5.
 - "change to SEC" → action=change_tier, new_tier="SEC".
+- AnyConnect tier swap: "change that to Apex"/"swap to Plus"/"make it PLS" on a prior AnyConnect quote → action=change_tier with new_tier="APX" (for Apex/APX) or new_tier="PLS" (for Plus/PLS). These tier values only apply when the prior quote contains AnyConnect SKUs (LIC-L-AC-*).
 - Pricing follow-up on a prior quote — the user wants to see the dollar figures on items they've already been quoted. Natural-language examples: "what is the cost", "how much", "how much is that", "how much does it cost", "what's the price", "with pricing", "add pricing", "show me pricing", "give me pricing", "what's this cost", "total cost", "the price", "pricing" — basically any message that asks about cost/price/pricing without introducing new SKUs or changing the spec. → action="show_pricing", set modifiers.show_pricing=true, reference.resolve_from_history=true. This is a no-op on items/term/tier — keep the prior quote exactly as-is and just render it with pricing visible. Trust the semantic meaning of the message; you don't need the exact phrase to match — if the intent is "I want to see the cost of what you just quoted," use show_pricing.
 - For revisions: set reference.resolve_from_history=true.
 - "renewal for [device list]" is NOT a revision — it's a fresh quote with license_only=true.
@@ -2985,6 +2986,16 @@ function buildQuoteFromV2(v2, rawText) {
 
   // Pure license path — caller renders via directLicense / directLicenseList
   if (hwItems.length === 0 && licItems.length > 0) {
+    // AnyConnect 25-user minimum: if ANY license item is an AnyConnect SKU with
+    // qty < 25, clamp to 25. Surface a clarificationNote the renderer will
+    // prepend to the user-facing message so the bump is visible.
+    let _acClamped = false;
+    for (const it of licItems) {
+      if (/^LIC-L-AC-(APX|PLS)-\d+Y-S1$/i.test(String(it.sku || '')) && Number(it.qty) < 25) {
+        it.qty = 25;
+        _acClamped = true;
+      }
+    }
     if (licItems.length === 1) {
       return {
         items: [],
@@ -2996,6 +3007,7 @@ function buildQuoteFromV2(v2, rawText) {
         isRevision: false,
         showPricing,
         unresolvedCategories: [],
+        clarificationNote: _acClamped ? 'AnyConnect has a 25-user minimum — bumped quantity to 25.' : undefined,
         _fromV2: true
       };
     }
@@ -3022,6 +3034,7 @@ function buildQuoteFromV2(v2, rawText) {
         isRevision: false,
         showPricing,
         unresolvedCategories: [],
+        clarificationNote: _acClamped ? 'AnyConnect has a 25-user minimum — bumped quantity to 25.' : undefined,
         _fromV2: true
       };
     }
@@ -3046,6 +3059,7 @@ function buildQuoteFromV2(v2, rawText) {
         isRevision: false,
         showPricing,
         unresolvedCategories: [],
+        clarificationNote: _acClamped ? 'AnyConnect has a 25-user minimum — bumped quantity to 25.' : undefined,
         _fromV2: true
       };
     }
@@ -3059,6 +3073,7 @@ function buildQuoteFromV2(v2, rawText) {
       isRevision: false,
       showPricing,
       unresolvedCategories: [],
+      clarificationNote: _acClamped ? 'AnyConnect has a 25-user minimum — bumped quantity to 25.' : undefined,
       _fromV2: true
     };
   }
@@ -3240,6 +3255,36 @@ function applyV2Revision(priorParsed, v2) {
     }
     case 'change_tier': {
       const raw = String(rev.new_tier || '').toUpperCase().replace(/\s+/g, '').replace(/^SD-WAN$/, 'SDW');
+      // AnyConnect tier swap — PLS ⇄ APX. Aliases: APEX/PLUS map to APX/PLS.
+      // Rewrites the LIC-L-AC-{tier}-... prefix in every prior item.
+      const acTier = raw === 'APEX' || raw === 'APX' ? 'APX'
+                   : raw === 'PLUS' || raw === 'PLS' ? 'PLS'
+                   : null;
+      if (acTier) {
+        const swap = (sku) => String(sku).replace(/^LIC-L-AC-(APX|PLS)-/i, `LIC-L-AC-${acTier}-`);
+        let touched = false;
+        if (hasItems) {
+          for (const it of next.items) {
+            const newSku = swap(it.baseSku);
+            if (newSku !== it.baseSku) { it.baseSku = newSku; touched = true; }
+          }
+        }
+        if (next.directLicenseList) {
+          for (const it of next.directLicenseList) {
+            const newSku = swap(it.sku);
+            if (newSku !== it.sku) { it.sku = newSku; touched = true; }
+          }
+        }
+        if (next.directLicense) {
+          const newSku = swap(next.directLicense.sku);
+          if (newSku !== next.directLicense.sku) { next.directLicense.sku = newSku; touched = true; }
+        }
+        if (touched) {
+          next.clarificationNote = `Swapped to AnyConnect ${acTier === 'APX' ? 'Apex' : 'Plus'}.`;
+          return next;
+        }
+        // No AnyConnect SKUs in prior quote — fall through to standard tier logic (will likely return null).
+      }
       if (!['SEC', 'ENT', 'SDW'].includes(raw)) return null;
       next.requestedTier = raw;
       return next;
