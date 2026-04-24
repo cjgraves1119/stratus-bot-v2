@@ -653,5 +653,255 @@ t('Empty preState would refuse: caller must check before building payload', () =
   assert.equal(d.itemsToAdd.length, 0);
 });
 
+console.log('\n─── Bug C: update verification false-negative on silent rejection (Codex round-6) ───');
+
+// Mirror the production verification logic for zoho_update_record on Quotes.
+// Key invariants:
+//   - Outer gate runs whenever module === 'Quotes' && success — NOT gated on data.Quoted_Items.
+//   - Per-item delete/modify checks gate on data.Quoted_Items having actual intents.
+//   - No-op detection (anyItemChanged + totals) ALWAYS runs when preUpdateSnapshot exists.
+//   - Scalar-persistence check fires when any data[k] (excluding derived/Quoted_Items) didn't persist.
+//   - Tolerant valuesEqual handles picklist string-vs-object, reference id, float drift.
+
+// Re-declared locally so the test runs without loading the worker module.
+const SCALAR_VERIFY_EXCLUDE = new Set([
+  'Quoted_Items', 'Do_Not_Auto_Update_Prices',
+  'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment',
+  'All_Taxes_Total', 'Tax_1_Total', 'Tax_2_Total',
+  'Modified_Time', 'Last_Activity_Time', 'Modified_By',
+  'Created_Time', 'Created_By',
+]);
+
+function valuesEqual(pre, post) {
+  if (pre === post) return true;
+  if (pre == null && post == null) return true;
+  if (pre == null || post == null) return false;
+  if (typeof pre === 'number' && typeof post === 'number') return Math.abs(pre - post) < 0.01;
+  if (typeof pre === 'string' && typeof post === 'object') return pre === post.name || pre === post.id || pre === String(post);
+  if (typeof post === 'string' && typeof pre === 'object') return post === pre.name || post === pre.id || post === String(pre);
+  if (typeof pre === 'object' && typeof post === 'object') {
+    if (Array.isArray(pre) || Array.isArray(post)) {
+      if (!Array.isArray(pre) || !Array.isArray(post)) return false;
+      if (pre.length !== post.length) return false;
+      return pre.every((v, i) => valuesEqual(v, post[i]));
+    }
+    if (pre.id != null && post.id != null) return String(pre.id) === String(post.id);
+    try { return JSON.stringify(pre) === JSON.stringify(post); } catch { return false; }
+  }
+  if (typeof pre === 'boolean' || typeof post === 'boolean') return Boolean(pre) === Boolean(post);
+  return String(pre) === String(post);
+}
+
+// Compute the scalar-persistence categories the production check produces.
+function computeScalarPersistence(data, preSnap, postRec) {
+  const tried = Object.keys(data).filter(k => !SCALAR_VERIFY_EXCLUDE.has(k));
+  const persisted = [];
+  const dropped = [];
+  const alreadyMatched = [];
+  for (const k of tried) {
+    const wasIntended = !valuesEqual(preSnap[k], data[k]);
+    const actuallyChanged = !valuesEqual(preSnap[k], postRec[k]);
+    if (!wasIntended) alreadyMatched.push(k);
+    else if (actuallyChanged) persisted.push(k);
+    else dropped.push(k);
+  }
+  return { tried, persisted, dropped, already_matched: alreadyMatched };
+}
+
+// Compute item-side change indicator from pre/post snapshots.
+function computeItemChange(preSnap, postRec) {
+  const preItemsById = new Map((preSnap.Quoted_Items || []).map(i => [i.id, {
+    discount: Number(i.Discount || 0),
+    quantity: Number(i.Quantity || 0),
+    product_id: i.Product_Name?.id || null,
+  }]));
+  const postItems = postRec.Quoted_Items || [];
+  let any = false;
+  for (const post of postItems) {
+    const pre = preItemsById.get(post.id);
+    if (!pre) { any = true; break; }
+    if (Math.abs(pre.discount - Number(post.Discount || 0)) > 0.01) { any = true; break; }
+    if (pre.quantity !== Number(post.Quantity || 0)) { any = true; break; }
+  }
+  if (preItemsById.size !== postItems.length) any = true;
+  const totalChanged = Math.abs(Number(preSnap.Grand_Total || 0) - Number(postRec.Grand_Total || 0)) > 0.01;
+  const subChanged = Math.abs(Number(preSnap.Sub_Total || 0) - Number(postRec.Sub_Total || 0)) > 0.01;
+  return { anyItemChanged: any, totalChanged, subChanged };
+}
+
+t('valuesEqual: number tolerance < 1¢', () => {
+  assert.equal(valuesEqual(100.001, 100.002), true);
+  assert.equal(valuesEqual(100, 100.5), false);
+});
+
+t('valuesEqual: picklist write-string vs read-object', () => {
+  // Zoho returns Stage as {name:"Review", id:"..."} on read but accepts string on write.
+  assert.equal(valuesEqual('Review', { name: 'Review', id: '12345' }), true);
+  assert.equal(valuesEqual({ name: 'Review', id: '12345' }, 'Review'), true);
+  assert.equal(valuesEqual('Negotiation', { name: 'Review', id: '12345' }), false);
+});
+
+t('valuesEqual: reference object equality by id', () => {
+  assert.equal(valuesEqual({ id: 'A', name: 'x' }, { id: 'A', name: 'y' }), true);
+  assert.equal(valuesEqual({ id: 'A' }, { id: 'B' }), false);
+});
+
+t('valuesEqual: arrays element-wise', () => {
+  assert.equal(valuesEqual([1, 2, 3], [1, 2, 3]), true);
+  assert.equal(valuesEqual([1, 2], [1, 2, 3]), false);
+});
+
+t('valuesEqual: null/undefined handling', () => {
+  assert.equal(valuesEqual(null, null), true);
+  assert.equal(valuesEqual(undefined, undefined), true);
+  assert.equal(valuesEqual(null, 'value'), false);
+});
+
+// ── Live failure shape: Quote 2570562000402426396 ──
+// pre and post both have 6 identical items @ $9,105.02. Llama's PUT included
+// Quoted_Items intents (likely _delete on the licenses) but Zoho silently
+// rejected them. Modified_Time advanced; everything else unchanged.
+t('LIVE REPRO Quote 2570562000402426396: items unchanged → ZOHO_DROPPED_QUOTED_ITEMS warning', () => {
+  const items = [
+    { Product_Name: { id: 'PID_MX75' }, Quantity: 1, Discount: 941, id: 'sub_1' },
+    { Product_Name: { id: 'PID_LIC_MX75' }, Quantity: 1, Discount: 887, id: 'sub_2' },
+    { Product_Name: { id: 'PID_MX85' }, Quantity: 1, Discount: 703, id: 'sub_3' },
+    { Product_Name: { id: 'PID_LIC_MX85' }, Quantity: 1, Discount: 804, id: 'sub_4' },
+    { Product_Name: { id: 'PID_CW9172I' }, Quantity: 2, Discount: 1714, id: 'sub_5' },
+    { Product_Name: { id: 'PID_LIC_ENT' }, Quantity: 2, Discount: 168, id: 'sub_6' },
+  ];
+  const preSnap = { Quoted_Items: items, Grand_Total: 9105.02, Sub_Total: 9105.0152 };
+  const postRec = { Quoted_Items: items, Grand_Total: 9105.02, Sub_Total: 9105.0152 };
+  const data = {
+    Quoted_Items: [
+      { id: 'sub_2', _delete: null }, // license removal intent
+      { id: 'sub_4', _delete: null },
+      { id: 'sub_6', _delete: null },
+    ],
+  };
+
+  const { anyItemChanged, totalChanged, subChanged } = computeItemChange(preSnap, postRec);
+  assert.equal(anyItemChanged, false, 'no item-side change');
+  assert.equal(totalChanged, false);
+  assert.equal(subChanged, false);
+
+  const triedQuotedItems = Array.isArray(data.Quoted_Items) && data.Quoted_Items.length > 0;
+  const shouldFire = triedQuotedItems && !anyItemChanged && !totalChanged && !subChanged;
+  assert.equal(shouldFire, true, 'ZOHO_DROPPED_QUOTED_ITEMS warning must fire on this exact scenario');
+});
+
+t('Scalar-only legitimate update: scalar persisted → no warning', () => {
+  // Llama updates Subject. Zoho accepts. Pre.Subject differs from post.Subject.
+  const preSnap = { Subject: 'Old Title', Grand_Total: 5000, Sub_Total: 5000, Quoted_Items: [] };
+  const postRec = { Subject: 'New Title', Grand_Total: 5000, Sub_Total: 5000, Quoted_Items: [] };
+  const data = { Subject: 'New Title' };
+  const sp = computeScalarPersistence(data, preSnap, postRec);
+  assert.deepEqual(sp.persisted, ['Subject']);
+  assert.deepEqual(sp.dropped, []);
+  assert.deepEqual(sp.already_matched, []);
+});
+
+t('Scalar-only silently rejected: scalar dropped → ZOHO_REJECTED_SCALARS warning', () => {
+  const preSnap = { Subject: 'Old', Stage: 'Negotiation', Grand_Total: 5000, Sub_Total: 5000, Quoted_Items: [] };
+  const postRec = { Subject: 'Old', Stage: 'Negotiation', Grand_Total: 5000, Sub_Total: 5000, Quoted_Items: [] };
+  const data = { Subject: 'New', Stage: 'Closed Won' };
+  const sp = computeScalarPersistence(data, preSnap, postRec);
+  assert.deepEqual(sp.persisted, []);
+  assert.deepEqual(sp.dropped.sort(), ['Stage', 'Subject'].sort());
+  assert.equal(sp.dropped.length, 2, 'both fields must be flagged as dropped');
+});
+
+t('Scalar set to current value: not flagged (already_matched, not dropped)', () => {
+  // Llama tries to "set" Subject to its existing value. Zoho's no-change
+  // is benign — must not generate a false-positive warning.
+  const preSnap = { Subject: 'Same', Grand_Total: 5000, Sub_Total: 5000, Quoted_Items: [] };
+  const postRec = { Subject: 'Same', Grand_Total: 5000, Sub_Total: 5000, Quoted_Items: [] };
+  const data = { Subject: 'Same' };
+  const sp = computeScalarPersistence(data, preSnap, postRec);
+  assert.deepEqual(sp.dropped, []);
+  assert.deepEqual(sp.already_matched, ['Subject']);
+});
+
+t('Mixed scalar+items: scalar persisted, items unchanged → only ZOHO_DROPPED_QUOTED_ITEMS', () => {
+  const items = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 0, id: 'sub_1' }];
+  const preSnap = { Subject: 'Old', Quoted_Items: items, Grand_Total: 1000, Sub_Total: 1000 };
+  const postRec = { Subject: 'New', Quoted_Items: items, Grand_Total: 1000, Sub_Total: 1000 };
+  const data = { Subject: 'New', Quoted_Items: [{ id: 'sub_1', _delete: null }] };
+  const sp = computeScalarPersistence(data, preSnap, postRec);
+  const ic = computeItemChange(preSnap, postRec);
+  // Scalar OK
+  assert.deepEqual(sp.persisted, ['Subject']);
+  assert.deepEqual(sp.dropped, []);
+  // Items dropped → DROPPED_QUOTED_ITEMS would fire
+  const triedQI = Array.isArray(data.Quoted_Items) && data.Quoted_Items.length > 0;
+  const itemsWarn = triedQI && !ic.anyItemChanged && !ic.totalChanged && !ic.subChanged;
+  assert.equal(itemsWarn, true);
+});
+
+t('Mixed scalar+items: scalar dropped AND items unchanged → BOTH warnings', () => {
+  const items = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 0, id: 'sub_1' }];
+  const preSnap = { Subject: 'Old', Quoted_Items: items, Grand_Total: 1000, Sub_Total: 1000 };
+  const postRec = { Subject: 'Old', Quoted_Items: items, Grand_Total: 1000, Sub_Total: 1000 };
+  const data = { Subject: 'New', Quoted_Items: [{ id: 'sub_1', _delete: null }] };
+  const sp = computeScalarPersistence(data, preSnap, postRec);
+  const ic = computeItemChange(preSnap, postRec);
+  assert.deepEqual(sp.dropped, ['Subject']);
+  assert.equal(ic.anyItemChanged, false);
+  // Both warnings should fire in production
+});
+
+t('Picklist field equality tolerance: write-string vs read-object — no false-positive', () => {
+  // Llama writes `Stage: 'Review'` as a string. Zoho returns `Stage: {name: 'Review', id: '...'}`.
+  // The persistence check must NOT flag this as dropped.
+  const preSnap = { Stage: { name: 'Negotiation', id: '12345' }, Grand_Total: 0, Sub_Total: 0, Quoted_Items: [] };
+  const postRec = { Stage: { name: 'Review', id: '67890' }, Grand_Total: 0, Sub_Total: 0, Quoted_Items: [] };
+  const data = { Stage: 'Review' };
+  const sp = computeScalarPersistence(data, preSnap, postRec);
+  assert.deepEqual(sp.persisted, ['Stage'], 'string-write-then-object-read must register as persisted');
+  assert.deepEqual(sp.dropped, []);
+});
+
+t('Excluded fields: Tax/Grand_Total/etc never appear in scalar checks', () => {
+  // Even if data contained these, they should not be evaluated.
+  const preSnap = { Subject: 'A', Grand_Total: 100, Sub_Total: 100, Tax: 7, Quoted_Items: [] };
+  const postRec = { Subject: 'A', Grand_Total: 100, Sub_Total: 100, Tax: 7, Quoted_Items: [] };
+  const data = { Grand_Total: 99, Sub_Total: 99, Tax: 6.93, Adjustment: 0 }; // all excluded
+  const sp = computeScalarPersistence(data, preSnap, postRec);
+  assert.deepEqual(sp.tried, [], 'no fields tried after exclusion');
+  assert.deepEqual(sp.dropped, []);
+  assert.deepEqual(sp.persisted, []);
+});
+
+t('Live-failure end-to-end: verify-fail result is treated as error by askClaude harvesting', () => {
+  // Simulate the production verification block result for Quote 2570562000402426396.
+  const verification = {
+    success: false,
+    code: 'SUCCESS',
+    data: { id: '2570562000402426396' },
+    message: '⚠️ Zoho returned SUCCESS but verification detected the changes did not actually land. See verification.WARNING.',
+    verification: {
+      success: false,
+      WARNING: 'ZOHO_DROPPED_QUOTED_ITEMS: ... | ZOHO_REJECTED_SCALARS: ...',
+      actual_item_count: 6,
+      grand_total: 9105.02,
+    },
+  };
+  const resultIsError = verification.success === false || !!verification.error || !!verification.validation_error;
+  assert.ok(resultIsError, 'verify-fail must classify as error so harvesting skips whitelisting');
+
+  // Confirm no Quote URL in payload could be harvested
+  const verified = new Map();
+  if (!resultIsError) {
+    const s = JSON.stringify(verification);
+    const rx = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+    let mm;
+    while ((mm = rx.exec(s)) !== null) {
+      if (!verified.has(mm[1])) verified.set(mm[1], new Set());
+      verified.get(mm[1]).add(mm[2]);
+    }
+  }
+  assert.ok(!verified.has('Quotes'), 'no Quote URL whitelisted on verify-fail');
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);

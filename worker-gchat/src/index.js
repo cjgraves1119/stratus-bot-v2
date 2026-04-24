@@ -5831,11 +5831,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // Capture the current record state BEFORE we PUT. For Quotes this also
         // powers the silent-no-op detector (line-item diff); for all modules it
         // enables undo_crm_action to restore the exact prior field values.
+        // 2026-04-24 Codex Bug C fix: for Quotes, ALWAYS include Quoted_Items
+        // + totals in the snapshot regardless of what the model is changing,
+        // so the post-PUT verification can detect silent no-ops on EVERY
+        // Quote update (not just ones that touched data.Quoted_Items).
         let preUpdateSnapshot = null;
         try {
           // Only request the fields we're about to modify (plus id + a name field)
           // to keep the snapshot small.
-          const fieldsToSnap = ['id', ...Object.keys(data)].join(',');
+          const baseSnapFields = module_name === 'Quotes'
+            ? ['id', 'Quoted_Items', 'Grand_Total', 'Sub_Total']
+            : ['id'];
+          const fieldsToSnap = [...new Set([...baseSnapFields, ...Object.keys(data)])].join(',');
           const pre = await zohoApiCall('GET', `${module_name}/${record_id}?fields=${encodeURIComponent(fieldsToSnap)}`, env);
           preUpdateSnapshot = pre?.data?.[0] || null;
         } catch (snapErr) {
@@ -5907,19 +5914,38 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           updateParsed.message = updateUserSummary;
         }
 
-        // ── SERVER-SIDE VERIFICATION for Quoted_Items updates ────────────────
+        // ── SERVER-SIDE VERIFICATION for Quote updates ────────────────────────
         // Zoho returns SUCCESS even for malformed Quoted_Items payloads that
-        // silently fail. To prevent ANY model (Gemma, Claude, Haiku) from
+        // silently fail, AND for scalar PUTs whose fields get rejected by
+        // workflow rules / picklist filters. To prevent any model from
         // hallucinating a successful modification, we re-fetch the quote
-        // immediately and embed the ACTUAL post-update line items into the
-        // tool response. The model cannot claim success that didn't happen
-        // because the evidence of what actually changed is in the tool result.
-        if (module_name === 'Quotes' && data.Quoted_Items && updateParsed?.success) {
+        // immediately and embed the ACTUAL post-update state into the tool
+        // response. The model cannot claim success that didn't happen because
+        // the evidence of what actually changed is in the tool result.
+        //
+        // 2026-04-24 Codex Bug C fix: outer gate dropped the data.Quoted_Items
+        // requirement, so verification now runs on EVERY successful Quote PUT.
+        // Per-item delete/modify checks are gated on data.Quoted_Items having
+        // actual intents; no-op detection runs whenever preUpdateSnapshot
+        // exists; new scalar-persistence check fires when ANY top-level field
+        // in `data` failed to persist.
+        if (module_name === 'Quotes' && updateParsed?.success) {
           // Log the EXACT payload Claude sent so we can diagnose silent no-ops
-          console.log(`[GCHAT] Quote update verification starting. Payload Quoted_Items:`, JSON.stringify(data.Quoted_Items).substring(0, 1500));
+          console.log(`[GCHAT] Quote update verification starting. data keys: ${Object.keys(data).join(',')}`);
           try {
-            const verifyFields = 'id,Quote_Number,Grand_Total,Sub_Total,Quoted_Items';
-            const verifyResult = await zohoApiCall('GET', `Quotes/${record_id}?fields=${verifyFields}`, env);
+            // Verify GET — fetch base fields PLUS every scalar field in data
+            // so the persistence check has post-state for each one.
+            const SCALAR_VERIFY_EXCLUDE = new Set([
+              'Quoted_Items', 'Do_Not_Auto_Update_Prices',
+              'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment',
+              'All_Taxes_Total', 'Tax_1_Total', 'Tax_2_Total',
+              'Modified_Time', 'Last_Activity_Time', 'Modified_By',
+              'Created_Time', 'Created_By',
+            ]);
+            const baseFields = ['id', 'Quote_Number', 'Grand_Total', 'Sub_Total', 'Quoted_Items'];
+            const dataScalarFields = Object.keys(data).filter(k => !SCALAR_VERIFY_EXCLUDE.has(k));
+            const verifyFields = [...new Set([...baseFields, ...dataScalarFields])].join(',');
+            const verifyResult = await zohoApiCall('GET', `Quotes/${record_id}?fields=${encodeURIComponent(verifyFields)}`, env);
             const verifyRecord = verifyResult?.data?.[0];
 
             if (verifyRecord) {
@@ -5934,72 +5960,96 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 total: item.Total,
               }));
 
-              // Compute what the model REQUESTED vs what actually landed.
-              // Three operation types on Quoted_Items:
-              //   DELETE — item has id + _delete: null
-              //   MODIFY — item has id + other changed fields (Discount, Quantity, etc.)
-              //   ADD    — item has no id, has Product_Name.id
-              const requested = data.Quoted_Items.map(i => {
-                const isDelete = i._delete === null;
-                const hasId = !!i.id;
-                return {
-                  raw: i,
-                  id: i.id || null,
-                  product_id: i.Product_Name?.id || null,
-                  requested_quantity: i.Quantity,
-                  requested_discount: i.Discount,
-                  delete: isDelete,
-                  modify: hasId && !isDelete,
-                  add: !hasId,
-                };
-              });
-
-              const requestedDeleteIds = new Set(
-                requested.filter(r => r.delete && r.id).map(r => r.id)
-              );
-              const requestedModifications = requested.filter(r => r.modify);
-
-              const actualItemIds = new Set(actualItems.map(i => i.id));
-              const actualItemsById = new Map(actualItems.map(i => [i.id, i]));
-
-              const deletesApplied = [...requestedDeleteIds].filter(id => !actualItemIds.has(id));
-              const deletesFailed = [...requestedDeleteIds].filter(id => actualItemIds.has(id));
-
-              // Check each MODIFICATION against actual post-update state. Zoho returns
-              // SUCCESS even when modifying fields (like Discount) on existing items
-              // has no effect — e.g. wrong field name, wrong value type, etc.
-              const modificationResults = requestedModifications.map(r => {
-                const actual = actualItemsById.get(r.id);
-                if (!actual) {
-                  return { id: r.id, applied: false, reason: 'Item no longer in quote after update' };
+              // ── Tolerant scalar equality (handles picklist {name,id} vs string,
+              //    reference {id,...} comparison, and float drift) ──
+              const valuesEqual = (pre, post) => {
+                if (pre === post) return true;
+                if (pre == null && post == null) return true;
+                if (pre == null || post == null) return false;
+                if (typeof pre === 'number' && typeof post === 'number') {
+                  return Math.abs(pre - post) < 0.01;
                 }
-                const checks = {};
-                let allApplied = true;
-                if (r.requested_quantity !== undefined) {
-                  // Normalize to numbers (Zoho may return string or number)
-                  const wantQ = Number(r.requested_quantity);
-                  const gotQ = Number(actual.quantity);
-                  const match = wantQ === gotQ;
-                  checks.quantity = { requested: wantQ, actual: gotQ, match };
-                  if (!match) allApplied = false;
+                // Picklist write-string vs read-object: input "Review" vs output {name:"Review",id:"..."}
+                if (typeof pre === 'string' && typeof post === 'object') {
+                  return pre === post.name || pre === post.id || pre === String(post);
                 }
-                if (r.requested_discount !== undefined) {
-                  // Zoho stores Discount as a flat dollar amount. Tolerate small float drift.
-                  const wantD = Number(r.requested_discount);
-                  const gotD = Number(actual.discount || 0);
-                  const match = Math.abs(wantD - gotD) < 0.01;
-                  checks.discount = { requested: wantD, actual: gotD, match };
-                  if (!match) allApplied = false;
+                if (typeof post === 'string' && typeof pre === 'object') {
+                  return post === pre.name || post === pre.id || post === String(pre);
                 }
-                return {
-                  id: r.id,
-                  applied: allApplied,
-                  checks,
-                };
-              });
+                // Reference object equality by id
+                if (typeof pre === 'object' && typeof post === 'object') {
+                  if (Array.isArray(pre) || Array.isArray(post)) {
+                    if (!Array.isArray(pre) || !Array.isArray(post)) return false;
+                    if (pre.length !== post.length) return false;
+                    return pre.every((v, i) => valuesEqual(v, post[i]));
+                  }
+                  if (pre.id != null && post.id != null) return String(pre.id) === String(post.id);
+                  try { return JSON.stringify(pre) === JSON.stringify(post); } catch { return false; }
+                }
+                if (typeof pre === 'boolean' || typeof post === 'boolean') {
+                  return Boolean(pre) === Boolean(post);
+                }
+                return String(pre) === String(post);
+              };
 
-              const modificationsFailed = modificationResults.filter(m => !m.applied);
-              const modificationsApplied = modificationResults.filter(m => m.applied);
+              // ── Per-item check (only when data.Quoted_Items has intents) ──
+              const triedQuotedItems = Array.isArray(data.Quoted_Items) && data.Quoted_Items.length > 0;
+              let requested = [];
+              let requestedDeleteIds = new Set();
+              let requestedModifications = [];
+              let deletesApplied = [];
+              let deletesFailed = [];
+              let modificationResults = [];
+              let modificationsFailed = [];
+              let modificationsApplied = [];
+
+              if (triedQuotedItems) {
+                requested = data.Quoted_Items.map(i => {
+                  const isDelete = i._delete === null;
+                  const hasId = !!i.id;
+                  return {
+                    raw: i,
+                    id: i.id || null,
+                    product_id: i.Product_Name?.id || null,
+                    requested_quantity: i.Quantity,
+                    requested_discount: i.Discount,
+                    delete: isDelete,
+                    modify: hasId && !isDelete,
+                    add: !hasId,
+                  };
+                });
+                requestedDeleteIds = new Set(requested.filter(r => r.delete && r.id).map(r => r.id));
+                requestedModifications = requested.filter(r => r.modify);
+                const actualItemIds = new Set(actualItems.map(i => i.id));
+                const actualItemsById = new Map(actualItems.map(i => [i.id, i]));
+                deletesApplied = [...requestedDeleteIds].filter(id => !actualItemIds.has(id));
+                deletesFailed = [...requestedDeleteIds].filter(id => actualItemIds.has(id));
+                modificationResults = requestedModifications.map(r => {
+                  const actual = actualItemsById.get(r.id);
+                  if (!actual) {
+                    return { id: r.id, applied: false, reason: 'Item no longer in quote after update' };
+                  }
+                  const checks = {};
+                  let allApplied = true;
+                  if (r.requested_quantity !== undefined) {
+                    const wantQ = Number(r.requested_quantity);
+                    const gotQ = Number(actual.quantity);
+                    const match = wantQ === gotQ;
+                    checks.quantity = { requested: wantQ, actual: gotQ, match };
+                    if (!match) allApplied = false;
+                  }
+                  if (r.requested_discount !== undefined) {
+                    const wantD = Number(r.requested_discount);
+                    const gotD = Number(actual.discount || 0);
+                    const match = Math.abs(wantD - gotD) < 0.01;
+                    checks.discount = { requested: wantD, actual: gotD, match };
+                    if (!match) allApplied = false;
+                  }
+                  return { id: r.id, applied: allApplied, checks };
+                });
+                modificationsFailed = modificationResults.filter(m => !m.applied);
+                modificationsApplied = modificationResults.filter(m => m.applied);
+              }
 
               const verification = {
                 ...updateParsed,
@@ -6010,19 +6060,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   sub_total: verifyRecord.Sub_Total,
                   actual_line_items: actualItems,
                   actual_item_count: actualItems.length,
-                  requested_operations: {
-                    deletes_requested: requested.filter(r => r.delete).length,
-                    deletes_applied: deletesApplied.length,
-                    deletes_failed: deletesFailed,
-                    adds_requested: requested.filter(r => r.add).length,
-                    modifications_requested: requestedModifications.length,
-                    modifications_applied: modificationsApplied.length,
-                    modifications_failed: modificationsFailed,
-                  },
+                  data_keys_tried: Object.keys(data).filter(k => k !== 'Do_Not_Auto_Update_Prices'),
                 },
               };
+              if (triedQuotedItems) {
+                verification.verification.requested_operations = {
+                  deletes_requested: requested.filter(r => r.delete).length,
+                  deletes_applied: deletesApplied.length,
+                  deletes_failed: deletesFailed,
+                  adds_requested: requested.filter(r => r.add).length,
+                  modifications_requested: requestedModifications.length,
+                  modifications_applied: modificationsApplied.length,
+                  modifications_failed: modificationsFailed,
+                };
+              }
 
-              // FAIL LOUDLY if any requested change didn't actually land
+              // ── Warnings: per-item failures (only when items intent existed) ──
               const warnings = [];
               if (deletesFailed.length > 0) {
                 warnings.push(`DELETE FAILED: ${deletesFailed.length} line item(s) were NOT removed despite API SUCCESS. IDs still present: ${deletesFailed.join(', ')}.`);
@@ -6035,7 +6088,6 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     .join(', ');
                   return `item ${m.id} (${fieldIssues || m.reason})`;
                 }).join('; ');
-                // Detect quantity-specific failures and provide actionable retry guidance
                 const qtyFailures = modificationsFailed.filter(m => m.checks?.quantity && !m.checks.quantity.match);
                 if (qtyFailures.length > 0) {
                   warnings.push(`QUANTITY UPDATE REJECTED: ${qtyFailures.length} line item(s) quantity did NOT change. ${details}. To fix: resubmit the FULL Quoted_Items array (all items, not just the changed one) with the correct Quantity value inside each item object. Partial Quoted_Items payloads are silently ignored by Zoho.`);
@@ -6044,21 +6096,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 }
               }
 
-              // ── No-op detection: compare pre-update vs post-update snapshots ──
-              // If the model sent a Quoted_Items payload but the Grand_Total / Sub_Total
-              // is unchanged, the update was effectively a no-op. This catches the case
-              // where Claude sends an existing Discount value without actually changing
-              // anything, or where Zoho silently ignores the payload.
+              // ── Pre/post diff (always runs when preUpdateSnapshot is available) ──
+              let totalChanged = false, subChanged = false, anyItemChanged = false;
               if (preUpdateSnapshot) {
                 const preTotal = Number(preUpdateSnapshot.Grand_Total || 0);
                 const postTotal = Number(verifyRecord.Grand_Total || 0);
                 const preSub = Number(preUpdateSnapshot.Sub_Total || 0);
                 const postSub = Number(verifyRecord.Sub_Total || 0);
-                const totalChanged = Math.abs(preTotal - postTotal) > 0.01;
-                const subChanged = Math.abs(preSub - postSub) > 0.01;
+                totalChanged = Math.abs(preTotal - postTotal) > 0.01;
+                subChanged = Math.abs(preSub - postSub) > 0.01;
 
-                // Also compute per-item diff — detect whether ANY line item's Discount,
-                // Quantity, or Product changed
+                // Per-item diff — detect whether ANY line item's Discount, Quantity,
+                // Product, or set membership changed.
                 const preItemsById = new Map(
                   (preUpdateSnapshot.Quoted_Items || []).map(i => [i.id, {
                     discount: Number(i.Discount || 0),
@@ -6066,22 +6115,64 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     product_id: i.Product_Name?.id || null,
                   }])
                 );
-                let anyItemChanged = false;
                 for (const post of actualItems) {
                   const pre = preItemsById.get(post.id);
-                  if (!pre) { anyItemChanged = true; break; } // new item added
+                  if (!pre) { anyItemChanged = true; break; }
                   if (Math.abs(pre.discount - Number(post.discount || 0)) > 0.01) { anyItemChanged = true; break; }
                   if (pre.quantity !== Number(post.quantity || 0)) { anyItemChanged = true; break; }
                 }
-                if (preItemsById.size !== actualItems.length) anyItemChanged = true; // item removed
+                if (preItemsById.size !== actualItems.length) anyItemChanged = true;
 
                 verification.verification.pre_update_totals = { grand_total: preTotal, sub_total: preSub };
                 verification.verification.post_update_totals = { grand_total: postTotal, sub_total: postSub };
                 verification.verification.any_item_changed = anyItemChanged;
 
-                if (!totalChanged && !subChanged && !anyItemChanged) {
+                // ZOHO_DROPPED_QUOTED_ITEMS: items intent existed but nothing
+                // item-side changed. Replaces the broader NO_OP_UPDATE_DETECTED
+                // warning with a more specific signal for the line-item path.
+                if (triedQuotedItems && !anyItemChanged && !totalChanged && !subChanged) {
                   warnings.push(
-                    `NO-OP UPDATE DETECTED: The quote is completely unchanged after the update call. Pre-update Grand_Total=${preTotal}, post-update Grand_Total=${postTotal}. No line item fields differ. This means the values you sent in Quoted_Items matched what was already there (no real change). If the user asked you to change something, you sent the WRONG values — re-read the quote, recompute what the target should be, and try again with DIFFERENT numbers.`
+                    `ZOHO_DROPPED_QUOTED_ITEMS: Zoho returned SUCCESS but your Quoted_Items payload had NO effect on the quote. Item count, Grand_Total ($${preTotal}), and Sub_Total all match the pre-update state exactly. The line-item changes you intended were silently rejected. Possible causes: payload shape mismatch, _delete on the only remaining item (Zoho refuses to leave a Quote with zero items), stale subform ids, or Do_Not_Auto_Update_Prices conflict. Do NOT claim the line items were changed — surface the failure to the user and offer to retry.`
+                  );
+                }
+              }
+
+              // ── NEW: Scalar-field persistence check (Codex Bug C) ──────────
+              // For each top-level data key (excluding Quoted_Items + derived
+              // totals), compare pre/post values via tolerant equality. If
+              // the user intended a change (data[k] !== pre[k]) but post[k]
+              // equals pre[k], Zoho silently dropped that field.
+              if (preUpdateSnapshot) {
+                const scalarsTried = Object.keys(data).filter(k => !SCALAR_VERIFY_EXCLUDE.has(k));
+                const scalarsPersisted = [];
+                const scalarsDropped = [];
+                const scalarsAlreadyMatched = [];
+                for (const k of scalarsTried) {
+                  const wasIntendedChange = !valuesEqual(preUpdateSnapshot[k], data[k]);
+                  const actuallyChanged = !valuesEqual(preUpdateSnapshot[k], verifyRecord[k]);
+                  if (!wasIntendedChange) {
+                    scalarsAlreadyMatched.push(k);
+                  } else if (actuallyChanged) {
+                    scalarsPersisted.push(k);
+                  } else {
+                    scalarsDropped.push(k);
+                  }
+                }
+                verification.verification.scalar_fields = {
+                  tried: scalarsTried,
+                  persisted: scalarsPersisted,
+                  dropped: scalarsDropped,
+                  already_matched: scalarsAlreadyMatched,
+                };
+                if (scalarsDropped.length > 0) {
+                  const dropped = scalarsDropped.map(k => {
+                    const intended = data[k];
+                    const actual = verifyRecord[k];
+                    const renderVal = (v) => typeof v === 'object' ? JSON.stringify(v).slice(0, 40) : String(v);
+                    return `${k} (intended=${renderVal(intended)}, actual=${renderVal(actual)})`;
+                  }).join('; ');
+                  warnings.push(
+                    `ZOHO_REJECTED_SCALARS: Zoho returned SUCCESS but ${scalarsDropped.length} scalar field(s) you tried to change did NOT persist: ${dropped}. Possible causes: invalid field names, wrong value type, picklist value not in the picklist, workflow rule blocked the change, or layout/permission filter. Do NOT claim those fields were updated.`
                   );
                 }
               }
@@ -6089,11 +6180,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (warnings.length > 0) {
                 verification.verification.WARNING =
                   warnings.join(' | ') + ' The update did NOT achieve what was requested. Tell the user the modification failed and offer to retry. Do NOT claim the change was applied.';
+                verification.verification.success = false;
                 verification.success = false;
                 verification.message = '⚠️ Zoho returned SUCCESS but verification detected the changes did not actually land. See verification.WARNING.';
               }
 
-              console.log(`[GCHAT] Quote update verification: ${actualItems.length} items, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}`);
+              console.log(`[GCHAT] Quote update verification: items=${actualItems.length}, triedQuotedItems=${triedQuotedItems}, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}, warnings=${warnings.length}`);
               return verification;
             }
             // Verify GET succeeded but returned no record — record may have
