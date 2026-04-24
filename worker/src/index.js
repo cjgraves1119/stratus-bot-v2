@@ -542,6 +542,11 @@ async function getBotPersonId(token) {
   const res = await fetch('https://webexapis.com/v1/people/me', {
     headers: { Authorization: `Bearer ${token}` }
   });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(`[WEBEX] getBotPersonId failed: ${res.status} ${res.statusText} — ${body.substring(0, 200)}`);
+    return null;
+  }
   const data = await res.json();
   cachedBotPersonId = data.id;
   return cachedBotPersonId;
@@ -552,6 +557,11 @@ async function getMessage(messageId, token) {
   const res = await fetch(`https://webexapis.com/v1/messages/${messageId}`, {
     headers: { Authorization: `Bearer ${token}` }
   });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(`[WEBEX] getMessage failed: ${res.status} ${res.statusText} — ${body.substring(0, 200)}`);
+    return null;
+  }
   return res.json();
 }
 
@@ -1195,16 +1205,44 @@ async function askCFVision(prompt, imageData, env) {
   }
 }
 
+// Strip markdown syntax to produce a clean text fallback for Webex clients
+// that don't render markdown (mobile previews, notifications, raw API callers).
+// Webex recommends sending both `markdown` and `text` together; omitting text
+// causes some clients to show raw markdown characters.
+function markdownToPlainText(md) {
+  if (!md) return '';
+  return md
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')  // [label](url) -> "label (url)"
+    .replace(/\*\*([^*]+)\*\*/g, '$1')                  // **bold**
+    .replace(/\*([^*]+)\*/g, '$1')                        // *italic*
+    .replace(/__([^_]+)__/g, '$1')                          // __bold__
+    .replace(/`([^`]+)`/g, '$1')                            // `code`
+    .replace(/^#{1,6}\s+/gm, '')                           // # headers
+    .replace(/^\s*[*+]\s+/gm, '- ')                       // bullet markers
+    .replace(/\n{3,}/g, '\n\n')                          // collapse blank-line runs
+    .trim();
+}
+
+async function postWebexMessage(roomId, markdown, token) {
+  const text = markdownToPlainText(markdown);
+  const res = await fetch('https://webexapis.com/v1/messages', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ roomId, markdown, text })
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(`[WEBEX] sendMessage failed: ${res.status} ${res.statusText} — ${body.substring(0, 300)}`);
+  }
+  return res;
+}
+
 async function sendMessage(roomId, markdown, token) {
   // Webex has a ~7439 char limit for markdown messages.
   // If the message exceeds this, split into chunks at line boundaries.
   const MAX_LEN = 7000; // Leave margin for safety
   if (markdown.length <= MAX_LEN) {
-    await fetch('https://webexapis.com/v1/messages', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId, markdown })
-    });
+    await postWebexMessage(roomId, markdown, token);
     return;
   }
 
@@ -1221,11 +1259,7 @@ async function sendMessage(roomId, markdown, token) {
   if (remaining) chunks.push(remaining);
 
   for (const chunk of chunks) {
-    await fetch('https://webexapis.com/v1/messages', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId, markdown: chunk })
-    });
+    await postWebexMessage(roomId, chunk, token);
   }
 }
 
