@@ -2990,7 +2990,7 @@ function buildQuoteResponse(parsed) {
   if (parsed.isTermOptionQuote && parsed.items) {
     const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
     for (const item of parsed.items) {
-      const termMatch = item.baseSku.match(/(\d)YR?$/i);
+      const termMatch = item.baseSku.match(/(\d)Y(?:R|-S\d+)?$/i);
       if (termMatch) {
         const key = `${termMatch[1]}YR`;  // normalize 1Y → 1YR key
         if (termGroups[key]) termGroups[key].push({ sku: item.baseSku, qty: item.qty });
@@ -3003,7 +3003,8 @@ function buildQuoteResponse(parsed) {
         lines.push(`**${term.replace('YR', '-Year')} Co-Term:** ${url}`);
       }
     }
-    return { message: lines.join('\n\n'), needsLlm: false };
+    const _msgB = lines.join('\n\n');
+    return { message: parsed.clarificationNote ? `_${parsed.clarificationNote}_\n\n${_msgB}` : _msgB, needsLlm: false };
   }
 
   // Multi-line license SKU list (CSV from dashboard)
@@ -3015,7 +3016,7 @@ function buildQuoteResponse(parsed) {
     // Detect term from license SKUs (e.g. LIC-ENT-3YR → 3, LIC-MT-3Y → 3)
     let detectedTerm = null;
     for (const { sku } of parsed.directLicenseList) {
-      const termMatch = sku.match(/(\d+)\s*Y(?:R|EA)?$/i);
+      const termMatch = sku.match(/(\d+)\s*Y(?:R|EA|-S\d+)?$/i);
       if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
     }
     const terms = detectedTerm ? [detectedTerm] : [1, 3, 5];

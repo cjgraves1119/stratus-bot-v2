@@ -3025,6 +3025,30 @@ function buildQuoteFromV2(v2, rawText) {
         _fromV2: true
       };
     }
+    // Auto-route multi-term license lists through isTermOptionQuote.
+    // When every SKU carries an explicit term suffix (-NYR or -NY or -NY-S1)
+    // AND the set spans more than one term, the user wants one URL per term
+    // (not one URL with all items duplicated). Examples: AnyConnect
+    // [LIC-L-AC-PLS-{1,3,5}Y-S1] or a hand-typed Duo list split across terms.
+    // The isTermOptionQuote renderer groups by term and emits a per-term URL.
+    const _termRe = /-(\d+)Y(?:R|-S\d+)?$/i;
+    const _allHaveTerms = dedup.every(l => _termRe.test(String(l.sku || '')));
+    const _termSet = new Set();
+    dedup.forEach(l => { const m = String(l.sku || '').match(_termRe); if (m) _termSet.add(m[1]); });
+    if (_allHaveTerms && _termSet.size > 1) {
+      return {
+        items: dedup.map(l => ({ baseSku: l.sku, qty: l.qty, isLicenseOnly: true })),
+        isQuote: true,
+        isTermOptionQuote: true,
+        modifiers: { hardwareOnly: false, licenseOnly: true, separateQuotes: false },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing,
+        unresolvedCategories: [],
+        _fromV2: true
+      };
+    }
     return {
       items: [],
       directLicenseList: dedup,
@@ -3083,7 +3107,7 @@ function buildQuoteFromV2(v2, rawText) {
   // attached license (e.g. "5 MR44 with LIC-ENT-3YR" implies 3yr).
   if (requestedTerm == null && licItems.length > 0 && !mods.all_terms) {
     for (const lic of licItems) {
-      const termMatch = lic.sku.match(/-([135])YR?$/);
+      const termMatch = lic.sku.match(/-([135])Y(?:R|-S\d+)?$/);
       if (termMatch) {
         const impliedTerm = parseInt(termMatch[1], 10);
         if ([1, 3, 5].includes(impliedTerm)) {
@@ -4520,7 +4544,7 @@ function buildQuoteResponse(parsed) {
     const separateQuotes = Boolean(parsed.modifiers && parsed.modifiers.separateQuotes);
     const termGroups = { '1YR': [], '3YR': [], '5YR': [] };
     for (const item of parsed.items) {
-      const termMatch = item.baseSku.match(/(\d)YR?$/i);
+      const termMatch = item.baseSku.match(/(\d)Y(?:R|-S\d+)?$/i);
       if (termMatch) {
         const key = `${termMatch[1]}YR`;  // normalize 1Y → 1YR key
         if (termGroups[key]) termGroups[key].push({ sku: item.baseSku, qty: item.qty });
@@ -4533,7 +4557,7 @@ function buildQuoteResponse(parsed) {
       // Group SKUs by their tier family (the SKU minus the trailing term).
       const tierFamilies = new Map(); // tierKey → tier label
       for (const item of parsed.items) {
-        const tierKey = item.baseSku.replace(/-(\d)YR?$/i, '');
+        const tierKey = item.baseSku.replace(/-(\d)Y(?:R|-S\d+)?$/i, '');
         if (!tierFamilies.has(tierKey)) {
           // Friendly label: LIC-DUO-ESSENTIALS → "Duo Essentials"
           let label = tierKey
@@ -4548,14 +4572,19 @@ function buildQuoteResponse(parsed) {
             .replace(/\bESS\b/i, 'Essentials')
             .replace(/\bADV\b/i, 'Advantage')
             .replace(/\bDNS\b/i, 'DNS')
-            .replace(/\bSIG\b/i, 'SIG');
+            .replace(/\bSIG\b/i, 'SIG')
+            // AnyConnect / Cisco Secure Client: LIC-L-AC-APX → "AnyConnect Apex"
+            .replace(/^L AC APX$/i, 'AnyConnect Apex')
+            .replace(/^L AC PLS$/i, 'AnyConnect Plus')
+            .replace(/\bL AC APX\b/i, 'AnyConnect Apex')
+            .replace(/\bL AC PLS\b/i, 'AnyConnect Plus');
           tierFamilies.set(tierKey, label.trim());
         }
       }
       for (const [tierKey, label] of tierFamilies) {
         lines.push(`**${label}:**`);
         for (const term of ['1YR', '3YR', '5YR']) {
-          const matching = termGroups[term].filter(s => s.sku.replace(/-(\d)YR?$/i, '') === tierKey);
+          const matching = termGroups[term].filter(s => s.sku.replace(/-(\d)Y(?:R|-S\d+)?$/i, '') === tierKey);
           if (matching.length > 0) {
             const url = buildStratusUrl(matching);
             lines.push(`${term.replace('YR', '-Year')} Co-Term: ${url}`);
@@ -4563,7 +4592,8 @@ function buildQuoteResponse(parsed) {
         }
         lines.push('');
       }
-      return { message: lines.join('\n').trim(), needsLlm: false };
+      const _msgA = lines.join('\n').trim();
+      return { message: parsed.clarificationNote ? `_${parsed.clarificationNote}_\n\n${_msgA}` : _msgA, needsLlm: false };
     }
     for (const [term, skus] of Object.entries(termGroups)) {
       if (skus.length > 0) {
@@ -4571,7 +4601,8 @@ function buildQuoteResponse(parsed) {
         lines.push(`**${term.replace('YR', '-Year')} Co-Term:** ${url}`);
       }
     }
-    return { message: lines.join('\n\n'), needsLlm: false };
+    const _msgB = lines.join('\n\n');
+    return { message: parsed.clarificationNote ? `_${parsed.clarificationNote}_\n\n${_msgB}` : _msgB, needsLlm: false };
   }
 
   // Multi-line license SKU list (CSV from dashboard)
@@ -4583,7 +4614,7 @@ function buildQuoteResponse(parsed) {
     // Detect term from license SKUs (e.g. LIC-ENT-3YR → 3, LIC-MT-3Y → 3)
     let detectedTerm = null;
     for (const { sku } of parsed.directLicenseList) {
-      const termMatch = sku.match(/(\d+)\s*Y(?:R|EA)?$/i);
+      const termMatch = sku.match(/(\d+)\s*Y(?:R|EA|-S\d+)?$/i);
       if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
     }
     const terms = detectedTerm ? [detectedTerm] : [1, 3, 5];
