@@ -58,7 +58,10 @@ function buildParserShim() {
 
   src += '\nmodule.exports = { parseMessage, buildStratusUrl: typeof buildStratusUrl !== "undefined" ? buildStratusUrl : null, getLicenseSkus: typeof getLicenseSkus !== "undefined" ? getLicenseSkus : null, validateSku: typeof validateSku !== "undefined" ? validateSku : null, applySuffix: typeof applySuffix !== "undefined" ? applySuffix : null, buildQuoteFromV2: typeof buildQuoteFromV2 !== "undefined" ? buildQuoteFromV2 : null, applyV2Revision: typeof applyV2Revision !== "undefined" ? applyV2Revision : null, extractPriorFromAssistantUrl: typeof extractPriorFromAssistantUrl !== "undefined" ? extractPriorFromAssistantUrl : null };\n';
 
-  const shimPath = path.join(os.tmpdir(), `stratus-parser-shim-${process.pid}.cjs`);
+  // Include Date.now() alongside pid so a stale file from a prior run
+  // (common in containerized sandboxes that reuse pid 3, etc.) can't
+  // block the write with EACCES. Fresh path per test invocation.
+  const shimPath = path.join(os.tmpdir(), `stratus-parser-shim-${process.pid}-${Date.now()}.cjs`);
   fs.writeFileSync(shimPath, src);
   return require(shimPath);
 }
@@ -2972,6 +2975,130 @@ if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
         return {
           pass: r && r.requestedTier === 'SEC',
           actual: JSON.stringify({ tier: r?.requestedTier }),
+        };
+      },
+    },
+    // ═══ Per-term standalone family promotion (MV/MT/agnostic-MR) ═══
+    // Regression from the 2026-04-24 Webex MV quote-cost bug: "what are the
+    // costs" after "30 MV licenses" collapsed into one merged URL because
+    // only Duo/Umbrella were being promoted back to isTermOptionQuote on
+    // URL-history reconstruction. These tests lock in promotion + guards.
+    {
+      name: '[PROMOTE] MV multi-term pool → isTermOptionQuote (3 items, licenseOnly)',
+      run: () => {
+        const prior = '1-Year: https://stratusinfosystems.com/order/?item=LIC-MV-1YR&qty=30\n3-Year: https://stratusinfosystems.com/order/?item=LIC-MV-3YR&qty=30\n5-Year: https://stratusinfosystems.com/order/?item=LIC-MV-5YR&qty=30';
+        const r = _realExtractPriorFromAssistantUrl(prior);
+        return {
+          pass: r && r.isTermOptionQuote === true && r.items?.length === 3 && r.modifiers?.licenseOnly === true && !r.directLicenseList && !r.directLicense,
+          actual: JSON.stringify({ isTermOptionQuote: r?.isTermOptionQuote, itemCount: r?.items?.length, dll: !!r?.directLicenseList, dl: !!r?.directLicense }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE] MT multi-term pool → isTermOptionQuote',
+      run: () => {
+        // MT uses single "Y" suffix (LIC-MT-1Y), not "YR".
+        const prior = 'https://stratusinfosystems.com/order/?item=LIC-MT-1Y&qty=5\nhttps://stratusinfosystems.com/order/?item=LIC-MT-3Y&qty=5\nhttps://stratusinfosystems.com/order/?item=LIC-MT-5Y&qty=5';
+        const r = _realExtractPriorFromAssistantUrl(prior);
+        return {
+          pass: r && r.isTermOptionQuote === true && r.items?.length === 3 && r.items[0].baseSku === 'LIC-MT-1Y',
+          actual: JSON.stringify({ isTermOptionQuote: r?.isTermOptionQuote, items: r?.items }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE] agnostic MR ENT multi-term pool → isTermOptionQuote',
+      run: () => {
+        const prior = 'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR&qty=5\nhttps://stratusinfosystems.com/order/?item=LIC-ENT-3YR&qty=5\nhttps://stratusinfosystems.com/order/?item=LIC-ENT-5YR&qty=5';
+        const r = _realExtractPriorFromAssistantUrl(prior);
+        return {
+          pass: r && r.isTermOptionQuote === true && r.items?.length === 3 && r.requestedTier === 'ENT',
+          actual: JSON.stringify({ isTermOptionQuote: r?.isTermOptionQuote, itemCount: r?.items?.length, tier: r?.requestedTier }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE-NEG] mixed families MV+ENT → stays directLicenseList (single-family guard)',
+      run: () => {
+        // Both match PER_TERM_STANDALONE_RE but familyKeys.size === 2, so
+        // promotion must NOT fire. Falls through to directLicenseList.
+        const prior = 'https://stratusinfosystems.com/order/?item=LIC-MV-3YR,LIC-ENT-3YR&qty=30,5';
+        const r = _realExtractPriorFromAssistantUrl(prior);
+        return {
+          pass: r && !r.isTermOptionQuote && Array.isArray(r.directLicenseList) && r.directLicenseList.length === 2,
+          actual: JSON.stringify({ isTermOptionQuote: r?.isTermOptionQuote, dll: r?.directLicenseList }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE-NEG] single-term MV pool → directLicense (not promoted)',
+      run: () => {
+        // Only one term present — multi-term guard trips, falls to directLicense.
+        const prior = 'https://stratusinfosystems.com/order/?item=LIC-MV-3YR&qty=30';
+        const r = _realExtractPriorFromAssistantUrl(prior);
+        return {
+          pass: r && !r.isTermOptionQuote && r.directLicense?.sku === 'LIC-MV-3YR' && r.directLicense?.qty === 30,
+          actual: JSON.stringify({ isTermOptionQuote: r?.isTermOptionQuote, dl: r?.directLicense }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE] show_pricing revise on MV pool preserves isTermOptionQuote shape',
+      run: () => {
+        // End-to-end: prior URL → extract → applyV2Revision(show_pricing).
+        // Output must keep 3 items in isTermOptionQuote (no flatten to DLL).
+        const prior = '1-Year: https://stratusinfosystems.com/order/?item=LIC-MV-1YR&qty=30\n3-Year: https://stratusinfosystems.com/order/?item=LIC-MV-3YR&qty=30\n5-Year: https://stratusinfosystems.com/order/?item=LIC-MV-5YR&qty=30';
+        const priorParsed = _realExtractPriorFromAssistantUrl(prior);
+        const v2 = { intent: 'revise', confidence: 0.95, items: [], modifiers: { show_pricing: true }, revision: { action: 'show_pricing' }, reference: { resolve_from_history: true } };
+        const revised = _realApplyV2Revision(priorParsed, v2);
+        return {
+          pass: revised && revised.isTermOptionQuote === true && revised.showPricing === true && revised.items?.length === 3 && !revised.directLicenseList,
+          actual: JSON.stringify({ isTermOptionQuote: revised?.isTermOptionQuote, showPricing: revised?.showPricing, itemCount: revised?.items?.length, dll: !!revised?.directLicenseList }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE] chained revise — change_term=3 on promoted MV pool filters to LIC-MV-3YR only',
+      run: () => {
+        // After show_pricing promotion, a follow-up "3 year only" should
+        // filter the 3 items down to just LIC-MV-3YR. This proves the
+        // promotion restored a state shape the existing term-filter logic
+        // can operate on.
+        const prior = '1-Year: https://stratusinfosystems.com/order/?item=LIC-MV-1YR&qty=30\n3-Year: https://stratusinfosystems.com/order/?item=LIC-MV-3YR&qty=30\n5-Year: https://stratusinfosystems.com/order/?item=LIC-MV-5YR&qty=30';
+        const priorParsed = _realExtractPriorFromAssistantUrl(prior);
+        const v2 = { intent: 'revise', confidence: 0.95, items: [], modifiers: {}, revision: { action: 'change_term', new_term: 3 }, reference: { resolve_from_history: true } };
+        const revised = _realApplyV2Revision(priorParsed, v2);
+        return {
+          pass: revised && Array.isArray(revised.items) && revised.items.length === 1 && revised.items[0].baseSku === 'LIC-MV-3YR',
+          actual: JSON.stringify({ items: revised?.items }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE-REGRESSION] DUO single-tier multi-term → promoted, separateQuotes=false',
+      run: () => {
+        // Assert the new per-term standalone block runs AFTER the existing
+        // DUO/UMB block, not in front of it. Single-tier DUO must still
+        // promote to isTermOptionQuote, with separateQuotes=false (one tier).
+        const prior = 'Duo Essentials 1-Year: https://stratusinfosystems.com/order/?item=LIC-DUO-ESSENTIALS-1YR&qty=10\nDuo Essentials 3-Year: https://stratusinfosystems.com/order/?item=LIC-DUO-ESSENTIALS-3YR&qty=10';
+        const r = _realExtractPriorFromAssistantUrl(prior);
+        return {
+          pass: r && r.isTermOptionQuote === true && r.modifiers?.separateQuotes === false && r.items?.length === 2,
+          actual: JSON.stringify({ isTermOptionQuote: r?.isTermOptionQuote, separateQuotes: r?.modifiers?.separateQuotes, itemCount: r?.items?.length }),
+        };
+      },
+    },
+    {
+      name: '[PROMOTE-REGRESSION] DUO multi-tier multi-term → promoted with separateQuotes=true',
+      run: () => {
+        // The other half of the DUO regression: mixing DUO-ESSENTIALS and
+        // DUO-ADVANTAGE across terms must still trip separateQuotes=true so
+        // the renderer emits one URL per (tier, term) pair.
+        const prior = 'https://stratusinfosystems.com/order/?item=LIC-DUO-ESSENTIALS-1YR,LIC-DUO-ADVANTAGE-1YR,LIC-DUO-ESSENTIALS-3YR,LIC-DUO-ADVANTAGE-3YR&qty=10,10,10,10';
+        const r = _realExtractPriorFromAssistantUrl(prior);
+        return {
+          pass: r && r.isTermOptionQuote === true && r.modifiers?.separateQuotes === true && r.items?.length === 4,
+          actual: JSON.stringify({ isTermOptionQuote: r?.isTermOptionQuote, separateQuotes: r?.modifiers?.separateQuotes, itemCount: r?.items?.length }),
         };
       },
     },
