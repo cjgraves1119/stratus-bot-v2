@@ -76,3 +76,33 @@ binding = "AI"
 # Runs at 11:00 UTC (6:00 AM CT / 5:00 AM CST)
 [triggers]
 crons = ["0 11 * * *"]
+
+# ── Cloudflare Workflows: durable CRM dispatch ──────────────────────────────
+# CrmWorkflow is defined in src/index.js and is the intended primary
+# transport for CRM work (Queue is the fallback). The live account already
+# has a Workflow resource named `stratus-gchat-crm-workflow` bound to class
+# CrmWorkflow on script stratus-ai-bot-gchat — this binding makes the code
+# path reachable. Without it, env.CRM_WORKFLOW is undefined and dispatch
+# silently falls through to the Queue.
+[[workflows]]
+name = "stratus-gchat-crm-workflow"
+binding = "CRM_WORKFLOW"
+class_name = "CrmWorkflow"
+
+# ── Analytics Engine: real-time telemetry ───────────────────────────────────
+# writeMetric() in src/index.js already writes to env.BOT_METRICS with
+# blobs[bot, path, model] + doubles[duration, input_tokens, output_tokens,
+# cost_usd] + indexes[person_id]. Without this binding all GChat AE writes
+# are silent no-ops.
+[[analytics_engine_datasets]]
+binding = "BOT_METRICS"
+dataset = "stratus_bot_metrics"
+
+# ── R2 Object Storage ───────────────────────────────────────────────────────
+# r2Put/r2Get/r2Delete/r2List helpers in src/index.js reference
+# env.BOT_STORAGE. Bucket must exist before deploy:
+#   npx wrangler r2 bucket create stratus-bot-storage
+[[r2_buckets]]
+binding = "BOT_STORAGE"
+bucket_name = "stratus-bot-storage"
+
