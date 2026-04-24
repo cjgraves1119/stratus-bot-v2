@@ -6096,14 +6096,41 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               console.log(`[GCHAT] Quote update verification: ${actualItems.length} items, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}`);
               return verification;
             }
-          } catch (verifyErr) {
-            console.warn(`[GCHAT] Quote verification fetch failed:`, verifyErr.message);
-            // Annotate the response so the model knows verification couldn't run
+            // Verify GET succeeded but returned no record — record may have
+            // been deleted between PUT and verification, or auth/perm issue.
+            // 2026-04-24 Codex round-4 fix: normalize this path the same way
+            // the no-op detection does. Top-level success=false,
+            // verification.success=false, verification.WARNING. The model
+            // must NOT claim success when verification can't confirm change.
+            console.warn(`[GCHAT] Quote verification GET returned no record for ${record_id}. Treating update as unverified — refusing to confirm success.`);
             return {
               ...updateParsed,
+              success: false,
+              message: '⚠️ Zoho returned SUCCESS on the PUT but the verification re-fetch returned no record. The update is UNVERIFIED — do NOT claim the change was applied.',
               verification: {
+                success: false,
                 verified: false,
-                reason: `Verification re-fetch failed: ${verifyErr.message}. Tell the user to manually confirm the quote in Zoho before trusting this result.`,
+                WARNING: `Verification re-fetch returned no record for Quote ${record_id} after a SUCCESS write. The update is UNVERIFIED. Tell the user the change cannot be confirmed and offer to retry. Do NOT claim the change was applied.`,
+                reason: 'verify_get_returned_no_record',
+              },
+            };
+          } catch (verifyErr) {
+            // Verify GET threw (network error, transient Zoho fault, etc).
+            // 2026-04-24 Codex round-4 fix: same normalization as the no-record
+            // path. The previous shape spread updateParsed (success:true) and
+            // only set verification.verified=false, which let the model narrate
+            // success on a write whose effects were never confirmed.
+            console.warn(`[GCHAT] Quote verification fetch failed:`, verifyErr.message);
+            return {
+              ...updateParsed,
+              success: false,
+              message: `⚠️ Zoho returned SUCCESS on the PUT but the verification re-fetch threw: ${verifyErr.message}. The update is UNVERIFIED — do NOT claim the change was applied.`,
+              verification: {
+                success: false,
+                verified: false,
+                WARNING: `Verification re-fetch threw: ${verifyErr.message}. The update is UNVERIFIED. Tell the user the change cannot be confirmed and offer to retry. Do NOT claim the change was applied.`,
+                reason: 'verify_get_threw',
+                error: verifyErr.message,
               },
             };
           }

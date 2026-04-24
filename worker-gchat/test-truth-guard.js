@@ -325,5 +325,110 @@ t('Verify-fail result cannot whitelist the failed Quote id in verifiedRecordsByM
   assert.ok(/⚠️/.test(guarded), 'hallucinated-success warning must fire');
 });
 
+console.log('\n─── Quote-update verification-failure normalization (Codex round-4) ───');
+
+// Mirrors the production return shapes for the verify-fetch-fails paths in
+// zoho_update_record (worker-gchat/src/index.js). Two cases:
+//   (a) verify GET threw — catch block returns success:false + WARNING
+//   (b) verify GET returned no record — falls through to the no-record path
+// Codex's invariant: under either case, top-level success MUST be false and
+// a verification.WARNING must be present so the model can't narrate success.
+
+function simulateVerifyGetThrew(updateParsed, errMessage) {
+  // Mirror production catch block.
+  return {
+    ...updateParsed,
+    success: false,
+    message: `⚠️ Zoho returned SUCCESS on the PUT but the verification re-fetch threw: ${errMessage}. The update is UNVERIFIED — do NOT claim the change was applied.`,
+    verification: {
+      success: false,
+      verified: false,
+      WARNING: `Verification re-fetch threw: ${errMessage}. The update is UNVERIFIED. Tell the user the change cannot be confirmed and offer to retry. Do NOT claim the change was applied.`,
+      reason: 'verify_get_threw',
+      error: errMessage,
+    },
+  };
+}
+
+function simulateVerifyGetReturnedNoRecord(updateParsed, recordId) {
+  return {
+    ...updateParsed,
+    success: false,
+    message: '⚠️ Zoho returned SUCCESS on the PUT but the verification re-fetch returned no record. The update is UNVERIFIED — do NOT claim the change was applied.',
+    verification: {
+      success: false,
+      verified: false,
+      WARNING: `Verification re-fetch returned no record for Quote ${recordId} after a SUCCESS write. The update is UNVERIFIED. Tell the user the change cannot be confirmed and offer to retry. Do NOT claim the change was applied.`,
+      reason: 'verify_get_returned_no_record',
+    },
+  };
+}
+
+t('verify GET threw: top-level success is false (not true from updateParsed)', () => {
+  const ret = simulateVerifyGetThrew({ success: true, code: 'SUCCESS', data: { id: 'X', code: 'SUCCESS' } }, 'fetch timeout');
+  assert.equal(ret.success, false, 'top-level success must be false');
+  assert.equal(ret.verification.success, false, 'inner verification.success must be false');
+  assert.ok(ret.verification.WARNING, 'WARNING must be present');
+  assert.equal(ret.verification.reason, 'verify_get_threw');
+});
+
+t('verify GET threw: WARNING text instructs the model not to claim success', () => {
+  const ret = simulateVerifyGetThrew({ success: true }, 'ECONNRESET');
+  assert.match(ret.verification.WARNING, /UNVERIFIED/);
+  assert.match(ret.verification.WARNING, /Do NOT claim the change was applied/i);
+});
+
+t('verify GET threw: top-level message also flags the failure', () => {
+  const ret = simulateVerifyGetThrew({ success: true }, 'timeout');
+  assert.match(ret.message, /UNVERIFIED/);
+  assert.match(ret.message, /⚠️/);
+  assert.match(ret.message, /Do NOT claim/i);
+});
+
+t('verify GET returned no record: top-level success is false', () => {
+  const ret = simulateVerifyGetReturnedNoRecord({ success: true, code: 'SUCCESS' }, '2570562000400116511');
+  assert.equal(ret.success, false);
+  assert.equal(ret.verification.success, false);
+  assert.equal(ret.verification.reason, 'verify_get_returned_no_record');
+});
+
+t('verify-fail result is treated as error by askClaude harvesting (no whitelist)', () => {
+  // Production logic: resultIsError = result.success === false || !!result.error || !!result.validation_error.
+  // A verify-fail result must be classified as error so its ids are NOT
+  // harvested into verifiedRecordsByModule.
+  const ret = simulateVerifyGetThrew(
+    { success: true, code: 'SUCCESS', data: { id: '2570562000400116511', code: 'SUCCESS' } },
+    'fetch timeout'
+  );
+  const resultIsError = ret.success === false || !!ret.error || !!ret.validation_error;
+  assert.ok(resultIsError, 'verify-fail must be classified as error so harvesting is skipped');
+
+  // Now confirm: with NO whitelisting, a model-rendered Quote URL is stripped.
+  const verified = new Map();
+  if (!resultIsError) {
+    const s = JSON.stringify(ret);
+    const rx = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+    let mm;
+    while ((mm = rx.exec(s)) !== null) {
+      if (!verified.has(mm[1])) verified.set(mm[1], new Set());
+      verified.get(mm[1]).add(mm[2]);
+    }
+  }
+  assert.ok(!verified.has('Quotes'), 'no Quotes whitelist when verify failed');
+
+  const reply = 'The quote was updated. [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000400116511)';
+  const guarded = applyTruthGuard(reply, verified, [{ isError: true, recordUrl: null }]);
+  assert.ok(!/tab\/Quotes\/2570562000400116511/.test(guarded), 'URL stripped');
+  assert.ok(/⚠️/.test(guarded), 'success-claim warning fires');
+});
+
+t('verify-fail does not include a usable Zoho URL anywhere in payload', () => {
+  // Belt-and-suspenders: the verify-fail return must not embed a Quote URL
+  // that could be harvested by the URL regex at a later stage.
+  const ret = simulateVerifyGetThrew({ success: true }, 'transient');
+  const serialized = JSON.stringify(ret);
+  assert.ok(!/\/tab\/Quotes\/\d{15,19}/.test(serialized), 'no Quote URL in verify-fail payload');
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);
