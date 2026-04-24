@@ -430,5 +430,228 @@ t('verify-fail does not include a usable Zoho URL anywhere in payload', () => {
   assert.ok(!/\/tab\/Quotes\/\d{15,19}/.test(serialized), 'no Quote URL in verify-fail payload');
 });
 
+console.log('\n─── Quote update undo: smart-diff + no-op fast path (Codex round-5) ───');
+
+// Mirrors the production smart-diff algorithm in worker-gchat/src/index.js
+// undo_crm_action update branch for module=Quotes. Validates that:
+//   - identical sets → empty diff (no-op fast path fires)
+//   - removed item in current → 1 add op, 0 deletes
+//   - extra item in current → 0 adds, 1 delete
+//   - mixed → both
+//   - duplicates handled as multisets
+// preState-empty refusal is shape-tested separately.
+
+function buildItem(productId, qty, discount, subformId = null) {
+  const item = {
+    Product_Name: { id: productId },
+    Quantity: qty,
+    Discount: discount,
+    List_Price: 1000,
+    Description: `Item ${productId}`,
+    Sequence_Number: 1,
+  };
+  if (subformId) item.id = subformId;
+  return item;
+}
+
+function smartDiff(currentItems, preStateItems) {
+  const itemKey = (it) => {
+    const pid = it.Product_Name?.id || null;
+    const qty = Number(it.Quantity || 0);
+    const disc = Number(it.Discount || 0);
+    if (!pid) return null;
+    return `${pid}|${qty}|${disc.toFixed(2)}`;
+  };
+  const currentKeyToIds = new Map();
+  for (const it of currentItems) {
+    const k = itemKey(it);
+    if (!k) continue;
+    if (!currentKeyToIds.has(k)) currentKeyToIds.set(k, []);
+    currentKeyToIds.get(k).push(it.id);
+  }
+  const preStateKeyCount = new Map();
+  for (const it of preStateItems) {
+    const k = itemKey(it);
+    if (!k) continue;
+    preStateKeyCount.set(k, (preStateKeyCount.get(k) || 0) + 1);
+  }
+  const idsToDelete = [];
+  for (const [k, ids] of currentKeyToIds.entries()) {
+    const want = preStateKeyCount.get(k) || 0;
+    const have = ids.length;
+    if (have > want) for (let i = want; i < have; i++) idsToDelete.push(ids[i]);
+  }
+  const itemsToAdd = [];
+  for (const [k, want] of preStateKeyCount.entries()) {
+    const have = (currentKeyToIds.get(k) || []).length;
+    if (want > have) {
+      let needed = want - have;
+      for (const it of preStateItems) {
+        if (needed === 0) break;
+        if (itemKey(it) !== k) continue;
+        itemsToAdd.push({
+          Product_Name: { id: it.Product_Name.id },
+          Quantity: it.Quantity,
+          Discount: it.Discount,
+        });
+        needed--;
+      }
+    }
+  }
+  return { idsToDelete, itemsToAdd, equivalent: idsToDelete.length === 0 && itemsToAdd.length === 0 };
+}
+
+t('identical sets → equivalent (no-op fast path)', () => {
+  const current = [
+    buildItem('PID_A', 1, 100, 'sub_1'),
+    buildItem('PID_B', 2, 200, 'sub_2'),
+  ];
+  const preState = [
+    buildItem('PID_A', 1, 100),
+    buildItem('PID_B', 2, 200),
+  ];
+  const d = smartDiff(current, preState);
+  assert.equal(d.equivalent, true, 'must detect equivalence');
+  assert.equal(d.idsToDelete.length, 0);
+  assert.equal(d.itemsToAdd.length, 0);
+});
+
+t('same items different order → equivalent (set-wise comparison)', () => {
+  const current = [buildItem('PID_A', 1, 100, 'sub_1'), buildItem('PID_B', 2, 200, 'sub_2')];
+  const preState = [buildItem('PID_B', 2, 200), buildItem('PID_A', 1, 100)];
+  assert.equal(smartDiff(current, preState).equivalent, true);
+});
+
+t('current has 1 extra item → 1 delete, 0 adds', () => {
+  const current = [
+    buildItem('PID_A', 1, 100, 'sub_1'),
+    buildItem('PID_B', 2, 200, 'sub_2'),
+    buildItem('PID_C', 1, 50, 'sub_3'),
+  ];
+  const preState = [buildItem('PID_A', 1, 100), buildItem('PID_B', 2, 200)];
+  const d = smartDiff(current, preState);
+  assert.equal(d.idsToDelete.length, 1);
+  assert.equal(d.idsToDelete[0], 'sub_3');
+  assert.equal(d.itemsToAdd.length, 0);
+  assert.equal(d.equivalent, false);
+});
+
+t('preState has 1 item missing from current → 0 deletes, 1 add', () => {
+  const current = [buildItem('PID_A', 1, 100, 'sub_1')];
+  const preState = [buildItem('PID_A', 1, 100), buildItem('PID_B', 2, 200)];
+  const d = smartDiff(current, preState);
+  assert.equal(d.idsToDelete.length, 0);
+  assert.equal(d.itemsToAdd.length, 1);
+  assert.equal(d.itemsToAdd[0].Product_Name.id, 'PID_B');
+});
+
+t('mixed: current and preState differ in both directions', () => {
+  const current = [buildItem('PID_A', 1, 100, 'sub_1'), buildItem('PID_X', 1, 50, 'sub_2')];
+  const preState = [buildItem('PID_A', 1, 100), buildItem('PID_B', 2, 200)];
+  const d = smartDiff(current, preState);
+  assert.equal(d.idsToDelete.length, 1);
+  assert.equal(d.idsToDelete[0], 'sub_2');
+  assert.equal(d.itemsToAdd.length, 1);
+  assert.equal(d.itemsToAdd[0].Product_Name.id, 'PID_B');
+});
+
+t('quantity mismatch produces delete+add (not stable)', () => {
+  const current = [buildItem('PID_A', 1, 100, 'sub_1')];
+  const preState = [buildItem('PID_A', 5, 100)];
+  const d = smartDiff(current, preState);
+  // Different (pid, qty, disc) keys → treated as separate items
+  assert.equal(d.idsToDelete.length, 1);
+  assert.equal(d.itemsToAdd.length, 1);
+});
+
+t('discount drift < 1¢ treated as same (toFixed(2) tolerance)', () => {
+  const current = [buildItem('PID_A', 1, 100.001, 'sub_1')];
+  const preState = [buildItem('PID_A', 1, 100.002)];
+  const d = smartDiff(current, preState);
+  assert.equal(d.equivalent, true, 'sub-cent drift must not produce a diff');
+});
+
+t('duplicates handled as multisets (3 of same SKU in both → equivalent)', () => {
+  const current = [
+    buildItem('PID_A', 1, 100, 'sub_1'),
+    buildItem('PID_A', 1, 100, 'sub_2'),
+    buildItem('PID_A', 1, 100, 'sub_3'),
+  ];
+  const preState = [
+    buildItem('PID_A', 1, 100),
+    buildItem('PID_A', 1, 100),
+    buildItem('PID_A', 1, 100),
+  ];
+  assert.equal(smartDiff(current, preState).equivalent, true);
+});
+
+t('duplicates: 3 in current, 2 in preState → exactly 1 delete', () => {
+  const current = [
+    buildItem('PID_A', 1, 100, 'sub_1'),
+    buildItem('PID_A', 1, 100, 'sub_2'),
+    buildItem('PID_A', 1, 100, 'sub_3'),
+  ];
+  const preState = [buildItem('PID_A', 1, 100), buildItem('PID_A', 1, 100)];
+  const d = smartDiff(current, preState);
+  assert.equal(d.idsToDelete.length, 1);
+  assert.equal(d.idsToDelete[0], 'sub_3', 'last dup deleted to keep earlier sequence numbers stable');
+  assert.equal(d.itemsToAdd.length, 0);
+});
+
+// Reproduces the exact live failure shape: Quote 2570562000402426396, 6 items
+// (3 hardware + 3 license rows), Grand_Total $9,105.02, current matches preState
+// because the prior "remove the licenses" PUT was silently rejected by Zoho.
+t('LIVE REPRO Quote 2570562000402426396: 6 items unchanged → no-op fast path', () => {
+  const items = [
+    { Product_Name: { id: '2570562000064739443' }, Quantity: 1, Discount: 941, id: '2570562000402426397' },  // MX75-HW
+    { Product_Name: { id: '2570562000064739383' }, Quantity: 1, Discount: 887, id: '2570562000402426398' },  // LIC-MX75-SEC-1Y
+    { Product_Name: { id: '2570562000064739444' }, Quantity: 1, Discount: 703, id: '2570562000402426399' },  // MX85-HW
+    { Product_Name: { id: '2570562000064739398' }, Quantity: 1, Discount: 804, id: '2570562000402426400' },  // LIC-MX85-SEC-1Y
+    { Product_Name: { id: '2570562000297110189' }, Quantity: 2, Discount: 1714, id: '2570562000402426401' }, // CW9172I-RTG x2
+    { Product_Name: { id: '2570562000001098894' }, Quantity: 2, Discount: 168, id: '2570562000402426402' },  // LIC-ENT-1YR x2
+  ];
+  // preState = same 6 items (because Zoho rejected the change)
+  const preStateMirror = items.map(({ id, ...rest }) => rest);
+  const d = smartDiff(items, preStateMirror);
+  assert.equal(d.equivalent, true, 'no-op fast path must fire on this exact live failure shape');
+  assert.equal(d.idsToDelete.length, 0);
+  assert.equal(d.itemsToAdd.length, 0);
+});
+
+t('LIVE REPRO follow-up: licenses actually removed → 3 deletes, 0 adds', () => {
+  // Counterfactual: if the "remove licenses" PUT had succeeded, current would
+  // be HW-only (3 items). The undo would then delete nothing extra and re-add
+  // the 3 license rows.
+  const current = [
+    { Product_Name: { id: '2570562000064739443' }, Quantity: 1, Discount: 941, id: '2570562000402426397' },
+    { Product_Name: { id: '2570562000064739444' }, Quantity: 1, Discount: 703, id: '2570562000402426399' },
+    { Product_Name: { id: '2570562000297110189' }, Quantity: 2, Discount: 1714, id: '2570562000402426401' },
+  ];
+  const preState = [
+    { Product_Name: { id: '2570562000064739443' }, Quantity: 1, Discount: 941 },
+    { Product_Name: { id: '2570562000064739383' }, Quantity: 1, Discount: 887 },
+    { Product_Name: { id: '2570562000064739444' }, Quantity: 1, Discount: 703 },
+    { Product_Name: { id: '2570562000064739398' }, Quantity: 1, Discount: 804 },
+    { Product_Name: { id: '2570562000297110189' }, Quantity: 2, Discount: 1714 },
+    { Product_Name: { id: '2570562000001098894' }, Quantity: 2, Discount: 168 },
+  ];
+  const d = smartDiff(current, preState);
+  assert.equal(d.idsToDelete.length, 0, 'no current items need deleting (all 3 hardware match preState)');
+  assert.equal(d.itemsToAdd.length, 3, 'three license rows must be re-added');
+  const addedPids = d.itemsToAdd.map(i => i.Product_Name.id).sort();
+  assert.deepEqual(addedPids, ['2570562000001098894', '2570562000064739383', '2570562000064739398'].sort());
+});
+
+t('Empty preState would refuse: caller must check before building payload', () => {
+  // The algorithm does NOT short-circuit on empty preState — that gate lives
+  // in the production caller. Document the invariant.
+  const current = [buildItem('PID_A', 1, 100, 'sub_1')];
+  const d = smartDiff(current, []);
+  // Diff says: delete the one current item (would leave 0 items).
+  // Production caller must intercept: preStateItems.length === 0 → refuse.
+  assert.equal(d.idsToDelete.length, 1);
+  assert.equal(d.itemsToAdd.length, 0);
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);

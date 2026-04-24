@@ -7505,76 +7505,188 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               }
               reversalResult = putRes;
             } else {
-              // Quotes — two-step dance to avoid stale subform row id errors.
-              // Zoho regenerates Quoted_Items row ids on every update, so PUTing
-              // preState.Quoted_Items raw fails with "the subform id given seems
-              // to be invalid". Instead:
-              //   Step 1: fetch current Quote, build a PUT that deletes every
-              //           live Quoted_Items row ({id, _delete: null}) and restores
-              //           scalar fields. Do_Not_Auto_Update_Prices prevents reprice.
-              //   Step 2: PUT flattened preState rows (no subform ids) to repopulate.
-              //   Verify: re-fetch and confirm item count matches preState.
-              const currentRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Quoted_Items`, env);
-              const currentItems = currentRes?.data?.[0]?.Quoted_Items || [];
+              // Quotes — single-PUT atomic mixed delete+add with smart-diff.
+              // 2026-04-24 Codex round-5 fix: the prior two-step approach
+              // (delete-all then re-add) tripped Zoho's "all entries of
+              // Quoted_Items cannot be deleted" rule because step 1 alone
+              // implied an empty intermediate state. The single-PUT mixed
+              // approach satisfies Zoho because the FINAL state always has
+              // ≥1 line item (the preState items being added back).
+              //
+              // Algorithm:
+              //   1. Fetch current Quoted_Items + Grand_Total.
+              //   2. Smart-diff against preState by (product_id, qty, discount).
+              //      - Items in BOTH → keep, leave subform id stable (no op).
+              //      - Items only in current → delete ({id, _delete: null}).
+              //      - Items only in preState → add (no subform id, fresh row).
+              //   3. No-op fast path: if diff is empty (current set ≡ preState
+              //      set), the prior mutation was silently rejected by Zoho
+              //      (e.g., live Quote 2570562000402426396 case). Skip the
+              //      destructive PUT and return an honest message.
+              //   4. preState-empty refusal: if preState has zero items,
+              //      Zoho's "must have ≥1 line item" rule forbids the restore.
+              //      Refuse with a clear error rather than corrupt the Quote.
+              //   5. Single PUT with delete ops + add ops + scalar restores.
+              //   6. Verify post-state: item count + Grand_Total match preState
+              //      within tolerance.
+              const currentRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Quoted_Items,Grand_Total,Sub_Total`, env);
+              const currentRec = currentRes?.data?.[0] || {};
+              const currentItems = currentRec.Quoted_Items || [];
+              const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
 
-              // Step 1: clear current items + restore scalars in one PUT
-              const clearPayload = { Do_Not_Auto_Update_Prices: true };
-              if (currentItems.length > 0) {
-                clearPayload.Quoted_Items = currentItems.map(it => ({ id: it.id, _delete: null }));
+              // Build a multiset of (product_id, qty, discount) keys for each side
+              const itemKey = (it) => {
+                const pid = it.Product_Name?.id || null;
+                const qty = Number(it.Quantity || 0);
+                const disc = Number(it.Discount || 0);
+                if (!pid) return null;
+                return `${pid}|${qty}|${disc.toFixed(2)}`;
+              };
+              const currentKeyToIds = new Map(); // key → array of subform ids in current
+              for (const it of currentItems) {
+                const k = itemKey(it);
+                if (!k) continue;
+                if (!currentKeyToIds.has(k)) currentKeyToIds.set(k, []);
+                currentKeyToIds.get(k).push(it.id);
               }
+              const preStateKeyCount = new Map(); // key → desired count from preState
+              for (const it of preStateItems) {
+                const k = itemKey(it);
+                if (!k) continue;
+                preStateKeyCount.set(k, (preStateKeyCount.get(k) || 0) + 1);
+              }
+
+              // Compute deletes: each current row whose key is over-represented
+              // (more in current than in preState) gets a delete op.
+              const idsToDelete = [];
+              for (const [k, ids] of currentKeyToIds.entries()) {
+                const want = preStateKeyCount.get(k) || 0;
+                const have = ids.length;
+                if (have > want) {
+                  // Delete `have - want` of these. Pick the LAST ones so earlier
+                  // sequence numbers stay stable.
+                  for (let i = want; i < have; i++) idsToDelete.push(ids[i]);
+                }
+              }
+              // Compute adds: preState rows whose key is under-represented in current.
+              const itemsToAdd = [];
+              for (const [k, want] of preStateKeyCount.entries()) {
+                const have = (currentKeyToIds.get(k) || []).length;
+                if (want > have) {
+                  // Pick `want - have` instances from preStateItems matching this key.
+                  let needed = want - have;
+                  for (const it of preStateItems) {
+                    if (needed === 0) break;
+                    if (itemKey(it) !== k) continue;
+                    itemsToAdd.push({
+                      Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
+                      Quantity: it.Quantity,
+                      List_Price: it.List_Price,
+                      Discount: it.Discount,
+                      Description: it.Description,
+                      Sequence_Number: it.Sequence_Number,
+                    });
+                    needed--;
+                  }
+                }
+              }
+              const itemsetEquivalent = idsToDelete.length === 0 && itemsToAdd.length === 0;
+
+              // Compute scalar fields to restore (excluding stripped + Quoted_Items)
+              const scalarRestore = {};
               for (const [k, v] of Object.entries(preState)) {
                 if (STRIP.has(k) || k.startsWith('$') || k === 'Quoted_Items') continue;
-                clearPayload[k] = v;
-              }
-              const clearRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [clearPayload] });
-              const clearStatus = clearRes?.data?.[0]?.status;
-              if (clearStatus !== 'success') {
-                return { success: false, error: `Undo restore failed at clear step: ${clearRes?.data?.[0]?.message || 'unknown'}`, detail: clearRes };
+                scalarRestore[k] = v;
               }
 
-              // Step 2: re-add preState items as fresh rows (no subform ids)
-              const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
-              if (preStateItems.length > 0) {
-                const addPayload = {
-                  Do_Not_Auto_Update_Prices: true,
-                  Quoted_Items: preStateItems.map(it => ({
-                    Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
-                    Quantity: it.Quantity,
-                    List_Price: it.List_Price,
-                    Discount: it.Discount,
-                    Description: it.Description,
-                    Sequence_Number: it.Sequence_Number
-                  })).filter(it => it.Product_Name?.id)
-                };
-                const addRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [addPayload] });
-                const addStatus = addRes?.data?.[0]?.status;
-                if (addStatus !== 'success') {
-                  return { success: false, error: `Undo restore failed at re-add step: ${addRes?.data?.[0]?.message || 'unknown'}`, detail: addRes };
+              // No-op fast path — current Quoted_Items already matches preState.
+              // The prior update was silently rejected (live failure shape).
+              // Restore scalars only if any are pending; otherwise return a
+              // truthful "nothing to undo" success without writing.
+              if (itemsetEquivalent) {
+                console.log(`[UNDO] No-op fast path for Quote ${origRecordId}: current Quoted_Items already matches preState (prior mutation was silently rejected).`);
+                if (Object.keys(scalarRestore).length > 0) {
+                  const scalarPayload = { Do_Not_Auto_Update_Prices: true, ...scalarRestore };
+                  const sRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [scalarPayload] });
+                  if (sRes?.data?.[0]?.status !== 'success') {
+                    return { success: false, error: `Undo scalar restore failed: ${sRes?.data?.[0]?.message || 'unknown'}`, detail: sRes };
+                  }
+                  reversalResult = sRes;
+                } else {
+                  reversalResult = { data: [{ status: 'success', code: 'NO_OP', message: 'No-op — prior mutation did not actually change the quote.' }] };
                 }
-                reversalResult = addRes;
+                reversalSummary = `Nothing to undo on ${origModule.replace(/s$/, '')} ${origRecordId} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state). [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                // Fall through to the shared logging/return at the bottom.
               } else {
-                reversalResult = clearRes;
-              }
-
-              // Verify line count matches preState (guards against silent Zoho no-ops)
-              try {
-                const verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
-                const verifyItems = verifyRes?.data?.[0]?.Quoted_Items || [];
-                if (verifyItems.length !== preStateItems.length) {
+                // preState-empty guard — Zoho refuses to leave a Quote with zero items.
+                if (preStateItems.length === 0) {
                   return {
                     success: false,
-                    error: `Undo restore verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
-                    detail: verifyRes
+                    error: 'undo_refused_empty_preState',
+                    message: `Cannot undo Quote ${origRecordId}: preState had zero Quoted_Items, but Zoho requires every Quote to have at least one line item. The original mutation likely created the Quote — route through the delete-undo path instead of update-undo.`,
                   };
                 }
-              } catch (verifyErr) {
-                console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
+
+                // Build single mixed payload: delete changed/extra current rows
+                // + add missing preState rows + restore scalars. Final state will
+                // have exactly the preState item set.
+                const restorePayload = {
+                  Do_Not_Auto_Update_Prices: true,
+                  ...scalarRestore,
+                };
+                const ops = [];
+                for (const id of idsToDelete) ops.push({ id, _delete: null });
+                for (const item of itemsToAdd) {
+                  if (item.Product_Name?.id) ops.push(item);
+                }
+                if (ops.length > 0) restorePayload.Quoted_Items = ops;
+
+                const restoreRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [restorePayload] });
+                const restoreStatus = restoreRes?.data?.[0]?.status;
+                if (restoreStatus !== 'success') {
+                  return {
+                    success: false,
+                    error: `Undo restore failed: ${restoreRes?.data?.[0]?.message || 'unknown'}`,
+                    detail: restoreRes,
+                    diff: { deletes: idsToDelete.length, adds: itemsToAdd.length },
+                  };
+                }
+                reversalResult = restoreRes;
+
+                // Verify post-state: item count + Grand_Total match preState within tolerance.
+                try {
+                  const verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
+                  const verifyRec = verifyRes?.data?.[0];
+                  const verifyItems = verifyRec?.Quoted_Items || [];
+                  if (verifyItems.length !== preStateItems.length) {
+                    return {
+                      success: false,
+                      error: `Undo verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
+                      detail: verifyRes,
+                    };
+                  }
+                  const preTotal = Number(preState.Grand_Total || 0);
+                  const postTotal = Number(verifyRec?.Grand_Total || 0);
+                  if (preTotal > 0 && Math.abs(preTotal - postTotal) > 0.01) {
+                    return {
+                      success: false,
+                      error: `Undo verification failed: Grand_Total expected ${preTotal}, got ${postTotal}`,
+                      detail: verifyRes,
+                    };
+                  }
+                } catch (verifyErr) {
+                  console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
+                }
               }
             }
 
             reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId}`;
-            const restoredFields = Object.keys(preState).filter(k => !STRIP.has(k)).slice(0, 4).join(', ');
-            reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
+            // Honor a no-op-path summary set above (Quote no-op fast path).
+            // Otherwise build the standard "Undid update" summary.
+            if (!reversalSummary) {
+              const restoredFields = Object.keys(preState).filter(k => !STRIP.has(k)).slice(0, 4).join(', ');
+              reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
+            }
           } else {
             return { success: false, error: `Operation type "${lookup.operation}" is not undo-able.` };
           }
