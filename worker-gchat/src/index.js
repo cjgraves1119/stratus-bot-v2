@@ -755,6 +755,17 @@ function applySuffix(sku) {
   // downstream catalog lookup fails cleanly instead of constructing a fake -RTG SKU.
   if (/^CW917\d[IHD]/.test(upper)) return upper.endsWith('-RTG') ? upper : `${upper}-RTG`;
   if (/^CW916\d/.test(upper)) return upper.endsWith('-MR') ? upper : `${upper}-MR`;
+  // Cisco Catalyst switches (C9200L/C9300/C9300L/C9300X) — Stratus catalog
+  // stocks only Meraki-managed (-M) variants. Auto-promote unsuffixed inputs
+  // when `${upper}-M` actually exists in the price catalog; otherwise leave
+  // unchanged so the hard-block / clarification path catches it. Skip -A
+  // (IOS-XE, not stocked) and -M-O (STA-KIT special-case) as canonical.
+  // Same pattern as CW9172 auto-I promote (2026-04-24 Codex council).
+  if (/^C9(200L|300L|300X|300)-/.test(upper)
+      && !upper.endsWith('-M') && !upper.endsWith('-A') && !upper.endsWith('-M-O')) {
+    const mCandidate = `${upper}-M`;
+    if (prices[mCandidate]) return mCandidate;
+  }
   if (upper.startsWith('MS150') || upper.startsWith('C9') || upper.startsWith('C8') || upper.startsWith('MA-')) return upper;
   if (/^MS\d/.test(upper)) return upper.endsWith('-HW') ? upper : `${upper}-HW`;
   if (/^MX\d+C[W]?(-HW)?-NA$/i.test(upper)) return upper;
