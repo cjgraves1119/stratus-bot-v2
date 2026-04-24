@@ -245,5 +245,85 @@ t('Zoho URL regex does not over-match on arbitrary digits inside URL', () => {
   assert.ok(guarded.includes(shortIdUrl));
 });
 
+console.log('\n─── Quote-create verification-failure shape (Codex pre-merge check) ───');
+
+// Simulate the exact return shape emitted by create_deal_and_quote when the
+// post-create GET verification fails. Codex flagged that `{ success:false,
+// ...results }` would silently become success:true if `results` ever carries
+// `success: true`. Verify the patched shape cannot regress to success.
+function simulateCreateDealAndQuoteVerifyFailReturn(resultsInitialState) {
+  // Mirror the production code after the patch.
+  const results = { ...resultsInitialState };
+  const quoteId = '2570562000400116511';
+  const error = 'GET returned no record';
+  // Scrub per production
+  if (results.records?.quote) delete results.records.quote;
+  if (!Array.isArray(results.errors)) results.errors = [];
+  results.errors.push(`Quote verification failed after create: ${error}`);
+  results.success = false; // defensive — set on results BEFORE spread
+  return {
+    ...results,
+    success: false,
+    error: 'quote_create_verify_failed',
+    created_id_unverified: quoteId,
+    instruction: 'Treat as FAILED create',
+    wall_ms: 0,
+  };
+}
+
+t('Verify-fail shape is success:false even when results had success:true', () => {
+  const ret = simulateCreateDealAndQuoteVerifyFailReturn({
+    steps: ['ok'],
+    errors: [],
+    records: { deal: { id: 'DEAL_X' }, quote: { id: 'QUOTE_Y', url: 'https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000400116511' } },
+    success: true, // <-- the trap: a future refactor could set this earlier
+  });
+  assert.equal(ret.success, false, 'top-level success must be false');
+  assert.equal(ret.error, 'quote_create_verify_failed');
+  assert.equal(ret.created_id_unverified, '2570562000400116511');
+  assert.ok(!ret.records?.quote, 'records.quote must be scrubbed');
+});
+
+t('Verify-fail shape does not expose a Quote URL in any field', () => {
+  const ret = simulateCreateDealAndQuoteVerifyFailReturn({
+    steps: [],
+    errors: [],
+    records: { deal: { id: 'DEAL_X' }, quote: { id: 'QUOTE_Y', url: 'https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000400116511' } },
+    success: true,
+  });
+  const serialized = JSON.stringify(ret);
+  // The quote URL string must NOT appear anywhere in the scrubbed payload.
+  assert.ok(!/\/tab\/Quotes\/\d{15,19}/.test(serialized), 'no Quote URL may leak through on verify-fail');
+  // created_id_unverified carries the id for diagnostics but NOT as a URL.
+  assert.ok(ret.created_id_unverified, 'id may be surfaced for diagnostics');
+});
+
+t('Verify-fail result cannot whitelist the failed Quote id in verifiedRecordsByModule', () => {
+  const ret = simulateCreateDealAndQuoteVerifyFailReturn({
+    steps: [],
+    errors: [],
+    records: { deal: { id: 'DEAL_X' }, quote: { id: 'QUOTE_Y', url: 'https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000400116511' } },
+    success: true,
+  });
+  // Simulate the askClaude harvesting logic: only SUCCESSFUL results contribute.
+  const verified = new Map();
+  const resultIsError = ret.success === false || !!ret.error || !!ret.validation_error;
+  if (!resultIsError) {
+    const s = JSON.stringify(ret);
+    const rx = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+    let mm;
+    while ((mm = rx.exec(s)) !== null) {
+      if (!verified.has(mm[1])) verified.set(mm[1], new Set());
+      verified.get(mm[1]).add(mm[2]);
+    }
+  }
+  assert.ok(!verified.has('Quotes'), 'Quotes module must not be present in verifiedRecordsByModule');
+  // If the model then tries to render a Quote URL with the failed id, the guard strips it.
+  const fakeReply = 'The quote was created. [View](https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000400116511)';
+  const guarded = applyTruthGuard(fakeReply, verified, []);
+  assert.ok(!/tab\/Quotes\/2570562000400116511/.test(guarded), 'URL must be stripped by guard');
+  assert.ok(/⚠️/.test(guarded), 'hallucinated-success warning must fire');
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);

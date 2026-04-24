@@ -6931,10 +6931,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // response sanitizer will allow a View Quote link through.
             delete results.records.quote;
             results.errors.push(`Quote verification failed after create: ${quoteVerifyError}`);
+            // Force results into a failure shape BEFORE the spread so that if
+            // a future refactor sets results.success = true earlier in the flow,
+            // the spread can't clobber our success:false. Codex pre-merge fix
+            // 2026-04-24 — the old `{ success:false, ...results }` ordering was
+            // a silent-success trap waiting for a refactor.
+            results.success = false;
             return {
+              ...results,
               success: false,
               error: 'quote_create_verify_failed',
-              ...results,
               created_id_unverified: quoteId,
               instruction: `Zoho reported Quote ${quoteId} was created but the verification fetch ${quoteVerifyError}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render any quote URL.`,
               wall_ms: Date.now() - _startMs
