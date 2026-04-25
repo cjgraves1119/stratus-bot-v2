@@ -1,0 +1,48 @@
+name: Worker Build Check
+
+# Pre-merge build validation. Catches syntax that `node -c` tolerates but
+# Cloudflare's wrangler/esbuild rejects (e.g. inline backticks inside a
+# template-literal-delimited prompt string — the exact failure that broke
+# the 2026-04-25 deploy after PR #2 + PR #3 merged).
+#
+# Triggers:
+#   - pull_request to main → block PR check until all three workers build
+#   - push to main → defense in depth before Deploy Stratus Bots runs
+#
+# No CLOUDFLARE_API_TOKEN required: `wrangler deploy --dry-run --outdir`
+# bundles to disk without uploading.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-check:
+    name: Wrangler dry-run (${{ matrix.worker }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [worker, worker-gchat, worker-gateway]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install ${{ matrix.worker }}
+        run: |
+          cd ${{ matrix.worker }} && (npm install --omit=dev || npm install --omit=dev --no-package-lock)
+
+      - name: Wrangler deploy --dry-run (${{ matrix.worker }})
+        run: |
+          cd ${{ matrix.worker }} && npx wrangler deploy --dry-run --outdir /tmp/dry-run-${{ matrix.worker }}
+
+      - name: Confirm bundle was produced
+        run: |
+          ls -la /tmp/dry-run-${{ matrix.worker }}/
+          test -s /tmp/dry-run-${{ matrix.worker }}/index.js && echo "✓ ${{ matrix.worker }} built successfully" || (echo "✗ ${{ matrix.worker }} build produced no output" && exit 1)
