@@ -5831,15 +5831,193 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // Capture the current record state BEFORE we PUT. For Quotes this also
         // powers the silent-no-op detector (line-item diff); for all modules it
         // enables undo_crm_action to restore the exact prior field values.
+        // 2026-04-24 Codex Bug C fix: for Quotes, ALWAYS include Quoted_Items
+        // + totals in the snapshot regardless of what the model is changing,
+        // so the post-PUT verification can detect silent no-ops on EVERY
+        // Quote update (not just ones that touched data.Quoted_Items).
         let preUpdateSnapshot = null;
         try {
           // Only request the fields we're about to modify (plus id + a name field)
           // to keep the snapshot small.
-          const fieldsToSnap = ['id', ...Object.keys(data)].join(',');
+          const baseSnapFields = module_name === 'Quotes'
+            ? ['id', 'Quoted_Items', 'Grand_Total', 'Sub_Total']
+            : ['id'];
+          const fieldsToSnap = [...new Set([...baseSnapFields, ...Object.keys(data)])].join(',');
           const pre = await zohoApiCall('GET', `${module_name}/${record_id}?fields=${encodeURIComponent(fieldsToSnap)}`, env);
           preUpdateSnapshot = pre?.data?.[0] || null;
         } catch (snapErr) {
           console.warn(`[GCHAT] Pre-update snapshot failed for ${module_name}/${record_id}:`, snapErr.message);
+        }
+
+        // ── 2026-04-24 Codex round-9 + round-10: omission-style delete normalizer ──
+        // Detect "id-only keep-list" payloads where the model sends
+        // data.Quoted_Items containing only id-fields for the rows it wants to
+        // KEEP. Zoho's PUT semantics on Quoted_Items are additive, NOT
+        // replacement — items omitted from the array are LEFT ALONE, not
+        // deleted. Live D1 evidence (Quote 2570562000402426396 ops 1070/1071)
+        // showed Llama send a hardware-only keep-list with no _delete markers,
+        // expecting the licenses to be removed.
+        //
+        // This normalizer runs BEFORE the PUT and either:
+        //   - Auto-converts unambiguous strict-subset keep-lists to explicit
+        //     {id, _delete: null} ops for the omitted current ids; OR
+        //   - Rejects with a specific error code (KEEP_LIST_NO_OP /
+        //     KEEP_LIST_UNKNOWN_IDS / KEEP_LIST_DUPLICATE_IDS /
+        //     KEEP_LIST_SNAPSHOT_UNAVAILABLE / MIXED_ID_ONLY_PAYLOAD /
+        //     EMPTY_QUOTED_ITEMS_REJECTED).
+        //
+        // Round-10 additions: also reject (a) all-id-only without a usable
+        // current-row snapshot — can't safely diff, would otherwise reach
+        // Zoho as no-op and falsely look applied; (b) empty Quoted_Items
+        // with current rows present — Zoho's additive PUT means an empty
+        // array does NOT delete anything; the model must be explicit.
+        let keepListNormalization = null;
+        if (module_name === 'Quotes' && Array.isArray(data.Quoted_Items)) {
+          const hasCurrentItems = preUpdateSnapshot
+            && Array.isArray(preUpdateSnapshot.Quoted_Items)
+            && preUpdateSnapshot.Quoted_Items.length > 0;
+
+          // Round-10 (a) [Codex round-10b tightening]: ALWAYS reject empty
+          // Quoted_Items on Quote updates, regardless of snapshot availability.
+          // An empty array is never a meaningful/safe Zoho Quote update. With
+          // snapshot we can also include current count; without it, we say so.
+          if (data.Quoted_Items.length === 0) {
+            const currentCountStr = hasCurrentItems
+              ? `The Quote currently has ${preUpdateSnapshot.Quoted_Items.length} line item(s).`
+              : `The current row count could not be verified because the pre-update snapshot was unavailable.`;
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'empty_quoted_items_rejected',
+              message: `EMPTY_QUOTED_ITEMS_REJECTED: An empty Quoted_Items array does NOT delete or replace existing rows on Quote ${record_id} — Zoho's PUT semantics on Quoted_Items are additive, so an empty array is a server-side no-op. ${currentCountStr} Every intended delete must be explicit: send {id: "<row_id>", _delete: null} for each row to remove.`,
+            };
+          }
+
+          // No further normalization needed for empty arrays without current items.
+          if (data.Quoted_Items.length > 0) {
+          // 2026-04-24 Codex round-11 finding #1: tighten to an ALLOWLIST of
+          // harmless metadata keys. Previous denylist treated rows like
+          // { id, Custom_Field: "x" } or { id, Total: 123 } as id-only, which
+          // would have incorrectly converted them to deletes for omitted rows.
+          // Now: id-only means the object has ONLY id plus keys from a small
+          // allowlist of harmless metadata/control/rendering fields. Any
+          // unknown key makes the row explicit/unsupported, not a keep-list.
+          const ID_ONLY_ALLOWED_KEYS = new Set([
+            'id',
+            // Zoho internal metadata that may appear in a row without being
+            // an intent signal. Kept narrow — if a key isn't here, we treat
+            // the row as explicit and refuse keep-list normalization.
+            '$field_states', '$in_merge', '$layout_id', '$zia_visions',
+          ]);
+          const isQuoteRowIdOnly = (row) => {
+            if (!row || typeof row !== 'object' || !row.id) return false;
+            for (const k of Object.keys(row)) {
+              if (!ID_ONLY_ALLOWED_KEYS.has(k)) return false;
+            }
+            return true;
+          };
+          const hasUnsupportedShape = (row) => {
+            // Any row with id + some unknown field is NOT id-only AND NOT a
+            // clean explicit op (explicit ops are {_delete:null}, {modify
+            // fields}, or adds with Product_Name). Flag so we can refuse.
+            if (!row || typeof row !== 'object' || !row.id) return false;
+            if (isQuoteRowIdOnly(row)) return false;
+            const explicitKeys = new Set(['_delete', 'Product_Name', 'Quantity', 'Discount', 'List_Price', 'Description', 'Sequence_Number', 'Tax']);
+            for (const k of Object.keys(row)) {
+              if (k === 'id' || ID_ONLY_ALLOWED_KEYS.has(k)) continue;
+              if (!explicitKeys.has(k)) return true; // unknown key present
+            }
+            return false;
+          };
+          const allIdOnly = data.Quoted_Items.every(isQuoteRowIdOnly);
+          const someIdOnly = data.Quoted_Items.some(isQuoteRowIdOnly);
+          // Unknown fields → refuse before the model gets a chance to hide behind them.
+          const unsupportedRows = data.Quoted_Items.filter(hasUnsupportedShape);
+          if (unsupportedRows.length > 0) {
+            const sampleKeys = new Set();
+            for (const r of unsupportedRows) {
+              for (const k of Object.keys(r)) {
+                if (k !== 'id' && !ID_ONLY_ALLOWED_KEYS.has(k)) sampleKeys.add(k);
+              }
+            }
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'unsupported_quoted_items_shape',
+              message: `UNSUPPORTED_QUOTED_ITEMS_SHAPE: Your Quoted_Items payload contains row(s) with unrecognized field(s): ${[...sampleKeys].slice(0, 5).join(', ')}. Only these shapes are supported on a Quote PUT: (1) DELETE: {id, _delete: null}; (2) MODIFY: {id, Quantity?, Discount?, List_Price?, Description?, Sequence_Number?}; (3) ADD: {Product_Name: {id}, Quantity, Discount, ...}. Remove the unknown field(s) and resubmit.`,
+              unknown_fields: [...sampleKeys],
+              row_count: unsupportedRows.length,
+            };
+          }
+
+          // Round-10 (b): all-id-only without a current-row snapshot → reject.
+          // Without preUpdateSnapshot.Quoted_Items we cannot compute a strict-
+          // subset diff, and the id-only rows would reach Zoho as no-ops while
+          // looking superficially "applied" (no per-item failure markers).
+          if (allIdOnly && !hasCurrentItems) {
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'keep_list_snapshot_unavailable',
+              message: `KEEP_LIST_SNAPSHOT_UNAVAILABLE: Cannot safely interpret an id-only Quoted_Items keep-list without current Quote subform rows for diff (preUpdateSnapshot missing or has no Quoted_Items). Re-fetch the Quote via zoho_get_record on Quotes/${record_id} so the server can compute a strict-subset diff, OR use explicit {id: "<row_id>", _delete: null} markers for the rows you actually want to remove.`,
+            };
+          }
+
+          if (allIdOnly) {
+            const currentIds = new Set((preUpdateSnapshot.Quoted_Items || []).map(it => it.id).filter(Boolean));
+            const keptIds = data.Quoted_Items.map(r => r.id);
+            const keptSet = new Set(keptIds);
+            // Duplicate id check
+            if (keptIds.length !== keptSet.size) {
+              return {
+                validation_error: true,
+                action: 'update_blocked',
+                error: 'keep_list_duplicate_ids',
+                message: `KEEP_LIST_DUPLICATE_IDS: Your Quoted_Items keep-list contains duplicate ids. Each subform id should appear at most once. Resubmit with unique ids, or use explicit {id, _delete: null} markers for the rows to remove.`,
+              };
+            }
+            const unknownIds = keptIds.filter(id => !currentIds.has(id));
+            if (unknownIds.length > 0) {
+              return {
+                validation_error: true,
+                action: 'update_blocked',
+                error: 'keep_list_unknown_ids',
+                message: `KEEP_LIST_UNKNOWN_IDS: Your Quoted_Items keep-list references subform ids that don't exist on Quote ${record_id}: ${unknownIds.join(', ')}. Re-fetch the quote to get current subform ids, or use explicit {id, _delete: null} markers for the rows you actually want to remove.`,
+                unknown_ids: unknownIds,
+              };
+            }
+            const omittedIds = [...currentIds].filter(id => !keptSet.has(id));
+            if (omittedIds.length === 0) {
+              return {
+                validation_error: true,
+                action: 'update_blocked',
+                error: 'keep_list_matches_all_current',
+                message: `KEEP_LIST_NO_OP: Your Quoted_Items keep-list contains all ${currentIds.size} current rows — that's a no-op, NOT a delete. Zoho's Quoted_Items PUT semantics are ADDITIVE: items omitted from the array are LEFT ALONE, not deleted. To remove a line item, send {id: "<row_id>", _delete: null} for each row to remove. Resubmit with explicit _delete: null markers.`,
+              };
+            }
+            // Strict-subset keep-list: normalize to explicit delete ops for omitted ids.
+            // Preserve Do_Not_Auto_Update_Prices via the existing auto-injection.
+            console.log(`[GCHAT] Quote ${record_id}: id-only keep-list normalized → ${omittedIds.length} _delete op(s) for omitted subform ids: ${omittedIds.join(',')}`);
+            keepListNormalization = {
+              original_kept_ids: keptIds,
+              converted_delete_ids: omittedIds,
+            };
+            data.Quoted_Items = omittedIds.map(id => ({ id, _delete: null }));
+          } else if (someIdOnly) {
+            // Mixed id-only + explicit ops — ambiguous, reject.
+            const idOnlyCount = data.Quoted_Items.filter(isQuoteRowIdOnly).length;
+            const explicitCount = data.Quoted_Items.length - idOnlyCount;
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'mixed_id_only_payload',
+              message: `MIXED_ID_ONLY_PAYLOAD: Your Quoted_Items array mixes ${idOnlyCount} id-only row(s) with ${explicitCount} explicit modify/add/delete row(s). Id-only rows in a mixed PUT are ambiguous — they could mean keep, modify, or no-op, and Zoho's PUT semantics make them no-op in practice. Resubmit using only explicit operations: {id, _delete: null} for removals, {id, Quantity: N, Discount: D, ...} for modifications, {Product_Name: {id: "..."}, Quantity, ...} for adds.`,
+              id_only_count: idOnlyCount,
+              explicit_count: explicitCount,
+            };
+          }
+          // else: all rows have explicit ops (delete/modify/add) — pass through unchanged.
+          } // end "if (data.Quoted_Items.length > 0)"
         }
 
         const updateStart = Date.now();
@@ -5907,19 +6085,38 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           updateParsed.message = updateUserSummary;
         }
 
-        // ── SERVER-SIDE VERIFICATION for Quoted_Items updates ────────────────
+        // ── SERVER-SIDE VERIFICATION for Quote updates ────────────────────────
         // Zoho returns SUCCESS even for malformed Quoted_Items payloads that
-        // silently fail. To prevent ANY model (Gemma, Claude, Haiku) from
+        // silently fail, AND for scalar PUTs whose fields get rejected by
+        // workflow rules / picklist filters. To prevent any model from
         // hallucinating a successful modification, we re-fetch the quote
-        // immediately and embed the ACTUAL post-update line items into the
-        // tool response. The model cannot claim success that didn't happen
-        // because the evidence of what actually changed is in the tool result.
-        if (module_name === 'Quotes' && data.Quoted_Items && updateParsed?.success) {
+        // immediately and embed the ACTUAL post-update state into the tool
+        // response. The model cannot claim success that didn't happen because
+        // the evidence of what actually changed is in the tool result.
+        //
+        // 2026-04-24 Codex Bug C fix: outer gate dropped the data.Quoted_Items
+        // requirement, so verification now runs on EVERY successful Quote PUT.
+        // Per-item delete/modify checks are gated on data.Quoted_Items having
+        // actual intents; no-op detection runs whenever preUpdateSnapshot
+        // exists; new scalar-persistence check fires when ANY top-level field
+        // in `data` failed to persist.
+        if (module_name === 'Quotes' && updateParsed?.success) {
           // Log the EXACT payload Claude sent so we can diagnose silent no-ops
-          console.log(`[GCHAT] Quote update verification starting. Payload Quoted_Items:`, JSON.stringify(data.Quoted_Items).substring(0, 1500));
+          console.log(`[GCHAT] Quote update verification starting. data keys: ${Object.keys(data).join(',')}`);
           try {
-            const verifyFields = 'id,Quote_Number,Grand_Total,Sub_Total,Quoted_Items';
-            const verifyResult = await zohoApiCall('GET', `Quotes/${record_id}?fields=${verifyFields}`, env);
+            // Verify GET — fetch base fields PLUS every scalar field in data
+            // so the persistence check has post-state for each one.
+            const SCALAR_VERIFY_EXCLUDE = new Set([
+              'Quoted_Items', 'Do_Not_Auto_Update_Prices',
+              'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment',
+              'All_Taxes_Total', 'Tax_1_Total', 'Tax_2_Total',
+              'Modified_Time', 'Last_Activity_Time', 'Modified_By',
+              'Created_Time', 'Created_By',
+            ]);
+            const baseFields = ['id', 'Quote_Number', 'Grand_Total', 'Sub_Total', 'Quoted_Items'];
+            const dataScalarFields = Object.keys(data).filter(k => !SCALAR_VERIFY_EXCLUDE.has(k));
+            const verifyFields = [...new Set([...baseFields, ...dataScalarFields])].join(',');
+            const verifyResult = await zohoApiCall('GET', `Quotes/${record_id}?fields=${encodeURIComponent(verifyFields)}`, env);
             const verifyRecord = verifyResult?.data?.[0];
 
             if (verifyRecord) {
@@ -5934,72 +6131,230 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 total: item.Total,
               }));
 
-              // Compute what the model REQUESTED vs what actually landed.
-              // Three operation types on Quoted_Items:
-              //   DELETE — item has id + _delete: null
-              //   MODIFY — item has id + other changed fields (Discount, Quantity, etc.)
-              //   ADD    — item has no id, has Product_Name.id
-              const requested = data.Quoted_Items.map(i => {
-                const isDelete = i._delete === null;
-                const hasId = !!i.id;
-                return {
-                  raw: i,
-                  id: i.id || null,
-                  product_id: i.Product_Name?.id || null,
-                  requested_quantity: i.Quantity,
-                  requested_discount: i.Discount,
-                  delete: isDelete,
-                  modify: hasId && !isDelete,
-                  add: !hasId,
-                };
-              });
-
-              const requestedDeleteIds = new Set(
-                requested.filter(r => r.delete && r.id).map(r => r.id)
-              );
-              const requestedModifications = requested.filter(r => r.modify);
-
-              const actualItemIds = new Set(actualItems.map(i => i.id));
-              const actualItemsById = new Map(actualItems.map(i => [i.id, i]));
-
-              const deletesApplied = [...requestedDeleteIds].filter(id => !actualItemIds.has(id));
-              const deletesFailed = [...requestedDeleteIds].filter(id => actualItemIds.has(id));
-
-              // Check each MODIFICATION against actual post-update state. Zoho returns
-              // SUCCESS even when modifying fields (like Discount) on existing items
-              // has no effect — e.g. wrong field name, wrong value type, etc.
-              const modificationResults = requestedModifications.map(r => {
-                const actual = actualItemsById.get(r.id);
-                if (!actual) {
-                  return { id: r.id, applied: false, reason: 'Item no longer in quote after update' };
+              // ── Tolerant scalar equality (handles picklist {name,id} vs string,
+              //    reference {id,...} comparison, and float drift) ──
+              const valuesEqual = (pre, post) => {
+                if (pre === post) return true;
+                if (pre == null && post == null) return true;
+                if (pre == null || post == null) return false;
+                if (typeof pre === 'number' && typeof post === 'number') {
+                  return Math.abs(pre - post) < 0.01;
                 }
-                const checks = {};
-                let allApplied = true;
-                if (r.requested_quantity !== undefined) {
-                  // Normalize to numbers (Zoho may return string or number)
-                  const wantQ = Number(r.requested_quantity);
-                  const gotQ = Number(actual.quantity);
-                  const match = wantQ === gotQ;
-                  checks.quantity = { requested: wantQ, actual: gotQ, match };
-                  if (!match) allApplied = false;
+                // Picklist write-string vs read-object: input "Review" vs output {name:"Review",id:"..."}
+                if (typeof pre === 'string' && typeof post === 'object') {
+                  return pre === post.name || pre === post.id || pre === String(post);
                 }
-                if (r.requested_discount !== undefined) {
-                  // Zoho stores Discount as a flat dollar amount. Tolerate small float drift.
-                  const wantD = Number(r.requested_discount);
-                  const gotD = Number(actual.discount || 0);
-                  const match = Math.abs(wantD - gotD) < 0.01;
-                  checks.discount = { requested: wantD, actual: gotD, match };
-                  if (!match) allApplied = false;
+                if (typeof post === 'string' && typeof pre === 'object') {
+                  return post === pre.name || post === pre.id || post === String(pre);
                 }
-                return {
-                  id: r.id,
-                  applied: allApplied,
-                  checks,
-                };
-              });
+                // Reference object equality by id
+                if (typeof pre === 'object' && typeof post === 'object') {
+                  if (Array.isArray(pre) || Array.isArray(post)) {
+                    if (!Array.isArray(pre) || !Array.isArray(post)) return false;
+                    if (pre.length !== post.length) return false;
+                    return pre.every((v, i) => valuesEqual(v, post[i]));
+                  }
+                  if (pre.id != null && post.id != null) return String(pre.id) === String(post.id);
+                  try { return JSON.stringify(pre) === JSON.stringify(post); } catch { return false; }
+                }
+                if (typeof pre === 'boolean' || typeof post === 'boolean') {
+                  return Boolean(pre) === Boolean(post);
+                }
+                return String(pre) === String(post);
+              };
 
-              const modificationsFailed = modificationResults.filter(m => !m.applied);
-              const modificationsApplied = modificationResults.filter(m => m.applied);
+              // ── Per-item check (only when data.Quoted_Items has intents) ──
+              // 2026-04-24 Codex round-11 finding #4: verify adds AND more
+              // modification fields. Previous code confirmed deletes and only
+              // Quantity/Discount modifications. Adds were counted but never
+              // verified, and List_Price / Description / Product_Name / Tax
+              // changes could be dropped silently. Now all four verified.
+              const triedQuotedItems = Array.isArray(data.Quoted_Items) && data.Quoted_Items.length > 0;
+              let requested = [];
+              let requestedDeleteIds = new Set();
+              let requestedModifications = [];
+              let requestedAdds = [];
+              let deletesApplied = [];
+              let deletesFailed = [];
+              // Codex round-12b fix: declare deletesNeverExisted +
+              // deletesUnverifiable at the same scope as the other delete
+              // result arrays. Previously they were `let`-declared inside
+              // the `if (triedQuotedItems)` block — block-scoped — and the
+              // warnings code outside that block referenced them, throwing
+              // ReferenceError on every Quote update where data.Quoted_Items
+              // was absent (Subject-only edits etc), which the outer
+              // try/catch then converted into an "unverified failure"
+              // (verify_get_threw). This default-empty initialization makes
+              // the warnings checks safe regardless of triedQuotedItems.
+              let deletesNeverExisted = [];
+              let deletesUnverifiable = [];
+              let modificationResults = [];
+              let modificationsFailed = [];
+              let modificationsApplied = [];
+              let addResults = [];
+              let addsFailed = [];
+              let addsApplied = [];
+
+              if (triedQuotedItems) {
+                requested = data.Quoted_Items.map(i => {
+                  const isDelete = i._delete === null;
+                  const hasId = !!i.id;
+                  return {
+                    raw: i,
+                    id: i.id || null,
+                    product_id: i.Product_Name?.id || null,
+                    requested_quantity: i.Quantity,
+                    requested_discount: i.Discount,
+                    requested_list_price: i.List_Price,
+                    requested_description: i.Description,
+                    requested_product_id: i.Product_Name?.id || null,
+                    delete: isDelete,
+                    modify: hasId && !isDelete,
+                    add: !hasId && (i.Product_Name?.id || i.Product_Name?.name),
+                  };
+                });
+                requestedDeleteIds = new Set(requested.filter(r => r.delete && r.id).map(r => r.id));
+                requestedModifications = requested.filter(r => r.modify);
+                requestedAdds = requested.filter(r => r.add);
+                const actualItemIds = new Set(actualItems.map(i => i.id));
+                const actualItemsById = new Map(actualItems.map(i => [i.id, i]));
+                // Codex round-12 P0-2: a delete is only "applied" if the
+                // requested id existed in preUpdateSnapshot AND is gone from
+                // post-state. If the id was never in preState (stale/bad
+                // subform id), Zoho ignores it and post-state also lacks it,
+                // so the OLD logic claimed success. Track three buckets:
+                //   - applied: in pre, gone from post → real delete
+                //   - failed (still present): in pre, still in post → Zoho refused
+                //   - failed (never existed): not in pre, also not in post → bad id
+                const preItemIdSet = new Set(
+                  (preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items))
+                    ? preUpdateSnapshot.Quoted_Items.map(it => it.id).filter(Boolean)
+                    : []
+                );
+                const preSnapshotUsable = preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items);
+                deletesApplied = [];
+                deletesFailed = [];
+                deletesNeverExisted = [];
+                deletesUnverifiable = [];
+                for (const id of requestedDeleteIds) {
+                  if (!preSnapshotUsable) {
+                    deletesUnverifiable.push(id);
+                    continue;
+                  }
+                  if (!preItemIdSet.has(id)) {
+                    deletesNeverExisted.push(id);
+                  } else if (!actualItemIds.has(id)) {
+                    deletesApplied.push(id);
+                  } else {
+                    deletesFailed.push(id);
+                  }
+                }
+
+                // Modification check — now covers Quantity, Discount, List_Price,
+                // Description, and Product_Name (id) changes.
+                modificationResults = requestedModifications.map(r => {
+                  const actual = actualItemsById.get(r.id);
+                  if (!actual) {
+                    return { id: r.id, applied: false, reason: 'Item no longer in quote after update' };
+                  }
+                  const checks = {};
+                  let allApplied = true;
+                  if (r.requested_quantity !== undefined) {
+                    const wantQ = Number(r.requested_quantity);
+                    const gotQ = Number(actual.quantity);
+                    const match = wantQ === gotQ;
+                    checks.quantity = { requested: wantQ, actual: gotQ, match };
+                    if (!match) allApplied = false;
+                  }
+                  if (r.requested_discount !== undefined) {
+                    const wantD = Number(r.requested_discount);
+                    const gotD = Number(actual.discount || 0);
+                    const match = Math.abs(wantD - gotD) < 0.01;
+                    checks.discount = { requested: wantD, actual: gotD, match };
+                    if (!match) allApplied = false;
+                  }
+                  if (r.requested_list_price !== undefined) {
+                    const wantLP = Number(r.requested_list_price);
+                    const gotLP = Number(actual.list_price || 0);
+                    const match = Math.abs(wantLP - gotLP) < 0.01;
+                    checks.list_price = { requested: wantLP, actual: gotLP, match };
+                    if (!match) allApplied = false;
+                  }
+                  if (r.requested_description !== undefined && r.requested_description !== null) {
+                    const wantDesc = String(r.requested_description);
+                    const gotDesc = actual.description == null ? '' : String(actual.description);
+                    const match = wantDesc === gotDesc;
+                    checks.description = { requested: wantDesc, actual: gotDesc, match };
+                    if (!match) allApplied = false;
+                  }
+                  if (r.requested_product_id && r.modify) {
+                    // Model sent Product_Name.id on an existing row — verify Zoho
+                    // actually swapped the product (rare but dangerous if silent).
+                    const wantPid = String(r.requested_product_id);
+                    const gotPid = String(actual.product_id || actual.Product_Name?.id || '');
+                    const match = wantPid === gotPid;
+                    checks.product_id = { requested: wantPid, actual: gotPid, match };
+                    if (!match) allApplied = false;
+                  }
+                  return { id: r.id, applied: allApplied, checks };
+                });
+                modificationsFailed = modificationResults.filter(m => !m.applied);
+                modificationsApplied = modificationResults.filter(m => m.applied);
+
+                // Add check — for each requested add, confirm an actualItem with
+                // the requested product_id AND matching qty/discount (tolerant)
+                // exists that wasn't there pre-update. Uses multiset to handle
+                // duplicates.
+                // Codex round-12 P0-3: WITHOUT a usable preUpdateSnapshot we
+                // CANNOT compute newly-added rows safely — an existing matching
+                // row would falsely satisfy a dropped add. Fail closed.
+                const preIdSetForAdds = new Set((preUpdateSnapshot?.Quoted_Items || []).map(it => it.id).filter(Boolean));
+                const preSnapshotUsableForAdds = preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items);
+                const newlyAddedActual = preSnapshotUsableForAdds
+                  ? actualItems.filter(it => !preIdSetForAdds.has(it.id))
+                  : [];
+                const newlyAddedAvail = [...newlyAddedActual]; // consumed as we match adds
+                addResults = requestedAdds.map(r => {
+                  if (!preSnapshotUsableForAdds) {
+                    return {
+                      applied: false,
+                      requested_product_id: String(r.requested_product_id || ''),
+                      reason: 'add_unverifiable_no_pre_snapshot',
+                    };
+                  }
+                  // Find a newly-added actual item matching product_id (+ qty/disc tolerance)
+                  const wantPid = String(r.requested_product_id || '');
+                  const wantQ = r.requested_quantity !== undefined ? Number(r.requested_quantity) : null;
+                  const wantD = r.requested_discount !== undefined ? Number(r.requested_discount) : null;
+                  const wantLP = r.requested_list_price !== undefined ? Number(r.requested_list_price) : null;
+                  const ix = newlyAddedAvail.findIndex(a => {
+                    const apid = String(a.product_id || a.Product_Name?.id || '');
+                    if (apid !== wantPid) return false;
+                    if (wantQ !== null && Number(a.quantity) !== wantQ) return false;
+                    if (wantD !== null && Math.abs(Number(a.discount || 0) - wantD) >= 0.01) return false;
+                    if (wantLP !== null && Math.abs(Number(a.list_price || 0) - wantLP) >= 0.01) return false;
+                    return true;
+                  });
+                  if (ix === -1) {
+                    return {
+                      applied: false,
+                      requested_product_id: wantPid,
+                      requested_qty: wantQ,
+                      requested_discount: wantD,
+                      requested_list_price: wantLP,
+                      reason: 'No newly-added row matches requested product_id + quantity + discount + list_price',
+                    };
+                  }
+                  const matched = newlyAddedAvail.splice(ix, 1)[0];
+                  return {
+                    applied: true,
+                    matched_id: matched.id,
+                    requested_product_id: wantPid,
+                  };
+                });
+                addsFailed = addResults.filter(a => !a.applied);
+                addsApplied = addResults.filter(a => a.applied);
+              }
 
               const verification = {
                 ...updateParsed,
@@ -6010,22 +6365,39 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   sub_total: verifyRecord.Sub_Total,
                   actual_line_items: actualItems,
                   actual_item_count: actualItems.length,
-                  requested_operations: {
-                    deletes_requested: requested.filter(r => r.delete).length,
-                    deletes_applied: deletesApplied.length,
-                    deletes_failed: deletesFailed,
-                    adds_requested: requested.filter(r => r.add).length,
-                    modifications_requested: requestedModifications.length,
-                    modifications_applied: modificationsApplied.length,
-                    modifications_failed: modificationsFailed,
-                  },
+                  data_keys_tried: Object.keys(data).filter(k => k !== 'Do_Not_Auto_Update_Prices'),
                 },
               };
+              // Codex round-9: surface the keep-list normalization so the model
+              // sees what the server interpreted vs what it sent.
+              if (keepListNormalization) {
+                verification.verification.keep_list_normalization = keepListNormalization;
+              }
+              if (triedQuotedItems) {
+                verification.verification.requested_operations = {
+                  deletes_requested: requested.filter(r => r.delete).length,
+                  deletes_applied: deletesApplied.length,
+                  deletes_failed: deletesFailed,
+                  adds_requested: requestedAdds.length,
+                  adds_applied: addsApplied.length,
+                  adds_failed: addsFailed,
+                  modifications_requested: requestedModifications.length,
+                  modifications_applied: modificationsApplied.length,
+                  modifications_failed: modificationsFailed,
+                };
+              }
 
-              // FAIL LOUDLY if any requested change didn't actually land
+              // ── Warnings: per-item failures (only when items intent existed) ──
               const warnings = [];
               if (deletesFailed.length > 0) {
                 warnings.push(`DELETE FAILED: ${deletesFailed.length} line item(s) were NOT removed despite API SUCCESS. IDs still present: ${deletesFailed.join(', ')}.`);
+              }
+              // Codex round-12 P0-2: bad/stale ids that were never on the Quote.
+              if (deletesNeverExisted && deletesNeverExisted.length > 0) {
+                warnings.push(`DELETE_ID_NEVER_EXISTED: ${deletesNeverExisted.length} requested delete id(s) were NOT in the Quote pre-update — Zoho ignored them and the apparent post-state absence is meaningless. Bad/stale subform ids: ${deletesNeverExisted.join(', ')}. Re-fetch the Quote (zoho_get_record) for current subform ids before retrying.`);
+              }
+              if (deletesUnverifiable && deletesUnverifiable.length > 0) {
+                warnings.push(`DELETE_UNVERIFIABLE_NO_PRE_SNAPSHOT: ${deletesUnverifiable.length} requested delete id(s) cannot be verified because the pre-update snapshot was unavailable. IDs: ${deletesUnverifiable.join(', ')}. Treat as failed — re-fetch the Quote and retry only the deletes whose ids are confirmed present.`);
               }
               if (modificationsFailed.length > 0) {
                 const details = modificationsFailed.map(m => {
@@ -6035,7 +6407,6 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     .join(', ');
                   return `item ${m.id} (${fieldIssues || m.reason})`;
                 }).join('; ');
-                // Detect quantity-specific failures and provide actionable retry guidance
                 const qtyFailures = modificationsFailed.filter(m => m.checks?.quantity && !m.checks.quantity.match);
                 if (qtyFailures.length > 0) {
                   warnings.push(`QUANTITY UPDATE REJECTED: ${qtyFailures.length} line item(s) quantity did NOT change. ${details}. To fix: resubmit the FULL Quoted_Items array (all items, not just the changed one) with the correct Quantity value inside each item object. Partial Quoted_Items payloads are silently ignored by Zoho.`);
@@ -6043,45 +6414,118 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   warnings.push(`MODIFICATION FAILED: ${modificationsFailed.length} line item change(s) did NOT apply. ${details}. Zoho accepted the payload but the values did not change. Resubmit with the full Quoted_Items array.`);
                 }
               }
+              // Codex round-11 finding #4: add-failure warning.
+              if (addsFailed.length > 0) {
+                const details = addsFailed.map(a =>
+                  `product ${a.requested_product_id} (qty=${a.requested_qty}, disc=${a.requested_discount}, lp=${a.requested_list_price}) — ${a.reason}`
+                ).join('; ');
+                warnings.push(`ADD_FAILED: ${addsFailed.length} requested line item(s) were NOT added to the quote despite API SUCCESS. ${details}. No newly-added row matches the requested product_id + quantity + discount + list_price. Zoho accepted the payload but silently dropped the adds — do NOT claim the item(s) were added.`);
+              }
 
-              // ── No-op detection: compare pre-update vs post-update snapshots ──
-              // If the model sent a Quoted_Items payload but the Grand_Total / Sub_Total
-              // is unchanged, the update was effectively a no-op. This catches the case
-              // where Claude sends an existing Discount value without actually changing
-              // anything, or where Zoho silently ignores the payload.
+              // ── Pre/post diff (always runs when preUpdateSnapshot is available) ──
+              // 2026-04-24 Codex round-7 fix: replace by-id matching with multiset
+              // fingerprint. Subform-id-invariant — Zoho regenerates Quoted_Items
+              // ids on some PUT paths, which would defeat by-id matching and let
+              // a true no-op slip through as anyItemChanged=true. The fingerprint
+              // is the multiset of (product_id, qty, discount) tuples, which is
+              // exactly the user-perceivable line-item identity.
+              let totalChanged = false, subChanged = false, anyItemChanged = false;
+              let itemFingerprintMatches = false;
               if (preUpdateSnapshot) {
                 const preTotal = Number(preUpdateSnapshot.Grand_Total || 0);
                 const postTotal = Number(verifyRecord.Grand_Total || 0);
                 const preSub = Number(preUpdateSnapshot.Sub_Total || 0);
                 const postSub = Number(verifyRecord.Sub_Total || 0);
-                const totalChanged = Math.abs(preTotal - postTotal) > 0.01;
-                const subChanged = Math.abs(preSub - postSub) > 0.01;
+                totalChanged = Math.abs(preTotal - postTotal) > 0.01;
+                subChanged = Math.abs(preSub - postSub) > 0.01;
 
-                // Also compute per-item diff — detect whether ANY line item's Discount,
-                // Quantity, or Product changed
-                const preItemsById = new Map(
-                  (preUpdateSnapshot.Quoted_Items || []).map(i => [i.id, {
-                    discount: Number(i.Discount || 0),
-                    quantity: Number(i.Quantity || 0),
-                    product_id: i.Product_Name?.id || null,
-                  }])
-                );
-                let anyItemChanged = false;
-                for (const post of actualItems) {
-                  const pre = preItemsById.get(post.id);
-                  if (!pre) { anyItemChanged = true; break; } // new item added
-                  if (Math.abs(pre.discount - Number(post.discount || 0)) > 0.01) { anyItemChanged = true; break; }
-                  if (pre.quantity !== Number(post.quantity || 0)) { anyItemChanged = true; break; }
-                }
-                if (preItemsById.size !== actualItems.length) anyItemChanged = true; // item removed
+                // Multiset fingerprint helpers — order-independent + subform-id-independent.
+                const itemFingerprintKey = (it) => {
+                  const pid = it.Product_Name?.id || null;
+                  const qty = Number(it.Quantity || 0);
+                  // Discount may live as `Discount` on raw item or `discount` after slim-down
+                  const disc = Number(it.Discount != null ? it.Discount : (it.discount || 0));
+                  if (!pid) return null;
+                  return `${pid}|${qty}|${disc.toFixed(2)}`;
+                };
+                const fingerprintMultiset = (items) => {
+                  const m = new Map();
+                  for (const it of items || []) {
+                    const k = itemFingerprintKey(it);
+                    if (!k) continue;
+                    m.set(k, (m.get(k) || 0) + 1);
+                  }
+                  return m;
+                };
+                const fingerprintEqual = (a, b) => {
+                  if (a.size !== b.size) return false;
+                  for (const [k, c] of a) if (b.get(k) !== c) return false;
+                  return true;
+                };
+
+                const preFingerprint = fingerprintMultiset(preUpdateSnapshot.Quoted_Items);
+                const postFingerprint = fingerprintMultiset(verifyRecord.Quoted_Items || actualItems);
+                itemFingerprintMatches = fingerprintEqual(preFingerprint, postFingerprint);
+                anyItemChanged = !itemFingerprintMatches;
 
                 verification.verification.pre_update_totals = { grand_total: preTotal, sub_total: preSub };
                 verification.verification.post_update_totals = { grand_total: postTotal, sub_total: postSub };
                 verification.verification.any_item_changed = anyItemChanged;
+                verification.verification.item_fingerprint_match = itemFingerprintMatches;
 
-                if (!totalChanged && !subChanged && !anyItemChanged) {
+                // ZOHO_DROPPED_QUOTED_ITEMS: items intent existed but the live
+                // multiset is bit-for-bit identical to preState. Subform ids
+                // could have been regenerated and we'd still catch it here.
+                // Per Codex round-7: row-fingerprint match alone is sufficient
+                // to refuse success — totals are downstream of items.
+                if (triedQuotedItems && itemFingerprintMatches) {
                   warnings.push(
-                    `NO-OP UPDATE DETECTED: The quote is completely unchanged after the update call. Pre-update Grand_Total=${preTotal}, post-update Grand_Total=${postTotal}. No line item fields differ. This means the values you sent in Quoted_Items matched what was already there (no real change). If the user asked you to change something, you sent the WRONG values — re-read the quote, recompute what the target should be, and try again with DIFFERENT numbers.`
+                    `ZOHO_DROPPED_QUOTED_ITEMS: Zoho returned SUCCESS but your Quoted_Items payload had NO effect on the quote. The live row fingerprint (product_id, quantity, discount per row) is identical to pre-update state. Pre Grand_Total=$${preTotal}, post Grand_Total=$${postTotal}. The line-item changes you intended were silently rejected. Possible causes: payload shape mismatch, _delete on the only remaining item (Zoho refuses to leave a Quote with zero items), stale subform ids, or Do_Not_Auto_Update_Prices conflict. Do NOT claim the line items were changed — surface the failure to the user and offer to retry.`
+                  );
+                }
+              }
+
+              // ── NEW: Scalar-field persistence check (Codex Bug C) ──────────
+              // For each top-level data key (excluding Quoted_Items + derived
+              // totals), compare pre/post values via tolerant equality. If
+              // the user intended a change (data[k] !== pre[k]) but post[k]
+              // equals pre[k], Zoho silently dropped that field.
+              if (preUpdateSnapshot) {
+                // Codex round-12 P1: compare post-state to REQUESTED value, not
+                // just "post != pre". Previously a request {Subject: 'A'} where
+                // pre.Subject='Old' and post.Subject='B' (some unrelated change)
+                // would falsely register as persisted because pre→post differed.
+                // Now: persisted only when post equals the requested value.
+                const scalarsTried = Object.keys(data).filter(k => !SCALAR_VERIFY_EXCLUDE.has(k));
+                const scalarsPersisted = [];
+                const scalarsDropped = [];
+                const scalarsAlreadyMatched = [];
+                for (const k of scalarsTried) {
+                  const wasIntendedChange = !valuesEqual(preUpdateSnapshot[k], data[k]);
+                  const postEqualsRequested = valuesEqual(verifyRecord[k], data[k]);
+                  if (!wasIntendedChange) {
+                    scalarsAlreadyMatched.push(k);
+                  } else if (postEqualsRequested) {
+                    scalarsPersisted.push(k);
+                  } else {
+                    scalarsDropped.push(k);
+                  }
+                }
+                verification.verification.scalar_fields = {
+                  tried: scalarsTried,
+                  persisted: scalarsPersisted,
+                  dropped: scalarsDropped,
+                  already_matched: scalarsAlreadyMatched,
+                };
+                if (scalarsDropped.length > 0) {
+                  const dropped = scalarsDropped.map(k => {
+                    const intended = data[k];
+                    const actual = verifyRecord[k];
+                    const renderVal = (v) => typeof v === 'object' ? JSON.stringify(v).slice(0, 40) : String(v);
+                    return `${k} (intended=${renderVal(intended)}, actual=${renderVal(actual)})`;
+                  }).join('; ');
+                  warnings.push(
+                    `ZOHO_REJECTED_SCALARS: Zoho returned SUCCESS but ${scalarsDropped.length} scalar field(s) you tried to change did NOT persist: ${dropped}. Possible causes: invalid field names, wrong value type, picklist value not in the picklist, workflow rule blocked the change, or layout/permission filter. Do NOT claim those fields were updated.`
                   );
                 }
               }
@@ -6089,21 +6533,59 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (warnings.length > 0) {
                 verification.verification.WARNING =
                   warnings.join(' | ') + ' The update did NOT achieve what was requested. Tell the user the modification failed and offer to retry. Do NOT claim the change was applied.';
+                verification.verification.success = false;
                 verification.success = false;
                 verification.message = '⚠️ Zoho returned SUCCESS but verification detected the changes did not actually land. See verification.WARNING.';
+                // 2026-04-24 Codex round-7: clear undo token + record url + replace
+                // _user_visible_summary with the warning text. The model must not
+                // be able to surface "View Updated Quote" or an undo token for a
+                // mutation whose effects didn't persist. mutationSummaries upstream
+                // captures these from the result; clearing them here means no fake
+                // success-shape gets injected into the final reply.
+                delete verification._undo_token;
+                delete verification._record_url;
+                verification._user_visible_summary = `⚠️ Update on ${module_name.replace(/s$/, '')} ${record_id} was NOT applied. ${verification.verification.WARNING}`;
+                verification.message = verification._user_visible_summary;
               }
 
-              console.log(`[GCHAT] Quote update verification: ${actualItems.length} items, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}`);
+              console.log(`[GCHAT] Quote update verification: items=${actualItems.length}, triedQuotedItems=${triedQuotedItems}, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}, warnings=${warnings.length}`);
               return verification;
             }
-          } catch (verifyErr) {
-            console.warn(`[GCHAT] Quote verification fetch failed:`, verifyErr.message);
-            // Annotate the response so the model knows verification couldn't run
+            // Verify GET succeeded but returned no record — record may have
+            // been deleted between PUT and verification, or auth/perm issue.
+            // 2026-04-24 Codex round-4 fix: normalize this path the same way
+            // the no-op detection does. Top-level success=false,
+            // verification.success=false, verification.WARNING. The model
+            // must NOT claim success when verification can't confirm change.
+            console.warn(`[GCHAT] Quote verification GET returned no record for ${record_id}. Treating update as unverified — refusing to confirm success.`);
             return {
               ...updateParsed,
+              success: false,
+              message: '⚠️ Zoho returned SUCCESS on the PUT but the verification re-fetch returned no record. The update is UNVERIFIED — do NOT claim the change was applied.',
               verification: {
+                success: false,
                 verified: false,
-                reason: `Verification re-fetch failed: ${verifyErr.message}. Tell the user to manually confirm the quote in Zoho before trusting this result.`,
+                WARNING: `Verification re-fetch returned no record for Quote ${record_id} after a SUCCESS write. The update is UNVERIFIED. Tell the user the change cannot be confirmed and offer to retry. Do NOT claim the change was applied.`,
+                reason: 'verify_get_returned_no_record',
+              },
+            };
+          } catch (verifyErr) {
+            // Verify GET threw (network error, transient Zoho fault, etc).
+            // 2026-04-24 Codex round-4 fix: same normalization as the no-record
+            // path. The previous shape spread updateParsed (success:true) and
+            // only set verification.verified=false, which let the model narrate
+            // success on a write whose effects were never confirmed.
+            console.warn(`[GCHAT] Quote verification fetch failed:`, verifyErr.message);
+            return {
+              ...updateParsed,
+              success: false,
+              message: `⚠️ Zoho returned SUCCESS on the PUT but the verification re-fetch threw: ${verifyErr.message}. The update is UNVERIFIED — do NOT claim the change was applied.`,
+              verification: {
+                success: false,
+                verified: false,
+                WARNING: `Verification re-fetch threw: ${verifyErr.message}. The update is UNVERIFIED. Tell the user the change cannot be confirmed and offer to retry. Do NOT claim the change was applied.`,
+                reason: 'verify_get_threw',
+                error: verifyErr.message,
               },
             };
           }
@@ -7458,10 +7940,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             reversalOperation = 'restore';
             // Strip read-only / system / derived fields. For Quotes we also strip
             // totals (Zoho recomputes) and Quote_Number (auto-generated).
+            // 2026-04-24 Codex round-8: extended to cover ALL derived totals
+            // and our Do_Not_Auto_Update_Prices control flag. The prior set
+            // missed All_Taxes_Total / Tax_1_Total / Tax_2_Total / Tax (already
+            // there) AND Do_Not_Auto_Update_Prices — the latter was the actual
+            // leak: Bug C's expanded pre-snapshot for Quotes pulls in any data
+            // key the user's update set, so if the original update included
+            // Do_Not_Auto_Update_Prices, preState carried it forward and the
+            // undo PUT would either (a) issue a pointless scalar restore in
+            // the no-op fast path, or (b) override the explicit
+            // Do_Not_Auto_Update_Prices: true control flag in the mixed
+            // restore payload via spread order.
             const STRIP = new Set([
               'id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By',
               'Last_Activity_Time', 'Owner', '$editable',
-              'Quote_Number', 'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout'
+              'Quote_Number', 'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout',
+              // Codex round-8 additions:
+              'All_Taxes_Total', 'Tax_1_Total', 'Tax_2_Total',
+              'Do_Not_Auto_Update_Prices',
             ]);
 
             if (origModule !== 'Quotes') {
@@ -7478,76 +7974,350 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               }
               reversalResult = putRes;
             } else {
-              // Quotes — two-step dance to avoid stale subform row id errors.
-              // Zoho regenerates Quoted_Items row ids on every update, so PUTing
-              // preState.Quoted_Items raw fails with "the subform id given seems
-              // to be invalid". Instead:
-              //   Step 1: fetch current Quote, build a PUT that deletes every
-              //           live Quoted_Items row ({id, _delete: null}) and restores
-              //           scalar fields. Do_Not_Auto_Update_Prices prevents reprice.
-              //   Step 2: PUT flattened preState rows (no subform ids) to repopulate.
-              //   Verify: re-fetch and confirm item count matches preState.
-              const currentRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Quoted_Items`, env);
-              const currentItems = currentRes?.data?.[0]?.Quoted_Items || [];
+              // Quotes — single-PUT atomic mixed delete+add with smart-diff.
+              // 2026-04-24 Codex round-5 fix: the prior two-step approach
+              // (delete-all then re-add) tripped Zoho's "all entries of
+              // Quoted_Items cannot be deleted" rule because step 1 alone
+              // implied an empty intermediate state. The single-PUT mixed
+              // approach satisfies Zoho because the FINAL state always has
+              // ≥1 line item (the preState items being added back).
+              //
+              // Algorithm:
+              //   1. Fetch current Quoted_Items + Grand_Total.
+              //   2. Smart-diff against preState by (product_id, qty, discount).
+              //      - Items in BOTH → keep, leave subform id stable (no op).
+              //      - Items only in current → delete ({id, _delete: null}).
+              //      - Items only in preState → add (no subform id, fresh row).
+              //   3. No-op fast path: if diff is empty (current set ≡ preState
+              //      set), the prior mutation was silently rejected by Zoho
+              //      (e.g., live Quote 2570562000402426396 case). Skip the
+              //      destructive PUT and return an honest message.
+              //   4. preState-empty refusal: if preState has zero items,
+              //      Zoho's "must have ≥1 line item" rule forbids the restore.
+              //      Refuse with a clear error rather than corrupt the Quote.
+              //   5. Single PUT with delete ops + add ops + scalar restores.
+              //   6. Verify post-state: item count + Grand_Total match preState
+              //      within tolerance.
+              const currentRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Quoted_Items,Grand_Total,Sub_Total`, env);
+              const currentRec = currentRes?.data?.[0] || {};
+              const currentItems = currentRec.Quoted_Items || [];
+              const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
 
-              // Step 1: clear current items + restore scalars in one PUT
-              const clearPayload = { Do_Not_Auto_Update_Prices: true };
-              if (currentItems.length > 0) {
-                clearPayload.Quoted_Items = currentItems.map(it => ({ id: it.id, _delete: null }));
+              // 2026-04-24 Codex round-11 finding #3: widen the smart-diff key
+              // to include all meaningful mutable Quote line fields. Previous
+              // (product_id + qty + discount) missed List_Price and Description
+              // changes, so a same-product/qty/discount row with a changed
+              // List_Price (e.g., Zoho recomputed after a catalog price update)
+              // or changed Description would wrongly take the no-op fast path.
+              // Tax is derived (Zoho recomputes); Sequence_Number is display
+              // ordering (Zoho may renumber) — exclude both to avoid false
+              // negatives. Include: product_id, qty, discount, list_price, description.
+              const itemKey = (it) => {
+                const pid = it.Product_Name?.id || null;
+                const qty = Number(it.Quantity || 0);
+                const disc = Number(it.Discount || 0);
+                const lp = Number(it.List_Price || 0);
+                const desc = it.Description == null ? '' : String(it.Description);
+                if (!pid) return null;
+                return `${pid}|${qty}|${disc.toFixed(2)}|${lp.toFixed(2)}|${desc}`;
+              };
+              const currentKeyToIds = new Map(); // key → array of subform ids in current
+              for (const it of currentItems) {
+                const k = itemKey(it);
+                if (!k) continue;
+                if (!currentKeyToIds.has(k)) currentKeyToIds.set(k, []);
+                currentKeyToIds.get(k).push(it.id);
               }
+              const preStateKeyCount = new Map(); // key → desired count from preState
+              for (const it of preStateItems) {
+                const k = itemKey(it);
+                if (!k) continue;
+                preStateKeyCount.set(k, (preStateKeyCount.get(k) || 0) + 1);
+              }
+
+              // Compute deletes: each current row whose key is over-represented
+              // (more in current than in preState) gets a delete op.
+              const idsToDelete = [];
+              for (const [k, ids] of currentKeyToIds.entries()) {
+                const want = preStateKeyCount.get(k) || 0;
+                const have = ids.length;
+                if (have > want) {
+                  // Delete `have - want` of these. Pick the LAST ones so earlier
+                  // sequence numbers stay stable.
+                  for (let i = want; i < have; i++) idsToDelete.push(ids[i]);
+                }
+              }
+              // Compute adds: preState rows whose key is under-represented in current.
+              const itemsToAdd = [];
+              for (const [k, want] of preStateKeyCount.entries()) {
+                const have = (currentKeyToIds.get(k) || []).length;
+                if (want > have) {
+                  // Pick `want - have` instances from preStateItems matching this key.
+                  let needed = want - have;
+                  for (const it of preStateItems) {
+                    if (needed === 0) break;
+                    if (itemKey(it) !== k) continue;
+                    itemsToAdd.push({
+                      Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
+                      Quantity: it.Quantity,
+                      List_Price: it.List_Price,
+                      Discount: it.Discount,
+                      Description: it.Description,
+                      Sequence_Number: it.Sequence_Number,
+                    });
+                    needed--;
+                  }
+                }
+              }
+              const itemsetEquivalent = idsToDelete.length === 0 && itemsToAdd.length === 0;
+
+              // Compute scalar fields to restore (excluding stripped + Quoted_Items)
+              const scalarRestore = {};
               for (const [k, v] of Object.entries(preState)) {
                 if (STRIP.has(k) || k.startsWith('$') || k === 'Quoted_Items') continue;
-                clearPayload[k] = v;
-              }
-              const clearRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [clearPayload] });
-              const clearStatus = clearRes?.data?.[0]?.status;
-              if (clearStatus !== 'success') {
-                return { success: false, error: `Undo restore failed at clear step: ${clearRes?.data?.[0]?.message || 'unknown'}`, detail: clearRes };
+                scalarRestore[k] = v;
               }
 
-              // Step 2: re-add preState items as fresh rows (no subform ids)
-              const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
-              if (preStateItems.length > 0) {
-                const addPayload = {
-                  Do_Not_Auto_Update_Prices: true,
-                  Quoted_Items: preStateItems.map(it => ({
-                    Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
-                    Quantity: it.Quantity,
-                    List_Price: it.List_Price,
-                    Discount: it.Discount,
-                    Description: it.Description,
-                    Sequence_Number: it.Sequence_Number
-                  })).filter(it => it.Product_Name?.id)
-                };
-                const addRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [addPayload] });
-                const addStatus = addRes?.data?.[0]?.status;
-                if (addStatus !== 'success') {
-                  return { success: false, error: `Undo restore failed at re-add step: ${addRes?.data?.[0]?.message || 'unknown'}`, detail: addRes };
+              // No-op fast path — current Quoted_Items already matches preState.
+              // The prior update was silently rejected (live failure shape).
+              // Restore scalars only if any are pending; otherwise return a
+              // truthful "nothing to undo" success without writing.
+              // 2026-04-24 Codex round-8: scalarRestore now built from the
+              // tightened STRIP, so the live failure case (preState contains
+              // only Quoted_Items + Grand_Total + Sub_Total + Do_Not_Auto_Update_Prices,
+              // all stripped) yields scalarRestore.length === 0 → pure NO_OP,
+              // no PUT.
+              // Helper: tolerant scalar equality used by undo + update verification.
+              // Same semantics as the round-6 valuesEqual in the update path
+              // (handles picklist string-vs-object, reference id, float drift).
+              const undoValuesEqual = (pre, post) => {
+                if (pre === post) return true;
+                if (pre == null && post == null) return true;
+                if (pre == null || post == null) return false;
+                if (typeof pre === 'number' && typeof post === 'number') return Math.abs(pre - post) < 0.01;
+                if (typeof pre === 'string' && typeof post === 'object') return pre === post.name || pre === post.id || pre === String(post);
+                if (typeof post === 'string' && typeof pre === 'object') return post === pre.name || post === pre.id || post === String(pre);
+                if (typeof pre === 'object' && typeof post === 'object') {
+                  if (Array.isArray(pre) || Array.isArray(post)) {
+                    if (!Array.isArray(pre) || !Array.isArray(post)) return false;
+                    if (pre.length !== post.length) return false;
+                    return pre.every((v, i) => undoValuesEqual(v, post[i]));
+                  }
+                  if (pre.id != null && post.id != null) return String(pre.id) === String(post.id);
+                  try { return JSON.stringify(pre) === JSON.stringify(post); } catch { return false; }
                 }
-                reversalResult = addRes;
-              } else {
-                reversalResult = clearRes;
-              }
+                if (typeof pre === 'boolean' || typeof post === 'boolean') return Boolean(pre) === Boolean(post);
+                return String(pre) === String(post);
+              };
+              const scalarRestoreKeys = Object.keys(scalarRestore);
 
-              // Verify line count matches preState (guards against silent Zoho no-ops)
-              try {
-                const verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
-                const verifyItems = verifyRes?.data?.[0]?.Quoted_Items || [];
+              if (itemsetEquivalent) {
+                console.log(`[UNDO] No-op fast path for Quote ${origRecordId}: current Quoted_Items already matches preState (prior mutation was silently rejected).`);
+                let scalarPutHappened = false;
+                if (scalarRestoreKeys.length > 0) {
+                  // Spread scalarRestore FIRST, then literal Do_Not_Auto_Update_Prices: true
+                  // so even if STRIP misses the flag, our explicit value wins.
+                  const scalarPayload = { ...scalarRestore, Do_Not_Auto_Update_Prices: true };
+                  const sRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [scalarPayload] });
+                  if (sRes?.data?.[0]?.status !== 'success') {
+                    return { success: false, error: `Undo scalar restore failed: ${sRes?.data?.[0]?.message || 'unknown'}`, detail: sRes };
+                  }
+                  scalarPutHappened = true;
+                  // Codex round-12 P0-1: verify scalar restore actually landed.
+                  // Without this the model can claim "Undid update" on a write
+                  // whose effects didn't persist.
+                  let scalarVerifyRec;
+                  try {
+                    const scalarVerifyFields = ['id', ...scalarRestoreKeys].join(',');
+                    const sVerifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=${encodeURIComponent(scalarVerifyFields)}`, env);
+                    scalarVerifyRec = sVerifyRes?.data?.[0];
+                    if (!scalarVerifyRec?.id) {
+                      return {
+                        success: false,
+                        error: 'undo_scalar_verify_no_record',
+                        message: `⚠️ Undo scalar PUT returned SUCCESS but the verification re-fetch returned no record for Quote ${origRecordId}. Do NOT claim the update was undone and do NOT surface a success link/token.`,
+                        detail: sVerifyRes,
+                      };
+                    }
+                  } catch (sErr) {
+                    return {
+                      success: false,
+                      error: 'undo_scalar_verify_fetch_failed',
+                      message: `⚠️ Undo scalar PUT returned SUCCESS but the verification re-fetch threw: ${sErr.message}. Do NOT claim the update was undone and do NOT surface a success link/token.`,
+                      detail: sErr.message,
+                    };
+                  }
+                  const scalarMismatches = [];
+                  for (const k of scalarRestoreKeys) {
+                    if (!undoValuesEqual(scalarRestore[k], scalarVerifyRec[k])) {
+                      scalarMismatches.push({ field: k, requested: scalarRestore[k], actual: scalarVerifyRec[k] });
+                    }
+                  }
+                  if (scalarMismatches.length > 0) {
+                    return {
+                      success: false,
+                      error: 'undo_scalar_verify_mismatch',
+                      message: `⚠️ Undo scalar PUT returned SUCCESS but ${scalarMismatches.length} scalar field(s) did NOT persist on Quote ${origRecordId}. Do NOT claim the update was undone. Mismatches: ${scalarMismatches.map(m => `${m.field}(want=${JSON.stringify(m.requested).slice(0,40)}, got=${JSON.stringify(m.actual).slice(0,40)})`).join('; ')}`,
+                      mismatches: scalarMismatches,
+                    };
+                  }
+                  reversalResult = sRes;
+                } else {
+                  reversalResult = { data: [{ status: 'success', code: 'NO_OP', message: 'No-op — prior mutation did not actually change the quote.' }] };
+                }
+                // Codex round-12 P0-1: summary semantics. "Nothing to undo" only
+                // when no write happened. If we just restored scalars, say so
+                // explicitly (and only after verification confirmed it).
+                if (scalarPutHappened) {
+                  const fieldList = scalarRestoreKeys.slice(0, 4).join(', ');
+                  reversalSummary = `Undid update on Quote ${origRecordId} — Quoted_Items already matched preState; restored ${scalarRestoreKeys.length} scalar field(s) (${fieldList}) and verified persistence. [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                } else {
+                  reversalSummary = `Nothing to undo on ${origModule.replace(/s$/, '')} ${origRecordId} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state and no scalar fields needed restoration). [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                }
+                // Fall through to the shared logging/return at the bottom.
+              } else {
+                // preState-empty guard — Zoho refuses to leave a Quote with zero items.
+                if (preStateItems.length === 0) {
+                  return {
+                    success: false,
+                    error: 'undo_refused_empty_preState',
+                    message: `Cannot undo Quote ${origRecordId}: preState had zero Quoted_Items, but Zoho requires every Quote to have at least one line item. The original mutation likely created the Quote — route through the delete-undo path instead of update-undo.`,
+                  };
+                }
+
+                // Build single mixed payload: delete changed/extra current rows
+                // + add missing preState rows + restore scalars. Final state will
+                // have exactly the preState item set.
+                // 2026-04-24 Codex round-8: spread scalarRestore FIRST and put
+                // Do_Not_Auto_Update_Prices:true LAST so a stray preState value
+                // for that flag (if it ever slips past STRIP) cannot disable
+                // our pricing-control flag.
+                const restorePayload = {
+                  ...scalarRestore,
+                  Do_Not_Auto_Update_Prices: true,
+                };
+                const ops = [];
+                for (const id of idsToDelete) ops.push({ id, _delete: null });
+                for (const item of itemsToAdd) {
+                  if (item.Product_Name?.id) ops.push(item);
+                }
+                if (ops.length > 0) restorePayload.Quoted_Items = ops;
+
+                const restoreRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [restorePayload] });
+                const restoreStatus = restoreRes?.data?.[0]?.status;
+                if (restoreStatus !== 'success') {
+                  return {
+                    success: false,
+                    error: `Undo restore failed: ${restoreRes?.data?.[0]?.message || 'unknown'}`,
+                    detail: restoreRes,
+                    diff: { deletes: idsToDelete.length, adds: itemsToAdd.length },
+                  };
+                }
+                reversalResult = restoreRes;
+
+                // 2026-04-24 Codex round-11 finding #2+#3: verify post-state
+                // with the same multiset fingerprint the smart-diff uses, AND
+                // fail loud if the verify GET throws. Previous code caught the
+                // verify error and fell through to success, which was another
+                // false-success path. Also same-count/same-total wrong-product-
+                // mix is now caught by the fingerprint multiset compare.
+                // Codex round-12 P0-1: also fetch the scalarRestore keys so we
+                // can verify they actually persisted. Previously only items +
+                // Grand_Total were fetched, leaving scalar restores unverified.
+                let verifyRes, verifyRec, verifyItems;
+                try {
+                  const verifyFieldList = ['id', 'Grand_Total', 'Quoted_Items', ...scalarRestoreKeys];
+                  const verifyFieldsStr = [...new Set(verifyFieldList)].join(',');
+                  verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=${encodeURIComponent(verifyFieldsStr)}`, env);
+                  verifyRec = verifyRes?.data?.[0];
+                  if (!verifyRec?.id) {
+                    return {
+                      success: false,
+                      error: 'undo_verify_no_record',
+                      message: `⚠️ Undo restore PUT returned SUCCESS but the verification re-fetch returned no record for Quote ${origRecordId}. Do NOT claim the update was undone and do NOT surface a success link or token.`,
+                      detail: verifyRes,
+                    };
+                  }
+                  verifyItems = verifyRec.Quoted_Items || [];
+                } catch (verifyErr) {
+                  console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
+                  return {
+                    success: false,
+                    error: `undo_verify_fetch_failed`,
+                    message: `⚠️ Undo restore PUT returned SUCCESS but the verification re-fetch threw: ${verifyErr.message}. Cannot confirm the restore actually landed. Do NOT claim the update was undone and do NOT surface a success link or token.`,
+                    detail: verifyErr.message,
+                  };
+                }
                 if (verifyItems.length !== preStateItems.length) {
                   return {
                     success: false,
-                    error: `Undo restore verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
-                    detail: verifyRes
+                    error: `Undo verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
+                    detail: verifyRes,
                   };
                 }
-              } catch (verifyErr) {
-                console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
+                // Multiset fingerprint compare using the wide smart-diff key.
+                const postFingerprint = new Map();
+                for (const it of verifyItems) {
+                  const k = itemKey(it);
+                  if (!k) continue;
+                  postFingerprint.set(k, (postFingerprint.get(k) || 0) + 1);
+                }
+                const preFingerprint = new Map();
+                for (const it of preStateItems) {
+                  const k = itemKey(it);
+                  if (!k) continue;
+                  preFingerprint.set(k, (preFingerprint.get(k) || 0) + 1);
+                }
+                let fingerprintMatch = preFingerprint.size === postFingerprint.size;
+                if (fingerprintMatch) {
+                  for (const [k, c] of preFingerprint) {
+                    if (postFingerprint.get(k) !== c) { fingerprintMatch = false; break; }
+                  }
+                }
+                if (!fingerprintMatch) {
+                  return {
+                    success: false,
+                    error: `undo_verify_fingerprint_mismatch`,
+                    message: `⚠️ Undo restore PUT returned SUCCESS but the post-restore row fingerprint does not match preState. Item counts match (${verifyItems.length}) but product/qty/discount/list_price/description signatures differ — same-count wrong-product-mix detected. Do NOT claim the undo succeeded.`,
+                    detail: verifyRes,
+                  };
+                }
+                const preTotal = Number(preState.Grand_Total || 0);
+                const postTotal = Number(verifyRec?.Grand_Total || 0);
+                if (preTotal > 0 && Math.abs(preTotal - postTotal) > 0.01) {
+                  return {
+                    success: false,
+                    error: `Undo verification failed: Grand_Total expected ${preTotal}, got ${postTotal}`,
+                    detail: verifyRes,
+                  };
+                }
+                // Codex round-12 P0-1: verify scalarRestore fields persisted.
+                if (scalarRestoreKeys.length > 0) {
+                  const scalarMismatches = [];
+                  for (const k of scalarRestoreKeys) {
+                    if (!undoValuesEqual(scalarRestore[k], verifyRec[k])) {
+                      scalarMismatches.push({ field: k, requested: scalarRestore[k], actual: verifyRec[k] });
+                    }
+                  }
+                  if (scalarMismatches.length > 0) {
+                    return {
+                      success: false,
+                      error: 'undo_scalar_verify_mismatch',
+                      message: `⚠️ Undo restore PUT returned SUCCESS but ${scalarMismatches.length} scalar field(s) did NOT persist on Quote ${origRecordId}. Do NOT claim the update was undone. Mismatches: ${scalarMismatches.map(m => `${m.field}(want=${JSON.stringify(m.requested).slice(0,40)}, got=${JSON.stringify(m.actual).slice(0,40)})`).join('; ')}`,
+                      mismatches: scalarMismatches,
+                    };
+                  }
+                }
               }
             }
 
             reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId}`;
-            const restoredFields = Object.keys(preState).filter(k => !STRIP.has(k)).slice(0, 4).join(', ');
-            reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
+            // Honor a no-op-path summary set above (Quote no-op fast path).
+            // Otherwise build the standard "Undid update" summary.
+            if (!reversalSummary) {
+              const restoredFields = Object.keys(preState).filter(k => !STRIP.has(k)).slice(0, 4).join(', ');
+              reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
+            }
           } else {
             return { success: false, error: `Operation type "${lookup.operation}" is not undo-able.` };
           }
@@ -8784,6 +9554,21 @@ Updates are ADDITIVE — Zoho ADDS items, does NOT replace.
 - ADD items: include WITHOUT "id", with Product_Name: {"id": "zoho_product_id"}, Quantity, Discount
 - MODIFY items: include with existing "id" + changed fields
 - REPLACE (e.g., swap license): DELETE old + ADD new in SAME update
+
+⚠️ **ANTI-PATTERN — OMISSION-STYLE DELETE NEVER WORKS.** Sending a Quoted_Items array containing ONLY the ids of items you want to KEEP (with no `_delete: null` markers and no other fields) does NOT delete the omitted rows. Zoho leaves them alone. The server has a guard that handles all-id-only payloads: it will **auto-convert unambiguous strict subsets** to explicit `_delete: null` ops, **otherwise reject** with one of `KEEP_LIST_NO_OP` (all-current keep-list, no actual removal) / `KEEP_LIST_UNKNOWN_IDS` (id not on the Quote) / `KEEP_LIST_DUPLICATE_IDS` / `KEEP_LIST_SNAPSHOT_UNAVAILABLE` (cannot diff without current rows — re-fetch the Quote first) / `MIXED_ID_ONLY_PAYLOAD` (ambiguous mix of id-only + explicit ops) / `EMPTY_QUOTED_ITEMS_REJECTED` (empty array does not delete anything). To remove rows, ALWAYS send `{id: "<row_id>", _delete: null}` for each row to remove.
+
+  Example WRONG (will be auto-corrected or rejected):
+  Quoted_Items: [
+    {"id": "hw_1"},
+    {"id": "hw_2"}
+  ]  // ← model thinks this means "delete everything else"; Zoho says "no-op"
+
+  Example RIGHT:
+  Quoted_Items: [
+    {"id": "lic_1", "_delete": null},
+    {"id": "lic_2", "_delete": null},
+    {"id": "lic_3", "_delete": null}
+  ]  // ← explicit delete for each row to remove. Items "hw_1"/"hw_2" stay because they're not in the payload.
 
 **NEVER infer quote contents from Subject field.** Always read actual Quoted_Items via zoho_get_record before modifying existing quotes.
 - **ALWAYS include Discount when adding new line items** — including license term swaps. Missing Discount = list price charged
@@ -11101,13 +11886,18 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     // If the reply is missing BOTH the undo token for this mutation AND the zoho URL,
     // append the full summary. Otherwise if only the token is missing but url present,
     // just append the undo-token line.
-    if (last.undoToken && !replyHasToken && !hasAnyToken) {
+    // 2026-04-24 Codex round-7: gate undo-token / record-url injection on
+    // !last.isError. A failed mutation must NEVER have its undo token or
+    // [Open in Zoho] link appended to the reply — that would falsely imply
+    // success and let the user click a link/issue an undo against a write
+    // whose effects didn't persist.
+    if (!last.isError && last.undoToken && !replyHasToken && !hasAnyToken) {
       if (!replyHasUrl && last.recordUrl) {
         finalReply = `${finalReply.trim()}\n\n${last.summary}`;
       } else {
         finalReply = `${finalReply.trim()}\n\nUndo token: \`${last.undoToken}\` (say "undo" to reverse).`;
       }
-    } else if (last.recordUrl && !replyHasUrl && !/\[Open in Zoho\]/i.test(finalReply) && !/https:\/\/crm\.zoho\.com/i.test(finalReply)) {
+    } else if (!last.isError && last.recordUrl && !replyHasUrl && !/\[Open in Zoho\]/i.test(finalReply) && !/https:\/\/crm\.zoho\.com/i.test(finalReply)) {
       // Missing the Zoho link but has a token — append just the link.
       finalReply = `${finalReply.trim()}\n\n[Open in Zoho](${last.recordUrl})`;
     }
