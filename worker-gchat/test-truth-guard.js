@@ -1260,12 +1260,26 @@ const isQuoteRowIdOnly = (row) => {
 };
 
 function normalizeKeepList(data, preUpdateSnapshot, recordId = 'Q1') {
-  if (!Array.isArray(data.Quoted_Items) || data.Quoted_Items.length === 0) return { data, normalized: false };
-  if (!preUpdateSnapshot || !Array.isArray(preUpdateSnapshot.Quoted_Items) || preUpdateSnapshot.Quoted_Items.length === 0) {
-    return { data, normalized: false };
+  if (!Array.isArray(data.Quoted_Items)) return { data, normalized: false };
+  const hasCurrentItems = preUpdateSnapshot
+    && Array.isArray(preUpdateSnapshot.Quoted_Items)
+    && preUpdateSnapshot.Quoted_Items.length > 0;
+
+  // Round-10 (a): empty Quoted_Items + non-empty current → reject.
+  if (data.Quoted_Items.length === 0 && hasCurrentItems) {
+    return { error: 'empty_quoted_items_rejected', current_count: preUpdateSnapshot.Quoted_Items.length };
   }
+
+  if (data.Quoted_Items.length === 0) return { data, normalized: false };
+
   const allIdOnly = data.Quoted_Items.every(isQuoteRowIdOnly);
   const someIdOnly = data.Quoted_Items.some(isQuoteRowIdOnly);
+
+  // Round-10 (b): all-id-only without snapshot → reject.
+  if (allIdOnly && !hasCurrentItems) {
+    return { error: 'keep_list_snapshot_unavailable' };
+  }
+
   if (allIdOnly) {
     const currentIds = new Set(preUpdateSnapshot.Quoted_Items.map(it => it.id).filter(Boolean));
     const keptIds = data.Quoted_Items.map(r => r.id);
@@ -1428,16 +1442,67 @@ t('Add-only payload (no ids, just Product_Name) → pass through unchanged', () 
   assert.equal(r.normalized, false);
 });
 
-t('Empty Quoted_Items array → pass through (not a keep-list)', () => {
+t('Empty Quoted_Items array with empty preState → pass through (degenerate, not rejected)', () => {
   const data = { Quoted_Items: [] };
-  const preSnap = { Quoted_Items: [{ id: 'sub_1' }] };
+  const preSnap = { Quoted_Items: [] };
   const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.normalized, false);
+  assert.equal(r.error, undefined);
+});
+
+console.log('\n─── Round-10 edge guards: empty array + missing snapshot ───');
+
+t('Empty Quoted_Items + non-empty current → reject empty_quoted_items_rejected', () => {
+  // The model sent Quoted_Items: [] expecting Zoho to clear all line items.
+  // Zoho's additive PUT means [] is a no-op; reject pre-PUT.
+  const data = { Quoted_Items: [], Do_Not_Auto_Update_Prices: true };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }, { id: 'sub_3' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.error, 'empty_quoted_items_rejected');
+  assert.equal(r.current_count, 3, 'message must surface current item count');
+});
+
+t('All-id-only payload + missing snapshot → reject keep_list_snapshot_unavailable', () => {
+  // Cannot compute strict-subset diff without current rows. Without rejection,
+  // the id-only payload would reach Zoho as no-op AND be hard to detect post-hoc
+  // because verification has no pre/post rows to fingerprint against.
+  const data = {
+    Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }],
+    Do_Not_Auto_Update_Prices: true,
+  };
+  const r = normalizeKeepList(data, null);
+  assert.equal(r.error, 'keep_list_snapshot_unavailable');
+});
+
+t('All-id-only + snapshot has empty Quoted_Items → reject keep_list_snapshot_unavailable', () => {
+  // Same logic: snapshot exists but has no current rows to diff against.
+  const data = { Quoted_Items: [{ id: 'sub_1' }] };
+  const preSnap = { Quoted_Items: [] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.error, 'keep_list_snapshot_unavailable');
+});
+
+t('Explicit _delete:null payload + missing snapshot → still passes through (not id-only)', () => {
+  // Explicit deletes are unambiguous. They don't need a snapshot to interpret.
+  const data = { Quoted_Items: [{ id: 'sub_1', _delete: null }] };
+  const r = normalizeKeepList(data, null);
+  assert.equal(r.error, undefined);
   assert.equal(r.normalized, false);
 });
 
-t('No preUpdateSnapshot → no normalization (defensive)', () => {
-  const data = { Quoted_Items: [{ id: 'sub_1' }] };
+t('Explicit add payload + missing snapshot → passes through', () => {
+  // Pure adds (no ids) are unambiguous and don't depend on current state.
+  const data = { Quoted_Items: [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 50 }] };
   const r = normalizeKeepList(data, null);
+  assert.equal(r.error, undefined);
+  assert.equal(r.normalized, false);
+});
+
+t('Empty Quoted_Items + missing snapshot → degenerate, not rejected (degenerate case)', () => {
+  // No snapshot, empty payload — nothing to do, nothing to reject.
+  const data = { Quoted_Items: [] };
+  const r = normalizeKeepList(data, null);
+  assert.equal(r.error, undefined);
   assert.equal(r.normalized, false);
 });
 

@@ -5849,7 +5849,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.warn(`[GCHAT] Pre-update snapshot failed for ${module_name}/${record_id}:`, snapErr.message);
         }
 
-        // ── 2026-04-24 Codex round-9: omission-style delete normalizer ────────
+        // ── 2026-04-24 Codex round-9 + round-10: omission-style delete normalizer ──
         // Detect "id-only keep-list" payloads where the model sends
         // data.Quoted_Items containing only id-fields for the rows it wants to
         // KEEP. Zoho's PUT semantics on Quoted_Items are additive, NOT
@@ -5858,18 +5858,39 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // showed Llama send a hardware-only keep-list with no _delete markers,
         // expecting the licenses to be removed.
         //
-        // This normalizer runs BEFORE the PUT and converts strict-subset
-        // keep-lists to explicit {id, _delete: null} ops for the omitted
-        // current ids. Mixed id-only + explicit shapes are rejected as
-        // ambiguous. Unknown ids are rejected. All-current keep-lists are
-        // rejected as no-op intent (model bug).
+        // This normalizer runs BEFORE the PUT and either:
+        //   - Auto-converts unambiguous strict-subset keep-lists to explicit
+        //     {id, _delete: null} ops for the omitted current ids; OR
+        //   - Rejects with a specific error code (KEEP_LIST_NO_OP /
+        //     KEEP_LIST_UNKNOWN_IDS / KEEP_LIST_DUPLICATE_IDS /
+        //     KEEP_LIST_SNAPSHOT_UNAVAILABLE / MIXED_ID_ONLY_PAYLOAD /
+        //     EMPTY_QUOTED_ITEMS_REJECTED).
+        //
+        // Round-10 additions: also reject (a) all-id-only without a usable
+        // current-row snapshot — can't safely diff, would otherwise reach
+        // Zoho as no-op and falsely look applied; (b) empty Quoted_Items
+        // with current rows present — Zoho's additive PUT means an empty
+        // array does NOT delete anything; the model must be explicit.
         let keepListNormalization = null;
-        if (module_name === 'Quotes'
-            && Array.isArray(data.Quoted_Items)
-            && data.Quoted_Items.length > 0
-            && preUpdateSnapshot
+        if (module_name === 'Quotes' && Array.isArray(data.Quoted_Items)) {
+          const hasCurrentItems = preUpdateSnapshot
             && Array.isArray(preUpdateSnapshot.Quoted_Items)
-            && preUpdateSnapshot.Quoted_Items.length > 0) {
+            && preUpdateSnapshot.Quoted_Items.length > 0;
+
+          // Round-10 (a): empty Quoted_Items + non-empty current → reject.
+          // The model intended to "clear" the items by sending [], but Zoho's
+          // additive semantics make this a no-op.
+          if (data.Quoted_Items.length === 0 && hasCurrentItems) {
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'empty_quoted_items_rejected',
+              message: `EMPTY_QUOTED_ITEMS_REJECTED: An empty Quoted_Items array does NOT delete or replace existing rows on Quote ${record_id} — Zoho's PUT semantics on Quoted_Items are additive, so an empty array is a server-side no-op. The Quote currently has ${preUpdateSnapshot.Quoted_Items.length} line item(s). Every intended delete must be explicit: send {id: "<row_id>", _delete: null} for each row to remove.`,
+            };
+          }
+
+          // No further normalization needed for empty arrays without current items.
+          if (data.Quoted_Items.length > 0) {
           const isQuoteRowIdOnly = (row) => {
             if (!row || typeof row !== 'object' || !row.id) return false;
             // Any of these keys present (including _delete: null) means the
@@ -5882,6 +5903,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           };
           const allIdOnly = data.Quoted_Items.every(isQuoteRowIdOnly);
           const someIdOnly = data.Quoted_Items.some(isQuoteRowIdOnly);
+
+          // Round-10 (b): all-id-only without a current-row snapshot → reject.
+          // Without preUpdateSnapshot.Quoted_Items we cannot compute a strict-
+          // subset diff, and the id-only rows would reach Zoho as no-ops while
+          // looking superficially "applied" (no per-item failure markers).
+          if (allIdOnly && !hasCurrentItems) {
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'keep_list_snapshot_unavailable',
+              message: `KEEP_LIST_SNAPSHOT_UNAVAILABLE: Cannot safely interpret an id-only Quoted_Items keep-list without current Quote subform rows for diff (preUpdateSnapshot missing or has no Quoted_Items). Re-fetch the Quote via zoho_get_record on Quotes/${record_id} so the server can compute a strict-subset diff, OR use explicit {id: "<row_id>", _delete: null} markers for the rows you actually want to remove.`,
+            };
+          }
+
           if (allIdOnly) {
             const currentIds = new Set((preUpdateSnapshot.Quoted_Items || []).map(it => it.id).filter(Boolean));
             const keptIds = data.Quoted_Items.map(r => r.id);
@@ -5936,6 +5971,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
           // else: all rows have explicit ops (delete/modify/add) — pass through unchanged.
+          } // end "if (data.Quoted_Items.length > 0)"
         }
 
         const updateStart = Date.now();
@@ -9167,7 +9203,7 @@ Updates are ADDITIVE — Zoho ADDS items, does NOT replace.
 - MODIFY items: include with existing "id" + changed fields
 - REPLACE (e.g., swap license): DELETE old + ADD new in SAME update
 
-⚠️ **ANTI-PATTERN — OMISSION-STYLE DELETE NEVER WORKS.** Sending a Quoted_Items array containing ONLY the ids of items you want to KEEP (with no `_delete: null` markers and no other fields) does NOT delete the omitted rows. Zoho leaves them alone. The server has a guard that will REJECT any all-id-only Quoted_Items payload that's a strict subset of current rows — it will either auto-convert to explicit `_delete` ops (if unambiguous) or refuse with `KEEP_LIST_NO_OP`/`KEEP_LIST_UNKNOWN_IDS`/`MIXED_ID_ONLY_PAYLOAD`. To remove rows, ALWAYS send `{id: "<row_id>", _delete: null}` for each row to remove.
+⚠️ **ANTI-PATTERN — OMISSION-STYLE DELETE NEVER WORKS.** Sending a Quoted_Items array containing ONLY the ids of items you want to KEEP (with no `_delete: null` markers and no other fields) does NOT delete the omitted rows. Zoho leaves them alone. The server has a guard that handles all-id-only payloads: it will **auto-convert unambiguous strict subsets** to explicit `_delete: null` ops, **otherwise reject** with one of `KEEP_LIST_NO_OP` (all-current keep-list, no actual removal) / `KEEP_LIST_UNKNOWN_IDS` (id not on the Quote) / `KEEP_LIST_DUPLICATE_IDS` / `KEEP_LIST_SNAPSHOT_UNAVAILABLE` (cannot diff without current rows — re-fetch the Quote first) / `MIXED_ID_ONLY_PAYLOAD` (ambiguous mix of id-only + explicit ops) / `EMPTY_QUOTED_ITEMS_REJECTED` (empty array does not delete anything). To remove rows, ALWAYS send `{id: "<row_id>", _delete: null}` for each row to remove.
 
   Example WRONG (will be auto-corrected or rejected):
   Quoted_Items: [
