@@ -8,6 +8,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { sendToBackground, onMessage } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
+import {
+  parseZohoRecordUrl,
+  contextMatchesUrl,
+  minimalContextFromUrl,
+} from '../../lib/zoho-url.js';
 // Quote generation routed through worker API (same engine as Webex/GChat bots)
 
 // ─────────────────────────────────────────────
@@ -147,13 +152,25 @@ function buildParticipantOptions(emailContext) {
 // ─────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────
-export default function ChatPanel({ emailContext, navData, messages, onMessagesChange }) {
+export default function ChatPanel({
+  emailContext,
+  navData,
+  messages,
+  onMessagesChange,
+  // Active Zoho page context — lifted into App.jsx so the header pill and
+  // the chat panel share a single source of truth. URL-validated there.
+  zohoPageContext: zohoPageContextProp,
+}) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selectedContextEmail, setSelectedContextEmail] = useState(null);
   const [contextDropdownOpen, setContextDropdownOpen] = useState(false);
-  const [zohoPageContext, setZohoPageContext] = useState(null);
+  // Local fallback state for cases where the panel is rendered without the
+  // prop wired (e.g. legacy entry points). Primary reader is the computed
+  // `zohoPageContext` below.
+  const [zohoPageContextLocal, setZohoPageContextLocal] = useState(null);
+  const zohoPageContext = zohoPageContextProp ?? zohoPageContextLocal;
   // Manually-pinned CRM record from search (overrides zohoPageContext when set)
   // Shape: { module, recordId, recordName, accountName, email }
   const [manualRecord, setManualRecord] = useState(null);
@@ -183,66 +200,62 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     setSelectedContextEmail(null);
   }, [emailContext?.customerEmail, emailContext?.subject]);
 
-  // Pull current page context (Zoho record, if any) on mount and when user returns to chat tab.
+  // Legacy fallback: when the parent did not pass zohoPageContext via props
+  // (older embedding, tests, etc.) we still refresh locally. When the prop
+  // IS wired (default path), this effect is a no-op.
   //
-  // Two-path read strategy:
-  //   1. Try sendToBackground(GET_PAGE_CONTEXT) — fast if the service worker is alive.
-  //   2. If the message fails OR returns nothing, fall back to chrome.storage.local directly.
-  //      Content scripts write zohoPageContext straight to storage now (MV3-safe), so the
-  //      value is always there even when the background worker has gone idle.
+  // URL is authoritative: we only trust cached/stored context when its
+  // recordId + module match the active tab URL.
   useEffect(() => {
+    if (zohoPageContextProp !== undefined && zohoPageContextProp !== null) return;
     let cancelled = false;
     async function refreshPageCtx() {
-      let zohoCtx = null;
-
-      // Gate everything on the active tab actually being a Zoho record page.
-      // Without this check, a stale zohoPageContext left in chrome.storage.local
-      // from a previously-open Zoho tab would leak into Gmail / other pages as
-      // "the record the user is currently viewing".
-      let onZoho = false;
+      let activeUrl = '';
       try {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        onZoho = (activeTab?.url || '').startsWith('https://crm.zoho.com/');
-      } catch (_) { /* no tabs permission or query failed — treat as not-on-zoho */ }
+        activeUrl = activeTab?.url || '';
+      } catch (_) { /* ignore */ }
 
-      if (!onZoho) {
-        if (cancelled) return;
-        setZohoPageContext(null);
+      const urlInfo = parseZohoRecordUrl(activeUrl);
+      if (!urlInfo?.isRecord) {
+        if (!cancelled) setZohoPageContextLocal(null);
         return;
       }
 
-      // Path 1: background message (best-effort — worker may be sleeping)
+      // Path 1: background message.
+      let zohoCtx = null;
       try {
         const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT, {});
-        if (!cancelled && ctx?.zohoContext?.recordId) {
+        if (contextMatchesUrl(ctx?.zohoContext, urlInfo)) {
           zohoCtx = ctx.zohoContext;
         }
       } catch (err) {
         console.warn('[Stratus Chat] GET_PAGE_CONTEXT via background failed:', err?.message);
       }
 
-      // Path 2: read chrome.storage.local directly (always available in MV3 content/sidebar)
+      // Path 2: direct storage read with matching validation.
       if (!zohoCtx) {
         try {
           const stored = await chrome.storage.local.get('zohoPageContext');
-          if (stored?.zohoPageContext?.recordId) {
+          if (contextMatchesUrl(stored?.zohoPageContext, urlInfo)) {
             zohoCtx = stored.zohoPageContext;
-            console.log('[Stratus Chat] Zoho context recovered from storage directly:', zohoCtx);
           }
-        } catch (err) {
-          console.warn('[Stratus Chat] chrome.storage.local read failed:', err?.message);
-        }
+        } catch (_) { /* ignore */ }
       }
 
+      // Path 3: URL-derived minimal context (always beats null when on a
+      // record page, so the chat header shows the right id even before
+      // DOM enrichment finishes).
+      if (!zohoCtx) zohoCtx = minimalContextFromUrl(urlInfo);
+
       if (cancelled) return;
-      setZohoPageContext(zohoCtx || null);
+      setZohoPageContextLocal(zohoCtx);
     }
 
     refreshPageCtx();
-    // Poll every 2s while the panel is open to catch navigation within Zoho
     const interval = setInterval(refreshPageCtx, 2000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, []);
+  }, [zohoPageContextProp]);
 
   // Build a context hint string for "this quote"-style references
   function buildZohoPageContextHint(ctx) {
@@ -314,11 +327,6 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
     const thisAbort = abortRef.current;
 
     try {
-      // NOTE: URL quote intercept removed in v1.11.7.
-      // Chat tab is now Zoho-only — every quote request routes through the
-      // Claude/Zoho handoff below so it picks up the pinned account or the
-      // active Zoho page record. URL quotes live in the Quote tab.
-
       const historyForApi = (messages || []).slice(-10).map(m => ({
         role: m.role,
         content: m.content,
@@ -331,77 +339,187 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
           ? { ...emailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
           : emailContext || null;
 
-      // Inject active Zoho page context so "this quote", "this deal", "modify this",
-      // etc. resolve to whatever record the user is currently viewing in Zoho CRM.
-      // The hint is prepended to the user message so the LLM sees it as part of
-      // the query context — not injected into system prompt (which Claude flags as
-      // prompt injection when it looks like capability claims).
-      // Priority: manually-pinned record > auto-detected Zoho page context.
+      // ── Resolve the ACTIVE Zoho record from the active tab URL ─────────
       //
-      // Force a synchronous re-read of chrome.storage.local before building the
-      // hint so we capture the latest detected record even if the 2s poll in the
-      // mount effect hasn't cycled yet (first-message race fix, v1.11.7).
-      let freshZohoCtx = zohoPageContext;
-      if (!manualRecord) {
-        try {
-          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          const onZoho = (activeTab?.url || '').startsWith('https://crm.zoho.com/');
-          if (onZoho) {
-            const stored = await chrome.storage.local.get('zohoPageContext');
-            if (stored?.zohoPageContext?.recordId) {
-              freshZohoCtx = stored.zohoPageContext;
-              // Sync state so the context bar label updates too
-              if (!zohoPageContext || zohoPageContext.recordId !== freshZohoCtx.recordId) {
-                setZohoPageContext(freshZohoCtx);
-              }
-            }
+      // The URL is authoritative for "what record is the user currently
+      // viewing". We re-read it synchronously here so a message sent
+      // immediately after SPA navigation targets the NEW record, not
+      // whatever is cached in state from 2 seconds ago.
+      let activeZohoRecord = null;
+      let activeUrlInfo = null;
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const activeUrl = activeTab?.url || '';
+        activeUrlInfo = parseZohoRecordUrl(activeUrl);
+        if (activeUrlInfo?.isRecord) {
+          // Prefer the enriched state if it matches the URL; else fall
+          // back to storage (matching only); else the URL-only minimal.
+          if (contextMatchesUrl(zohoPageContext, activeUrlInfo)) {
+            activeZohoRecord = zohoPageContext;
           } else {
-            // Tab isn't on Zoho — don't leak stale context into Gmail/other pages
-            freshZohoCtx = null;
+            try {
+              const stored = await chrome.storage.local.get('zohoPageContext');
+              if (contextMatchesUrl(stored?.zohoPageContext, activeUrlInfo)) {
+                activeZohoRecord = stored.zohoPageContext;
+              }
+            } catch (_) { /* ignore */ }
+            if (!activeZohoRecord) {
+              activeZohoRecord = minimalContextFromUrl(activeUrlInfo);
+            }
           }
-        } catch (err) {
-          console.warn('[Stratus Chat] Pre-send page context refresh failed:', err?.message);
         }
+      } catch (err) {
+        console.warn('[Stratus Chat] Pre-send page context refresh failed:', err?.message);
       }
 
+      // ── Priority rules for which record the LLM targets ───────────────
+      //
+      // The user can pin an Account (or any record) via the search flow.
+      // Previously `activeRecord = manualRecord || freshZohoCtx`, which
+      // meant a pinned Account would HIDE the active Quote the user was
+      // looking at. That caused Codex's live repro:
+      //
+      //   User on Quote 2570562000402426396, pinned Account TestCo Stress
+      //   Eval LLC. Asked "what quote am I viewing?" Bot answered:
+      //   "You're currently viewing Account 'TestCo Stress Eval LLC'...
+      //    but no specific quote is open." — wrong.
+      //
+      // New rules:
+      //   - If the user is ACTIVELY on a non-Account record (Quote/Deal/
+      //     Contact/SalesOrder/Invoice/Task), the active record is the
+      //     primary target for deictic commands like "this quote".
+      //     A pinned Account becomes SUPPLEMENTAL context (account for
+      //     creation, account for lookup) but never hides the active
+      //     record.
+      //   - If there's no active record page, the pinned record becomes
+      //     the primary target.
+      //   - If the user pinned a non-Account record, that wins over any
+      //     conflicting active page (explicit > implicit).
+      //
+      // ────────────────────────────────────────────────────────────────
+      const pinnedIsAccount =
+        !!manualRecord && manualRecord.module === 'Accounts';
+      const activeIsNonAccountRecord =
+        !!activeZohoRecord
+        && activeZohoRecord.page === 'record'
+        && activeZohoRecord.module
+        && activeZohoRecord.module !== 'Accounts';
+
+      let primaryRecord = null;
+      let supplementalAccount = null; // pinned Account alongside a non-Account active record
+
+      if (manualRecord && !pinnedIsAccount) {
+        // Pinned a Quote/Deal/Contact explicitly — that's the user's choice.
+        primaryRecord = manualRecord;
+      } else if (activeIsNonAccountRecord) {
+        // Active page is a Quote/Deal/Contact — never let a pinned Account
+        // override it for deictic commands.
+        primaryRecord = activeZohoRecord;
+        if (pinnedIsAccount) supplementalAccount = manualRecord;
+      } else if (manualRecord) {
+        // Pinned Account and no active non-Account record → Account is primary.
+        primaryRecord = manualRecord;
+      } else if (activeZohoRecord) {
+        primaryRecord = activeZohoRecord;
+      }
+
+      // ── Build the natural-language context hint ──────────────────────
       let textToSend = messageText;
-      const activeRecord = manualRecord || freshZohoCtx;
-      const zohoHint = buildZohoPageContextHint(activeRecord);
-      if (zohoHint) {
-        const source = manualRecord ? 'pinned by user' : 'currently viewing';
-        textToSend = `${zohoHint}\n(Source: ${source})\n\nUser message: ${messageText}`;
+      const primaryHint = buildZohoPageContextHint(primaryRecord);
+      let sourceLabel = null;
+      if (primaryRecord) {
+        if (primaryRecord === activeZohoRecord) sourceLabel = 'currently viewing';
+        else if (primaryRecord === manualRecord) sourceLabel = 'pinned by user';
+        else sourceLabel = 'context';
       }
 
-      // ── Structured context flags passed to the worker ──
+      if (primaryHint) {
+        let hint = primaryHint;
+        if (supplementalAccount) {
+          const accLine = `Pinned Account (supplemental, NOT the primary record): ${supplementalAccount.recordName || supplementalAccount.recordId} (id: ${supplementalAccount.recordId}). Use this account only for lookups or new-record parentage; deictic commands like "this quote" still refer to the primary record above.`;
+          hint = `${hint}\n\n${accLine}`;
+        }
+        textToSend = `${hint}\n(Source: ${sourceLabel})\n\nUser message: ${messageText}`;
+      } else if (supplementalAccount) {
+        // No primary record, but a pinned account is useful context too.
+        const accHint = buildZohoPageContextHint(supplementalAccount);
+        if (accHint) textToSend = `${accHint}\n(Source: pinned by user)\n\nUser message: ${messageText}`;
+      }
+
+      // ── Fail-closed guard ─────────────────────────────────────────────
+      //
+      // If the active tab URL is a record page AND the outgoing hint does
+      // not mention that record id, something went wrong (primary was
+      // overridden or resolution failed). Abort rather than send a
+      // request that might target a stale/wrong record.
+      if (activeUrlInfo?.isRecord
+          && !textToSend.includes(activeUrlInfo.recordId)
+          // Only enforce when no user-pinned non-Account record is the
+          // explicit winner — the user can deliberately target a
+          // different record by pinning it.
+          && !(manualRecord && !pinnedIsAccount)) {
+        setError(
+          `Active Zoho page (${activeUrlInfo.module} ${activeUrlInfo.recordId}) did not reach the outgoing request. Refusing to send to avoid targeting a stale record. Please retry — the extension will re-read the active page.`
+        );
+        return;
+      }
+
+      // ── Structured context flags passed to the worker ─────────────────
+      //
       // `source: 'chat-tab'` tells /api/chat-waterfall to SKIP the Tier 0
       // deterministic engine pre-check — URL quotes live in the Quote tab,
       // Chat tab quote requests always go through Zoho.
-      // `pinnedAccount` gives the worker a resolved Account id so it skips the
-      // 4-tier account waterfall entirely and uses the user's manual pick.
-      const pinnedAccount = (() => {
-        if (!activeRecord) return null;
-        // Accounts: the record IS the account
-        if (activeRecord.module === 'Accounts') {
-          return { id: activeRecord.recordId, name: activeRecord.recordName || activeRecord.accountName, module: 'Accounts' };
-        }
-        // Contacts/Deals/Quotes: use the parent account if we captured it
-        if (activeRecord.accountId) {
-          return { id: activeRecord.accountId, name: activeRecord.accountName || null, module: activeRecord.module };
-        }
-        return null;
+      //
+      // `pinnedAccount` — resolved Account id (skips the 4-tier account
+      // waterfall on the worker side).
+      //
+      // `activeZohoRecord` — structured representation of the primary
+      // record so the worker doesn't have to parse natural language to
+      // know which record to target. Includes a `source` tag so the
+      // worker can tell whether the user is looking at it ('active-tab')
+      // vs. explicitly pinned it ('pinned').
+      const pinnedAccountPayload = (() => {
+        // If a pinned Account is supplemental, send it as pinnedAccount
+        // even though it's not the primary record.
+        const acct = pinnedIsAccount
+          ? manualRecord
+          : (primaryRecord && primaryRecord.module === 'Accounts'
+              ? primaryRecord
+              : (primaryRecord && primaryRecord.accountId
+                  ? { id: primaryRecord.accountId, name: primaryRecord.accountName, module: primaryRecord.module }
+                  : null));
+        if (!acct) return null;
+        if (acct.id) return acct; // already in {id, name} shape (from above branch)
+        return {
+          id: acct.recordId,
+          name: acct.recordName || acct.accountName || null,
+          module: 'Accounts',
+        };
+      })();
+
+      const activeRecordPayload = (() => {
+        if (!primaryRecord || !primaryRecord.recordId) return null;
+        const explicitlyPinned = primaryRecord === manualRecord;
+        return {
+          module: primaryRecord.module,
+          recordId: primaryRecord.recordId,
+          recordName: primaryRecord.recordName || null,
+          accountId: primaryRecord.accountId || null,
+          accountName: primaryRecord.accountName || null,
+          email: primaryRecord.email || null,
+          url: primaryRecord.url || null,
+          source: explicitlyPinned ? 'pinned' : 'active-tab',
+        };
       })();
 
       effectiveContext = {
         ...(effectiveContext || {}),
         source: 'chat-tab',
-        ...(pinnedAccount ? { pinnedAccount } : {}),
+        ...(pinnedAccountPayload ? { pinnedAccount: pinnedAccountPayload } : {}),
+        ...(activeRecordPayload ? { activeZohoRecord: activeRecordPayload } : {}),
       };
 
-      // ── Progress tracking ────────────────────────────────────────────────
-      // Generate a short id, send it with the chat request, and poll the
-      // gateway every second to render "🔍 Searching Zoho Accounts..." style
-      // step messages as tools fire. KV-backed; zero added latency on the
-      // chat call itself (writes are fire-and-forget on the server).
+      // ── Progress tracking ────────────────────────────────────────────
       const progressId = `p_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
       setProgressSteps([]);
 
@@ -472,7 +590,7 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
         setTimeout(() => setProgressSteps([]), 1500);
       }
     }
-  }, [input, loading, messages, emailContext, onMessagesChange, zohoPageContext, manualRecord, selectedContextEmail]);
+  }, [input, loading, messages, emailContext, onMessagesChange, zohoPageContext, manualRecord, selectedContextEmail, participantOptions]);
 
   // ── Manual CRM search (inside context dropdown) ──
   const handleCrmSearch = useCallback(async () => {
@@ -708,13 +826,27 @@ export default function ChatPanel({ emailContext, navData, messages, onMessagesC
             </span>
             <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
               {(() => {
-                if (manualRecord) {
-                  const modLabel = ({Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact'}[manualRecord.module] || manualRecord.module);
-                  return `${modLabel}: ${manualRecord.recordName || manualRecord.recordId}`;
+                const MOD = {Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact',Tasks:'Task',SalesOrders:'Sales Order',Invoices:'Invoice'};
+                const active = (zohoPageContext && zohoPageContext.recordId) ? zohoPageContext : null;
+                const pinnedAccount = manualRecord && manualRecord.module === 'Accounts' ? manualRecord : null;
+                const pinnedOther = manualRecord && manualRecord.module !== 'Accounts' ? manualRecord : null;
+                // User explicitly pinned a non-Account record — that wins.
+                if (pinnedOther) {
+                  const m = MOD[pinnedOther.module] || pinnedOther.module;
+                  return `${m}: ${pinnedOther.recordName || pinnedOther.recordId}`;
                 }
-                if (zohoPageContext && zohoPageContext.recordId) {
-                  const modLabel = ({Quotes:'Quote',Potentials:'Deal',Deals:'Deal',Accounts:'Account',Contacts:'Contact',Tasks:'Task',SalesOrders:'Sales Order',Invoices:'Invoice'}[zohoPageContext.module] || zohoPageContext.module);
-                  return `Viewing ${modLabel}: ${zohoPageContext.recordName || zohoPageContext.recordId}`;
+                // Active non-Account record + pinned Account supplement — show BOTH so the
+                // user never sees their active Quote get hidden by a pinned Account.
+                if (active && active.module !== 'Accounts' && pinnedAccount) {
+                  const m = MOD[active.module] || active.module;
+                  return `Viewing ${m}: ${active.recordName || active.recordId}  •  Pinned Acct: ${pinnedAccount.recordName || pinnedAccount.recordId}`;
+                }
+                if (active) {
+                  const m = MOD[active.module] || active.module;
+                  return `Viewing ${m}: ${active.recordName || active.recordId}`;
+                }
+                if (pinnedAccount) {
+                  return `Account: ${pinnedAccount.recordName || pinnedAccount.recordId}`;
                 }
                 if (activeContextEmail) {
                   return `Contact: ${activeContact?.name || activeContextEmail}`;
