@@ -795,6 +795,65 @@ function getLicenseSkus(baseSku, requestedTier) {
   return validated;
 }
 
+function collectQuotePreResolveSkuTokens(text) {
+  const preSkuTokens = [];
+  const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C8|C9|Z)\d[A-Z0-9-]*/gi;
+  let m;
+  while ((m = skuRegex.exec((text || '').toUpperCase())) !== null) {
+    preSkuTokens.push(m[0]);
+  }
+  // Also detect license SKUs directly mentioned.
+  const licRegex = /\bLIC-[A-Z0-9-]+/gi;
+  while ((m = licRegex.exec((text || '').toUpperCase())) !== null) {
+    preSkuTokens.push(m[0]);
+  }
+  return preSkuTokens;
+}
+
+function preResolveProductsForQuoteText(text) {
+  const preSkuTokens = collectQuotePreResolveSkuTokens(text);
+  const preResolved = {};
+  for (const raw of [...new Set(preSkuTokens)]) {
+    const suffixed = applySuffix(raw);
+    const cached = prices[suffixed] || prices[raw] || null;
+    if (!cached?.zoho_product_id) continue;
+
+    preResolved[raw] = {
+      suffixed_sku: suffixed,
+      product_id: cached.zoho_product_id,
+      list_price: cached.list || null,
+      ecomm_price: cached.price || null,
+      discount_per_unit: cached.discount_per_unit || 0,
+      product_active: true
+    };
+
+    // Also pre-resolve auto-added licenses so quote creation can skip the
+    // batch_product_lookup iteration entirely.
+    const licOptions = getLicenseSkus(raw);
+    if (licOptions?.length) {
+      for (const lic of licOptions) {
+        const licCached = prices[lic.sku] || null;
+        if (licCached?.zoho_product_id) {
+          preResolved[lic.sku] = {
+            suffixed_sku: lic.sku,
+            product_id: licCached.zoho_product_id,
+            list_price: licCached.list || null,
+            ecomm_price: licCached.price || null,
+            discount_per_unit: licCached.discount_per_unit || 0,
+            product_active: true
+          };
+        }
+      }
+    }
+  }
+
+  return preResolved;
+}
+
+function hasQuotePreResolveSkuToken(text) {
+  return collectQuotePreResolveSkuTokens(text).length > 0;
+}
+
 function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
@@ -6875,7 +6934,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term } = toolInput;
         let { lead_source } = toolInput;
         const results = { steps: [], errors: [], records: {} };
         const _startMs = Date.now();
@@ -7077,6 +7136,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             const before = lead_source;
             lead_source = 'Stratus Referal';
             if (before) results.steps.push(`Lead_Source "${before}" invalid — coerced to "Stratus Referal"`);
+          }
+          const VALID_BILLING_TERMS = ['Prepaid Term', 'Prepaid'];
+          let quoteBillingTerm = cisco_billing_term || 'Prepaid Term';
+          if (!VALID_BILLING_TERMS.includes(quoteBillingTerm)) {
+            const before = quoteBillingTerm;
+            quoteBillingTerm = 'Prepaid Term';
+            results.steps.push(`Cisco_Billing_Term "${before}" invalid - coerced to "Prepaid Term"`);
           }
           if (contactId) {
             results.records.contact = { id: contactId, url: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contactId}` };
@@ -7357,10 +7423,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Billing_Code: billingAddr.zip,
             Billing_Country: billingAddr.country,
             Shipping_Country: billingAddr.country || 'United States',
+            Cisco_Billing_Term: quoteBillingTerm,
             Owner: { id: '2570562000141711002' },
             Quoted_Items: quotedItems
           };
           if (contactId) quoteData.Contact_Name = { id: contactId };
+          results.steps.push(
+            cisco_billing_term
+              ? `Set Cisco_Billing_Term: ${quoteBillingTerm} (caller-supplied)`
+              : `Set Cisco_Billing_Term: Prepaid Term (default - no override supplied)`
+          );
 
           const quoteResult = await zohoApiCall('POST', 'Quotes', env, { data: [quoteData] });
           const quoteId = quoteResult?.data?.[0]?.details?.id;
@@ -7379,7 +7451,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let quoteVerifyFailed = false;
           let quoteVerifyError = null;
           try {
-            const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Quoted_Items`, env);
+            const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Cisco_Billing_Term,Quoted_Items`, env);
             const fq = fetchedQuote?.data?.[0];
             if (fq?.id) {
               quoteVerification = {
@@ -7387,6 +7459,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 Grand_Total: fq.Grand_Total,
                 Sub_Total: fq.Sub_Total,
                 Quote_Stage: fq.Quote_Stage,
+                Cisco_Billing_Term: fq.Cisco_Billing_Term,
                 item_count: fq.Quoted_Items?.length || 0,
                 items: (fq.Quoted_Items || []).map(item => ({
                   product: item.Product_Name?.name || item.product?.name || 'Unknown',
@@ -8993,6 +9066,7 @@ const CRM_EMAIL_TOOLS = [
         },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
+        cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
         billing_address: {
           type: 'object',
           description: 'Billing address (optional — looked up from Account if omitted)',
@@ -15291,6 +15365,19 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               // URL quoting lives in the dedicated Quote tab instead.
               let deterministicResult = null;
               const skipDeterministic = wSource === 'chat-tab' || (wEc && wEc.source === 'chat-tab');
+              const shouldPreResolveWaterfallProducts = /\b(quote|create.*quote|quote.*for)\b/i.test(wText)
+                || (skipDeterministic && hasQuotePreResolveSkuToken(wText));
+              if (shouldPreResolveWaterfallProducts) {
+                try {
+                  const preResolved = preResolveProductsForQuoteText(wText);
+                  if (Object.keys(preResolved).length > 0) {
+                    wEnrichedMessage += `\n\n[Pre-resolved products: ${JSON.stringify(preResolved)}]`;
+                    console.log(`[API/chat-waterfall] Pre-resolved ${Object.keys(preResolved).length} products from cache`);
+                  }
+                } catch (preResolveErr) {
+                  console.log(`[API/chat-waterfall] Product pre-resolution skipped: ${preResolveErr.message}`);
+                }
+              }
               if (!forceModel && !skipDeterministic) {
                 try {
                   const classification = await classifyWithCF(wText, env);
@@ -15330,11 +15417,15 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 // detect in-prompt "confirm:true" phrases for destructive ops
                 // and auto-inject consent when Llama fails to propagate it.
                 env.__USER_PROMPT_RAW = wText || '';
+                const forceClaudeForChatWrite = !forceModel && skipDeterministic && shouldForceClaudeForWrite(wText);
+                if (forceClaudeForChatWrite) {
+                  console.log(`[WATERFALL] Forcing Claude for chat-tab write intent`);
+                }
                 // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
                   forceLlama: forceModel === 'llama',
                   forceGemma: forceModel === 'gemma',
-                  forceClaude: forceModel === 'claude',
+                  forceClaude: forceModel === 'claude' || forceClaudeForChatWrite,
                   dryRun: wDryRun === true
                 });
                 env.__USER_PROMPT_RAW = null;
@@ -15599,54 +15690,14 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               // If this looks like a quote creation request, pre-resolve product IDs from cache
               // so Claude can skip the batch_product_lookup iteration entirely (~3-5s saved).
               if (useTools && /\b(quote|create.*quote|quote.*for)\b/i.test(chatText)) {
-                const preSkuTokens = [];
-                const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C9|Z)\d[A-Z0-9-]*/gi;
-                let m;
-                while ((m = skuRegex.exec(chatText.toUpperCase())) !== null) {
-                  preSkuTokens.push(m[0]);
-                }
-                // Also detect license SKUs directly mentioned
-                const licRegex = /\bLIC-[A-Z0-9-]+/gi;
-                while ((m = licRegex.exec(chatText.toUpperCase())) !== null) {
-                  preSkuTokens.push(m[0]);
-                }
-                if (preSkuTokens.length > 0) {
-                  const preResolved = {};
-                  for (const raw of [...new Set(preSkuTokens)]) {
-                    const suffixed = applySuffix(raw);
-                    const cached = prices[suffixed] || prices[raw] || null;
-                    if (cached?.zoho_product_id) {
-                      preResolved[raw] = {
-                        suffixed_sku: suffixed,
-                        product_id: cached.zoho_product_id,
-                        list_price: cached.list || null,
-                        ecomm_price: cached.price || null,
-                        discount_per_unit: cached.discount_per_unit || 0,
-                        product_active: true
-                      };
-                      // Also pre-resolve licenses
-                      const licOptions = getLicenseSkus(raw);
-                      if (licOptions?.length) {
-                        for (const lic of licOptions) {
-                          const licCached = prices[lic.sku] || null;
-                          if (licCached?.zoho_product_id) {
-                            preResolved[lic.sku] = {
-                              suffixed_sku: lic.sku,
-                              product_id: licCached.zoho_product_id,
-                              list_price: licCached.list || null,
-                              ecomm_price: licCached.price || null,
-                              discount_per_unit: licCached.discount_per_unit || 0,
-                              product_active: true
-                            };
-                          }
-                        }
-                      }
-                    }
-                  }
+                try {
+                  const preResolved = preResolveProductsForQuoteText(chatText);
                   if (Object.keys(preResolved).length > 0) {
                     enrichedMessage += `\n\n[Pre-resolved products: ${JSON.stringify(preResolved)}]`;
                     console.log(`[API/chat] Pre-resolved ${Object.keys(preResolved).length} products from cache`);
                   }
+                } catch (preResolveErr) {
+                  console.log(`[API/chat] Product pre-resolution skipped: ${preResolveErr.message}`);
                 }
               }
 
