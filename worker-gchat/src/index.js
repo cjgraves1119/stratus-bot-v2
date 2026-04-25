@@ -6206,8 +6206,37 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 requestedAdds = requested.filter(r => r.add);
                 const actualItemIds = new Set(actualItems.map(i => i.id));
                 const actualItemsById = new Map(actualItems.map(i => [i.id, i]));
-                deletesApplied = [...requestedDeleteIds].filter(id => !actualItemIds.has(id));
-                deletesFailed = [...requestedDeleteIds].filter(id => actualItemIds.has(id));
+                // Codex round-12 P0-2: a delete is only "applied" if the
+                // requested id existed in preUpdateSnapshot AND is gone from
+                // post-state. If the id was never in preState (stale/bad
+                // subform id), Zoho ignores it and post-state also lacks it,
+                // so the OLD logic claimed success. Track three buckets:
+                //   - applied: in pre, gone from post → real delete
+                //   - failed (still present): in pre, still in post → Zoho refused
+                //   - failed (never existed): not in pre, also not in post → bad id
+                const preItemIdSet = new Set(
+                  (preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items))
+                    ? preUpdateSnapshot.Quoted_Items.map(it => it.id).filter(Boolean)
+                    : []
+                );
+                const preSnapshotUsable = preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items);
+                deletesApplied = [];
+                deletesFailed = [];
+                let deletesNeverExisted = [];
+                let deletesUnverifiable = [];
+                for (const id of requestedDeleteIds) {
+                  if (!preSnapshotUsable) {
+                    deletesUnverifiable.push(id);
+                    continue;
+                  }
+                  if (!preItemIdSet.has(id)) {
+                    deletesNeverExisted.push(id);
+                  } else if (!actualItemIds.has(id)) {
+                    deletesApplied.push(id);
+                  } else {
+                    deletesFailed.push(id);
+                  }
+                }
 
                 // Modification check — now covers Quantity, Discount, List_Price,
                 // Description, and Product_Name (id) changes.
@@ -6264,10 +6293,23 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 // the requested product_id AND matching qty/discount (tolerant)
                 // exists that wasn't there pre-update. Uses multiset to handle
                 // duplicates.
-                const preIdSet = new Set((preUpdateSnapshot?.Quoted_Items || []).map(it => it.id).filter(Boolean));
-                const newlyAddedActual = actualItems.filter(it => !preIdSet.has(it.id));
+                // Codex round-12 P0-3: WITHOUT a usable preUpdateSnapshot we
+                // CANNOT compute newly-added rows safely — an existing matching
+                // row would falsely satisfy a dropped add. Fail closed.
+                const preIdSetForAdds = new Set((preUpdateSnapshot?.Quoted_Items || []).map(it => it.id).filter(Boolean));
+                const preSnapshotUsableForAdds = preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items);
+                const newlyAddedActual = preSnapshotUsableForAdds
+                  ? actualItems.filter(it => !preIdSetForAdds.has(it.id))
+                  : [];
                 const newlyAddedAvail = [...newlyAddedActual]; // consumed as we match adds
                 addResults = requestedAdds.map(r => {
+                  if (!preSnapshotUsableForAdds) {
+                    return {
+                      applied: false,
+                      requested_product_id: String(r.requested_product_id || ''),
+                      reason: 'add_unverifiable_no_pre_snapshot',
+                    };
+                  }
                   // Find a newly-added actual item matching product_id (+ qty/disc tolerance)
                   const wantPid = String(r.requested_product_id || '');
                   const wantQ = r.requested_quantity !== undefined ? Number(r.requested_quantity) : null;
@@ -6337,6 +6379,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const warnings = [];
               if (deletesFailed.length > 0) {
                 warnings.push(`DELETE FAILED: ${deletesFailed.length} line item(s) were NOT removed despite API SUCCESS. IDs still present: ${deletesFailed.join(', ')}.`);
+              }
+              // Codex round-12 P0-2: bad/stale ids that were never on the Quote.
+              if (deletesNeverExisted && deletesNeverExisted.length > 0) {
+                warnings.push(`DELETE_ID_NEVER_EXISTED: ${deletesNeverExisted.length} requested delete id(s) were NOT in the Quote pre-update — Zoho ignored them and the apparent post-state absence is meaningless. Bad/stale subform ids: ${deletesNeverExisted.join(', ')}. Re-fetch the Quote (zoho_get_record) for current subform ids before retrying.`);
+              }
+              if (deletesUnverifiable && deletesUnverifiable.length > 0) {
+                warnings.push(`DELETE_UNVERIFIABLE_NO_PRE_SNAPSHOT: ${deletesUnverifiable.length} requested delete id(s) cannot be verified because the pre-update snapshot was unavailable. IDs: ${deletesUnverifiable.join(', ')}. Treat as failed — re-fetch the Quote and retry only the deletes whose ids are confirmed present.`);
               }
               if (modificationsFailed.length > 0) {
                 const details = modificationsFailed.map(m => {
@@ -6430,16 +6479,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               // the user intended a change (data[k] !== pre[k]) but post[k]
               // equals pre[k], Zoho silently dropped that field.
               if (preUpdateSnapshot) {
+                // Codex round-12 P1: compare post-state to REQUESTED value, not
+                // just "post != pre". Previously a request {Subject: 'A'} where
+                // pre.Subject='Old' and post.Subject='B' (some unrelated change)
+                // would falsely register as persisted because pre→post differed.
+                // Now: persisted only when post equals the requested value.
                 const scalarsTried = Object.keys(data).filter(k => !SCALAR_VERIFY_EXCLUDE.has(k));
                 const scalarsPersisted = [];
                 const scalarsDropped = [];
                 const scalarsAlreadyMatched = [];
                 for (const k of scalarsTried) {
                   const wasIntendedChange = !valuesEqual(preUpdateSnapshot[k], data[k]);
-                  const actuallyChanged = !valuesEqual(preUpdateSnapshot[k], verifyRecord[k]);
+                  const postEqualsRequested = valuesEqual(verifyRecord[k], data[k]);
                   if (!wasIntendedChange) {
                     scalarsAlreadyMatched.push(k);
-                  } else if (actuallyChanged) {
+                  } else if (postEqualsRequested) {
                     scalarsPersisted.push(k);
                   } else {
                     scalarsDropped.push(k);
@@ -8021,9 +8075,34 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               // only Quoted_Items + Grand_Total + Sub_Total + Do_Not_Auto_Update_Prices,
               // all stripped) yields scalarRestore.length === 0 → pure NO_OP,
               // no PUT.
+              // Helper: tolerant scalar equality used by undo + update verification.
+              // Same semantics as the round-6 valuesEqual in the update path
+              // (handles picklist string-vs-object, reference id, float drift).
+              const undoValuesEqual = (pre, post) => {
+                if (pre === post) return true;
+                if (pre == null && post == null) return true;
+                if (pre == null || post == null) return false;
+                if (typeof pre === 'number' && typeof post === 'number') return Math.abs(pre - post) < 0.01;
+                if (typeof pre === 'string' && typeof post === 'object') return pre === post.name || pre === post.id || pre === String(post);
+                if (typeof post === 'string' && typeof pre === 'object') return post === pre.name || post === pre.id || post === String(pre);
+                if (typeof pre === 'object' && typeof post === 'object') {
+                  if (Array.isArray(pre) || Array.isArray(post)) {
+                    if (!Array.isArray(pre) || !Array.isArray(post)) return false;
+                    if (pre.length !== post.length) return false;
+                    return pre.every((v, i) => undoValuesEqual(v, post[i]));
+                  }
+                  if (pre.id != null && post.id != null) return String(pre.id) === String(post.id);
+                  try { return JSON.stringify(pre) === JSON.stringify(post); } catch { return false; }
+                }
+                if (typeof pre === 'boolean' || typeof post === 'boolean') return Boolean(pre) === Boolean(post);
+                return String(pre) === String(post);
+              };
+              const scalarRestoreKeys = Object.keys(scalarRestore);
+
               if (itemsetEquivalent) {
                 console.log(`[UNDO] No-op fast path for Quote ${origRecordId}: current Quoted_Items already matches preState (prior mutation was silently rejected).`);
-                if (Object.keys(scalarRestore).length > 0) {
+                let scalarPutHappened = false;
+                if (scalarRestoreKeys.length > 0) {
                   // Spread scalarRestore FIRST, then literal Do_Not_Auto_Update_Prices: true
                   // so even if STRIP misses the flag, our explicit value wins.
                   const scalarPayload = { ...scalarRestore, Do_Not_Auto_Update_Prices: true };
@@ -8031,11 +8110,58 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   if (sRes?.data?.[0]?.status !== 'success') {
                     return { success: false, error: `Undo scalar restore failed: ${sRes?.data?.[0]?.message || 'unknown'}`, detail: sRes };
                   }
+                  scalarPutHappened = true;
+                  // Codex round-12 P0-1: verify scalar restore actually landed.
+                  // Without this the model can claim "Undid update" on a write
+                  // whose effects didn't persist.
+                  let scalarVerifyRec;
+                  try {
+                    const scalarVerifyFields = ['id', ...scalarRestoreKeys].join(',');
+                    const sVerifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=${encodeURIComponent(scalarVerifyFields)}`, env);
+                    scalarVerifyRec = sVerifyRes?.data?.[0];
+                    if (!scalarVerifyRec?.id) {
+                      return {
+                        success: false,
+                        error: 'undo_scalar_verify_no_record',
+                        message: `⚠️ Undo scalar PUT returned SUCCESS but the verification re-fetch returned no record for Quote ${origRecordId}. Do NOT claim the update was undone and do NOT surface a success link/token.`,
+                        detail: sVerifyRes,
+                      };
+                    }
+                  } catch (sErr) {
+                    return {
+                      success: false,
+                      error: 'undo_scalar_verify_fetch_failed',
+                      message: `⚠️ Undo scalar PUT returned SUCCESS but the verification re-fetch threw: ${sErr.message}. Do NOT claim the update was undone and do NOT surface a success link/token.`,
+                      detail: sErr.message,
+                    };
+                  }
+                  const scalarMismatches = [];
+                  for (const k of scalarRestoreKeys) {
+                    if (!undoValuesEqual(scalarRestore[k], scalarVerifyRec[k])) {
+                      scalarMismatches.push({ field: k, requested: scalarRestore[k], actual: scalarVerifyRec[k] });
+                    }
+                  }
+                  if (scalarMismatches.length > 0) {
+                    return {
+                      success: false,
+                      error: 'undo_scalar_verify_mismatch',
+                      message: `⚠️ Undo scalar PUT returned SUCCESS but ${scalarMismatches.length} scalar field(s) did NOT persist on Quote ${origRecordId}. Do NOT claim the update was undone. Mismatches: ${scalarMismatches.map(m => `${m.field}(want=${JSON.stringify(m.requested).slice(0,40)}, got=${JSON.stringify(m.actual).slice(0,40)})`).join('; ')}`,
+                      mismatches: scalarMismatches,
+                    };
+                  }
                   reversalResult = sRes;
                 } else {
                   reversalResult = { data: [{ status: 'success', code: 'NO_OP', message: 'No-op — prior mutation did not actually change the quote.' }] };
                 }
-                reversalSummary = `Nothing to undo on ${origModule.replace(/s$/, '')} ${origRecordId} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state). [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                // Codex round-12 P0-1: summary semantics. "Nothing to undo" only
+                // when no write happened. If we just restored scalars, say so
+                // explicitly (and only after verification confirmed it).
+                if (scalarPutHappened) {
+                  const fieldList = scalarRestoreKeys.slice(0, 4).join(', ');
+                  reversalSummary = `Undid update on Quote ${origRecordId} — Quoted_Items already matched preState; restored ${scalarRestoreKeys.length} scalar field(s) (${fieldList}) and verified persistence. [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                } else {
+                  reversalSummary = `Nothing to undo on ${origModule.replace(/s$/, '')} ${origRecordId} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state and no scalar fields needed restoration). [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                }
                 // Fall through to the shared logging/return at the bottom.
               } else {
                 // preState-empty guard — Zoho refuses to leave a Quote with zero items.
@@ -8083,11 +8209,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 // verify error and fell through to success, which was another
                 // false-success path. Also same-count/same-total wrong-product-
                 // mix is now caught by the fingerprint multiset compare.
+                // Codex round-12 P0-1: also fetch the scalarRestore keys so we
+                // can verify they actually persisted. Previously only items +
+                // Grand_Total were fetched, leaving scalar restores unverified.
                 let verifyRes, verifyRec, verifyItems;
                 try {
-                  verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
+                  const verifyFieldList = ['id', 'Grand_Total', 'Quoted_Items', ...scalarRestoreKeys];
+                  const verifyFieldsStr = [...new Set(verifyFieldList)].join(',');
+                  verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=${encodeURIComponent(verifyFieldsStr)}`, env);
                   verifyRec = verifyRes?.data?.[0];
-                  verifyItems = verifyRec?.Quoted_Items || [];
+                  if (!verifyRec?.id) {
+                    return {
+                      success: false,
+                      error: 'undo_verify_no_record',
+                      message: `⚠️ Undo restore PUT returned SUCCESS but the verification re-fetch returned no record for Quote ${origRecordId}. Do NOT claim the update was undone and do NOT surface a success link or token.`,
+                      detail: verifyRes,
+                    };
+                  }
+                  verifyItems = verifyRec.Quoted_Items || [];
                 } catch (verifyErr) {
                   console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
                   return {
@@ -8139,6 +8278,23 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     error: `Undo verification failed: Grand_Total expected ${preTotal}, got ${postTotal}`,
                     detail: verifyRes,
                   };
+                }
+                // Codex round-12 P0-1: verify scalarRestore fields persisted.
+                if (scalarRestoreKeys.length > 0) {
+                  const scalarMismatches = [];
+                  for (const k of scalarRestoreKeys) {
+                    if (!undoValuesEqual(scalarRestore[k], verifyRec[k])) {
+                      scalarMismatches.push({ field: k, requested: scalarRestore[k], actual: verifyRec[k] });
+                    }
+                  }
+                  if (scalarMismatches.length > 0) {
+                    return {
+                      success: false,
+                      error: 'undo_scalar_verify_mismatch',
+                      message: `⚠️ Undo restore PUT returned SUCCESS but ${scalarMismatches.length} scalar field(s) did NOT persist on Quote ${origRecordId}. Do NOT claim the update was undone. Mismatches: ${scalarMismatches.map(m => `${m.field}(want=${JSON.stringify(m.requested).slice(0,40)}, got=${JSON.stringify(m.actual).slice(0,40)})`).join('; ')}`,
+                      mismatches: scalarMismatches,
+                    };
+                  }
                 }
               }
             }

@@ -1843,5 +1843,243 @@ t('Modify with List_Price AND Description both applied → passes', () => {
   assert.equal(r.applied, true);
 });
 
+console.log('\n─── Round-12 P0-1: Quote undo scalar restore verification ───');
+
+// Simulate the no-op fast path scalar PUT verification flow.
+function simulateScalarUndoVerify({ scalarRestore, putStatus, getThrows, postRecord }) {
+  if (Object.keys(scalarRestore).length === 0) {
+    return { success: true, summary: 'no-op (no scalars to restore)' };
+  }
+  if (putStatus !== 'success') {
+    return { success: false, error: 'undo_scalar_put_failed' };
+  }
+  if (getThrows) {
+    return { success: false, error: 'undo_scalar_verify_fetch_failed' };
+  }
+  if (!postRecord || !postRecord.id) {
+    return { success: false, error: 'undo_scalar_verify_no_record' };
+  }
+  const eq = (a, b) => {
+    if (a === b) return true;
+    if (a == null || b == null) return false;
+    if (typeof a === 'string' && typeof b === 'object') return a === b.name || a === b.id;
+    if (typeof b === 'string' && typeof a === 'object') return b === a.name || b === a.id;
+    return String(a) === String(b);
+  };
+  const mismatches = [];
+  for (const k of Object.keys(scalarRestore)) {
+    if (!eq(scalarRestore[k], postRecord[k])) mismatches.push(k);
+  }
+  if (mismatches.length > 0) {
+    return { success: false, error: 'undo_scalar_verify_mismatch', mismatches };
+  }
+  return { success: true, summary: `Undid update — restored ${Object.keys(scalarRestore).length} scalar(s)` };
+}
+
+t('itemsetEquivalent + scalarRestore PUT success but verify GET throws → success:false', () => {
+  const r = simulateScalarUndoVerify({
+    scalarRestore: { Subject: 'Old' },
+    putStatus: 'success',
+    getThrows: true,
+  });
+  assert.equal(r.success, false);
+  assert.equal(r.error, 'undo_scalar_verify_fetch_failed');
+});
+
+t('verify GET succeeds but scalar not restored → success:false', () => {
+  const r = simulateScalarUndoVerify({
+    scalarRestore: { Subject: 'Old' },
+    putStatus: 'success',
+    getThrows: false,
+    postRecord: { id: 'Q1', Subject: 'NEW_VALUE_NOT_RESTORED' }, // Zoho dropped the restore
+  });
+  assert.equal(r.success, false);
+  assert.equal(r.error, 'undo_scalar_verify_mismatch');
+  assert.deepEqual(r.mismatches, ['Subject']);
+});
+
+t('non-equivalent restore: rows ok but scalar wrong → success:false', () => {
+  // Same simulator covers this: scalarRestore mismatched.
+  const r = simulateScalarUndoVerify({
+    scalarRestore: { Stage: 'Negotiation' },
+    putStatus: 'success',
+    getThrows: false,
+    postRecord: { id: 'Q1', Stage: { name: 'Closed Won', id: 'X' } },
+  });
+  assert.equal(r.success, false);
+  assert.equal(r.error, 'undo_scalar_verify_mismatch');
+});
+
+t('scalar restored correctly (string→object picklist) → success', () => {
+  const r = simulateScalarUndoVerify({
+    scalarRestore: { Stage: 'Review' },
+    putStatus: 'success',
+    getThrows: false,
+    postRecord: { id: 'Q1', Stage: { name: 'Review', id: 'X' } },
+  });
+  assert.equal(r.success, true);
+});
+
+t('itemsetEquivalent with no scalars → no-op success (no PUT)', () => {
+  const r = simulateScalarUndoVerify({
+    scalarRestore: {},
+    putStatus: null,
+    getThrows: false,
+  });
+  assert.equal(r.success, true);
+  assert.match(r.summary, /no-op/);
+});
+
+console.log('\n─── Round-12 P0-2: explicit delete pre-existence required ───');
+
+function classifyDeletes(requestedDeleteIds, preUpdateSnapshot, actualItems) {
+  const preItemIdSet = new Set(
+    (preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items))
+      ? preUpdateSnapshot.Quoted_Items.map(it => it.id).filter(Boolean) : []
+  );
+  const preSnapshotUsable = preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items);
+  const actualItemIds = new Set(actualItems.map(i => i.id));
+  const applied = [], failedStillPresent = [], neverExisted = [], unverifiable = [];
+  for (const id of requestedDeleteIds) {
+    if (!preSnapshotUsable) { unverifiable.push(id); continue; }
+    if (!preItemIdSet.has(id)) { neverExisted.push(id); continue; }
+    if (!actualItemIds.has(id)) applied.push(id);
+    else failedStillPresent.push(id);
+  }
+  return { applied, failed: failedStillPresent, neverExisted, unverifiable };
+}
+
+t('delete id absent from pre AND post → flagged as never_existed (NOT applied)', () => {
+  const result = classifyDeletes(
+    new Set(['BAD_ID']),
+    { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }] },
+    [{ id: 'sub_1' }, { id: 'sub_2' }]
+  );
+  assert.equal(result.applied.length, 0, 'BAD_ID was never on the Quote — must NOT count as applied');
+  assert.deepEqual(result.neverExisted, ['BAD_ID']);
+});
+
+t('delete id present in pre and absent post → applied', () => {
+  const result = classifyDeletes(
+    new Set(['sub_2']),
+    { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }] },
+    [{ id: 'sub_1' }]
+  );
+  assert.deepEqual(result.applied, ['sub_2']);
+  assert.equal(result.failed.length, 0);
+});
+
+t('delete id present in pre and still present post → failed (Zoho refused)', () => {
+  const result = classifyDeletes(
+    new Set(['sub_2']),
+    { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }] },
+    [{ id: 'sub_1' }, { id: 'sub_2' }]
+  );
+  assert.equal(result.applied.length, 0);
+  assert.deepEqual(result.failed, ['sub_2']);
+});
+
+t('delete id with no pre snapshot → unverifiable (NOT applied)', () => {
+  const result = classifyDeletes(new Set(['sub_2']), null, [{ id: 'sub_1' }]);
+  assert.equal(result.applied.length, 0);
+  assert.deepEqual(result.unverifiable, ['sub_2']);
+});
+
+console.log('\n─── Round-12 P0-3: add verification requires pre snapshot ───');
+
+function verifyAddsRound12(requestedAdds, preUpdateSnapshot, actualItems) {
+  const preIdSet = new Set((preUpdateSnapshot?.Quoted_Items || []).map(it => it.id).filter(Boolean));
+  const preSnapshotUsable = preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items);
+  const newlyAdded = preSnapshotUsable ? actualItems.filter(it => !preIdSet.has(it.id)) : [];
+  const avail = [...newlyAdded];
+  return requestedAdds.map(r => {
+    if (!preSnapshotUsable) {
+      return { applied: false, reason: 'add_unverifiable_no_pre_snapshot' };
+    }
+    const wantPid = String(r.requested_product_id);
+    const wantQ = r.requested_quantity != null ? Number(r.requested_quantity) : null;
+    const wantD = r.requested_discount != null ? Number(r.requested_discount) : null;
+    const ix = avail.findIndex(a => {
+      if (String(a.product_id) !== wantPid) return false;
+      if (wantQ !== null && Number(a.quantity) !== wantQ) return false;
+      if (wantD !== null && Math.abs(Number(a.discount || 0) - wantD) >= 0.01) return false;
+      return true;
+    });
+    if (ix === -1) return { applied: false, reason: 'no match' };
+    avail.splice(ix, 1);
+    return { applied: true };
+  });
+}
+
+t('add intent + missing pre snapshot → fails (unverifiable)', () => {
+  const adds = [{ requested_product_id: 'PID_NEW', requested_quantity: 1, requested_discount: 0 }];
+  const r = verifyAddsRound12(adds, null, [{ id: 'sub_1', product_id: 'PID_NEW', quantity: 1, discount: 0 }]);
+  assert.equal(r[0].applied, false);
+  assert.equal(r[0].reason, 'add_unverifiable_no_pre_snapshot',
+    'with no pre snapshot, an existing matching row must NOT satisfy a dropped add');
+});
+
+t('add dropped but existing matching row remains → fails (correctly identifies pre-existing row, not a new add)', () => {
+  // Critical case: Zoho dropped the add entirely, but there's already a matching
+  // row from before. Without pre-snapshot we'd falsely call this success.
+  // With pre-snapshot, we know the matching row is OLD (in pre) — not newly added.
+  const adds = [{ requested_product_id: 'PID_A', requested_quantity: 1, requested_discount: 0 }];
+  const preSnap = { Quoted_Items: [{ id: 'sub_old_PID_A' }] };
+  const post = [{ id: 'sub_old_PID_A', product_id: 'PID_A', quantity: 1, discount: 0 }];
+  const r = verifyAddsRound12(adds, preSnap, post);
+  assert.equal(r[0].applied, false, 'pre-existing row must NOT count as the requested add');
+});
+
+t('add intent + pre snapshot + actual new matching row → passes', () => {
+  const adds = [{ requested_product_id: 'PID_NEW', requested_quantity: 1, requested_discount: 0 }];
+  const preSnap = { Quoted_Items: [{ id: 'sub_old' }] };
+  const post = [
+    { id: 'sub_old', product_id: 'PID_OTHER', quantity: 1, discount: 0 },
+    { id: 'sub_new', product_id: 'PID_NEW', quantity: 1, discount: 0 },
+  ];
+  const r = verifyAddsRound12(adds, preSnap, post);
+  assert.equal(r[0].applied, true);
+});
+
+console.log('\n─── Round-12 P1: scalar update verify compares post to REQUESTED ───');
+
+function classifyScalar({ pre, requested, post }) {
+  const eq = (a, b) => {
+    if (a === b) return true;
+    if (a == null || b == null) return false;
+    if (typeof a === 'string' && typeof b === 'object') return a === b.name || a === b.id;
+    if (typeof b === 'string' && typeof a === 'object') return b === a.name || b === a.id;
+    return String(a) === String(b);
+  };
+  const wasIntendedChange = !eq(pre, requested);
+  const postEqualsRequested = eq(post, requested);
+  if (!wasIntendedChange) return 'already_matched';
+  if (postEqualsRequested) return 'persisted';
+  return 'dropped';
+}
+
+t('Subject=A intended, post=B (some other value) → dropped (NOT persisted)', () => {
+  // Old logic: post differs from pre → "persisted" (FALSE POSITIVE).
+  // New logic: post must equal REQUESTED.
+  const r = classifyScalar({ pre: 'Old', requested: 'A', post: 'B' });
+  assert.equal(r, 'dropped', 'post must equal requested, not just differ from pre');
+});
+
+t('Subject=A intended, post=A → persisted', () => {
+  assert.equal(classifyScalar({ pre: 'Old', requested: 'A', post: 'A' }), 'persisted');
+});
+
+t('Subject=Old (no real change) → already_matched', () => {
+  assert.equal(classifyScalar({ pre: 'Old', requested: 'Old', post: 'Old' }), 'already_matched');
+});
+
+t('Subject=A intended, post=Old (Zoho dropped the change) → dropped', () => {
+  assert.equal(classifyScalar({ pre: 'Old', requested: 'A', post: 'Old' }), 'dropped');
+});
+
+t('Stage write-string vs read-object: requested "Review", post {name:"Review"} → persisted', () => {
+  assert.equal(classifyScalar({ pre: { name: 'Negotiation' }, requested: 'Review', post: { name: 'Review' } }), 'persisted');
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);
