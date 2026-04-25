@@ -1106,5 +1106,138 @@ t('Verify-fail return shape: no _undo_token, no _record_url, _user_visible_summa
   assert.match(result._user_visible_summary, /⚠️/);
 });
 
+console.log('\n─── Quote undo STRIP + spread-order (Codex round-8 pre-merge) ───');
+
+// Mirrors the production STRIP set used by the undo update branch for Quotes.
+const UNDO_STRIP = new Set([
+  'id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By',
+  'Last_Activity_Time', 'Owner', '$editable',
+  'Quote_Number', 'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout',
+  'All_Taxes_Total', 'Tax_1_Total', 'Tax_2_Total',
+  'Do_Not_Auto_Update_Prices',
+]);
+
+function buildScalarRestore(preState) {
+  const out = {};
+  for (const [k, v] of Object.entries(preState)) {
+    if (UNDO_STRIP.has(k) || k.startsWith('$') || k === 'Quoted_Items') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+t('Live no-op undo: preState has only items+totals+control flag → scalarRestore is empty', () => {
+  // Reproduces the exact preState shape Bug C's snapshot logic produces
+  // for a Quote update where data only contained Quoted_Items.
+  const preState = {
+    id: '2570562000402426396',
+    Quoted_Items: [
+      { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_1' },
+    ],
+    Grand_Total: 9105.02,
+    Sub_Total: 9105.0152,
+    Do_Not_Auto_Update_Prices: true,
+  };
+  const sr = buildScalarRestore(preState);
+  assert.deepEqual(sr, {}, 'scalarRestore must be empty so no-op fast path returns NO_OP without PUT');
+});
+
+t('Live no-op undo: preState with derived totals included → all stripped', () => {
+  const preState = {
+    id: '2570562000402426396',
+    Quoted_Items: [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_1' }],
+    Grand_Total: 9105.02,
+    Sub_Total: 9105.0152,
+    Tax: 421.91,
+    All_Taxes_Total: 421.91,
+    Tax_1_Total: 421.91,
+    Tax_2_Total: 0,
+    Adjustment: 0,
+    Quote_Number: '2570562000402426403',
+    Do_Not_Auto_Update_Prices: true,
+    Modified_Time: '2026-04-24T18:55:43-04:00',
+    Last_Activity_Time: '2026-04-24T18:55:43-04:00',
+    Modified_By: { id: '...', name: 'Tim' },
+  };
+  const sr = buildScalarRestore(preState);
+  assert.deepEqual(sr, {}, 'all derived totals + system fields + control flag must be stripped');
+});
+
+t('Real scalar to restore (Subject change): scalarRestore preserves it', () => {
+  const preState = {
+    id: 'Q1',
+    Quoted_Items: [],
+    Grand_Total: 1000,
+    Sub_Total: 1000,
+    Do_Not_Auto_Update_Prices: true,
+    Subject: 'Original Subject',
+    Stage: 'Negotiation',
+  };
+  const sr = buildScalarRestore(preState);
+  assert.deepEqual(sr, { Subject: 'Original Subject', Stage: 'Negotiation' });
+});
+
+t('Mixed restore payload: Do_Not_Auto_Update_Prices:true comes AFTER spread', () => {
+  // Production code: const restorePayload = { ...scalarRestore, Do_Not_Auto_Update_Prices: true };
+  // Even if a malicious/unexpected scalarRestore contained Do_Not_Auto_Update_Prices:false,
+  // the literal `: true` after the spread must override.
+  const scalarRestore = { Subject: 'Old', Do_Not_Auto_Update_Prices: false }; // hypothetical leak
+  const payload = { ...scalarRestore, Do_Not_Auto_Update_Prices: true };
+  assert.equal(payload.Do_Not_Auto_Update_Prices, true, 'literal-after-spread must win');
+  assert.equal(payload.Subject, 'Old', 'other restored scalars preserved');
+});
+
+t('No-op fast path scalar PUT: spread-then-literal locks the flag too', () => {
+  // The no-op fast path uses the same pattern.
+  const scalarRestore = { Subject: 'X', Do_Not_Auto_Update_Prices: false };
+  const scalarPayload = { ...scalarRestore, Do_Not_Auto_Update_Prices: true };
+  assert.equal(scalarPayload.Do_Not_Auto_Update_Prices, true);
+});
+
+t('Mixed restore payload: derived totals never appear', () => {
+  // After STRIP filtering, Grand_Total/Sub_Total/Tax/etc. never end up in scalarRestore
+  // and therefore never appear in the mixed restorePayload.
+  const preState = {
+    id: 'Q1',
+    Quoted_Items: [],
+    Grand_Total: 5000, Sub_Total: 5000, Tax: 350, All_Taxes_Total: 350,
+    Tax_1_Total: 350, Tax_2_Total: 0, Adjustment: 0,
+    Subject: 'Old',
+  };
+  const sr = buildScalarRestore(preState);
+  const payload = { ...sr, Do_Not_Auto_Update_Prices: true };
+  for (const f of ['Grand_Total', 'Sub_Total', 'Tax', 'All_Taxes_Total', 'Tax_1_Total', 'Tax_2_Total', 'Adjustment']) {
+    assert.equal(payload[f], undefined, `${f} must not appear in restore payload`);
+  }
+  assert.equal(payload.Subject, 'Old');
+  assert.equal(payload.Do_Not_Auto_Update_Prices, true);
+});
+
+t('Live no-op undo end-to-end: itemsetEquivalent=true + empty scalarRestore → pure NO_OP, no PUT call', () => {
+  // Compose the production logic shape from the no-op fast path.
+  const preState = {
+    id: '2570562000402426396',
+    Quoted_Items: [
+      { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100 },
+    ],
+    Grand_Total: 9105.02,
+    Sub_Total: 9105.0152,
+    Do_Not_Auto_Update_Prices: true,
+  };
+  const itemsetEquivalent = true;  // assumption from smart-diff
+  const sr = buildScalarRestore(preState);
+  let didPUT = false;
+  let resultMessage = null;
+  if (itemsetEquivalent) {
+    if (Object.keys(sr).length > 0) {
+      didPUT = true; // would have called zohoApiCall('PUT', ...)
+    } else {
+      resultMessage = 'No-op — prior mutation did not actually change the quote.';
+    }
+  }
+  assert.equal(didPUT, false, 'no PUT must be issued in the live no-op case');
+  assert.match(resultMessage, /No-op/);
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);

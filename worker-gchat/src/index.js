@@ -7609,10 +7609,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             reversalOperation = 'restore';
             // Strip read-only / system / derived fields. For Quotes we also strip
             // totals (Zoho recomputes) and Quote_Number (auto-generated).
+            // 2026-04-24 Codex round-8: extended to cover ALL derived totals
+            // and our Do_Not_Auto_Update_Prices control flag. The prior set
+            // missed All_Taxes_Total / Tax_1_Total / Tax_2_Total / Tax (already
+            // there) AND Do_Not_Auto_Update_Prices — the latter was the actual
+            // leak: Bug C's expanded pre-snapshot for Quotes pulls in any data
+            // key the user's update set, so if the original update included
+            // Do_Not_Auto_Update_Prices, preState carried it forward and the
+            // undo PUT would either (a) issue a pointless scalar restore in
+            // the no-op fast path, or (b) override the explicit
+            // Do_Not_Auto_Update_Prices: true control flag in the mixed
+            // restore payload via spread order.
             const STRIP = new Set([
               'id', 'Created_Time', 'Modified_Time', 'Created_By', 'Modified_By',
               'Last_Activity_Time', 'Owner', '$editable',
-              'Quote_Number', 'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout'
+              'Quote_Number', 'Tax', 'Grand_Total', 'Sub_Total', 'Adjustment', 'Layout',
+              // Codex round-8 additions:
+              'All_Taxes_Total', 'Tax_1_Total', 'Tax_2_Total',
+              'Do_Not_Auto_Update_Prices',
             ]);
 
             if (origModule !== 'Quotes') {
@@ -7727,10 +7741,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               // The prior update was silently rejected (live failure shape).
               // Restore scalars only if any are pending; otherwise return a
               // truthful "nothing to undo" success without writing.
+              // 2026-04-24 Codex round-8: scalarRestore now built from the
+              // tightened STRIP, so the live failure case (preState contains
+              // only Quoted_Items + Grand_Total + Sub_Total + Do_Not_Auto_Update_Prices,
+              // all stripped) yields scalarRestore.length === 0 → pure NO_OP,
+              // no PUT.
               if (itemsetEquivalent) {
                 console.log(`[UNDO] No-op fast path for Quote ${origRecordId}: current Quoted_Items already matches preState (prior mutation was silently rejected).`);
                 if (Object.keys(scalarRestore).length > 0) {
-                  const scalarPayload = { Do_Not_Auto_Update_Prices: true, ...scalarRestore };
+                  // Spread scalarRestore FIRST, then literal Do_Not_Auto_Update_Prices: true
+                  // so even if STRIP misses the flag, our explicit value wins.
+                  const scalarPayload = { ...scalarRestore, Do_Not_Auto_Update_Prices: true };
                   const sRes = await zohoApiCall('PUT', `${origModule}/${origRecordId}`, env, { data: [scalarPayload] });
                   if (sRes?.data?.[0]?.status !== 'success') {
                     return { success: false, error: `Undo scalar restore failed: ${sRes?.data?.[0]?.message || 'unknown'}`, detail: sRes };
@@ -7754,9 +7775,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 // Build single mixed payload: delete changed/extra current rows
                 // + add missing preState rows + restore scalars. Final state will
                 // have exactly the preState item set.
+                // 2026-04-24 Codex round-8: spread scalarRestore FIRST and put
+                // Do_Not_Auto_Update_Prices:true LAST so a stray preState value
+                // for that flag (if it ever slips past STRIP) cannot disable
+                // our pricing-control flag.
                 const restorePayload = {
-                  Do_Not_Auto_Update_Prices: true,
                   ...scalarRestore,
+                  Do_Not_Auto_Update_Prices: true,
                 };
                 const ops = [];
                 for (const id of idsToDelete) ops.push({ id, _delete: null });
