@@ -1239,5 +1239,216 @@ t('Live no-op undo end-to-end: itemsetEquivalent=true + empty scalarRestore → 
   assert.match(resultMessage, /No-op/);
 });
 
+console.log('\n─── Omission-style delete normalizer (Codex round-9) ───');
+
+// Mirrors the production normalizer added to zoho_update_record before the
+// Quote PUT. Exercises:
+//   - all-id-only strict subset → convert omitted current ids to delete ops
+//   - all-id-only equals current → reject (no-op intent)
+//   - all-id-only with unknown id → reject
+//   - mixed id-only + explicit ops → reject
+//   - duplicate ids in keep-list → reject
+//   - Do_Not_Auto_Update_Prices preserved through normalization
+
+const isQuoteRowIdOnly = (row) => {
+  if (!row || typeof row !== 'object' || !row.id) return false;
+  const meaningfulKeys = ['_delete', 'Product_Name', 'Quantity', 'Discount', 'List_Price', 'Description', 'Sequence_Number', 'Tax'];
+  for (const k of meaningfulKeys) {
+    if (k in row && row[k] !== undefined) return false;
+  }
+  return true;
+};
+
+function normalizeKeepList(data, preUpdateSnapshot, recordId = 'Q1') {
+  if (!Array.isArray(data.Quoted_Items) || data.Quoted_Items.length === 0) return { data, normalized: false };
+  if (!preUpdateSnapshot || !Array.isArray(preUpdateSnapshot.Quoted_Items) || preUpdateSnapshot.Quoted_Items.length === 0) {
+    return { data, normalized: false };
+  }
+  const allIdOnly = data.Quoted_Items.every(isQuoteRowIdOnly);
+  const someIdOnly = data.Quoted_Items.some(isQuoteRowIdOnly);
+  if (allIdOnly) {
+    const currentIds = new Set(preUpdateSnapshot.Quoted_Items.map(it => it.id).filter(Boolean));
+    const keptIds = data.Quoted_Items.map(r => r.id);
+    const keptSet = new Set(keptIds);
+    if (keptIds.length !== keptSet.size) {
+      return { error: 'keep_list_duplicate_ids' };
+    }
+    const unknownIds = keptIds.filter(id => !currentIds.has(id));
+    if (unknownIds.length > 0) {
+      return { error: 'keep_list_unknown_ids', unknown_ids: unknownIds };
+    }
+    const omittedIds = [...currentIds].filter(id => !keptSet.has(id));
+    if (omittedIds.length === 0) {
+      return { error: 'keep_list_matches_all_current' };
+    }
+    const newQuotedItems = omittedIds.map(id => ({ id, _delete: null }));
+    return {
+      data: { ...data, Quoted_Items: newQuotedItems },
+      normalized: true,
+      normalization: { original_kept_ids: keptIds, converted_delete_ids: omittedIds },
+    };
+  } else if (someIdOnly) {
+    const idOnlyCount = data.Quoted_Items.filter(isQuoteRowIdOnly).length;
+    return {
+      error: 'mixed_id_only_payload',
+      id_only_count: idOnlyCount,
+      explicit_count: data.Quoted_Items.length - idOnlyCount,
+    };
+  }
+  return { data, normalized: false };
+}
+
+t('LIVE shape Quote 2570562000402426396: HW-only keep-list → 3 license _delete ops', () => {
+  // The exact crm_operations row 1070/1071 payload Codex captured.
+  const data = {
+    Quoted_Items: [
+      { id: '2570562000402426397' },  // MX75-HW
+      { id: '2570562000402426399' },  // MX85-HW
+      { id: '2570562000402426401' },  // CW9172I-RTG
+    ],
+    Do_Not_Auto_Update_Prices: true,
+  };
+  const preSnap = {
+    Quoted_Items: [
+      { id: '2570562000402426397' },  // MX75-HW
+      { id: '2570562000402426398' },  // LIC-MX75-SEC-1Y
+      { id: '2570562000402426399' },  // MX85-HW
+      { id: '2570562000402426400' },  // LIC-MX85-SEC-1Y
+      { id: '2570562000402426401' },  // CW9172I-RTG
+      { id: '2570562000402426402' },  // LIC-ENT-1YR
+    ],
+  };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.normalized, true, 'must normalize the live payload');
+  assert.equal(r.error, undefined);
+  assert.equal(r.data.Quoted_Items.length, 3, 'three delete ops');
+  const deleteIds = r.data.Quoted_Items.map(it => it.id).sort();
+  assert.deepEqual(
+    deleteIds,
+    ['2570562000402426398', '2570562000402426400', '2570562000402426402'].sort(),
+    'must produce delete ops for the 3 license subform ids'
+  );
+  for (const op of r.data.Quoted_Items) assert.equal(op._delete, null);
+  assert.equal(r.data.Do_Not_Auto_Update_Prices, true, 'control flag preserved');
+  assert.deepEqual(
+    r.normalization.original_kept_ids.sort(),
+    ['2570562000402426397', '2570562000402426399', '2570562000402426401'].sort()
+  );
+});
+
+t('All-current keep-list → reject with keep_list_matches_all_current', () => {
+  const data = {
+    Quoted_Items: [
+      { id: 'sub_1' }, { id: 'sub_2' }, { id: 'sub_3' },
+    ],
+    Do_Not_Auto_Update_Prices: true,
+  };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }, { id: 'sub_3' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.normalized, undefined);
+  assert.equal(r.error, 'keep_list_matches_all_current');
+});
+
+t('Unknown id in keep-list → reject with keep_list_unknown_ids', () => {
+  const data = {
+    Quoted_Items: [
+      { id: 'sub_1' },        // exists
+      { id: 'sub_DOES_NOT_EXIST' },
+    ],
+    Do_Not_Auto_Update_Prices: true,
+  };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.error, 'keep_list_unknown_ids');
+  assert.deepEqual(r.unknown_ids, ['sub_DOES_NOT_EXIST']);
+});
+
+t('Mixed id-only + explicit modify → reject with mixed_id_only_payload', () => {
+  const data = {
+    Quoted_Items: [
+      { id: 'sub_1' },                                 // id-only
+      { id: 'sub_2', Quantity: 5 },                    // explicit modify
+      { Product_Name: { id: 'PID_NEW' }, Quantity: 1 } // explicit add
+    ],
+  };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.error, 'mixed_id_only_payload');
+  assert.equal(r.id_only_count, 1);
+  assert.equal(r.explicit_count, 2);
+});
+
+t('Duplicate id in keep-list → reject with keep_list_duplicate_ids', () => {
+  const data = {
+    Quoted_Items: [
+      { id: 'sub_1' },
+      { id: 'sub_1' },  // duplicate
+    ],
+  };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.error, 'keep_list_duplicate_ids');
+});
+
+t('Already-explicit payload (all _delete:null) → pass through unchanged', () => {
+  const data = {
+    Quoted_Items: [
+      { id: 'sub_1', _delete: null },
+      { id: 'sub_2', _delete: null },
+    ],
+  };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }, { id: 'sub_3' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.normalized, false, 'no normalization needed');
+  assert.equal(r.error, undefined);
+  assert.equal(r.data.Quoted_Items.length, 2);
+});
+
+t('Already-explicit payload (modify only) → pass through unchanged', () => {
+  const data = {
+    Quoted_Items: [
+      { id: 'sub_1', Quantity: 5 },
+      { id: 'sub_2', Discount: 100 },
+    ],
+  };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }, { id: 'sub_2' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.normalized, false);
+  assert.equal(r.data.Quoted_Items.length, 2);
+});
+
+t('Add-only payload (no ids, just Product_Name) → pass through unchanged', () => {
+  const data = {
+    Quoted_Items: [
+      { Product_Name: { id: 'PID_NEW' }, Quantity: 1, Discount: 50 },
+    ],
+  };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.normalized, false);
+});
+
+t('Empty Quoted_Items array → pass through (not a keep-list)', () => {
+  const data = { Quoted_Items: [] };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.normalized, false);
+});
+
+t('No preUpdateSnapshot → no normalization (defensive)', () => {
+  const data = { Quoted_Items: [{ id: 'sub_1' }] };
+  const r = normalizeKeepList(data, null);
+  assert.equal(r.normalized, false);
+});
+
+t('Single id-only row that matches single current row → no-op (all-current)', () => {
+  // Edge case: 1-element keep-list when current has 1 item.
+  const data = { Quoted_Items: [{ id: 'sub_1' }] };
+  const preSnap = { Quoted_Items: [{ id: 'sub_1' }] };
+  const r = normalizeKeepList(data, preSnap);
+  assert.equal(r.error, 'keep_list_matches_all_current',
+    '1-of-1 keep-list still triggers the all-current rejection (model bug, not delete intent)');
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);

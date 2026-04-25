@@ -5849,6 +5849,95 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.warn(`[GCHAT] Pre-update snapshot failed for ${module_name}/${record_id}:`, snapErr.message);
         }
 
+        // ── 2026-04-24 Codex round-9: omission-style delete normalizer ────────
+        // Detect "id-only keep-list" payloads where the model sends
+        // data.Quoted_Items containing only id-fields for the rows it wants to
+        // KEEP. Zoho's PUT semantics on Quoted_Items are additive, NOT
+        // replacement — items omitted from the array are LEFT ALONE, not
+        // deleted. Live D1 evidence (Quote 2570562000402426396 ops 1070/1071)
+        // showed Llama send a hardware-only keep-list with no _delete markers,
+        // expecting the licenses to be removed.
+        //
+        // This normalizer runs BEFORE the PUT and converts strict-subset
+        // keep-lists to explicit {id, _delete: null} ops for the omitted
+        // current ids. Mixed id-only + explicit shapes are rejected as
+        // ambiguous. Unknown ids are rejected. All-current keep-lists are
+        // rejected as no-op intent (model bug).
+        let keepListNormalization = null;
+        if (module_name === 'Quotes'
+            && Array.isArray(data.Quoted_Items)
+            && data.Quoted_Items.length > 0
+            && preUpdateSnapshot
+            && Array.isArray(preUpdateSnapshot.Quoted_Items)
+            && preUpdateSnapshot.Quoted_Items.length > 0) {
+          const isQuoteRowIdOnly = (row) => {
+            if (!row || typeof row !== 'object' || !row.id) return false;
+            // Any of these keys present (including _delete: null) means the
+            // row carries an explicit operation intent and is NOT id-only.
+            const meaningfulKeys = ['_delete', 'Product_Name', 'Quantity', 'Discount', 'List_Price', 'Description', 'Sequence_Number', 'Tax'];
+            for (const k of meaningfulKeys) {
+              if (k in row && row[k] !== undefined) return false;
+            }
+            return true;
+          };
+          const allIdOnly = data.Quoted_Items.every(isQuoteRowIdOnly);
+          const someIdOnly = data.Quoted_Items.some(isQuoteRowIdOnly);
+          if (allIdOnly) {
+            const currentIds = new Set((preUpdateSnapshot.Quoted_Items || []).map(it => it.id).filter(Boolean));
+            const keptIds = data.Quoted_Items.map(r => r.id);
+            const keptSet = new Set(keptIds);
+            // Duplicate id check
+            if (keptIds.length !== keptSet.size) {
+              return {
+                validation_error: true,
+                action: 'update_blocked',
+                error: 'keep_list_duplicate_ids',
+                message: `KEEP_LIST_DUPLICATE_IDS: Your Quoted_Items keep-list contains duplicate ids. Each subform id should appear at most once. Resubmit with unique ids, or use explicit {id, _delete: null} markers for the rows to remove.`,
+              };
+            }
+            const unknownIds = keptIds.filter(id => !currentIds.has(id));
+            if (unknownIds.length > 0) {
+              return {
+                validation_error: true,
+                action: 'update_blocked',
+                error: 'keep_list_unknown_ids',
+                message: `KEEP_LIST_UNKNOWN_IDS: Your Quoted_Items keep-list references subform ids that don't exist on Quote ${record_id}: ${unknownIds.join(', ')}. Re-fetch the quote to get current subform ids, or use explicit {id, _delete: null} markers for the rows you actually want to remove.`,
+                unknown_ids: unknownIds,
+              };
+            }
+            const omittedIds = [...currentIds].filter(id => !keptSet.has(id));
+            if (omittedIds.length === 0) {
+              return {
+                validation_error: true,
+                action: 'update_blocked',
+                error: 'keep_list_matches_all_current',
+                message: `KEEP_LIST_NO_OP: Your Quoted_Items keep-list contains all ${currentIds.size} current rows — that's a no-op, NOT a delete. Zoho's Quoted_Items PUT semantics are ADDITIVE: items omitted from the array are LEFT ALONE, not deleted. To remove a line item, send {id: "<row_id>", _delete: null} for each row to remove. Resubmit with explicit _delete: null markers.`,
+              };
+            }
+            // Strict-subset keep-list: normalize to explicit delete ops for omitted ids.
+            // Preserve Do_Not_Auto_Update_Prices via the existing auto-injection.
+            console.log(`[GCHAT] Quote ${record_id}: id-only keep-list normalized → ${omittedIds.length} _delete op(s) for omitted subform ids: ${omittedIds.join(',')}`);
+            keepListNormalization = {
+              original_kept_ids: keptIds,
+              converted_delete_ids: omittedIds,
+            };
+            data.Quoted_Items = omittedIds.map(id => ({ id, _delete: null }));
+          } else if (someIdOnly) {
+            // Mixed id-only + explicit ops — ambiguous, reject.
+            const idOnlyCount = data.Quoted_Items.filter(isQuoteRowIdOnly).length;
+            const explicitCount = data.Quoted_Items.length - idOnlyCount;
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'mixed_id_only_payload',
+              message: `MIXED_ID_ONLY_PAYLOAD: Your Quoted_Items array mixes ${idOnlyCount} id-only row(s) with ${explicitCount} explicit modify/add/delete row(s). Id-only rows in a mixed PUT are ambiguous — they could mean keep, modify, or no-op, and Zoho's PUT semantics make them no-op in practice. Resubmit using only explicit operations: {id, _delete: null} for removals, {id, Quantity: N, Discount: D, ...} for modifications, {Product_Name: {id: "..."}, Quantity, ...} for adds.`,
+              id_only_count: idOnlyCount,
+              explicit_count: explicitCount,
+            };
+          }
+          // else: all rows have explicit ops (delete/modify/add) — pass through unchanged.
+        }
+
         const updateStart = Date.now();
         const updateResult = await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
         if (module_name === 'Quotes') {
@@ -6063,6 +6152,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   data_keys_tried: Object.keys(data).filter(k => k !== 'Do_Not_Auto_Update_Prices'),
                 },
               };
+              // Codex round-9: surface the keep-list normalization so the model
+              // sees what the server interpreted vs what it sent.
+              if (keepListNormalization) {
+                verification.verification.keep_list_normalization = keepListNormalization;
+              }
               if (triedQuotedItems) {
                 verification.verification.requested_operations = {
                   deletes_requested: requested.filter(r => r.delete).length,
@@ -9072,6 +9166,21 @@ Updates are ADDITIVE — Zoho ADDS items, does NOT replace.
 - ADD items: include WITHOUT "id", with Product_Name: {"id": "zoho_product_id"}, Quantity, Discount
 - MODIFY items: include with existing "id" + changed fields
 - REPLACE (e.g., swap license): DELETE old + ADD new in SAME update
+
+⚠️ **ANTI-PATTERN — OMISSION-STYLE DELETE NEVER WORKS.** Sending a Quoted_Items array containing ONLY the ids of items you want to KEEP (with no `_delete: null` markers and no other fields) does NOT delete the omitted rows. Zoho leaves them alone. The server has a guard that will REJECT any all-id-only Quoted_Items payload that's a strict subset of current rows — it will either auto-convert to explicit `_delete` ops (if unambiguous) or refuse with `KEEP_LIST_NO_OP`/`KEEP_LIST_UNKNOWN_IDS`/`MIXED_ID_ONLY_PAYLOAD`. To remove rows, ALWAYS send `{id: "<row_id>", _delete: null}` for each row to remove.
+
+  Example WRONG (will be auto-corrected or rejected):
+  Quoted_Items: [
+    {"id": "hw_1"},
+    {"id": "hw_2"}
+  ]  // ← model thinks this means "delete everything else"; Zoho says "no-op"
+
+  Example RIGHT:
+  Quoted_Items: [
+    {"id": "lic_1", "_delete": null},
+    {"id": "lic_2", "_delete": null},
+    {"id": "lic_3", "_delete": null}
+  ]  // ← explicit delete for each row to remove. Items "hw_1"/"hw_2" stay because they're not in the payload.
 
 **NEVER infer quote contents from Subject field.** Always read actual Quoted_Items via zoho_get_record before modifying existing quotes.
 - **ALWAYS include Discount when adding new line items** — including license term swaps. Missing Discount = list price charged
