@@ -2081,5 +2081,114 @@ t('Stage write-string vs read-object: requested "Review", post {name:"Review"} �
   assert.equal(classifyScalar({ pre: { name: 'Negotiation' }, requested: 'Review', post: { name: 'Review' } }), 'persisted');
 });
 
+console.log('\n─── Round-12b: let-scope regression for deletesNeverExisted/Unverifiable ───');
+
+// Codex caught: deletesNeverExisted / deletesUnverifiable were declared
+// `let` inside `if (triedQuotedItems) { ... }` but referenced in the
+// warnings section outside that block. ReferenceError on any Quote update
+// where data.Quoted_Items was absent (Subject-only edit etc.).
+//
+// The mirror below reproduces the exact production flow: declare the
+// arrays at outer scope with default [], reassign inside the block,
+// reference outside without TDZ error.
+
+function simulateUpdateVerificationWarnings({ triedQuotedItems, requestedDeleteIds, preItemIds, postItemIds, preSnapshotUsable }) {
+  // Mirror of the production scope.
+  let deletesApplied = [];
+  let deletesFailed = [];
+  let deletesNeverExisted = []; // Codex round-12b: outer scope
+  let deletesUnverifiable = []; // Codex round-12b: outer scope
+
+  if (triedQuotedItems) {
+    const preItemIdSet = new Set(preItemIds || []);
+    const actualItemIds = new Set(postItemIds || []);
+    deletesApplied = [];
+    deletesFailed = [];
+    deletesNeverExisted = [];
+    deletesUnverifiable = [];
+    for (const id of requestedDeleteIds || []) {
+      if (!preSnapshotUsable) { deletesUnverifiable.push(id); continue; }
+      if (!preItemIdSet.has(id)) { deletesNeverExisted.push(id); continue; }
+      if (!actualItemIds.has(id)) deletesApplied.push(id);
+      else deletesFailed.push(id);
+    }
+  }
+
+  // Warnings construction — outside the if block. Must NOT throw when
+  // triedQuotedItems was false.
+  const warnings = [];
+  if (deletesFailed.length > 0) warnings.push('DELETE FAILED');
+  if (deletesNeverExisted && deletesNeverExisted.length > 0) warnings.push('DELETE_ID_NEVER_EXISTED');
+  if (deletesUnverifiable && deletesUnverifiable.length > 0) warnings.push('DELETE_UNVERIFIABLE_NO_PRE_SNAPSHOT');
+
+  return { warnings, deletesApplied, deletesFailed, deletesNeverExisted, deletesUnverifiable };
+}
+
+t('Quote update with triedQuotedItems=false (Subject-only edit) does NOT throw ReferenceError', () => {
+  // The exact failure shape Codex described: data has no Quoted_Items,
+  // verification block runs (Bug C dropped that gate), warnings code
+  // references deletesNeverExisted/deletesUnverifiable. Outer-scope
+  // declaration means they exist as empty arrays.
+  let threw = null;
+  let result;
+  try {
+    result = simulateUpdateVerificationWarnings({
+      triedQuotedItems: false,
+      requestedDeleteIds: undefined,
+      preItemIds: ['sub_1', 'sub_2'],
+      postItemIds: ['sub_1', 'sub_2'],
+      preSnapshotUsable: true,
+    });
+  } catch (e) {
+    threw = e;
+  }
+  assert.equal(threw, null, 'no ReferenceError on triedQuotedItems=false path');
+  assert.deepEqual(result.warnings, [], 'no warnings on a no-items-intent Quote update');
+  assert.deepEqual(result.deletesNeverExisted, []);
+  assert.deepEqual(result.deletesUnverifiable, []);
+});
+
+t('Quote update with triedQuotedItems=true and no delete failures → no warnings', () => {
+  // Belt-and-suspenders: confirm the warnings section doesn't false-positive
+  // when triedQuotedItems is true but every check is clean.
+  const result = simulateUpdateVerificationWarnings({
+    triedQuotedItems: true,
+    requestedDeleteIds: ['sub_2'],
+    preItemIds: ['sub_1', 'sub_2'],
+    postItemIds: ['sub_1'],
+    preSnapshotUsable: true,
+  });
+  assert.deepEqual(result.deletesApplied, ['sub_2']);
+  assert.deepEqual(result.deletesFailed, []);
+  assert.deepEqual(result.deletesNeverExisted, []);
+  assert.deepEqual(result.deletesUnverifiable, []);
+  assert.deepEqual(result.warnings, []);
+});
+
+t('Quote update with triedQuotedItems=true and never_existed id → DELETE_ID_NEVER_EXISTED warning fires', () => {
+  const result = simulateUpdateVerificationWarnings({
+    triedQuotedItems: true,
+    requestedDeleteIds: ['BAD_STALE_ID'],
+    preItemIds: ['sub_1'],
+    postItemIds: ['sub_1'],
+    preSnapshotUsable: true,
+  });
+  assert.deepEqual(result.deletesApplied, []);
+  assert.deepEqual(result.deletesNeverExisted, ['BAD_STALE_ID']);
+  assert.ok(result.warnings.includes('DELETE_ID_NEVER_EXISTED'));
+});
+
+t('Quote update with triedQuotedItems=true and no pre snapshot → DELETE_UNVERIFIABLE warning fires', () => {
+  const result = simulateUpdateVerificationWarnings({
+    triedQuotedItems: true,
+    requestedDeleteIds: ['sub_2'],
+    preItemIds: [],
+    postItemIds: ['sub_1'],
+    preSnapshotUsable: false,
+  });
+  assert.deepEqual(result.deletesUnverifiable, ['sub_2']);
+  assert.ok(result.warnings.includes('DELETE_UNVERIFIABLE_NO_PRE_SNAPSHOT'));
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);

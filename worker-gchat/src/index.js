@@ -6176,6 +6176,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               let requestedAdds = [];
               let deletesApplied = [];
               let deletesFailed = [];
+              // Codex round-12b fix: declare deletesNeverExisted +
+              // deletesUnverifiable at the same scope as the other delete
+              // result arrays. Previously they were `let`-declared inside
+              // the `if (triedQuotedItems)` block — block-scoped — and the
+              // warnings code outside that block referenced them, throwing
+              // ReferenceError on every Quote update where data.Quoted_Items
+              // was absent (Subject-only edits etc), which the outer
+              // try/catch then converted into an "unverified failure"
+              // (verify_get_threw). This default-empty initialization makes
+              // the warnings checks safe regardless of triedQuotedItems.
+              let deletesNeverExisted = [];
+              let deletesUnverifiable = [];
               let modificationResults = [];
               let modificationsFailed = [];
               let modificationsApplied = [];
@@ -6222,8 +6234,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 const preSnapshotUsable = preUpdateSnapshot && Array.isArray(preUpdateSnapshot.Quoted_Items);
                 deletesApplied = [];
                 deletesFailed = [];
-                let deletesNeverExisted = [];
-                let deletesUnverifiable = [];
+                deletesNeverExisted = [];
+                deletesUnverifiable = [];
                 for (const id of requestedDeleteIds) {
                   if (!preSnapshotUsable) {
                     deletesUnverifiable.push(id);
