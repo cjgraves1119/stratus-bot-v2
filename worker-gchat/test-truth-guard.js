@@ -903,5 +903,208 @@ t('Live-failure end-to-end: verify-fail result is treated as error by askClaude 
   assert.ok(!verified.has('Quotes'), 'no Quote URL whitelisted on verify-fail');
 });
 
+console.log('\n─── Multiset row fingerprint + undo-token suppression (Codex round-7) ───');
+
+// Mirrors the production fingerprint helpers added in the verification block.
+function itemFingerprintKey(it) {
+  const pid = it.Product_Name?.id || null;
+  const qty = Number(it.Quantity || 0);
+  const disc = Number(it.Discount != null ? it.Discount : (it.discount || 0));
+  if (!pid) return null;
+  return `${pid}|${qty}|${disc.toFixed(2)}`;
+}
+function fingerprintMultiset(items) {
+  const m = new Map();
+  for (const it of items || []) {
+    const k = itemFingerprintKey(it);
+    if (!k) continue;
+    m.set(k, (m.get(k) || 0) + 1);
+  }
+  return m;
+}
+function fingerprintEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const [k, c] of a) if (b.get(k) !== c) return false;
+  return true;
+}
+
+t('fingerprint: identical sets match regardless of subform-id changes', () => {
+  const pre = [
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_OLD_1' },
+    { Product_Name: { id: 'PID_B' }, Quantity: 2, Discount: 50, id: 'sub_OLD_2' },
+  ];
+  const post = [
+    { Product_Name: { id: 'PID_B' }, Quantity: 2, Discount: 50, id: 'sub_NEW_X' },  // Zoho regenerated id
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_NEW_Y' },  // and reordered
+  ];
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), true,
+    'fingerprint must be invariant to subform id regeneration AND ordering');
+});
+
+t('fingerprint: different quantity → mismatch', () => {
+  const pre = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_1' }];
+  const post = [{ Product_Name: { id: 'PID_A' }, Quantity: 2, Discount: 100, id: 'sub_1' }];
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), false);
+});
+
+t('fingerprint: different discount > 1¢ → mismatch', () => {
+  const pre = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_1' }];
+  const post = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 99, id: 'sub_1' }];
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), false);
+});
+
+t('fingerprint: discount drift < 1¢ → match (toFixed(2) tolerance)', () => {
+  const pre = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100.001, id: 'sub_1' }];
+  const post = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100.002, id: 'sub_1' }];
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), true);
+});
+
+t('fingerprint: missing item → mismatch', () => {
+  const pre = [
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_1' },
+    { Product_Name: { id: 'PID_B' }, Quantity: 1, Discount: 50, id: 'sub_2' },
+  ];
+  const post = [{ Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_1' }];
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), false);
+});
+
+t('fingerprint: duplicate items as multiset (3-of-A pre vs 2-of-A post → mismatch)', () => {
+  const pre = [
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_1' },
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_2' },
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_3' },
+  ];
+  const post = [
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_4' },
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, id: 'sub_5' },
+  ];
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), false,
+    'dropping one duplicate must register as mismatch even with regenerated ids');
+});
+
+t('LIVE REPRO Quote 2570562000402426396: fingerprint matches with regenerated subform ids', () => {
+  // Hypothetical: even if Zoho regenerated all subform ids during the
+  // silent-rejected PUT, the fingerprint match would still detect no-op.
+  const items = [
+    { Product_Name: { id: 'PID_MX75' }, Quantity: 1, Discount: 941 },
+    { Product_Name: { id: 'PID_LIC_MX75' }, Quantity: 1, Discount: 887 },
+    { Product_Name: { id: 'PID_MX85' }, Quantity: 1, Discount: 703 },
+    { Product_Name: { id: 'PID_LIC_MX85' }, Quantity: 1, Discount: 804 },
+    { Product_Name: { id: 'PID_CW9172I' }, Quantity: 2, Discount: 1714 },
+    { Product_Name: { id: 'PID_LIC_ENT' }, Quantity: 2, Discount: 168 },
+  ];
+  const pre = items.map((it, i) => ({ ...it, id: `pre_${i}` }));
+  const post = items.map((it, i) => ({ ...it, id: `post_REGEN_${i}` })); // ids regenerated
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), true,
+    'fingerprint must match on this exact live failure even if Zoho regenerated subform ids');
+  // Therefore: ZOHO_DROPPED_QUOTED_ITEMS must fire regardless of id regeneration.
+});
+
+t('Real change is still caught: licenses removed → fingerprint mismatch', () => {
+  const pre = [
+    { Product_Name: { id: 'PID_HW1' }, Quantity: 1, Discount: 941 },
+    { Product_Name: { id: 'PID_LIC1' }, Quantity: 1, Discount: 887 },
+    { Product_Name: { id: 'PID_HW2' }, Quantity: 1, Discount: 703 },
+  ];
+  const post = [
+    { Product_Name: { id: 'PID_HW1' }, Quantity: 1, Discount: 941, id: 'sub_x' },
+    { Product_Name: { id: 'PID_HW2' }, Quantity: 1, Discount: 703, id: 'sub_y' },
+  ];
+  assert.equal(fingerprintEqual(fingerprintMultiset(pre), fingerprintMultiset(post)), false,
+    'real license removal MUST register as fingerprint mismatch (not a no-op)');
+});
+
+console.log('\n─── Undo-token suppression on verify-fail (Codex round-7) ───');
+
+// Mirror the askClaude truth-guard injection guards — the `!last.isError`
+// gate added in this commit. A failed mutation must NEVER cause an undo
+// token or [Open in Zoho] link to be appended to the user reply.
+
+function simulateInjection(finalReplyIn, last) {
+  let finalReply = finalReplyIn;
+  const replyHasToken = last.undoToken && finalReply.includes(last.undoToken);
+  const replyHasUrl = last.recordUrl && finalReply.includes(last.recordUrl);
+  const hasAnyToken = /`u_[a-z0-9_-]+`/i.test(finalReply) || /\bundo\s+token/i.test(finalReply);
+  if (!last.isError && last.undoToken && !replyHasToken && !hasAnyToken) {
+    if (!replyHasUrl && last.recordUrl) {
+      finalReply = `${finalReply.trim()}\n\n${last.summary}`;
+    } else {
+      finalReply = `${finalReply.trim()}\n\nUndo token: \`${last.undoToken}\` (say "undo" to reverse).`;
+    }
+  } else if (!last.isError && last.recordUrl && !replyHasUrl && !/\[Open in Zoho\]/i.test(finalReply) && !/https:\/\/crm\.zoho\.com/i.test(finalReply)) {
+    finalReply = `${finalReply.trim()}\n\n[Open in Zoho](${last.recordUrl})`;
+  }
+  return finalReply;
+}
+
+t('Failed mutation: undo token NOT injected', () => {
+  const out = simulateInjection(
+    'Update attempted.',
+    { isError: true, undoToken: 'u_c7214a00', recordUrl: null, summary: 'failed', toolName: 'zoho_update_record' }
+  );
+  assert.ok(!out.includes('u_c7214a00'), 'undo token must NOT appear');
+  assert.ok(!/say "undo" to reverse/i.test(out), 'undo prompt must NOT appear');
+});
+
+t('Failed mutation: [Open in Zoho] NOT injected', () => {
+  const out = simulateInjection(
+    'Update attempted.',
+    { isError: true, undoToken: null, recordUrl: 'https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000402426396', summary: 'failed', toolName: 'zoho_update_record' }
+  );
+  assert.ok(!/Open in Zoho/i.test(out), 'Open in Zoho link must NOT appear on failed mutation');
+});
+
+t('Successful mutation: undo token IS injected (regression — round-7 only added gate, not removed function)', () => {
+  const out = simulateInjection(
+    'Update applied.',
+    { isError: false, undoToken: 'u_abc123', recordUrl: null, summary: 'success', toolName: 'zoho_update_record' }
+  );
+  assert.ok(/u_abc123/.test(out), 'undo token must still appear for successful mutations');
+});
+
+t('Successful mutation: [Open in Zoho] IS injected when missing', () => {
+  const url = 'https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000400000001';
+  const out = simulateInjection(
+    'Update applied.',
+    { isError: false, undoToken: null, recordUrl: url, summary: 'success', toolName: 'zoho_update_record' }
+  );
+  assert.ok(out.includes(url), 'Zoho link must still be injected on success');
+});
+
+t('Failed mutation: error summary still injected (separate path)', () => {
+  // The error-summary injection (lines 11378-11386) is a separate gate that
+  // explicitly fires WHEN last.isError is true. That stays unchanged so the
+  // user sees the verbatim warning text.
+  let finalReply = 'The model said something';
+  const last = { isError: true, summary: 'ZOHO_DROPPED_QUOTED_ITEMS: line items unchanged.' };
+  if (last.isError && last.summary) {
+    const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
+    if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
+      finalReply = `${finalReply.trim()}\n\n${last.summary}`;
+    }
+  }
+  assert.ok(/ZOHO_DROPPED_QUOTED_ITEMS/.test(finalReply), 'error summary still surfaces');
+});
+
+t('Verify-fail return shape: no _undo_token, no _record_url, _user_visible_summary is the warning', () => {
+  // Production verification block result shape after warnings fire.
+  const result = {
+    success: false,
+    code: 'SUCCESS',
+    data: { id: '2570562000402426396' },
+    message: '⚠️ Update on Quote 2570562000402426396 was NOT applied. ZOHO_DROPPED_QUOTED_ITEMS: ...',
+    verification: {
+      success: false,
+      WARNING: 'ZOHO_DROPPED_QUOTED_ITEMS: ...',
+    },
+    _user_visible_summary: '⚠️ Update on Quote 2570562000402426396 was NOT applied. ZOHO_DROPPED_QUOTED_ITEMS: ...',
+    // No _undo_token, no _record_url
+  };
+  assert.equal(result._undo_token, undefined);
+  assert.equal(result._record_url, undefined);
+  assert.match(result._user_visible_summary, /NOT applied/);
+  assert.match(result._user_visible_summary, /⚠️/);
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);

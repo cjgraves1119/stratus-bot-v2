@@ -6097,7 +6097,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               }
 
               // ── Pre/post diff (always runs when preUpdateSnapshot is available) ──
+              // 2026-04-24 Codex round-7 fix: replace by-id matching with multiset
+              // fingerprint. Subform-id-invariant — Zoho regenerates Quoted_Items
+              // ids on some PUT paths, which would defeat by-id matching and let
+              // a true no-op slip through as anyItemChanged=true. The fingerprint
+              // is the multiset of (product_id, qty, discount) tuples, which is
+              // exactly the user-perceivable line-item identity.
               let totalChanged = false, subChanged = false, anyItemChanged = false;
+              let itemFingerprintMatches = false;
               if (preUpdateSnapshot) {
                 const preTotal = Number(preUpdateSnapshot.Grand_Total || 0);
                 const postTotal = Number(verifyRecord.Grand_Total || 0);
@@ -6106,33 +6113,48 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 totalChanged = Math.abs(preTotal - postTotal) > 0.01;
                 subChanged = Math.abs(preSub - postSub) > 0.01;
 
-                // Per-item diff — detect whether ANY line item's Discount, Quantity,
-                // Product, or set membership changed.
-                const preItemsById = new Map(
-                  (preUpdateSnapshot.Quoted_Items || []).map(i => [i.id, {
-                    discount: Number(i.Discount || 0),
-                    quantity: Number(i.Quantity || 0),
-                    product_id: i.Product_Name?.id || null,
-                  }])
-                );
-                for (const post of actualItems) {
-                  const pre = preItemsById.get(post.id);
-                  if (!pre) { anyItemChanged = true; break; }
-                  if (Math.abs(pre.discount - Number(post.discount || 0)) > 0.01) { anyItemChanged = true; break; }
-                  if (pre.quantity !== Number(post.quantity || 0)) { anyItemChanged = true; break; }
-                }
-                if (preItemsById.size !== actualItems.length) anyItemChanged = true;
+                // Multiset fingerprint helpers — order-independent + subform-id-independent.
+                const itemFingerprintKey = (it) => {
+                  const pid = it.Product_Name?.id || null;
+                  const qty = Number(it.Quantity || 0);
+                  // Discount may live as `Discount` on raw item or `discount` after slim-down
+                  const disc = Number(it.Discount != null ? it.Discount : (it.discount || 0));
+                  if (!pid) return null;
+                  return `${pid}|${qty}|${disc.toFixed(2)}`;
+                };
+                const fingerprintMultiset = (items) => {
+                  const m = new Map();
+                  for (const it of items || []) {
+                    const k = itemFingerprintKey(it);
+                    if (!k) continue;
+                    m.set(k, (m.get(k) || 0) + 1);
+                  }
+                  return m;
+                };
+                const fingerprintEqual = (a, b) => {
+                  if (a.size !== b.size) return false;
+                  for (const [k, c] of a) if (b.get(k) !== c) return false;
+                  return true;
+                };
+
+                const preFingerprint = fingerprintMultiset(preUpdateSnapshot.Quoted_Items);
+                const postFingerprint = fingerprintMultiset(verifyRecord.Quoted_Items || actualItems);
+                itemFingerprintMatches = fingerprintEqual(preFingerprint, postFingerprint);
+                anyItemChanged = !itemFingerprintMatches;
 
                 verification.verification.pre_update_totals = { grand_total: preTotal, sub_total: preSub };
                 verification.verification.post_update_totals = { grand_total: postTotal, sub_total: postSub };
                 verification.verification.any_item_changed = anyItemChanged;
+                verification.verification.item_fingerprint_match = itemFingerprintMatches;
 
-                // ZOHO_DROPPED_QUOTED_ITEMS: items intent existed but nothing
-                // item-side changed. Replaces the broader NO_OP_UPDATE_DETECTED
-                // warning with a more specific signal for the line-item path.
-                if (triedQuotedItems && !anyItemChanged && !totalChanged && !subChanged) {
+                // ZOHO_DROPPED_QUOTED_ITEMS: items intent existed but the live
+                // multiset is bit-for-bit identical to preState. Subform ids
+                // could have been regenerated and we'd still catch it here.
+                // Per Codex round-7: row-fingerprint match alone is sufficient
+                // to refuse success — totals are downstream of items.
+                if (triedQuotedItems && itemFingerprintMatches) {
                   warnings.push(
-                    `ZOHO_DROPPED_QUOTED_ITEMS: Zoho returned SUCCESS but your Quoted_Items payload had NO effect on the quote. Item count, Grand_Total ($${preTotal}), and Sub_Total all match the pre-update state exactly. The line-item changes you intended were silently rejected. Possible causes: payload shape mismatch, _delete on the only remaining item (Zoho refuses to leave a Quote with zero items), stale subform ids, or Do_Not_Auto_Update_Prices conflict. Do NOT claim the line items were changed — surface the failure to the user and offer to retry.`
+                    `ZOHO_DROPPED_QUOTED_ITEMS: Zoho returned SUCCESS but your Quoted_Items payload had NO effect on the quote. The live row fingerprint (product_id, quantity, discount per row) is identical to pre-update state. Pre Grand_Total=$${preTotal}, post Grand_Total=$${postTotal}. The line-item changes you intended were silently rejected. Possible causes: payload shape mismatch, _delete on the only remaining item (Zoho refuses to leave a Quote with zero items), stale subform ids, or Do_Not_Auto_Update_Prices conflict. Do NOT claim the line items were changed — surface the failure to the user and offer to retry.`
                   );
                 }
               }
@@ -6183,6 +6205,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 verification.verification.success = false;
                 verification.success = false;
                 verification.message = '⚠️ Zoho returned SUCCESS but verification detected the changes did not actually land. See verification.WARNING.';
+                // 2026-04-24 Codex round-7: clear undo token + record url + replace
+                // _user_visible_summary with the warning text. The model must not
+                // be able to surface "View Updated Quote" or an undo token for a
+                // mutation whose effects didn't persist. mutationSummaries upstream
+                // captures these from the result; clearing them here means no fake
+                // success-shape gets injected into the final reply.
+                delete verification._undo_token;
+                delete verification._record_url;
+                verification._user_visible_summary = `⚠️ Update on ${module_name.replace(/s$/, '')} ${record_id} was NOT applied. ${verification.verification.WARNING}`;
+                verification.message = verification._user_visible_summary;
               }
 
               console.log(`[GCHAT] Quote update verification: items=${actualItems.length}, triedQuotedItems=${triedQuotedItems}, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}, warnings=${warnings.length}`);
@@ -11332,13 +11364,18 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     // If the reply is missing BOTH the undo token for this mutation AND the zoho URL,
     // append the full summary. Otherwise if only the token is missing but url present,
     // just append the undo-token line.
-    if (last.undoToken && !replyHasToken && !hasAnyToken) {
+    // 2026-04-24 Codex round-7: gate undo-token / record-url injection on
+    // !last.isError. A failed mutation must NEVER have its undo token or
+    // [Open in Zoho] link appended to the reply — that would falsely imply
+    // success and let the user click a link/issue an undo against a write
+    // whose effects didn't persist.
+    if (!last.isError && last.undoToken && !replyHasToken && !hasAnyToken) {
       if (!replyHasUrl && last.recordUrl) {
         finalReply = `${finalReply.trim()}\n\n${last.summary}`;
       } else {
         finalReply = `${finalReply.trim()}\n\nUndo token: \`${last.undoToken}\` (say "undo" to reverse).`;
       }
-    } else if (last.recordUrl && !replyHasUrl && !/\[Open in Zoho\]/i.test(finalReply) && !/https:\/\/crm\.zoho\.com/i.test(finalReply)) {
+    } else if (!last.isError && last.recordUrl && !replyHasUrl && !/\[Open in Zoho\]/i.test(finalReply) && !/https:\/\/crm\.zoho\.com/i.test(finalReply)) {
       // Missing the Zoho link but has a token — append just the link.
       finalReply = `${finalReply.trim()}\n\n[Open in Zoho](${last.recordUrl})`;
     }
