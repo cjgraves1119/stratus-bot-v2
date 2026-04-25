@@ -8133,6 +8133,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const origRecordId = lookup.record_id;
           const preState = lookup.pre_state ? JSON.parse(lookup.pre_state) : null;
 
+          // 2026-04-25: Quote_Number-aware label for user-facing summaries
+          // in this undo handler. URLs still use record_id (Zoho URLs are
+          // record_id-based) but human-readable text prefers Quote #<num>.
+          // Broader audit across all worker handlers is tracked as Tier 1
+          // cycle 3.
+          const quoteRefLabel = (origModule === 'Quotes' && preState?.Quote_Number)
+            ? `Quote #${preState.Quote_Number}`
+            : `${origModule.replace(/s$/, '')} ${origRecordId}`;
+
           let reversalResult = null;
           let reversalOperation = null;
           let reversalUrl = null;
@@ -8299,11 +8308,103 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 preStateKeyCount.set(k, (preStateKeyCount.get(k) || 0) + 1);
               }
 
-              // Compute deletes: each current row whose key is over-represented
-              // (more in current than in preState) gets a delete op.
+              // ── 2026-04-25: per-id in-place restore pass (Tier 1 cycle 2) ──
+              // Before falling through to the existing wide-key delete-add
+              // multiset logic, look for rows that exist in BOTH current and
+              // preState by subform id. For those, restore scalar fields via
+              // in-place PUT instead of delete-add. This preserves the line id
+              // when the user did `modify qty/discount` then `undo` — the
+              // historical pain point that motivated this cycle.
+              //
+              // Step A live test (2026-04-25) proved the modify path's
+              // PUT `[{id, Quantity}]` shape is accepted by Zoho. This pass
+              // uses the same shape for restoration. We only emit fields that
+              // actually changed (narrow PUT) to avoid touching derived /
+              // locked fields. Memory feedback_zoho_quote_subform_id_invalidation.md
+              // forbids PUT-ing preState.Quoted_Items raw (full payloads with
+              // Tax/Total/Net) — that's a different shape than this narrow PUT.
+              const inPlaceRestoreOps = [];
+              const idsConsumedByInPlace = new Set();
+              // Build current-by-id and consumable-pre-by-id maps. Use copies
+              // of preStateItems so we can pull rows out as we match.
+              const currentById = new Map();
+              for (const it of currentItems) {
+                if (it && it.id) currentById.set(String(it.id), it);
+              }
+              const preByIdAvailable = new Map(); // id → pre row, single-shot consumption
+              for (const it of preStateItems) {
+                if (it && it.id && currentById.has(String(it.id))) {
+                  preByIdAvailable.set(String(it.id), it);
+                }
+              }
+              // For each id present in both, compute narrow scalar diff. Only
+              // emit a PUT op if at least one field differs. Skip product_id
+              // mismatches — if the product changed, this row is fundamentally
+              // a different line and must go through delete-add.
+              const closeNum = (a, b) => Math.abs(Number(a || 0) - Number(b || 0)) <= 0.01;
+              const stringDiff = (a, b) => {
+                const A = a == null ? '' : String(a);
+                const B = b == null ? '' : String(b);
+                return A !== B;
+              };
+              for (const [idStr, preRow] of preByIdAvailable.entries()) {
+                const curRow = currentById.get(idStr);
+                if (!curRow) continue;
+                const prePid = preRow.Product_Name?.id || null;
+                const curPid = curRow.Product_Name?.id || null;
+                if (prePid !== curPid) continue; // different products — leave for delete-add
+                const patch = { id: preRow.id };
+                let touched = false;
+                if (!closeNum(preRow.Quantity, curRow.Quantity)) {
+                  patch.Quantity = preRow.Quantity;
+                  touched = true;
+                }
+                if (!closeNum(preRow.Discount, curRow.Discount)) {
+                  patch.Discount = preRow.Discount;
+                  touched = true;
+                }
+                if (!closeNum(preRow.List_Price, curRow.List_Price)) {
+                  patch.List_Price = preRow.List_Price;
+                  touched = true;
+                }
+                if (stringDiff(preRow.Description, curRow.Description)) {
+                  patch.Description = preRow.Description;
+                  touched = true;
+                }
+                if (touched) {
+                  inPlaceRestoreOps.push(patch);
+                  idsConsumedByInPlace.add(idStr);
+                }
+                // If !touched, the row is already at preState values for this
+                // id — no PUT needed and we still mark it consumed so the
+                // wide-key logic below doesn't try to delete-add it.
+                idsConsumedByInPlace.add(idStr);
+              }
+              // Rebuild current/preState views excluding rows already handled
+              // by the in-place pass. The wide-key multiset logic then only
+              // sees rows that genuinely need delete-add (added rows or
+              // removed rows or product-id changes).
+              const currentItemsRemaining = currentItems.filter(it => !it.id || !idsConsumedByInPlace.has(String(it.id)));
+              const preStateItemsRemaining = preStateItems.filter(it => !it.id || !idsConsumedByInPlace.has(String(it.id)));
+              const currentKeyToIdsRemaining = new Map();
+              for (const it of currentItemsRemaining) {
+                const k = itemKey(it);
+                if (!k) continue;
+                if (!currentKeyToIdsRemaining.has(k)) currentKeyToIdsRemaining.set(k, []);
+                currentKeyToIdsRemaining.get(k).push(it.id);
+              }
+              const preStateKeyCountRemaining = new Map();
+              for (const it of preStateItemsRemaining) {
+                const k = itemKey(it);
+                if (!k) continue;
+                preStateKeyCountRemaining.set(k, (preStateKeyCountRemaining.get(k) || 0) + 1);
+              }
+
+              // Compute deletes from REMAINING set: each current row whose
+              // key is over-represented (more in current than in preState).
               const idsToDelete = [];
-              for (const [k, ids] of currentKeyToIds.entries()) {
-                const want = preStateKeyCount.get(k) || 0;
+              for (const [k, ids] of currentKeyToIdsRemaining.entries()) {
+                const want = preStateKeyCountRemaining.get(k) || 0;
                 const have = ids.length;
                 if (have > want) {
                   // Delete `have - want` of these. Pick the LAST ones so earlier
@@ -8311,14 +8412,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   for (let i = want; i < have; i++) idsToDelete.push(ids[i]);
                 }
               }
-              // Compute adds: preState rows whose key is under-represented in current.
+              // Compute adds from REMAINING set: preState rows whose key is
+              // under-represented in current.
               const itemsToAdd = [];
-              for (const [k, want] of preStateKeyCount.entries()) {
-                const have = (currentKeyToIds.get(k) || []).length;
+              for (const [k, want] of preStateKeyCountRemaining.entries()) {
+                const have = (currentKeyToIdsRemaining.get(k) || []).length;
                 if (want > have) {
-                  // Pick `want - have` instances from preStateItems matching this key.
+                  // Pick `want - have` instances from preStateItemsRemaining matching this key.
                   let needed = want - have;
-                  for (const it of preStateItems) {
+                  for (const it of preStateItemsRemaining) {
                     if (needed === 0) break;
                     if (itemKey(it) !== k) continue;
                     itemsToAdd.push({
@@ -8333,7 +8435,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   }
                 }
               }
-              const itemsetEquivalent = idsToDelete.length === 0 && itemsToAdd.length === 0;
+              const itemsetEquivalent =
+                idsToDelete.length === 0 &&
+                itemsToAdd.length === 0 &&
+                inPlaceRestoreOps.length === 0;
 
               // Compute scalar fields to restore (excluding stripped + Quoted_Items)
               const scalarRestore = {};
@@ -8434,9 +8539,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 // explicitly (and only after verification confirmed it).
                 if (scalarPutHappened) {
                   const fieldList = scalarRestoreKeys.slice(0, 4).join(', ');
-                  reversalSummary = `Undid update on Quote ${origRecordId} — Quoted_Items already matched preState; restored ${scalarRestoreKeys.length} scalar field(s) (${fieldList}) and verified persistence. [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                  reversalSummary = `Undid update on ${quoteRefLabel} — Quoted_Items already matched preState; restored ${scalarRestoreKeys.length} scalar field(s) (${fieldList}) and verified persistence. [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
                 } else {
-                  reversalSummary = `Nothing to undo on ${origModule.replace(/s$/, '')} ${origRecordId} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state and no scalar fields needed restoration). [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                  reversalSummary = `Nothing to undo on ${quoteRefLabel} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state and no scalar fields needed restoration). [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
                 }
                 // Fall through to the shared logging/return at the bottom.
               } else {
@@ -8445,7 +8550,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   return {
                     success: false,
                     error: 'undo_refused_empty_preState',
-                    message: `Cannot undo Quote ${origRecordId}: preState had zero Quoted_Items, but Zoho requires every Quote to have at least one line item. The original mutation likely created the Quote — route through the delete-undo path instead of update-undo.`,
+                    message: `Cannot undo ${quoteRefLabel}: preState had zero Quoted_Items, but Zoho requires every Quote to have at least one line item. The original mutation likely created the Quote — route through the delete-undo path instead of update-undo.`,
                   };
                 }
 
@@ -8461,6 +8566,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   Do_Not_Auto_Update_Prices: true,
                 };
                 const ops = [];
+                // 2026-04-25: in-place restore ops first (preserves subform
+                // ids on rows that only had scalar diffs). Then deletes for
+                // genuinely-removed rows, then adds for genuinely-added rows.
+                for (const patch of inPlaceRestoreOps) ops.push(patch);
                 for (const id of idsToDelete) ops.push({ id, _delete: null });
                 for (const item of itemsToAdd) {
                   if (item.Product_Name?.id) ops.push(item);
@@ -8567,8 +8676,65 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     return {
                       success: false,
                       error: 'undo_scalar_verify_mismatch',
-                      message: `⚠️ Undo restore PUT returned SUCCESS but ${scalarMismatches.length} scalar field(s) did NOT persist on Quote ${origRecordId}. Do NOT claim the update was undone. Mismatches: ${scalarMismatches.map(m => `${m.field}(want=${JSON.stringify(m.requested).slice(0,40)}, got=${JSON.stringify(m.actual).slice(0,40)})`).join('; ')}`,
+                      message: `⚠️ Undo restore PUT returned SUCCESS but ${scalarMismatches.length} scalar field(s) did NOT persist on ${quoteRefLabel}. Do NOT claim the update was undone. Mismatches: ${scalarMismatches.map(m => `${m.field}(want=${JSON.stringify(m.requested).slice(0,40)}, got=${JSON.stringify(m.actual).slice(0,40)})`).join('; ')}`,
                       mismatches: scalarMismatches,
+                    };
+                  }
+                }
+                // ── 2026-04-25 Codex review: id-preservation verification ──
+                // Cycle 2's whole purpose is to preserve subform ids when the
+                // user does `modify` then `undo`. Fingerprint compare confirms
+                // the right SET of values landed; it does NOT prove our
+                // per-id PUT ops actually preserved the ids we patched.
+                // Without this check Zoho could silently delete-recreate a
+                // row even on a {id, Quantity} PUT and we'd claim success
+                // even though the patch's structural goal failed.
+                if (inPlaceRestoreOps.length > 0) {
+                  const verifyItemsById = new Map();
+                  for (const it of verifyItems) {
+                    if (it && it.id) verifyItemsById.set(String(it.id), it);
+                  }
+                  const preStateItemsById = new Map();
+                  for (const it of preStateItems) {
+                    if (it && it.id) preStateItemsById.set(String(it.id), it);
+                  }
+                  const inPlaceFailures = [];
+                  for (const patch of inPlaceRestoreOps) {
+                    const idStr = String(patch.id);
+                    const got = verifyItemsById.get(idStr);
+                    if (!got) {
+                      inPlaceFailures.push(`id ${idStr} missing from post-restore (Zoho may have replaced the row)`);
+                      continue;
+                    }
+                    const preRow = preStateItemsById.get(idStr);
+                    const prePid = preRow?.Product_Name?.id || null;
+                    const gotPid = got.Product_Name?.id || null;
+                    if (prePid && gotPid && String(prePid) !== String(gotPid)) {
+                      inPlaceFailures.push(`id ${idStr} Product_Name changed: pre=${prePid}, post=${gotPid}`);
+                    }
+                    if (patch.Quantity != null && Math.abs(Number(got.Quantity || 0) - Number(patch.Quantity || 0)) > 0.01) {
+                      inPlaceFailures.push(`id ${idStr} Quantity didn't persist: requested=${patch.Quantity}, got=${got.Quantity}`);
+                    }
+                    if (patch.Discount != null && Math.abs(Number(got.Discount || 0) - Number(patch.Discount || 0)) > 0.01) {
+                      inPlaceFailures.push(`id ${idStr} Discount didn't persist: requested=${patch.Discount}, got=${got.Discount}`);
+                    }
+                    if (patch.List_Price != null && Math.abs(Number(got.List_Price || 0) - Number(patch.List_Price || 0)) > 0.01) {
+                      inPlaceFailures.push(`id ${idStr} List_Price didn't persist: requested=${patch.List_Price}, got=${got.List_Price}`);
+                    }
+                    if (patch.Description != null) {
+                      const want = String(patch.Description ?? '');
+                      const have = String(got.Description ?? '');
+                      if (want !== have) {
+                        inPlaceFailures.push(`id ${idStr} Description didn't persist`);
+                      }
+                    }
+                  }
+                  if (inPlaceFailures.length > 0) {
+                    return {
+                      success: false,
+                      error: 'undo_inplace_id_lost',
+                      message: `⚠️ Undo restore PUT returned SUCCESS and the row fingerprint matches preState, but the per-id in-place restore did NOT preserve the expected subform ids/values on ${quoteRefLabel}. ${inPlaceFailures.length} failure(s): ${inPlaceFailures.join('; ')}. Do NOT claim the undo succeeded — the patch's structural-fidelity goal was not achieved.`,
+                      inplace_failures: inPlaceFailures,
                     };
                   }
                 }
@@ -8580,7 +8746,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // Otherwise build the standard "Undid update" summary.
             if (!reversalSummary) {
               const restoredFields = Object.keys(preState).filter(k => !STRIP.has(k)).slice(0, 4).join(', ');
-              reversalSummary = `Undid update on ${origModule.replace(/s$/, '')} ${origRecordId} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
+              reversalSummary = `Undid update on ${quoteRefLabel} — restored: ${restoredFields} — [Open in Zoho](${reversalUrl})`;
             }
           } else {
             return { success: false, error: `Operation type "${lookup.operation}" is not undo-able.` };
