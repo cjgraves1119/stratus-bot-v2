@@ -5895,18 +5895,60 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           // No further normalization needed for empty arrays without current items.
           if (data.Quoted_Items.length > 0) {
+          // 2026-04-24 Codex round-11 finding #1: tighten to an ALLOWLIST of
+          // harmless metadata keys. Previous denylist treated rows like
+          // { id, Custom_Field: "x" } or { id, Total: 123 } as id-only, which
+          // would have incorrectly converted them to deletes for omitted rows.
+          // Now: id-only means the object has ONLY id plus keys from a small
+          // allowlist of harmless metadata/control/rendering fields. Any
+          // unknown key makes the row explicit/unsupported, not a keep-list.
+          const ID_ONLY_ALLOWED_KEYS = new Set([
+            'id',
+            // Zoho internal metadata that may appear in a row without being
+            // an intent signal. Kept narrow — if a key isn't here, we treat
+            // the row as explicit and refuse keep-list normalization.
+            '$field_states', '$in_merge', '$layout_id', '$zia_visions',
+          ]);
           const isQuoteRowIdOnly = (row) => {
             if (!row || typeof row !== 'object' || !row.id) return false;
-            // Any of these keys present (including _delete: null) means the
-            // row carries an explicit operation intent and is NOT id-only.
-            const meaningfulKeys = ['_delete', 'Product_Name', 'Quantity', 'Discount', 'List_Price', 'Description', 'Sequence_Number', 'Tax'];
-            for (const k of meaningfulKeys) {
-              if (k in row && row[k] !== undefined) return false;
+            for (const k of Object.keys(row)) {
+              if (!ID_ONLY_ALLOWED_KEYS.has(k)) return false;
             }
             return true;
           };
+          const hasUnsupportedShape = (row) => {
+            // Any row with id + some unknown field is NOT id-only AND NOT a
+            // clean explicit op (explicit ops are {_delete:null}, {modify
+            // fields}, or adds with Product_Name). Flag so we can refuse.
+            if (!row || typeof row !== 'object' || !row.id) return false;
+            if (isQuoteRowIdOnly(row)) return false;
+            const explicitKeys = new Set(['_delete', 'Product_Name', 'Quantity', 'Discount', 'List_Price', 'Description', 'Sequence_Number', 'Tax']);
+            for (const k of Object.keys(row)) {
+              if (k === 'id' || ID_ONLY_ALLOWED_KEYS.has(k)) continue;
+              if (!explicitKeys.has(k)) return true; // unknown key present
+            }
+            return false;
+          };
           const allIdOnly = data.Quoted_Items.every(isQuoteRowIdOnly);
           const someIdOnly = data.Quoted_Items.some(isQuoteRowIdOnly);
+          // Unknown fields → refuse before the model gets a chance to hide behind them.
+          const unsupportedRows = data.Quoted_Items.filter(hasUnsupportedShape);
+          if (unsupportedRows.length > 0) {
+            const sampleKeys = new Set();
+            for (const r of unsupportedRows) {
+              for (const k of Object.keys(r)) {
+                if (k !== 'id' && !ID_ONLY_ALLOWED_KEYS.has(k)) sampleKeys.add(k);
+              }
+            }
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'unsupported_quoted_items_shape',
+              message: `UNSUPPORTED_QUOTED_ITEMS_SHAPE: Your Quoted_Items payload contains row(s) with unrecognized field(s): ${[...sampleKeys].slice(0, 5).join(', ')}. Only these shapes are supported on a Quote PUT: (1) DELETE: {id, _delete: null}; (2) MODIFY: {id, Quantity?, Discount?, List_Price?, Description?, Sequence_Number?}; (3) ADD: {Product_Name: {id}, Quantity, Discount, ...}. Remove the unknown field(s) and resubmit.`,
+              unknown_fields: [...sampleKeys],
+              row_count: unsupportedRows.length,
+            };
+          }
 
           // Round-10 (b): all-id-only without a current-row snapshot → reject.
           // Without preUpdateSnapshot.Quoted_Items we cannot compute a strict-
@@ -6122,15 +6164,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               };
 
               // ── Per-item check (only when data.Quoted_Items has intents) ──
+              // 2026-04-24 Codex round-11 finding #4: verify adds AND more
+              // modification fields. Previous code confirmed deletes and only
+              // Quantity/Discount modifications. Adds were counted but never
+              // verified, and List_Price / Description / Product_Name / Tax
+              // changes could be dropped silently. Now all four verified.
               const triedQuotedItems = Array.isArray(data.Quoted_Items) && data.Quoted_Items.length > 0;
               let requested = [];
               let requestedDeleteIds = new Set();
               let requestedModifications = [];
+              let requestedAdds = [];
               let deletesApplied = [];
               let deletesFailed = [];
               let modificationResults = [];
               let modificationsFailed = [];
               let modificationsApplied = [];
+              let addResults = [];
+              let addsFailed = [];
+              let addsApplied = [];
 
               if (triedQuotedItems) {
                 requested = data.Quoted_Items.map(i => {
@@ -6142,17 +6193,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     product_id: i.Product_Name?.id || null,
                     requested_quantity: i.Quantity,
                     requested_discount: i.Discount,
+                    requested_list_price: i.List_Price,
+                    requested_description: i.Description,
+                    requested_product_id: i.Product_Name?.id || null,
                     delete: isDelete,
                     modify: hasId && !isDelete,
-                    add: !hasId,
+                    add: !hasId && (i.Product_Name?.id || i.Product_Name?.name),
                   };
                 });
                 requestedDeleteIds = new Set(requested.filter(r => r.delete && r.id).map(r => r.id));
                 requestedModifications = requested.filter(r => r.modify);
+                requestedAdds = requested.filter(r => r.add);
                 const actualItemIds = new Set(actualItems.map(i => i.id));
                 const actualItemsById = new Map(actualItems.map(i => [i.id, i]));
                 deletesApplied = [...requestedDeleteIds].filter(id => !actualItemIds.has(id));
                 deletesFailed = [...requestedDeleteIds].filter(id => actualItemIds.has(id));
+
+                // Modification check — now covers Quantity, Discount, List_Price,
+                // Description, and Product_Name (id) changes.
                 modificationResults = requestedModifications.map(r => {
                   const actual = actualItemsById.get(r.id);
                   if (!actual) {
@@ -6174,10 +6232,74 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     checks.discount = { requested: wantD, actual: gotD, match };
                     if (!match) allApplied = false;
                   }
+                  if (r.requested_list_price !== undefined) {
+                    const wantLP = Number(r.requested_list_price);
+                    const gotLP = Number(actual.list_price || 0);
+                    const match = Math.abs(wantLP - gotLP) < 0.01;
+                    checks.list_price = { requested: wantLP, actual: gotLP, match };
+                    if (!match) allApplied = false;
+                  }
+                  if (r.requested_description !== undefined && r.requested_description !== null) {
+                    const wantDesc = String(r.requested_description);
+                    const gotDesc = actual.description == null ? '' : String(actual.description);
+                    const match = wantDesc === gotDesc;
+                    checks.description = { requested: wantDesc, actual: gotDesc, match };
+                    if (!match) allApplied = false;
+                  }
+                  if (r.requested_product_id && r.modify) {
+                    // Model sent Product_Name.id on an existing row — verify Zoho
+                    // actually swapped the product (rare but dangerous if silent).
+                    const wantPid = String(r.requested_product_id);
+                    const gotPid = String(actual.product_id || actual.Product_Name?.id || '');
+                    const match = wantPid === gotPid;
+                    checks.product_id = { requested: wantPid, actual: gotPid, match };
+                    if (!match) allApplied = false;
+                  }
                   return { id: r.id, applied: allApplied, checks };
                 });
                 modificationsFailed = modificationResults.filter(m => !m.applied);
                 modificationsApplied = modificationResults.filter(m => m.applied);
+
+                // Add check — for each requested add, confirm an actualItem with
+                // the requested product_id AND matching qty/discount (tolerant)
+                // exists that wasn't there pre-update. Uses multiset to handle
+                // duplicates.
+                const preIdSet = new Set((preUpdateSnapshot?.Quoted_Items || []).map(it => it.id).filter(Boolean));
+                const newlyAddedActual = actualItems.filter(it => !preIdSet.has(it.id));
+                const newlyAddedAvail = [...newlyAddedActual]; // consumed as we match adds
+                addResults = requestedAdds.map(r => {
+                  // Find a newly-added actual item matching product_id (+ qty/disc tolerance)
+                  const wantPid = String(r.requested_product_id || '');
+                  const wantQ = r.requested_quantity !== undefined ? Number(r.requested_quantity) : null;
+                  const wantD = r.requested_discount !== undefined ? Number(r.requested_discount) : null;
+                  const wantLP = r.requested_list_price !== undefined ? Number(r.requested_list_price) : null;
+                  const ix = newlyAddedAvail.findIndex(a => {
+                    const apid = String(a.product_id || a.Product_Name?.id || '');
+                    if (apid !== wantPid) return false;
+                    if (wantQ !== null && Number(a.quantity) !== wantQ) return false;
+                    if (wantD !== null && Math.abs(Number(a.discount || 0) - wantD) >= 0.01) return false;
+                    if (wantLP !== null && Math.abs(Number(a.list_price || 0) - wantLP) >= 0.01) return false;
+                    return true;
+                  });
+                  if (ix === -1) {
+                    return {
+                      applied: false,
+                      requested_product_id: wantPid,
+                      requested_qty: wantQ,
+                      requested_discount: wantD,
+                      requested_list_price: wantLP,
+                      reason: 'No newly-added row matches requested product_id + quantity + discount + list_price',
+                    };
+                  }
+                  const matched = newlyAddedAvail.splice(ix, 1)[0];
+                  return {
+                    applied: true,
+                    matched_id: matched.id,
+                    requested_product_id: wantPid,
+                  };
+                });
+                addsFailed = addResults.filter(a => !a.applied);
+                addsApplied = addResults.filter(a => a.applied);
               }
 
               const verification = {
@@ -6202,7 +6324,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   deletes_requested: requested.filter(r => r.delete).length,
                   deletes_applied: deletesApplied.length,
                   deletes_failed: deletesFailed,
-                  adds_requested: requested.filter(r => r.add).length,
+                  adds_requested: requestedAdds.length,
+                  adds_applied: addsApplied.length,
+                  adds_failed: addsFailed,
                   modifications_requested: requestedModifications.length,
                   modifications_applied: modificationsApplied.length,
                   modifications_failed: modificationsFailed,
@@ -6228,6 +6352,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 } else {
                   warnings.push(`MODIFICATION FAILED: ${modificationsFailed.length} line item change(s) did NOT apply. ${details}. Zoho accepted the payload but the values did not change. Resubmit with the full Quoted_Items array.`);
                 }
+              }
+              // Codex round-11 finding #4: add-failure warning.
+              if (addsFailed.length > 0) {
+                const details = addsFailed.map(a =>
+                  `product ${a.requested_product_id} (qty=${a.requested_qty}, disc=${a.requested_discount}, lp=${a.requested_list_price}) — ${a.reason}`
+                ).join('; ');
+                warnings.push(`ADD_FAILED: ${addsFailed.length} requested line item(s) were NOT added to the quote despite API SUCCESS. ${details}. No newly-added row matches the requested product_id + quantity + discount + list_price. Zoho accepted the payload but silently dropped the adds — do NOT claim the item(s) were added.`);
               }
 
               // ── Pre/post diff (always runs when preUpdateSnapshot is available) ──
@@ -7806,13 +7937,23 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const currentItems = currentRec.Quoted_Items || [];
               const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
 
-              // Build a multiset of (product_id, qty, discount) keys for each side
+              // 2026-04-24 Codex round-11 finding #3: widen the smart-diff key
+              // to include all meaningful mutable Quote line fields. Previous
+              // (product_id + qty + discount) missed List_Price and Description
+              // changes, so a same-product/qty/discount row with a changed
+              // List_Price (e.g., Zoho recomputed after a catalog price update)
+              // or changed Description would wrongly take the no-op fast path.
+              // Tax is derived (Zoho recomputes); Sequence_Number is display
+              // ordering (Zoho may renumber) — exclude both to avoid false
+              // negatives. Include: product_id, qty, discount, list_price, description.
               const itemKey = (it) => {
                 const pid = it.Product_Name?.id || null;
                 const qty = Number(it.Quantity || 0);
                 const disc = Number(it.Discount || 0);
+                const lp = Number(it.List_Price || 0);
+                const desc = it.Description == null ? '' : String(it.Description);
                 if (!pid) return null;
-                return `${pid}|${qty}|${disc.toFixed(2)}`;
+                return `${pid}|${qty}|${disc.toFixed(2)}|${lp.toFixed(2)}|${desc}`;
               };
               const currentKeyToIds = new Map(); // key → array of subform ids in current
               for (const it of currentItems) {
@@ -7936,29 +8077,68 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 }
                 reversalResult = restoreRes;
 
-                // Verify post-state: item count + Grand_Total match preState within tolerance.
+                // 2026-04-24 Codex round-11 finding #2+#3: verify post-state
+                // with the same multiset fingerprint the smart-diff uses, AND
+                // fail loud if the verify GET throws. Previous code caught the
+                // verify error and fell through to success, which was another
+                // false-success path. Also same-count/same-total wrong-product-
+                // mix is now caught by the fingerprint multiset compare.
+                let verifyRes, verifyRec, verifyItems;
                 try {
-                  const verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
-                  const verifyRec = verifyRes?.data?.[0];
-                  const verifyItems = verifyRec?.Quoted_Items || [];
-                  if (verifyItems.length !== preStateItems.length) {
-                    return {
-                      success: false,
-                      error: `Undo verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
-                      detail: verifyRes,
-                    };
-                  }
-                  const preTotal = Number(preState.Grand_Total || 0);
-                  const postTotal = Number(verifyRec?.Grand_Total || 0);
-                  if (preTotal > 0 && Math.abs(preTotal - postTotal) > 0.01) {
-                    return {
-                      success: false,
-                      error: `Undo verification failed: Grand_Total expected ${preTotal}, got ${postTotal}`,
-                      detail: verifyRes,
-                    };
-                  }
+                  verifyRes = await zohoApiCall('GET', `${origModule}/${origRecordId}?fields=id,Grand_Total,Quoted_Items`, env);
+                  verifyRec = verifyRes?.data?.[0];
+                  verifyItems = verifyRec?.Quoted_Items || [];
                 } catch (verifyErr) {
                   console.warn('[UNDO] Post-restore verification fetch failed:', verifyErr.message);
+                  return {
+                    success: false,
+                    error: `undo_verify_fetch_failed`,
+                    message: `⚠️ Undo restore PUT returned SUCCESS but the verification re-fetch threw: ${verifyErr.message}. Cannot confirm the restore actually landed. Do NOT claim the update was undone and do NOT surface a success link or token.`,
+                    detail: verifyErr.message,
+                  };
+                }
+                if (verifyItems.length !== preStateItems.length) {
+                  return {
+                    success: false,
+                    error: `Undo verification failed: expected ${preStateItems.length} items, got ${verifyItems.length}`,
+                    detail: verifyRes,
+                  };
+                }
+                // Multiset fingerprint compare using the wide smart-diff key.
+                const postFingerprint = new Map();
+                for (const it of verifyItems) {
+                  const k = itemKey(it);
+                  if (!k) continue;
+                  postFingerprint.set(k, (postFingerprint.get(k) || 0) + 1);
+                }
+                const preFingerprint = new Map();
+                for (const it of preStateItems) {
+                  const k = itemKey(it);
+                  if (!k) continue;
+                  preFingerprint.set(k, (preFingerprint.get(k) || 0) + 1);
+                }
+                let fingerprintMatch = preFingerprint.size === postFingerprint.size;
+                if (fingerprintMatch) {
+                  for (const [k, c] of preFingerprint) {
+                    if (postFingerprint.get(k) !== c) { fingerprintMatch = false; break; }
+                  }
+                }
+                if (!fingerprintMatch) {
+                  return {
+                    success: false,
+                    error: `undo_verify_fingerprint_mismatch`,
+                    message: `⚠️ Undo restore PUT returned SUCCESS but the post-restore row fingerprint does not match preState. Item counts match (${verifyItems.length}) but product/qty/discount/list_price/description signatures differ — same-count wrong-product-mix detected. Do NOT claim the undo succeeded.`,
+                    detail: verifyRes,
+                  };
+                }
+                const preTotal = Number(preState.Grand_Total || 0);
+                const postTotal = Number(verifyRec?.Grand_Total || 0);
+                if (preTotal > 0 && Math.abs(preTotal - postTotal) > 0.01) {
+                  return {
+                    success: false,
+                    error: `Undo verification failed: Grand_Total expected ${preTotal}, got ${postTotal}`,
+                    detail: verifyRes,
+                  };
                 }
               }
             }

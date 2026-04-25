@@ -1524,5 +1524,324 @@ t('Single id-only row that matches single current row → no-op (all-current)', 
     '1-of-1 keep-list still triggers the all-current rejection (model bug, not delete intent)');
 });
 
+console.log('\n─── Round-11 #1: allowlist-based id-only classifier ───');
+
+const ID_ONLY_ALLOWED_KEYS = new Set([
+  'id',
+  '$field_states', '$in_merge', '$layout_id', '$zia_visions',
+]);
+const EXPLICIT_KEYS = new Set(['_delete', 'Product_Name', 'Quantity', 'Discount', 'List_Price', 'Description', 'Sequence_Number', 'Tax']);
+function isQuoteRowIdOnlyStrict(row) {
+  if (!row || typeof row !== 'object' || !row.id) return false;
+  for (const k of Object.keys(row)) {
+    if (!ID_ONLY_ALLOWED_KEYS.has(k)) return false;
+  }
+  return true;
+}
+function hasUnsupportedShape(row) {
+  if (!row || typeof row !== 'object' || !row.id) return false;
+  if (isQuoteRowIdOnlyStrict(row)) return false;
+  for (const k of Object.keys(row)) {
+    if (k === 'id' || ID_ONLY_ALLOWED_KEYS.has(k)) continue;
+    if (!EXPLICIT_KEYS.has(k)) return true;
+  }
+  return false;
+}
+
+t('id-only classifier: plain {id} is id-only', () => {
+  assert.equal(isQuoteRowIdOnlyStrict({ id: 'sub_1' }), true);
+});
+
+t('id-only classifier: {id, $layout_id} (Zoho metadata) still id-only', () => {
+  assert.equal(isQuoteRowIdOnlyStrict({ id: 'sub_1', $layout_id: { id: 'L1' } }), true);
+});
+
+t('id-only classifier: {id, Custom_Field} is NOT id-only (unknown field)', () => {
+  assert.equal(isQuoteRowIdOnlyStrict({ id: 'sub_1', Custom_Field: 'x' }), false);
+  assert.equal(hasUnsupportedShape({ id: 'sub_1', Custom_Field: 'x' }), true);
+});
+
+t('id-only classifier: {id, Total: 123} is NOT id-only (Total is derived, not allowed)', () => {
+  assert.equal(isQuoteRowIdOnlyStrict({ id: 'sub_1', Total: 123 }), false);
+  assert.equal(hasUnsupportedShape({ id: 'sub_1', Total: 123 }), true);
+});
+
+t('id-only classifier: {id, _delete: null} is explicit delete, not id-only', () => {
+  assert.equal(isQuoteRowIdOnlyStrict({ id: 'sub_1', _delete: null }), false);
+  assert.equal(hasUnsupportedShape({ id: 'sub_1', _delete: null }), false, 'explicit _delete is supported shape');
+});
+
+t('id-only classifier: {id, Quantity: 5} is explicit modify, not id-only', () => {
+  assert.equal(isQuoteRowIdOnlyStrict({ id: 'sub_1', Quantity: 5 }), false);
+  assert.equal(hasUnsupportedShape({ id: 'sub_1', Quantity: 5 }), false);
+});
+
+t('Strict subset with {id + unknown field} must NOT normalize to deletes', () => {
+  // Previously: denylist-based isQuoteRowIdOnly would have treated
+  // { id, Custom_Field: "x" } as id-only and converted to delete ops for
+  // omitted current ids. Now: the unknown field triggers
+  // unsupported_quoted_items_shape rejection before normalization.
+  const payload = [
+    { id: 'sub_1', Custom_Field: 'x' },
+    { id: 'sub_2', Custom_Field: 'y' },
+  ];
+  const unsupported = payload.filter(hasUnsupportedShape);
+  assert.equal(unsupported.length, 2, 'both rows must trigger unsupported shape');
+  // Because of hasUnsupportedShape, the normalizer will return
+  // error: 'unsupported_quoted_items_shape' BEFORE computing keep-list semantics.
+});
+
+console.log('\n─── Round-11 #2: undo verify-GET-throws is hard failure ───');
+
+// Mirror the production path: restoreRes returns success status, verify GET throws.
+function simulateUndoRestoreWithVerifyThrow(restoreStatus, verifyThrows) {
+  // Production code:
+  //   const restoreRes = await zohoApiCall('PUT', ...);
+  //   if (restoreStatus !== 'success') return failure(...);
+  //   reversalResult = restoreRes;
+  //   try { verifyRes = await zohoApiCall('GET', ...); verifyRec = ...; }
+  //   catch (e) { return { success: false, error: 'undo_verify_fetch_failed', ... }; }
+  //   // ... fingerprint & count checks ...
+  if (restoreStatus !== 'success') {
+    return { success: false, error: 'restore_failed' };
+  }
+  if (verifyThrows) {
+    return {
+      success: false,
+      error: 'undo_verify_fetch_failed',
+      message: '⚠️ Undo restore PUT returned SUCCESS but the verification re-fetch threw — do NOT claim the update was undone.',
+    };
+  }
+  return { success: true, _user_visible_summary: 'Undid update on Quote X — restored: ...' };
+}
+
+t('Restore PUT success + verify GET throws → success:false, no "Undid update" summary', () => {
+  const result = simulateUndoRestoreWithVerifyThrow('success', true);
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'undo_verify_fetch_failed');
+  assert.ok(!/undid update/i.test(result._user_visible_summary || ''), 'no "Undid update" success phrase');
+  assert.match(result.message, /UNVERIFIED|do NOT claim|threw/i);
+});
+
+t('Restore PUT success + verify GET ok → success:true (happy path preserved)', () => {
+  const result = simulateUndoRestoreWithVerifyThrow('success', false);
+  assert.equal(result.success, true);
+});
+
+t('Restore PUT fails → success:false (unchanged behavior)', () => {
+  const result = simulateUndoRestoreWithVerifyThrow('fail', false);
+  assert.equal(result.success, false);
+});
+
+console.log('\n─── Round-11 #3: widened undo smart-diff fingerprint ───');
+
+// Production itemKey now: product_id | qty | discount | list_price | description
+function widenedItemKey(it) {
+  const pid = it.Product_Name?.id || null;
+  const qty = Number(it.Quantity || 0);
+  const disc = Number(it.Discount || 0);
+  const lp = Number(it.List_Price || 0);
+  const desc = it.Description == null ? '' : String(it.Description);
+  if (!pid) return null;
+  return `${pid}|${qty}|${disc.toFixed(2)}|${lp.toFixed(2)}|${desc}`;
+}
+
+t('Same product/qty/discount but changed List_Price → different keys (no no-op)', () => {
+  const pre = { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, List_Price: 500 };
+  const post = { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, List_Price: 450 };
+  assert.notEqual(widenedItemKey(pre), widenedItemKey(post),
+    'List_Price change must produce different fingerprint keys');
+});
+
+t('Same product/qty/discount but changed Description → different keys (no no-op)', () => {
+  const pre = { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, List_Price: 500, Description: 'Old note' };
+  const post = { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, List_Price: 500, Description: 'New note' };
+  assert.notEqual(widenedItemKey(pre), widenedItemKey(post),
+    'Description change must produce different fingerprint keys');
+});
+
+t('Identical rows → same key (no-op fast path fires)', () => {
+  const a = { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, List_Price: 500, Description: 'same' };
+  const b = { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 100, List_Price: 500, Description: 'same' };
+  assert.equal(widenedItemKey(a), widenedItemKey(b));
+});
+
+t('Same count/total but wrong product mix after restore → fingerprint multiset mismatch', () => {
+  // Pre: 2 rows [A@100, B@100] total 200
+  // Post-restore (buggy): 2 rows [A@100, A@100] total 200 — same count, same total, WRONG mix
+  const pre = [
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 0, List_Price: 100 },
+    { Product_Name: { id: 'PID_B' }, Quantity: 1, Discount: 0, List_Price: 100 },
+  ];
+  const post = [
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 0, List_Price: 100 },
+    { Product_Name: { id: 'PID_A' }, Quantity: 1, Discount: 0, List_Price: 100 },
+  ];
+  const preFp = new Map();
+  for (const it of pre) { const k = widenedItemKey(it); preFp.set(k, (preFp.get(k) || 0) + 1); }
+  const postFp = new Map();
+  for (const it of post) { const k = widenedItemKey(it); postFp.set(k, (postFp.get(k) || 0) + 1); }
+  let match = preFp.size === postFp.size;
+  if (match) for (const [k, c] of preFp) if (postFp.get(k) !== c) { match = false; break; }
+  assert.equal(match, false, 'wrong product mix must fail fingerprint compare even with matching count+total');
+});
+
+console.log('\n─── Round-11 #4: update verification verifies adds + widened modify fields ───');
+
+function mockRequestedOps(data) {
+  return data.Quoted_Items.map(i => {
+    const isDelete = i._delete === null;
+    const hasId = !!i.id;
+    return {
+      raw: i,
+      id: i.id || null,
+      requested_quantity: i.Quantity,
+      requested_discount: i.Discount,
+      requested_list_price: i.List_Price,
+      requested_description: i.Description,
+      requested_product_id: i.Product_Name?.id || null,
+      delete: isDelete,
+      modify: hasId && !isDelete,
+      add: !hasId && (i.Product_Name?.id || i.Product_Name?.name),
+    };
+  });
+}
+
+function verifyAdds(requestedAdds, actualItems, preItemIds) {
+  const preIdSet = new Set(preItemIds);
+  const newlyAddedAvail = actualItems.filter(it => !preIdSet.has(it.id));
+  const results = [];
+  for (const r of requestedAdds) {
+    const wantPid = String(r.requested_product_id || '');
+    const wantQ = r.requested_quantity !== undefined ? Number(r.requested_quantity) : null;
+    const wantD = r.requested_discount !== undefined ? Number(r.requested_discount) : null;
+    const wantLP = r.requested_list_price !== undefined ? Number(r.requested_list_price) : null;
+    const ix = newlyAddedAvail.findIndex(a => {
+      const apid = String(a.product_id || '');
+      if (apid !== wantPid) return false;
+      if (wantQ !== null && Number(a.quantity) !== wantQ) return false;
+      if (wantD !== null && Math.abs(Number(a.discount || 0) - wantD) >= 0.01) return false;
+      if (wantLP !== null && Math.abs(Number(a.list_price || 0) - wantLP) >= 0.01) return false;
+      return true;
+    });
+    if (ix === -1) {
+      results.push({ applied: false, requested_product_id: wantPid, reason: 'no match' });
+    } else {
+      const matched = newlyAddedAvail.splice(ix, 1)[0];
+      results.push({ applied: true, matched_id: matched.id });
+    }
+  }
+  return results;
+}
+
+t('Requested add missing from post-state → fails verification', () => {
+  const data = { Quoted_Items: [{ Product_Name: { id: 'PID_NEW' }, Quantity: 1, Discount: 50 }] };
+  const ops = mockRequestedOps(data);
+  const adds = ops.filter(o => o.add);
+  // Zoho silently dropped the add — post-state has no new row for PID_NEW
+  const actualItems = [{ id: 'sub_1', product_id: 'PID_A', quantity: 1, discount: 0 }];
+  const preIds = ['sub_1'];
+  const results = verifyAdds(adds, actualItems, preIds);
+  assert.equal(results[0].applied, false);
+  assert.equal(results[0].requested_product_id, 'PID_NEW');
+});
+
+t('Requested add with wrong qty in post-state → fails verification', () => {
+  const data = { Quoted_Items: [{ Product_Name: { id: 'PID_NEW' }, Quantity: 5, Discount: 0 }] };
+  const ops = mockRequestedOps(data);
+  const adds = ops.filter(o => o.add);
+  // Add landed but Zoho wrote qty=1 (silently truncated)
+  const actualItems = [
+    { id: 'sub_1', product_id: 'PID_A', quantity: 1, discount: 0 },
+    { id: 'sub_NEW', product_id: 'PID_NEW', quantity: 1, discount: 0 },
+  ];
+  const results = verifyAdds(adds, actualItems, ['sub_1']);
+  assert.equal(results[0].applied, false, 'wrong qty must fail add verification');
+});
+
+t('Requested add with wrong product in post-state → fails verification', () => {
+  const data = { Quoted_Items: [{ Product_Name: { id: 'PID_NEW' }, Quantity: 1, Discount: 0 }] };
+  const adds = mockRequestedOps(data).filter(o => o.add);
+  // Some OTHER row got added (not PID_NEW)
+  const actualItems = [
+    { id: 'sub_1', product_id: 'PID_A', quantity: 1, discount: 0 },
+    { id: 'sub_NEW', product_id: 'PID_WRONG', quantity: 1, discount: 0 },
+  ];
+  const results = verifyAdds(adds, actualItems, ['sub_1']);
+  assert.equal(results[0].applied, false);
+});
+
+t('Requested add with wrong discount → fails verification', () => {
+  const data = { Quoted_Items: [{ Product_Name: { id: 'PID_NEW' }, Quantity: 1, Discount: 100 }] };
+  const adds = mockRequestedOps(data).filter(o => o.add);
+  const actualItems = [
+    { id: 'sub_NEW', product_id: 'PID_NEW', quantity: 1, discount: 0 }, // discount dropped
+  ];
+  const results = verifyAdds(adds, actualItems, []);
+  assert.equal(results[0].applied, false);
+});
+
+t('Requested add landed correctly → passes verification', () => {
+  const data = { Quoted_Items: [{ Product_Name: { id: 'PID_NEW' }, Quantity: 2, Discount: 50, List_Price: 500 }] };
+  const adds = mockRequestedOps(data).filter(o => o.add);
+  const actualItems = [
+    { id: 'sub_NEW', product_id: 'PID_NEW', quantity: 2, discount: 50, list_price: 500 },
+  ];
+  const results = verifyAdds(adds, actualItems, []);
+  assert.equal(results[0].applied, true);
+});
+
+// Modify check — verifies List_Price and Description drops in addition to qty/discount.
+function checkModify(req, actual) {
+  const checks = {};
+  let allApplied = true;
+  if (req.requested_quantity !== undefined) {
+    const match = Number(req.requested_quantity) === Number(actual.quantity);
+    checks.quantity = { match };
+    if (!match) allApplied = false;
+  }
+  if (req.requested_discount !== undefined) {
+    const match = Math.abs(Number(req.requested_discount) - Number(actual.discount || 0)) < 0.01;
+    checks.discount = { match };
+    if (!match) allApplied = false;
+  }
+  if (req.requested_list_price !== undefined) {
+    const match = Math.abs(Number(req.requested_list_price) - Number(actual.list_price || 0)) < 0.01;
+    checks.list_price = { match };
+    if (!match) allApplied = false;
+  }
+  if (req.requested_description !== undefined && req.requested_description !== null) {
+    const wantDesc = String(req.requested_description);
+    const gotDesc = actual.description == null ? '' : String(actual.description);
+    const match = wantDesc === gotDesc;
+    checks.description = { match };
+    if (!match) allApplied = false;
+  }
+  return { applied: allApplied, checks };
+}
+
+t('Existing-row List_Price change that Zoho drops → modification verification fails', () => {
+  const req = { id: 'sub_1', requested_list_price: 450 };
+  const actual = { id: 'sub_1', list_price: 500 }; // Zoho kept old price
+  const r = checkModify(req, actual);
+  assert.equal(r.applied, false);
+  assert.equal(r.checks.list_price.match, false);
+});
+
+t('Existing-row Description change that Zoho drops → modification verification fails', () => {
+  const req = { id: 'sub_1', requested_description: 'New note' };
+  const actual = { id: 'sub_1', description: 'Old note' };
+  const r = checkModify(req, actual);
+  assert.equal(r.applied, false);
+  assert.equal(r.checks.description.match, false);
+});
+
+t('Modify with List_Price AND Description both applied → passes', () => {
+  const req = { id: 'sub_1', requested_list_price: 450, requested_description: 'New' };
+  const actual = { id: 'sub_1', list_price: 450, description: 'New' };
+  const r = checkModify(req, actual);
+  assert.equal(r.applied, true);
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);
