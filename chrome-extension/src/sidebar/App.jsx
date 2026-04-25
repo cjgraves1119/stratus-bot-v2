@@ -253,15 +253,56 @@ export default function App() {
   // Listen for Zoho page navigation (record changes within Zoho SPA).
   // The content script publishes a minimal URL-derived context on nav and
   // then enriches it; both passes come through here.
+  //
+  // CRITICAL: content scripts run in EVERY Zoho tab, so a background tab
+  // that the user is not currently looking at can also fire this message
+  // (storage update from another tab → background → fanout). Without
+  // validation, the header/chat would briefly flip to the inactive tab's
+  // record until the 2s active-URL poll corrected it. To prevent that,
+  // we validate the incoming context against the ACTIVE tab URL here too.
   useEffect(() => {
-    return onMessage(MSG.ZOHO_CONTEXT_CHANGED, (data) => {
-      setZohoPageContext(data);
-      setPageType('zoho');
-      setCrmContext(null); // Reset so CRM panel re-fetches
+    return onMessage(MSG.ZOHO_CONTEXT_CHANGED, async (data) => {
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const activeUrl = activeTab?.url || '';
+        const urlInfo = parseZohoRecordUrl(activeUrl);
 
-      if (data?.page === 'record') {
-        setActiveTab('crm');
-        triggerZohoRecordLookup(data);
+        // Active tab is not Zoho at all — ignore. Header/chat should be
+        // cleared by the polling effect / page-type listener anyway.
+        if (!urlInfo?.isZoho) {
+          return;
+        }
+
+        // Active tab is Zoho but on a list/dashboard (no record) — clear
+        // the primary record context. A record-page message from an
+        // inactive tab must not appear as "the record I'm viewing".
+        if (!urlInfo.isRecord) {
+          setZohoPageContext(null);
+          setPageType('zoho');
+          setCrmContext(null);
+          return;
+        }
+
+        // Active tab IS a record page. Only accept the incoming context
+        // when it describes that same record.
+        if (!contextMatchesUrl(data, urlInfo)) {
+          // Inactive-tab update — drop it. The poll effect re-derives
+          // primary context from the active URL on its own cadence.
+          return;
+        }
+
+        setZohoPageContext(data);
+        setPageType('zoho');
+        setCrmContext(null); // Reset so CRM panel re-fetches
+
+        if (data?.page === 'record') {
+          setActiveTab('crm');
+          triggerZohoRecordLookup(data);
+        }
+      } catch (err) {
+        // tabs.query can fail in odd MV3 states. On error, conservatively
+        // ignore the message rather than risk applying a stale record.
+        console.warn('[Stratus App] ZOHO_CONTEXT_CHANGED validation failed:', err?.message);
       }
     });
   }, []);

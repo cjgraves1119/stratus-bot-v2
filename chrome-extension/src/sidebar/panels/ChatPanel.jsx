@@ -479,22 +479,41 @@ export default function ChatPanel({
       // worker can tell whether the user is looking at it ('active-tab')
       // vs. explicitly pinned it ('pinned').
       const pinnedAccountPayload = (() => {
-        // If a pinned Account is supplemental, send it as pinnedAccount
-        // even though it's not the primary record.
-        const acct = pinnedIsAccount
-          ? manualRecord
-          : (primaryRecord && primaryRecord.module === 'Accounts'
-              ? primaryRecord
-              : (primaryRecord && primaryRecord.accountId
-                  ? { id: primaryRecord.accountId, name: primaryRecord.accountName, module: primaryRecord.module }
-                  : null));
-        if (!acct) return null;
-        if (acct.id) return acct; // already in {id, name} shape (from above branch)
-        return {
-          id: acct.recordId,
-          name: acct.recordName || acct.accountName || null,
-          module: 'Accounts',
-        };
+        // Always emit a uniform { id, name, module: 'Accounts' } payload.
+        //
+        // The `module` is hardcoded to 'Accounts' because `id` is always an
+        // Account id in every branch below — even when sourced from a Quote/
+        // Deal/Contact's parent reference. (Previous version leaked the
+        // parent record's module through, which was a payload-contract
+        // footgun for the worker.)
+
+        // 1. User explicitly pinned an Account → that Account is the pin.
+        if (pinnedIsAccount && manualRecord) {
+          return {
+            id: manualRecord.recordId,
+            name: manualRecord.recordName || manualRecord.accountName || null,
+            module: 'Accounts',
+          };
+        }
+        // 2. Primary record IS an Account (active page is an Account, no
+        //    pinned non-Account record overriding it).
+        if (primaryRecord && primaryRecord.module === 'Accounts') {
+          return {
+            id: primaryRecord.recordId,
+            name: primaryRecord.recordName || primaryRecord.accountName || null,
+            module: 'Accounts',
+          };
+        }
+        // 3. Primary record is a Quote/Deal/Contact whose parent Account
+        //    we captured (accountId/accountName from the record page).
+        if (primaryRecord && primaryRecord.accountId) {
+          return {
+            id: primaryRecord.accountId,
+            name: primaryRecord.accountName || null,
+            module: 'Accounts',
+          };
+        }
+        return null;
       })();
 
       const activeRecordPayload = (() => {
