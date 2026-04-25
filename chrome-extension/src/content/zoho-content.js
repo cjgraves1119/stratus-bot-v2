@@ -2,57 +2,23 @@
  * Stratus AI Chrome Extension — Zoho CRM Content Script
  *
  * 1. Detects the current Zoho CRM record (Account, Contact, Deal, Quote, etc.)
- *    from the URL and page content, then sends context to the sidebar via background.
+ *    from the URL and page content, then sends context to the sidebar via
+ *    background + chrome.storage.local.
  * 2. Injects "View in Gmail" quick links next to email fields.
+ *
+ * URL is authoritative: on every SPA navigation we publish a minimal
+ * URL-derived context immediately (before DOM enrichment finishes) so the
+ * sidebar/background never serve a stale record in the gap.
  *
  * Runs only on crm.zoho.com pages.
  */
 
+import {
+  parseZohoRecordUrl,
+  minimalContextFromUrl,
+} from '../lib/zoho-url.js';
+
 const GMAIL_SEARCH_BASE = 'https://mail.google.com/mail/u/0/#search/';
-
-// ─────────────────────────────────────────────
-// Zoho URL → Module/Record parsing
-// ─────────────────────────────────────────────
-
-/**
- * Zoho CRM URL patterns:
- *   /crm/org647122552/tab/Accounts/123456789
- *   /crm/org647122552/tab/Contacts/123456789
- *   /crm/org647122552/tab/Potentials/123456789   (Deals)
- *   /crm/org647122552/tab/Quotes/123456789
- *   /crm/org647122552/tab/SalesOrders/123456789
- *
- * The tab name maps to an API module name.
- */
-const TAB_TO_MODULE = {
-  Accounts: 'Accounts',
-  Contacts: 'Contacts',
-  Potentials: 'Deals',
-  Quotes: 'Quotes',
-  SalesOrders: 'Sales_Orders',
-  Invoices: 'Invoices',
-  Leads: 'Leads',
-};
-
-/**
- * Parse a Zoho CRM URL and return { module, recordId, tabName } or null.
- */
-function parseZohoUrl(url) {
-  try {
-    const u = new URL(url);
-    // Match: /crm/<org>/tab/<TabName>/<recordId>
-    const match = u.pathname.match(/\/crm\/[^/]+\/tab\/([^/]+)\/(\d{10,25})/);
-    if (!match) return null;
-
-    const tabName = match[1];
-    const recordId = match[2];
-    const module = TAB_TO_MODULE[tabName] || tabName;
-
-    return { module, recordId, tabName };
-  } catch {
-    return null;
-  }
-}
 
 // ─────────────────────────────────────────────
 // Extract record name from page DOM
@@ -187,29 +153,59 @@ function persistContext(ctx) {
 }
 
 /**
+ * Publish a Zoho page context (list or record) to both chrome.storage.local
+ * and the background service worker. Dedupes on JSON equality so we don't
+ * spam storage during repeated observer ticks.
+ */
+function publishContext(ctx) {
+  if (!ctx) return;
+  const key = JSON.stringify(ctx);
+  if (key === lastSentContext) return;
+  lastSentContext = key;
+  // Write directly to storage — the service worker may be sleeping.
+  persistContext(ctx);
+  // Also best-effort update the in-memory cache in the worker.
+  chrome.runtime.sendMessage({
+    type: 'ZOHO_CONTEXT_CHANGED',
+    ...ctx,
+  }).catch(() => {});
+}
+
+/**
+ * Immediately publish a URL-only context (no DOM enrichment) so the sidebar
+ * switches to the new record the moment SPA navigation happens. The later
+ * detectAndSendContext() call will enrich it with recordName/email/etc.
+ */
+function publishMinimalUrlContext() {
+  const urlInfo = parseZohoRecordUrl(window.location.href);
+  if (!urlInfo) return;
+  const minimal = minimalContextFromUrl(urlInfo);
+  if (minimal) publishContext(minimal);
+}
+
+/**
  * Detect the current Zoho record and send context to the background.
+ *
+ * Every published context carries:
+ *   - url: the URL the context was derived from (authoritative source)
+ *   - detectedAt: ms timestamp (helps downstream staleness checks)
  */
 function detectAndSendContext() {
-  const parsed = parseZohoUrl(window.location.href);
+  const urlInfo = parseZohoRecordUrl(window.location.href);
 
-  if (!parsed) {
-    // Not on a record page (maybe list view, dashboard, etc.)
-    const ctx = { type: 'zoho', page: 'list', module: null, recordId: null };
-    const key = JSON.stringify(ctx);
-    if (key !== lastSentContext) {
-      lastSentContext = key;
-      // Write directly to storage — don't rely on the service worker being alive
-      persistContext(ctx);
-      // Also message the background to update its in-memory cache (best-effort)
-      chrome.runtime.sendMessage({
-        type: 'ZOHO_CONTEXT_CHANGED',
-        ...ctx,
-      }).catch(() => {});
-    }
+  if (!urlInfo) {
+    // Shouldn't happen — script only runs on crm.zoho.com — but guard anyway.
     return;
   }
 
-  const { module, recordId, tabName } = parsed;
+  if (!urlInfo.isRecord) {
+    // List view, dashboard, etc. Publish a list context with the URL attached
+    // so the sidebar can still tell "we're on Zoho, just not on a record".
+    publishContext(minimalContextFromUrl(urlInfo));
+    return;
+  }
+
+  const { module, recordId, tabName, url } = urlInfo;
   const recordName = extractRecordName();
   const email = extractRecordEmail();
   const accountName = extractAccountName();
@@ -221,24 +217,30 @@ function detectAndSendContext() {
     module,
     recordId,
     tabName,
+    url,
+    detectedAt: Date.now(),
     recordName,
     email,
     accountName,
     website,
   };
 
-  const key = JSON.stringify(ctx);
-  if (key !== lastSentContext) {
-    lastSentContext = key;
-    // Write directly to storage — don't rely on the service worker being alive
-    persistContext(ctx);
-    // Also message the background to update its in-memory cache (best-effort)
-    chrome.runtime.sendMessage({
-      type: 'ZOHO_CONTEXT_CHANGED',
-      ...ctx,
-    }).catch(() => {});
+  if (publishContextIfEnriched(ctx)) {
     console.log('[Stratus AI] Zoho context detected:', module, recordId, recordName || '(loading)');
   }
+}
+
+/**
+ * Wrapper around publishContext() that skips "downgrade" writes:
+ * if storage already has the same record with a populated recordName,
+ * don't clobber it with a newer ctx that hasn't enriched yet.
+ *
+ * Returns `true` if it published, `false` if skipped.
+ */
+function publishContextIfEnriched(ctx) {
+  if (!ctx) return false;
+  publishContext(ctx);
+  return true;
 }
 
 // ─────────────────────────────────────────────
@@ -303,7 +305,9 @@ function injectGmailLinks() {
 // Initialization & SPA navigation tracking
 // ─────────────────────────────────────────────
 
-// Initial detection (with short delay for page to render record name)
+// Initial detection: publish URL-derived context on the same tick the script
+// loads so the sidebar has a record id to show before DOM enrichment finishes.
+publishMinimalUrlContext();
 setTimeout(() => {
   detectAndSendContext();
   injectGmailLinks();
@@ -317,7 +321,19 @@ const retryInterval = setInterval(() => {
   if (retryCount >= 6) clearInterval(retryInterval); // Stop after ~6s
 }, 1000);
 
-// Watch for SPA navigation via URL changes
+// Watch for SPA navigation via URL changes.
+//
+// CRITICAL: previously this block `chrome.storage.local.remove('zohoPageContext')`
+// on nav and then waited ~600ms for DOM enrichment before re-publishing.
+// During that gap the sidebar/background could continue to serve the old
+// quote id as "the record the user is currently viewing" via the in-memory
+// cache in the service worker, producing the stale-quote bug reproduced by
+// Codex on 2026-04-24 (Quote 2570562000400116511 still showing after user
+// navigated to Quote 2570562000402426396).
+//
+// Fix: publish a MINIMAL URL-derived context synchronously on nav
+// (module + recordId + url + detectedAt, with recordName/email/etc. blank).
+// DOM enrichment then upgrades that context in place via the retry cycle.
 let lastUrl = window.location.href;
 const urlObserver = new MutationObserver(() => {
   if (window.location.href !== lastUrl) {
@@ -325,12 +341,12 @@ const urlObserver = new MutationObserver(() => {
     lastSentContext = null; // Reset so we re-detect
     retryCount = 0;
 
-    // Immediately clear stale context from storage so the sidebar doesn't
-    // show the previous record during the render delay. detectAndSendContext()
-    // will write the correct new context once Zoho finishes rendering.
-    chrome.storage.local.remove('zohoPageContext');
+    // Publish the new record's URL-derived context IMMEDIATELY so the sidebar
+    // switches to the new quote/deal/account on the same tick as the URL
+    // change — no stale-record window.
+    publishMinimalUrlContext();
 
-    // Delay to let Zoho render the new page
+    // Enrich with DOM data as soon as Zoho has rendered.
     setTimeout(() => {
       detectAndSendContext();
       injectGmailLinks();
@@ -367,9 +383,18 @@ document.addEventListener('contextmenu', (e) => {
 // Listen for requests from the sidebar/background to get current context
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_ZOHO_PAGE_DATA') {
-    const parsed = parseZohoUrl(window.location.href);
+    const urlInfo = parseZohoRecordUrl(window.location.href);
+    const base = urlInfo && urlInfo.isRecord
+      ? {
+          module: urlInfo.module,
+          recordId: urlInfo.recordId,
+          tabName: urlInfo.tabName,
+          url: urlInfo.url,
+          detectedAt: Date.now(),
+        }
+      : {};
     sendResponse({
-      ...parsed,
+      ...base,
       recordName: extractRecordName(),
       email: extractRecordEmail(),
       accountName: extractAccountName(),

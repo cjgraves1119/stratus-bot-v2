@@ -14,6 +14,11 @@
 import { MSG } from '../lib/constants.js';
 import { registerMessageHandlers } from '../lib/messaging.js';
 import { getSettings } from '../lib/storage.js';
+import {
+  parseZohoRecordUrl,
+  contextMatchesUrl,
+  minimalContextFromUrl,
+} from '../lib/zoho-url.js';
 
 import * as api from './api-client.js';
 import { startZohoAuth, getAuthStatus, disconnectZoho, getValidZohoToken } from './auth.js';
@@ -301,12 +306,19 @@ registerMessageHandlers({
   },
 
   // ── Zoho Page Context ──
-  [MSG.ZOHO_CONTEXT_CHANGED]: async (payload) => {
-    currentZohoPageContext = payload;
+  [MSG.ZOHO_CONTEXT_CHANGED]: async (payload, sender) => {
+    // Stamp url/detectedAt if the sender omitted them, so downstream
+    // readers can always make staleness decisions.
+    const stamped = {
+      ...payload,
+      url: payload?.url || sender?.tab?.url || null,
+      detectedAt: payload?.detectedAt || Date.now(),
+    };
+    currentZohoPageContext = stamped;
     // Persist to LOCAL storage (not session) so it survives service worker restarts.
     // Manifest V3 service workers die after ~30s idle; session storage clears with them.
     try {
-      await chrome.storage.local.set({ zohoPageContext: payload });
+      await chrome.storage.local.set({ zohoPageContext: stamped });
     } catch (err) {
       console.error('[Stratus] Failed to persist Zoho context:', err);
     }
@@ -314,41 +326,77 @@ registerMessageHandlers({
   },
 
   [MSG.GET_PAGE_CONTEXT]: async () => {
-    // Determine current page type from the active tab URL
+    // Determine current page type from the active tab URL.
     let activeUrl = '';
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       activeUrl = tab?.url || '';
-
-      if (activeUrl.startsWith('https://mail.google.com/')) {
-        currentPageType = 'gmail';
-      } else if (activeUrl.startsWith('https://crm.zoho.com/')) {
-        currentPageType = 'zoho';
-      } else {
-        currentPageType = 'other';
-      }
     } catch {
       // Fallback if tabs query fails
     }
 
-    // Only recover Zoho context from storage if the active tab is actually Zoho.
-    // Otherwise a stale record left behind from a previous Zoho tab would leak
-    // into Gmail/other pages as "the record the user is currently viewing".
-    const onZoho = activeUrl.startsWith('https://crm.zoho.com/');
-    if (onZoho && !currentZohoPageContext) {
-      try {
-        const stored = await chrome.storage.local.get('zohoPageContext');
-        if (stored?.zohoPageContext) {
-          currentZohoPageContext = stored.zohoPageContext;
+    // Derive page type from the URL we just observed (not from a cached
+    // currentPageType that may have drifted since the last onUpdated event).
+    if (activeUrl.startsWith('https://mail.google.com/')) {
+      currentPageType = 'gmail';
+    } else if (activeUrl.startsWith('https://crm.zoho.com/')) {
+      currentPageType = 'zoho';
+    } else {
+      currentPageType = 'other';
+    }
+
+    // Active Zoho URL is the authoritative source of truth for which record
+    // the user is currently viewing. Cached/stored context is only trusted
+    // when it matches that URL. If it doesn't, we fall back to a minimal
+    // URL-derived context so the sidebar sees the correct record id even
+    // while DOM enrichment is still pending in the content script.
+    //
+    // This is the central fix for the "stale Quote id sticks around after
+    // SPA nav to a new Quote" bug (Codex repro, 2026-04-24).
+    const urlInfo = parseZohoRecordUrl(activeUrl);
+    let zohoContext = null;
+
+    if (urlInfo && urlInfo.isZoho) {
+      // Recover stored context if in-memory cache is empty.
+      if (!currentZohoPageContext) {
+        try {
+          const stored = await chrome.storage.local.get('zohoPageContext');
+          if (stored?.zohoPageContext) {
+            currentZohoPageContext = stored.zohoPageContext;
+          }
+        } catch {}
+      }
+
+      if (urlInfo.isRecord) {
+        if (contextMatchesUrl(currentZohoPageContext, urlInfo)) {
+          // Cached context is for the record the user is actually viewing —
+          // trust it (it may have enriched recordName/email/accountName).
+          zohoContext = currentZohoPageContext;
+        } else {
+          // Cached context is either missing or for a DIFFERENT record
+          // (previous Zoho tab, previous page in SPA). Never leak it.
+          // Fall back to a URL-only context so the sidebar at least has
+          // the correct record id to target.
+          if (currentZohoPageContext && !contextMatchesUrl(currentZohoPageContext, urlInfo)) {
+            // Drop the stale in-memory cache too so subsequent calls don't
+            // keep resurrecting it.
+            currentZohoPageContext = null;
+            chrome.storage.local.remove('zohoPageContext').catch(() => {});
+          }
+          zohoContext = minimalContextFromUrl(urlInfo);
         }
-      } catch {}
+      } else {
+        // On Zoho but not on a record page (list view / dashboard). Don't
+        // serve any cached record as "the current record" — the user isn't
+        // viewing one.
+        zohoContext = minimalContextFromUrl(urlInfo);
+      }
     }
 
     return {
       pageType: currentPageType,
-      // Gate zohoContext on actually being on a Zoho tab. This is the
-      // belt-and-suspenders fix so no stale storage value can leak through.
-      zohoContext: onZoho ? currentZohoPageContext : null,
+      zohoContext,
+      activeUrl,
       emailContext: currentEmailContext,
     };
   },

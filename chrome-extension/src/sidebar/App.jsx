@@ -8,6 +8,11 @@
 import { useState, useEffect, useCallback, lazy, Suspense, Component } from 'react';
 import { sendToBackground, onMessage } from '../lib/messaging';
 import { MSG, COLORS } from '../lib/constants';
+import {
+  parseZohoRecordUrl,
+  contextMatchesUrl,
+  minimalContextFromUrl,
+} from '../lib/zoho-url.js';
 
 // Eager load the default panel; lazy load the rest for faster initial render
 import EmailPanel from './panels/EmailPanel';
@@ -99,42 +104,55 @@ export default function App() {
     sendToBackground(MSG.GET_AUTH_STATUS).then(setAuthStatus).catch(() => {});
 
     async function initPageContext() {
+      // Single source of truth: the currently active tab URL.
+      // Parse it first so every downstream decision uses the same anchor.
+      let activeUrl = '';
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        activeUrl = activeTab?.url || '';
+      } catch (err) {
+        console.warn('[Stratus App] chrome.tabs.query failed:', err?.message);
+      }
+      const urlInfo = parseZohoRecordUrl(activeUrl);
       let type = 'other';
+      if (activeUrl.startsWith('https://mail.google.com/')) type = 'gmail';
+      else if (urlInfo?.isZoho) type = 'zoho';
+
       let zohoCtx = null;
 
-      // Path 1: background message
-      try {
-        const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT);
-        type = ctx?.pageType || 'other';
-        if (ctx?.zohoContext?.recordId) zohoCtx = ctx.zohoContext;
-      } catch (err) {
-        console.warn('[Stratus App] GET_PAGE_CONTEXT via background failed:', err?.message);
-      }
-
-      // Path 2: direct storage read (fallback when worker is sleeping).
-      // IMPORTANT: storage presence does NOT imply we're on Zoho — the user
-      // may have closed the Zoho tab or switched to Gmail. Verify against the
-      // actual active tab URL before trusting the stored context.
-      if (!zohoCtx) {
+      if (urlInfo?.isZoho) {
+        // Path 1: ask the background worker. It already runs the same URL
+        // validation and returns cached context only when it matches, or a
+        // minimal URL-derived context otherwise.
         try {
-          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-          const activeUrl = activeTab?.url || '';
-          const onZoho = activeUrl.startsWith('https://crm.zoho.com/');
-          if (onZoho) {
-            const stored = await chrome.storage.local.get('zohoPageContext');
-            if (stored?.zohoPageContext?.recordId) {
-              zohoCtx = stored.zohoPageContext;
-              type = 'zoho';
-              console.log('[Stratus App] Zoho context recovered from storage:', zohoCtx);
-            }
-          } else {
-            // Derive real page type from active tab URL so we don't end up
-            // stuck on 'other' just because the background worker was asleep.
-            if (activeUrl.startsWith('https://mail.google.com/')) type = 'gmail';
-            else type = 'other';
+          const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT);
+          if (ctx?.zohoContext && contextMatchesUrl(ctx.zohoContext, urlInfo)) {
+            zohoCtx = ctx.zohoContext;
           }
         } catch (err) {
-          console.warn('[Stratus App] chrome.storage.local read failed:', err?.message);
+          console.warn('[Stratus App] GET_PAGE_CONTEXT via background failed:', err?.message);
+        }
+
+        // Path 2: direct storage read (fallback when the service worker
+        // response came back null). Same validation — we only trust the
+        // stored value if module + recordId match the active tab URL.
+        if (!zohoCtx) {
+          try {
+            const stored = await chrome.storage.local.get('zohoPageContext');
+            if (contextMatchesUrl(stored?.zohoPageContext, urlInfo)) {
+              zohoCtx = stored.zohoPageContext;
+              console.log('[Stratus App] Zoho context recovered from storage:', zohoCtx);
+            }
+          } catch (err) {
+            console.warn('[Stratus App] chrome.storage.local read failed:', err?.message);
+          }
+        }
+
+        // Path 3: still nothing that matches the active URL — fall back to a
+        // URL-derived minimal context so the header pill at least shows the
+        // correct record id while DOM enrichment is still loading.
+        if (!zohoCtx && urlInfo.isRecord) {
+          zohoCtx = minimalContextFromUrl(urlInfo);
         }
       }
 
@@ -232,18 +250,116 @@ export default function App() {
     });
   }, []);
 
-  // Listen for Zoho page navigation (record changes within Zoho SPA)
+  // Listen for Zoho page navigation (record changes within Zoho SPA).
+  // The content script publishes a minimal URL-derived context on nav and
+  // then enriches it; both passes come through here.
+  //
+  // CRITICAL: content scripts run in EVERY Zoho tab, so a background tab
+  // that the user is not currently looking at can also fire this message
+  // (storage update from another tab → background → fanout). Without
+  // validation, the header/chat would briefly flip to the inactive tab's
+  // record until the 2s active-URL poll corrected it. To prevent that,
+  // we validate the incoming context against the ACTIVE tab URL here too.
   useEffect(() => {
-    return onMessage(MSG.ZOHO_CONTEXT_CHANGED, (data) => {
-      setZohoPageContext(data);
-      setPageType('zoho');
-      setCrmContext(null); // Reset so CRM panel re-fetches
+    return onMessage(MSG.ZOHO_CONTEXT_CHANGED, async (data) => {
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const activeUrl = activeTab?.url || '';
+        const urlInfo = parseZohoRecordUrl(activeUrl);
 
-      if (data?.page === 'record') {
-        setActiveTab('crm');
-        triggerZohoRecordLookup(data);
+        // Active tab is not Zoho at all — ignore. Header/chat should be
+        // cleared by the polling effect / page-type listener anyway.
+        if (!urlInfo?.isZoho) {
+          return;
+        }
+
+        // Active tab is Zoho but on a list/dashboard (no record) — clear
+        // the primary record context. A record-page message from an
+        // inactive tab must not appear as "the record I'm viewing".
+        if (!urlInfo.isRecord) {
+          setZohoPageContext(null);
+          setPageType('zoho');
+          setCrmContext(null);
+          return;
+        }
+
+        // Active tab IS a record page. Only accept the incoming context
+        // when it describes that same record.
+        if (!contextMatchesUrl(data, urlInfo)) {
+          // Inactive-tab update — drop it. The poll effect re-derives
+          // primary context from the active URL on its own cadence.
+          return;
+        }
+
+        setZohoPageContext(data);
+        setPageType('zoho');
+        setCrmContext(null); // Reset so CRM panel re-fetches
+
+        if (data?.page === 'record') {
+          setActiveTab('crm');
+          triggerZohoRecordLookup(data);
+        }
+      } catch (err) {
+        // tabs.query can fail in odd MV3 states. On error, conservatively
+        // ignore the message rather than risk applying a stale record.
+        console.warn('[Stratus App] ZOHO_CONTEXT_CHANGED validation failed:', err?.message);
       }
     });
+  }, []);
+
+  // Active-URL-synced polling for the Zoho context. The MV3 service worker
+  // sleeps after ~30s idle and the ZOHO_CONTEXT_CHANGED message won't wake
+  // the sidebar if the user has it pinned open. This loop re-derives the
+  // active-page context every 2s directly from the active tab URL and
+  // chrome.storage.local, discarding any stale value whose module/recordId
+  // don't match the current URL. This is the single source of truth fed
+  // into both the header pill and the ChatPanel via props.
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const activeUrl = activeTab?.url || '';
+        const urlInfo = parseZohoRecordUrl(activeUrl);
+
+        if (!urlInfo?.isZoho) {
+          // User is off Zoho entirely — clear the header pill.
+          if (!cancelled) setZohoPageContext((prev) => (prev ? null : prev));
+          return;
+        }
+        if (!urlInfo.isRecord) {
+          // List view / dashboard: no active record.
+          if (!cancelled) setZohoPageContext((prev) => (prev ? null : prev));
+          return;
+        }
+
+        // Prefer stored context iff it matches active URL; else synthesize.
+        let next = null;
+        try {
+          const stored = await chrome.storage.local.get('zohoPageContext');
+          if (contextMatchesUrl(stored?.zohoPageContext, urlInfo)) {
+            next = stored.zohoPageContext;
+          }
+        } catch (_) { /* ignore */ }
+        if (!next) next = minimalContextFromUrl(urlInfo);
+
+        if (cancelled) return;
+        setZohoPageContext((prev) => {
+          // Avoid unnecessary re-renders — only replace when id/module/recordName change.
+          if (prev
+            && prev.recordId === next.recordId
+            && prev.module === next.module
+            && (prev.recordName || null) === (next.recordName || null)) {
+            return prev;
+          }
+          return next;
+        });
+      } catch (_) { /* ignore */ }
+    }
+
+    refresh();
+    const interval = setInterval(refresh, 2000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
   // Listen for navigation requests
@@ -385,7 +501,7 @@ export default function App() {
             {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} />}
             {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
             {activeTab === 'quote' && <QuotePanel navData={navData} emailContext={emailContext} onNavigate={handleNavigate} />}
-            {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} />}
+            {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} zohoPageContext={zohoPageContext} />}
             {activeTab === 'search' && <SearchPanel navData={navData} />}
           </Suspense>
         </PanelErrorBoundary>
