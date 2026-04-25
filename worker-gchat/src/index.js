@@ -5877,15 +5877,19 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             && Array.isArray(preUpdateSnapshot.Quoted_Items)
             && preUpdateSnapshot.Quoted_Items.length > 0;
 
-          // Round-10 (a): empty Quoted_Items + non-empty current → reject.
-          // The model intended to "clear" the items by sending [], but Zoho's
-          // additive semantics make this a no-op.
-          if (data.Quoted_Items.length === 0 && hasCurrentItems) {
+          // Round-10 (a) [Codex round-10b tightening]: ALWAYS reject empty
+          // Quoted_Items on Quote updates, regardless of snapshot availability.
+          // An empty array is never a meaningful/safe Zoho Quote update. With
+          // snapshot we can also include current count; without it, we say so.
+          if (data.Quoted_Items.length === 0) {
+            const currentCountStr = hasCurrentItems
+              ? `The Quote currently has ${preUpdateSnapshot.Quoted_Items.length} line item(s).`
+              : `The current row count could not be verified because the pre-update snapshot was unavailable.`;
             return {
               validation_error: true,
               action: 'update_blocked',
               error: 'empty_quoted_items_rejected',
-              message: `EMPTY_QUOTED_ITEMS_REJECTED: An empty Quoted_Items array does NOT delete or replace existing rows on Quote ${record_id} — Zoho's PUT semantics on Quoted_Items are additive, so an empty array is a server-side no-op. The Quote currently has ${preUpdateSnapshot.Quoted_Items.length} line item(s). Every intended delete must be explicit: send {id: "<row_id>", _delete: null} for each row to remove.`,
+              message: `EMPTY_QUOTED_ITEMS_REJECTED: An empty Quoted_Items array does NOT delete or replace existing rows on Quote ${record_id} — Zoho's PUT semantics on Quoted_Items are additive, so an empty array is a server-side no-op. ${currentCountStr} Every intended delete must be explicit: send {id: "<row_id>", _delete: null} for each row to remove.`,
             };
           }
 

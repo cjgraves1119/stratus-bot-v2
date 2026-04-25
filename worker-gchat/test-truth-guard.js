@@ -1265,12 +1265,16 @@ function normalizeKeepList(data, preUpdateSnapshot, recordId = 'Q1') {
     && Array.isArray(preUpdateSnapshot.Quoted_Items)
     && preUpdateSnapshot.Quoted_Items.length > 0;
 
-  // Round-10 (a): empty Quoted_Items + non-empty current → reject.
-  if (data.Quoted_Items.length === 0 && hasCurrentItems) {
-    return { error: 'empty_quoted_items_rejected', current_count: preUpdateSnapshot.Quoted_Items.length };
+  // Round-10b: ALWAYS reject empty Quoted_Items on Quote updates,
+  // regardless of snapshot availability. An empty array is never a
+  // meaningful/safe Zoho Quote update.
+  if (data.Quoted_Items.length === 0) {
+    return {
+      error: 'empty_quoted_items_rejected',
+      current_count: hasCurrentItems ? preUpdateSnapshot.Quoted_Items.length : null,
+      snapshot_available: !!hasCurrentItems,
+    };
   }
-
-  if (data.Quoted_Items.length === 0) return { data, normalized: false };
 
   const allIdOnly = data.Quoted_Items.every(isQuoteRowIdOnly);
   const someIdOnly = data.Quoted_Items.some(isQuoteRowIdOnly);
@@ -1442,12 +1446,14 @@ t('Add-only payload (no ids, just Product_Name) → pass through unchanged', () 
   assert.equal(r.normalized, false);
 });
 
-t('Empty Quoted_Items array with empty preState → pass through (degenerate, not rejected)', () => {
+t('Empty Quoted_Items + empty preState → REJECT empty_quoted_items_rejected (round-10b: universal)', () => {
+  // Codex round-10b tightening: an empty Quoted_Items array is never
+  // meaningful, regardless of preState. Reject universally.
   const data = { Quoted_Items: [] };
   const preSnap = { Quoted_Items: [] };
   const r = normalizeKeepList(data, preSnap);
-  assert.equal(r.normalized, false);
-  assert.equal(r.error, undefined);
+  assert.equal(r.error, 'empty_quoted_items_rejected');
+  assert.equal(r.snapshot_available, false, 'snapshot considered unavailable when preState items empty');
 });
 
 console.log('\n─── Round-10 edge guards: empty array + missing snapshot ───');
@@ -1498,12 +1504,15 @@ t('Explicit add payload + missing snapshot → passes through', () => {
   assert.equal(r.normalized, false);
 });
 
-t('Empty Quoted_Items + missing snapshot → degenerate, not rejected (degenerate case)', () => {
-  // No snapshot, empty payload — nothing to do, nothing to reject.
+t('Empty Quoted_Items + missing snapshot → REJECT empty_quoted_items_rejected (round-10b: universal)', () => {
+  // Codex round-10b: even with no snapshot, an empty array is unsafe.
+  // Without snapshot we cannot fingerprint-verify post-PUT, so the model
+  // could falsely claim a clear/replace occurred.
   const data = { Quoted_Items: [] };
   const r = normalizeKeepList(data, null);
-  assert.equal(r.error, undefined);
-  assert.equal(r.normalized, false);
+  assert.equal(r.error, 'empty_quoted_items_rejected');
+  assert.equal(r.current_count, null, 'current count null when no snapshot');
+  assert.equal(r.snapshot_available, false);
 });
 
 t('Single id-only row that matches single current row → no-op (all-current)', () => {
