@@ -7667,26 +7667,25 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   'Tax_Rate', '$taxable', '$line_tax_detail', '$currency_symbol',
                   '$editable_quote', 'Exchange_Rate', 'Currency'
                 ]);
-                const roundTax = (n) => {
-                  const v = typeof n === 'number' ? n : (n == null ? null : Number(n));
-                  if (v == null || Number.isNaN(v)) return null;
-                  return Math.round(v * 100) / 100;
-                };
+                // Codex review 2026-04-25: removed unused roundTax helper —
+                // Tax is no longer manipulated, so the rounder has no callers.
                 const cleanPayload = {};
                 for (const [k, v] of Object.entries(srcRec)) {
                   if (STRIP_FIELDS.has(k)) continue;
                   if (k === 'Quoted_Items' && Array.isArray(v)) {
-                    cleanPayload.Quoted_Items = v.map(it => {
+                    // 2026-04-25: Tax field intentionally OMITTED from per-line
+                  // payload. Zoho owns tax computation via AutoCalculateTax +
+                  // org-level rate. We don't manipulate it on either creation
+                  // or clone — let Zoho calculate whatever it calculates.
+                  cleanPayload.Quoted_Items = v.map(it => {
                       const itemPayload = {
                         Product_Name: it.Product_Name?.id ? { id: it.Product_Name.id } : undefined,
                         Quantity: it.Quantity,
                         List_Price: it.List_Price,
                         Discount: it.Discount,
                         Description: it.Description,
-                        Sequence_Number: it.Sequence_Number,
-                        Tax: 0
+                        Sequence_Number: it.Sequence_Number
                       };
-                      // Drop undefined values so Zoho doesn't reject "Tax":undefined
                       Object.keys(itemPayload).forEach(key => {
                         if (itemPayload[key] === undefined) delete itemPayload[key];
                       });
@@ -7814,17 +7813,204 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
 
+          // ── Structural-fidelity verifier (2026-04-25, Chris's rule) ─────────
+          // Zoho owns tax/total calculation; we only verify what we control:
+          // SKUs, quantities, list prices, discounts, account/deal/contact
+          // links, line count, and the requested Subject rename. Tax/total
+          // drift is informational and never causes failure on its own.
+          //
+          // Hard-fail conditions:
+          //   - Account_Name.id / Deal_Name.id / Contact_Name.id mismatch
+          //   - Quoted_Items length mismatch
+          //   - Per-line product_id / Quantity / List_Price / Discount mismatch
+          //   - new_subject was provided but post-clone Subject doesn't match
+          // Informational notes:
+          //   - Sub_Total / Grand_Total / All_Taxes_Total drift
+          //   - Auto_Tax_Rate_Percent differences
+          //   - Workflow-stamped fields (Vendor1, Quote_Stage)
+          let structuralIssues = [];
+          let infoNotes = [];
+          try {
+            const srcResp = await zohoApiCall('GET', `Quotes/${quote_id}`, env);
+            const srcRec = srcResp?.data?.[0];
+            // Re-fetch the clone with full subform for line-by-line compare
+            const cloneFullResp = await zohoApiCall('GET', `Quotes/${clonedId}`, env);
+            const cloneRec = cloneFullResp?.data?.[0];
+
+            if (!srcRec) {
+              structuralIssues.push(`source quote ${quote_id} fetch returned no record during verification`);
+            } else if (!cloneRec) {
+              structuralIssues.push(`clone quote ${clonedId} fetch returned no record during verification`);
+            } else {
+              // Account / Deal / Contact link checks
+              const srcAccountId = srcRec.Account_Name?.id || null;
+              const cloneAccountId = cloneRec.Account_Name?.id || null;
+              if (srcAccountId !== cloneAccountId) {
+                structuralIssues.push(`Account_Name.id mismatch: source=${srcAccountId} clone=${cloneAccountId}`);
+              }
+              const srcDealId = srcRec.Deal_Name?.id || null;
+              const cloneDealId = cloneRec.Deal_Name?.id || null;
+              if (srcDealId !== cloneDealId) {
+                structuralIssues.push(`Deal_Name.id mismatch: source=${srcDealId} clone=${cloneDealId}`);
+              }
+              const srcContactId = srcRec.Contact_Name?.id || null;
+              const cloneContactId = cloneRec.Contact_Name?.id || null;
+              if (srcContactId && srcContactId !== cloneContactId) {
+                structuralIssues.push(`Contact_Name.id mismatch: source=${srcContactId} clone=${cloneContactId}`);
+              }
+
+              // Subject rename check (only if caller asked for one)
+              if (new_subject && cloneRec.Subject !== new_subject) {
+                structuralIssues.push(`Subject rename did not stick: requested="${new_subject}" actual="${cloneRec.Subject}"`);
+              }
+
+              // Quoted_Items structural compare — match by Sequence_Number, NOT
+              // array index (Zoho can re-order). Compare per-line product_id,
+              // Quantity, List_Price, Discount within $0.01 tolerance.
+              const srcLines = Array.isArray(srcRec.Quoted_Items) ? srcRec.Quoted_Items : [];
+              const cloneLines = Array.isArray(cloneRec.Quoted_Items) ? cloneRec.Quoted_Items : [];
+              if (srcLines.length !== cloneLines.length) {
+                structuralIssues.push(`Quoted_Items length mismatch: source=${srcLines.length} clone=${cloneLines.length}`);
+              } else {
+                const closeEnough = (a, b) => Math.abs(Number(a || 0) - Number(b || 0)) <= 0.01;
+                // Codex review 2026-04-25: build line-key with index fallback
+                // when Sequence_Number is missing/blank. Without this, a quote
+                // where Zoho omits Sequence_Number on every line would
+                // false-fail every line as missing. Also detect duplicate keys
+                // so silent Map-overwrite doesn't hide real drift.
+                const seqKey = (line, idx) => {
+                  const raw = line && line.Sequence_Number != null ? String(line.Sequence_Number).trim() : '';
+                  return raw || `idx_${idx + 1}`;
+                };
+                const cloneBySeq = new Map();
+                const cloneSeqCounts = new Map();
+                cloneLines.forEach((cl, idx) => {
+                  const seq = seqKey(cl, idx);
+                  cloneSeqCounts.set(seq, (cloneSeqCounts.get(seq) || 0) + 1);
+                  cloneBySeq.set(seq, cl);
+                });
+                const dupCloneSeqs = [...cloneSeqCounts.entries()]
+                  .filter(([, c]) => c > 1)
+                  .map(([s]) => s);
+                if (dupCloneSeqs.length > 0) {
+                  structuralIssues.push(`clone has duplicate line-keys (${dupCloneSeqs.join(', ')}) — line-by-line compare unreliable, refusing to claim success`);
+                }
+                const srcSeqCounts = new Map();
+                srcLines.forEach((sl, idx) => {
+                  const seq = seqKey(sl, idx);
+                  srcSeqCounts.set(seq, (srcSeqCounts.get(seq) || 0) + 1);
+                });
+                const dupSrcSeqs = [...srcSeqCounts.entries()]
+                  .filter(([, c]) => c > 1)
+                  .map(([s]) => s);
+                if (dupSrcSeqs.length > 0) {
+                  structuralIssues.push(`source has duplicate line-keys (${dupSrcSeqs.join(', ')}) — line-by-line compare unreliable`);
+                }
+                srcLines.forEach((sl, idx) => {
+                  const seq = seqKey(sl, idx);
+                  const cl = cloneBySeq.get(seq);
+                  if (!cl) {
+                    structuralIssues.push(`line ${seq} (${sl.Product_Name?.Product_Code || '?'}) present in source but missing in clone`);
+                    return;
+                  }
+                  const srcSku = sl.Product_Name?.Product_Code || null;
+                  const cloneSku = cl.Product_Name?.Product_Code || null;
+                  const srcProductId = sl.Product_Name?.id || null;
+                  const cloneProductId = cl.Product_Name?.id || null;
+                  if (srcProductId !== cloneProductId) {
+                    structuralIssues.push(`line ${seq} (${srcSku || '?'} → ${cloneSku || '?'}): Product_Name.id mismatch source=${srcProductId} clone=${cloneProductId}`);
+                  }
+                  if (Number(sl.Quantity || 0) !== Number(cl.Quantity || 0)) {
+                    structuralIssues.push(`line ${seq} (${srcSku}): Quantity mismatch source=${sl.Quantity} clone=${cl.Quantity}`);
+                  }
+                  if (!closeEnough(sl.List_Price, cl.List_Price)) {
+                    structuralIssues.push(`line ${seq} (${srcSku}): List_Price mismatch source=${sl.List_Price} clone=${cl.List_Price}`);
+                  }
+                  if (!closeEnough(sl.Discount, cl.Discount)) {
+                    structuralIssues.push(`line ${seq} (${srcSku}): Discount mismatch source=${sl.Discount} clone=${cl.Discount}`);
+                  }
+                });
+              }
+
+              // Informational tax/total notes — never fail, just observe.
+              const srcGrand = Number(srcRec.Grand_Total || 0);
+              const cloneGrand = Number(cloneRec.Grand_Total || 0);
+              if (Math.abs(srcGrand - cloneGrand) > 0.01) {
+                infoNotes.push(`Grand_Total: source $${srcGrand.toFixed(2)}, clone $${cloneGrand.toFixed(2)} (Zoho-recomputed; structurally OK)`);
+              }
+              const srcTax = Number(srcRec.All_Taxes_Total || 0);
+              const cloneTax = Number(cloneRec.All_Taxes_Total || 0);
+              if (Math.abs(srcTax - cloneTax) > 0.01) {
+                infoNotes.push(`All_Taxes_Total: source $${srcTax.toFixed(2)}, clone $${cloneTax.toFixed(2)}`);
+              }
+              if ((srcRec.Auto_Tax_Rate_Percent || 0) !== (cloneRec.Auto_Tax_Rate_Percent || 0)) {
+                infoNotes.push(`Auto_Tax_Rate_Percent: source=${srcRec.Auto_Tax_Rate_Percent ?? 'null'} clone=${cloneRec.Auto_Tax_Rate_Percent ?? 'null'}`);
+              }
+            }
+          } catch (verifyErr) {
+            structuralIssues.push(`structural verifier threw: ${verifyErr.message}`);
+          }
+
+          if (structuralIssues.length > 0) {
+            const partialUrl = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
+            console.warn(`[CLONE-QUOTE] Structural verification failed for clone ${clonedId}: ${structuralIssues.join('; ')}`);
+            await logCrmOpToD1(env, {
+              personId: personId || null,
+              bot: botFromPersonId(personId),
+              operation: 'clone',
+              module: 'Quotes',
+              recordId: clonedId,
+              recordName: cloneFacts?.subject || null,
+              status: 'error',
+              durationMs: Date.now() - cloneStart,
+              errorMessage: `structural_fidelity_failed: ${structuralIssues.join('; ')}`,
+              details: { source_quote_id: quote_id, new_subject: new_subject || null, used_fallback: usedFallback, structural_issues: structuralIssues, info_notes: infoNotes },
+              requestPayload: { source_quote_id: quote_id, new_subject: new_subject || null },
+              responsePayload: { partial_cloned_quote_id: clonedId, facts: cloneFacts }
+            });
+            return {
+              success: false,
+              error: 'quote_clone_structural_fidelity_failed',
+              source_quote_id: quote_id,
+              partial_cloned_quote_id: clonedId,
+              partial_url: partialUrl,
+              structural_issues: structuralIssues,
+              info_notes: infoNotes,
+              _no_partial_success: true,
+              _user_visible_summary:
+                `Clone of quote ${quote_id} produced id ${clonedId} but structural verification failed. ` +
+                `Issues: ${structuralIssues.join('; ')}. ` +
+                `The partial record exists at ${partialUrl} — review and delete manually. ` +
+                `Do NOT claim this clone succeeded.`,
+              message:
+                `Clone created partial record ${clonedId} but does NOT match source structurally: ${structuralIssues.join('; ')}. ` +
+                `Tell the user the clone failed verification and surface the partial record id (${clonedId}) so they can manually delete it. ` +
+                `Do NOT render a success message and do NOT include "Open in Zoho" links suggesting the clone is good.`
+            };
+          }
+
           const cloneUndoToken = generateUndoToken();
           const cloneUrlLink = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
           // Markdown-link the URL so autolinkers don't grab a trailing period.
           // NOTE: the fallback flag is intentionally NOT surfaced in the
           // user-visible summary — it's internal plumbing and the word
           // "rejected" causes Llama to narrate success as failure (Bug B).
+          // 2026-04-25: success summary explicitly states what was verified
+          // (SKUs, quantities, list prices, discounts) and what's known to
+          // drift (taxes/totals — Zoho-owned, expected, structurally fine).
+          const quoteRefLabel = cloneFacts?.quote_number
+            ? `Quote #${cloneFacts.quote_number}`
+            : `quote ${clonedId}`;
+          const taxNoteSuffix = infoNotes.length > 0
+            ? ` (Tax/total figures are Zoho-recomputed — that's expected and does NOT mean the clone is wrong.)`
+            : '';
           const cloneUserSummary =
             `Cloned quote ${quote_id} → ${clonedId}` +
             (cloneFacts?.quote_number ? ` (${cloneFacts.quote_number})` : '') +
             (cloneFacts?.subject ? ` — "${cloneFacts.subject}"` : '') +
-            ` — [Open in Zoho](${cloneUrlLink})` +
+            ` — verified matching SKUs, quantities, list prices, and discounts.` +
+            taxNoteSuffix +
+            ` — [${quoteRefLabel}](${cloneUrlLink})` +
             ` — Undo token: \`${cloneUndoToken}\` (say "undo" to reverse).`;
 
           await logCrmOpToD1(env, {
@@ -7856,6 +8042,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             url: cloneUrlLink,
             facts: cloneFacts,
             used_deep_clone_fallback: usedFallback,
+            // Informational notes — tax/total drift between source and clone.
+            // Always Zoho-owned, never a failure on its own. Surfaced for
+            // debug visibility but the model is told not to narrate them
+            // as problems (see _user_visible_summary phrasing).
+            info_notes: infoNotes,
             _undo_token: cloneUndoToken,
             _record_url: cloneUrlLink,
             _user_visible_summary: cloneUserSummary,
@@ -11869,6 +12060,8 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
           // (Llama often paraphrases these away on simple single-field updates).
           // Also capture from error paths (refusals, ambiguity, etc.) so the
           // exact verbatim phrasing reaches the user reply.
+          // Capture summary fields (object-only — these live as side-channel
+          // properties on tool result objects, not in stringified payloads).
           if (result && typeof result === 'object') {
             const summary = result._user_visible_summary;
             const undoToken = result._undo_token;
@@ -11881,32 +12074,78 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
                 isError: result.success === false,
               });
             }
-            // Response-truth guard: harvest {module, id} refs from this
-            // successful tool result. Only SUCCESSFUL results contribute.
-            const resultIsError = result.success === false || !!result.error || !!result.validation_error;
-            if (!resultIsError) {
-              const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-              // (1) Any Zoho CRM URL embedded in the serialized result
-              const urlRe = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
-              let _mm;
-              while ((_mm = urlRe.exec(resultStr)) !== null) {
-                addVerifiedRef(_mm[1], _mm[2]);
-              }
-              // (2) Tool args that address a specific module+record — whitelist that pair on success.
-              const args = call.arguments || {};
-              if (args.module_name && args.record_id) {
+          }
+          // ── Response-truth guard whitelist harvest ──────────────────────────
+          // 2026-04-25: Hoisted out of the object-only gate so stringified
+          // tool results (zoho_get_record / zoho_search_records return
+          // JSON.stringify(...)) can whitelist their own _url fields.
+          // Without this, read-only Zoho lookups would have their View URLs
+          // stripped as "[link removed: unverified]" even though the URLs
+          // came from real Zoho data.
+          //
+          // Determine error state for both string and object results.
+          let resultIsError = false;
+          let resultStrForGuard = null;
+          let parsedResultForGuard = null;
+          if (result && typeof result === 'object') {
+            resultIsError = result.success === false || !!result.error || !!result.validation_error;
+            resultStrForGuard = JSON.stringify(result);
+            parsedResultForGuard = result;
+          } else if (typeof result === 'string' && result) {
+            try {
+              const parsed = JSON.parse(result);
+              resultIsError = parsed.success === false || !!parsed.error || !!parsed.validation_error;
+              parsedResultForGuard = parsed;
+            } catch { /* non-JSON string — treat as non-error data */ }
+            resultStrForGuard = result;
+          }
+          // ── Path 1 (URL regex) runs on BOTH success and error results. ─────
+          // Codex review 2026-04-25: error results that legitimately surface a
+          // real Zoho URL (e.g. a structural-fidelity failure exposing
+          // `partial_url` so the user can manually delete the partial record)
+          // need that URL to survive the final truth-guard scrub. URLs only
+          // appear in the result string if the worker put them there, so
+          // model fabrication risk does not apply to path 1.
+          if (resultStrForGuard) {
+            const urlRe = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+            let _mm;
+            while ((_mm = urlRe.exec(resultStrForGuard)) !== null) {
+              addVerifiedRef(_mm[1], _mm[2]);
+            }
+          }
+          // ── Paths 2–4: args / data / record_id whitelisting. ───────────────
+          // These remain success-only — args and structural ids could be
+          // model-fabricated, and we don't want fabricated ids whitelisted
+          // just because the tool returned non-error empty data.
+          if (!resultIsError && resultStrForGuard) {
+            const args = call.arguments || {};
+            // (2) Args-based whitelist with positive-proof tightening.
+            //     Only whitelist (module_name, record_id) when the parsed
+            //     result actually contains the requested record. Prevents a
+            //     model-fabricated record_id from getting whitelisted just
+            //     because the tool returned non-error empty data.
+            if (args.module_name && args.record_id && parsedResultForGuard) {
+              const ridStr = String(args.record_id);
+              const dataArr = Array.isArray(parsedResultForGuard.data) ? parsedResultForGuard.data : null;
+              const recordPresent =
+                (dataArr && dataArr.some(r => r && r.id && String(r.id) === ridStr)) ||
+                (parsedResultForGuard.id && String(parsedResultForGuard.id) === ridStr) ||
+                (parsedResultForGuard.record_id && String(parsedResultForGuard.record_id) === ridStr);
+              if (recordPresent) {
                 addVerifiedRef(args.module_name, args.record_id);
               }
-              // (3) zoho_search_records / list-style results under a given module_name
-              if (args.module_name && Array.isArray(result.data)) {
-                for (const rec of result.data) {
-                  if (rec && rec.id) addVerifiedRef(args.module_name, rec.id);
-                }
+            }
+            // (3) zoho_search_records / list-style results — only when result
+            //     is an object with a non-empty data array.
+            if (args.module_name && parsedResultForGuard && Array.isArray(parsedResultForGuard.data)) {
+              for (const rec of parsedResultForGuard.data) {
+                if (rec && rec.id) addVerifiedRef(args.module_name, rec.id);
               }
-              // (4) zoho_create_record responses carry the created id structurally
-              if (args.module_name && result.record_id) {
-                addVerifiedRef(args.module_name, result.record_id);
-              }
+            }
+            // (4) zoho_create_record / clone responses carry the created id
+            //     structurally as result.record_id.
+            if (args.module_name && parsedResultForGuard && parsedResultForGuard.record_id) {
+              addVerifiedRef(args.module_name, parsedResultForGuard.record_id);
             }
           }
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
