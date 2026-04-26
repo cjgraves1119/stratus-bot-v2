@@ -5898,8 +5898,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         try {
           // Only request the fields we're about to modify (plus id + a name field)
           // to keep the snapshot small.
+          // 2026-04-25 cycle 2 hotfix: include Quote_Number in the pre-update
+          // snapshot so the undo handler's quoteRefLabel helper can surface
+          // the customer-facing number ("Quote #2570562000402639034") instead
+          // of the long record_id. Live test confirmed the helper was firing
+          // but always falling back because preState.Quote_Number was undef.
           const baseSnapFields = module_name === 'Quotes'
-            ? ['id', 'Quoted_Items', 'Grand_Total', 'Sub_Total']
+            ? ['id', 'Quoted_Items', 'Grand_Total', 'Sub_Total', 'Quote_Number']
             : ['id'];
           const fieldsToSnap = [...new Set([...baseSnapFields, ...Object.keys(data)])].join(',');
           const pre = await zohoApiCall('GET', `${module_name}/${record_id}?fields=${encodeURIComponent(fieldsToSnap)}`, env);
