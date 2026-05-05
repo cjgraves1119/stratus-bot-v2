@@ -1192,6 +1192,100 @@ function extractSkusFromVisionText(text) {
   return dedupeSkus(skus);
 }
 
+// ─── Dashboard vision prompt + audit pass ───────────────────────────────────
+// Pulled out of the fetch handler so the prompt is testable and the audit pass
+// (second-shot vision call when the first pass looks suspicious) can re-use
+// the same parsing rules.
+function getDashboardVisionPrompt() {
+  return `You are analyzing a Cisco Meraki license dashboard screenshot.
+
+Only extract rows from the TOP "License information" table — the one with the columns "License limit" and "Current device count". IGNORE the "License History" section at the bottom (those are past renewals with license keys like Z228-BEAC-D2QX and old devices — they must never appear in output).
+
+Respond with ONLY this block. No preamble, no summary, no recommendations, no markdown bold, no explanations:
+
+LICENSE_DASHBOARD_PARSE_V1
+---
+SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
+---
+EXPIRATION: <YYYY-MM-DD or unknown>
+MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
+MR_EDITION: <Enterprise | Advanced | none>
+
+Hard rules:
+1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, MX models, MS models, MT, MV, MG, Z-series).
+2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
+3. Skip a row ONLY when ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip. Otherwise emit.
+4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table.
+5. NEVER drop a visible row whose ACTIVE >= 1. If a row is partially obscured by a colored annotation, read what is visible and emit it. Annotations (red/yellow/blue underlines, circles, crosses, highlighter strokes) are user markup — they are NOT table boundaries and they do NOT terminate the table.
+6. KEEP READING the rows BELOW any colored marker stroke. Underlines and crosses commonly span between adjacent rows (e.g. between MX65 and MX85). Continue scanning all subsequent rows in the License information table until you reach the License History section.
+7. Worked example: a dashboard listing "MX65 | 1 | 0" then "MX85 | 1 | 1" with a red underline crossing both rows must skip MX65 (ACTIVE=0) AND emit MX85 (ACTIVE=1). Never drop MX85 because of the annotation.
+8. Do NOT include SKUs from the "License History" section (e.g. MX84 from a prior renewal).
+9. LIMIT and ACTIVE must be the exact integers from the "License limit" and "Current device count" columns — never derive from model numbers.
+10. Preserve hyphens exactly (MS120-24P, not MS120 24P).
+11. Do not wrap labels in asterisks or other markdown. Output plain ASCII only.
+12. If the table is genuinely empty after applying rules 3-8, emit the LICENSE_DASHBOARD_PARSE_V1 block with no SKU lines between the --- markers — but only after you have scanned every row top-to-bottom.`;
+}
+
+// Audit prompt: shown to the model along with the first pass's output. The
+// model is asked to re-scan the same image looking specifically for rows the
+// first pass may have dropped near colored annotations or table boundaries.
+function getDashboardVisionAuditPrompt(firstResponse) {
+  const safeFirst = String(firstResponse || '').slice(0, 2000);
+  return `You already produced this LICENSE_DASHBOARD_PARSE_V1 output for the screenshot:
+
+---FIRST PASS---
+${safeFirst}
+---END FIRST PASS---
+
+Now re-scan the SAME image. Your job is to catch rows the first pass may have missed — especially rows whose ACTIVE >= 1 that sit just below or above a colored annotation (red/yellow/blue underline, cross, circle, highlighter stroke). Annotations are user markup, NOT table boundaries; the License information table continues below them.
+
+Focus checks:
+- For every MX, MR Enterprise, MS, MT, MV, MG, Z, CW, or C9 row visible in the License information table with ACTIVE >= 1, confirm it is present in the first pass.
+- If you see an MX65 row, also look immediately above and below it for an MX85, MX67, MX68, MX75, MX95, MX105, MX250, or MX450 row that the first pass may have skipped.
+- Do not invent SKUs. Only confirm or add rows that are literally visible in the top License information table.
+
+Respond with ONLY a fresh LICENSE_DASHBOARD_PARSE_V1 block in the same format as before, listing every row with ACTIVE >= 1 you can see. The caller will merge this with the first pass by taking the MAX qty per SKU (not the sum), so it is safe to repeat rows the first pass already had.`;
+}
+
+// Trigger heuristic for the audit pass. Returns true when the first response
+// looks suspicious in a way the audit prompt is good at catching.
+function shouldAuditDashboardVision(firstResponse) {
+  if (!firstResponse) return false;
+  const skus = extractSkusFromVisionText(firstResponse);
+  if (skus.length === 0) return false;
+  const upper = (s) => String(s.sku || '').toUpperCase();
+  const hasMrEnt = skus.some(s => upper(s) === 'MR-ENT' || upper(s) === 'MR_ENT');
+  const hasDeviceFamily = skus.some(s => /^(MX|MS|MV|MG|Z|CW|C9)\d/i.test(upper(s)));
+  // Pattern A: MR-only (no device family) — common when annotations hide MX rows.
+  if (hasMrEnt && !hasDeviceFamily) return true;
+  // Pattern B: MX65 present but MX85/MX95/MX105/MX67/MX68/MX75/MX250/MX450 absent.
+  // The MX65 row is frequently followed by another MX in real screenshots.
+  const hasMx65 = skus.some(s => /^MX65\b/i.test(upper(s)));
+  const hasOtherMx = skus.some(s => /^MX(?:67|68|75|85|95|105|250|450)\b/i.test(upper(s)));
+  if (hasMx65 && !hasOtherMx) return true;
+  return false;
+}
+
+// Merge two SKU lists by taking MAX qty per SKU (not sum). Used for first +
+// audit pass merging where re-emitted rows would otherwise double-count
+// (e.g. MR-ENT shows up in both passes with the same qty).
+function mergeVisionSkusMax(first, audit) {
+  const out = new Map();
+  const ingest = (list) => {
+    for (const it of (list || [])) {
+      if (!it || !it.sku) continue;
+      const sku = String(it.sku).toUpperCase();
+      const qty = Number(it.qty) || 0;
+      if (qty <= 0) continue;
+      const prev = out.get(sku);
+      if (!prev || qty > prev.qty) out.set(sku, { sku, qty });
+    }
+  };
+  ingest(first);
+  ingest(audit);
+  return Array.from(out.values());
+}
+
 // CF Vision: analyze images via Llama 4 Scout (free) before falling back to Claude
 async function askCFVision(prompt, imageData, env) {
   if (!env.AI) return null;
@@ -6818,37 +6912,56 @@ export default {
             const imageData = await downloadWebexFile(fileUrl, token);
             if (imageData && imageData.mediaType.startsWith('image/')) {
               T.step('wx-image', 'exit', { result: 'has_image' });
-              const DASHBOARD_VISION_PROMPT = `You are analyzing a Cisco Meraki license dashboard screenshot.
-
-Only extract rows from the TOP "License information" table — the one with the columns "License limit" and "Current device count". IGNORE the "License History" section at the bottom (those are past renewals with license keys like Z228-BEAC-D2QX and old devices — they must never appear in output).
-
-Respond with ONLY this block. No preamble, no summary, no recommendations, no markdown bold, no explanations:
-
-LICENSE_DASHBOARD_PARSE_V1
----
-SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
----
-EXPIRATION: <YYYY-MM-DD or unknown>
-MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
-MR_EDITION: <Enterprise | Advanced | none>
-
-Hard rules:
-1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, MX models, MS models, MT, MV, MG, Z-series).
-2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
-3. Skip any row where ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip.
-4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table. If unsure, leave it out.
-5. Do NOT include SKUs from the "License History" section (e.g. MX84 from a prior renewal).
-6. LIMIT and ACTIVE must be the exact integers from the "License limit" and "Current device count" columns — never derive from model numbers.
-7. Preserve hyphens exactly (MS120-24P, not MS120 24P).
-8. Do not wrap labels in asterisks or other markdown. Output plain ASCII only.
-9. If nothing extractable, emit the block with no SKU lines between the --- markers.`;
-
-              const prompt = text || DASHBOARD_VISION_PROMPT;
+              // Build the vision prompt: ALWAYS the dashboard extraction prompt as
+              // the primary task, with any user caption appended as additional
+              // context. The legacy code did `prompt = text || DASHBOARD_VISION_PROMPT`,
+              // so a caption like "what licenses do I have?" replaced the dashboard
+              // prompt entirely and the model returned a paragraph instead of the
+              // LICENSE_DASHBOARD_PARSE_V1 block. The downstream extractSkus parser
+              // then found nothing and the deterministic quote pipeline got skipped.
+              const _basePrompt = getDashboardVisionPrompt();
+              const _userCaption = (text || '').trim();
+              const prompt = _userCaption
+                ? `${_basePrompt}\n\nUser also wrote: "${_userCaption}"\nRespond with the LICENSE_DASHBOARD_PARSE_V1 block first; you may add additional notes after the block if relevant to the user's note.`
+                : _basePrompt;
 
               // Tier 1: Try CF Workers AI vision (Llama 4 Scout — free)
               T.step('wx-cfvision', 'enter');
-              const cfVision = await askCFVision(prompt, imageData, env);
+              let cfVision = await askCFVision(prompt, imageData, env);
               T.step('wx-cfvision', 'exit');
+
+              // Audit pass: when the first pass looks suspicious (MR-ENT only,
+              // or MX65 with no other MX nearby) the dashboard often has rows
+              // hidden behind a colored annotation that the first pass dropped.
+              // Run a second vision call with an audit prompt that re-scans
+              // for missed rows, then merge by MAX qty so re-emitted rows
+              // (like MR-ENT showing up in both passes) don't double-count.
+              if (cfVision && cfVision.response && shouldAuditDashboardVision(cfVision.response)) {
+                T.step('wx-cfvision-audit', 'enter');
+                console.log('[CF-Vision] First pass suspicious, running audit pass');
+                const auditPrompt = getDashboardVisionAuditPrompt(cfVision.response);
+                const audit = await askCFVision(auditPrompt, imageData, env);
+                T.step('wx-cfvision-audit', 'exit', { ran: !!audit });
+                if (audit && audit.response) {
+                  const firstSkus = extractSkusFromVisionText(cfVision.response);
+                  const auditSkus = extractSkusFromVisionText(audit.response);
+                  const merged = mergeVisionSkusMax(firstSkus, auditSkus);
+                  // Stitch a synthetic LICENSE_DASHBOARD_PARSE_V1 block from the
+                  // merged list so the rest of the pipeline (which calls
+                  // extractSkusFromVisionText again on cfVision.response) sees
+                  // every row. Keep the original first-pass tail (EXPIRATION
+                  // / MX_EDITION / MR_EDITION lines) to preserve metadata.
+                  const tail = cfVision.response.split(/\n---\n/).slice(2).join('\n---\n');
+                  const skuLines = merged.map(s => `SKU: ${s.sku} | LIMIT: ${s.qty} | ACTIVE: ${s.qty}`).join('\n');
+                  cfVision = {
+                    ...cfVision,
+                    response: `LICENSE_DASHBOARD_PARSE_V1\n---\n${skuLines}\n---${tail ? '\n' + tail : ''}`,
+                    elapsed: cfVision.elapsed + audit.elapsed,
+                    audited: true
+                  };
+                  console.log(`[CF-Vision] Audit merge: first=${firstSkus.length} audit=${auditSkus.length} merged=${merged.length}`);
+                }
+              }
 
               if (cfVision) {
                 // CF vision succeeded — extract SKUs and store for follow-up requests
