@@ -250,9 +250,196 @@ function rendered(text) {
   console.log(`${m5bWorks ? '🎉' : 'ℹ️ '} KNOWN-GAP probe: comma-list "1yr, 3yr 5yr" multi-term ${m5bWorks ? 'NOW WORKS — promote to assertion' : 'still emits only first term (out of scope)'}`);
 }
 
-// ─── Run async test, then summarise ────────────────────────────────────────
+// ─── Family coverage: Duo Advantage / Umbrella / AnyConnect / MV / MT / agnostic-MR ──
+// Each block exercises the same flow as Case 3 (single-license prior + change_term)
+// for one product family, asserting the rendered URL contains the expected
+// rewritten SKU and quantity. These are the WebEx packet cases Codex called
+// out as needing executable assertions, plus MV/MT/agnostic-MR coverage to
+// match the PR body's stated scope.
+
+function reviseAndRender(priorMsg, action, payload) {
+  const prior = extractPriorFromAssistantUrl(priorMsg);
+  if (!prior) return { prior: null, msg: null };
+  const revised = applyV2Revision(prior, { revision: { action, ...payload } });
+  if (!revised) return { prior, msg: null };
+  const out = buildQuoteResponse(revised);
+  return { prior, revised, msg: out && out.message };
+}
+
+// Duo Advantage 5YR → change to 3 year
+{
+  const { msg } = reviseAndRender(
+    'https://stratusinfosystems.com/order/?item=LIC-DUO-ADVANTAGE-5YR&qty=25',
+    'change_term', { new_term: 3 }
+  );
+  check('Duo Advantage 5YR → change_term=3 renders LIC-DUO-ADVANTAGE-3YR&qty=25',
+    !!msg && msg.includes('LIC-DUO-ADVANTAGE-3YR') && /qty=25\b/.test(msg) &&
+      !msg.includes('LIC-DUO-ADVANTAGE-5YR'),
+    `msg=${msg}`);
+}
+
+// Umbrella DNS Essentials 1YR → swap to 5 year
+{
+  const { msg } = reviseAndRender(
+    'https://stratusinfosystems.com/order/?item=LIC-UMB-DNS-ESS-K9-1YR&qty=50',
+    'change_term', { new_term: 5 }
+  );
+  check('Umbrella DNS Ess 1YR → change_term=5 renders LIC-UMB-DNS-ESS-K9-5YR&qty=50',
+    !!msg && msg.includes('LIC-UMB-DNS-ESS-K9-5YR') && /qty=50\b/.test(msg) &&
+      !msg.includes('LIC-UMB-DNS-ESS-K9-1YR'),
+    `msg=${msg}`);
+}
+
+// AnyConnect Apex 3Y-S1 → change to 1 year
+{
+  const { msg } = reviseAndRender(
+    'https://stratusinfosystems.com/order/?item=LIC-L-AC-APX-3Y-S1&qty=10',
+    'change_term', { new_term: 1 }
+  );
+  check('AnyConnect Apex 3Y-S1 → change_term=1 renders LIC-L-AC-APX-1Y-S1&qty=10',
+    !!msg && msg.includes('LIC-L-AC-APX-1Y-S1') && /qty=10\b/.test(msg) &&
+      !msg.includes('LIC-L-AC-APX-3Y-S1'),
+    `msg=${msg}`);
+}
+
+// MV camera license 1YR → change to 5 year
+{
+  const { msg } = reviseAndRender(
+    'https://stratusinfosystems.com/order/?item=LIC-MV-1YR&qty=8',
+    'change_term', { new_term: 5 }
+  );
+  check('MV 1YR → change_term=5 renders LIC-MV-5YR&qty=8',
+    !!msg && msg.includes('LIC-MV-5YR') && /qty=8\b/.test(msg) &&
+      !msg.includes('LIC-MV-1YR'),
+    `msg=${msg}`);
+}
+
+// MT sensor license 1Y → change to 3 year (single-Y suffix variant)
+{
+  const { msg } = reviseAndRender(
+    'https://stratusinfosystems.com/order/?item=LIC-MT-1Y&qty=12',
+    'change_term', { new_term: 3 }
+  );
+  check('MT 1Y → change_term=3 renders LIC-MT-3Y&qty=12',
+    !!msg && msg.includes('LIC-MT-3Y') && /qty=12\b/.test(msg) &&
+      !msg.includes('LIC-MT-1Y'),
+    `msg=${msg}`);
+}
+
+// Agnostic-MR LIC-ENT-1YR → change to 3 year
+{
+  const { msg } = reviseAndRender(
+    'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR&qty=20',
+    'change_term', { new_term: 3 }
+  );
+  check('Agnostic MR LIC-ENT-1YR → change_term=3 renders LIC-ENT-3YR&qty=20',
+    !!msg && msg.includes('LIC-ENT-3YR') && /qty=20\b/.test(msg) &&
+      !msg.includes('LIC-ENT-1YR'),
+    `msg=${msg}`);
+}
+
+// ─── handleFollowUpModifier family coverage ────────────────────────────────
+// Mirrors the V2-revise tests above through the deterministic follow-up path.
+
+function makeKv(history) {
+  return {
+    get: async (key, type) => {
+      if (!key.startsWith('conv:')) return null;
+      const data = { messages: history };
+      return type === 'json' ? data : JSON.stringify(data);
+    },
+    put: async () => {},
+  };
+}
+
+async function followupFamilyTests() {
+  const cases = [
+    {
+      label: 'Duo Advantage follow-up "3 year" after 5YR',
+      priorUrl: 'https://stratusinfosystems.com/order/?item=LIC-DUO-ADVANTAGE-5YR&qty=25',
+      msg: '3 year',
+      expectIncludes: 'LIC-DUO-ADVANTAGE-3YR',
+      expectQty: 25,
+    },
+    {
+      label: 'Umbrella DNS Ess follow-up "swap to 5 year" after 1YR',
+      priorUrl: 'https://stratusinfosystems.com/order/?item=LIC-UMB-DNS-ESS-K9-1YR&qty=50',
+      msg: 'swap to 5 year',
+      expectIncludes: 'LIC-UMB-DNS-ESS-K9-5YR',
+      expectQty: 50,
+    },
+    {
+      label: 'AnyConnect Apex follow-up "change to 1 year" after 3Y',
+      priorUrl: 'https://stratusinfosystems.com/order/?item=LIC-L-AC-APX-3Y-S1&qty=10',
+      msg: 'change to 1 year',
+      expectIncludes: 'LIC-L-AC-APX-1Y-S1',
+      expectQty: 10,
+    },
+  ];
+  for (const c of cases) {
+    const history = [
+      { role: 'user', content: 'prior request' },
+      { role: 'assistant', content: c.priorUrl },
+    ];
+    const reply = await handleFollowUpModifier(c.msg, 'test-person', makeKv(history));
+    const ok = typeof reply === 'string' &&
+               reply.includes(c.expectIncludes) &&
+               new RegExp(`qty=${c.expectQty}\\b`).test(reply);
+    check(c.label, ok, `reply=${reply}`);
+  }
+}
+
+// ─── Fail-closed assertions (Codex pushback round 1) ───────────────────────
+// When prior bears a recognizable term suffix and rewrite can't produce a
+// validated replacement, both code paths must return null instead of silently
+// re-rendering the original SKU.
+
+{
+  // Forge a fake term-bearing SKU not in prices.json. extractPriorFromAssistantUrl
+  // doesn't validate against prices, so this gives us a controllable test.
+  const fakePrior = {
+    items: [],
+    directLicense: { sku: 'LIC-FAKE-MADEUP-1YR', qty: 1 },
+    modifiers: { hardwareOnly: false, licenseOnly: true },
+    isTermOptionQuote: false,
+    requestedTerm: null,
+    isAdvisory: false,
+    isRevision: false,
+  };
+  const revised = applyV2Revision(fakePrior, { revision: { action: 'change_term', new_term: 3 } });
+  check('Fail-closed: directLicense with term-bearing SKU not in prices → applyV2Revision returns null',
+    revised === null, `revised=${JSON.stringify(revised)}`);
+}
+
+async function failClosedFollowupTest() {
+  const history = [
+    { role: 'user', content: 'fake' },
+    // URL with a fake term-bearing SKU. Renderer would parse this back out, but
+    // rewriteSkuTerm + prices validation should reject the rewrite candidate.
+    { role: 'assistant', content: 'https://stratusinfosystems.com/order/?item=LIC-FAKE-MADEUP-1YR&qty=1' },
+  ];
+  const reply = await handleFollowUpModifier('change to 3 year', 'test-person', makeKv(history));
+  check('Fail-closed: followup-modifier with term-bearing SKU not in prices returns null (no stale URL)',
+    reply === null, `reply=${reply}`);
+}
+
+// Same-term no-op: "change to 3 year" after a 3YR prior should produce the
+// same SKU (no rewrite needed) — must NOT trigger fail-closed.
+{
+  const { msg } = reviseAndRender(
+    'https://stratusinfosystems.com/order/?item=LIC-DUO-ESSENTIALS-3YR&qty=7',
+    'change_term', { new_term: 3 }
+  );
+  check('Same-term no-op: 3YR prior + change_term=3 keeps LIC-DUO-ESSENTIALS-3YR (not null)',
+    !!msg && msg.includes('LIC-DUO-ESSENTIALS-3YR&qty=7'),
+    `msg=${msg}`);
+}
+
+// // ─── Run async test, then summarise ────────────────────────────────────────
 (async () => {
   await testFollowUp();
+  await followupFamilyTests();
+  await failClosedFollowupTest();
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 })();

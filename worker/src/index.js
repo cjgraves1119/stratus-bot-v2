@@ -2199,23 +2199,41 @@ async function handleFollowUpModifier(text, personId, kv) {
     } else {
       // No labeled term matched. Fall back to rewriting the SKU term suffix
       // for term-in-SKU families (Duo / Umbrella / AnyConnect / MV / MT /
-      // agnostic-MR). This handles "change to 3 year" after a single-term
-      // Duo Essentials quote, where the prior URL has no labeled term to
-      // filter against.
-      const rewrittenTerms = [];
+      // agnostic-MR). FAIL-CLOSED: if any item bears a term suffix that
+      // doesn't match the requested term AND we can't produce a validated
+      // rewrite, return null so the caller falls through to V2-revise/Claude
+      // rather than re-rendering the stale URL.
+      const rewrittenItems = [];
+      let anyTermBearing = false;
+      let anyFailed = false;
       for (const [, items] of filteredTerms) {
-        const rewritten = [];
         for (const it of items) {
+          const tm = String(it.sku).match(/-([135])(YR|Y-S\d+|Y)$/i);
+          if (!tm) {
+            // Non-term-bearing SKU (rare in this branch — keep as-is).
+            rewrittenItems.push(it);
+            continue;
+          }
+          anyTermBearing = true;
+          const currentTerm = parseInt(tm[1], 10);
+          if (currentTerm === wantTerm) {
+            // Already at requested term, no rewrite needed.
+            rewrittenItems.push(it);
+            continue;
+          }
           const newSku = rewriteSkuTerm(it.sku, wantTerm);
           if (newSku && newSku !== it.sku && (newSku in prices)) {
-            rewritten.push({ sku: newSku, qty: it.qty });
+            rewrittenItems.push({ sku: newSku, qty: it.qty });
+          } else {
+            anyFailed = true;
           }
         }
-        if (rewritten.length > 0) rewrittenTerms.push([String(wantTerm), rewritten]);
       }
-      if (rewrittenTerms.length > 0) filteredTerms = rewrittenTerms;
-      // else: leave filteredTerms unchanged so the caller still produces
-      // *some* response — better than returning null and routing to Claude.
+      if (anyTermBearing && anyFailed) return null; // fail-closed
+      if (anyTermBearing && rewrittenItems.length > 0) {
+        filteredTerms = [[String(wantTerm), rewrittenItems]];
+      }
+      // else (no term-bearing items at all): leave filteredTerms unchanged.
     }
   }
 
@@ -3355,12 +3373,27 @@ function applyV2Revision(priorParsed, v2) {
       }
       // Single Duo/Umbrella/etc. directLicense — rewrite the embedded term
       // suffix in place. This is the most common revise-after-bare-quote path
-      // (e.g. "100 Duo Essentials" → "change to 3 year").
+      // (e.g. "100 Duo Essentials" → "change to 3 year"). FAIL-CLOSED: if the
+      // SKU bears a recognizable term suffix that doesn't match the requested
+      // term and rewrite can't produce a validated replacement, return null
+      // rather than silently re-rendering the prior term — that's the exact
+      // failure shape this PR exists to prevent.
       if (next.directLicense) {
-        const newSku = rewriteSkuTerm(next.directLicense.sku, t);
-        if (newSku && newSku !== next.directLicense.sku && (newSku in prices)) {
-          next.directLicense = { ...next.directLicense, sku: newSku };
+        const oldSku = String(next.directLicense.sku || '');
+        const tm = oldSku.match(/-([135])(YR|Y-S\d+|Y)$/i);
+        if (tm) {
+          const currentTerm = parseInt(tm[1], 10);
+          if (currentTerm !== t) {
+            const newSku = rewriteSkuTerm(oldSku, t);
+            if (newSku && newSku !== oldSku && (newSku in prices)) {
+              next.directLicense = { ...next.directLicense, sku: newSku };
+            } else {
+              return null; // fail-closed: term-bearing SKU but no validated rewrite
+            }
+          }
+          // currentTerm === t: already at requested term, no-op
         }
+        // No term suffix: leave directLicense alone (not a term-in-SKU family).
       }
       return next;
     }
