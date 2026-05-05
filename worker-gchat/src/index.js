@@ -745,6 +745,30 @@ async function addToHistory(kv, personId, role, content) {
 let cachedBotPersonId = null;
 // ─── SKU Suffix Rules ────────────────────────────────────────────────────────
 
+
+// ── 2026-05-05 council: Zoho-intent signal detector ───────────────────
+// Codex PR #14 retest Test 2: "quote 21 3 year MR renewals in zoho.
+// Be sure to include the account address on the quote" was intercepted by
+// Tier 0 deterministic URL responder, which returned ecomm URLs instead of
+// letting Llama+CRM create the Zoho quote the user explicitly asked for.
+// This helper detects Zoho-write intent so Tier 0 can skip and the request
+// falls through to the LLM/CRM tool-use path.
+//
+// True when text contains any of:
+//   - "in zoho" / "to zoho" / "into zoho"
+//   - "include / add the account address"
+//   - "on the (zoho) quote"
+//   - "create a (zoho) quote/deal/opportunity for/in"
+//   - mentions of explicit billing/shipping fields the user wants populated
+function looksLikeZohoQuoteIntent(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /\b(?:in|to|into)\s+zoho\b/i.test(text)
+      || /\b(?:include|add|with)\s+(?:the\s+)?(?:account|customer|company)?\s*(?:billing\s+)?address\b/i.test(text)
+      || /\bon\s+the\s+(?:zoho\s+)?quote\b/i.test(text)
+      || /\bcreate\s+(?:a\s+|the\s+)?(?:zoho\s+)?(?:quote|deal|opportunity)\s+(?:for|in)\b/i.test(text)
+      || /\b(?:billing|shipping)\s+(?:address|street|city|state|zip|country)\b/i.test(text);
+}
+
 // ── 2026-05-05 council: ambiguous license-term gate ────────────────────
 // Detects free-text "N <family> licenses" without explicit term and returns
 // a deterministic ask-for-term reply, preventing Llama from silently
@@ -16027,7 +16051,11 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   console.log(`[API/chat-waterfall] Product pre-resolution skipped: ${preResolveErr.message}`);
                 }
               }
-              if (!forceModel && !skipDeterministic) {
+              const _zohoIntent = looksLikeZohoQuoteIntent(wText);
+              if (_zohoIntent) {
+                console.log(`[WATERFALL] Tier 0 skipped: explicit Zoho-write intent detected in user text`);
+              }
+              if (!forceModel && !skipDeterministic && !_zohoIntent) {
                 try {
                   const classification = await classifyWithCF(wText, env);
                   if (classification?.intent === 'quote') {
