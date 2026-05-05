@@ -10,7 +10,7 @@ const assert = require('assert');
 // these tests should be regenerated from source.)
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
-  const mrLicMatch = upper.match(/^LIC-(?:ENT-MR|MR-ENT|MR)-(\d+)Y(?:R)?$/);
+  const mrLicMatch = upper.match(/^LIC-(?:ENT-MR|MR-ENT|MR)-(1|3|5)Y(?:R)?$/);
   if (mrLicMatch) return `LIC-ENT-${mrLicMatch[1]}YR`;
   // (Other branches omitted — we only test the MR license normalizer here.
   // Hardware suffix logic is exercised in test-chat-waterfall-quote-fix.js.)
@@ -86,6 +86,28 @@ t('LIC-ENT-3YR (already canonical) NOT changed', () => {
 t('Random non-license string passes through', () => {
   assert.strictEqual(applySuffix('LIC-ENT-MR'), 'LIC-ENT-MR'); // no term suffix
   assert.strictEqual(applySuffix('LIC-MR-ENT'), 'LIC-MR-ENT');
+});
+
+// Codex pushback 2026-05-05: regex must NOT manufacture non-canonical
+// rewrites for unsupported terms. Catalog only has LIC-ENT-{1,3,5}YR; if
+// Llama invents LIC-ENT-MR-7YR or LIC-MR-10YR, the safety net should NOT
+// normalize to LIC-ENT-7YR/-10YR (those don't exist either). Pass through
+// unchanged so the downstream not-found surfaces a real error instead of
+// manufacturing a new fake SKU class.
+t('LIC-ENT-MR-7YR (unsupported term) NOT rewritten', () => {
+  assert.strictEqual(applySuffix('LIC-ENT-MR-7YR'), 'LIC-ENT-MR-7YR');
+});
+t('LIC-ENT-MR-10YR (unsupported term) NOT rewritten', () => {
+  assert.strictEqual(applySuffix('LIC-ENT-MR-10YR'), 'LIC-ENT-MR-10YR');
+});
+t('LIC-MR-7Y (unsupported term, missing R) NOT rewritten', () => {
+  assert.strictEqual(applySuffix('LIC-MR-7Y'), 'LIC-MR-7Y');
+});
+t('LIC-MR-ENT-2YR (unsupported term 2y) NOT rewritten', () => {
+  assert.strictEqual(applySuffix('LIC-MR-ENT-2YR'), 'LIC-MR-ENT-2YR');
+});
+t('LIC-MR-0YR (zero term, edge case) NOT rewritten', () => {
+  assert.strictEqual(applySuffix('LIC-MR-0YR'), 'LIC-MR-0YR');
 });
 
 console.log(`\n${passed}/${passed + failed} tests passed`);

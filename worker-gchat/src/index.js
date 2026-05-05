@@ -752,7 +752,7 @@ function applySuffix(sku) {
   // license is universal across ALL MR APs and the only valid SKU forms are
   // LIC-ENT-1YR / -3YR / -5YR. Normalize before any catalog lookup so the
   // rest of the pipeline never sees the invented form.
-  const mrLicMatch = upper.match(/^LIC-(?:ENT-MR|MR-ENT|MR)-(\d+)Y(?:R)?$/);
+  const mrLicMatch = upper.match(/^LIC-(?:ENT-MR|MR-ENT|MR)-(1|3|5)Y(?:R)?$/);
   if (mrLicMatch) return `LIC-ENT-${mrLicMatch[1]}YR`;
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
