@@ -7003,6 +7003,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               results.steps.push(`Found Account by name: ${accountData.Account_Name} (${accountId})`);
             }
           }
+          // Search responses can be field-sparse depending on Zoho layout/API
+          // behavior. Re-fetch the Account before address gating/quote creation
+          // so "include account address" cannot degrade into blank Billing_*.
+          if (accountId) {
+            try {
+              const fullAcct = await zohoApiCall('GET',
+                `Accounts/${accountId}?fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Shipping_Street,Shipping_City,Shipping_State,Shipping_Code,Shipping_Country,Phone,Website`,
+                env);
+              if (fullAcct?.data?.[0]) {
+                accountData = { ...(accountData || {}), ...fullAcct.data[0] };
+                results.steps.push(`Fetched Account billing fields for Quote address: ${accountId}`);
+              }
+            } catch (acctFetchErr) {
+              results.steps.push(`Account billing re-fetch skipped: ${acctFetchErr.message}`);
+            }
+          }
 
           // ── HARD GATE #2: If no Account found, require full billing info + contact before creating ──
           if (!accountId) {
@@ -7208,6 +7224,50 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (!stageProduct(rawSku, qty)) {
                 missingProducts.push(rawSku);
               }
+              continue;
+            }
+            // Model-agnostic license aliases. These are license-only requests,
+            // not hardware. Prevents "21 MR licenses" from becoming 21x MR46-HW.
+            if (rawSku === 'MR-ENT' || rawSku === 'MR-AGN') {
+              if (!license_term) {
+                return {
+                  success: false,
+                  error: 'missing_license_term',
+                  instruction: 'Ask the user which MR Enterprise license term they want: 1 year, 3 year, or 5 year. Do NOT create a Deal or Quote until they choose a term.',
+                  _user_visible_summary: 'Which MR Enterprise license term should I use: 1 year, 3 year, or 5 year?',
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              const licSku = `LIC-ENT-${defaultTerm}YR`;
+              if (!stageProduct(licSku, qty)) missingProducts.push(licSku);
+              continue;
+            }
+            if (rawSku === 'MV-AGN') {
+              if (!license_term) {
+                return {
+                  success: false,
+                  error: 'missing_license_term',
+                  instruction: 'Ask the user which MV camera license term they want: 1 year, 3 year, or 5 year. Do NOT create a Deal or Quote until they choose a term.',
+                  _user_visible_summary: 'Which MV camera license term should I use: 1 year, 3 year, or 5 year?',
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              const licSku = `LIC-MV-${defaultTerm}YR`;
+              if (!stageProduct(licSku, qty)) missingProducts.push(licSku);
+              continue;
+            }
+            if (rawSku === 'MT-AGN') {
+              if (!license_term) {
+                return {
+                  success: false,
+                  error: 'missing_license_term',
+                  instruction: 'Ask the user which MT sensor license term they want: 1 year, 3 year, or 5 year. Do NOT create a Deal or Quote until they choose a term.',
+                  _user_visible_summary: 'Which MT sensor license term should I use: 1 year, 3 year, or 5 year?',
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              const licSku = `LIC-MT-${defaultTerm}Y`;
+              if (!stageProduct(licSku, qty)) missingProducts.push(licSku);
               continue;
             }
 
@@ -7554,6 +7614,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             results.note = 'Some products were not found. Mention this to the user but do NOT attempt to fix it with additional tool calls.';
           }
           results.instruction = 'DONE. Report these results to the user with Zoho links. Do NOT call any more tools — the workflow is complete.';
+          const quoteNumber = results.records.quote?.quote_number;
+          const quoteLabel = quoteNumber ? `Quote #${quoteNumber}` : 'Quote';
+          results._record_url = results.records.quote?.url || null;
+          results._user_visible_summary =
+            `Created ${quoteLabel} for ${results.records.account.name} — ` +
+            `[Open in Zoho](${results.records.quote.url})` +
+            (results.records.deal?.url ? ` — [View Deal](${results.records.deal.url})` : '') +
+            (results.records.task?.url ? ` — [View Task](${results.records.task.url})` : '');
           return results;
         } catch (e) {
           results.errors.push(`Unexpected error: ${e.message}`);
@@ -9451,7 +9519,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Pass ONLY hardware SKUs (e.g., MX68, MS130-12X, MR44) — licenses are auto-added using the correct SKU for each model. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results — do NOT make additional tool calls to modify the quote.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results — do NOT make additional tool calls to modify the quote.',
     input_schema: {
       type: 'object',
       properties: {
@@ -9464,12 +9532,12 @@ const CRM_EMAIL_TOOLS = [
           items: {
             type: 'object',
             properties: {
-              sku: { type: 'string', description: 'HARDWARE SKUs only (e.g., MR44, MX68, MS130-12X). Licenses are auto-added. Do NOT pass license SKUs — they are resolved automatically.' },
+              sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes. For "MR licenses" use MR-ENT or LIC-ENT-{term}YR; never substitute MR46/MR44 hardware unless the user asked for AP hardware.' },
               qty: { type: 'number', description: 'Quantity (default 1)' }
             },
             required: ['sku']
           },
-          description: 'Array of HARDWARE SKUs only. Licenses auto-added per model.'
+          description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses. License-only requests must stay license-only.'
         },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
@@ -9978,6 +10046,7 @@ SKU suffixes and hardware→license pairing are handled automatically by the too
 - You do NOT need to manually apply suffixes or figure out license SKUs — just pass base SKUs to the tools
 - License quantity always equals hardware quantity (1:1 ratio)
 - If a user explicitly names a license SKU (e.g., "LIC-ENT-3YR"), pass it as-is to batch_product_lookup
+- If the user asks for licenses only, do NOT convert that into hardware. In create_deal_and_quote, use the explicit license SKU or the model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN).
 
 **MR Enterprise License — UNIVERSAL across all MR APs.** The only valid SKUs are:
 - LIC-ENT-1YR (1 year)
@@ -9990,9 +10059,10 @@ NEVER invent or use these patterns — they are not real Cisco SKUs:
 - ❌ LIC-MR-{n}YR / LIC-MR-{n}Y
 
 Free-text request → SKU mapping (memorize):
-- "5 MR licenses" / "21 MR enterprise licenses" / "licenses for the MR access points" / "MR-ENT licenses" → LIC-ENT-{term}YR
+- "5 MR licenses" / "21 MR enterprise licenses" / "licenses for the MR access points" / "MR-ENT licenses" → LIC-ENT-{term}YR or create_deal_and_quote sku MR-ENT with license_term
 - If the user does not specify a term, ask: "1 year, 3 year, or 5 year?" Do NOT default silently.
 - The MR model number (MR36, MR44, MR46, MR57, etc.) does NOT change the license SKU. All MR APs share the same LIC-ENT-{term}YR license.
+- NEVER turn "MR licenses" into MR46-HW, MR44-HW, or any AP hardware line. Only add hardware when the user asks for APs/access points/hardware/devices.
 
 Same pattern for other Meraki families (memorize the universal license per family):
 - MV (cameras) → LIC-MV-{term}YR
