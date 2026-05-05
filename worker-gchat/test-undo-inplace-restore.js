@@ -186,6 +186,17 @@ function verifyInPlacePreservation(verifyItems, inPlaceRestoreOps, preStateItems
   return { ok: failures.length === 0, failures };
 }
 
+// Full Quote structural-fidelity verifier. Fingerprints and totals can match
+// after delete-add, but the exact subform ids still changed.
+function verifyExactSubformIds(verifyItems, preStateItems) {
+  const expected = preStateItems.map(it => it?.id).filter(Boolean).map(String);
+  const actual = verifyItems.map(it => it?.id).filter(Boolean).map(String);
+  const canVerify = expected.length === preStateItems.length && actual.length === verifyItems.length;
+  if (!canVerify) return { ok: true, skipped: true, expected, actual };
+  const ok = expected.length === actual.length && expected.every((id, idx) => id === actual[idx]);
+  return { ok, skipped: false, expected, actual };
+}
+
 // Quote_Number-aware label — same shape as the production undo helper.
 function buildQuoteRefLabel(origModule, origRecordId, preState) {
   if (origModule === 'Quotes' && preState && preState.Quote_Number) {
@@ -379,6 +390,39 @@ t('verifier FAILS when Product_Name.id changed under same subform id', () => {
   const result = verifyInPlacePreservation(verifyItems, inPlaceRestoreOps, preStateItems);
   assert.equal(result.ok, false);
   assert.ok(result.failures.some(f => f.includes('Product_Name changed')));
+});
+
+t('exact-id verifier FAILS when delete-add restores values with regenerated license ids', () => {
+  const preStateItems = [
+    { id: '2570562000402426397', Product_Name: { id: 'PID_MX75' }, Quantity: 1, List_Price: 2362.03, Discount: 941 },
+    { id: '2570562000402426398', Product_Name: { id: 'PID_LIC75' }, Quantity: 1, List_Price: 1660.79, Discount: 887 },
+    { id: '2570562000402426399', Product_Name: { id: 'PID_MX85' }, Quantity: 1, List_Price: 3670.05, Discount: 703 },
+    { id: '2570562000402426400', Product_Name: { id: 'PID_LIC85' }, Quantity: 1, List_Price: 2452.55, Discount: 804 },
+    { id: '2570562000402426401', Product_Name: { id: 'PID_AP' }, Quantity: 2, List_Price: 1676.64, Discount: 1714 },
+    { id: '2570562000402426402', Product_Name: { id: 'PID_LICAP' }, Quantity: 2, List_Price: 200.70, Discount: 168 },
+  ];
+  const verifyItems = [
+    preStateItems[0],
+    { ...preStateItems[1], id: '2570562000404051436' },
+    preStateItems[2],
+    { ...preStateItems[3], id: '2570562000404051437' },
+    preStateItems[4],
+    { ...preStateItems[5], id: '2570562000404051438' },
+  ];
+  const result = verifyExactSubformIds(verifyItems, preStateItems);
+  assert.equal(result.ok, false, 'regenerated ids must fail exact-state undo');
+  assert.deepEqual(result.expected, preStateItems.map(i => i.id));
+  assert.deepEqual(result.actual, verifyItems.map(i => i.id));
+});
+
+t('exact-id verifier PASSES when all subform ids match byte-for-byte', () => {
+  const preStateItems = [
+    { id: 'sub_1', Product_Name: { id: 'PID_A' } },
+    { id: 'sub_2', Product_Name: { id: 'PID_B' } },
+  ];
+  const result = verifyExactSubformIds([{ ...preStateItems[0] }, { ...preStateItems[1] }], preStateItems);
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, false);
 });
 
 console.log('\nQuote_Number-aware label');

@@ -8669,6 +8669,31 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     detail: verifyRes,
                   };
                 }
+                // Exact-state undo must preserve Quote subform row ids, not
+                // merely recreate equivalent product/qty/discount rows. If a
+                // remove-to-undo path falls back to delete-add, Zoho can return a
+                // matching fingerprint and total while silently issuing new
+                // Quoted_Items ids. That breaks the structural-fidelity
+                // contract, so fail loudly before the model can call it done.
+                const expectedSubformIds = preStateItems.map(it => it?.id).filter(Boolean).map(String);
+                const actualSubformIds = verifyItems.map(it => it?.id).filter(Boolean).map(String);
+                const canVerifySubformIds =
+                  expectedSubformIds.length === preStateItems.length &&
+                  actualSubformIds.length === verifyItems.length;
+                if (canVerifySubformIds) {
+                  const sameIds =
+                    expectedSubformIds.length === actualSubformIds.length &&
+                    expectedSubformIds.every((id, idx) => id === actualSubformIds[idx]);
+                  if (!sameIds) {
+                    return {
+                      success: false,
+                      error: 'undo_subform_ids_changed',
+                      message: `⚠️ Undo restore PUT returned SUCCESS and the row fingerprint/total match preState, but Quote line-item subform ids changed on ${quoteRefLabel}. Expected ids [${expectedSubformIds.join(', ')}], got [${actualSubformIds.join(', ')}]. Do NOT claim the undo succeeded. Deleted Zoho subform ids cannot be reused, so the exact prior Quote structure was not restored and row-linked downstream data may need manual relinking.`,
+                      expected_ids: expectedSubformIds,
+                      actual_ids: actualSubformIds,
+                    };
+                  }
+                }
                 // Codex round-12 P0-1: verify scalarRestore fields persisted.
                 if (scalarRestoreKeys.length > 0) {
                   const scalarMismatches = [];
@@ -12234,7 +12259,12 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
           // Capture summary fields (object-only — these live as side-channel
           // properties on tool result objects, not in stringified payloads).
           if (result && typeof result === 'object') {
-            const summary = result._user_visible_summary;
+            const resultIsErrorForSummary = result.success === false || !!result.error || !!result.validation_error;
+            const isWriteToolForSummary = typeof BENCHMARK_WRITE_TOOLS !== 'undefined' && BENCHMARK_WRITE_TOOLS.has(call.name);
+            const summary = result._user_visible_summary
+              || (resultIsErrorForSummary && isWriteToolForSummary
+                ? `That did not succeed: ${result.message || result.error || result.validation_error || 'the CRM write tool returned an error.'}`
+                : null);
             const undoToken = result._undo_token;
             if (summary && typeof summary === 'string') {
               mutationSummaries.push({
@@ -12242,7 +12272,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
                 summary,
                 undoToken: undoToken || null,
                 recordUrl: result._record_url || null,
-                isError: result.success === false,
+                isError: resultIsErrorForSummary,
               });
             }
           }
@@ -12391,7 +12421,13 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     // summary phrase so test criteria / users see exact error wording.
     if (last.isError && last.summary) {
       const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
-      if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
+      const hasContradictorySuccess =
+        /\b(?:quote|deal|task|record|contact|account|action|change|update|undo)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|deleted|removed|restored|undone|reversed)\b/i.test(finalReply)
+        || /\b(?:created|added|updated|cloned|saved|deleted|removed|restored|undone|reversed)\s+(?:a\s+new\s+)?(?:quote|deal|task|record|contact|account|action|change|update|undo)\b/i.test(finalReply)
+        || /\brestored to (?:its|the) previous state\b/i.test(finalReply);
+      if (hasContradictorySuccess) {
+        finalReply = last.summary;
+      } else if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
         finalReply = `${finalReply.trim()}\n\n${last.summary}`;
       }
     }
