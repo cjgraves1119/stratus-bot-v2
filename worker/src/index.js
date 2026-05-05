@@ -261,6 +261,8 @@ const DATASHEET_URLS = {
   MX105: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX95%2F%2F105_Datasheet',
   MX250: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX250_Datasheet',
   MX450: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX450_Datasheet',
+  'C8111-G2-MX': 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/C8111-G2-MX_and_C8121-G2-MX_Data_Sheet',
+  'C8121-G2-MX': 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/C8111-G2-MX_and_C8121-G2-MX_Data_Sheet',
   MR28: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR28_Datasheet',
   MR36: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36_Datasheet',
   MR36H: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36H_Datasheet',
@@ -322,6 +324,8 @@ function getDatasheetKey(model) {
   if (cwMatch && DATASHEET_URLS[cwMatch[1]]) return cwMatch[1];
   const msMatch = upper.match(/^(MS\d+)/);
   if (msMatch && DATASHEET_URLS[msMatch[1]]) return msMatch[1];
+  if (upper.startsWith('C8111-G2-MX')) return 'C8111-G2-MX';
+  if (upper.startsWith('C8121-G2-MX')) return 'C8121-G2-MX';
   if (upper.startsWith('C9300X')) return 'C9300X';
   if (upper.startsWith('C9300L')) return 'C9300L';
   if (upper.startsWith('C9300')) return 'C9300';
@@ -1444,11 +1448,13 @@ function getLicenseSkus(baseSku, requestedTier) {
 function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
-  // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers
-  const c8Match = upper.match(/^C(8111|8455)/);
+  // C8111 / C8121 / C8455 Catalyst Firewalls (MX-OS) — ENT/SEC/SDW tiers.
+  // Default SEC matches MX-family default (these are MX successors). Switch to
+  // ENT or SDW only when the user explicitly asks for that tier.
+  const c8Match = upper.match(/^C(8111|8121|8455)/);
   if (c8Match) {
     const model = c8Match[1];
-    const tier = requestedTier || 'ENT';
+    const tier = requestedTier || 'SEC';
     return [
       { term: '1Y', sku: `LIC-C${model}-${tier}-1Y` },
       { term: '3Y', sku: `LIC-C${model}-${tier}-3Y` },
@@ -1916,6 +1922,7 @@ function detectFamily(sku) {
   if (/^C9300/.test(sku)) return 'C9300';
   if (/^C9200L/.test(sku)) return 'C9200L';
   if (/^C8111/.test(sku)) return 'C8111';
+  if (/^C8121/.test(sku)) return 'C8121';
   if (/^C8455/.test(sku)) return 'C8455';
   return null;
 }
@@ -5833,7 +5840,11 @@ APs (MR): MR28, MR36, MR36H, MR44, MR46, MR46E, MR52, MR57, MR76, MR78, MR86
 APs (CW Wi-Fi 6E): CW9162I, CW9163E (external antenna), CW9164I, CW9166I, CW9166D1 (directional)
 APs (CW Wi-Fi 7): CW9171I (entry), CW9172I (mid-range, DEFAULT), CW9172H (hospitality), CW9174I (high-perf), CW9176I (premium), CW9176D1 (directional), CW9178I (top-tier), CW9179F (outdoor)
 MX Security: MX67, MX67W, MX67C, MX67C-NA, MX68, MX68W, MX68CW, MX68CW-NA, MX75, MX85, MX95, MX105, MX250, MX450
-Next-Gen MX (Catalyst-based, MX OS): C8111-G2-MX (replaces MX67, 2 Gbps FW, 1.2 Gbps VPN, 4 LAN, 200 users), C8121-G2-MX (replaces MX68, 2 Gbps FW, 1.2 Gbps VPN, 10 LAN, 200 users)
+Next-Gen MX / Catalyst Firewalls (Catalyst-based hardware running MX OS — own license family, NOT MX67/MX68 licenses):
+  - C8111-G2-MX: succeeds MX67 form factor (2 Gbps FW, 1.2 Gbps VPN, 4 LAN, 200 users). Licenses: LIC-C8111-{ENT|SEC|SDW}-{1Y|3Y|5Y}.
+  - C8121-G2-MX: succeeds MX68 form factor (2 Gbps FW, 1.2 Gbps VPN, 10 LAN, 200 users). Licenses: LIC-C8121-{ENT|SEC|SDW}-{1Y|3Y|5Y}.
+  - NEVER associate MX67 or MX68 license SKUs with C8111-G2-MX or C8121-G2-MX. The Catalyst hardware uses its own C8111/C8121 license SKUs.
+  - Default tier when user does not specify: SEC (matches MX successor behavior). Use ENT or SDW only when the user explicitly asks for that tier.
 MS130 Switches: MS130-8, MS130-8P, MS130-8P-I, MS130-8X, MS130-12X, MS130-24, MS130-24P, MS130-24X, MS130-48, MS130-48P, MS130-48X, MS130R-8P
 MS150 Switches: MS150-24T-4G, MS150-24P-4G, MS150-24T-4X, MS150-24P-4X, MS150-24MP-4X, MS150-48T-4G, MS150-48LP-4G, MS150-48FP-4G, MS150-48T-4X, MS150-48LP-4X, MS150-48FP-4X, MS150-48MP-4X
 MS390 Switches: MS390-24UX, MS390-48UX, MS390-48UX2

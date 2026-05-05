@@ -8008,6 +8008,86 @@
       "discount_per_unit": 2057,
       "discount_pct": 33
     },
+    "C8121-G2-MX": {
+      "list": 2069,
+      "price": 1386,
+      "discount": 0.3301,
+      "zoho_product_id": "2570562000403908520",
+      "discount_per_unit": 683,
+      "discount_pct": 33
+    },
+    "LIC-C8121-SEC-1Y": {
+      "list": 1839,
+      "price": 1232,
+      "discount": 0.3301,
+      "zoho_product_id": "2570562000403908498",
+      "discount_per_unit": 607,
+      "discount_pct": 33
+    },
+    "LIC-C8121-SEC-3Y": {
+      "list": 4136,
+      "price": 2771,
+      "discount": 0.33,
+      "zoho_product_id": "2570562000403908497",
+      "discount_per_unit": 1365,
+      "discount_pct": 33
+    },
+    "LIC-C8121-SEC-5Y": {
+      "list": 6893,
+      "price": 4618,
+      "discount": 0.33,
+      "zoho_product_id": "2570562000403909424",
+      "discount_per_unit": 2275,
+      "discount_pct": 33
+    },
+    "LIC-C8121-SDW-1Y": {
+      "list": 2757,
+      "price": 1847,
+      "discount": 0.3301,
+      "zoho_product_id": "2570562000403908503",
+      "discount_per_unit": 910,
+      "discount_pct": 33
+    },
+    "LIC-C8121-SDW-3Y": {
+      "list": 6203,
+      "price": 4156,
+      "discount": 0.33,
+      "zoho_product_id": "2570562000403908502",
+      "discount_per_unit": 2047,
+      "discount_pct": 33
+    },
+    "LIC-C8121-SDW-5Y": {
+      "list": 10340,
+      "price": 6928,
+      "discount": 0.33,
+      "zoho_product_id": "2570562000403908501",
+      "discount_per_unit": 3412,
+      "discount_pct": 33
+    },
+    "LIC-C8121-ENT-1Y": {
+      "list": 919,
+      "price": 616,
+      "discount": 0.3297,
+      "zoho_product_id": "2570562000403908508",
+      "discount_per_unit": 303,
+      "discount_pct": 33
+    },
+    "LIC-C8121-ENT-3Y": {
+      "list": 2069,
+      "price": 1386,
+      "discount": 0.3301,
+      "zoho_product_id": "2570562000403908507",
+      "discount_per_unit": 683,
+      "discount_pct": 33
+    },
+    "LIC-C8121-ENT-5Y": {
+      "list": 3446,
+      "price": 2309,
+      "discount": 0.3299,
+      "zoho_product_id": "2570562000403908506",
+      "discount_per_unit": 1137,
+      "discount_pct": 33
+    },
     "C8455-G2-MX": {
       "list": 44451,
       "price": 29890,

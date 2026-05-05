@@ -216,11 +216,11 @@ function getLicenseSkus(baseSku, requestedTier) {
 function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
-  // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers
-  const c8Match = upper.match(/^C(8111|8455)/);
+  // C8111 / C8121 / C8455 Catalyst Firewalls (MX-OS) — default SEC (matches MX).
+  const c8Match = upper.match(/^C(8111|8121|8455)/);
   if (c8Match) {
     const model = c8Match[1];
-    const tier = requestedTier || 'ENT';
+    const tier = requestedTier || 'SEC';
     return [
       { term: '1Y', sku: `LIC-C${model}-${tier}-1Y` },
       { term: '3Y', sku: `LIC-C${model}-${tier}-3Y` },
@@ -1187,10 +1187,15 @@ const tests = [
 
   // C8111/C8455
   ...[
-    ['C8111-G2-MX', null, ['LIC-C8111-ENT-1Y', 'LIC-C8111-ENT-3Y', 'LIC-C8111-ENT-5Y']],
+    ['C8111-G2-MX', null, ['LIC-C8111-SEC-1Y', 'LIC-C8111-SEC-3Y', 'LIC-C8111-SEC-5Y']],
+    ['C8111-G2-MX', 'ENT', ['LIC-C8111-ENT-1Y', 'LIC-C8111-ENT-3Y', 'LIC-C8111-ENT-5Y']],
     ['C8111-G2-MX', 'SDW', ['LIC-C8111-SDW-1Y', 'LIC-C8111-SDW-3Y', 'LIC-C8111-SDW-5Y']],
     ['C8111-G2-MX', 'SEC', ['LIC-C8111-SEC-1Y', 'LIC-C8111-SEC-3Y', 'LIC-C8111-SEC-5Y']],
-    ['C8455-G2-MX', null, ['LIC-C8455-ENT-1Y', 'LIC-C8455-ENT-3Y', 'LIC-C8455-ENT-5Y']],
+    ['C8121-G2-MX', null, ['LIC-C8121-SEC-1Y', 'LIC-C8121-SEC-3Y', 'LIC-C8121-SEC-5Y']],
+    ['C8121-G2-MX', 'ENT', ['LIC-C8121-ENT-1Y', 'LIC-C8121-ENT-3Y', 'LIC-C8121-ENT-5Y']],
+    ['C8121-G2-MX', 'SEC', ['LIC-C8121-SEC-1Y', 'LIC-C8121-SEC-3Y', 'LIC-C8121-SEC-5Y']],
+    ['C8121-G2-MX', 'SDW', ['LIC-C8121-SDW-1Y', 'LIC-C8121-SDW-3Y', 'LIC-C8121-SDW-5Y']],
+    ['C8455-G2-MX', 'ENT', ['LIC-C8455-ENT-1Y', 'LIC-C8455-ENT-3Y', 'LIC-C8455-ENT-5Y']],
   ].map(([sku, tier, expected]) => ({
     name: `[LICENSE] ${sku} ${tier || 'ENT'} → C8xxx router`,
     customTest: () => {
@@ -1267,7 +1272,7 @@ const tests = [
     'Z4', 'Z4C', 'MG41', 'MG52E', 'MS130-24', 'MS130-8P', 'MS130R-8P',
     'MS150-24P-4G', 'MS150-48FP-4X', 'MS125-24P',
     'MS390-24UX', 'C9200L-24P-4G-M', 'C9300-48P-M',
-    'C9300X-12Y-M', 'C9300L-48PF-4X-M', 'C8111-G2-MX', 'C8455-G2-MX',
+    'C9300X-12Y-M', 'C9300L-48PF-4X-M', 'C8111-G2-MX', 'C8121-G2-MX', 'C8455-G2-MX',
     'MV63X', 'MT10', 'MS450-12',
     'MS210-24P', 'MS350-24X', 'MS355-48X', 'MS425-32',
   ].map(sku => ({
@@ -2517,6 +2522,76 @@ if (_realParseMessage) {
           pass: r?.isClarification === true && cat?.generation === '6' && cat?.qty === 5 &&
                 /MR36/.test(r?.clarificationMessage || ''),
           actual: `isClarification=${r?.isClarification} cat=${JSON.stringify(cat)}`,
+        };
+      },
+    },
+    // ═══════════════════════════════════════════════════════════════════════
+    // C8121-G2-MX catalog hardening — 2026-05-05
+    // Bug: bot recommended MX68 licenses for C8121-G2-MX. Now must use C8121 licenses.
+    // ═══════════════════════════════════════════════════════════════════════
+    {
+      name: '[PARSER] "quote a C8121-G2-MX" → items=C8121-G2-MX, no MX68 hallucination',
+      run: () => {
+        const r = _realParseMessage('quote a C8121-G2-MX');
+        const it = r?.items?.[0];
+        const hasC8121 = it?.baseSku === 'C8121-G2-MX';
+        const noMx68 = !JSON.stringify(r).includes('MX68');
+        return {
+          pass: hasC8121 && noMx68,
+          actual: `baseSku=${it?.baseSku} hasMX68=${!noMx68}`,
+        };
+      },
+    },
+    {
+      name: '[PARSER] "quote C8121-G2-MX with 3 year security" → SEC tier, term=3',
+      run: () => {
+        const r = _realParseMessage('quote C8121-G2-MX with 3 year security');
+        const it = r?.items?.[0];
+        return {
+          pass: it?.baseSku === 'C8121-G2-MX' && r?.requestedTier === 'SEC' && r?.requestedTerm === 3,
+          actual: `baseSku=${it?.baseSku} tier=${r?.requestedTier} term=${r?.requestedTerm}`,
+        };
+      },
+    },
+    {
+      name: '[LICENSE-NEG] C8121-G2-MX must NEVER return LIC-MX68-* SKUs',
+      run: () => {
+        const lics = getLicenseSkus('C8121-G2-MX', null);
+        const skus = (lics || []).map(l => l.sku);
+        const hasMx68 = skus.some(s => /^LIC-MX6[78]/.test(s));
+        const allC8121 = skus.length > 0 && skus.every(s => /^LIC-C8121-/.test(s));
+        return {
+          pass: !hasMx68 && allC8121,
+          actual: `skus=${JSON.stringify(skus)}`,
+        };
+      },
+    },
+    {
+      name: '[LICENSE-NEG] C8121-G2-MX SDW tier returns LIC-C8121-SDW-*Y not -*YR',
+      run: () => {
+        const lics = getLicenseSkus('C8121-G2-MX', 'SDW');
+        const skus = (lics || []).map(l => l.sku);
+        const allCorrect = skus.length === 3 && skus.every(s => /^LIC-C8121-SDW-[135]Y$/.test(s));
+        return {
+          pass: allCorrect,
+          actual: `skus=${JSON.stringify(skus)}`,
+        };
+      },
+    },
+    {
+      name: '[PRICES] all 10 C8121 SKUs present in prices.json',
+      run: () => {
+        const required = [
+          'C8121-G2-MX',
+          'LIC-C8121-SEC-1Y','LIC-C8121-SEC-3Y','LIC-C8121-SEC-5Y',
+          'LIC-C8121-SDW-1Y','LIC-C8121-SDW-3Y','LIC-C8121-SDW-5Y',
+          'LIC-C8121-ENT-1Y','LIC-C8121-ENT-3Y','LIC-C8121-ENT-5Y',
+        ];
+        const missing = required.filter(s => !(s in prices));
+        const noZohoId = required.filter(s => !prices[s]?.zoho_product_id);
+        return {
+          pass: missing.length === 0 && noZohoId.length === 0,
+          actual: `missing=${JSON.stringify(missing)} noZohoId=${JSON.stringify(noZohoId)}`,
         };
       },
     },
