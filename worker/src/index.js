@@ -217,6 +217,28 @@ const prices = new Proxy(staticPrices, {
   }
 });
 
+// ─── Term-in-SKU rewrite helper ──────────────────────────────────────────────
+// Some product families embed the term directly in the SKU rather than carrying
+// it as separate metadata. When the user asks to switch terms on a prior quote
+// containing one of these families, we have to rewrite the SKU itself, not
+// just toggle a `requestedTerm` field. Covers:
+//   LIC-DUO-{TIER}-{1,3,5}YR
+//   LIC-UMB-{TYPE}-{TIER}-K9-{1,3,5}YR
+//   LIC-L-AC-{TIER}-{1,3,5}Y-S{n}    (AnyConnect / Cisco Secure Client)
+//   LIC-MV-{1,3,5}YR  /  LIC-MT-{1,3,5}Y
+//   LIC-(ENT|SEC|SDW)-{1,3,5}YR      (tier-agnostic MR)
+//   LIC-MX*-{TIER}-{1,3,5}YR  /  LIC-MX*-SDW-{1,3,5}Y
+// Returns the rewritten SKU on success, or null when the SKU has no recognized
+// trailing term suffix. Caller is expected to validate against `prices`.
+function rewriteSkuTerm(sku, newTerm) {
+  if (!sku || ![1, 3, 5].includes(Number(newTerm))) return null;
+  const s = String(sku).toUpperCase();
+  // Suffix grammar: -{1|3|5}{YR | Y-S\d+ | Y}
+  const m = s.match(/-([135])(YR|Y-S\d+|Y)$/);
+  if (!m) return null;
+  return s.replace(/-([135])(YR|Y-S\d+|Y)$/, `-${newTerm}$2`);
+}
+
 const catalog = catalogData;
 const specs = specsData;
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
@@ -2072,7 +2094,7 @@ async function handleFollowUpModifier(text, personId, kv) {
   // Pure modifier phrases (no SKU tokens needed)
   const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?)\s*\.?\s*$/i.test(upper);
   const isLicOnly = /^(LICENSE[S]?\s+ONLY|LICENCE[S]?\s+ONLY|JUST\s+(THE\s+)?LICENSE[S]?|LICENSE[S]?\s+RENEWAL|RENEWAL\s+ONLY|NO\s+HARDWARE)\s*\.?\s*$/i.test(upper);
-  const isTermOnly = upper.match(/^(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(\d)\s*-?\s*YEAR(?:\s+ONLY|\s+PLEASE)?\s*\.?\s*$/i);
+  const isTermOnly = upper.match(/^(?:(?:CHANGE|SWAP|REPLACE)(?:\s+(?:TO|WITH|IT\s+TO))?\s+)?(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(?:A\s+)?(\d)\s*-?\s*YEAR(?:\s+(?:ONLY|PLEASE|LICENSE[S]?|TERM))?\s*\.?\s*$/i);
   const isAddPricing = /^(ADD\s+PRICING|WITH\s+PRICING|INCLUDE\s+PRICING|SHOW\s+ME\s+PRICING|HOW\s+MUCH(\s+(IS|ARE)\s+(IT|THAT|THOSE|THIS|THESE|THEM))?\s*\??\s*)$/i.test(upper);
 
   if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) return null;
@@ -2172,7 +2194,47 @@ async function handleFollowUpModifier(text, personId, kv) {
   if (isTermOnly) {
     const wantTerm = parseInt(isTermOnly[1], 10);
     const single = filteredTerms.find(([k]) => String(k) === String(wantTerm));
-    if (single) filteredTerms = [single];
+    if (single) {
+      filteredTerms = [single];
+    } else {
+      // No labeled term matched. Fall back to rewriting the SKU term suffix
+      // for term-in-SKU families (Duo / Umbrella / AnyConnect / MV / MT /
+      // agnostic-MR). FAIL-CLOSED: if any item bears a term suffix that
+      // doesn't match the requested term AND we can't produce a validated
+      // rewrite, return null so the caller falls through to V2-revise/Claude
+      // rather than re-rendering the stale URL.
+      const rewrittenItems = [];
+      let anyTermBearing = false;
+      let anyFailed = false;
+      for (const [, items] of filteredTerms) {
+        for (const it of items) {
+          const tm = String(it.sku).match(/-([135])(YR|Y-S\d+|Y)$/i);
+          if (!tm) {
+            // Non-term-bearing SKU (rare in this branch — keep as-is).
+            rewrittenItems.push(it);
+            continue;
+          }
+          anyTermBearing = true;
+          const currentTerm = parseInt(tm[1], 10);
+          if (currentTerm === wantTerm) {
+            // Already at requested term, no rewrite needed.
+            rewrittenItems.push(it);
+            continue;
+          }
+          const newSku = rewriteSkuTerm(it.sku, wantTerm);
+          if (newSku && newSku !== it.sku && (newSku in prices)) {
+            rewrittenItems.push({ sku: newSku, qty: it.qty });
+          } else {
+            anyFailed = true;
+          }
+        }
+      }
+      if (anyTermBearing && anyFailed) return null; // fail-closed
+      if (anyTermBearing && rewrittenItems.length > 0) {
+        filteredTerms = [[String(wantTerm), rewrittenItems]];
+      }
+      // else (no term-bearing items at all): leave filteredTerms unchanged.
+    }
   }
 
   // Apply mutation
@@ -2181,7 +2243,11 @@ async function handleFollowUpModifier(text, personId, kv) {
     let out = items;
     if (isHwOnly) out = applyHwOnly(out);
     else if (isLicOnly) out = applyLicOnly(out, term === 'na' ? null : parseInt(term, 10));
-    else if (hasRemovePrefix || hasAddPrefix || hasSwapPrefix) {
+    else if ((hasRemovePrefix || hasAddPrefix || hasSwapPrefix) && !isTermOnly) {
+      // hasSwapPrefix can co-occur with isTermOnly (e.g. "change to 3 year").
+      // In that case the term filter / SKU-rewrite above already produced the
+      // intended state, so we skip the item mutation pass which would only
+      // try to interpret "change ..." as add/remove/swap and fail.
       const r = applyItemMutation(out, text);
       if (r) out = r;
       else return null; // couldn't parse the mutation — pass through
@@ -3263,13 +3329,25 @@ function applyV2Revision(priorParsed, v2) {
       next.requestedTerm = t;
       // For Duo/Umbrella isTermOptionQuote items, the term lives IN the SKU
       // (LIC-DUO-ESSENTIALS-{1,3,5}YR) — metadata alone doesn't filter them.
-      // Narrow the items list to just the matching term so the renderer
-      // emits per-tier URLs for only the selected term.
+      // First try to narrow to items whose suffix already matches the new term.
+      // If nothing matches (prior was a single-term quote), rewrite each SKU's
+      // term suffix instead. Validates the rewritten SKU against `prices`.
       if (next.isTermOptionQuote && Array.isArray(next.items) && next.items.length > 0) {
         const suffixRe = new RegExp(`-${t}Y(?:R|-S\\d+)?$`, 'i');
         const filtered = next.items.filter(i => suffixRe.test(String(i.baseSku)));
-        if (filtered.length === 0) return null; // no SKUs at that term → bail
-        next.items = filtered;
+        if (filtered.length > 0) {
+          next.items = filtered;
+        } else {
+          const rewritten = [];
+          for (const it of next.items) {
+            const newSku = rewriteSkuTerm(it.baseSku, t);
+            if (newSku && newSku !== it.baseSku && (newSku in prices)) {
+              rewritten.push({ ...it, baseSku: newSku });
+            }
+          }
+          if (rewritten.length === 0) return null;
+          next.items = rewritten;
+        }
       }
       // Same idea for a directLicenseList of Duo/Umbrella SKUs (legacy path
       // for prior states that predate the isTermOptionQuote promotion).
@@ -3278,9 +3356,44 @@ function applyV2Revision(priorParsed, v2) {
         const allDuoUmb = next.directLicenseList.every(l => /^LIC-(DUO|UMB|L-AC)-/i.test(String(l.sku || '')));
         if (allDuoUmb) {
           const filtered = next.directLicenseList.filter(l => suffixRe.test(String(l.sku)));
-          if (filtered.length === 0) return null;
-          next.directLicenseList = filtered;
+          if (filtered.length > 0) {
+            next.directLicenseList = filtered;
+          } else {
+            const rewritten = [];
+            for (const lic of next.directLicenseList) {
+              const newSku = rewriteSkuTerm(lic.sku, t);
+              if (newSku && newSku !== lic.sku && (newSku in prices)) {
+                rewritten.push({ ...lic, sku: newSku });
+              }
+            }
+            if (rewritten.length === 0) return null;
+            next.directLicenseList = rewritten;
+          }
         }
+      }
+      // Single Duo/Umbrella/etc. directLicense — rewrite the embedded term
+      // suffix in place. This is the most common revise-after-bare-quote path
+      // (e.g. "100 Duo Essentials" → "change to 3 year"). FAIL-CLOSED: if the
+      // SKU bears a recognizable term suffix that doesn't match the requested
+      // term and rewrite can't produce a validated replacement, return null
+      // rather than silently re-rendering the prior term — that's the exact
+      // failure shape this PR exists to prevent.
+      if (next.directLicense) {
+        const oldSku = String(next.directLicense.sku || '');
+        const tm = oldSku.match(/-([135])(YR|Y-S\d+|Y)$/i);
+        if (tm) {
+          const currentTerm = parseInt(tm[1], 10);
+          if (currentTerm !== t) {
+            const newSku = rewriteSkuTerm(oldSku, t);
+            if (newSku && newSku !== oldSku && (newSku in prices)) {
+              next.directLicense = { ...next.directLicense, sku: newSku };
+            } else {
+              return null; // fail-closed: term-bearing SKU but no validated rewrite
+            }
+          }
+          // currentTerm === t: already at requested term, no-op
+        }
+        // No term suffix: leave directLicense alone (not a term-in-SKU family).
       }
       return next;
     }
