@@ -1323,8 +1323,13 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   const mxEditionRaw = String(opts.mxEdition || '').toUpperCase();
   const mxTier = /SDW|SD[-\s]*WAN/.test(mxEditionRaw) ? 'SDW' : 'SEC';
 
-  const renewalDevices = [];
-  const eolUpgrades = [];
+  // Partition vision SKUs into:
+  //   - non-EOL devices (current/stocked models, license-only renewal)
+  //   - EOL devices (current license still renewable AND a replacement
+  //     hardware upgrade is offered separately)
+  //   - MR-ENT (rolls into LIC-ENT-{term}YR at the active qty)
+  const nonEolDevices = [];
+  const eolDevices = [];
   let mrEntQty = 0;
   for (const s of (visionSkus || [])) {
     if (!s || !s.sku || !(Number(s.qty) > 0)) continue;
@@ -1335,58 +1340,155 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
       continue;
     }
     if (isEol(upper)) {
-      const replacement = checkEol(upper);
-      eolUpgrades.push({ model: upper, qty, replacement });
-      continue;
+      eolDevices.push({ model: upper, qty, replacement: checkEol(upper) });
+    } else {
+      nonEolDevices.push({ model: upper, qty });
     }
-    renewalDevices.push({ model: upper, qty });
   }
 
-  const termGroups = { '1Y': [], '3Y': [], '5Y': [] };
-
-  for (const { model, qty } of renewalDevices) {
+  // Helper: license SKU for `model` at `term` ('1Y' / '3Y' / '5Y'). Returns
+  // null when model has no mapped license family (or all generated SKUs
+  // are absent from prices.json — getLicenseSkus already filters those).
+  const licFor = (model, term) => {
     const lics = getLicenseSkus(model, mxTier);
-    if (!lics) continue;
-    for (const term of ['1Y', '3Y', '5Y']) {
-      const lic = lics.find(l => l.term === term);
-      if (lic) termGroups[term].push({ sku: lic.sku, qty });
+    if (!lics) return null;
+    return lics.find(l => l.term === term) || null;
+  };
+
+  const TERMS = ['1Y', '3Y', '5Y'];
+  const empty = () => ({ '1Y': [], '3Y': [], '5Y': [] });
+
+  // Carry-forward block: non-EOL device licenses + MR-ENT. Used as the
+  // base for both Option 1 (Renew As-Is — adds EOL device LICENSES on top)
+  // and Option 2/3 (Hardware Refresh — adds replacement HW + replacement
+  // LICENSE for each EOL on top).
+  const carryForward = empty();
+  for (const { model, qty } of nonEolDevices) {
+    for (const term of TERMS) {
+      const lic = licFor(model, term);
+      if (lic) carryForward[term].push({ sku: lic.sku, qty });
     }
   }
-
   if (mrEntQty > 0) {
-    termGroups['1Y'].push({ sku: 'LIC-ENT-1YR', qty: mrEntQty });
-    termGroups['3Y'].push({ sku: 'LIC-ENT-3YR', qty: mrEntQty });
-    termGroups['5Y'].push({ sku: 'LIC-ENT-5YR', qty: mrEntQty });
+    carryForward['1Y'].push({ sku: 'LIC-ENT-1YR', qty: mrEntQty });
+    carryForward['3Y'].push({ sku: 'LIC-ENT-3YR', qty: mrEntQty });
+    carryForward['5Y'].push({ sku: 'LIC-ENT-5YR', qty: mrEntQty });
   }
 
-  const anyRenewal = Object.values(termGroups).some(g => g.length > 0);
-  if (!anyRenewal && eolUpgrades.length === 0) return null;
-
-  const lines = [];
-  for (const term of ['1Y', '3Y', '5Y']) {
-    if (termGroups[term].length === 0) continue;
-    const url = buildStratusUrl(termGroups[term]);
-    const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
-    lines.push(`**${label} Co-Term:** ${url}`);
-  }
-
-  let upgradeBlock = null;
-  if (eolUpgrades.length > 0) {
-    const upgradeLines = ['**Optional Upgrade — End-of-Life Devices:**'];
-    for (const { model, qty, replacement } of eolUpgrades) {
-      const repl = Array.isArray(replacement) ? replacement[0] : replacement;
-      const tail = repl ? ` → recommended replacement: **${repl}**` : '';
-      upgradeLines.push(`- ${model} (qty ${qty})${tail}`);
+  // Option 1 — Renew As-Is. Carry-forward + each EOL device's CURRENT
+  // license (because the customer still owns the EOL hardware and the
+  // dashboard count covers it). NEVER include EOL hardware here.
+  const option1 = empty();
+  for (const term of TERMS) option1[term].push(...carryForward[term]);
+  for (const { model, qty } of eolDevices) {
+    for (const term of TERMS) {
+      const lic = licFor(model, term);
+      if (lic) option1[term].push({ sku: lic.sku, qty });
     }
-    upgradeBlock = upgradeLines.join('\n');
   }
+
+  // Helper: build a Hardware Refresh option for a given uplink index.
+  // 0 = primary (1G when array, scalar when single replacement)
+  // 1 = alt (10G when array length >= 2; falls back to 0 if no alt exists,
+  //   which means Option 2 and Option 3 would be identical — caller guards)
+  const buildRefresh = (uplinkIdx) => {
+    const groups = empty();
+    for (const term of TERMS) groups[term].push(...carryForward[term]);
+    for (const { qty, replacement } of eolDevices) {
+      if (!replacement) continue;
+      const replModel = Array.isArray(replacement)
+        ? (replacement[uplinkIdx] || replacement[0])
+        : replacement;
+      const hwSku = applySuffix(replModel);
+      groups['1Y'].push({ sku: hwSku, qty });
+      groups['3Y'].push({ sku: hwSku, qty });
+      groups['5Y'].push({ sku: hwSku, qty });
+      const replLics = getLicenseSkus(replModel, mxTier);
+      if (replLics) {
+        for (const term of TERMS) {
+          const lic = replLics.find(l => l.term === term);
+          if (lic) groups[term].push({ sku: lic.sku, qty });
+        }
+      }
+    }
+    return groups;
+  };
+
+  const hasEol = eolDevices.length > 0;
+  // "Has alt uplink" = any EOL replacement is an array with a distinct
+  // 10G alternative. Only then do we render Option 3 (10G); otherwise
+  // Option 2 doesn't get a "1G Uplink" qualifier and there's no Option 3.
+  const hasAltUplink = eolDevices.some(e =>
+    Array.isArray(e.replacement) && e.replacement.length >= 2 && e.replacement[1] !== e.replacement[0]
+  );
+
+  const option2 = hasEol ? buildRefresh(0) : null;
+  const option3 = (hasEol && hasAltUplink) ? buildRefresh(1) : null;
+
+  // Render helpers
+  const renderTerms = (groups) => {
+    const lines = [];
+    for (const term of TERMS) {
+      if (groups[term].length === 0) continue;
+      const url = buildStratusUrl(groups[term]);
+      const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
+      lines.push(`${label} Co-Term: ${url}`);
+    }
+    return lines.join('\n');
+  };
+
+  // EOL prose section. One line per EOL model with its replacement(s).
+  // Single replacement → "Replacement: X". Dual-uplink array → "Replacements:
+  // A (1G) / B (10G)". The hardware-refresh URLs already encode the SKUs,
+  // so this prose is intentionally brief.
+  let eolProse = '';
+  if (eolDevices.length > 0) {
+    const proseLines = ['**Products End of Life:**'];
+    for (const { model, replacement } of eolDevices) {
+      let line = `${model} (EOL) → `;
+      if (Array.isArray(replacement) && replacement.length >= 2 && replacement[1] !== replacement[0]) {
+        const parts = replacement.slice(0, 2).map((r, i) => `${r} (${i === 0 ? '1G' : '10G'})`);
+        line += `Replacements: ${parts.join(' / ')}`;
+      } else {
+        const repl = Array.isArray(replacement) ? replacement[0] : replacement;
+        line += repl ? `Replacement: ${repl}` : 'Replacement: see Cisco for upgrade path';
+      }
+      proseLines.push(line);
+    }
+    eolProse = proseLines.join('\n');
+  }
+
+  // Final assembly
+  const sections = [];
+  if (eolProse) sections.push(eolProse);
+
+  const opt1Body = renderTerms(option1);
+  if (opt1Body) sections.push(`**Option 1 - Renew As-Is:**\n${opt1Body}`);
+
+  if (option2) {
+    const headerOpt2 = hasAltUplink
+      ? '**Option 2 - Hardware Refresh, 1G Uplink:**'
+      : '**Option 2 - Hardware Refresh:**';
+    const opt2Body = renderTerms(option2);
+    if (opt2Body) sections.push(`${headerOpt2}\n${opt2Body}`);
+  }
+  if (option3) {
+    const opt3Body = renderTerms(option3);
+    if (opt3Body) sections.push(`**Option 3 - Hardware Refresh, 10G Uplink:**\n${opt3Body}`);
+  }
+
+  if (sections.length === 0) return null;
 
   return {
-    message: lines.join('\n\n'),
-    upgradeBlock,
-    termGroups,
-    renewalDevices,
-    eolUpgrades,
+    message: sections.join('\n\n'),
+    // Back-compat fields kept for the existing callsite drop-detection.
+    // upgradeBlock is no longer separate — it's folded into message — so
+    // the field is null and callers should rely on message alone.
+    upgradeBlock: null,
+    termGroups: option1,
+    option1, option2, option3,
+    eolDevices,
+    nonEolDevices,
     mrEntQty,
     mxTier
   };
@@ -7116,10 +7218,10 @@ export default {
                     mrEdition: _dashMeta.mrEdition
                   });
 
-                  if (dashQuote && (dashQuote.message || dashQuote.upgradeBlock)) {
+                  if (dashQuote && dashQuote.message) {
                     // Drop detection: every renewal-eligible vision SKU must appear in
-                    // the rendered URLs (or in the upgrade block for EOL devices).
-                    const qmsg = (dashQuote.message || '') + '\n' + (dashQuote.upgradeBlock || '');
+                    // the rendered URLs (Option 1 + Option 2/3 collectively).
+                    const qmsg = dashQuote.message || '';
                     const droppedFlags = [];
                     for (const s of visionSkus) {
                       const upper = s.sku.toUpperCase();
@@ -7138,8 +7240,7 @@ export default {
                     if (droppedFlags.length > 0) {
                       console.warn(`[CF-Vision] ${droppedFlags.length} SKU(s) dropped from final quote:`, droppedFlags);
                     }
-                    const upgradeTail = dashQuote.upgradeBlock ? `\n\n---\n\n${dashQuote.upgradeBlock}` : '';
-                    const combined = `**Detected SKUs:**\n${skuSummary}${dropBlock}\n\n---\n\n${dashQuote.message}${upgradeTail}`;
+                    const combined = `**Detected SKUs:**\n${skuSummary}${dropBlock}\n\n---\n\n${dashQuote.message}`;
                     await addToHistory(kv, personId, 'assistant', combined);
                     T.step('wx-send', 'enter');
                     await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + License Renewal (${cfVision.elapsed}ms, free)_`, token);
