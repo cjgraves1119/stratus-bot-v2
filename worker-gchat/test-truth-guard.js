@@ -1035,16 +1035,8 @@ function simulateInjection(finalReplyIn, last) {
     finalReply = `${finalReply.trim()}\n\n[Open in Zoho](${last.recordUrl})`;
   }
   if (last.isError && last.summary) {
-    const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
-    const hasContradictorySuccess =
-      /\b(?:quote|deal|task|record|contact|account|action|change|update|undo)\s+(?:was|has\s+been|is)\s+(?:(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|deleted|removed|restored|undone|reversed|reverted)|successful)\b/i.test(finalReply)
-      || /\b(?:created|added|updated|cloned|saved|deleted|removed|restored|undone|reversed|reverted)\s+(?:a\s+new\s+)?(?:quote|deal|task|record|contact|account|action|change|update|undo)\b/i.test(finalReply)
-      || /\b(?:restored|reverted)\s+to (?:its|the) previous state\b/i.test(finalReply);
-    if (hasContradictorySuccess) {
-      finalReply = last.summary;
-    } else if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
-      finalReply = `${finalReply.trim()}\n\n${last.summary}`;
-    }
+    // 2026-05-05 council: deterministic full replacement on tool error.
+    finalReply = last.summary;
   }
   return finalReply;
 }
@@ -2233,5 +2225,75 @@ t('Quote update with triedQuotedItems=true and no pre snapshot → DELETE_UNVERI
   assert.ok(result.warnings.includes('DELETE_UNVERIFIABLE_NO_PRE_SNAPSHOT'));
 });
 
+// ── 2026-05-05 council: deterministic isError replacement regression suite ──
+// Codex live retest of PR #8 (worker version 663) showed Llama still narrating
+// "The undo action was not successful. Quote #X reverted back to its previous
+// state. [URL removed: unverified] That did not succeed: ..." — failure
+// summary appended below model success prose. Pivoting to deterministic
+// full replacement covers ANY model wording without regex whack-a-mole.
+
+t('Failed undo: "reverted back to its previous state" + URL placeholder collapses to summary', () => {
+  const out = simulateInjection(
+    'The undo action was not successful.\n\nQuote #2570562000402426403 reverted back to its previous state.\n\n[URL removed: unverified]\n\nThat did not succeed: Undo verification failed: Grand_Total expected 9105.02, got 9105.01',
+    {
+      isError: true,
+      undoToken: null,
+      recordUrl: null,
+      summary: 'That did not succeed: Undo verification failed: Grand_Total expected 9105.02, got 9105.01',
+      toolName: 'undo_crm_action',
+    }
+  );
+  assert.equal(out, 'That did not succeed: Undo verification failed: Grand_Total expected 9105.02, got 9105.01');
+  assert.ok(!/reverted back/i.test(out), 'failed undo must not retain "reverted back" wording');
+  assert.ok(!/URL removed/i.test(out), 'failed undo must not retain URL placeholder');
+  assert.ok(!/link removed/i.test(out), 'failed undo must not retain link placeholder');
+  assert.ok(!/not successful/i.test(out), 'failed undo must not retain "not successful" prose');
+});
+
+t('Failed update: arbitrary model prose discarded entirely on isError', () => {
+  const out = simulateInjection(
+    'Looks great, the deal is now updated and saved with the new amount.',
+    {
+      isError: true,
+      undoToken: null,
+      recordUrl: null,
+      summary: '❌ Deal update failed: MANDATORY_NOT_FOUND on field Account_Name',
+      toolName: 'zoho_update_record',
+    }
+  );
+  assert.equal(out, '❌ Deal update failed: MANDATORY_NOT_FOUND on field Account_Name');
+});
+
+t('Failed task create: completely unrelated chatty prose discarded', () => {
+  const out = simulateInjection(
+    'I went ahead and added the task to your queue. You should see it in a moment in your CRM.',
+    {
+      isError: true,
+      undoToken: null,
+      recordUrl: null,
+      summary: '❌ Tasks record creation failed: MANDATORY_NOT_FOUND ($se_module)',
+      toolName: 'zoho_create_record',
+    }
+  );
+  assert.equal(out, '❌ Tasks record creation failed: MANDATORY_NOT_FOUND ($se_module)');
+});
+
+t('isError with no contradictory wording still gets replaced (no longer appended)', () => {
+  // Pre-PR #9 behavior: keyPhrase append. Post-PR #9: full replacement always.
+  const out = simulateInjection(
+    'I will check that for you.',
+    {
+      isError: true,
+      undoToken: null,
+      recordUrl: null,
+      summary: '❌ Quote update failed: validation error on Quoted_Items[0].Quantity',
+      toolName: 'zoho_update_record',
+    }
+  );
+  assert.equal(out, '❌ Quote update failed: validation error on Quoted_Items[0].Quantity');
+  assert.ok(!/check that for you/i.test(out), 'previous chatty prose discarded');
+});
+
 console.log(`\n${passed}/${passed + failed} tests passed`);
 if (failed > 0) process.exit(1);
+
