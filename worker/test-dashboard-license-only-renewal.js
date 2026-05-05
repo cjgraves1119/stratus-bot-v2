@@ -149,23 +149,37 @@ MR_EDITION: Enterprise`;
     `msg=${msg}`);
 }
 
-// ─── EOL device → upgrade block, NOT in renewal cart ────────────────────────
-// MX64 is EOL (replaced by MX67). With ACTIVE=2, it should NOT appear in the
-// per-term URLs but should be flagged in the upgrade block.
+// ─── EOL device: license stays in Option 1, hardware shifts to Option 2 ─────
+// (Codex spec correction post-PR #22). Customer still owns the EOL device, so
+// Option 1 (Renew As-Is) carries its CURRENT license; Option 2 (Hardware
+// Refresh) replaces the EOL hardware + its license with the replacement.
+// MX64 (EOL) → MX67 is a scalar (no 1G/10G alts), so no Option 3 emitted.
 {
   const out = buildDashboardRenewalQuote(
     [{ sku: 'MX64', qty: 2 }, { sku: 'MR-ENT', qty: 4 }],
     { mxEdition: 'Advanced Security' }
   );
   const msg = out && out.message;
-  check('EOL MX64 NOT in renewal URLs',
-    !!msg && !/LIC-MX64-/.test(msg) && !/MX64-HW/.test(msg),
+  check('Option 1 INCLUDES the EOL device current license at qty=ACTIVE',
+    !!msg && /Option 1 - Renew As-Is/.test(msg) && /LIC-MX64-SEC-3YR/.test(msg),
     `msg=${msg}`);
-  check('EOL device surfaces in upgrade block',
-    out && out.upgradeBlock && /MX64/.test(out.upgradeBlock) && /Optional Upgrade/i.test(out.upgradeBlock),
-    `upgradeBlock=${out && out.upgradeBlock}`);
-  check('Renewal URLs still have LIC-ENT for the MR fleet',
-    !!msg && /LIC-ENT-3YR&qty=4\b/.test(msg),
+  check('Option 1 does NOT include EOL hardware (no MX64-HW in renewal cart)',
+    !!msg && !/MX64-HW/.test(msg),
+    `msg=${msg}`);
+  check('Option 2 replaces MX64 hardware with MX67-HW + LIC-MX67-SEC-*',
+    !!msg && /Option 2 - Hardware Refresh/.test(msg) && /MX67-HW/.test(msg) && /LIC-MX67-SEC-3YR/.test(msg),
+    `msg=${msg}`);
+  check('Option 2 does NOT contain the EOL MX64 license',
+    !!msg && !(msg.split('Option 2')[1] || '').includes('LIC-MX64-'),
+    `msg=${msg}`);
+  check('Products End of Life prose lists MX64 → Replacement: MX67',
+    !!msg && /Products End of Life/.test(msg) && /MX64.*EOL.*Replacement.*MX67/.test(msg),
+    `msg=${msg}`);
+  check('Scalar replacement (no 10G alt) → no Option 3 rendered',
+    !!msg && !/Option 3/.test(msg),
+    `msg=${msg}`);
+  check('Renewal carry-forward includes LIC-ENT for the MR fleet at qty=4',
+    !!msg && /LIC-ENT-3YR/.test(msg) && /qty=4,/.test(msg),
     `msg=${msg}`);
 }
 
