@@ -8660,21 +8660,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     detail: verifyRes,
                   };
                 }
-                const preTotal = Number(preState.Grand_Total || 0);
-                const postTotal = Number(verifyRec?.Grand_Total || 0);
-                if (preTotal > 0 && Math.abs(preTotal - postTotal) > 0.01) {
-                  return {
-                    success: false,
-                    error: `Undo verification failed: Grand_Total expected ${preTotal}, got ${postTotal}`,
-                    detail: verifyRes,
-                  };
-                }
+                // ── 2026-05-05 council: reorder, structural diff before Grand_Total ──
+                // Codex live retest showed Grand_Total mismatch ($0.01 float
+                // rounding) was firing first and short-circuiting the more
+                // informative subform_ids_changed check. Reordered so any
+                // structural id regeneration surfaces ahead of cent-level
+                // total drift. A 1-cent total mismatch is mostly a
+                // verification-window artifact; an id-set change is a real
+                // structural failure of the restore.
+                //
                 // Exact-state undo must preserve Quote subform row ids, not
                 // merely recreate equivalent product/qty/discount rows. If a
                 // remove-to-undo path falls back to delete-add, Zoho can return a
-                // matching fingerprint and total while silently issuing new
-                // Quoted_Items ids. That breaks the structural-fidelity
-                // contract, so fail loudly before the model can call it done.
+                // matching fingerprint while silently issuing new Quoted_Items
+                // ids. Fail loudly before the model can call it done.
                 const expectedSubformIds = preStateItems.map(it => it?.id).filter(Boolean).map(String);
                 const actualSubformIds = verifyItems.map(it => it?.id).filter(Boolean).map(String);
                 const canVerifySubformIds =
@@ -8688,11 +8687,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     return {
                       success: false,
                       error: 'undo_subform_ids_changed',
-                      message: `⚠️ Undo restore PUT returned SUCCESS and the row fingerprint/total match preState, but Quote line-item subform ids changed on ${quoteRefLabel}. Expected ids [${expectedSubformIds.join(', ')}], got [${actualSubformIds.join(', ')}]. Do NOT claim the undo succeeded. Deleted Zoho subform ids cannot be reused, so the exact prior Quote structure was not restored and row-linked downstream data may need manual relinking.`,
+                      message: `⚠️ Undo restore PUT returned SUCCESS and the row fingerprint match preState, but Quote line-item subform ids changed on ${quoteRefLabel}. Expected ids [${expectedSubformIds.join(', ')}], got [${actualSubformIds.join(', ')}]. Do NOT claim the undo succeeded. Deleted Zoho subform ids cannot be reused (Zoho returns INVALID_DATA on insert with a previously-deleted id), so the exact prior Quote structure was not restored and row-linked downstream data may need manual relinking.`,
                       expected_ids: expectedSubformIds,
                       actual_ids: actualSubformIds,
                     };
                   }
+                }
+                // ── Grand_Total check, AFTER structural id check ────────────
+                // Tolerance widened from > 0.01 to > 0.02 to absorb IEEE 754
+                // rounding (Math.abs(9105.02 - 9105.01) = 0.0100000000002 due
+                // to float). Real total errors will exceed 2 cents.
+                const preTotal = Number(preState.Grand_Total || 0);
+                const postTotal = Number(verifyRec?.Grand_Total || 0);
+                if (preTotal > 0 && Math.abs(preTotal - postTotal) > 0.02) {
+                  return {
+                    success: false,
+                    error: `Undo verification failed: Grand_Total expected ${preTotal}, got ${postTotal}`,
+                    detail: verifyRes,
+                  };
                 }
                 // Codex round-12 P0-1: verify scalarRestore fields persisted.
                 if (scalarRestoreKeys.length > 0) {
@@ -12420,16 +12432,17 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     // For error responses (refusals, ambiguity) surface the verbatim
     // summary phrase so test criteria / users see exact error wording.
     if (last.isError && last.summary) {
-      const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
-      const hasContradictorySuccess =
-        /\b(?:quote|deal|task|record|contact|account|action|change|update|undo)\s+(?:was|has\s+been|is)\s+(?:(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|deleted|removed|restored|undone|reversed|reverted)|successful)\b/i.test(finalReply)
-        || /\b(?:created|added|updated|cloned|saved|deleted|removed|restored|undone|reversed|reverted)\s+(?:a\s+new\s+)?(?:quote|deal|task|record|contact|account|action|change|update|undo)\b/i.test(finalReply)
-        || /\b(?:restored|reverted)\s+to (?:its|the) previous state\b/i.test(finalReply);
-      if (hasContradictorySuccess) {
-        finalReply = last.summary;
-      } else if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
-        finalReply = `${finalReply.trim()}\n\n${last.summary}`;
-      }
+      // ── 2026-05-05 council: drop regex-based contradictory-success detection ─
+      // Codex live retest of PR #8 showed Llama still rationalized failures by
+      // narrating success above the appended failure summary, with phrasings
+      // ("reverted back to its previous state", URL placeholders) that always
+      // slipped past whichever regex variant was in play. Pivoting to
+      // deterministic full replacement: the verifier's failure summary is the
+      // single source of truth on tool error. The model's prose is discarded.
+      // No URL placeholders ([URL removed: unverified] / [link removed]), no
+      // partial salvage of model wording. The whole reply collapses to the
+      // tool's error string.
+      finalReply = last.summary;
     }
 
     // ── Undo narration injection ───────────────────────────────────────
