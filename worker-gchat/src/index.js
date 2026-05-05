@@ -746,6 +746,14 @@ let cachedBotPersonId = null;
 // ─── SKU Suffix Rules ────────────────────────────────────────────────────────
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
+  // ── 2026-05-05 council: MR Enterprise license SKU canonicalization ─────
+  // Llama invents non-canonical patterns LIC-ENT-MR-{n}YR, LIC-MR-ENT-{n}YR,
+  // LIC-MR-{n}YR / -{n}Y when asked for "N MR licenses". The MR Enterprise
+  // license is universal across ALL MR APs and the only valid SKU forms are
+  // LIC-ENT-1YR / -3YR / -5YR. Normalize before any catalog lookup so the
+  // rest of the pipeline never sees the invented form.
+  const mrLicMatch = upper.match(/^LIC-(?:ENT-MR|MR-ENT|MR)-(\d+)Y(?:R)?$/);
+  if (mrLicMatch) return `LIC-ENT-${mrLicMatch[1]}YR`;
   if (/^CW-(ANT|MNT|ACC|INJ|POE)/.test(upper) || upper === 'CW9800H1-MCG') return upper;
   if (upper === 'CW9179F') return upper;  // CW9179F has no -RTG suffix
   // Wi-Fi 7 CW917X APs — only known-good variant stems get -RTG.
@@ -9970,6 +9978,28 @@ SKU suffixes and hardware→license pairing are handled automatically by the too
 - You do NOT need to manually apply suffixes or figure out license SKUs — just pass base SKUs to the tools
 - License quantity always equals hardware quantity (1:1 ratio)
 - If a user explicitly names a license SKU (e.g., "LIC-ENT-3YR"), pass it as-is to batch_product_lookup
+
+**MR Enterprise License — UNIVERSAL across all MR APs.** The only valid SKUs are:
+- LIC-ENT-1YR (1 year)
+- LIC-ENT-3YR (3 year)
+- LIC-ENT-5YR (5 year)
+
+NEVER invent or use these patterns — they are not real Cisco SKUs:
+- ❌ LIC-ENT-MR-{n}YR
+- ❌ LIC-MR-ENT-{n}YR
+- ❌ LIC-MR-{n}YR / LIC-MR-{n}Y
+
+Free-text request → SKU mapping (memorize):
+- "5 MR licenses" / "21 MR enterprise licenses" / "licenses for the MR access points" / "MR-ENT licenses" → LIC-ENT-{term}YR
+- If the user does not specify a term, ask: "1 year, 3 year, or 5 year?" Do NOT default silently.
+- The MR model number (MR36, MR44, MR46, MR57, etc.) does NOT change the license SKU. All MR APs share the same LIC-ENT-{term}YR license.
+
+Same pattern for other Meraki families (memorize the universal license per family):
+- MV (cameras) → LIC-MV-{term}YR
+- MT (sensors) → LIC-MT-{term}YR
+- MG (cellular) → LIC-MG-{term}YR
+- MS (switches) → MODEL-SPECIFIC, not universal — use batch_product_lookup
+- MX (security) → MODEL-SPECIFIC (LIC-MX{model}-SEC-{term}YR), use batch_product_lookup
 
 ---
 
