@@ -7,7 +7,9 @@ const assert = require('assert');
 
 function detectAmbiguousLicenseTerm(text) {
   if (!text || typeof text !== 'string') return null;
-  const m = text.match(/\b(\d+)\s*(MR|MV|MT|MG)\s+(?:enterprise\s+)?licens(?:es?|ing)\b/i);
+  const mNoun = text.match(/\b(\d+)\s*(MR|MV|MT|MG)\s+(?:enterprise\s+)?(?:licens(?:es?|ing)|renewals?)\b/i);
+  const mVerb = mNoun ? null : text.match(/\brenew(?:al)?\s+(?:(\d+)\s+)?(MR|MV|MT|MG)\s+(?:enterprise\s+)?licens(?:es?|ing)\b/i);
+  const m = mNoun || mVerb;
   if (!m) return null;
   const hasTerm =
     /\b([135])\s*[-]?\s*(?:year|yr|y)s?\b/i.test(text)
@@ -16,7 +18,7 @@ function detectAmbiguousLicenseTerm(text) {
     || /\bLIC-(?:ENT|MV|MT|MG)-[^\s]*[135]Y/i.test(text);
   if (hasTerm) return null;
   const family = m[2].toUpperCase();
-  const qty = parseInt(m[1], 10);
+  const qty = m[1] ? parseInt(m[1], 10) : 1;
   const familyLabel =
     family === 'MR' ? 'MR Enterprise' :
     family === 'MV' ? 'MV camera' :
@@ -133,6 +135,61 @@ t('empty string → returns null', () => {
 t('non-string input → returns null', () => {
   assert.strictEqual(detectAmbiguousLicenseTerm(42), null);
   assert.strictEqual(detectAmbiguousLicenseTerm({}), null);
+});
+
+
+// ── 2026-05-05 council follow-up: renewal-phrase coverage ──
+// Codex callout on PR #12 retest: matcher must cover renewal phrasing too.
+console.log('\n  Renewal phrase coverage');
+t('"21 MR renewals" → fires (noun-form renewal)', () => {
+  const r = detectAmbiguousLicenseTerm('quote 21 MR renewals');
+  assert.ok(r); assert.strictEqual(r.family, 'MR'); assert.strictEqual(r.qty, 21);
+});
+t('"21 MR renewal" (singular) → fires', () => {
+  const r = detectAmbiguousLicenseTerm('21 MR renewal');
+  assert.ok(r); assert.strictEqual(r.family, 'MR'); assert.strictEqual(r.qty, 21);
+});
+t('"renew MR licenses" (verb, no qty) → fires with qty=1', () => {
+  const r = detectAmbiguousLicenseTerm('renew MR licenses');
+  assert.ok(r); assert.strictEqual(r.family, 'MR'); assert.strictEqual(r.qty, 1);
+});
+t('"renew 21 MR licenses" (verb + qty) → fires', () => {
+  const r = detectAmbiguousLicenseTerm('renew 21 MR licenses');
+  assert.ok(r); assert.strictEqual(r.family, 'MR'); assert.strictEqual(r.qty, 21);
+});
+t('"renewal of 5 MR licenses" → fires', () => {
+  const r = detectAmbiguousLicenseTerm('renewal of 5 MR licenses');
+  assert.ok(r); assert.strictEqual(r.family, 'MR'); assert.strictEqual(r.qty, 5);
+});
+t('"5 MV renewals" → fires (MV family + renewal)', () => {
+  const r = detectAmbiguousLicenseTerm('quote 5 MV renewals');
+  assert.ok(r); assert.strictEqual(r.family, 'MV');
+});
+t('"renew 3 MT licenses" → fires (MT family verb-form)', () => {
+  const r = detectAmbiguousLicenseTerm('renew 3 MT licenses');
+  assert.ok(r); assert.strictEqual(r.family, 'MT'); assert.strictEqual(r.qty, 3);
+});
+
+// Renewal + explicit term — must NOT fire
+t('"21 MR renewals 3 year" → does NOT fire (explicit term)', () => {
+  assert.strictEqual(detectAmbiguousLicenseTerm('21 MR renewals 3 year'), null);
+});
+t('"renew MR licenses for 5 years" → does NOT fire (term in for-clause)', () => {
+  assert.strictEqual(detectAmbiguousLicenseTerm('renew MR licenses for 5 years'), null);
+});
+t('"renew 21 MR licenses 1y" → does NOT fire', () => {
+  assert.strictEqual(detectAmbiguousLicenseTerm('renew 21 MR licenses 1y'), null);
+});
+t('"renewal of 21 LIC-ENT-3YR" → does NOT fire (canonical SKU)', () => {
+  assert.strictEqual(detectAmbiguousLicenseTerm('renewal of 21 LIC-ENT-3YR'), null);
+});
+
+// Negative — non-license renewal phrasing should not match
+t('"renew the contract" → does NOT fire', () => {
+  assert.strictEqual(detectAmbiguousLicenseTerm('renew the contract'), null);
+});
+t('"21 quotes need renewal" → does NOT fire (no family-license signal)', () => {
+  assert.strictEqual(detectAmbiguousLicenseTerm('21 quotes need renewal'), null);
 });
 
 console.log(`\n${passed}/${passed + failed} tests passed`);
