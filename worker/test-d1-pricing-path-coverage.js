@@ -96,5 +96,30 @@ function findHandlerBlock(declarationLineMatch) {
   checkNoUnloggedReturn('pricingReply', 'Pricing');
 }
 
+
+// ─── 6. Lifecycle-attached writes — Codex pushback on PR #26 ────────────────
+// Each new D1 call must be wrapped in ctx.waitUntil(...) or prefixed with
+// await. A bare `logBotUsageToD1(...).catch(() => {})` can be cut off when
+// the Worker request returns, dropping the row.
+{
+  const lifecycleAttached = (replyVar, label) => {
+    const re = new RegExp(`if\\s*\\(${replyVar}\\)\\s*\\{[\\s\\S]*?return;`, 'g');
+    const m = re.exec(src);
+    if (!m) return;
+    const body = m[0];
+    const hasWaitUntil = /ctx\.waitUntil\(\s*logBotUsageToD1\(/.test(body);
+    const hasAwait = /await\s+logBotUsageToD1\(/.test(body);
+    check(`${label}: D1 call is lifecycle-attached (ctx.waitUntil OR await)`,
+      hasWaitUntil || hasAwait,
+      `${label} D1 call is bare fire-and-forget — Worker may abandon before flush`);
+  };
+  // Only apply to the three NEW paths covered by this PR. Pre-existing paths
+  // (followup-modifier, cf-deterministic, etc.) follow a different pattern
+  // that's been verified to work in production; not in scope to change here.
+  lifecycleAttached('eolDateReply', 'EOL');
+  lifecycleAttached('quoteConfirmReply', 'Quote-confirm');
+  lifecycleAttached('pricingReply', 'Pricing');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

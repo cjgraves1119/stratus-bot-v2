@@ -7369,7 +7369,7 @@ export default {
             await sendMessage(roomId, eolDateReply, token);
             T.step('wx-send', 'exit');
             T.step('wx-d1', 'enter');
-            logBotUsageToD1(env, { personId, requestText: text, responsePath: 'eol-date', durationMs: Date.now() - _wxStartMs, responseText: eolDateReply }).catch(() => {});
+            ctx.waitUntil(logBotUsageToD1(env, { personId, requestText: text, responsePath: 'eol-date', durationMs: Date.now() - _wxStartMs, responseText: eolDateReply }).catch(() => {}));
             writeMetric(env, { path: 'eol-date', durationMs: Date.now() - _wxStartMs, personId });
             T.step('wx-d1', 'exit');
             ctx.waitUntil(T.flush());
@@ -7389,7 +7389,7 @@ export default {
             await sendMessage(roomId, quoteConfirmReply, token);
             T.step('wx-send', 'exit');
             T.step('wx-d1', 'enter');
-            logBotUsageToD1(env, { personId, requestText: text, responsePath: 'quote-confirmation', durationMs: Date.now() - _wxStartMs, responseText: quoteConfirmReply }).catch(() => {});
+            ctx.waitUntil(logBotUsageToD1(env, { personId, requestText: text, responsePath: 'quote-confirmation', durationMs: Date.now() - _wxStartMs, responseText: quoteConfirmReply }).catch(() => {}));
             writeMetric(env, { path: 'quote-confirmation', durationMs: Date.now() - _wxStartMs, personId });
             T.step('wx-d1', 'exit');
             ctx.waitUntil(T.flush());
@@ -7436,7 +7436,7 @@ export default {
             await sendMessage(roomId, pricingReply, token);
             T.step('wx-send', 'exit');
             T.step('wx-d1', 'enter');
-            logBotUsageToD1(env, { personId, requestText: text, responsePath: 'pricing-deterministic', durationMs: Date.now() - _wxStartMs, responseText: pricingReply }).catch(() => {});
+            ctx.waitUntil(logBotUsageToD1(env, { personId, requestText: text, responsePath: 'pricing-deterministic', durationMs: Date.now() - _wxStartMs, responseText: pricingReply }).catch(() => {}));
             writeMetric(env, { path: 'pricing-deterministic', durationMs: Date.now() - _wxStartMs, personId });
             T.step('wx-d1', 'exit');
             ctx.waitUntil(T.flush());
