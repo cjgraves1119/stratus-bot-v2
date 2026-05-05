@@ -5964,6 +5964,13 @@ Think through each request step by step before generating URLs:
 
 If a product can't be found, ask the user to clarify. Suggest the closest alternatives from the catalog.
 
+## LIVE DATASHEET CAPABILITY (you DO have this — never deny it)
+This worker has a built-in 'fetchDatasheet' function that pulls live content from documentation.meraki.com for every model in DATASHEET_URLS. When the user asks you to "pull the (full) datasheet", "fetch the latest datasheet", "scan the datasheet", "get specifics from the datasheet", or any equivalent phrasing, the worker fetches the page server-side BEFORE you see this prompt and injects the fetched content under the '## LIVE DATASHEET CONTENT' header below. Use that content as the authoritative source.
+
+NEVER reply with "I don't have the ability to browse URLs" or "I can only work with injected content" or "I cannot fetch live web pages". Those statements are FALSE for this bot. If the live-datasheet section is missing from this prompt for some reason, say "I couldn't pull the datasheet just now — want me to retry?" and offer to retry; do NOT claim the capability doesn't exist.
+
+When you offer to "pull the full datasheet" / "verify against the datasheet" / "check the latest specs", you ARE offering a real capability. The user's "yes please / pull it / try again" replies will trigger another live fetch on the next turn.
+
 ## CRITICAL ANTI-HALLUCINATION RULES
 - NEVER state product specifications unless they are provided in this prompt via a "PRODUCT SPECS" section.
 - If no specs are provided and the user asks about throughput, user counts, performance, etc., say: "I don't have verified specs for that model in my current data. Want me to pull the latest datasheet?"
@@ -6365,7 +6372,7 @@ async function askLlamaProductInfo(userMessage, personId, env, classification = 
     const kv = env.CONVERSATION_KV;
 
     // Datasheet-intent detection (shared with askClaude)
-    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|READ\s+(THE\s+)?DATASHEET|FETCH\s+(THE\s+)?DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|READ\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GRAB\s+(?:THE\s+)?DATASHEET)\b/i.test(userMessage);
     if (!wantsLiveDatasheet && classification && classification.intent === 'product_info') {
       // product_info followups often reference a prior turn that named a model
       const FOLLOWUP = /\b(SPECIFICS|MORE\s+DETAILS?|TELL\s+ME\s+MORE|KEEP\s+GOING|CONTINUE)\b/i;
@@ -6543,7 +6550,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
   const claudeStartMs = Date.now();
   try {
     const upper = userMessage.toUpperCase();
-    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|LOOK\s+(IT\s+)?UP|PULL\s+(IT\s+)?UP|DIG\s+INTO|READ\s+(THE\s+)?DATASHEET|FETCH\s+(THE\s+)?DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|LOOK\s+(IT\s+)?UP|PULL\s+(IT\s+)?UP|DIG\s+INTO|READ\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GRAB\s+(?:THE\s+)?DATASHEET)\b/i.test(userMessage);
 
     // V2 classifier: product_info intent → treat as datasheet-lookup request
     // This lets followup questions like "get specifics from datasheet" or "tell me more"
@@ -7424,6 +7431,49 @@ export default {
             T.step('wx-followup', 'exit', { result: 'error' });
           }
 
+          // ── Deterministic flag-it handler (Codex priority 2 — no-schema) ──
+          // The bot has historically offered "I'll flag it" / "want me to flag it"
+          // in some replies. Without a real handler, the user's "flag it" reply
+          // was treated as random text by the LLM router. This block catches the
+          // short flag-it phrasing, writes a structured 'feedback-flag' row to
+          // bot_usage (error_message holds a preview of the prior assistant
+          // turn so triage knows what was flagged), and confirms to the user.
+          // No DB schema change — reuses the existing bot_usage table.
+          T.step('wx-flag', 'enter');
+          const isFlagPhrase = /^\s*(?:please\s+)?(?:flag|mark|report|note)(?:\s+(?:it|this|that|the\s+(?:last|previous|prior)\s+(?:answer|reply|response|message)?))?\s*\.?\s*$/i.test(text);
+          if (isFlagPhrase) {
+            try {
+              const histForFlag = await getHistory(kv, personId);
+              const lastAsst = (histForFlag || []).filter(h => h.role === 'assistant').slice(-1)[0];
+              const flaggedPreview = lastAsst ? String(lastAsst.content || '').substring(0, 400) : '(no prior assistant message)';
+              const flagAck = "Got it - I've logged this thread for review. Anything else I can help with?";
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', flagAck);
+              T.step('wx-flag', 'exit', { result: 'logged' });
+              T.step('wx-send', 'enter');
+              await sendMessage(roomId, flagAck, token);
+              T.step('wx-send', 'exit');
+              T.step('wx-d1', 'enter');
+              ctx.waitUntil(logBotUsageToD1(env, {
+                personId,
+                requestText: text,
+                responsePath: 'feedback-flag',
+                durationMs: Date.now() - _wxStartMs,
+                responseText: flagAck,
+                errorMessage: `FLAGGED: ${flaggedPreview}`
+              }).catch(() => {}));
+              writeMetric(env, { path: 'feedback-flag', durationMs: Date.now() - _wxStartMs, personId });
+              T.step('wx-d1', 'exit');
+              ctx.waitUntil(T.flush());
+              return;
+            } catch (e) {
+              console.warn('[Flag] error:', e.message);
+              T.step('wx-flag', 'exit', { result: 'error' });
+            }
+          } else {
+            T.step('wx-flag', 'exit', { result: 'no_match' });
+          }
+
           // Deterministic pricing calculator
           T.step('wx-pricing', 'enter');
           const pricingReply = await handlePricingRequest(text, personId, kv);
@@ -7661,8 +7711,47 @@ export default {
               // Don't return — fall through to Claude below
             }
 
-            // CF: conversation — casual chat, CF handles directly
+            // CF: conversation — casual chat, CF handles directly.
+            // Guard: if this looks like a retry/correction phrase ("try again",
+            // "you can do X", "yes please", "retry") AND the last assistant
+            // message was a Claude reply (datasheet/product_info path), reroute
+            // to Claude with the full history so the prior context survives.
+            // Without this, "You can do live web fetches, try again" goes to
+            // askCFConversation which has no history and returns a generic
+            // Stratus intro — observed live 2026-05-01T17:39:07Z (D1 row 2562).
             else if (activeClassification.intent === 'conversation') {
+              const isRetryPhrase = /\b(try\s+again|retry|do\s+it\s+again|please\s+(try|do|fetch|pull|retry)|you\s+(can|do)\s+(do|have|fetch|pull|browse)|that.s\s+wrong|fetch\s+it|do\s+it)\b/i.test(text);
+              if (isRetryPhrase) {
+                let priorWasClaude = false;
+                try {
+                  const histForRetry = await getHistory(kv, personId);
+                  const recentAsst = (histForRetry || []).filter(h => h.role === 'assistant').slice(-2);
+                  // Heuristic: any recent assistant turn that mentions datasheet/spec
+                  // material, or carries the Claude footer, was probably the path
+                  // the user is asking us to retry.
+                  priorWasClaude = recentAsst.some(t => {
+                    const c = String(t && t.content || '');
+                    return /Claude Sonnet|Live datasheet|datasheet|specs?\b|cached specs|browse|fetch/i.test(c);
+                  });
+                } catch (_) {}
+                if (priorWasClaude) {
+                  console.log('[CF-First] Retry phrase + prior Claude/datasheet context → reroute to Claude with history');
+                  T.step('wx-claude', 'enter');
+                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model they were asking about, fetch the live datasheet via the worker's built-in capability, and answer. Do NOT claim you cannot browse — you can.)`, personId, env, null, activeClassification);
+                  T.step('wx-claude', 'exit');
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', retryReply);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, retryReply, token);
+                  T.step('wx-send', 'exit');
+                  T.step('wx-d1', 'enter');
+                  ctx.waitUntil(logBotUsageToD1(env, { personId, requestText: text, responsePath: 'claude-retry-rerouted', durationMs: Date.now() - _wxStartMs, responseText: retryReply }).catch(() => {}));
+                  writeMetric(env, { path: 'claude-retry-rerouted', durationMs: Date.now() - _wxStartMs, personId });
+                  T.step('wx-d1', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+              }
               const convoReply = activeClassification.reply && activeClassification.reply.length > 5
                 ? activeClassification.reply
                 : (await askCFConversation(text, env))?.response;
