@@ -5066,7 +5066,9 @@ function buildQuoteResponse(parsed) {
       }
     }
 
-    return { message: lines.join('\n').trim(), needsLlm: false };
+    let _msg = lines.join('\n').trim();
+    if (parsed.clarificationNote) _msg = `_${parsed.clarificationNote}_\n\n${_msg}`;
+    return { message: _msg, needsLlm: false };
   }
 
   if (parsed.directLicense) {
@@ -5075,6 +5077,13 @@ function buildQuoteResponse(parsed) {
     let message = url;
     // Exact-group pricing: single sku+qty pair, strict boolean check.
     if (parsed.showPricing === true) message += buildPricingBlock([{ sku, qty }], true);
+    // Surface clarificationNote (e.g. "AnyConnect has a 25-user minimum —
+    // bumped quantity to 25.") so silent qty/term/SKU adjustments are
+    // visible to the user. Mirrors the isTermOptionQuote and refresh
+    // renderers which already prepend the note.
+    if (parsed.clarificationNote) {
+      message = `_${parsed.clarificationNote}_\n\n${message}`;
+    }
     return { message, needsLlm: false };
   }
 
