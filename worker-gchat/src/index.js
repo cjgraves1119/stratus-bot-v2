@@ -944,11 +944,13 @@ function hasQuotePreResolveSkuToken(text) {
 function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
-  // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers
+  // C8111 / C8121 / C8455 Catalyst Firewalls (MX-OS) — ENT/SEC/SDW tiers.
+  // Default SEC matches MX-family default (these are MX successors). Switch to
+  // ENT or SDW only when the user explicitly asks for that tier.
   const c8Match = upper.match(/^C(8111|8121|8455)/);
   if (c8Match) {
     const model = c8Match[1];
-    const tier = requestedTier || 'ENT';
+    const tier = requestedTier || 'SEC';
     return [
       { term: '1Y', sku: `LIC-C${model}-${tier}-1Y` },
       { term: '3Y', sku: `LIC-C${model}-${tier}-3Y` },
@@ -3930,7 +3932,7 @@ Next-Gen MX / Catalyst Firewalls (Catalyst-based hardware running MX OS — own 
   - C8111-G2-MX: succeeds MX67 form factor (2 Gbps FW, 1.2 Gbps VPN, 4 LAN, 200 users). Licenses: LIC-C8111-{ENT|SEC|SDW}-{1Y|3Y|5Y}.
   - C8121-G2-MX: succeeds MX68 form factor (2 Gbps FW, 1.2 Gbps VPN, 10 LAN, 200 users). Licenses: LIC-C8121-{ENT|SEC|SDW}-{1Y|3Y|5Y}.
   - NEVER associate MX67 or MX68 license SKUs with C8111-G2-MX or C8121-G2-MX. The Catalyst hardware uses its own C8111/C8121 license SKUs.
-  - Default tier: SEC. If user is ambiguous on tier (ENT vs SEC vs SDW), ASK before quoting.
+  - Default tier when user does not specify: SEC (matches MX successor behavior). Use ENT or SDW only when the user explicitly asks for that tier.
 MS130 Switches: MS130-8, MS130-8P, MS130-8P-I, MS130-8X, MS130-12X, MS130-24, MS130-24P, MS130-24X, MS130-48, MS130-48P, MS130-48X, MS130R-8P
 MS150 Switches: MS150-24T-4G, MS150-24P-4G, MS150-24T-4X, MS150-24P-4X, MS150-24MP-4X, MS150-48T-4G, MS150-48LP-4G, MS150-48FP-4G, MS150-48T-4X, MS150-48LP-4X, MS150-48FP-4X, MS150-48MP-4X
 MS390 Switches: MS390-24UX, MS390-48UX, MS390-48UX2

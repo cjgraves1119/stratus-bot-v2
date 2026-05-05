@@ -216,11 +216,11 @@ function getLicenseSkus(baseSku, requestedTier) {
 function _getLicenseSkusRaw(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
-  // C8111 / C8455 Secure Routers — ENT/SEC/SDW license tiers
+  // C8111 / C8121 / C8455 Catalyst Firewalls (MX-OS) — default SEC (matches MX).
   const c8Match = upper.match(/^C(8111|8121|8455)/);
   if (c8Match) {
     const model = c8Match[1];
-    const tier = requestedTier || 'ENT';
+    const tier = requestedTier || 'SEC';
     return [
       { term: '1Y', sku: `LIC-C${model}-${tier}-1Y` },
       { term: '3Y', sku: `LIC-C${model}-${tier}-3Y` },
@@ -1187,13 +1187,15 @@ const tests = [
 
   // C8111/C8455
   ...[
-    ['C8111-G2-MX', null, ['LIC-C8111-ENT-1Y', 'LIC-C8111-ENT-3Y', 'LIC-C8111-ENT-5Y']],
+    ['C8111-G2-MX', null, ['LIC-C8111-SEC-1Y', 'LIC-C8111-SEC-3Y', 'LIC-C8111-SEC-5Y']],
+    ['C8111-G2-MX', 'ENT', ['LIC-C8111-ENT-1Y', 'LIC-C8111-ENT-3Y', 'LIC-C8111-ENT-5Y']],
     ['C8111-G2-MX', 'SDW', ['LIC-C8111-SDW-1Y', 'LIC-C8111-SDW-3Y', 'LIC-C8111-SDW-5Y']],
     ['C8111-G2-MX', 'SEC', ['LIC-C8111-SEC-1Y', 'LIC-C8111-SEC-3Y', 'LIC-C8111-SEC-5Y']],
-    ['C8121-G2-MX', null, ['LIC-C8121-ENT-1Y', 'LIC-C8121-ENT-3Y', 'LIC-C8121-ENT-5Y']],
+    ['C8121-G2-MX', null, ['LIC-C8121-SEC-1Y', 'LIC-C8121-SEC-3Y', 'LIC-C8121-SEC-5Y']],
+    ['C8121-G2-MX', 'ENT', ['LIC-C8121-ENT-1Y', 'LIC-C8121-ENT-3Y', 'LIC-C8121-ENT-5Y']],
     ['C8121-G2-MX', 'SEC', ['LIC-C8121-SEC-1Y', 'LIC-C8121-SEC-3Y', 'LIC-C8121-SEC-5Y']],
     ['C8121-G2-MX', 'SDW', ['LIC-C8121-SDW-1Y', 'LIC-C8121-SDW-3Y', 'LIC-C8121-SDW-5Y']],
-    ['C8455-G2-MX', null, ['LIC-C8455-ENT-1Y', 'LIC-C8455-ENT-3Y', 'LIC-C8455-ENT-5Y']],
+    ['C8455-G2-MX', 'ENT', ['LIC-C8455-ENT-1Y', 'LIC-C8455-ENT-3Y', 'LIC-C8455-ENT-5Y']],
   ].map(([sku, tier, expected]) => ({
     name: `[LICENSE] ${sku} ${tier || 'ENT'} → C8xxx router`,
     customTest: () => {
