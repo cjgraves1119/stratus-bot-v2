@@ -744,6 +744,48 @@ async function addToHistory(kv, personId, role, content) {
 // ─── Bot Identity ────────────────────────────────────────────────────────────
 let cachedBotPersonId = null;
 // ─── SKU Suffix Rules ────────────────────────────────────────────────────────
+
+// ── 2026-05-05 council: ambiguous license-term gate ────────────────────
+// Detects free-text "N <family> licenses" without explicit term and returns
+// a deterministic ask-for-term reply, preventing Llama from silently
+// defaulting to 1YR. Production failure: bot_usage id 2623 / v666 had Llama
+// silently picking LIC-ENT-1YR for "quote 21 MR licenses in zoho", creating
+// real Zoho records the user never confirmed.
+//
+// Fires for MR / MV / MT / MG generic-family license requests when no
+// explicit 1/3/5 year term marker appears anywhere in the user text.
+// Returns null when the request has a term (explicit) or when the user
+// referenced specific hardware models (which Llama can resolve cleanly).
+function detectAmbiguousLicenseTerm(text) {
+  if (!text || typeof text !== 'string') return null;
+  // Generic family-name license request, qty required
+  const m = text.match(/\b(\d+)\s*(MR|MV|MT|MG)\s+(?:enterprise\s+)?licens(?:es?|ing)\b/i);
+  if (!m) return null;
+  // Reject if any explicit term marker appears anywhere in the text:
+  //   "1 year", "3yr", "5y", "1Y", "3-year", "five years", embedded -1YR
+  const hasTerm =
+    /\b([135])\s*[-]?\s*(?:year|yr|y)s?\b/i.test(text)
+    || /\b(?:one|three|five)[\s-]+years?\b/i.test(text)
+    || /-([135])Y(?:R)?\b/i.test(text)
+    || /\bLIC-(?:ENT|MV|MT|MG)-[^\s]*[135]Y/i.test(text);
+  if (hasTerm) return null;
+  const family = m[2].toUpperCase();
+  const qty = parseInt(m[1], 10);
+  const familyLabel =
+    family === 'MR' ? 'MR Enterprise' :
+    family === 'MV' ? 'MV camera' :
+    family === 'MT' ? 'MT sensor' :
+    family === 'MG' ? 'MG cellular' : family;
+  return {
+    family,
+    qty,
+    askMessage:
+      `Which ${familyLabel} license term should I use: 1 year, 3 year, or 5 year?\n\n` +
+      `(I won't create the quote until you choose a term — the license SKU varies by term: ` +
+      `LIC-${family === 'MR' ? 'ENT' : family}-{1,3,5}YR.)`
+  };
+}
+
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
   // ── 2026-05-05 council: MR Enterprise license SKU canonicalization ─────
@@ -15914,6 +15956,43 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 } catch (crmErr) {
                   console.log(`[WATERFALL] CRM pre-resolve skipped: ${crmErr.message}`);
                 }
+              }
+
+              // ── 2026-05-05 council: ambiguous license-term hard gate ──
+              // Runs BEFORE all other tiers (including Tier 0 deterministic),
+              // covers chat-tab path that bypasses the existing deterministic
+              // pre-check. Production failure v666: Llama silently defaulted
+              // "21 MR licenses" to LIC-ENT-1YR and created records.
+              const _ambigLic = detectAmbiguousLicenseTerm(wText);
+              if (_ambigLic) {
+                console.log(`[WATERFALL] Ambiguous license-term gate fired: ${_ambigLic.family} qty=${_ambigLic.qty}`);
+                outcome = {
+                  reply: _ambigLic.askMessage,
+                  model: 'deterministic-license-term-gate',
+                  tierUsed: 'deterministic',
+                  gemmaResult: null,
+                  claudeResult: null,
+                  stallReason: null,
+                  toolCalls: [],
+                  iterations: 0,
+                  elapsedMs: 0,
+                  totalMs: Date.now() - (typeof t0 !== 'undefined' ? t0 : Date.now())
+                };
+                // Save user turn to history; assistant turn handled by reply path below.
+                await addToHistory(env.CONVERSATION_KV, wPersonId, 'user', wEnrichedMessage);
+                await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', _ambigLic.askMessage);
+                apiResult = {
+                  success: true,
+                  reply: `${_ambigLic.askMessage}\n\n---\n_⚡ Deterministic license-term gate (no LLM invoked, no Zoho writes)_`,
+                  model: 'deterministic-license-term-gate',
+                  tierUsed: 'deterministic',
+                  stallReason: null,
+                  elapsedMs: 0,
+                  totalMs: outcome.totalMs,
+                  iterations: 0,
+                  toolCallCount: 0
+                };
+                break;
               }
 
               // ── TIER 0: Deterministic Engine Pre-Check ──
