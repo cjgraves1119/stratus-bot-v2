@@ -758,8 +758,15 @@ let cachedBotPersonId = null;
 // referenced specific hardware models (which Llama can resolve cleanly).
 function detectAmbiguousLicenseTerm(text) {
   if (!text || typeof text !== 'string') return null;
-  // Generic family-name license request, qty required
-  const m = text.match(/\b(\d+)\s*(MR|MV|MT|MG)\s+(?:enterprise\s+)?licens(?:es?|ing)\b/i);
+  // Generic family license/renewal request — three accepted shapes:
+  //   A. noun-form: "N <fam> licenses" or "N <fam> renewals"
+  //   B. verb-form: "renew[al] [N] <fam> licenses" (qty optional, defaults 1)
+  //   C. lone-noun: "renew the <fam> licenses" / "<fam> license renewal" handled
+  //      by both A (treating "renewal" as plural noun) and B.
+  // Codex follow-up on PR #12: matcher must cover renewal phrasing too.
+  const mNoun = text.match(/\b(\d+)\s*(MR|MV|MT|MG)\s+(?:enterprise\s+)?(?:licens(?:es?|ing)|renewals?)\b/i);
+  const mVerb = mNoun ? null : text.match(/\brenew(?:al)?\s+(?:(\d+)\s+)?(MR|MV|MT|MG)\s+(?:enterprise\s+)?licens(?:es?|ing)\b/i);
+  const m = mNoun || mVerb;
   if (!m) return null;
   // Reject if any explicit term marker appears anywhere in the text:
   //   "1 year", "3yr", "5y", "1Y", "3-year", "five years", embedded -1YR
@@ -770,7 +777,9 @@ function detectAmbiguousLicenseTerm(text) {
     || /\bLIC-(?:ENT|MV|MT|MG)-[^\s]*[135]Y/i.test(text);
   if (hasTerm) return null;
   const family = m[2].toUpperCase();
-  const qty = parseInt(m[1], 10);
+  // Verb-form may omit qty ("renew MR licenses"); default to 1 for the user-
+  // visible echo. Gate firing decision is independent of qty value.
+  const qty = m[1] ? parseInt(m[1], 10) : 1;
   const familyLabel =
     family === 'MR' ? 'MR Enterprise' :
     family === 'MV' ? 'MV camera' :
