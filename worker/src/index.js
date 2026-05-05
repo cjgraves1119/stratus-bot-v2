@@ -41,22 +41,30 @@ function writeMetric(env, { path, model, durationMs, inputTokens, outputTokens, 
 }
 
 // ── D1 Analytics Helper (Webex bot) ─────────────────────────────────────────
-async function logBotUsageToD1(env, { personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage }) {
+async function logBotUsageToD1(env, { personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage, responseText, toolCallsJson }) {
   if (!env?.ANALYTICS_DB) return;
   try {
+    // Truncate response_text to keep D1 row size sane. Dashboard renewal
+    // replies (Option 1 + Option 2 + Option 3 with multi-SKU URLs) can run
+    // 2-4 KB; cap at 4000 chars which keeps the diagnostic value while
+    // staying well under SQLite's per-row limits.
+    const truncatedReq = (requestText || '').substring(0, 500);
+    const truncatedResp = responseText ? String(responseText).substring(0, 4000) : null;
     await env.ANALYTICS_DB.prepare(
-      `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message)
-       VALUES ('webex', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message, response_text, tool_calls_json)
+       VALUES ('webex', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       personId || null,
-      (requestText || '').substring(0, 500),
+      truncatedReq,
       responsePath,
       model || null,
       inputTokens || 0,
       outputTokens || 0,
       costUsd || 0,
       durationMs || null,
-      errorMessage || null
+      errorMessage || null,
+      truncatedResp,
+      toolCallsJson || null
     ).run();
   } catch (err) {
     console.error('[D1] bot_usage insert error:', err.message);
@@ -6473,7 +6481,8 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
             requestText: userMessage,
             responsePath: 'waterfall-llama-product-info',
             model: '@cf/meta/llama-4-scout-17b-16e-instruct',
-            durationMs: elapsed
+            durationMs: elapsed,
+            responseText: llamaOut.reply
           }).catch(() => {}));
         } else {
           logBotUsageToD1(env, {
@@ -6481,7 +6490,8 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
             requestText: userMessage,
             responsePath: 'waterfall-llama-product-info',
             model: '@cf/meta/llama-4-scout-17b-16e-instruct',
-            durationMs: elapsed
+            durationMs: elapsed,
+            responseText: llamaOut.reply
           }).catch(() => {});
         }
         // User-visible model marker — confirms which model produced this reply.
@@ -6905,7 +6915,8 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
         inputTokens: data.usage.input_tokens || 0,
         outputTokens: data.usage.output_tokens || 0,
         costUsd,
-        durationMs: null
+        durationMs: null,
+        responseText: finalReply
       }).catch(() => {});
     }
 
@@ -7246,7 +7257,7 @@ export default {
                     await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + License Renewal (${cfVision.elapsed}ms, free)_`, token);
                     T.step('wx-send', 'exit');
                     T.step('wx-d1', 'enter');
-                    logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision-quote', durationMs: cfVision.elapsed }).catch(() => {});
+                    logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision-quote', durationMs: cfVision.elapsed, responseText: combined }).catch(() => {});
                     writeMetric(env, { path: 'cf-vision-quote', durationMs: cfVision.elapsed, personId });
                     T.step('wx-d1', 'exit');
                     ctx.waitUntil(T.flush());
@@ -7261,7 +7272,7 @@ export default {
                   await sendMessage(roomId, `${summaryMsg}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
                   T.step('wx-send', 'exit');
                   T.step('wx-d1', 'enter');
-                  logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision', durationMs: cfVision.elapsed }).catch(() => {});
+                  logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision', durationMs: cfVision.elapsed, responseText: summaryMsg }).catch(() => {});
                   writeMetric(env, { path: 'cf-vision', durationMs: cfVision.elapsed, personId });
                   T.step('wx-d1', 'exit');
                   ctx.waitUntil(T.flush());
@@ -7274,7 +7285,7 @@ export default {
                 await sendMessage(roomId, `${cfVision.response}\n\n_⚡ Workers AI Vision (${cfVision.elapsed}ms, free)_`, token);
                 T.step('wx-send', 'exit');
                 T.step('wx-d1', 'enter');
-                logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision', durationMs: cfVision.elapsed }).catch(() => {});
+                logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision', durationMs: cfVision.elapsed, responseText: cfVision.response }).catch(() => {});
                 writeMetric(env, { path: 'cf-vision', durationMs: cfVision.elapsed, personId });
                 T.step('wx-d1', 'exit');
                 ctx.waitUntil(T.flush());
@@ -7357,7 +7368,7 @@ export default {
               await sendMessage(roomId, `${followUpReply}\n\n_⚡ Follow-up modifier (deterministic, free)_`, token);
               T.step('wx-send', 'exit');
               T.step('wx-d1', 'enter');
-              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'followup-modifier', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'followup-modifier', durationMs: Date.now() - _wxStartMs, responseText: followUpReply }).catch(() => {});
               writeMetric(env, { path: 'followup-modifier', durationMs: Date.now() - _wxStartMs, personId });
               T.step('wx-d1', 'exit');
               ctx.waitUntil(T.flush());
@@ -7583,7 +7594,7 @@ export default {
               await sendMessage(roomId, `${activeClassification.reply}\n\n_⚡ Workers AI (${activeClassification.elapsed}ms, free)_`, token);
               T.step('wx-send', 'exit');
               T.step('wx-d1', 'enter');
-              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', durationMs: Date.now() - _wxStartMs, responseText: activeClassification.reply }).catch(() => {});
               writeMetric(env, { path: 'cf-clarify', durationMs: Date.now() - _wxStartMs, personId });
               T.step('wx-d1', 'exit');
               ctx.waitUntil(T.flush());
@@ -7615,7 +7626,7 @@ export default {
                 await sendMessage(roomId, `${convoReply}\n\n_⚡ Workers AI (${activeClassification.elapsed}ms, free)_`, token);
                 T.step('wx-send', 'exit');
                 T.step('wx-d1', 'enter');
-                logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-conversation', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-conversation', durationMs: Date.now() - _wxStartMs, responseText: convoReply }).catch(() => {});
                 writeMetric(env, { path: 'cf-conversation', durationMs: Date.now() - _wxStartMs, personId });
                 T.step('wx-d1', 'exit');
                 ctx.waitUntil(T.flush());
@@ -7726,7 +7737,7 @@ export default {
                   await sendMessage(roomId, `${quoteResult.message}\n\n_⚡ CF-routed deterministic (${activeClassification.elapsed}ms classify, free)_`, token);
                   T.step('wx-send', 'exit');
                   T.step('wx-d1', 'enter');
-                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-deterministic', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-deterministic', durationMs: Date.now() - _wxStartMs, responseText: quoteResult.message }).catch(() => {});
                   writeMetric(env, { path: 'cf-deterministic', durationMs: Date.now() - _wxStartMs, personId });
                   T.step('wx-d1', 'exit');
                   ctx.waitUntil(T.flush());
@@ -7772,7 +7783,7 @@ export default {
                         await sendMessage(roomId, `${visionResult.message}\n\n_⚡ Vision follow-up + Deterministic Quote (${activeClassification.elapsed}ms classify, free)_`, token);
                         T.step('wx-send', 'exit');
                         T.step('wx-d1', 'enter');
-                        logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                        logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, responseText: visionResult.message }).catch(() => {});
                         writeMetric(env, { path: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, personId });
                         T.step('wx-d1', 'exit');
                         // Clear vision SKUs after successful use
@@ -7980,7 +7991,7 @@ export default {
                   await sendMessage(roomId, `${revisedResult.message}\n\n_⚡ CF-routed V2 revision (${activeClassification.elapsed}ms classify, free)_`, token);
                   T.step('wx-send', 'exit');
                   T.step('wx-d1', 'enter');
-                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-v2-revise', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-v2-revise', durationMs: Date.now() - _wxStartMs, responseText: revisedResult.message }).catch(() => {});
                   writeMetric(env, { path: 'cf-v2-revise', durationMs: Date.now() - _wxStartMs, personId });
                   T.step('wx-d1', 'exit');
                   ctx.waitUntil(T.flush());
@@ -8017,7 +8028,7 @@ export default {
           await sendMessage(roomId, claudeReply, token);
           T.step('wx-send', 'exit');
           T.step('wx-d1', 'enter');
-          logBotUsageToD1(env, { personId, requestText: text, responsePath: 'claude', durationMs: Date.now() - _wxStartMs }).catch(() => {});
+          logBotUsageToD1(env, { personId, requestText: text, responsePath: 'claude', durationMs: Date.now() - _wxStartMs, responseText: claudeReply }).catch(() => {});
           writeMetric(env, { path: 'claude', durationMs: Date.now() - _wxStartMs, personId });
           T.step('wx-d1', 'exit');
           T.step('wx-history', 'enter'); T.step('wx-history', 'exit');
