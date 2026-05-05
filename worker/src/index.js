@@ -1290,6 +1290,108 @@ function mergeVisionSkusMax(first, audit) {
   return Array.from(out.values());
 }
 
+
+// Extract dashboard metadata (MX_EDITION / MR_EDITION / EXPIRATION) from a
+// LICENSE_DASHBOARD_PARSE_V1 vision response. Returns { mxEdition, mrEdition,
+// expiration } with empty strings for missing fields.
+function extractDashboardMetadata(text) {
+  const out = { mxEdition: '', mrEdition: '', expiration: '' };
+  if (!text) return out;
+  const mx = String(text).match(/MX_EDITION:\s*([^\n]+)/i);
+  const mr = String(text).match(/MR_EDITION:\s*([^\n]+)/i);
+  const exp = String(text).match(/EXPIRATION:\s*([^\n]+)/i);
+  if (mx) out.mxEdition = mx[1].trim();
+  if (mr) out.mrEdition = mr[1].trim();
+  if (exp) out.expiration = exp[1].trim();
+  return out;
+}
+
+// Build a license-only renewal quote from a dashboard vision parse.
+// Dashboard rows describe ACTIVE devices that need license renewal — they are
+// NOT a hardware quote intent. Per Chris's product spec:
+//   - Active count > 0  → emit license SKU(s) at qty=ACTIVE for each term.
+//   - MR-ENT             → emit LIC-ENT-{term}YR at the MR-ENT qty.
+//   - EOL devices       → list separately as an OPTIONAL upgrade, not in the
+//                          renewal cart.
+//   - MX_EDITION drives the MX license tier (Advanced Security → SEC,
+//     Secure SD-WAN Plus → SDW). Default SEC when absent.
+//   - Hardware SKUs are never added unless an explicit hardware-replacement
+//     rule fires (out of scope for dashboard parses today).
+//
+// Returns { message, upgradeBlock, termGroups } or null if no renewal items.
+function buildDashboardRenewalQuote(visionSkus, opts = {}) {
+  const mxEditionRaw = String(opts.mxEdition || '').toUpperCase();
+  const mxTier = /SDW|SD[-\s]*WAN/.test(mxEditionRaw) ? 'SDW' : 'SEC';
+
+  const renewalDevices = [];
+  const eolUpgrades = [];
+  let mrEntQty = 0;
+  for (const s of (visionSkus || [])) {
+    if (!s || !s.sku || !(Number(s.qty) > 0)) continue;
+    const upper = String(s.sku).toUpperCase();
+    const qty = Math.floor(Number(s.qty));
+    if (upper === 'MR-ENT' || upper === 'MR_ENT') {
+      mrEntQty += qty;
+      continue;
+    }
+    if (isEol(upper)) {
+      const replacement = checkEol(upper);
+      eolUpgrades.push({ model: upper, qty, replacement });
+      continue;
+    }
+    renewalDevices.push({ model: upper, qty });
+  }
+
+  const termGroups = { '1Y': [], '3Y': [], '5Y': [] };
+
+  for (const { model, qty } of renewalDevices) {
+    const lics = getLicenseSkus(model, mxTier);
+    if (!lics) continue;
+    for (const term of ['1Y', '3Y', '5Y']) {
+      const lic = lics.find(l => l.term === term);
+      if (lic) termGroups[term].push({ sku: lic.sku, qty });
+    }
+  }
+
+  if (mrEntQty > 0) {
+    termGroups['1Y'].push({ sku: 'LIC-ENT-1YR', qty: mrEntQty });
+    termGroups['3Y'].push({ sku: 'LIC-ENT-3YR', qty: mrEntQty });
+    termGroups['5Y'].push({ sku: 'LIC-ENT-5YR', qty: mrEntQty });
+  }
+
+  const anyRenewal = Object.values(termGroups).some(g => g.length > 0);
+  if (!anyRenewal && eolUpgrades.length === 0) return null;
+
+  const lines = [];
+  for (const term of ['1Y', '3Y', '5Y']) {
+    if (termGroups[term].length === 0) continue;
+    const url = buildStratusUrl(termGroups[term]);
+    const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
+    lines.push(`**${label} Co-Term:** ${url}`);
+  }
+
+  let upgradeBlock = null;
+  if (eolUpgrades.length > 0) {
+    const upgradeLines = ['**Optional Upgrade — End-of-Life Devices:**'];
+    for (const { model, qty, replacement } of eolUpgrades) {
+      const repl = Array.isArray(replacement) ? replacement[0] : replacement;
+      const tail = repl ? ` → recommended replacement: **${repl}**` : '';
+      upgradeLines.push(`- ${model} (qty ${qty})${tail}`);
+    }
+    upgradeBlock = upgradeLines.join('\n');
+  }
+
+  return {
+    message: lines.join('\n\n'),
+    upgradeBlock,
+    termGroups,
+    renewalDevices,
+    eolUpgrades,
+    mrEntQty,
+    mxTier
+  };
+}
+
 // CF Vision: analyze images via Llama 4 Scout (free) before falling back to Claude
 async function askCFVision(prompt, imageData, env) {
   if (!env.AI) return null;
@@ -6999,69 +7101,25 @@ export default {
                   // Clean summary line: "LIC-ENT-3YR × 6" instead of raw markdown table
                   const skuSummary = visionSkus.map(s => `**${s.sku}** × ${s.qty}`).join('\n');
 
-                  // MR-ENT is a generic "MR Enterprise license" signal from the vision
-                  // extractor. It is NOT a real catalog SKU. Routing it through the text
-                  // bridge with hardware SKUs triggers parseMessage's agnostic-family
-                  // short-circuit which DROPS the hardware items. So: strip MR-ENT out
-                  // of parseMessage input and handle MR licenses separately after.
-                  const mrEntItems = visionSkus.filter(s => s.sku === 'MR-ENT' || s.sku === 'MR_ENT');
-                  const hardwareItems = visionSkus.filter(s => s.sku !== 'MR-ENT' && s.sku !== 'MR_ENT');
-                  const mrEntQty = mrEntItems.reduce((sum, s) => sum + (s.qty || 0), 0);
+                  // Dashboard renewal mode: a license-dashboard screenshot describes
+                  // ACTIVE devices needing license renewal — NOT a hardware quote intent.
+                  // buildDashboardRenewalQuote emits per-term license-only URLs and
+                  // surfaces any EOL devices in a separate "Optional Upgrade" block.
+                  // MX_EDITION (Advanced Security / Secure SD-WAN Plus) drives the MX
+                  // license tier; MR-ENT rolls into LIC-ENT-{term}YR with the active qty.
+                  // Hardware SKUs are NEVER added here — that was the prior bug shape:
+                  // routing through parseMessage emitted MX85-HW alongside the license,
+                  // turning a renewal quote into a hardware-purchase quote.
+                  const _dashMeta = extractDashboardMetadata(cfVision.response || '');
+                  const dashQuote = buildDashboardRenewalQuote(visionSkus, {
+                    mxEdition: _dashMeta.mxEdition,
+                    mrEdition: _dashMeta.mrEdition
+                  });
 
-                  const skuText = hardwareItems.map(s => `${s.qty} ${s.sku}`).join(', ');
-                  const visionQuoteParsed = hardwareItems.length > 0 ? parseMessage(skuText) : null;
-                  const hwResult = (visionQuoteParsed && visionQuoteParsed.items.length > 0)
-                    ? buildQuoteResponse(visionQuoteParsed)
-                    : null;
-
-                  // MR-license handling: merge LIC-ENT-{term}YR directly into the
-                  // hardware quote URLs when both are present (one unified cart per
-                  // term). If MR-only (no hardware), emit a standalone 3-URL block.
-                  const mergeMrIntoUrls = (msg, qty) => {
-                    if (!msg || !qty) return msg;
-                    // Each stratus URL has shape: ...?item=A,B,C&qty=1,2,3
-                    // Append LIC-ENT-{termYr} and qty to the matching term URL.
-                    return msg.replace(
-                      /(https:\/\/stratusinfosystems\.com\/order\/\?item=)([^&\s]+)(&qty=)([^\s)]+)/g,
-                      (full, pre, items, midQty, qtys) => {
-                        // Detect term from surrounding context by scanning the item list.
-                        let term = null;
-                        if (/-1YR?\b/.test(items) || /-1Y\b/.test(items)) term = '1YR';
-                        else if (/-3YR?\b/.test(items) || /-3Y\b/.test(items)) term = '3YR';
-                        else if (/-5YR?\b/.test(items) || /-5Y\b/.test(items)) term = '5YR';
-                        if (!term) return full;
-                        return `${pre}${items},LIC-ENT-${term}${midQty}${qtys},${qty}`;
-                      }
-                    );
-                  };
-
-                  let mrBlock = '';
-                  let mergedHwMessage = hwResult ? hwResult.message : null;
-                  if (mrEntQty > 0) {
-                    if (hwResult && hwResult.message && !hwResult.needsLlm) {
-                      // Hardware present: merge MR licenses into the existing term URLs.
-                      // MR-ENT is listed in "Detected SKUs" already, so no need for an
-                      // extra callout — treat it like any other detected item.
-                      mergedHwMessage = mergeMrIntoUrls(hwResult.message, mrEntQty);
-                    } else {
-                      // No hardware: emit standalone MR block so user still gets URLs.
-                      const mr1 = buildStratusUrl([{ sku: 'LIC-ENT-1YR', qty: mrEntQty }]);
-                      const mr3 = buildStratusUrl([{ sku: 'LIC-ENT-3YR', qty: mrEntQty }]);
-                      const mr5 = buildStratusUrl([{ sku: 'LIC-ENT-5YR', qty: mrEntQty }]);
-                      mrBlock = [
-                        '',
-                        `**MR Enterprise Licenses (${mrEntQty} AP${mrEntQty === 1 ? '' : 's'}):**`,
-                        `**1-Year:** ${mr1}`,
-                        `**3-Year:** ${mr3}`,
-                        `**5-Year:** ${mr5}`
-                      ].join('\n\n');
-                    }
-                  }
-
-                  if (hwResult && hwResult.message && !hwResult.needsLlm) {
-                    // Drop detection: verify every extracted SKU appears in the combined
-                    // rendered output (merged hardware message + optional MR block).
-                    const qmsg = (mergedHwMessage || '') + (mrBlock || '');
+                  if (dashQuote && (dashQuote.message || dashQuote.upgradeBlock)) {
+                    // Drop detection: every renewal-eligible vision SKU must appear in
+                    // the rendered URLs (or in the upgrade block for EOL devices).
+                    const qmsg = (dashQuote.message || '') + '\n' + (dashQuote.upgradeBlock || '');
                     const droppedFlags = [];
                     for (const s of visionSkus) {
                       const upper = s.sku.toUpperCase();
@@ -7080,10 +7138,11 @@ export default {
                     if (droppedFlags.length > 0) {
                       console.warn(`[CF-Vision] ${droppedFlags.length} SKU(s) dropped from final quote:`, droppedFlags);
                     }
-                    const combined = `**Detected SKUs:**\n${skuSummary}${dropBlock}\n\n---\n\n${mergedHwMessage}${mrBlock}`;
+                    const upgradeTail = dashQuote.upgradeBlock ? `\n\n---\n\n${dashQuote.upgradeBlock}` : '';
+                    const combined = `**Detected SKUs:**\n${skuSummary}${dropBlock}\n\n---\n\n${dashQuote.message}${upgradeTail}`;
                     await addToHistory(kv, personId, 'assistant', combined);
                     T.step('wx-send', 'enter');
-                    await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + Deterministic Quote (${cfVision.elapsed}ms, free)_`, token);
+                    await sendMessage(roomId, `${combined}\n\n_⚡ Workers AI Vision + License Renewal (${cfVision.elapsed}ms, free)_`, token);
                     T.step('wx-send', 'exit');
                     T.step('wx-d1', 'enter');
                     logBotUsageToD1(env, { personId, requestText: `[Image] ${prompt}`, responsePath: 'cf-vision-quote', durationMs: cfVision.elapsed }).catch(() => {});
@@ -7092,10 +7151,9 @@ export default {
                     ctx.waitUntil(T.flush());
                     return;
                   }
-                  // Deterministic couldn't build the hardware quote — still show the clean
-                  // summary. If we DID produce an MR-licenses block (e.g. MR-only screenshot),
-                  // include it so the user still gets the three LIC-ENT URLs.
-                  const summaryTail = mrBlock ? `\n\n---${mrBlock}` : '';
+                  // No renewal items resolvable (e.g. all rows EOL with no license map,
+                  // or unknown family) — fall back to the bare summary block.
+                  const summaryTail = '';
                   const summaryMsg = `**Detected SKUs:**\n${skuSummary}${summaryTail}`;
                   await addToHistory(kv, personId, 'assistant', summaryMsg);
                   T.step('wx-send', 'enter');
