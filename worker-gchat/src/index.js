@@ -18883,6 +18883,31 @@ Return ONLY a JSON object (no markdown, no explanation):
         T.step('gc-parse', 'exit', { result: reply ? 'resolved' : 'no_match' });
 
         if (!reply) {
+          // ── 2026-05-05 council: ambiguous license-term gate (GChat surface) ──
+          // PR #12 first added this gate at /api/chat-waterfall (Chrome ext +
+          // Webex routes). Codex PR #15 retest on Google Chat surface caught
+          // the gap: GChat webhook has its own dispatch and was bypassing the
+          // gate, so "quote 21 MR licenses" / "21 MR renewals" landed in
+          // crm_agent (Claude) instead of the deterministic ask-for-term.
+          // Plumbing the same helper here closes the surface-coverage hole.
+          const _gchatAmbigLic = detectAmbiguousLicenseTerm(text);
+          if (_gchatAmbigLic) {
+            console.log(`[GCHAT-AGENT] Ambiguous license-term gate fired: ${_gchatAmbigLic.family} qty=${_gchatAmbigLic.qty}`);
+            reply = `${_gchatAmbigLic.askMessage}\n\n---\n_⚡ Deterministic license-term gate (no LLM invoked, no Zoho writes)_`;
+            // Save both turns to KV history so user follow-up has context.
+            try {
+              await addToHistory(kv, personId, 'user', text);
+              await addToHistory(kv, personId, 'assistant', reply);
+            } catch (kvErr) {
+              console.log(`[GCHAT-AGENT] gate KV history write skipped: ${kvErr.message}`);
+            }
+            // Note: response_path logging at line ~19050 will see useTools
+            // undefined + reply set + no image, marking this as
+            // 'cf-deterministic'. Acceptable for now; followup task can
+            // refine to 'deterministic-license-term-gate' when wiring a
+            // dedicated marker.
+          }
+
           // Check if this is a CRM or email intent — if so, enable tool use
           T.step('gc-intent', 'enter');
           const intent = detectCrmEmailIntent(text);
@@ -18910,7 +18935,9 @@ Return ONLY a JSON object (no markdown, no explanation):
           const useTools = intent.hasAny && (hasCrmCreds || hasGmailCreds);
           T.step('gc-intent', 'exit', { result: useTools ? 'crm_tools' : 'general', hasCrm: intent.hasCrm, hasEmail: intent.hasEmail });
 
-          if (useTools) {
+          // 2026-05-05 council: skip CRM agent dispatch when the deterministic
+          // license-term gate already produced a reply.
+          if (useTools && !reply) {
             T.step('gc-dispatch', 'enter');
             console.log(`[GCHAT-AGENT] CRM/Email intent detected (crm=${intent.hasCrm}, email=${intent.hasEmail}). Enabling tool use.`);
 
