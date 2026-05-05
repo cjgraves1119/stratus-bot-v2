@@ -15958,6 +15958,8 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 }
               }
 
+              let outcome;
+
               // ── 2026-05-05 council: ambiguous license-term hard gate ──
               // Runs BEFORE all other tiers (including Tier 0 deterministic),
               // covers chat-tab path that bypasses the existing deterministic
@@ -16035,7 +16037,6 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 }
               }
 
-              let outcome;
               if (deterministicResult) {
                 // Return the deterministic answer without invoking any LLM
                 outcome = {
