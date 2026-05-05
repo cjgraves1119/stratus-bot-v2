@@ -1037,9 +1037,9 @@ function simulateInjection(finalReplyIn, last) {
   if (last.isError && last.summary) {
     const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
     const hasContradictorySuccess =
-      /\b(?:quote|deal|task|record|contact|account|action|change|update|undo)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|deleted|removed|restored|undone|reversed)\b/i.test(finalReply)
-      || /\b(?:created|added|updated|cloned|saved|deleted|removed|restored|undone|reversed)\s+(?:a\s+new\s+)?(?:quote|deal|task|record|contact|account|action|change|update|undo)\b/i.test(finalReply)
-      || /\brestored to (?:its|the) previous state\b/i.test(finalReply);
+      /\b(?:quote|deal|task|record|contact|account|action|change|update|undo)\s+(?:was|has\s+been|is)\s+(?:(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|deleted|removed|restored|undone|reversed|reverted)|successful)\b/i.test(finalReply)
+      || /\b(?:created|added|updated|cloned|saved|deleted|removed|restored|undone|reversed|reverted)\s+(?:a\s+new\s+)?(?:quote|deal|task|record|contact|account|action|change|update|undo)\b/i.test(finalReply)
+      || /\b(?:restored|reverted)\s+to (?:its|the) previous state\b/i.test(finalReply);
     if (hasContradictorySuccess) {
       finalReply = last.summary;
     } else if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
@@ -1111,6 +1111,22 @@ t('Failed undo: model cannot rationalize failure into restored-state success', (
   );
   assert.equal(out, 'That did not succeed: Undo verification failed: Grand_Total expected 9105.02, got 9105.01');
   assert.ok(!/restored to its previous state/i.test(out), 'failed undo must not claim restoration');
+});
+
+t('Failed undo: model cannot prepend successful/reverted narration before failure summary', () => {
+  const out = simulateInjection(
+    'The undo was successful. The quote has been reverted to its previous state with licenses.\n\n[link removed: unverified]\n\nThat did not succeed: Undo verification failed: Grand_Total expected 9105.02, got 9105.01',
+    {
+      isError: true,
+      undoToken: null,
+      recordUrl: null,
+      summary: 'That did not succeed: Undo verification failed: Grand_Total expected 9105.02, got 9105.01',
+      toolName: 'undo_crm_action',
+    }
+  );
+  assert.equal(out, 'That did not succeed: Undo verification failed: Grand_Total expected 9105.02, got 9105.01');
+  assert.ok(!/undo was successful/i.test(out), 'failed undo must not keep successful undo phrasing');
+  assert.ok(!/has been reverted/i.test(out), 'failed undo must not keep reverted-state phrasing');
 });
 
 t('Verify-fail return shape: no _undo_token, no _record_url, _user_visible_summary is the warning', () => {

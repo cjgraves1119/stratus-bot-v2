@@ -12422,9 +12422,9 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     if (last.isError && last.summary) {
       const keyPhrase = last.summary.split(/[.!?]/)[0].trim().slice(0, 80);
       const hasContradictorySuccess =
-        /\b(?:quote|deal|task|record|contact|account|action|change|update|undo)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|deleted|removed|restored|undone|reversed)\b/i.test(finalReply)
-        || /\b(?:created|added|updated|cloned|saved|deleted|removed|restored|undone|reversed)\s+(?:a\s+new\s+)?(?:quote|deal|task|record|contact|account|action|change|update|undo)\b/i.test(finalReply)
-        || /\brestored to (?:its|the) previous state\b/i.test(finalReply);
+        /\b(?:quote|deal|task|record|contact|account|action|change|update|undo)\s+(?:was|has\s+been|is)\s+(?:(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|deleted|removed|restored|undone|reversed|reverted)|successful)\b/i.test(finalReply)
+        || /\b(?:created|added|updated|cloned|saved|deleted|removed|restored|undone|reversed|reverted)\s+(?:a\s+new\s+)?(?:quote|deal|task|record|contact|account|action|change|update|undo)\b/i.test(finalReply)
+        || /\b(?:restored|reverted)\s+to (?:its|the) previous state\b/i.test(finalReply);
       if (hasContradictorySuccess) {
         finalReply = last.summary;
       } else if (keyPhrase && !finalReply.toLowerCase().includes(keyPhrase.toLowerCase())) {
