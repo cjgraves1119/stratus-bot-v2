@@ -18776,6 +18776,28 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         T.step('gc-session', 'exit', { result: isExplicitCrmRequest ? 'crm_routed' : 'normal' });
 
+        // ── 2026-05-05 council: ambiguous license-term gate (GChat surface, hoisted) ──
+        // First-deployed at line ~18887 (PR #17, commit a52f4f9), but Codex
+        // post-deploy retest on v668 found the gate was running AFTER the
+        // CF-first deterministic engine + Claude-fallback chain, which could
+        // already set `reply` via askClaude (response_path crm_agent + Claude
+        // model + 16k input tokens) before the gate had a chance to fire.
+        // Hoisting the gate to run BEFORE pricing/parseMessage/CF-classify/
+        // Claude-fallback so any free-text "N MR licenses" / "21 MR renewals"
+        // / "renew MR licenses" terminates here with the deterministic
+        // ask-for-term, NO LLM invoked, NO tool calls, NO Zoho writes.
+        const _gchatAmbigLic = detectAmbiguousLicenseTerm(text);
+        if (!reply && _gchatAmbigLic) {
+          console.log(`[GCHAT-AGENT] Ambiguous license-term gate fired (hoisted): ${_gchatAmbigLic.family} qty=${_gchatAmbigLic.qty}`);
+          reply = `${_gchatAmbigLic.askMessage}\n\n---\n_⚡ Deterministic license-term gate (no LLM invoked, no Zoho writes)_`;
+          try {
+            await addToHistory(kv, personId, 'user', text);
+            await addToHistory(kv, personId, 'assistant', reply);
+          } catch (kvErr) {
+            console.log(`[GCHAT-AGENT] gate KV history write skipped: ${kvErr.message}`);
+          }
+        }
+
         // ── CF-FIRST WATERFALL: CF classifies intent, deterministic executes quotes ──
         // Pre-check: Deterministic pricing calculator (Duo/Umbrella tier math) — always instant
         T.step('gc-pricing', 'enter');
@@ -18883,31 +18905,6 @@ Return ONLY a JSON object (no markdown, no explanation):
         T.step('gc-parse', 'exit', { result: reply ? 'resolved' : 'no_match' });
 
         if (!reply) {
-          // ── 2026-05-05 council: ambiguous license-term gate (GChat surface) ──
-          // PR #12 first added this gate at /api/chat-waterfall (Chrome ext +
-          // Webex routes). Codex PR #15 retest on Google Chat surface caught
-          // the gap: GChat webhook has its own dispatch and was bypassing the
-          // gate, so "quote 21 MR licenses" / "21 MR renewals" landed in
-          // crm_agent (Claude) instead of the deterministic ask-for-term.
-          // Plumbing the same helper here closes the surface-coverage hole.
-          const _gchatAmbigLic = detectAmbiguousLicenseTerm(text);
-          if (_gchatAmbigLic) {
-            console.log(`[GCHAT-AGENT] Ambiguous license-term gate fired: ${_gchatAmbigLic.family} qty=${_gchatAmbigLic.qty}`);
-            reply = `${_gchatAmbigLic.askMessage}\n\n---\n_⚡ Deterministic license-term gate (no LLM invoked, no Zoho writes)_`;
-            // Save both turns to KV history so user follow-up has context.
-            try {
-              await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', reply);
-            } catch (kvErr) {
-              console.log(`[GCHAT-AGENT] gate KV history write skipped: ${kvErr.message}`);
-            }
-            // Note: response_path logging at line ~19050 will see useTools
-            // undefined + reply set + no image, marking this as
-            // 'cf-deterministic'. Acceptable for now; followup task can
-            // refine to 'deterministic-license-term-gate' when wiring a
-            // dedicated marker.
-          }
-
           // Check if this is a CRM or email intent — if so, enable tool use
           T.step('gc-intent', 'enter');
           const intent = detectCrmEmailIntent(text);
