@@ -2651,9 +2651,29 @@ async function handlePricingRequest(text, personId, kv) {
   // When present, append the appropriate license SKU(s) to the pricing call.
   // Allow optional tier word (SEC/ENT/etc) between "year" and "license".
   const withLicenseMatch = text.match(/\bwith\s+(?:a\s+)?(?:(\d)\s*[-\s]?\s*year\s+)?(?:(?:ENT(?:ERPRISE)?|SEC(?:URITY)?|ADVANCED\s+SECURITY|SDW|SD[\s-]?WAN)\s+)?(license|licence|licensing|lic)\b/i);
-  const wantsLicense = !!withLicenseMatch;
-  const licenseTerm = withLicenseMatch && withLicenseMatch[1] ? parseInt(withLicenseMatch[1]) : 3;
-  const licenseTierMatch = wantsLicense && text.match(/\bwith\s+(?:a\s+)?(?:\d\s*[-\s]?\s*year\s+)?(ENT(?:ERPRISE)?|SEC(?:URITY)?|ADVANCED\s+SECURITY|SDW|SD[\s-]?WAN)\s+(license|licence|licensing)/i);
+  // Trailing license intent — "MODEL licenses [N year]" / "MODEL [N year] licenses" /
+  // "license cost for MODEL". No "with" prefix. Indicates license-only renewal:
+  // user already owns the hardware (most common dashboard renewal phrasing).
+  // Excludes "no licenses" / "without licenses" / "license only" forms which
+  // are handled elsewhere (or imply the same intent already).
+  const trailingLicenseMatch = !withLicenseMatch && text.match(/\b(?:license|licence|licensing)s?\b/i);
+  // licenseMode: null = no license intent, 'bundle' = HW + license,
+  //              'only' = license-only (no hardware).
+  let licenseMode = null;
+  if (withLicenseMatch) licenseMode = 'bundle';
+  else if (trailingLicenseMatch && !/\b(no|without)\s+licen/i.test(text)) licenseMode = 'only';
+
+  // Term extraction — works for both modes. With-prefix takes precedence;
+  // otherwise scan the whole message for "N year" and default to 3.
+  let licenseTerm = 3;
+  if (licenseMode === 'bundle' && withLicenseMatch && withLicenseMatch[1]) {
+    licenseTerm = parseInt(withLicenseMatch[1]);
+  } else if (licenseMode === 'only') {
+    const tm = text.match(/(\d)\s*[-\s]?\s*year/i);
+    if (tm) licenseTerm = parseInt(tm[1]);
+  }
+  // Tier extraction — same logic for both modes.
+  const licenseTierMatch = licenseMode && text.match(/\b(ENT(?:ERPRISE)?|SEC(?:URITY)?|ADVANCED\s+SECURITY|SDW|SD[\s-]?WAN)\s+(license|licence|licensing)/i);
   let licenseTierOverride = null;
   if (licenseTierMatch) {
     const t = licenseTierMatch[1].toUpperCase();
@@ -2661,6 +2681,8 @@ async function handlePricingRequest(text, personId, kv) {
     else if (/ENT/.test(t)) licenseTierOverride = 'ENT';
     else if (/SDW|SD.?WAN/.test(t)) licenseTierOverride = 'SDW';
   }
+  // Back-compat: callers below still reference `wantsLicense`.
+  const wantsLicense = licenseMode !== null;
   const _licenseSkusFor = (baseSku, term, tier) => {
     try {
       const cleanBase = baseSku.replace(/-(HW|MR|RTG|HW-NA)$/i, '');
@@ -2678,25 +2700,39 @@ async function handlePricingRequest(text, personId, kv) {
   if (directSkuMatch) {
     const qty = parseInt(directSkuMatch[1]);
     const sku = directSkuMatch[2].toUpperCase();
-    const skus = [sku];
-    const qtys = [qty];
+    const skus = [];
+    const qtys = [];
+    // licenseMode 'only' → drop hardware (renewal intent: customer already
+    // owns the device). 'bundle' or null → keep hardware as before.
+    if (licenseMode !== 'only') {
+      skus.push(sku);
+      qtys.push(qty);
+    }
     if (wantsLicense) {
       for (const ls of _licenseSkusFor(sku, licenseTerm, licenseTierOverride)) { skus.push(ls); qtys.push(qty); }
     }
-    const resp = formatPricingResponse(null, skus, qtys);
-    if (resp) return resp;
+    if (skus.length > 0) {
+      const resp = formatPricingResponse(null, skus, qtys);
+      if (resp) return resp;
+    }
   }
 
   if (singleSkuMatch) {
     const sku = singleSkuMatch[1].toUpperCase();
     if (!/^(OPTION|THE|THIS|THAT|MY|IT|A|AN)$/i.test(sku) && (/\d/.test(sku) || /^LIC-/i.test(sku))) {
-      const skus = [sku];
-      const qtys = [1];
+      const skus = [];
+      const qtys = [];
+      if (licenseMode !== 'only') {
+        skus.push(sku);
+        qtys.push(1);
+      }
       if (wantsLicense) {
         for (const ls of _licenseSkusFor(sku, licenseTerm, licenseTierOverride)) { skus.push(ls); qtys.push(1); }
       }
-      const resp = formatPricingResponse(null, skus, qtys);
-      if (resp) return resp;
+      if (skus.length > 0) {
+        const resp = formatPricingResponse(null, skus, qtys);
+        if (resp) return resp;
+      }
     }
   }
 
