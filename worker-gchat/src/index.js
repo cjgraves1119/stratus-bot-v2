@@ -4711,6 +4711,266 @@ async function zohoApiCall(method, path, env, body = null) {
   }
 }
 
+function normalizeDomainValue(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .split('/')[0]
+    .split('?')[0]
+    .replace(/\.$/, '');
+}
+
+const FREE_EMAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com',
+  'msn.com', 'yahoo.com', 'ymail.com', 'icloud.com', 'me.com', 'mac.com',
+  'aol.com', 'proton.me', 'protonmail.com', 'pm.me', 'comcast.net',
+  'verizon.net', 'att.net', 'sbcglobal.net', 'bellsouth.net',
+]);
+
+const ZIA_ORG_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
+const ZIA_CONFIG_CACHE_TTL_SECONDS = 6 * 60 * 60;
+const ZIA_POLL_TIMEOUT_MS = 15000;
+const ZIA_POLL_INTERVAL_MS = 1000;
+
+function isFreeEmailDomain(domain) {
+  return FREE_EMAIL_DOMAINS.has(normalizeDomainValue(domain));
+}
+
+function accountWebsiteMatchesDomain(website, domain) {
+  const cleanWebsite = normalizeDomainValue(website);
+  const cleanDomain = normalizeDomainValue(domain);
+  if (!cleanWebsite || !cleanDomain) return false;
+  return cleanWebsite === cleanDomain || cleanWebsite.endsWith(`.${cleanDomain}`);
+}
+
+function mapAccountSearchRecord(record, extra = {}) {
+  return {
+    id: record.id,
+    name: record.Account_Name || record.name || '',
+    phone: record.Phone || record.phone || '',
+    website: record.Website || record.website || '',
+    billingStreet: record.Billing_Street || record.billingStreet || record.street || '',
+    billingCity: record.Billing_City || record.billingCity || record.city || '',
+    billingState: record.Billing_State || record.billingState || record.state || '',
+    billingZip: record.Billing_Code || record.billingZip || record.zip || '',
+    zohoUrl: record.id ? `https://crm.zoho.com/crm/org647122552/tab/Accounts/${record.id}` : '',
+    ...extra,
+  };
+}
+
+function mapZiaEnrichedData(enrichedData = {}, fallbackDomain = '') {
+  const firstAddress = Array.isArray(enrichedData.address) ? (enrichedData.address[0] || {}) : {};
+  return {
+    name: enrichedData.name || '',
+    street: firstAddress.fill_address || '',
+    city: firstAddress.city || '',
+    state: firstAddress.state || '',
+    zip: firstAddress.pin_code || '',
+    website: normalizeDomainValue(enrichedData.website || fallbackDomain),
+    phone: enrichedData.primary_contact || '',
+    confidence: enrichedData.name || firstAddress.fill_address ? 'medium' : 'none',
+    source: 'zoho_zia',
+  };
+}
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function ziaCacheKey(website = '', email = '', name = '') {
+  const domain = normalizeDomainValue(website || (email.includes('@') ? email.split('@').pop() : ''));
+  if (domain) return `zia_org_enrichment:${domain}`;
+  const safeName = String(name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80);
+  return safeName ? `zia_org_enrichment:name:${safeName}` : '';
+}
+
+async function logZiaEnrichmentEvent(env, event = {}) {
+  if (!env?.CONVERSATION_KV) return;
+  try {
+    await env.CONVERSATION_KV.put(
+      `zia_enrichment_event:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      JSON.stringify({ ...event, ts: new Date().toISOString() }),
+      { expirationTtl: 45 * 24 * 60 * 60 }
+    );
+  } catch (_) {}
+}
+
+function ziaEnrichmentMatchesInputs(detail = {}, { name = '', email = '', website = '' } = {}) {
+  const basedOn = detail.enrich_based_on || {};
+  const wantWebsite = normalizeDomainValue(website);
+  const gotWebsite = normalizeDomainValue(basedOn.website || detail.enriched_data?.website || '');
+  if (wantWebsite && gotWebsite && accountWebsiteMatchesDomain(gotWebsite, wantWebsite)) return true;
+  if (email && basedOn.email && String(basedOn.email).toLowerCase() === String(email).toLowerCase()) return true;
+  if (name && basedOn.name && String(basedOn.name).toLowerCase() === String(name).toLowerCase()) return true;
+  return false;
+}
+
+async function findRecentCompletedZiaEnrichment(env, inputs = {}) {
+  const listResp = await zohoApiCall('GET', '__zia_org_enrichment?status=COMPLETED&per_page=10&sort_by=created_time&sort_order=desc', env);
+  for (const row of (listResp?.__zia_org_enrichment || [])) {
+    if (!row?.id) continue;
+    const detailResp = await zohoApiCall('GET', `__zia_org_enrichment/${encodeURIComponent(row.id)}`, env);
+    const detail = detailResp?.__zia_org_enrichment?.[0];
+    if (detail?.status === 'COMPLETED' && ziaEnrichmentMatchesInputs(detail, inputs)) {
+      return {
+        status: 'RECENT_COMPLETED',
+        jobId: row.id,
+        enrichBasedOn: detail.enrich_based_on || {},
+        enrichedData: detail.enriched_data || {},
+        suggestion: mapZiaEnrichedData(detail.enriched_data || {}, inputs.website || ''),
+      };
+    }
+  }
+  return null;
+}
+
+async function getZiaOrgEnrichmentConfig(env) {
+  const cacheKey = 'zia_org_enrichment_config:Accounts';
+  if (env?.CONVERSATION_KV) {
+    const cached = await env.CONVERSATION_KV.get(cacheKey, 'json').catch(() => null);
+    if (cached) return cached;
+  }
+
+  const resp = await zohoApiCall('GET', 'settings/zia/data_enrichment', env);
+  const configs = resp?.data_enrichment || [];
+  const accountConfig = configs.find(c =>
+    c?.type === 'organization'
+    && c?.status === true
+    && c?.module?.api_name === 'Accounts'
+  );
+  const inputNames = new Set((accountConfig?.input_data_field_mapping || [])
+    .map(m => m?.enrich_field?.name)
+    .filter(Boolean));
+  const code = resp?.code || '';
+  const result = {
+    available: !!accountConfig && !['NO_CONTENT', 'FEATURE_NOT_ENABLED', 'FEATURE_NOT_SUPPORTED', 'OAUTH_SCOPE_MISMATCH'].includes(code),
+    code,
+    message: resp?.message || (!accountConfig ? 'Accounts organization enrichment is not configured or active in Zoho Zia' : ''),
+    inputNames: Array.from(inputNames),
+  };
+
+  if (env?.CONVERSATION_KV && (result.available || result.code)) {
+    await env.CONVERSATION_KV.put(cacheKey, JSON.stringify(result), { expirationTtl: ZIA_CONFIG_CACHE_TTL_SECONDS }).catch(() => {});
+  }
+  return result;
+}
+
+async function requestZiaOrgEnrichment(env, { name = '', email = '', website = '' } = {}) {
+  const cacheKey = ziaCacheKey(website, email, name);
+  if (cacheKey && env?.CONVERSATION_KV) {
+    const cached = await env.CONVERSATION_KV.get(cacheKey, 'json').catch(() => null);
+    if (cached?.suggestion) {
+      await logZiaEnrichmentEvent(env, { status: 'CACHE_HIT', cacheKey, website: normalizeDomainValue(website) });
+      return { ...cached, status: 'CACHE_HIT', cacheKey };
+    }
+  }
+
+  const enrichBasedOn = {};
+  if (name && name.length >= 3) enrichBasedOn.name = name;
+  if (email && email.length >= 3) enrichBasedOn.email = email;
+  if (website && website.length >= 3) enrichBasedOn.website = website;
+  if (Object.keys(enrichBasedOn).length === 0) {
+    return { status: 'SKIPPED', reason: 'No enrichment inputs available' };
+  }
+
+  if (isFreeEmailDomain(website || (email.includes('@') ? email.split('@').pop() : ''))) {
+    return { status: 'SKIPPED', reason: 'Consumer email domains are not sent to Zia enrichment' };
+  }
+
+  const config = await getZiaOrgEnrichmentConfig(env).catch(err => ({
+    available: false,
+    code: 'CONFIG_ERROR',
+    message: err.message,
+  }));
+  if (!config.available) {
+    await logZiaEnrichmentEvent(env, { status: 'CONFIG_UNAVAILABLE', code: config.code, message: config.message, website: normalizeDomainValue(website) });
+    return {
+      status: 'UNAVAILABLE',
+      reason: config.message || config.code || 'Zia Accounts enrichment is not configured or the token lacks Zia enrichment scope',
+      code: config.code || '',
+    };
+  }
+
+  // Zoho only allows inputs that are enabled as Zia trigger fields in the
+  // org's enrichment configuration. Drop unmapped inputs instead of throwing
+  // NOT_ALLOWED and burning a failed attempt.
+  if (config.inputNames?.length) {
+    if (!config.inputNames.some(n => ['org_name', 'name'].includes(n))) delete enrichBasedOn.name;
+    if (!config.inputNames.includes('email')) delete enrichBasedOn.email;
+    if (!config.inputNames.some(n => ['org_website', 'website'].includes(n))) delete enrichBasedOn.website;
+    if (Object.keys(enrichBasedOn).length === 0) {
+      return {
+        status: 'SKIPPED',
+        reason: 'No available input is mapped as a Zia Accounts enrichment trigger',
+        code: 'NOT_MAPPED',
+      };
+    }
+  }
+
+  const recent = await findRecentCompletedZiaEnrichment(env, enrichBasedOn).catch(() => null);
+  if (recent?.suggestion) {
+    if (cacheKey && env?.CONVERSATION_KV && recent.suggestion.confidence !== 'none') {
+      await env.CONVERSATION_KV.put(cacheKey, JSON.stringify(recent), { expirationTtl: ZIA_ORG_CACHE_TTL_SECONDS }).catch(() => {});
+    }
+    await logZiaEnrichmentEvent(env, { status: 'RECENT_COMPLETED', jobId: recent.jobId, cacheKey, website: normalizeDomainValue(website) });
+    return recent;
+  }
+
+  const startResp = await zohoApiCall('POST', '__zia_org_enrichment?module=Accounts', env, {
+    __zia_org_enrichment: [{ enrich_based_on: enrichBasedOn }],
+  });
+  const startRow = startResp?.__zia_org_enrichment?.[0];
+  const jobId = startRow?.details?.id || startRow?.id || '';
+  if (!jobId) {
+    const code = startRow?.code || startResp?.code || '';
+    const reason = startRow?.message || startResp?.message || startResp?.error || code || 'Zia enrichment did not return a job ID';
+    await logZiaEnrichmentEvent(env, { status: 'START_FAILED', code, reason, enrichBasedOn });
+    return {
+      status: 'UNAVAILABLE',
+      reason,
+      code,
+      rawStatus: startRow?.status || startResp?.status || null,
+    };
+  }
+
+  const deadline = Date.now() + ZIA_POLL_TIMEOUT_MS;
+  await logZiaEnrichmentEvent(env, { status: 'SCHEDULED', jobId, enrichBasedOn });
+  while (Date.now() < deadline) {
+    await sleep(ZIA_POLL_INTERVAL_MS);
+    const detailResp = await zohoApiCall('GET', `__zia_org_enrichment/${encodeURIComponent(jobId)}`, env);
+    const detail = detailResp?.__zia_org_enrichment?.[0];
+    if (!detail) continue;
+    if (detail.status === 'COMPLETED') {
+      const completed = {
+        status: 'COMPLETED',
+        jobId,
+        enrichBasedOn,
+        enrichedData: detail.enriched_data || {},
+        suggestion: mapZiaEnrichedData(detail.enriched_data || {}, website),
+      };
+      if (cacheKey && env?.CONVERSATION_KV && completed.suggestion?.confidence !== 'none') {
+        await env.CONVERSATION_KV.put(cacheKey, JSON.stringify(completed), { expirationTtl: ZIA_ORG_CACHE_TTL_SECONDS }).catch(() => {});
+      }
+      await logZiaEnrichmentEvent(env, { status: 'COMPLETED', jobId, cacheKey, website: normalizeDomainValue(website) });
+      return completed;
+    }
+    if (['FAILED', 'DATA_NOT_FOUND', 'LIMIT_EXCEEDED', 'NOT_ALLOWED', 'FEATURE_NOT_ENABLED'].includes(detail.status) || ['LIMIT_EXCEEDED', 'NOT_ALLOWED', 'FEATURE_NOT_ENABLED'].includes(detail.code)) {
+      const failed = {
+        status: detail.status || 'UNAVAILABLE',
+        code: detail.code || '',
+        reason: detail.message || detail.error || detail.code || detail.status,
+        jobId,
+        enrichBasedOn,
+      };
+      await logZiaEnrichmentEvent(env, failed);
+      return failed;
+    }
+  }
+
+  await logZiaEnrichmentEvent(env, { status: 'TIMEOUT', jobId, enrichBasedOn });
+  return { status: 'TIMEOUT', reason: 'Zia job did not complete within 15 seconds; falling back to web research', jobId, enrichBasedOn };
+}
+
 // ─── Account Resolution Helpers ──────────────────────────────────────────────
 // Added 2026-04-21 — Skty Trading LLC forensic fix.
 // Previously /api/chat-waterfall enriched the message with customerDomain but
@@ -15035,28 +15295,43 @@ Hard rules:
             };
 
             try {
-              // Domain-based account search: criteria match on Website + word match on domain base name
+              // Domain-based account search: trust Website matches; keep name-only
+              // fallbacks visible but low confidence so they cannot masquerade
+              // as an authoritative domain match.
               if (domain && mod === 'Accounts') {
                 const results = [];
                 const seen = new Set();
+                const cleanDomain = normalizeDomainValue(domain);
+                if (isFreeEmailDomain(cleanDomain)) {
+                  apiResult = { records: [], module: mod, domain: cleanDomain, isDomainSearch: true, skipped: 'consumer_email_domain' };
+                  break;
+                }
 
-                // 1. Criteria search on Website field (e.g. "lavanture.com")
+                // 1. Criteria search on Website field (e.g. "lavanture.com").
                 try {
                   const domainResp = await zohoApiCall('GET',
-                    `Accounts/search?criteria=((Website:starts_with:${encodeURIComponent(domain)}))&fields=${fieldMap.Accounts}&per_page=5`, env
+                    `Accounts/search?criteria=((Website:contains:${encodeURIComponent(cleanDomain)}))&fields=${fieldMap.Accounts}&per_page=10`, env
                   );
                   for (const r of (domainResp?.data || [])) {
                     if (!seen.has(r.id)) {
-                      results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
-                        billingStreet: r.Billing_Street, billingCity: r.Billing_City,
-                        billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
+                      const exactWebsite = accountWebsiteMatchesDomain(r.Website, cleanDomain);
+                      results.push(mapAccountSearchRecord(r, {
+                        isDomainMatch: exactWebsite,
+                        matchType: exactWebsite ? 'website_exact' : 'website_contains',
+                        matchConfidence: exactWebsite ? 'high' : 'medium',
+                        matchReason: exactWebsite
+                          ? `Website domain matches ${cleanDomain}`
+                          : `Website contains ${cleanDomain}; verify before linking`,
+                      }));
                       seen.add(r.id);
                     }
                   }
                 } catch (_) {}
 
-                // 2. Word search on the domain base (strip TLD) — catches "Lavanture Products" from "lavanture.com"
-                const domainBase = domain.split('.')[0] || '';
+                // 2. Word search on the domain base (strip TLD). This is only
+                // a possible match because short bases like "drw" can collide
+                // with unrelated account records.
+                const domainBase = cleanDomain.split('.')[0] || '';
                 if (domainBase.length >= 3) {
                   try {
                     const baseResp = await zohoApiCall('GET',
@@ -15064,16 +15339,19 @@ Hard rules:
                     );
                     for (const r of (baseResp?.data || [])) {
                       if (!seen.has(r.id)) {
-                        results.push({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
-                          billingStreet: r.Billing_Street, billingCity: r.Billing_City,
-                          billingState: r.Billing_State, billingZip: r.Billing_Code, isDomainMatch: true });
+                        results.push(mapAccountSearchRecord(r, {
+                          isDomainMatch: false,
+                          matchType: 'name_word',
+                          matchConfidence: 'low',
+                          matchReason: `Account name matched "${domainBase}" only; verify before linking`,
+                        }));
                         seen.add(r.id);
                       }
                     }
                   } catch (_) {}
                 }
 
-                apiResult = { records: results, module: mod, domain, isDomainSearch: true };
+                apiResult = { records: results, module: mod, domain: cleanDomain, isDomainSearch: true };
               } else {
                 // Standard word search by name
                 const searchResp = await zohoApiCall('GET',
@@ -15082,9 +15360,7 @@ Hard rules:
                 const rawRecords = searchResp?.data || [];
                 // Normalize accounts to consistent shape
                 const records = mod === 'Accounts'
-                  ? rawRecords.map(r => ({ id: r.id, name: r.Account_Name, phone: r.Phone, website: r.Website,
-                      billingStreet: r.Billing_Street, billingCity: r.Billing_City,
-                      billingState: r.Billing_State, billingZip: r.Billing_Code }))
+                  ? rawRecords.map(r => mapAccountSearchRecord(r))
                   : rawRecords;
                 apiResult = { records, module: mod, query };
               }
@@ -15191,52 +15467,17 @@ Hard rules:
             break;
           }
 
-          // ── Enrich Company: Use Claude to derive company info from a domain ──
+          // ── Enrich Company: Use Zoho/Zia org enrichment for company info ──
           case '/api/enrich-company': {
             const { domain: enrichDomain } = apiBody;
             if (!enrichDomain) {
               return new Response(JSON.stringify({ error: 'domain required' }), { status: 400, headers: jsonHeaders });
             }
             try {
-              const enrichResp = await fetch('https://api.anthropic.com/v1/messages', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': env.ANTHROPIC_API_KEY,
-                  'anthropic-version': '2023-06-01',
-                },
-                body: JSON.stringify({
-                  model: 'claude-haiku-4-5-20251001',
-                  max_tokens: 300,
-                  system: `You are a company research assistant. Given an email domain, return the company's official name and headquarters address. Return ONLY a raw JSON object (no markdown, no code fences, no commentary). If you cannot determine a field, use an empty string. Format:
-{"name":"Company Name","street":"123 Main St","city":"City","state":"ST","zip":"12345","website":"domain.com","phone":""}
-Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Global Security Inc."). For state, use the 2-letter abbreviation. Only include information you are confident about.`,
-                  messages: [{ role: 'user', content: `Company domain: ${enrichDomain}` }]
-                })
-              });
-              if (!enrichResp.ok) {
-                apiResult = { error: 'Enrichment API error: ' + enrichResp.status };
-                break;
-              }
-              const enrichData = await enrichResp.json();
-              ctx.waitUntil(trackUsage(env, 'claude-haiku-4-5-20251001', enrichData.usage, 'addon-enrich'));
-              const enrichText = enrichData.content?.[0]?.text || '';
-              var enrichParsed;
-              try {
-                enrichParsed = JSON.parse(enrichText.replace(/```json\n?|\n?```/g, '').trim());
-              } catch (_) {
-                // Try extracting JSON from mixed text
-                var enrichJsonMatch = enrichText.match(/\{[\s\S]*"name"\s*:[\s\S]*\}/);
-                enrichParsed = enrichJsonMatch ? JSON.parse(enrichJsonMatch[0]) : {};
-              }
+              const zia = await requestZiaOrgEnrichment(env, { website: normalizeDomainValue(enrichDomain) });
               apiResult = {
-                name: enrichParsed.name || '',
-                street: enrichParsed.street || '',
-                city: enrichParsed.city || '',
-                state: enrichParsed.state || '',
-                zip: enrichParsed.zip || '',
-                website: enrichParsed.website || enrichDomain,
-                phone: enrichParsed.phone || '',
+                ...(zia?.suggestion || { name: '', street: '', city: '', state: '', zip: '', website: normalizeDomainValue(enrichDomain), phone: '' }),
+                zia,
               };
             } catch (err) {
               apiResult = { error: 'Enrichment failed: ' + err.message };
@@ -17754,7 +17995,69 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             }
 
             try {
-              const accountSuggestion = { name: '', street: '', city: '', state: '', zip: '', website: '', phone: '', confidence: 'none', source: '' };
+              const cleanDetectDomain = normalizeDomainValue(detectDomain);
+              const isConsumerDomain = isFreeEmailDomain(cleanDetectDomain);
+              const stages = [];
+              const candidates = [];
+              const seenCandidateIds = new Set();
+              const accountSuggestion = {
+                name: '',
+                street: '',
+                city: '',
+                state: '',
+                zip: '',
+                website: '',
+                phone: '',
+                confidence: 'none',
+                source: '',
+              };
+
+              function addCandidate(record, extra = {}) {
+                if (!record?.id || seenCandidateIds.has(record.id)) return;
+                seenCandidateIds.add(record.id);
+                candidates.push(mapAccountSearchRecord(record, extra));
+              }
+
+              async function findZohoAccountsByNameAndDomain(name, domain) {
+                const exactMatches = [];
+                if (name) {
+                  try {
+                    const acctSearch = await zohoApiCall('GET',
+                      `Accounts/search?criteria=(Account_Name:equals:${encodeURIComponent(name)})&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code`, env
+                    );
+                    for (const r of (acctSearch?.data || [])) {
+                      exactMatches.push(r);
+                      addCandidate(r, {
+                        isDomainMatch: accountWebsiteMatchesDomain(r.Website, domain),
+                        matchType: 'account_name_exact',
+                        matchConfidence: accountWebsiteMatchesDomain(r.Website, domain) ? 'high' : 'medium',
+                        matchReason: 'Zoho Account_Name exactly matches detected company name',
+                      });
+                    }
+                  } catch (_) {}
+                }
+
+                if (domain) {
+                  try {
+                    const domainSearch = await zohoApiCall('GET',
+                      `Accounts/search?criteria=(Website:contains:${encodeURIComponent(domain)})&fields=id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code`, env
+                    );
+                    for (const r of (domainSearch?.data || [])) {
+                      const exactWebsite = accountWebsiteMatchesDomain(r.Website, domain);
+                      addCandidate(r, {
+                        isDomainMatch: exactWebsite,
+                        matchType: exactWebsite ? 'website_exact' : 'website_contains',
+                        matchConfidence: exactWebsite ? 'high' : 'medium',
+                        matchReason: exactWebsite
+                          ? `Zoho Website matches ${domain}`
+                          : `Zoho Website contains ${domain}; verify before linking`,
+                      });
+                    }
+                  } catch (_) {}
+                }
+
+                return exactMatches;
+              }
 
               // ─── Phase 1: Parse email signature ───
               // Look for a signature block in the last ~2000 chars of the email body
@@ -17770,7 +18073,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 // City, State ZIP
                 cityStateZip: sigBlock.match(/([A-Z][a-z]+(?:\s[A-Z][a-z]+)*),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/),
                 // Website
-                website: sigBlock.match(/(?:https?:\/\/)?(?:www\.)?([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:com|net|org|edu|gov|io|co|us|biz|info)(?:\.[a-z]{2})?)/i),
+                website: sigBlock.match(/(?:https?:\/\/|www\.)([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.(?:com|net|org|edu|gov|io|co|us|biz|info)(?:\.[a-z]{2})?)/i),
               };
 
               // Extract phone
@@ -17790,143 +18093,192 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 accountSuggestion.zip = sigPatterns.cityStateZip[3].trim();
               }
 
-              // Extract website from signature or fall back to domain
+              // Extract website only when it is explicit in the selected thread.
+              // A copied participant's email domain must not be stamped onto a
+              // different customer account found in the body.
               if (sigPatterns.website) {
                 accountSuggestion.website = sigPatterns.website[0].replace(/^https?:\/\//, '').replace(/^www\./, '');
-              } else if (detectDomain) {
-                accountSuggestion.website = detectDomain;
               }
 
-              // ─── Phase 2: Use Claude to extract company name from signature ───
-              // Claude is better at identifying the company name from unstructured signature text
-              // Also does a web search if signature parsing got nothing useful
+              if (accountSuggestion.street || accountSuggestion.city || accountSuggestion.phone) {
+                accountSuggestion.confidence = 'medium';
+                accountSuggestion.source = 'email_thread';
+                stages.push({ step: 'email_thread', status: 'FOUND', detail: 'Signature/body contained address or phone fields' });
+              } else {
+                stages.push({ step: 'email_thread', status: 'NO_ADDRESS', detail: 'No explicit headquarters address found in visible email body' });
+              }
+
+              // ─── Phase 2: Use Claude without web tools to extract only from the email thread ───
+              // This keeps the first step grounded in the selected email instead
+              // of jumping straight to public web research.
               const hasAddressInfo = accountSuggestion.street || accountSuggestion.city;
               const sigLast500 = (detectBody || '').slice(-1500);
-              const needsWebLookup = !hasAddressInfo && detectDomain;
-
-              const claudePrompt = needsWebLookup
-                ? `Extract the company/organization name and mailing address for the domain "${detectDomain}".
-
-First check this email signature for clues:
----
-${sigLast500}
----
-
-If the signature doesn't have enough info, search the web for "${detectDomain}" to find the company name and address.
+              if (sigLast500.trim()) {
+                const claudePrompt = `Extract company/account information ONLY from this email signature or visible thread text. Do not use outside knowledge or web search.
 
 The sender's name is: ${detectSenderName || 'unknown'}
 The sender's email is: ${detectEmail || 'unknown'}
+The sender's domain is: ${cleanDetectDomain || 'unknown'}
 
-Return ONLY a JSON object (no markdown, no explanation):
-{"name": "Company Name", "street": "123 Main St", "city": "City", "state": "XX", "zip": "12345", "phone": "555-555-5555", "website": "${detectDomain || ''}", "confidence": "high|medium|low"}`
-                : `Extract the company/organization name from this email signature. The sender is ${detectSenderName || 'unknown'} at ${detectEmail || detectDomain || 'unknown domain'}.
-
-Signature block:
+Visible thread/signature text:
 ---
 ${sigLast500}
 ---
 
-Return ONLY a JSON object (no markdown, no explanation):
-{"name": "Company Name", "confidence": "high|medium|low"}`;
+Return ONLY a JSON object (no markdown, no explanation). Set website to an empty string unless the website is explicitly visible in the text:
+{"name": "Company Name", "street": "123 Main St", "city": "City", "state": "XX", "zip": "12345", "phone": "555-555-5555", "website": "", "confidence": "high|medium|low"}`;
 
-              // Use Claude with web search tool if we need a lookup
-              const claudeMessages = [{ role: 'user', content: claudePrompt }];
-              const claudeTools = needsWebLookup ? [{
-                type: 'web_search_20250305',
-                name: 'web_search',
-                max_uses: 3,
-              }] : undefined;
+                const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': env.ANTHROPIC_API_KEY,
+                    'anthropic-version': '2023-06-01',
+                  },
+                  body: JSON.stringify({
+                    model: 'claude-haiku-4-5-20251001',
+                    max_tokens: 500,
+                    messages: [{ role: 'user', content: claudePrompt }],
+                  }),
+                });
 
-              const claudeBody = {
-                model: 'claude-haiku-4-5-20251001',
-                max_tokens: 500,
-                messages: claudeMessages,
-              };
-              if (claudeTools) claudeBody.tools = claudeTools;
-
-              const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': env.ANTHROPIC_API_KEY,
-                  'anthropic-version': '2023-06-01',
-                },
-                body: JSON.stringify(claudeBody),
-              });
-
-              if (claudeResp.ok) {
-                const claudeData = await claudeResp.json();
-                // Extract text content from response (may have multiple content blocks with web search)
-                let textContent = '';
-                for (const block of (claudeData.content || [])) {
-                  if (block.type === 'text') textContent += block.text;
-                }
-
-                // Parse JSON from Claude's response
-                const jsonMatch = textContent.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                  try {
-                    const parsed = JSON.parse(jsonMatch[0]);
-                    if (parsed.name) accountSuggestion.name = parsed.name;
-                    if (parsed.street && !accountSuggestion.street) accountSuggestion.street = parsed.street;
-                    if (parsed.city && !accountSuggestion.city) accountSuggestion.city = parsed.city;
-                    if (parsed.state && !accountSuggestion.state) accountSuggestion.state = parsed.state;
-                    if (parsed.zip && !accountSuggestion.zip) accountSuggestion.zip = parsed.zip;
-                    if (parsed.phone && !accountSuggestion.phone) accountSuggestion.phone = parsed.phone;
-                    if (parsed.website && !accountSuggestion.website) accountSuggestion.website = parsed.website;
-                    if (parsed.confidence) accountSuggestion.confidence = parsed.confidence;
-                    accountSuggestion.source = needsWebLookup ? 'web_search' : 'signature';
-                  } catch (_) { /* JSON parse failed, keep regex results */ }
-                }
-              }
-
-              // ─── Phase 3: Check if account already exists in Zoho ───
-              let existingAccount = null;
-              if (accountSuggestion.name) {
-                try {
-                  const acctSearch = await zohoApiCall('GET',
-                    `Accounts/search?criteria=(Account_Name:equals:${encodeURIComponent(accountSuggestion.name)})&fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Website`, env
-                  );
-                  if (acctSearch?.data?.[0]) {
-                    existingAccount = {
-                      id: acctSearch.data[0].id,
-                      name: acctSearch.data[0].Account_Name,
-                      street: acctSearch.data[0].Billing_Street || '',
-                      city: acctSearch.data[0].Billing_City || '',
-                      state: acctSearch.data[0].Billing_State || '',
-                      zip: acctSearch.data[0].Billing_Code || '',
-                      website: acctSearch.data[0].Website || '',
-                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${acctSearch.data[0].id}`,
-                    };
+                if (claudeResp.ok) {
+                  const claudeData = await claudeResp.json();
+                  ctx.waitUntil(trackUsage(env, 'claude-haiku-4-5-20251001', claudeData.usage, 'addon-detect-signature'));
+                  let textContent = '';
+                  for (const block of (claudeData.content || [])) {
+                    if (block.type === 'text') textContent += block.text;
                   }
-                } catch (_) { /* search failed, continue with suggestion */ }
 
-                // Also try domain-based search if exact name didn't match
-                if (!existingAccount && detectDomain) {
-                  try {
-                    const domainSearch = await zohoApiCall('GET',
-                      `Accounts/search?criteria=(Website:contains:${encodeURIComponent(detectDomain)})&fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Website`, env
-                    );
-                    if (domainSearch?.data?.[0]) {
-                      existingAccount = {
-                        id: domainSearch.data[0].id,
-                        name: domainSearch.data[0].Account_Name,
-                        street: domainSearch.data[0].Billing_Street || '',
-                        city: domainSearch.data[0].Billing_City || '',
-                        state: domainSearch.data[0].Billing_State || '',
-                        zip: domainSearch.data[0].Billing_Code || '',
-                        website: domainSearch.data[0].Website || '',
-                        zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${domainSearch.data[0].id}`,
-                      };
-                    }
-                  } catch (_) { /* domain search failed */ }
+                  const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+                  if (jsonMatch) {
+                    try {
+                      const parsed = JSON.parse(jsonMatch[0]);
+                      if (parsed.name) accountSuggestion.name = parsed.name;
+                      if (parsed.street && !accountSuggestion.street) accountSuggestion.street = parsed.street;
+                      if (parsed.city && !accountSuggestion.city) accountSuggestion.city = parsed.city;
+                      if (parsed.state && !accountSuggestion.state) accountSuggestion.state = parsed.state;
+                      if (parsed.zip && !accountSuggestion.zip) accountSuggestion.zip = parsed.zip;
+                      if (parsed.phone && !accountSuggestion.phone) accountSuggestion.phone = parsed.phone;
+                      if (parsed.website && !accountSuggestion.website) accountSuggestion.website = normalizeDomainValue(parsed.website);
+                      if (parsed.confidence && parsed.confidence !== 'none') accountSuggestion.confidence = parsed.confidence;
+                      if (parsed.name || parsed.street || parsed.city) accountSuggestion.source = 'email_thread';
+                    } catch (_) { /* JSON parse failed, keep regex results */ }
+                  }
                 }
               }
+
+              // ─── Phase 3: Check native Zoho account data before web lookup ───
+              if (isConsumerDomain) {
+                stages.push({
+                  step: 'zoho_account_match',
+                  status: 'SKIPPED',
+                  detail: 'Consumer email domains are not used for account domain matching',
+                });
+              } else {
+                await findZohoAccountsByNameAndDomain(accountSuggestion.name, cleanDetectDomain);
+                stages.push({
+                  step: 'zoho_account_match',
+                  status: candidates.length > 0 ? 'FOUND' : 'NONE',
+                  detail: candidates.length > 0 ? `${candidates.length} candidate account(s) from Zoho` : 'No existing account matched name or website domain',
+                });
+              }
+
+              // ─── Phase 4: Use Zoho/Zia enrichment before external AI web search ───
+              const hasUsableCompanyInfo = !!(accountSuggestion.name && (accountSuggestion.street || accountSuggestion.city));
+              let zia = null;
+              if (isConsumerDomain) {
+                zia = { status: 'SKIPPED', reason: 'Consumer email domain' };
+                stages.push({ step: 'zoho_zia_enrichment', status: 'SKIPPED', detail: 'Consumer email domains are not sent to Zia enrichment' });
+              } else if (!hasUsableCompanyInfo && cleanDetectDomain) {
+                try {
+                  zia = await requestZiaOrgEnrichment(env, {
+                    name: accountSuggestion.name,
+                    email: detectEmail || '',
+                    website: cleanDetectDomain,
+                  });
+                  if (zia?.suggestion?.name) accountSuggestion.name = accountSuggestion.name || zia.suggestion.name;
+                  if (zia?.suggestion?.street && !accountSuggestion.street) accountSuggestion.street = zia.suggestion.street;
+                  if (zia?.suggestion?.city && !accountSuggestion.city) accountSuggestion.city = zia.suggestion.city;
+                  if (zia?.suggestion?.state && !accountSuggestion.state) accountSuggestion.state = zia.suggestion.state;
+                  if (zia?.suggestion?.zip && !accountSuggestion.zip) accountSuggestion.zip = zia.suggestion.zip;
+                  if (zia?.suggestion?.phone && !accountSuggestion.phone) accountSuggestion.phone = zia.suggestion.phone;
+                  if (zia?.suggestion?.website && !accountSuggestion.website) accountSuggestion.website = zia.suggestion.website;
+                  if (['COMPLETED', 'CACHE_HIT', 'RECENT_COMPLETED'].includes(zia?.status) && zia.suggestion?.confidence !== 'none') {
+                    accountSuggestion.confidence = zia.suggestion.confidence;
+                    accountSuggestion.source = 'zoho_zia';
+                  }
+                  stages.push({
+                    step: 'zoho_zia_enrichment',
+                    status: zia?.status || 'UNKNOWN',
+                    detail: zia?.reason || (zia?.status === 'COMPLETED' ? 'Zia returned enriched company data' : 'No completed Zia enrichment data returned in this request'),
+                  });
+                  if (zia?.suggestion?.name) await findZohoAccountsByNameAndDomain(zia.suggestion.name, cleanDetectDomain);
+                } catch (ziaErr) {
+                  zia = { status: 'ERROR', reason: ziaErr.message };
+                  stages.push({ step: 'zoho_zia_enrichment', status: 'ERROR', detail: ziaErr.message });
+                }
+              }
+
+              // ─── Phase 5: Last resort web search through Claude ───
+              const stillNeedsWebLookup = cleanDetectDomain && !isConsumerDomain && !(accountSuggestion.name && (accountSuggestion.street || accountSuggestion.city));
+              if (stillNeedsWebLookup) {
+                const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-api-key': env.ANTHROPIC_API_KEY,
+                    'anthropic-version': '2023-06-01',
+                  },
+                  body: JSON.stringify({
+                    model: 'claude-haiku-4-5-20251001',
+                    max_tokens: 600,
+                    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+                    messages: [{
+                      role: 'user',
+                      content: `Use web search to identify the official business name and headquarters address for the email domain "${cleanDetectDomain}". Return ONLY JSON:
+{"name": "Company Name", "street": "123 Main St", "city": "City", "state": "XX", "zip": "12345", "phone": "555-555-5555", "website": "${cleanDetectDomain}", "confidence": "high|medium|low"}`
+                    }],
+                  }),
+                });
+
+                if (claudeResp.ok) {
+                  const claudeData = await claudeResp.json();
+                  ctx.waitUntil(trackUsage(env, 'claude-haiku-4-5-20251001', claudeData.usage, 'addon-detect-web'));
+                  let textContent = '';
+                  for (const block of (claudeData.content || [])) {
+                    if (block.type === 'text') textContent += block.text;
+                  }
+                  const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+                  if (jsonMatch) {
+                    try {
+                      const parsed = JSON.parse(jsonMatch[0]);
+                      if (parsed.name) accountSuggestion.name = parsed.name;
+                      if (parsed.street) accountSuggestion.street = parsed.street;
+                      if (parsed.city) accountSuggestion.city = parsed.city;
+                      if (parsed.state) accountSuggestion.state = parsed.state;
+                      if (parsed.zip) accountSuggestion.zip = parsed.zip;
+                      if (parsed.phone && !accountSuggestion.phone) accountSuggestion.phone = parsed.phone;
+                      if (parsed.website) accountSuggestion.website = normalizeDomainValue(parsed.website);
+                      if (parsed.confidence) accountSuggestion.confidence = parsed.confidence;
+                      accountSuggestion.source = 'web_search';
+                    } catch (_) { /* keep current suggestion */ }
+                  }
+                  stages.push({ step: 'web_search', status: accountSuggestion.source === 'web_search' ? 'USED' : 'NO_DATA', detail: 'External web search was used only after email, Zoho account, and Zia checks' });
+                } else {
+                  stages.push({ step: 'web_search', status: 'ERROR', detail: `Claude web search returned ${claudeResp.status}` });
+                }
+              }
+
+              const existingAccount = candidates.find(c => c.matchConfidence === 'high') || null;
 
               apiResult = {
                 suggestion: accountSuggestion,
-                existingAccount: existingAccount,
-                domain: detectDomain || '',
+                existingAccount,
+                candidates,
+                zia,
+                stages,
+                domain: cleanDetectDomain || '',
               };
             } catch (err) {
               console.error('[detect-account] Error:', err);

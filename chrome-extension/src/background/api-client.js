@@ -301,6 +301,19 @@ export async function enrichCompany(domain) {
 }
 
 /**
+ * Detect account info using the selected email thread, Zoho/Zia enrichment,
+ * and only then web research as a fallback.
+ */
+export async function detectAccount({ emailBody, senderDomain, senderEmail, senderName }) {
+  return apiCall('/api/detect-account', {
+    emailBody: (emailBody || '').substring(0, MAX_EMAIL_BODY_CHARS),
+    senderDomain: senderDomain || '',
+    senderEmail: senderEmail || '',
+    senderName: senderName || '',
+  }, { timeout: 60000 });
+}
+
+/**
  * Create a new CRM account.
  */
 export async function crmCreateAccount(name, street, city, state, zip, website) {

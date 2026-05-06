@@ -300,6 +300,11 @@ registerMessageHandlers({
     return api.enrichCompany(domain);
   },
 
+  // ── Detect Account (thread → Zoho/Zia → web fallback) ──
+  [MSG.DETECT_ACCOUNT]: async (params) => {
+    return api.detectAccount(params || {});
+  },
+
   // ── CRM Create Task ──
   [MSG.CRM_CREATE_TASK]: async ({ subject, dueDate, dealId, contactId, priority, description }) => {
     return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description);

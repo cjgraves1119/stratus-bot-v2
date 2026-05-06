@@ -56,6 +56,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   // Create Account sub-form state (shown inside Add Contact form)
   const [showCreateAccount, setShowCreateAccount] = useState(false);
   const [newAccountData, setNewAccountData] = useState({ name: '', street: '', city: '', state: '', zip: '', website: '' });
+  const [newAccountSource, setNewAccountSource] = useState('');
+  const [accountDetection, setAccountDetection] = useState(null);
+  const [accountDetectionStatus, setAccountDetectionStatus] = useState('');
   const [createAccountLoading, setCreateAccountLoading] = useState(false);
   const [createAccountError, setCreateAccountError] = useState(null);
   const [enrichLoading, setEnrichLoading] = useState(false);
@@ -413,6 +416,61 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   }
 
   // ── Add Contact ──
+  function buildAccountDetectionPayload(emailForForm, contact) {
+    const domain = (emailForForm.split('@')[1] || '').toLowerCase();
+    return {
+      emailBody: emailContext?.body || '',
+      senderDomain: domain,
+      senderEmail: emailForForm || emailContext?.customerEmail || emailContext?.senderEmail || '',
+      senderName: contact?.name || emailContext?.customerName || emailContext?.senderName || '',
+    };
+  }
+
+  function applyAccountDetectionResult(result, domain) {
+    setAccountDetection(result || null);
+
+    const detectedCandidates = result?.candidates || [];
+    setDomainSuggestions(detectedCandidates);
+
+    if (result?.existingAccount?.id && result.existingAccount.matchConfidence === 'high') {
+      setAddFormAccountId(result.existingAccount.id);
+      setAddFormAccountName(result.existingAccount.name || '');
+      setShowCreateAccount(false);
+      setAccountDetectionStatus(`Linked exact Zoho website match for ${domain}.`);
+      return;
+    }
+
+    const suggestion = result?.suggestion || {};
+    if (suggestion.name || suggestion.street || suggestion.city) {
+      setShowCreateAccount(true);
+      setNewAccountSource(suggestion.source || '');
+      setNewAccountData(prev => ({
+        name: suggestion.name || prev.name,
+        street: suggestion.street || prev.street,
+        city: suggestion.city || prev.city,
+        state: suggestion.state || prev.state,
+        zip: suggestion.zip || prev.zip,
+        website: suggestion.website || (suggestion.source === 'email_thread' ? '' : prev.website || domain),
+      }));
+      const label = suggestion.source === 'email_thread'
+        ? 'Prefilled from the email thread.'
+        : suggestion.source === 'zoho_zia'
+          ? 'Prefilled from Zoho Zia enrichment.'
+          : suggestion.source === 'web_search'
+            ? 'Prefilled from web research after Zoho did not return enough data.'
+            : 'Prefilled from company lookup.';
+      setAccountDetectionStatus(label);
+      return;
+    }
+
+    if (detectedCandidates.length > 0) {
+      setAccountDetectionStatus('Zoho found possible matches. Verify before linking.');
+    } else {
+      setShowCreateAccount(true);
+      setAccountDetectionStatus('No existing account match found. Create a new account before adding the contact.');
+    }
+  }
+
   function openAddForm() {
     const contact = externalContacts.find(c => c.email?.toLowerCase() === selectedContact?.toLowerCase());
     const nameParts = (contact?.name || '').split(' ');
@@ -441,6 +499,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setAccountSearchResults([]);
     setDomainSuggestions([]);
     setShowCreateAccount(false);
+    setNewAccountSource('');
+    setAccountDetection(null);
+    setAccountDetectionStatus('');
     setNewAccountData({
       name: '',
       street: '',
@@ -454,36 +515,25 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setAddFormError(null);
     setAddFormSuccess(null);
 
-    // Auto-load domain suggestions if we don't already have an account
+    // Auto-run the account workflow if we don't already have an account:
+    // email thread first, Zoho/Zia second, web research last.
     if (!data?.account?.id && domain && !CONSUMER_DOMAINS.has(domain)) {
       setDomainSuggestionsLoading(true);
-      sendToBackground(MSG.CRM_ACCOUNT_SEARCH, { query: '', domain })
+      setEnrichLoading(true);
+      setAccountDetectionStatus('Checking email thread, then Zoho/Zia enrichment...');
+      sendToBackground(MSG.DETECT_ACCOUNT, buildAccountDetectionPayload(emailForForm, contact))
         .then(res => {
-          const found = res?.records || [];
-          setDomainSuggestions(found);
-          // If no CRM accounts found for this domain, auto-enrich from web
-          if (found.length === 0) {
-            setEnrichLoading(true);
-            setShowCreateAccount(true); // Auto-open create account form
-            sendToBackground(MSG.ENRICH_COMPANY, { domain })
-              .then(enriched => {
-                if (enriched && !enriched.error) {
-                  setNewAccountData(prev => ({
-                    name: enriched.name || prev.name,
-                    street: enriched.street || prev.street,
-                    city: enriched.city || prev.city,
-                    state: enriched.state || prev.state,
-                    zip: enriched.zip || prev.zip,
-                    website: enriched.website || domain,
-                  }));
-                }
-              })
-              .catch(() => {})
-              .finally(() => setEnrichLoading(false));
-          }
+          if (res?.error) throw new Error(res.error);
+          applyAccountDetectionResult(res, domain);
         })
-        .catch(() => {})
-        .finally(() => setDomainSuggestionsLoading(false));
+        .catch(err => {
+          setAccountDetectionStatus(`Company lookup failed: ${err.message || err}. You can still search Zoho or create the account manually.`);
+          setShowCreateAccount(true);
+        })
+        .finally(() => {
+          setDomainSuggestionsLoading(false);
+          setEnrichLoading(false);
+        });
     }
   }
 
@@ -522,9 +572,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         setAddFormAccountId(result.accountId);
         setAddFormAccountName(newAccountData.name.trim());
         setShowCreateAccount(false);
+        setNewAccountSource('');
         setAccountSearchQuery('');
         setAccountSearchResults([]);
         setDomainSuggestions([]);
+        setAccountDetectionStatus('Account created. You can now add the contact to it.');
       } else {
         setCreateAccountError(result?.error || 'Failed to create account');
       }
@@ -730,10 +782,13 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 accountSearchLoading={accountSearchLoading}
                 domainSuggestions={domainSuggestions}
                 domainSuggestionsLoading={domainSuggestionsLoading}
+                accountDetection={accountDetection}
+                accountDetectionStatus={accountDetectionStatus}
                 showCreateAccount={showCreateAccount}
                 setShowCreateAccount={setShowCreateAccount}
                 newAccountData={newAccountData}
                 setNewAccountData={setNewAccountData}
+                newAccountSource={newAccountSource}
                 onCreateAccount={handleCreateAccount}
                 createAccountLoading={createAccountLoading}
                 createAccountError={createAccountError}
@@ -1514,9 +1569,9 @@ function AddContactForm({
   formData, setFormData,
   accountId, setAccountId, accountName, setAccountName,
   accountSearchQuery, onAccountSearchChange, accountSearchResults, accountSearchLoading,
-  domainSuggestions, domainSuggestionsLoading,
+  domainSuggestions, domainSuggestionsLoading, accountDetection, accountDetectionStatus,
   showCreateAccount, setShowCreateAccount,
-  newAccountData, setNewAccountData, onCreateAccount, createAccountLoading, createAccountError,
+  newAccountData, setNewAccountData, newAccountSource, onCreateAccount, createAccountLoading, createAccountError,
   enrichLoading,
   onSubmit, onCancel, loading, error,
 }) {
@@ -1536,9 +1591,19 @@ function AddContactForm({
   // All candidate accounts for the dropdown: domain suggestions + name search results (deduped)
   const domainIds = new Set((domainSuggestions || []).map(a => a.id));
   const nameOnlyResults = (accountSearchResults || []).filter(a => !domainIds.has(a.id));
+  const trustedDomainSuggestions = (domainSuggestions || []).filter(a => a.matchConfidence === 'high' || a.isDomainMatch);
+  const possibleDomainSuggestions = (domainSuggestions || []).filter(a => !(a.matchConfidence === 'high' || a.isDomainMatch));
   const showDropdown = !accountId && !showCreateAccount && (
     domainSuggestions.length > 0 || accountSearchResults.length > 0 || domainSuggestionsLoading || accountSearchLoading
   );
+  const needsAccount = !accountId;
+  const sourceLabel = newAccountSource === 'email_thread'
+    ? 'From email thread'
+    : newAccountSource === 'zoho_zia'
+      ? 'From Zoho Zia enrichment'
+      : newAccountSource === 'web_search'
+        ? 'From web research'
+        : '';
 
   return (
     <Card>
@@ -1568,6 +1633,14 @@ function AddContactForm({
           <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, marginBottom: 6, textTransform: 'uppercase' }}>
             Account
           </div>
+          {accountDetectionStatus && !accountId && (
+            <div style={{
+              fontSize: 11, color: COLORS.TEXT_SECONDARY, background: COLORS.BG_SECONDARY,
+              border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, padding: '6px 8px', marginBottom: 6,
+            }}>
+              {accountDetectionStatus}
+            </div>
+          )}
 
           {/* Selected account pill */}
           {accountId ? (
@@ -1598,14 +1671,26 @@ function AddContactForm({
                     <div style={{ padding: '6px 10px', fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Searching...</div>
                   )}
 
-                  {/* Domain matches (shown first) */}
-                  {domainSuggestions.length > 0 && (
+                  {/* Trusted Zoho website matches (shown first) */}
+                  {trustedDomainSuggestions.length > 0 && (
                     <>
                       <div style={{ padding: '4px 10px', fontSize: 10, color: COLORS.TEXT_SECONDARY, background: '#f8f9fa', borderBottom: `1px solid ${COLORS.BORDER}`, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                        Domain Match
+                        Zoho Website Match
                       </div>
-                      {domainSuggestions.map((acct, i) => (
+                      {trustedDomainSuggestions.map((acct, i) => (
                         <AccountRow key={acct.id || i} acct={acct} onSelect={selectAccount} isDomainMatch />
+                      ))}
+                    </>
+                  )}
+
+                  {/* Lower-confidence Zoho candidates */}
+                  {possibleDomainSuggestions.length > 0 && (
+                    <>
+                      <div style={{ padding: '4px 10px', fontSize: 10, color: COLORS.TEXT_SECONDARY, background: '#fff8e1', borderTop: trustedDomainSuggestions.length > 0 ? `1px solid ${COLORS.BORDER}` : 'none', borderBottom: `1px solid ${COLORS.BORDER}`, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                        Possible Zoho Matches
+                      </div>
+                      {possibleDomainSuggestions.map((acct, i) => (
+                        <AccountRow key={acct.id || i} acct={acct} onSelect={selectAccount} />
                       ))}
                     </>
                   )}
@@ -1662,9 +1747,14 @@ function AddContactForm({
                 <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.STRATUS_BLUE, textTransform: 'uppercase' }}>
                   New Account
                 </div>
+                {sourceLabel && (
+                  <div style={{ fontSize: 10, color: COLORS.STRATUS_BLUE, background: 'white', border: `1px solid ${COLORS.STRATUS_BLUE}33`, borderRadius: 999, padding: '2px 7px' }}>
+                    {sourceLabel}
+                  </div>
+                )}
                 {enrichLoading && (
                   <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
-                    Looking up company info…
+                    Checking email thread, Zoho/Zia, then web…
                   </div>
                 )}
               </div>
@@ -1690,6 +1780,7 @@ function AddContactForm({
                 style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />
               <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>
                 Owner: <strong>Chris Graves</strong> (default)
+                {accountDetection?.zia?.status && <span> · Zia: {accountDetection.zia.status}</span>}
               </div>
               {createAccountError && (
                 <div style={{ fontSize: 11, color: COLORS.ERROR, marginBottom: 6 }}>{createAccountError}</div>
@@ -1709,10 +1800,15 @@ function AddContactForm({
         </div>
 
         {error && <div style={{ fontSize: 12, color: COLORS.ERROR, marginBottom: 8 }}>{error}</div>}
+        {needsAccount && (
+          <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>
+            Select an existing account or create the new account first, then add the contact to it.
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8 }}>
-          <button type="submit" disabled={loading} style={{
-            flex: 1, padding: '8px', background: COLORS.STRATUS_BLUE, color: 'white',
-            border: 'none', borderRadius: 6, fontSize: 12, cursor: loading ? 'not-allowed' : 'pointer',
+          <button type="submit" disabled={loading || needsAccount} style={{
+            flex: 1, padding: '8px', background: needsAccount ? COLORS.BORDER : COLORS.STRATUS_BLUE, color: 'white',
+            border: 'none', borderRadius: 6, fontSize: 12, cursor: (loading || needsAccount) ? 'not-allowed' : 'pointer',
             opacity: loading ? 0.6 : 1,
           }}>
             {loading ? 'Creating...' : 'Create Contact'}
@@ -1735,6 +1831,8 @@ function AccountRow({ acct, onSelect, isDomainMatch }) {
   const city = acct.billingCity || acct.Billing_City || '';
   const state = acct.billingState || acct.Billing_State || '';
   const location = [city, state].filter(Boolean).join(', ');
+  const confidence = acct.matchConfidence || '';
+  const reason = acct.matchReason || '';
   return (
     <div
       onMouseDown={(e) => { e.preventDefault(); onSelect(acct); }}
@@ -1747,8 +1845,14 @@ function AccountRow({ acct, onSelect, isDomainMatch }) {
         {location && <span>{location}</span>}
         {location && website && <span> · </span>}
         {website && <span>{website}</span>}
-        {isDomainMatch && <span style={{ marginLeft: 4, color: '#1a73e8', fontSize: 10, fontWeight: 600 }}>● domain</span>}
+        {isDomainMatch && <span style={{ marginLeft: 4, color: '#1a73e8', fontSize: 10, fontWeight: 600 }}>● website</span>}
+        {confidence === 'low' && <span style={{ marginLeft: 4, color: '#e37400', fontSize: 10, fontWeight: 600 }}>● verify</span>}
       </div>
+      {reason && (
+        <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginTop: 2 }}>
+          {reason}
+        </div>
+      )}
     </div>
   );
 }
