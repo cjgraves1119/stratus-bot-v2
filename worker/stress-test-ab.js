@@ -10,6 +10,11 @@
  * "expected correct intent" for each test case and measure which architecture
  * would route it correctly vs incorrectly.
  *
+ * NON-DECISION-SUPPORT FOR MODEL ROUTING: this file simulates classifier and
+ * waterfall behavior. Do not use its pass rate as evidence for relaxing Claude
+ * fallback. Decision-grade waterfall evals must call the deployed Worker and
+ * actual Llama/Gemma/Claude model endpoints.
+ *
  * The key question: Does the deterministic engine produce false-positive quotes
  * on product_info/advisory questions? (This was the original finding.)
  */

@@ -21,7 +21,7 @@ const MAIN_WORKER_PATH = '/api/chat-waterfall';
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, x-user-email, X-Force-Model',
+  'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, x-user-email, X-Force-Model, X-Eval-Run-Id',
 };
 
 function jsonResponse(body, status = 200, extraHeaders = {}) {
@@ -248,6 +248,7 @@ export default {
 
       const userEmail = request.headers.get('x-user-email') || 'anonymous';
       const forceHeader = request.headers.get('X-Force-Model');
+      const evalRunId = request.headers.get('X-Eval-Run-Id') || '';
       // Merge header override into body for downstream
       if (forceHeader && !body.forceModel) body.forceModel = forceHeader;
 
@@ -255,23 +256,26 @@ export default {
       let forwarded;
       try {
         forwarded = await forwardToMain(env, MAIN_WORKER_PATH, body, {
-          'x-user-email': userEmail
+          'x-user-email': userEmail,
+          ...(evalRunId ? { 'X-Eval-Run-Id': evalRunId } : {})
         });
       } catch (err) {
         return jsonResponse({ error: 'gateway_forward_failed', detail: err.message }, 502);
       }
 
       // Telemetry (async, non-blocking)
-      ctx.waitUntil(logGatewayHit(env, {
-        endpoint: '/api/chat',
-        tier: forwarded.data.tierUsed || 'unknown',
-        stallReason: forwarded.data.stallReason,
-        totalMs: forwarded.data.totalMs || (Date.now() - start),
-        model: forwarded.data.model,
-        toolCount: forwarded.data.toolCallCount,
-        userEmail,
-        status: forwarded.status
-      }));
+      if (!evalRunId) {
+        ctx.waitUntil(logGatewayHit(env, {
+          endpoint: '/api/chat',
+          tier: forwarded.data.tierUsed || 'unknown',
+          stallReason: forwarded.data.stallReason,
+          totalMs: forwarded.data.totalMs || (Date.now() - start),
+          model: forwarded.data.model,
+          toolCount: forwarded.data.toolCallCount,
+          userEmail,
+          status: forwarded.status
+        }));
+      }
 
       return jsonResponse(forwarded.data, forwarded.status);
     }

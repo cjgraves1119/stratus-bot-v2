@@ -3,6 +3,9 @@
  *
  * Runs each of 74 fixtures through three configurations via the deployed
  * /api/benchmark-classifier endpoint (which now accepts prompt_variant).
+ * Decision-grade runs call the live deployed Worker endpoint, which calls the
+ * actual bound Workers AI model. Do not replace these with local simulations
+ * when using the results to relax Claude routing.
  *
  * Variants:
  *   - legacy   → prompt_variant=legacy, model=Llama 4 Scout
@@ -25,6 +28,9 @@ const path = require('path');
 
 const ENDPOINT = 'https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier';
 const KEY = 'Biscuit4';
+const EVAL_MODE = 'live_benchmark_classifier';
+const DECISION_GRADE_LIVE_LLM = true;
+const EVAL_RUN_ID = process.env.EVAL_RUN_ID || `classifier-${Date.now()}`;
 
 const VARIANTS = [
   { id: 'legacy',      label: 'Legacy prompt (Llama)',  promptVariant: 'legacy', model: '@cf/meta/llama-4-scout-17b-16e-instruct' },
@@ -190,18 +196,66 @@ async function runOne(fixture, variant) {
   try {
     const res = await fetch(ENDPOINT, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Bench-Key': KEY },
+      headers: { 'Content-Type': 'application/json', 'X-Bench-Key': KEY, 'X-Eval-Run-Id': EVAL_RUN_ID },
       body: JSON.stringify(body)
     });
     const wall = Date.now() - wallStart;
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
-      return { error: `HTTP ${res.status} ${txt.substring(0,120)}`, latency: wall };
+      return {
+        error: `HTTP ${res.status} ${txt.substring(0,120)}`,
+        latency: wall,
+        httpStatus: res.status,
+        endpoint: ENDPOINT,
+        requestedModel: variant.model,
+        requestedPromptVariant: variant.promptVariant,
+        executedModel: null,
+        tierPath: null,
+        attempts: 1,
+        transientErrors: [`HTTP ${res.status}`],
+        liveEndpointCall: true,
+        liveLlmCall: false,
+        simulated: false,
+      };
     }
     const data = await res.json();
-    return { parsed: data.parsed, raw: data.raw, parseError: data.parseError, err: data.err, latency: data.elapsed || wall };
+    return {
+      parsed: data.parsed,
+      raw: data.raw,
+      parseError: data.parseError,
+      err: data.err,
+      latency: data.elapsed || wall,
+      httpStatus: res.status,
+      endpoint: ENDPOINT,
+      requestedModel: variant.model,
+      observedModel: data.model || null,
+      requestedPromptVariant: variant.promptVariant,
+      observedPromptVariant: data.prompt_variant || null,
+      executedModel: data.model || variant.model,
+      tierPath: data.model || variant.model,
+      attempts: 1,
+      transientErrors: data.err ? [data.err] : [],
+      inputTokens: data.input_tokens ?? data.usage?.input_tokens ?? null,
+      outputTokens: data.output_tokens ?? data.usage?.output_tokens ?? null,
+      liveEndpointCall: true,
+      liveLlmCall: !data.err,
+      simulated: false,
+    };
   } catch (e) {
-    return { error: e.message, latency: Date.now() - wallStart };
+    return {
+      error: e.message,
+      latency: Date.now() - wallStart,
+      endpoint: ENDPOINT,
+      requestedModel: variant.model,
+      requestedPromptVariant: variant.promptVariant,
+      executedModel: null,
+      tierPath: null,
+      attempts: 1,
+      transientErrors: [e.message],
+      liveEndpointCall: false,
+      liveLlmCall: false,
+      simulated: false,
+    };
   }
 }
 
@@ -222,6 +276,8 @@ async function main() {
   console.log(`  ${subset.length} fixtures × ${VARIANTS.length} variants`);
   console.log(`  Concurrency: ${concurrency}`);
   console.log(`  Endpoint: ${ENDPOINT}`);
+  console.log(`  Decision-grade eval: LIVE deployed endpoint + actual Workers AI calls (not simulated)`);
+  console.log(`  Eval run id: ${EVAL_RUN_ID}`);
   console.log(`════════════════════════════════════════════════════════════\n`);
 
   const results = {};  // variant.id → { fixture_id → { grade, latency, parsed } }
@@ -242,6 +298,25 @@ async function main() {
       const sdw  = probeSDW(job.fixture, r.parsed, job.variant.id);
       const swap = probeSwap(job.fixture, r.parsed, job.variant.id);
       results[job.variant.id][job.fixture.id] = {
+        evalMode: EVAL_MODE,
+        decisionGrade: DECISION_GRADE_LIVE_LLM,
+        liveEndpointCall: r.liveEndpointCall,
+        liveLlmCall: r.liveLlmCall,
+        simulated: r.simulated,
+        endpoint: r.endpoint,
+        syntheticEval: true,
+        evalRunId: EVAL_RUN_ID,
+        requestedModel: r.requestedModel,
+        executedModel: r.executedModel || null,
+        tierPath: r.tierPath || null,
+        observedModel: r.observedModel || null,
+        requestedPromptVariant: r.requestedPromptVariant,
+        observedPromptVariant: r.observedPromptVariant || null,
+        attempts: r.attempts,
+        transientErrors: r.transientErrors,
+        inputTokens: r.inputTokens ?? null,
+        outputTokens: r.outputTokens ?? null,
+        httpStatus: r.httpStatus || null,
         grade, sdw, swap,
         latency: r.latency,
         parsed: r.parsed,
@@ -347,6 +422,13 @@ async function main() {
   const outPath = path.join(__dirname, 'benchmark-3variant-results.json');
   fs.writeFileSync(outPath, JSON.stringify({
     timestamp: new Date().toISOString(),
+    evalMode: EVAL_MODE,
+    decisionGrade: DECISION_GRADE_LIVE_LLM,
+    liveLlmCallsRequired: true,
+    simulatedResultsAllowedForRoutingDecisions: false,
+    endpoint: ENDPOINT,
+    syntheticEval: true,
+    evalRunId: EVAL_RUN_ID,
     fixtureCount: subset.length,
     summary,
     results,

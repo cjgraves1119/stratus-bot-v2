@@ -14,6 +14,10 @@ const path = require('path');
 const crypto = require('crypto');
 
 const GATEWAY = 'https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev';
+const LIVE_TEST_ENDPOINT = `${GATEWAY}/api/chat`;
+const EVAL_MODE = 'live_gateway_chat';
+const DECISION_GRADE_LIVE_LLM = true;
+const EVAL_RUN_ID = process.env.EVAL_RUN_ID || crypto.randomUUID();
 const USER_EMAIL = 'chrisg@stratusinfosystems.com';
 const PERSON_ID = '2570562000141711002';
 const TEST_ACCOUNT = '2570562000401231689';
@@ -26,6 +30,7 @@ const FORCE_MODEL = process.env.FORCE_MODEL || null; // 'llama' | 'gemma' | 'kim
 const RUN_LABEL = process.env.RUN_LABEL || (FORCE_MODEL || 'auto');
 const AUTO_RESEED = process.env.AUTO_RESEED !== '0'; // default on
 const SEED_CONTACT = '2570562000401235755';
+const GATEWAY_API_KEY = process.env.STRATUS_GATEWAY_API_KEY || process.env.GATEWAY_API_KEY || '';
 
 const outPath = path.join(__dirname, `results-${RUN_LABEL}-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
 const logStream = fs.createWriteStream(outPath, { flags: 'a' });
@@ -106,12 +111,15 @@ async function sendChat(text, history, progressId, sessionId) {
   };
   if (FORCE_MODEL) body.forceModel = FORCE_MODEL;
   const t0 = Date.now();
-  const res = await fetch(`${GATEWAY}/api/chat`, {
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-User-Email': USER_EMAIL,
+    'X-Eval-Run-Id': EVAL_RUN_ID,
+  };
+  if (GATEWAY_API_KEY) headers['X-API-Key'] = GATEWAY_API_KEY;
+  const res = await fetch(LIVE_TEST_ENDPOINT, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-User-Email': USER_EMAIL,
-    },
+    headers,
     body: JSON.stringify(body),
   });
   const raw = await res.text();
@@ -123,6 +131,9 @@ async function sendChat(text, history, progressId, sessionId) {
     elapsedMs: Date.now() - t0,
     status: res.status,
     ok: res.ok,
+    liveEndpoint: LIVE_TEST_ENDPOINT,
+    liveEndpointCall: true,
+    simulated: false,
     raw,
     parsed,
     replyText,
@@ -137,6 +148,39 @@ const hrefHasTrailingPeriod = (html) => /href="[^"]*\.(?:"|\?)/i.test(html);
 const hrefEndsWithPeriodBeforeQuote = (html) => /href="[^"]*\.\s*"/.test(html) || /href="[^"]*\.[)\]]\s*"/.test(html);
 const containsCI = (text, needle) => (text || '').toLowerCase().includes((needle || '').toLowerCase());
 const hasZohoUrl = (text) => /https:\/\/crm\.zoho\.com\//i.test(text);
+function firstNonEmpty(...values) {
+  return values.find(v => v !== undefined && v !== null && v !== '') ?? null;
+}
+function getObservedResponsePath(parsed) {
+  return firstNonEmpty(parsed?.response_path, parsed?.responsePath, parsed?.path);
+}
+function getObservedTier(parsed) {
+  return firstNonEmpty(parsed?.tierUsed, parsed?.tier_used, parsed?.tier);
+}
+function getExecutedModel(parsed) {
+  return firstNonEmpty(parsed?.model, parsed?.executed_model, parsed?.executedModel, getObservedTier(parsed));
+}
+function getTierPath(parsed) {
+  if (Array.isArray(parsed?.tier_path)) return parsed.tier_path.join(',');
+  if (Array.isArray(parsed?.tierPath)) return parsed.tierPath.join(',');
+  if (Array.isArray(parsed?.iterations)) {
+    return parsed.iterations.map(i => firstNonEmpty(i.model, i.tier, i.name)).filter(Boolean).join(',') || null;
+  }
+  return firstNonEmpty(parsed?.tier_path, parsed?.tierPath, getObservedTier(parsed), parsed?.model);
+}
+function isTier0Deterministic(parsed) {
+  const path = String(getObservedResponsePath(parsed) || '').toLowerCase();
+  const tier = String(getObservedTier(parsed) || '').toLowerCase();
+  const model = String(getExecutedModel(parsed) || '').toLowerCase();
+  return parsed?.tier_0_deterministic === true ||
+    parsed?.tier0Deterministic === true ||
+    path.includes('deterministic') ||
+    tier.includes('deterministic') ||
+    model.includes('deterministic');
+}
+function getUsage(parsed, key) {
+  return firstNonEmpty(parsed?.[key], parsed?.usage?.[key], parsed?.usage?.[key.replace('_tokens', 'Tokens')]);
+}
 
 // Anchor href extraction
 function extractHrefs(html) {
@@ -529,6 +573,10 @@ async function main() {
   console.log(`=== Stratus AI 50-test matrix — ${startedAt} ===`);
   console.log(`Output: ${outPath}`);
   console.log(`Gateway: ${GATEWAY}`);
+  console.log(`Decision-grade eval: LIVE deployed gateway + actual model path (not simulated)`);
+  console.log(`Endpoint: ${LIVE_TEST_ENDPOINT}`);
+  console.log(`Eval run id: ${EVAL_RUN_ID}`);
+  console.log(`Gateway API key: ${GATEWAY_API_KEY ? 'present' : 'missing (gateway may return 401)'}`);
   console.log(`FORCE_MODEL: ${FORCE_MODEL || '(waterfall)'} — RUN_LABEL: ${RUN_LABEL}`);
   console.log('');
 
@@ -566,6 +614,26 @@ async function main() {
 
     const row = {
       id: t.id, cat: t.cat, destructive: t.destructive,
+      evalMode: EVAL_MODE,
+      decisionGrade: DECISION_GRADE_LIVE_LLM,
+      syntheticEval: true,
+      evalRunId: EVAL_RUN_ID,
+      liveEndpointCall: ctx.liveEndpointCall,
+      liveLlmCall: !isTier0Deterministic(ctx.parsed),
+      tier0Deterministic: isTier0Deterministic(ctx.parsed),
+      simulated: ctx.simulated,
+      endpoint: ctx.liveEndpoint,
+      requestedMode: FORCE_MODEL ? 'forced' : 'waterfall',
+      requestedModel: FORCE_MODEL || null,
+      executedModel: getExecutedModel(ctx.parsed),
+      tierPath: getTierPath(ctx.parsed),
+      observedModel: ctx.parsed?.model || null,
+      observedTierUsed: getObservedTier(ctx.parsed),
+      observedResponsePath: getObservedResponsePath(ctx.parsed),
+      attempts: 1,
+      transientErrors: [],
+      inputTokens: getUsage(ctx.parsed, 'input_tokens'),
+      outputTokens: getUsage(ctx.parsed, 'output_tokens'),
       prompt: t.prompt,
       elapsedMs: ctx.elapsedMs,
       status: ctx.status,

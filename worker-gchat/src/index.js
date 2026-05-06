@@ -90,13 +90,40 @@ const MODEL_PRICING = {
  * @param {Object} usage - { input_tokens, output_tokens } from API response
  * @param {string} source - Where the call originated (e.g. 'gchat', 'addon-analyze', 'addon-draft', 'crm-agent')
  */
-async function trackUsage(env, model, usage, source) {
+async function trackUsage(env, model, usage, source, evalContext = null) {
   if (!usage || !env?.CONVERSATION_KV) return;
   try {
     const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
     const inputCost = (usage.input_tokens / 1_000_000) * pricing.input;
     const outputCost = (usage.output_tokens / 1_000_000) * pricing.output;
     const totalCost = inputCost + outputCost;
+    const evalRunId = evalContext?.runId || null;
+
+    if (evalRunId) {
+      await logBotUsageToD1(env, {
+        bot: evalContext?.bot || (source.startsWith('addon') ? 'addon' : 'gchat'),
+        personId: evalContext?.personId || null,
+        requestText: evalContext?.requestText || null,
+        responsePath: source === 'crm-agent' ? 'crm_agent' : (source.includes('addon') ? 'claude' : 'claude'),
+        model,
+        requestedModel: evalContext?.requestedModel || null,
+        executedModel: model,
+        tierPath: model,
+        liveLlmCall: true,
+        tier0Deterministic: false,
+        attempts: 1,
+        transientErrors: [],
+        inputTokens: usage.input_tokens || 0,
+        outputTokens: usage.output_tokens || 0,
+        costUsd: Math.round(totalCost * 1_000_000) / 1_000_000,
+        durationMs: null,
+        errorMessage: null,
+        responseText: null,
+        endpoint: evalContext?.endpoint || null,
+        evalContext
+      });
+      return;
+    }
 
     const now = new Date();
     const monthKey = `usage_${now.getFullYear()}_${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -261,10 +288,49 @@ async function logPriceChangeToD1(env, { sku, oldPrice, newPrice, listPrice }) {
  */
 async function logBotUsageToD1(env, {
   bot, personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage,
-  responseText, toolCallsJson
+  responseText, toolCallsJson, requestedModel, executedModel, tierPath, liveLlmCall, tier0Deterministic,
+  attempts, transientErrors, endpoint, evalContext
 }) {
   if (!env?.ANALYTICS_DB) return;
   try {
+    const evalRunId = evalContext?.runId || null;
+    if (evalRunId) {
+      const resolvedExecutedModel = executedModel || model || null;
+      const resolvedTierPath = tierPath || resolvedExecutedModel || null;
+      const deterministic = tier0Deterministic === true || responsePath === 'deterministic' || model === 'deterministic';
+      await env.ANALYTICS_DB.prepare(
+        `INSERT INTO bot_usage_eval (
+          eval_run_id, bot, person_id, request_text, response_path, model,
+          requested_model, executed_model, tier_path, live_llm_call, tier_0_deterministic,
+          attempts, transient_errors, input_tokens, output_tokens, cost_usd, duration_ms,
+          error_message, response_text, tool_calls_json, endpoint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        evalRunId,
+        bot || 'gchat',
+        personId || null,
+        (requestText || '').substring(0, 2000),
+        responsePath || null,
+        model || null,
+        requestedModel || evalContext?.requestedModel || null,
+        resolvedExecutedModel,
+        resolvedTierPath,
+        liveLlmCall === undefined ? !deterministic : !!liveLlmCall,
+        deterministic,
+        attempts || 1,
+        transientErrors ? (typeof transientErrors === 'string' ? transientErrors : JSON.stringify(transientErrors)).substring(0, 2000) : null,
+        inputTokens || 0,
+        outputTokens || 0,
+        costUsd || 0,
+        durationMs || null,
+        errorMessage || null,
+        responseText ? String(responseText).substring(0, 8000) : null,
+        toolCallsJson ? (typeof toolCallsJson === 'string' ? toolCallsJson : JSON.stringify(toolCallsJson)).substring(0, 8000) : null,
+        endpoint || evalContext?.endpoint || null
+      ).run();
+      return;
+    }
+
     await env.ANALYTICS_DB.prepare(
       `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message, response_text, tool_calls_json)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -11084,7 +11150,7 @@ async function askCFConversation(userMessage, env) {
   }
 }
 
-async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null) {
+async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null, evalContext = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
@@ -11435,7 +11501,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       // Track API usage (writes to Analytics Engine, KV, AND D1 bot_usage)
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
-      trackUsage(env, activeModel, data.usage, usageSource).catch(() => {});
+      trackUsage(env, activeModel, data.usage, usageSource, evalContext).catch(() => {});
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
@@ -12787,7 +12853,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
 // Sets env.__BENCHMARK_DRY_RUN so executeToolCall can intercept writes
 // at the case level without needing globalThis hooks.
 // Tool call counts are inferred by scraping the agent log from KV.
-async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWallMs = 60000) {
+async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWallMs = 60000, evalContext = null) {
   const startMs = Date.now();
   const errors = [];
 
@@ -12803,7 +12869,7 @@ async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWall
   });
 
   try {
-    const reply = await askClaude(userMessage, personId, wrappedEnv, null, true, null, maxWallMs);
+    const reply = await askClaude(userMessage, personId, wrappedEnv, null, true, null, maxWallMs, evalContext);
     const replyText = typeof reply === 'string' ? reply : (reply?.reply || '(continuation returned)');
     return {
       reply: replyText,
@@ -13162,7 +13228,7 @@ function pickOptimizedPrompt(modelId) {
 }
 
 // Run a single benchmark task against a single model.
-async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full') {
+async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full', evalContext = null) {
   let systemPrompt;
   if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
     systemPrompt = pickOptimizedPrompt(modelConfig.id);
@@ -13173,7 +13239,7 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
   }
 
   if (modelConfig.type === 'claude') {
-    return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000);
+    return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext);
   }
   return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10);
 }
@@ -13447,13 +13513,14 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const useGemmaOnly = options.forceGemma === true;
   const useLlamaOnly = options.forceLlama === true;
   const dryRun = options.dryRun === true;
+  const evalContext = options.evalContext || null;
 
   const LLAMA = '@cf/meta/llama-4-scout-17b-16e-instruct';
   const GEMMA = '@cf/google/gemma-4-26b-a4b-it';
 
   // Force-Claude mode
   if (useClaudeOnly) {
-    const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
+    const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
     return { ...r, model: 'claude-sonnet-4-6', tierUsed: 'claude', totalMs: Date.now() - startMs };
   }
 
@@ -13532,7 +13599,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
 
   // ── Tier 3: Claude (final fallback) ──
   console.log(`[WATERFALL] Llama + Gemma both stalled (${llamaT.reason}/${gemmaT.reason}), escalating to Claude for personId=${personId}`);
-  const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000);
+  const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
   return {
     reply: claudeResult.reply,
     model: 'claude-sonnet-4-6',
@@ -13953,7 +14020,7 @@ ${(data.recentRequests || []).map(r => {
           headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-Gateway-Secret',
+            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-Gateway-Secret, X-Eval-Run-Id',
           }
         });
       }
@@ -13965,6 +14032,15 @@ ${(data.recentRequests || []).map(r => {
       }
 
       const apiBody = await request.json();
+      const evalRunId = request.headers.get('X-Eval-Run-Id') || null;
+      const evalContext = evalRunId ? {
+        runId: evalRunId,
+        endpoint: url.pathname,
+        requestText: apiBody?.text || null,
+        requestedModel: apiBody?.forceModel || null,
+        personId: null,
+        bot: null
+      } : null;
       const jsonHeaders = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' };
 
       try {
@@ -15918,7 +15994,21 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             }
             try {
               const benchPersonId = `bench:${taskId}:${Date.now()}`;
-              const result = await runBenchmarkTask(task, model, env, benchPersonId, bDryRun !== false, promptVariant || 'full');
+              const result = await runBenchmarkTask(
+                task,
+                model,
+                env,
+                benchPersonId,
+                bDryRun !== false,
+                promptVariant || 'full',
+                evalContext ? {
+                  ...evalContext,
+                  requestText: task.prompt,
+                  requestedModel: modelId,
+                  personId: benchPersonId,
+                  bot: 'benchmark'
+                } : null
+              );
               apiResult = { taskId, modelId, promptVariant: promptVariant || 'full', ...result };
             } catch (bErr) {
               apiResult = { taskId, modelId, error: bErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
@@ -16173,7 +16263,14 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   forceLlama: forceModel === 'llama',
                   forceGemma: forceModel === 'gemma',
                   forceClaude: forceModel === 'claude' || forceClaudeForChatWrite,
-                  dryRun: wDryRun === true
+                  dryRun: wDryRun === true,
+                  evalContext: evalContext ? {
+                    ...evalContext,
+                    requestText: wText,
+                    requestedModel: forceModel || null,
+                    personId: wPersonId,
+                    bot: 'gchat'
+                  } : null
                 });
                 env.__USER_PROMPT_RAW = null;
               }
@@ -16200,11 +16297,22 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               await addToHistory(env.CONVERSATION_KV, wPersonId, 'user', wEnrichedMessage);
               await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', outcome.reply);
 
+              const outcomeTierPath = outcome.tierUsed === 'deterministic'
+                ? 'deterministic'
+                : (outcome.tierUsed === 'llama'
+                  ? 'llama'
+                  : (outcome.tierUsed === 'gemma-fallback'
+                    ? 'llama,gemma'
+                    : (outcome.tierUsed === 'claude-fallback'
+                      ? 'llama,gemma,claude'
+                      : (outcome.tierUsed || outcome.model || null))));
+
               apiResult = {
                 success: true,
                 reply: replyWithBadge,
                 model: outcome.model,
                 tierUsed: outcome.tierUsed,
+                tierPath: outcomeTierPath,
                 stallReason: outcome.stallReason,
                 elapsedMs: outcome.elapsedMs,
                 totalMs: outcome.totalMs,
@@ -18025,6 +18133,11 @@ Return ONLY a JSON object (no markdown, no explanation):
             const _bot = botFromPersonId(_pid || _hdrEmail);
             const _botDb = (_bot === 'chrome-chat' || _bot === 'chrome-quote' || _bot === 'chrome-ext')
               ? 'addon' : _bot;
+            const _evalContext = evalContext ? { ...evalContext, personId: _pid, bot: _botDb } : null;
+            const _tierPath = Array.isArray(apiResult?.iterations)
+              ? apiResult.iterations.map(i => i.model || i.tier || i.name).filter(Boolean).join(',')
+              : (apiResult?.tierPath || apiResult?.tierUsed || apiResult?.model || null);
+            const _tier0Deterministic = apiResult?.tierUsed === 'deterministic' || apiResult?.model === 'deterministic' || apiResult?.model === 'deterministic-license-term-gate';
             ctx.waitUntil(logBotUsageToD1(env, {
               bot: _botDb,
               personId: _pid,
@@ -18037,11 +18150,20 @@ Return ONLY a JSON object (no markdown, no explanation):
                 ? 'error'
                 : (apiResult?.tierUsed === 'deterministic' ? 'deterministic' : 'crm_agent'),
               model: apiResult?.model || null,
+              requestedModel: apiBody.forceModel || null,
+              executedModel: apiResult?.model || null,
+              tierPath: _tierPath,
+              liveLlmCall: !_tier0Deterministic && !apiResult?.error,
+              tier0Deterministic: _tier0Deterministic,
+              attempts: 1,
+              transientErrors: apiResult?.error ? [apiResult.error] : [],
               durationMs: apiResult?.totalMs || null,
               responseText: typeof apiResult === 'string'
                 ? apiResult
                 : (apiResult?.reply || JSON.stringify(apiResult || '')),
-              errorMessage: apiResult?.error || null
+              errorMessage: apiResult?.error || null,
+              endpoint: url.pathname,
+              evalContext: _evalContext
             }));
           }
         } catch (_logErr) {

@@ -41,9 +41,46 @@ function writeMetric(env, { path, model, durationMs, inputTokens, outputTokens, 
 }
 
 // ── D1 Analytics Helper (Webex bot) ─────────────────────────────────────────
-async function logBotUsageToD1(env, { personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage, responseText, toolCallsJson }) {
+async function logBotUsageToD1(env, {
+  personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage,
+  responseText, toolCallsJson, requestedModel, executedModel, tierPath, liveLlmCall, tier0Deterministic,
+  attempts, transientErrors, endpoint, evalContext
+}) {
   if (!env?.ANALYTICS_DB) return;
   try {
+    if (evalContext?.runId) {
+      await env.ANALYTICS_DB.prepare(
+        `INSERT INTO bot_usage_eval (
+          eval_run_id, bot, person_id, request_text, response_path, model,
+          requested_model, executed_model, tier_path, live_llm_call, tier_0_deterministic,
+          attempts, transient_errors, input_tokens, output_tokens, cost_usd, duration_ms,
+          error_message, response_text, tool_calls_json, endpoint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        evalContext.runId,
+        'webex',
+        personId || null,
+        (requestText || '').substring(0, 2000),
+        responsePath || null,
+        model || null,
+        requestedModel || evalContext.requestedModel || null,
+        executedModel || model || null,
+        tierPath || executedModel || model || null,
+        liveLlmCall === undefined ? true : !!liveLlmCall,
+        !!tier0Deterministic,
+        attempts || 1,
+        transientErrors ? (typeof transientErrors === 'string' ? transientErrors : JSON.stringify(transientErrors)).substring(0, 2000) : null,
+        inputTokens || 0,
+        outputTokens || 0,
+        costUsd || 0,
+        durationMs || null,
+        errorMessage || null,
+        responseText ? String(responseText).substring(0, 8000) : null,
+        toolCallsJson ? String(toolCallsJson).substring(0, 8000) : null,
+        endpoint || evalContext.endpoint || null
+      ).run();
+      return;
+    }
     // Truncate response_text to keep D1 row size sane. Dashboard renewal
     // replies (Option 1 + Option 2 + Option 3 with multi-SKU URLs) can run
     // 2-4 KB; cap at 4000 chars which keeps the diagnostic value while
@@ -8516,7 +8553,7 @@ export default {
     // via the bound AI gateway (which works with the deployed worker's auth).
     // Used by the offline benchmark runner to A/B Llama vs Gemma vs Hermes.
     if (url.pathname === '/api/benchmark-classifier') {
-      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key' } });
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key, X-Eval-Run-Id' } });
       if (request.method !== 'POST') return new Response('POST required', { status: 405 });
       const key = request.headers.get('X-Bench-Key') || new URL(request.url).searchParams.get('key');
       if (key !== 'Biscuit4') return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
@@ -8525,6 +8562,15 @@ export default {
         const input = body.input;
         const priorCtx = body.prior_context || '';
         const model = body.model || '@cf/meta/llama-4-scout-17b-16e-instruct';
+        const evalRunId = request.headers.get('X-Eval-Run-Id') || null;
+        const evalContext = evalRunId ? {
+          runId: evalRunId,
+          endpoint: url.pathname,
+          requestText: input,
+          requestedModel: model,
+          personId: 'benchmark-classifier',
+          bot: 'webex'
+        } : null;
         // prompt_variant: "v2" (default, Schema v2 rich output) | "legacy" (CF_CLASSIFIER_PROMPT)
         const promptVariant = (body.prompt_variant || 'v2').toLowerCase();
         if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
@@ -8569,6 +8615,29 @@ export default {
           }
         }
 
+        if (evalContext) {
+          await logBotUsageToD1(env, {
+            personId: 'benchmark-classifier',
+            requestText: input,
+            responsePath: err ? 'error' : 'crm_agent',
+            model,
+            requestedModel: model,
+            executedModel: model,
+            tierPath: model,
+            liveLlmCall: true,
+            tier0Deterministic: false,
+            attempts: 1,
+            transientErrors: err ? [err] : [],
+            inputTokens: 0,
+            outputTokens: 0,
+            durationMs: elapsed,
+            errorMessage: err || parseError || null,
+            responseText: raw || JSON.stringify(parsed || ''),
+            endpoint: url.pathname,
+            evalContext
+          });
+        }
+
         return new Response(JSON.stringify({ model, prompt_variant: promptVariant, input, elapsed, raw, parsed, parseError, err }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'content-type':'application/json' } });
@@ -8589,7 +8658,7 @@ export default {
     //   "baseline" → SYSTEM_PROMPT only (matches production askClaude)
     //   "revised"  → SYSTEM_PROMPT + CF_GROUNDING_RULES (targets Llama/Gemma failure modes)
     if (url.pathname === '/api/benchmark-product-info') {
-      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key' } });
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key, X-Eval-Run-Id' } });
       if (request.method !== 'POST') return new Response('POST required', { status: 405 });
       const key = request.headers.get('X-Bench-Key') || new URL(request.url).searchParams.get('key');
       if (key !== 'Biscuit4') return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
@@ -8597,6 +8666,15 @@ export default {
         const body = await request.json();
         const input = body.input;
         const modelKey = (body.model || 'claude').toLowerCase();
+        const evalRunId = request.headers.get('X-Eval-Run-Id') || null;
+        const evalContext = evalRunId ? {
+          runId: evalRunId,
+          endpoint: url.pathname,
+          requestText: input,
+          requestedModel: modelKey,
+          personId: 'benchmark-product-info',
+          bot: 'webex'
+        } : null;
         const priorCtx = body.prior_context || '';
         const wantLiveDatasheet = !!body.want_live_datasheet;
         const promptVariant = (body.prompt_variant || 'baseline').toLowerCase();
@@ -8726,6 +8804,29 @@ export default {
         }
 
         const elapsed = Date.now() - start;
+        const tokenUsage = rawResult?.usage || rawResult?.result?.usage || {};
+        if (evalContext) {
+          await logBotUsageToD1(env, {
+            personId: 'benchmark-product-info',
+            requestText: input,
+            responsePath: err ? 'error' : 'crm_agent',
+            model: modelKey,
+            requestedModel: modelKey,
+            executedModel: modelKey,
+            tierPath: modelKey,
+            liveLlmCall: true,
+            tier0Deterministic: false,
+            attempts: 1,
+            transientErrors: err ? [err] : [],
+            inputTokens: tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0,
+            outputTokens: tokenUsage.output_tokens || tokenUsage.completion_tokens || 0,
+            durationMs: elapsed,
+            errorMessage: err || null,
+            responseText: reply || '',
+            endpoint: url.pathname,
+            evalContext
+          });
+        }
         return new Response(JSON.stringify({
           model: modelKey,
           prompt_variant: promptVariant,
