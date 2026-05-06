@@ -703,6 +703,14 @@ async function getRelevantDatasheetContext(message) {
   return context;
 }
 
+function isDatasheetRetryFollowup(message) {
+  return /\b(try\s+again|retry|again|try\s+that\s+again|do\s+it\s+again|please\s+(?:try|do|fetch|pull|retry)|you\s+(?:can|do)\s+(?:do|have|fetch|pull|browse)|fetch\s+it|pull\s+it|do\s+it)\b/i.test(String(message || ''));
+}
+
+function looksLikeRecentDatasheetTurn(content) {
+  return /Claude Sonnet|Live datasheet|LIVE DATASHEET CONTENT|datasheet|specs?\b|cached specs|browse|fetch|Source URL/i.test(String(content || ''));
+}
+
 // ─── Valid SKU Set ────────────────────────────────────────────────────────────
 const VALID_SKUS = new Set();
 for (const [key, value] of Object.entries(catalog)) {
@@ -11055,6 +11063,17 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     const todayStr = new Date().toISOString().split('T')[0];
     systemPrompt = `Today's date is ${todayStr}.\n\n` + systemPrompt;
     const kv = env.CONVERSATION_KV;
+
+    // Context-aware: retry/correction phrases after a datasheet answer must
+    // re-enter the live-datasheet branch so prior model mentions are fetched
+    // from history before Claude answers.
+    if (!wantsLiveDatasheet && isDatasheetRetryFollowup(userMessage) && personId && kv) {
+      const recentHistory = await getHistory(kv, personId);
+      const recentAssistantTurns = [...recentHistory].reverse().filter(h => h.role === 'assistant').slice(0, 3);
+      if (recentAssistantTurns.some(turn => looksLikeRecentDatasheetTurn(turn.content))) {
+        wantsLiveDatasheet = true;
+      }
+    }
 
     // Context-aware: bare "yes"/"yeah"/"sure" after bot offered datasheet check
     if (!wantsLiveDatasheet && /^\s*(yes|yeah|yep|yea|sure|please|go ahead|do it)\s*[.!]?\s*$/i.test(userMessage) && personId && kv) {

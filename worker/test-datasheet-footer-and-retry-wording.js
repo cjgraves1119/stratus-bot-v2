@@ -45,11 +45,17 @@ const check = (desc, cond, diag) => {
 {
   const note = (fileSrc.match(/The user is retrying a prior datasheet[\s\S]*?\)\)/) || [''])[0];
   check('Retry-reroute note found', note.length > 0);
-  check('Note says "this turn IS the retry" (no extra round-trip ask)',
-    /this turn IS the retry|already attempted a live datasheet fetch THIS turn/i.test(note),
+  check('Note treats the same turn as the retry (no extra round-trip ask)',
+    /same turn as the retry|this turn IS the retry/i.test(note),
+    note);
+  check('Note does NOT claim the fetch already ran before askClaude routing',
+    !/already attempted a live datasheet fetch THIS turn/i.test(note),
     note);
   check('Note explicitly forbids "send another message to trigger"',
     /do NOT ask the user to 'send another message to trigger the fetch'/i.test(note),
+    note);
+  check('Note explicitly forbids one-model-at-a-time retry punts',
+    /do NOT ask them to try one model at a time/i.test(note),
     note);
 }
 
@@ -234,6 +240,18 @@ for (const c of cases) {
   const out = sanitizeLiveFetchRetryWording(variantCbis);
   check('Variant C-bis: "Just say try again" with period removed',
     !/Just say "try again"|retry the fetch/i.test(out),
+    `out=${out}`);
+}
+
+// Variant D — live retry after five-model batch suggested one-at-a-time retries.
+{
+  const variantD = `The fetch ran on this turn — here's what came back:\n\n**The live datasheet fetches came back empty or incomplete for this batch.**\n\nA few things that could help:\n\n**Try fetching one at a time** — batch fetches of 5 models may be hitting a timeout or content limit. Try:\n— "Pull the live datasheet for CW9172I"\n— "Pull the live datasheet for CW9179F"\n— "Pull the live datasheet for C8455-G2-MX"\n\n**What I can confirm from prior turns in this session:**\n— **C8455-G2-MX** — fetched successfully earlier this conversation.\n\n**What I can't confirm** — CW9171I specs from a live fetch this session. Try them one at a time and I'll use the injected content directly.`;
+  const out = sanitizeLiveFetchRetryWording(variantD);
+  check('Variant D: one-at-a-time retry instructions scrubbed',
+    !/Try fetching one at a time|Try them one at a time|batch fetches of 5 models may be hitting/i.test(out),
+    `out=${out}`);
+  check('Variant D: prior successful live-source facts preserved',
+    /C8455-G2-MX/.test(out) && /fetched successfully earlier/.test(out),
     `out=${out}`);
 }
 

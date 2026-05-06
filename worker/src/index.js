@@ -512,6 +512,14 @@ async function getRelevantDatasheetContext(message) {
   return { text: context, models: keys, urls: fetchedUrls };
 }
 
+function isDatasheetRetryFollowup(message) {
+  return /\b(try\s+again|retry|again|try\s+that\s+again|do\s+it\s+again|please\s+(?:try|do|fetch|pull|retry)|you\s+(?:can|do)\s+(?:do|have|fetch|pull|browse)|fetch\s+it|pull\s+it|do\s+it)\b/i.test(String(message || ''));
+}
+
+function looksLikeRecentDatasheetTurn(content) {
+  return /Claude Sonnet|Live datasheet|LIVE DATASHEET CONTENT|datasheet|specs?\b|cached specs|browse|fetch|Source URL/i.test(String(content || ''));
+}
+
 // ─── Valid SKU Set ────────────────────────────────────────────────────────────
 const VALID_SKUS = new Set();
 for (const [key, value] of Object.entries(catalog)) {
@@ -6578,6 +6586,14 @@ function sanitizeLiveFetchRetryWording(reply) {
   //   Just say "try again" and I'll retry...
   out = out.replace(/\b(?:Just\s+)?[Ss]ay\s+["']?try again["']?[^.!?\n]*?(?:retry|attempt|fetch)[^.!?\n]*[.!?]/gi, '');
 
+  // Variant D — live retry after a successful multi-model fetch punted with
+  // "try fetching one at a time" even though recent history had usable source
+  // URLs. Remove one-at-a-time retry instructions without touching any
+  // already-grounded facts in the response body.
+  out = out.replace(/\n*A few things that could help:\s*\n+[\s\S]*?(?=\n+\*\*What I can confirm|\n+\*\*What I can't confirm|\n*$)/gi, '\n\n');
+  out = out.replace(/\bTry fetching one at a time[^.\n]*\.?/gi, '');
+  out = out.replace(/\bTry them one at a time[^.\n]*\.?/gi, '');
+
   // Cleanup — orphan "Here's what I'd suggest:" preamble + leftover fragments
   // left behind after the targeted replacements above.
   out = out.replace(/\bHere'?s what I'?d suggest:?\s*/gi, '');
@@ -6685,6 +6701,18 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     let showFooter = false;
     // product_info intent is always a spec question → footer is always relevant
     if (classification && classification.intent === 'product_info') showFooter = true;
+
+    // Context-aware: retry/correction phrases after a datasheet answer must
+    // re-enter the live-datasheet branch so prior model mentions are fetched
+    // from history before Claude answers. Without this, the retry reroute note
+    // can make Claude describe a missing injection even though no fetch ran.
+    if (!wantsLiveDatasheet && isDatasheetRetryFollowup(userMessage) && personId && kv) {
+      const recentHistory = await getHistory(kv, personId);
+      const recentAssistantTurns = [...recentHistory].reverse().filter(h => h.role === 'assistant').slice(0, 3);
+      if (recentAssistantTurns.some(turn => looksLikeRecentDatasheetTurn(turn.content))) {
+        wantsLiveDatasheet = true;
+      }
+    }
 
     // Context-aware: bare "yes"/"yeah"/"sure" after bot offered datasheet check
     if (!wantsLiveDatasheet && /^\s*(yes|yeah|yep|yea|sure|please|go ahead|do it)\s*[.!]?\s*$/i.test(userMessage) && personId && kv) {
@@ -7852,7 +7880,7 @@ export default {
                 if (priorWasClaude) {
                   console.log('[CF-First] Retry phrase + prior Claude/datasheet context → reroute to Claude with history');
                   T.step('wx-claude', 'enter');
-                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model they asked about. The worker has already attempted a live datasheet fetch THIS turn — if '## LIVE DATASHEET CONTENT' is in your prompt, answer from it directly. If it's missing, say the fetch came back empty and suggest the user try a different model or rephrase. Do NOT claim you cannot browse, and do NOT ask the user to 'send another message to trigger the fetch' — this turn IS the retry.)`, personId, env, null, activeClassification);
+                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model(s) they asked about. Treat this same turn as the retry: if '## LIVE DATASHEET CONTENT' is in your prompt, answer from it directly. If it is missing but recent history already contains a successful live datasheet answer, summarize that existing live-sourced answer. Do NOT claim you cannot browse, do NOT ask the user to 'send another message to trigger the fetch', and do NOT ask them to try one model at a time.)`, personId, env, null, activeClassification);
                   T.step('wx-claude', 'exit');
                   await addToHistory(kv, personId, 'user', text);
                   await addToHistory(kv, personId, 'assistant', retryReply);
