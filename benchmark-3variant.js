@@ -196,7 +196,7 @@ async function runOne(fixture, variant) {
   try {
     const res = await fetch(ENDPOINT, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Bench-Key': KEY },
+      headers: { 'Content-Type': 'application/json', 'X-Bench-Key': KEY, 'X-Eval-Run-Id': EVAL_RUN_ID },
       body: JSON.stringify(body)
     });
     const wall = Date.now() - wallStart;
