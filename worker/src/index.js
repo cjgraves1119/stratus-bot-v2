@@ -6516,12 +6516,17 @@ function stripEchoedSourceFooter(reply) {
 
 // Last-line defense for live-fetch retry wording. Prompt instructions alone are
 // not enough here: live testing showed Claude can still ask the user to resend
-// a new message to trigger another fetch. Rewrite only that narrow failure
-// shape before footer assembly.
+// a new message to trigger another fetch, promise injection on a future turn,
+// or instruct the user to say "try again". Rewrite only those narrow failure
+// shapes before footer assembly. PR #28 round 2 (2026-05-06): broadened to
+// catch "next turn" injection promises, "didn't inject this round" failure
+// narration, and "say try again" retry-punt instructions.
 function sanitizeLiveFetchRetryWording(reply) {
   if (!reply || typeof reply !== 'string') return reply || '';
-  if (!/(datasheet|fetch|worker|trigger|browse)/i.test(reply)) return reply;
+  if (!/(datasheet|fetch|worker|trigger|browse|inject|live\s+content)/i.test(reply)) return reply;
   let out = reply;
+
+  // ─── PR #28 round 1 patterns ────────────────────────────────────────
   out = out.replace(/Please resend your request as a new message[\s\S]*?(?:before I respond\.|before I answer\.|server-side and inject the full content before I respond\.)/gi,
     'I tried the live fetch on this turn before answering.');
   out = out.replace(/\bA fresh trigger will pull the complete page\./gi,
@@ -6530,8 +6535,44 @@ function sanitizeLiveFetchRetryWording(reply) {
     '(The live fetch is attempted on this turn before I answer. If the content is incomplete, I will say so directly.)');
   out = out.replace(/\bWant to send another message to trigger the fetch\?/gi,
     'The live fetch came back empty or incomplete.');
+
+  // ─── PR #28 round 2 patterns (Codex live regression 2026-05-06) ─────
+  // Variant A — parenthetical "next turn" injection promise. Catches:
+  //   (The live fetch will inject the full spec table on the next turn. Once it loads, I'll compare...)
+  out = out.replace(/\(The live fetch will inject[\s\S]*?on the next turn\.[\s\S]*?\)/gi,
+    '(The live fetch is attempted on this turn before I answer. If the content is incomplete I will say so directly.)');
+  // Bare (non-parenthetical) "next turn" promise.
+  out = out.replace(/\bThe live fetch will inject[^.\n]*?on the next turn\.[^.\n]*?(?:\.|\n|$)/gi,
+    'The live fetch is attempted on this turn before I answer.');
+
+  // Variant B — full failure-narration block. Catches the run from
+  // "the live content didn't inject this round..." through the "usually
+  // succeed on a second attempt" close, including any "Here's what I'd
+  // suggest:" preamble and 'Want me to retry? Just say "try again"...' punt.
+  out = out.replace(
+    /(?:It looks like\s*)?[Tt]he live content didn'?t inject this round[\s\S]*?(?:second attempt|once more|usually succeed)\.?/gi,
+    'The live fetch came back empty or incomplete.'
+  );
+
+  // Original "Want me to retry?" alone (kept as fallback for variants where
+  // the failure block above didn't fire).
   out = out.replace(/\bWant me to retry\?/gi,
     'The live fetch came back empty or incomplete.');
+
+  // Variant C — closing sign-off that re-prompts a "try again" turn:
+  //   Say "try again" and I'll retry the fetch!
+  //   Just say "try again" and I'll retry...
+  out = out.replace(/\b(?:Just\s+)?[Ss]ay\s+["']?try again["']?[^.!?\n]*?(?:retry|attempt|fetch)[^.!?\n]*[.!?]/gi, '');
+
+  // Cleanup — orphan "Here's what I'd suggest:" preamble + leftover fragments
+  // left behind after the targeted replacements above.
+  out = out.replace(/\bHere'?s what I'?d suggest:?\s*/gi, '');
+  out = out.replace(/\bThese usually succeed on a second attempt\.?/gi, '');
+  out = out.replace(/\bthis can occasionally happen if the fetch times? out\.?/gi, '');
+
+  // Collapse 3+ consecutive newlines back to a paragraph break, trim trailing.
+  out = out.replace(/\n{3,}/g, '\n\n').trimEnd();
+
   return out;
 }
 

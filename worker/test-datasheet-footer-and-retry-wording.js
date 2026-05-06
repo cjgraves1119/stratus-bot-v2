@@ -185,5 +185,65 @@ for (const c of cases) {
     `out=${sanitizeLiveFetchRetryWording(unrelated)}`);
 }
 
+// ─── D. Round-2 regressions: Codex live regression 2026-05-06 ─────────────
+// Variant A — "next turn" injection promise observed on PR #28 head 2297252.
+{
+  const variantA = `Here are the 48-port PoE MS150 variants:\n\n- MS150-48LP-4G\n- MS150-48FP-4G\n\n(The live fetch will inject the full spec table on the next turn. Once it loads, I'll compare all 48-port PoE models and flag any differences from what I listed above.)\n\n_💎 Claude Sonnet 4.6 · 2.0s_`;
+  const out = sanitizeLiveFetchRetryWording(variantA);
+  check('Variant A: "next turn" injection promise scrubbed',
+    !/on the next turn|inject the full spec table on the next turn|Once it loads/i.test(out),
+    `out=${out}`);
+  check('Variant A: replacement uses same-turn wording',
+    /attempted on this turn|came back empty or incomplete/i.test(out),
+    `out=${out}`);
+  check('Variant A: variant list preserved',
+    /MS150-48LP-4G/.test(out) && /MS150-48FP-4G/.test(out),
+    `out=${out}`);
+}
+
+// Variant B — "didn't inject this round / fetch times out / Just say try again" failure narration.
+{
+  const variantB = `It looks like the live content didn't inject this round — this can occasionally happen if the fetch times out.\n\nHere's what I'd suggest:\n\nWant me to retry? Just say "try again" and I'll attempt the fetch once more. These usually succeed on a second attempt.\n\n_💎 Claude Sonnet 4.6 · 2.4s_`;
+  const out = sanitizeLiveFetchRetryWording(variantB);
+  check('Variant B: "didn\'t inject this round" scrubbed',
+    !/didn'?t inject this round|fetch times? out|occasionally happen/i.test(out),
+    `out=${out}`);
+  check('Variant B: "Just say try again" punt scrubbed',
+    !/Just say "try again"|say "try again"|usually succeed|second attempt|Here'?s what I'?d suggest/i.test(out),
+    `out=${out}`);
+  check('Variant B: replacement standardized',
+    /came back empty or incomplete/i.test(out),
+    `out=${out}`);
+}
+
+// Variant C — closing tail "Say 'try again' and I'll retry the fetch!".
+{
+  const variantC = `The live fetch returned partial content this turn.\n\nSay "try again" and I'll retry the fetch!`;
+  const out = sanitizeLiveFetchRetryWording(variantC);
+  check('Variant C: trailing "Say try again" sign-off removed',
+    !/Say "try again"|retry the fetch/i.test(out),
+    `out=${out}`);
+  check('Variant C: prior partial-content sentence preserved',
+    /returned partial content/i.test(out),
+    `out=${out}`);
+}
+
+// Variant C bis — "Just say 'try again'" form with period close.
+{
+  const variantCbis = `The live datasheet didn't fully inject. Just say "try again" and I'll retry the fetch.`;
+  const out = sanitizeLiveFetchRetryWording(variantCbis);
+  check('Variant C-bis: "Just say try again" with period removed',
+    !/Just say "try again"|retry the fetch/i.test(out),
+    `out=${out}`);
+}
+
+// Negative — generic non-fetch "try again" prose must be preserved.
+{
+  const benign = `If your test fails, try again with a fresh build.`;
+  check('Sanitizer leaves benign "try again" prose alone (no fetch context)',
+    sanitizeLiveFetchRetryWording(benign) === benign,
+    `out=${sanitizeLiveFetchRetryWording(benign)}`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
