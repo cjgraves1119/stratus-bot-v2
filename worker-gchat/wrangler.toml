@@ -9,7 +9,10 @@ compatibility_date = "2024-01-01"
 [vars]
 # Non-secret config (secrets set via `wrangler secret put`)
 # ANTHROPIC_API_KEY = set via wrangler secret
-# DEEPSEEK_API_KEY = set via wrangler secret (eval-only forced DeepSeek tool-use benchmark path)
+# DEEPSEEK_API_KEY = set via wrangler secret
+# DeepSeek rollout flags. Keep advisory off until B6 guardrail shadow grading is clean.
+USE_DEEPSEEK_TIER_3 = "false"
+USE_DEEPSEEK_ADVISORY = "false"
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
 #
 # ─── CRM & Email Agent Secrets (POC) ───

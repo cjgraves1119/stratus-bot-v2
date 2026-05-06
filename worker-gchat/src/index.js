@@ -94,6 +94,10 @@ function isDeepSeekModel(model) {
   return DEEPSEEK_MODEL_IDS.has(String(model || '').toLowerCase());
 }
 
+function isTruthyFlag(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
 function normalizeForceModel(model) {
   const raw = String(model || '').trim();
   const normalized = raw.toLowerCase();
@@ -13762,6 +13766,28 @@ function shouldForceClaudeForWrite(userMessage) {
   return writePatterns.some(p => p.test(userMessage));
 }
 
+function isAdvisoryQuery(userMessage) {
+  if (!userMessage || typeof userMessage !== 'string') return false;
+  return /\b(compare|comparison|versus|vs\.?|which\s+(?:is|one|model)|recommend|recommendation|size|sizing|design|license|licensing|tier|enterprise|advanced\s+security|secure\s+sd-?wan|mr\s+advanced|mx\s+advanced|proposal|scope|bom|bill\s+of\s+materials)\b/i.test(userMessage);
+}
+
+function buildDeepSeekGuardedSystemPrompt(userMessage) {
+  const basePrompt = typeof buildCrmSystemPrompt === 'function'
+    ? buildCrmSystemPrompt(userMessage)
+    : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
+
+  return `${basePrompt}
+
+DEEPSEEK PRODUCTION GUARDRAILS:
+- Separate Meraki MR wireless licensing from MX security/SD-WAN licensing. Do not claim MR Advanced includes MX-side features such as IPS/IDS, AMP, content filtering, or Secure SD-WAN features.
+- For MX licensing, preserve hierarchy: Enterprise -> Advanced Security -> Secure SD-WAN Plus. Advanced Security is a superset of Enterprise.
+- MG52 and MG52E are valid current Meraki 5G cellular gateways. Do not ban or avoid them; when product currency matters, validate against current Cisco Meraki docs or state the uncertainty.
+- For SKU, EOL, license-feature, and model-comparison claims, prefer source-backed wording. If you are not certain, say what must be verified instead of inventing.
+- CRM record IDs must be copied in full from tool results. Never invent, truncate, or reconstruct IDs.
+- If a picklist value is rejected or unavailable, stop and ask for a valid value; do not loop on the same failed value.
+- After successful write, include the tool-provided user-visible summary, URL, and undo token when present.`;
+}
+
 // Alias: the stall detector is model-agnostic now that Llama is tier 1.
 // Legacy callers still reference `gemmaStallDetected` — keep it working.
 const cfStallDetected = gemmaStallDetected;
@@ -13790,9 +13816,32 @@ async function tryCfTier(modelId, userMessage, env, personId, dryRun) {
   return { winner: false, reason: stall.reason, result };
 }
 
+async function tryDeepSeekTier(userMessage, env, personId, dryRun) {
+  let result = null;
+  let callError = null;
+  try {
+    result = await askDeepSeekModel(
+      'deepseek-v4-pro',
+      userMessage,
+      buildDeepSeekGuardedSystemPrompt(userMessage),
+      CRM_EMAIL_TOOLS,
+      env,
+      personId,
+      dryRun,
+      15
+    );
+  } catch (err) {
+    callError = err.message;
+  }
+  const stall = result ? cfStallDetected(result) : { stalled: true, reason: callError ? 'exception' : 'no_response' };
+  const apiError = result?.errors?.length ? result.errors.map(e => e.error || e.phase).join('|') : null;
+  if (!stall.stalled && !apiError) return { winner: true, result };
+  return { winner: false, reason: apiError || stall.reason, result };
+}
+
 // Main waterfall function. Order post-V3 benchmark cutover (2026-04-20):
 //   Tier 1: Llama 4 Scout optimized  — 100% on V3, 2.5× faster than Claude
-//   Tier 2: Gemma 4 optimized        — 98% on V3, catches what Llama drops
+//   Tier 2: DeepSeek V4 Pro          — flag-gated replacement for Gemma 4
 //   Tier 3: Claude Sonnet 4.6        — final fallback for stall/rate-limit
 //
 // Previous implementation was Gemma → Claude with a write-intent bypass.
@@ -13809,6 +13858,9 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const forceDeepSeekModelId = options.forceDeepSeekModelId || null;
   const dryRun = options.dryRun === true;
   const evalContext = options.evalContext || null;
+  const deepSeekTier3Enabled = isTruthyFlag(env.USE_DEEPSEEK_TIER_3);
+  const deepSeekAdvisoryEnabled = isTruthyFlag(env.USE_DEEPSEEK_ADVISORY);
+  const advisoryQuery = isAdvisoryQuery(userMessage);
 
   const LLAMA = '@cf/meta/llama-4-scout-17b-16e-instruct';
   const GEMMA = '@cf/google/gemma-4-26b-a4b-it';
@@ -13911,7 +13963,65 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
     };
   }
 
-  // ── Tier 2: Gemma 4 (fallback) ──
+  // ── Tier 2: DeepSeek V4 Pro (flag-gated Gemma replacement) ──
+  if (deepSeekTier3Enabled) {
+    if (!advisoryQuery || deepSeekAdvisoryEnabled) {
+      console.log(`[WATERFALL] Llama stalled (${llamaT.reason}), trying DeepSeek V4 Pro for personId=${personId} advisory=${advisoryQuery}`);
+      const deepSeekT = await tryDeepSeekTier(userMessage, env, personId, dryRun);
+      if (deepSeekT.winner) {
+        return {
+          reply: deepSeekT.result.reply,
+          model: 'deepseek-v4-pro',
+          tierUsed: advisoryQuery ? 'deepseek-advisory' : 'deepseek-tier3',
+          llamaResult: llamaT.result,
+          gemmaResult: null,
+          deepSeekResult: deepSeekT.result,
+          claudeResult: null,
+          stallReason: llamaT.reason,
+          toolCalls: deepSeekT.result.toolCalls,
+          iterations: deepSeekT.result.iterations,
+          elapsedMs: deepSeekT.result.elapsedMs,
+          totalMs: Date.now() - startMs
+        };
+      }
+
+      console.log(`[WATERFALL] Llama + DeepSeek stalled (${llamaT.reason}/${deepSeekT.reason}), escalating to Claude for personId=${personId}`);
+      const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
+      return {
+        reply: claudeResult.reply,
+        model: 'claude-sonnet-4-6',
+        tierUsed: 'claude-fallback',
+        llamaResult: llamaT.result,
+        gemmaResult: null,
+        deepSeekResult: deepSeekT.result,
+        claudeResult,
+        stallReason: `llama:${llamaT.reason}|deepseek:${deepSeekT.reason}`,
+        toolCalls: claudeResult.toolCalls,
+        iterations: claudeResult.iterations,
+        elapsedMs: claudeResult.elapsedMs,
+        totalMs: Date.now() - startMs
+      };
+    }
+
+    console.log(`[WATERFALL] Llama stalled (${llamaT.reason}); advisory DeepSeek disabled, escalating directly to Claude for personId=${personId}`);
+    const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
+    return {
+      reply: claudeResult.reply,
+      model: 'claude-sonnet-4-6',
+      tierUsed: 'claude-advisory-fallback',
+      llamaResult: llamaT.result,
+      gemmaResult: null,
+      deepSeekResult: null,
+      claudeResult,
+      stallReason: `llama:${llamaT.reason}|deepseek:advisory_disabled`,
+      toolCalls: claudeResult.toolCalls,
+      iterations: claudeResult.iterations,
+      elapsedMs: claudeResult.elapsedMs,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // ── Legacy Tier 2: Gemma 4 (fallback while DeepSeek flag is off) ──
   console.log(`[WATERFALL] Llama stalled (${llamaT.reason}), trying Gemma for personId=${personId}`);
   const gemmaT = await tryCfTier(GEMMA, userMessage, env, personId, dryRun);
   if (gemmaT.winner) {
@@ -16627,7 +16737,10 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`,
                 'sea-lion': `🟣 SEA-LION V4 27B (forced eval) · ${outcome.elapsedMs}ms`,
                 'deepseek-v4-pro': `🟧 DeepSeek V4 Pro (forced eval) · ${outcome.elapsedMs}ms`,
-                'deepseek-v4-flash': `🟧 DeepSeek V4 Flash (forced eval) · ${outcome.elapsedMs}ms`
+                'deepseek-v4-flash': `🟧 DeepSeek V4 Flash (forced eval) · ${outcome.elapsedMs}ms`,
+                'deepseek-tier3': `🟧 DeepSeek V4 Pro (Tier 3 — fell back from Llama, reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
+                'deepseek-advisory': `🟧 DeepSeek V4 Pro (advisory tier — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
+                'claude-advisory-fallback': `🔶 Claude Sonnet 4.6 (advisory fallback, DeepSeek advisory disabled — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`
               };
               const badge = tierBadges[outcome.tierUsed] || `model: ${outcome.model}`;
               const replyWithBadge = `${outcome.reply}\n\n---\n_${badge}_`;
