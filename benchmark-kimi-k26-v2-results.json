@@ -1,0 +1,3686 @@
+{
+  "timestamp": "2026-05-06T17:35:08.068Z",
+  "evalMode": "live_benchmark_classifier",
+  "decisionGrade": true,
+  "liveLlmCallsRequired": true,
+  "simulatedResultsAllowedForRoutingDecisions": false,
+  "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+  "syntheticEval": true,
+  "evalRunId": "eval-kimi-k26-v2-1778088522",
+  "fixtureCount": 74,
+  "summary": {
+    "v2-kimi-k26": {
+      "label": "V2 prompt (Kimi K2.6)",
+      "model": "@cf/moonshotai/kimi-k2.6",
+      "promptVariant": "v2",
+      "overallScore": "136/586",
+      "overallPct": 23.2,
+      "intentAcc": 39.2,
+      "intentOk": 29,
+      "fixtures": 74,
+      "parseFail": 45,
+      "errors": 2,
+      "p50ms": 11243,
+      "p95ms": 64840,
+      "avgMs": 19706
+    }
+  },
+  "results": {
+    "v2-kimi-k26": {
+      "quote-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 5170,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 10,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":10,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"t",
+        "error": null
+      },
+      "quote-004": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 5478,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-003": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7640,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR44",
+              "qty": 2,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX67",
+              "qty": 3,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MR44\",\"qty\":2,\"sku_type\":\"hardware\"},{\"sku\":\"MX67\",\"qty\":3,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate",
+        "error": null
+      },
+      "quote-006-hw-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 13547,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 0.98,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR44",
+              "qty": 10,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":0.98,\"reply\":\"\",\"items\":[{\"sku\":\"MR44\",\"qty\":10,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"t",
+        "error": null
+      },
+      "quote-005": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 17780,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-008-hw-only-alt2": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9550,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-009-lic-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 6131,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-007-hw-only-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 23893,
+        "parsed": null,
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MX67\",\"qty\":5,\"sku",
+        "error": null
+      },
+      "quote-010-lic-only-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7689,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-002": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 38622,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX67",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MX67\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"ta",
+        "error": null
+      },
+      "quote-012-with-lic-term": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 12004,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-011-with-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 17417,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-014-bare-sku": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9545,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"ta",
+        "error": null
+      },
+      "quote-015-eol": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9217,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX64",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MX64\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"ta",
+        "error": null
+      },
+      "quote-017-multi-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 6098,
+        "parsed": null,
+        "raw": "{\"intent\":\"quote\",\"confidence",
+        "error": null
+      },
+      "quote-013-with-lic-tier": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 23725,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-019-show-pricing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 10852,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-016-bare-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 18565,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "LIC-ENT-3YR",
+              "qty": 1,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"LIC-ENT-3YR\",\"qty\":1,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":nu",
+        "error": null
+      },
+      "price-001-cost-of": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9197,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "price-002-how-much": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 6584,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "price-003-reverse": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 12245,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "price-005-with-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9545,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "revise-001-license-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 6200,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "toggle_hw_lic",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": "license_only"
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"toggle_hw_lic\",\"target_sku\":null,\"add_items\":[],\"ne",
+        "error": null
+      },
+      "price-006-with-3yr-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 14720,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "revise-002-hardware-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7133,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": true,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "toggle_hw_lic",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": "hardware_only"
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":true,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"toggle_hw_lic\",\"target_sku\":null,\"add_items\":[],\"ne",
+        "error": null
+      },
+      "revise-004-term-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 10166,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "revise-003-term": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 12553,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "quote-018-word-numbers": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 59260,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 2,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":2,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"ta",
+        "error": null
+      },
+      "revise-006-add-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7451,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 0.97,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS130-24P",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "add",
+            "target_sku": null,
+            "add_items": [
+              {
+                "sku": "MS130-24P",
+                "qty": 1,
+                "sku_type": "hardware"
+              }
+            ],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":0.97,\"reply\":\"\",\"items\":[{\"sku\":\"MS130-24P\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"",
+        "error": null
+      },
+      "revise-005-add": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 12027,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "revise-007-remove": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9719,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "remove",
+            "target_sku": "MR44",
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"remove\",\"target_sku\":\"MR44\",\"add_items\":[],\"new_te",
+        "error": null
+      },
+      "revise-009-swap": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": {
+          "pass": true,
+          "got": "swap",
+          "note": "revision.action=swap"
+        },
+        "latency": 5219,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "swap",
+            "target_sku": "MR44",
+            "add_items": [
+              {
+                "sku": "MR46",
+                "qty": 1
+              }
+            ],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"swap\",\"target_sku\":\"MR44\",\"add_items\":[{\"sku\":\"MR4",
+        "error": null
+      },
+      "revise-011-change-tier": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 10097,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "revise-008-remove-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 30344,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "Removing MX67 from the quote.",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "remove",
+            "target_sku": "MX67",
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1.0,\"reply\":\"Removing MX67 from the quote.\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"remove\",\"target_sku\":",
+        "error": null
+      },
+      "revise-012-add-pricing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 10961,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "pron-002": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 12942,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "pron-003": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7607,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "price-004-qty": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 111091,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "pron-004": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 15033,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "revise-010-change-qty": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 64651,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "clarify-001-vague-switch": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ clarify"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7806,
+        "parsed": {
+          "intent": "clarify",
+          "confidence": 1,
+          "reply": "Could you specify which switch model(s) and quantity you need? For example, MS130-24P-4G, MS150-24P, etc.",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"clarify\",\"confidence\":1.0,\"reply\":\"Could you specify which switch model(s) and quantity you need? For example, MS130-24P-4G, MS150-24P, etc.\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_term",
+        "error": null
+      },
+      "option-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9305,
+        "parsed": null,
+        "raw": "{\"intent\":\"revise\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku",
+        "error": "Expected ',' or '}' after property value in JSON at position 226 (line 1 column 227)"
+      },
+      "pron-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 8,
+          "max": 8,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "modifiers": "✓ all modifiers matched",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 52093,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "show_pricing",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku\":null,\"add_items\":[],\"new",
+        "error": null
+      },
+      "clarify-002-vague-ap": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ clarify"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7849,
+        "parsed": {
+          "intent": "clarify",
+          "confidence": 1,
+          "reply": "Which Meraki access point models and how many do you need? For example: MR46, MR56, etc.",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"clarify\",\"confidence\":1.0,\"reply\":\"Which Meraki access point models and how many do you need? For example: MR46, MR56, etc.\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separat",
+        "error": null
+      },
+      "clarify-004-price-alone": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ clarify"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 10490,
+        "parsed": {
+          "intent": "clarify",
+          "confidence": 1,
+          "reply": "I can help with that. What specific products or SKUs would you like pricing for?",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"clarify\",\"confidence\":1.0,\"reply\":\"I can help with that. What specific products or SKUs would you like pricing for?\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes",
+        "error": null
+      },
+      "clarify-003-variant": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 10659,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "info-003-capability": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 7415,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "convo-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ conversation"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 6916,
+        "parsed": {
+          "intent": "conversation",
+          "confidence": 1,
+          "reply": "Hey! I'm here to help you quote Cisco Meraki gear and licenses. What can I get started for you today?",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"conversation\",\"confidence\":1.0,\"reply\":\"Hey! I'm here to help you quote Cisco Meraki gear and licenses. What can I get started for you today?\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_ter",
+        "error": null
+      },
+      "info-001-sizing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 41393,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_te",
+        "error": null
+      },
+      "convo-002": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ conversation"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 21821,
+        "parsed": {
+          "intent": "conversation",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"conversation\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_te",
+        "error": null
+      },
+      "info-004-eol-status": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 39454,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_te",
+        "error": null
+      },
+      "convo-004": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 11638,
+        "parsed": null,
+        "raw": "{\"intent\":\"conversation\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_te",
+        "error": "Expected ',' or '}' after property value in JSON at position 361 (line 1 column 362)"
+      },
+      "edge-001-typo": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9261,
+        "parsed": null,
+        "raw": "{\"intent\":\"quote\",\"",
+        "error": null
+      },
+      "edge-002-mixed-hw-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 8106,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 5,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "LIC-ENT-3YR",
+              "qty": 3,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":5,\"sku_type\":\"hardware\"},{\"sku\":\"LIC-ENT-3YR\",\"qty\":3,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"se",
+        "error": null
+      },
+      "edge-003-renew-phrasing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 8616,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "edge-004-refresh-phrasing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 8606,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "convo-003": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ conversation"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 34719,
+        "parsed": {
+          "intent": "conversation",
+          "confidence": 1,
+          "reply": "I'm a Cisco/Meraki quoting assistant built by Stratus Information Systems.",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"conversation\",\"confidence\":1.0,\"reply\":\"I'm a Cisco/Meraki quoting assistant built by Stratus Information Systems.\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\"",
+        "error": null
+      },
+      "edge-007-cw-wifi7": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 20749,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "CW9172I",
+              "qty": 3,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"CW9172I\",\"qty\":3,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,",
+        "error": null
+      },
+      "info-002-compare": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 95128,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-001-renewal-multiline": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 11243,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "edge-008-sensors": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 11406,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MT14",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MT14\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"ta",
+        "error": null
+      },
+      "shadow-003-recommend-firewall": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 14612,
+        "parsed": null,
+        "raw": "{\"intent\":\"product_info\",\"confidence\":0.95,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"",
+        "error": null
+      },
+      "shadow-002-renewal-inline": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 14878,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "edge-005-natural-and": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 70581,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 10,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX67",
+              "qty": 2,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1.0,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":10,\"sku_type\":\"hardware\"},{\"sku\":\"MX67\",\"qty\":2,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separat",
+        "error": null
+      },
+      "edge-006-five-year-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 64840,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-004-recommend-ap": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 12717,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-005-dns-bare": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 17368,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-008-lic-sme-all-terms": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 8632,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-007-sme-license": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 13324,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-009-duo-essentials": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 13034,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-011-which-switch": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9373,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_te",
+        "error": null
+      },
+      "shadow-012-best-camera": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 9278,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":1.0,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_te",
+        "error": null
+      },
+      "shadow-010-duo-advantage-all-terms": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 32224,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      },
+      "shadow-006-url-echoback": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-kimi-k26-v2-1778088522",
+        "requestedModel": "@cf/moonshotai/kimi-k2.6",
+        "executedModel": "@cf/moonshotai/kimi-k2.6",
+        "tierPath": "@cf/moonshotai/kimi-k2.6",
+        "observedModel": "@cf/moonshotai/kimi-k2.6",
+        "requestedPromptVariant": "v2",
+        "observedPromptVariant": "v2",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 10,
+          "intentOk": false,
+          "details": {
+            "intent": "PARSE_FAIL"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 55008,
+        "parsed": null,
+        "raw": null,
+        "error": null
+      }
+    }
+  }
+}
