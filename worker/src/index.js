@@ -464,8 +464,8 @@ function getStaticSpecsContext(message) {
 }
 
 // ─── Datasheet Context ───────────────────────────────────────────────────────
-async function getRelevantDatasheetContext(message) {
-  const upper = message.toUpperCase();
+function extractDatasheetKeys(message) {
+  const upper = String(message || '').toUpperCase();
   const modelPatterns = [
     /\b(MX\d+[A-Z]*)/g, /\b(MR\d+[A-Z]*)/g, /\b(CW\d+[A-Z]*\d*)/g,
     /\b(MS\d{3}[R]?(?:-\d+[A-Z]*(?:-\d+[A-Z])?)?)/g, /\b(MV\d+[A-Z]*)/g,
@@ -480,8 +480,12 @@ async function getRelevantDatasheetContext(message) {
       if (key) models.add(key);
     }
   }
-  if (models.size === 0) return null;
-  const keys = [...models].slice(0, MAX_DATASHEET_FETCH_MODELS);
+  return [...models].slice(0, MAX_DATASHEET_FETCH_MODELS);
+}
+
+async function getRelevantDatasheetContext(message) {
+  const keys = extractDatasheetKeys(String(message || ''));
+  if (keys.length === 0) return null;
   const uniqueUrls = [...new Set(keys.map(k => DATASHEET_URLS[k]))];
   const fetches = uniqueUrls.map(async (url, idx) => {
     const text = await fetchDatasheet(url);
@@ -503,6 +507,9 @@ async function getRelevantDatasheetContext(message) {
   }
   let context = '## LIVE DATASHEET CONTENT (use this as your primary source for specs)\n' +
     'FORMATTING: This renders in Webex — NEVER output pipe-delimited markdown tables ("| col | col |"). They render as literal pipes. Use stacked bolded model headers followed by spec bullets per model.\n\n' +
+    `REQUESTED/FETCHED MODELS: ${keys.join(', ')}\n` +
+    'SOURCE URL RULE: Quote source URLs exactly from the [Datasheet: ...] labels below. Do NOT rewrite, shorten, infer, or invent datasheet URLs.\n' +
+    'SCOPE RULE: Answer only for the requested/fetched models above. Do NOT add models from conversation history unless the current user explicitly asked for them.\n\n' +
     results.join('\n\n');
   if (staticSpecs.length > 0) {
     context += '\n\n## CACHED SPECS (fallback if datasheet content is unclear)\n' +
@@ -518,6 +525,34 @@ function isDatasheetRetryFollowup(message) {
 
 function looksLikeRecentDatasheetTurn(content) {
   return /Claude Sonnet|Live datasheet|LIVE DATASHEET CONTENT|datasheet|specs?\b|cached specs|browse|fetch|Source URL/i.test(String(content || ''));
+}
+
+async function getRecentDatasheetRequestContext(history) {
+  const recentTurns = [...(history || [])].reverse().slice(0, 8);
+  const explicitUserRequests = recentTurns.filter(turn =>
+    turn &&
+    turn.role === 'user' &&
+    /\b(datasheets?|spec\s+sheet|live\s+web\s+fetch|fetch|pull|scan|read|get)\b/i.test(String(turn.content || '')) &&
+    extractDatasheetKeys(String(turn.content || '')).length > 0
+  );
+
+  for (const turn of explicitUserRequests) {
+    const ctx = await getRelevantDatasheetContext(turn.content);
+    if (ctx) return ctx;
+  }
+
+  // Fallback for pronoun followups where the user never repeated a model.
+  // Prefer user turns first to avoid assistant replies dragging stale models
+  // into the new live fetch and crowding out requested models at the cap.
+  for (const role of ['user', 'assistant']) {
+    for (const turn of recentTurns) {
+      if (!turn || turn.role !== role) continue;
+      const ctx = await getRelevantDatasheetContext(turn.content);
+      if (ctx) return ctx;
+    }
+  }
+
+  return null;
 }
 
 // ─── Valid SKU Set ────────────────────────────────────────────────────────────
@@ -728,15 +763,6 @@ function classifyProductInfoSubtype(userMessage, hasImage) {
   if (PRICING.test(upper)) return 'advisory';
   if (RECOMMEND.test(upper)) return 'advisory';
 
-  // Spec comparison path — multi-model + comparison intent with NO superlative/pricing/recommend
-  // above. Pure datasheet lookups ("MX95 vs MX105", "difference between MR46 and CW9164")
-  // are well within Llama's grounded-spec ability per bench v2 (20/24 with CF_GROUNDING_RULES).
-  if (MULTI_MODEL.test(m) && COMPARISON.test(upper)) return 'simple_lookup';
-  if (MULTI_MODEL.test(m)) return 'simple_lookup';
-
-  // Single-model comparisons against non-Meraki gear (e.g. "MR46 vs Ubiquiti U7") stay advisory
-  if (COMPARISON.test(upper)) return 'advisory';
-
   // Simple-lookup signals
   const SINGLE_MODEL_SPEC = /\b(SPECS?|SPECIFICATIONS?|DETAILS?|FEATURES?|CAPABILIT|WHAT\s+IS\s+(THE\s+)?(MR|CW|MX|MS|MV|MT|MG|Z)\d+|TELL\s+ME\s+ABOUT|WHAT\s+DOES\s+(THE\s+)?(MR|CW|MX|MS|MV|MT|MG|Z)\d+\s+DO|INFO\s+ON)\b/;
   const LICENSE_Q = /\b(LICENS(E|ING)|WHAT\s+LICENSE|LICENSE\s+(TERM|TYPE|DOES)|LIC-ENT|LIC-MS|LIC-MX|LIC-MV|LIC-MT|LIC-MG)\b/;
@@ -750,12 +776,24 @@ function classifyProductInfoSubtype(userMessage, hasImage) {
   const MODEL_IN_MSG = /\b(MR|CW|MX|MS|MV|MT|MG|Z)\d+[A-Z0-9-]*\b/i;
   const hasModel = MODEL_IN_MSG.test(m);
 
+  // Datasheet requests need the Claude path. This must run before the
+  // multi-model shortcut; live tests showed multi-model datasheet pulls can
+  // route through Llama otherwise, which may include stale history models or
+  // invent source URLs instead of using DATASHEET_URLS.
+  if (DATASHEET_FOLLOWUP.test(upper)) return 'advisory';
+
+  // Spec comparison path — multi-model + comparison intent with NO superlative/pricing/recommend
+  // above. Pure static-spec lookups ("MX95 vs MX105", "difference between MR46 and CW9164")
+  // are well within Llama's grounded-spec ability per bench v2 (20/24 with CF_GROUNDING_RULES).
+  if (MULTI_MODEL.test(m) && COMPARISON.test(upper)) return 'simple_lookup';
+  if (MULTI_MODEL.test(m)) return 'simple_lookup';
+
+  // Single-model comparisons against non-Meraki gear (e.g. "MR46 vs Ubiquiti U7") stay advisory
+  if (COMPARISON.test(upper)) return 'advisory';
+
   if (SINGLE_MODEL_SPEC.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
   if (LICENSE_Q.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
   if (EOL_Q.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
-  // Datasheet requests need the Claude path. Llama can answer static specs, but
-  // live tests showed it may invent source URLs instead of using DATASHEET_URLS.
-  if (DATASHEET_FOLLOWUP.test(upper)) return 'advisory';
 
   // Default: advisory (Claude) — bias toward accuracy
   return 'advisory';
@@ -6410,17 +6448,12 @@ async function askLlamaProductInfo(userMessage, personId, env, classification = 
       // If no model in current message, scan recent history for a model mention
       if (!datasheetContext && personId && kv) {
         const history = await getHistory(kv, personId);
-        const recentTurns = [...history].reverse().slice(0, 6);
-        for (const turn of recentTurns) {
-          if (turn && turn.content) {
-            const ctx = await getRelevantDatasheetContext(turn.content);
-            if (ctx) { datasheetContext = ctx; break; }
-          }
-        }
+        datasheetContext = await getRecentDatasheetRequestContext(history);
       }
       if (datasheetContext) {
         systemPrompt += '\n\n' + datasheetContext.text;
         systemPrompt += '\n\nThe user is asking for spec details. Use the datasheet content above as the authoritative source.';
+        systemPrompt += ` Answer only for these fetched models: ${(datasheetContext.models || []).join(', ')}. Do not include other models from conversation history. Copy source URLs exactly from the [Datasheet: ...] labels.`;
         sources.liveModels.push(...(datasheetContext.models || []));
         sources.liveUrls.push(...(datasheetContext.urls || []));
       } else {
@@ -6729,17 +6762,14 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       const datasheetContext = await getRelevantDatasheetContext(userMessage);
       if (!datasheetContext && personId) {
         const history = await getHistory(kv, personId);
-        // Scan recent history (not just last assistant) for any model mention.
-        // Followups like "get specifics from datasheet" may come several turns after the model was named.
-        const recentTurns = [...history].reverse().slice(0, 6);
-        let historyContext = null;
-        for (const turn of recentTurns) {
-          historyContext = await getRelevantDatasheetContext(turn.content);
-          if (historyContext) break;
-        }
+        // Prefer the last explicit user datasheet request over assistant reply
+        // text. Assistant replies can contain stale models from earlier turns,
+        // which crowds out the requested model set at the fetch cap.
+        let historyContext = await getRecentDatasheetRequestContext(history);
         if (historyContext) {
           systemPrompt += '\n\n' + historyContext.text;
           systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences.';
+          systemPrompt += ` Answer only for these fetched models: ${(historyContext.models || []).join(', ')}. Do not include other models from conversation history. Copy source URLs exactly from the [Datasheet: ...] labels.`;
           datasheetFetched = true;
           sources.liveModels.push(...(historyContext.models || []));
           sources.liveUrls.push(...(historyContext.urls || []));
@@ -6747,6 +6777,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       } else if (datasheetContext) {
         systemPrompt += '\n\n' + datasheetContext.text;
         systemPrompt += '\n\nThe user requested live datasheet verification. Use the live datasheet content above as the authoritative source.';
+        systemPrompt += ` Answer only for these fetched models: ${(datasheetContext.models || []).join(', ')}. Do not include other models from conversation history. Copy source URLs exactly from the [Datasheet: ...] labels.`;
         datasheetFetched = true;
         sources.liveModels.push(...(datasheetContext.models || []));
         sources.liveUrls.push(...(datasheetContext.urls || []));

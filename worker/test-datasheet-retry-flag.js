@@ -137,8 +137,12 @@ for (const phrase of phrasesShouldNotMatch) {
   check('DATASHEET_FOLLOWUP is routed to Claude/advisory, not Llama/simple_lookup',
     /if\s*\(DATASHEET_FOLLOWUP\.test\(upper\)\)\s*return\s+'advisory'/.test(fn),
     'datasheet followups can still route to Llama simple_lookup');
+  check('DATASHEET_FOLLOWUP routing runs before multi-model simple_lookup shortcut',
+    fn.indexOf('DATASHEET_FOLLOWUP.test(upper)') > 0 &&
+      fn.indexOf('DATASHEET_FOLLOWUP.test(upper)') < fn.indexOf('MULTI_MODEL.test(m) && COMPARISON.test(upper)'),
+    'multi-model datasheet pulls can still route through Llama before datasheet routing');
   check('source includes live-test rationale for not using Llama on datasheet pulls',
-    /Llama can answer static specs[\s\S]*invent source URLs/.test(fn),
+    /multi-model datasheet pulls[\s\S]*invent source URLs/.test(fn),
     'missing source-level rationale for routing live datasheet requests away from Llama');
 }
 
@@ -150,12 +154,28 @@ for (const phrase of phrasesShouldNotMatch) {
   check('looksLikeRecentDatasheetTurn helper exists',
     /function looksLikeRecentDatasheetTurn\(content\)/.test(src),
     'recent datasheet helper missing');
+  check('extractDatasheetKeys helper exists',
+    /function extractDatasheetKeys\(message\)/.test(src),
+    'datasheet model extraction helper missing');
+  check('getRecentDatasheetRequestContext helper exists',
+    /async function getRecentDatasheetRequestContext\(history\)/.test(src),
+    'history-scoped datasheet request helper missing');
+  check('history helper prefers explicit user datasheet requests before assistant text',
+    /explicitUserRequests[\s\S]*role === 'user'[\s\S]*for \(const role of \['user', 'assistant'\]/.test(src),
+    'retry fallback may still prefer assistant text and pull stale models');
   const askIdx = src.indexOf('async function askClaude');
   check('askClaude found for retry followup source checks', askIdx > 0);
   const askBlock = src.substring(askIdx, askIdx + 9000);
   check('askClaude promotes retry phrases after datasheet history to wantsLiveDatasheet',
     /isDatasheetRetryFollowup\(userMessage\)[\s\S]*looksLikeRecentDatasheetTurn[\s\S]*wantsLiveDatasheet\s*=\s*true/.test(askBlock),
     'retry phrases can still reach Claude without fetching prior datasheet models');
+  check('askClaude retry fetch uses scoped recent datasheet request context',
+    /getRecentDatasheetRequestContext\(history\)/.test(askBlock),
+    'retry fetch still scans generic history instead of the last explicit datasheet request');
+  check('live datasheet prompt forbids adding models from conversation history',
+    /Do NOT add models from conversation history/.test(src) &&
+      /Copy source URLs exactly from the \[Datasheet: \.\.\.\] labels/.test(src),
+    'prompt does not prevent stale model bleed or source URL rewriting');
 }
 
 // ─── D. Flag-it deterministic handler ────────────────────────────────────
