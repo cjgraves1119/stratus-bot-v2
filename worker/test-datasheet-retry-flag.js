@@ -44,6 +44,7 @@ check('Both wantsLiveDatasheet regex copies present in source',
 
 const phrasesShouldMatch = [
   'pull the full datasheet for details',     // ← the live failure phrasing
+  'pull the live datasheet',
   'pull the datasheet',
   'pull the latest datasheet',
   'pull the complete datasheet',
@@ -119,6 +120,20 @@ for (const phrase of phrasesShouldNotMatch) {
   check('cf-conversation retry path uses ctx.waitUntil for D1 (lifecycle-attached)',
     /ctx\.waitUntil\(\s*logBotUsageToD1/.test(branch),
     'D1 call not lifecycle-attached');
+}
+
+// ─── C2. Datasheet requests bypass Llama waterfall ───────────────────────
+{
+  const fnIdx = src.indexOf('function classifyProductInfoSubtype');
+  check('classifyProductInfoSubtype found', fnIdx > 0);
+  const fn = src.substring(fnIdx, fnIdx + 5000);
+
+  check('DATASHEET_FOLLOWUP is routed to Claude/advisory, not Llama/simple_lookup',
+    /if\s*\(DATASHEET_FOLLOWUP\.test\(upper\)\)\s*return\s+'advisory'/.test(fn),
+    'datasheet followups can still route to Llama simple_lookup');
+  check('source includes live-test rationale for not using Llama on datasheet pulls',
+    /Llama can answer static specs[\s\S]*invent source URLs/.test(fn),
+    'missing source-level rationale for routing live datasheet requests away from Llama');
 }
 
 // ─── D. Flag-it deterministic handler ────────────────────────────────────

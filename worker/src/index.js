@@ -355,6 +355,7 @@ const datasheetCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
 const DATASHEET_FETCH_TIMEOUT_MS = 10000;
 const DATASHEET_TEXT_MAX_CHARS = 6000;
+const MAX_DATASHEET_FETCH_MODELS = 5;
 
 async function fetchDatasheet(url) {
   const now = Date.now();
@@ -480,7 +481,7 @@ async function getRelevantDatasheetContext(message) {
     }
   }
   if (models.size === 0) return null;
-  const keys = [...models].slice(0, 3);
+  const keys = [...models].slice(0, MAX_DATASHEET_FETCH_MODELS);
   const uniqueUrls = [...new Set(keys.map(k => DATASHEET_URLS[k]))];
   const fetches = uniqueUrls.map(async (url, idx) => {
     const text = await fetchDatasheet(url);
@@ -744,7 +745,9 @@ function classifyProductInfoSubtype(userMessage, hasImage) {
   if (SINGLE_MODEL_SPEC.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
   if (LICENSE_Q.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
   if (EOL_Q.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
-  if (DATASHEET_FOLLOWUP.test(upper)) return hasModel ? 'simple_lookup' : 'advisory';
+  // Datasheet requests need the Claude path. Llama can answer static specs, but
+  // live tests showed it may invent source URLs instead of using DATASHEET_URLS.
+  if (DATASHEET_FOLLOWUP.test(upper)) return 'advisory';
 
   // Default: advisory (Claude) — bias toward accuracy
   return 'advisory';
@@ -6383,7 +6386,7 @@ async function askLlamaProductInfo(userMessage, personId, env, classification = 
     const kv = env.CONVERSATION_KV;
 
     // Datasheet-intent detection (shared with askClaude)
-    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|READ\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GRAB\s+(?:THE\s+)?DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|READ\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|FETCH\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|GET\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|GRAB\s+(?:THE\s+)?DATASHEET)\b/i.test(userMessage);
     if (!wantsLiveDatasheet && classification && classification.intent === 'product_info') {
       // product_info followups often reference a prior turn that named a model
       const FOLLOWUP = /\b(SPECIFICS|MORE\s+DETAILS?|TELL\s+ME\s+MORE|KEEP\s+GOING|CONTINUE)\b/i;
@@ -6654,7 +6657,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
   const claudeStartMs = Date.now();
   try {
     const upper = userMessage.toUpperCase();
-    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|LOOK\s+(IT\s+)?UP|PULL\s+(IT\s+)?UP|DIG\s+INTO|READ\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST)\s+)?DATASHEET|GRAB\s+(?:THE\s+)?DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?(LATEST|DATASHEET|SPECS?)|LATEST\s+DATASHEET|PULL\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|CHECK\s+IT|MAKE\s+SURE|CONFIRM\s+(THE\s+)?(SPECS?|DATA)|DID\s+YOU\s+CHECK|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET|GET\s+SPECIFICS|SPECIFICS\s+(FROM\s+)?(THE\s+)?DATASHEET|FROM\s+(THE\s+)?DATASHEET|WHAT\s+DOES\s+(THE\s+)?DATASHEET\s+SAY|LOOK\s+(IT\s+)?UP|PULL\s+(IT\s+)?UP|DIG\s+INTO|READ\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|FETCH\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|GET\s+(?:THE\s+)?(?:(?:FULL|COMPLETE|LATEST|LIVE)\s+)?DATASHEET|GRAB\s+(?:THE\s+)?DATASHEET)\b/i.test(userMessage);
 
     // V2 classifier: product_info intent → treat as datasheet-lookup request
     // This lets followup questions like "get specifics from datasheet" or "tell me more"
