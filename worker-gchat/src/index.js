@@ -579,6 +579,7 @@ const datasheetCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
 const DATASHEET_FETCH_TIMEOUT_MS = 10000;
 const DATASHEET_TEXT_MAX_CHARS = 6000;
+const MAX_DATASHEET_FETCH_MODELS = 5;
 
 async function fetchDatasheet(url) {
   const now = Date.now();
@@ -675,7 +676,7 @@ async function getRelevantDatasheetContext(message) {
     }
   }
   if (models.size === 0) return null;
-  const keys = [...models].slice(0, 3);
+  const keys = [...models].slice(0, MAX_DATASHEET_FETCH_MODELS);
   const uniqueUrls = [...new Set(keys.map(k => DATASHEET_URLS[k]))];
   const fetches = uniqueUrls.map(async url => {
     const text = await fetchDatasheet(url);
@@ -11047,7 +11048,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
     const upper = userMessage.toUpperCase();
-    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?DATASHEET|SCAN\s+(THE\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
+    let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|READ\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
 
     let systemPrompt = SYSTEM_PROMPT;
     // Inject current date so the LLM knows "today" for date calculations

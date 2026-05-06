@@ -127,6 +127,10 @@ function runSourceChecks(target) {
     /DATASHEET_TEXT_MAX_CHARS\s*=\s*6000/.test(src) &&
     /text\.slice\(0,\s*DATASHEET_TEXT_MAX_CHARS\)/.test(src),
     'text cap constant or usage missing');
+  check(`${target}: multi-model live datasheet fetch cap covers CW AP set plus C8455`,
+    /MAX_DATASHEET_FETCH_MODELS\s*=\s*5/.test(src) &&
+    /slice\(0,\s*MAX_DATASHEET_FETCH_MODELS\)/.test(src),
+    'live datasheet fetch cap can still drop the fourth/fifth model');
   check(`${target}: fetch rejects HTML 404/missing-page bodies`,
     /page not found\|404\\s\*-\\s\*page/i.test(src),
     'missing-page guard not found');
