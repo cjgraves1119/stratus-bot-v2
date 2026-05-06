@@ -5969,7 +5969,7 @@ This worker has a built-in 'fetchDatasheet' function that pulls live content fro
 
 NEVER reply with "I don't have the ability to browse URLs" or "I can only work with injected content" or "I cannot fetch live web pages". Those statements are FALSE for this bot. If the live-datasheet section is missing from this prompt for some reason, say "I couldn't pull the datasheet just now — want me to retry?" and offer to retry; do NOT claim the capability doesn't exist.
 
-When you offer to "pull the full datasheet" / "verify against the datasheet" / "check the latest specs", you ARE offering a real capability. The user's "yes please / pull it / try again" replies will trigger another live fetch on the next turn.
+When you offer to "pull the full datasheet" / "verify against the datasheet" / "check the latest specs", you ARE offering a real capability. The user's "yes please / pull it / try again" replies trigger a live fetch on THE SAME TURN they send — the worker re-runs fetchDatasheet server-side BEFORE you see the next prompt, then injects the fresh content under '## LIVE DATASHEET CONTENT' for you to use directly. NEVER tell the user to "send another message to trigger the fetch" or "try again to fetch" — by the time you're answering THIS turn, the fetch already ran. If '## LIVE DATASHEET CONTENT' is present in this prompt, use it. If it's missing, the fetch came back empty — say so plainly and offer a different model or alternative.
 
 ## CRITICAL ANTI-HALLUCINATION RULES
 - NEVER state product specifications unless they are provided in this prompt via a "PRODUCT SPECS" section.
@@ -6483,6 +6483,36 @@ async function askLlamaProductInfo(userMessage, personId, env, classification = 
   }
 }
 
+// Strip echoed source/datasheet attribution lines from a Claude reply.
+// Claude sometimes parrots back lines the worker injected into the prompt
+// (the '## LIVE DATASHEET CONTENT' block contains the source URL). The
+// worker appends its OWN attribution footer in the final-reply assembly,
+// so without this strip the user sees the same source twice. We only
+// touch trailing attribution-style lines — anything else in the body
+// is preserved verbatim.
+function stripEchoedSourceFooter(reply) {
+  if (!reply || typeof reply !== 'string') return reply || '';
+  const lines = reply.split('\n');
+  // Walk from the end; drop trailing blank lines plus any line that looks
+  // like a source/attribution echo. Stop at the first non-attribution line.
+  while (lines.length > 0) {
+    const tail = lines[lines.length - 1].trim();
+    if (tail === '') { lines.pop(); continue; }
+    // Match Claude's typical echo shapes:
+    //   Source: live datasheet — MS150 (documentation.meraki.com)
+    //   *Live datasheet: MS150*
+    //   _Source: ..._
+    //   [Datasheet: https://documentation.meraki.com/...]
+    //   📄 Source: live datasheet ...
+    if (/^[*_]?\s*(?:📄|📊|📚)?\s*(?:Source:\s*(?:live\s+)?datasheet|Live\s+datasheet:|\[Datasheet:)/i.test(tail)) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join('\n').trimEnd();
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, classification = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
 
@@ -6938,9 +6968,16 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     // Matches the Llama-path marker above for at-a-glance observability.
     const claudeSec = ((Date.now() - claudeStartMs) / 1000).toFixed(1);
     const modelMarker = `_💎 Claude Sonnet 4.6 · ${claudeSec}s_`;
+    // Footer dedupe: Claude occasionally echoes the worker-injected datasheet
+    // URL into the reply tail (e.g. "Source: live datasheet — MS150
+    // (documentation.meraki.com)" or "*Live datasheet: MS150*") because the
+    // injected '## LIVE DATASHEET CONTENT' block contains the URL. The worker
+    // ALSO appends its own attribution footer below — without dedupe the user
+    // sees the same source line twice. Strip Claude's echo before appending.
+    const dedupedReply = stripEchoedSourceFooter(reply);
     const finalReply = sourceFooter
-      ? `${reply}\n\n${sourceFooter}\n\n${modelMarker}`
-      : `${reply}\n\n${modelMarker}`;
+      ? `${dedupedReply}\n\n${sourceFooter}\n\n${modelMarker}`
+      : `${dedupedReply}\n\n${modelMarker}`;
 
     if (personId) {
       await addToHistory(kv, personId, 'user', userMessage);
@@ -7737,7 +7774,7 @@ export default {
                 if (priorWasClaude) {
                   console.log('[CF-First] Retry phrase + prior Claude/datasheet context → reroute to Claude with history');
                   T.step('wx-claude', 'enter');
-                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model they were asking about, fetch the live datasheet via the worker's built-in capability, and answer. Do NOT claim you cannot browse — you can.)`, personId, env, null, activeClassification);
+                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model they asked about. The worker has already attempted a live datasheet fetch THIS turn — if '## LIVE DATASHEET CONTENT' is in your prompt, answer from it directly. If it's missing, say the fetch came back empty and suggest the user try a different model or rephrase. Do NOT claim you cannot browse, and do NOT ask the user to 'send another message to trigger the fetch' — this turn IS the retry.)`, personId, env, null, activeClassification);
                   T.step('wx-claude', 'exit');
                   await addToHistory(kv, personId, 'user', text);
                   await addToHistory(kv, personId, 'assistant', retryReply);
