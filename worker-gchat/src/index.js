@@ -98,6 +98,33 @@ function isTruthyFlag(value) {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim());
 }
 
+function rolloutPercentFromFlag(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized || /^(0|false|no|off)$/i.test(normalized)) return 0;
+  if (isTruthyFlag(normalized)) return 100;
+
+  const percent = Number(normalized);
+  if (!Number.isFinite(percent)) return 0;
+  return Math.max(0, Math.min(100, percent));
+}
+
+function stablePercentBucket(key) {
+  const text = String(key || 'anonymous');
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % 10000 / 100;
+}
+
+function isRolloutEnabledForKey(flagValue, key) {
+  const percent = rolloutPercentFromFlag(flagValue);
+  if (percent <= 0) return false;
+  if (percent >= 100) return true;
+  return stablePercentBucket(key) < percent;
+}
+
 function normalizeForceModel(model) {
   const raw = String(model || '').trim();
   const normalized = raw.toLowerCase();
@@ -13858,7 +13885,9 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const forceDeepSeekModelId = options.forceDeepSeekModelId || null;
   const dryRun = options.dryRun === true;
   const evalContext = options.evalContext || null;
-  const deepSeekTier3Enabled = isTruthyFlag(env.USE_DEEPSEEK_TIER_3);
+  const rolloutKey = personId || evalContext?.personId || 'anonymous';
+  const deepSeekTier3RolloutPercent = rolloutPercentFromFlag(env.USE_DEEPSEEK_TIER_3);
+  const deepSeekTier3Enabled = isRolloutEnabledForKey(env.USE_DEEPSEEK_TIER_3, rolloutKey);
   const deepSeekAdvisoryEnabled = isTruthyFlag(env.USE_DEEPSEEK_ADVISORY);
   const advisoryQuery = isAdvisoryQuery(userMessage);
 
@@ -14019,6 +14048,10 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       elapsedMs: claudeResult.elapsedMs,
       totalMs: Date.now() - startMs
     };
+  }
+
+  if (deepSeekTier3RolloutPercent > 0) {
+    console.log(`[WATERFALL] DeepSeek Tier 3 rollout gate skipped personId=${personId} key=${rolloutKey} percent=${deepSeekTier3RolloutPercent} bucket=${stablePercentBucket(rolloutKey)}`);
   }
 
   // ── Legacy Tier 2: Gemma 4 (fallback while DeepSeek flag is off) ──

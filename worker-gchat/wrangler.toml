@@ -10,7 +10,9 @@ compatibility_date = "2024-01-01"
 # Non-secret config (secrets set via `wrangler secret put`)
 # ANTHROPIC_API_KEY = set via wrangler secret
 # DEEPSEEK_API_KEY = set via wrangler secret
-# DeepSeek rollout flags. Keep advisory off until B6 guardrail shadow grading is clean.
+# DeepSeek rollout flags. USE_DEEPSEEK_TIER_3 accepts false/true or a numeric
+# percent such as "5" for a stable personId canary. Keep advisory off until B6
+# guardrail shadow grading is clean.
 USE_DEEPSEEK_TIER_3 = "false"
 USE_DEEPSEEK_ADVISORY = "false"
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
