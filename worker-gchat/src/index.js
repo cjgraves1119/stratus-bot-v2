@@ -17996,6 +17996,7 @@ Hard rules:
               senderName: detectSenderName,
               threadContacts: detectThreadContacts = [],
               threadEmails: detectThreadEmails = [],
+              includeExternalEnrichment: detectIncludeExternalEnrichment = false,
             } = apiBody;
             if (!detectDomain && !detectBody) {
               return new Response(JSON.stringify({ error: 'emailBody or senderDomain required' }), { status: 400, headers: jsonHeaders });
@@ -18296,9 +18297,20 @@ Return ONLY a JSON object (no markdown, no explanation). Set website to an empty
               }
 
               // ─── Phase 4: Use Zoho/Zia enrichment before external AI web search ───
+              // This phase is explicitly button-gated by the Chrome extension.
+              // The first Add Contact pass must preserve existing Zoho account
+              // candidates for manual selection instead of jumping to a new
+              // account suggestion.
               const hasUsableCompanyInfo = !!(accountSuggestion.name && (accountSuggestion.street || accountSuggestion.city));
               let zia = null;
-              if (isConsumerDomain) {
+              if (!detectIncludeExternalEnrichment) {
+                zia = { status: 'SKIPPED', reason: 'External enrichment requires user action' };
+                stages.push({
+                  step: 'zoho_zia_enrichment',
+                  status: 'SKIPPED',
+                  detail: 'Skipped until user clicks company lookup',
+                });
+              } else if (isConsumerDomain) {
                 zia = { status: 'SKIPPED', reason: 'Consumer email domain' };
                 stages.push({ step: 'zoho_zia_enrichment', status: 'SKIPPED', detail: 'Consumer email domains are not sent to Zia enrichment' });
               } else if (!hasUsableCompanyInfo && cleanDetectDomain) {
@@ -18333,7 +18345,7 @@ Return ONLY a JSON object (no markdown, no explanation). Set website to an empty
 
               // ─── Phase 5: Last resort web search through Claude ───
               const hasThreadParticipantAccount = candidates.some(c => c.matchType === 'thread_participant_account' && c.matchConfidence === 'high');
-              const stillNeedsWebLookup = cleanDetectDomain && !isConsumerDomain && !hasThreadParticipantAccount && !(accountSuggestion.name && (accountSuggestion.street || accountSuggestion.city));
+              const stillNeedsWebLookup = detectIncludeExternalEnrichment && cleanDetectDomain && !isConsumerDomain && !hasThreadParticipantAccount && !(accountSuggestion.name && (accountSuggestion.street || accountSuggestion.city));
               if (stillNeedsWebLookup) {
                 const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
                   method: 'POST',
@@ -18380,6 +18392,12 @@ Return ONLY a JSON object (no markdown, no explanation). Set website to an empty
                 } else {
                   stages.push({ step: 'web_search', status: 'ERROR', detail: `Claude web search returned ${claudeResp.status}` });
                 }
+              } else if (!detectIncludeExternalEnrichment) {
+                stages.push({
+                  step: 'web_search',
+                  status: 'SKIPPED',
+                  detail: 'Skipped until user clicks company lookup',
+                });
               }
 
               const existingAccount = candidates.find(c => c.matchConfidence === 'high') || null;

@@ -5,7 +5,7 @@
  * - Sub-tabs: Info | Deals | Tasks
  * - Deals: SO number, tracking, ship date, Velocity Hub, Cisco rep assignment per deal
  * - Tasks: complete, create, suggest-task two-step preview → confirm
- * - Add Contact: domain-matched account auto-select with search
+ * - Add Contact: manual account selection before optional enrichment
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -416,7 +416,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   }
 
   // ── Add Contact ──
-  function buildAccountDetectionPayload(emailForForm, contact) {
+  function buildAccountDetectionPayload(emailForForm, contact, includeExternalEnrichment = false) {
     const domain = (emailForForm.split('@')[1] || '').toLowerCase();
     return {
       emailBody: emailContext?.body || '',
@@ -425,28 +425,29 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       senderName: contact?.name || emailContext?.customerName || emailContext?.senderName || '',
       threadContacts: emailContext?.threadContacts || [],
       threadEmails: emailContext?.allEmails || [],
+      includeExternalEnrichment,
     };
   }
 
-  function applyAccountDetectionResult(result, domain) {
+  function applyAccountDetectionResult(result, domain, { allowCreateSuggestion = false } = {}) {
     setAccountDetection(result || null);
 
     const detectedCandidates = result?.candidates || [];
     setDomainSuggestions(detectedCandidates);
 
     if (result?.existingAccount?.id && result.existingAccount.matchConfidence === 'high') {
-      setAddFormAccountId(result.existingAccount.id);
-      setAddFormAccountName(result.existingAccount.name || '');
+      setAddFormAccountId('');
+      setAddFormAccountName('');
       setShowCreateAccount(false);
       const linkedViaThread = result.existingAccount.matchType === 'thread_participant_account';
       setAccountDetectionStatus(linkedViaThread
-        ? 'Linked Zoho Account from another participant in this thread.'
-        : `Linked exact Zoho website match for ${domain}.`);
+        ? 'Zoho found a likely account from another participant in this thread. Select it below to link.'
+        : `Zoho found a likely website match for ${domain}. Select it below to link.`);
       return;
     }
 
     const suggestion = result?.suggestion || {};
-    if (suggestion.name || suggestion.street || suggestion.city) {
+    if (allowCreateSuggestion && (suggestion.name || suggestion.street || suggestion.city)) {
       setShowCreateAccount(true);
       setNewAccountSource(suggestion.source || '');
       setNewAccountData(prev => ({
@@ -471,9 +472,36 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     if (detectedCandidates.length > 0) {
       setAccountDetectionStatus('Zoho found possible matches. Verify before linking.');
     } else {
-      setShowCreateAccount(true);
-      setAccountDetectionStatus('No existing account match found. Create a new account before adding the contact.');
+      setShowCreateAccount(false);
+      setAccountDetectionStatus('No existing Zoho account match found. Search Zoho manually, create an account, or run company lookup.');
     }
+  }
+
+  function runAccountDetection(emailForForm, contact, { includeExternalEnrichment = false } = {}) {
+    const domain = emailForForm.split('@')[1] || '';
+    if (!domain && !emailContext?.body) return Promise.resolve();
+
+    setDomainSuggestionsLoading(true);
+    setEnrichLoading(includeExternalEnrichment);
+    setAccountDetectionStatus(includeExternalEnrichment
+      ? 'Running Zia and web lookup for new-account details...'
+      : 'Checking Zoho for existing account options...');
+
+    return sendToBackground(MSG.DETECT_ACCOUNT, buildAccountDetectionPayload(emailForForm, contact, includeExternalEnrichment))
+      .then(res => {
+        if (res?.error) throw new Error(res.error);
+        applyAccountDetectionResult(res, domain, { allowCreateSuggestion: includeExternalEnrichment });
+      })
+      .catch(err => {
+        setAccountDetectionStatus(includeExternalEnrichment
+          ? `Company lookup failed: ${err.message || err}. You can still search Zoho or create the account manually.`
+          : `Zoho account check failed: ${err.message || err}. You can still search Zoho manually.`);
+        if (includeExternalEnrichment) setShowCreateAccount(true);
+      })
+      .finally(() => {
+        setDomainSuggestionsLoading(false);
+        setEnrichLoading(false);
+      });
   }
 
   function openAddForm() {
@@ -520,26 +548,18 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setAddFormError(null);
     setAddFormSuccess(null);
 
-    // Auto-run the account workflow if we don't already have an account:
-    // email thread first, Zoho/Zia second, web research last.
+    // Auto-run only the safe Zoho/account pass. Zia and web lookup are
+    // intentionally gated behind an explicit button so manual account choices
+    // stay visible for MSP/third-party contact threads.
     if (!data?.account?.id && domain && !CONSUMER_DOMAINS.has(domain)) {
-      setDomainSuggestionsLoading(true);
-      setEnrichLoading(true);
-      setAccountDetectionStatus('Checking email thread, then Zoho/Zia enrichment...');
-      sendToBackground(MSG.DETECT_ACCOUNT, buildAccountDetectionPayload(emailForForm, contact))
-        .then(res => {
-          if (res?.error) throw new Error(res.error);
-          applyAccountDetectionResult(res, domain);
-        })
-        .catch(err => {
-          setAccountDetectionStatus(`Company lookup failed: ${err.message || err}. You can still search Zoho or create the account manually.`);
-          setShowCreateAccount(true);
-        })
-        .finally(() => {
-          setDomainSuggestionsLoading(false);
-          setEnrichLoading(false);
-        });
+      runAccountDetection(emailForForm, contact, { includeExternalEnrichment: false });
     }
+  }
+
+  function handleRunCompanyLookup() {
+    const lookupEmail = addFormData.email || selectedContact || '';
+    const contact = externalContacts.find(c => c.email?.toLowerCase() === lookupEmail.toLowerCase());
+    runAccountDetection(lookupEmail, contact, { includeExternalEnrichment: true });
   }
 
   function handleAccountSearchChange(q, skipSearch = false) {
@@ -798,6 +818,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 createAccountLoading={createAccountLoading}
                 createAccountError={createAccountError}
                 enrichLoading={enrichLoading}
+                onRunCompanyLookup={handleRunCompanyLookup}
                 onSubmit={handleAddContact}
                 onCancel={() => { setShowAddForm(false); setShowCreateAccount(false); }}
                 loading={addFormLoading}
@@ -1578,6 +1599,7 @@ function AddContactForm({
   showCreateAccount, setShowCreateAccount,
   newAccountData, setNewAccountData, newAccountSource, onCreateAccount, createAccountLoading, createAccountError,
   enrichLoading,
+  onRunCompanyLookup,
   onSubmit, onCancel, loading, error,
 }) {
   function selectAccount(acct) {
@@ -1727,20 +1749,48 @@ function AddContactForm({
                   >
                     ➕ Create new account
                   </div>
+                  <div
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      if (!enrichLoading) onRunCompanyLookup?.();
+                    }}
+                    style={{
+                      padding: '8px 10px', fontSize: 12, cursor: enrichLoading ? 'not-allowed' : 'pointer',
+                      color: enrichLoading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+                      borderTop: `1px solid ${COLORS.BORDER}`, fontWeight: 500,
+                    }}
+                    onMouseEnter={e => { if (!enrichLoading) e.currentTarget.style.background = '#e3f2fd'; }}
+                    onMouseLeave={e => e.currentTarget.style.background = 'white'}
+                  >
+                    {enrichLoading ? 'Looking up company details...' : 'Look up company details'}
+                  </div>
                 </div>
               )}
 
-              {/* "Create new account" button when dropdown isn't open */}
+              {/* Account action buttons when dropdown isn't open */}
               {!showDropdown && (
-                <button type="button"
-                  onClick={() => setShowCreateAccount(true)}
-                  style={{
-                    marginTop: 6, background: 'none', border: `1px dashed ${COLORS.STRATUS_BLUE}`,
-                    color: COLORS.STRATUS_BLUE, borderRadius: 6, padding: '5px 10px',
-                    fontSize: 12, cursor: 'pointer', width: '100%',
-                  }}>
-                  ➕ Create new account
-                </button>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button type="button"
+                    onClick={() => setShowCreateAccount(true)}
+                    style={{
+                      flex: 1, background: 'none', border: `1px dashed ${COLORS.STRATUS_BLUE}`,
+                      color: COLORS.STRATUS_BLUE, borderRadius: 6, padding: '5px 8px',
+                      fontSize: 12, cursor: 'pointer',
+                    }}>
+                    Create account
+                  </button>
+                  <button type="button"
+                    onClick={onRunCompanyLookup}
+                    disabled={enrichLoading}
+                    style={{
+                      flex: 1, background: 'white', border: `1px solid ${COLORS.BORDER}`,
+                      color: enrichLoading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+                      borderRadius: 6, padding: '5px 8px', fontSize: 12,
+                      cursor: enrichLoading ? 'not-allowed' : 'pointer',
+                    }}>
+                    {enrichLoading ? 'Looking up...' : 'Lookup details'}
+                  </button>
+                </div>
               )}
             </>
           )}
@@ -1759,10 +1809,23 @@ function AddContactForm({
                 )}
                 {enrichLoading && (
                   <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
-                    Checking email thread, Zoho/Zia, then web…
+                    Running Zia and web lookup…
                   </div>
                 )}
               </div>
+              {!newAccountSource && (
+                <button type="button"
+                  onClick={onRunCompanyLookup}
+                  disabled={enrichLoading}
+                  style={{
+                    width: '100%', marginBottom: 8, background: 'white',
+                    border: `1px solid ${COLORS.BORDER}`, color: enrichLoading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+                    borderRadius: 6, padding: '6px 8px', fontSize: 12,
+                    cursor: enrichLoading ? 'not-allowed' : 'pointer',
+                  }}>
+                  {enrichLoading ? 'Looking up company details...' : 'Look up company details'}
+                </button>
+              )}
               <input type="text" placeholder="Account Name *" value={newAccountData.name}
                 onChange={e => setNewAccountData(p => ({ ...p, name: e.target.value }))}
                 style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />

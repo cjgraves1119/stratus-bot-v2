@@ -304,12 +304,23 @@ export async function enrichCompany(domain) {
  * Detect account info using the selected email thread, Zoho/Zia enrichment,
  * and only then web research as a fallback.
  */
-export async function detectAccount({ emailBody, senderDomain, senderEmail, senderName }) {
+export async function detectAccount({
+  emailBody,
+  senderDomain,
+  senderEmail,
+  senderName,
+  threadContacts,
+  threadEmails,
+  includeExternalEnrichment,
+}) {
   return apiCall('/api/detect-account', {
     emailBody: (emailBody || '').substring(0, MAX_EMAIL_BODY_CHARS),
     senderDomain: senderDomain || '',
     senderEmail: senderEmail || '',
     senderName: senderName || '',
+    threadContacts: Array.isArray(threadContacts) ? threadContacts : [],
+    threadEmails: Array.isArray(threadEmails) ? threadEmails : [],
+    includeExternalEnrichment: !!includeExternalEnrichment,
   }, { timeout: 60000 });
 }
 
