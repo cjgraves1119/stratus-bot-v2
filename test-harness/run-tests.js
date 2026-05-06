@@ -6,7 +6,9 @@
  * captures the raw JSON, runs the harness's markdown renderer to produce rendered HTML,
  * evaluates the primary pass criteria, and writes a JSONL log.
  *
- * Destructive-op Zoho verification is intentionally left for the Claude driver.
+ * Candidate-model eval defaults to dry-run mode so write-shaped prompts do not
+ * mutate Zoho records. Set DRY_RUN=0 only for an explicitly approved live-write
+ * verification pass.
  */
 
 const fs = require('fs');
@@ -20,8 +22,8 @@ const DECISION_GRADE_LIVE_LLM = true;
 const EVAL_RUN_ID = process.env.EVAL_RUN_ID || crypto.randomUUID();
 const USER_EMAIL = 'chrisg@stratusinfosystems.com';
 const PERSON_ID = '2570562000141711002';
-const TEST_ACCOUNT = '2570562000401231689';
-const SEED_DEAL = '2570562000401269831';
+const TEST_ACCOUNT = process.env.TEST_ACCOUNT || '2570562000401231689';
+const SEED_DEAL = process.env.SEED_DEAL || '2570562000401269831';
 const SEED_DEAL_CLOSEDLOST = '2570562000401222755';
 let SEED_QUOTE = process.env.SEED_QUOTE || '2570562000401460084';
 let SEED_QUOTE_NUMBER = process.env.SEED_QUOTE_NUMBER || '2570562000401460086';
@@ -29,7 +31,8 @@ let SEED_QUOTED_ITEM = process.env.SEED_QUOTED_ITEM || '2570562000401460085';
 const FORCE_MODEL = process.env.FORCE_MODEL || null; // 'llama' | 'gemma' | 'claude' | 'sea-lion' | 'deepseek-v4-pro' | null (waterfall)
 const RUN_LABEL = process.env.RUN_LABEL || (FORCE_MODEL || 'auto');
 const AUTO_RESEED = process.env.AUTO_RESEED !== '0'; // default on
-const SEED_CONTACT = '2570562000401235755';
+const DRY_RUN = process.env.DRY_RUN !== '0'; // default on; set DRY_RUN=0 only for approved live-write validation
+const SEED_CONTACT = process.env.SEED_CONTACT || '2570562000401235755';
 const GATEWAY_API_KEY = process.env.STRATUS_GATEWAY_API_KEY || process.env.GATEWAY_API_KEY || '';
 
 const outPath = path.join(__dirname, `results-${RUN_LABEL}-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
@@ -108,6 +111,7 @@ async function sendChat(text, history, progressId, sessionId) {
       harness: true,
     },
     progressId,
+    dryRun: DRY_RUN,
   };
   if (FORCE_MODEL) body.forceModel = FORCE_MODEL;
   const t0 = Date.now();
@@ -476,10 +480,15 @@ async function ensureSeed() {
         harness: true,
       },
       forceModel: 'claude',
+      dryRun: DRY_RUN,
     };
     const res = await fetch(`${GATEWAY}/api/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-User-Email': USER_EMAIL },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Email': USER_EMAIL,
+        ...(GATEWAY_API_KEY ? { 'X-API-Key': GATEWAY_API_KEY } : {}),
+      },
       body: JSON.stringify(body),
     });
     const raw = await res.text();
@@ -507,6 +516,10 @@ async function ensureSeed() {
 
   // Fallback: if no quote found, create one
   if (/no records found|not found|no quotes|no record/i.test(reply)) {
+    if (DRY_RUN) {
+      console.log('  No quote on seed account — dry-run mode blocks creating a fresh seed quote; proceeding with defaults.');
+      return;
+    }
     console.log('  No quote on seed account — creating a fresh seed quote...');
     const createReply = await lookup(
       `Create a deal named 'HARNESS-SEED' on account ${TEST_ACCOUNT} with Lead_Source "Stratus Referal", ` +
@@ -578,6 +591,7 @@ async function main() {
   console.log(`Eval run id: ${EVAL_RUN_ID}`);
   console.log(`Gateway API key: ${GATEWAY_API_KEY ? 'present' : 'missing (gateway may return 401)'}`);
   console.log(`FORCE_MODEL: ${FORCE_MODEL || '(waterfall)'} — RUN_LABEL: ${RUN_LABEL}`);
+  console.log(`DRY_RUN: ${DRY_RUN ? 'true (write tools mocked)' : 'false (live writes allowed)'}`);
   console.log('');
 
   await ensureSeed();
