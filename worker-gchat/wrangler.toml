@@ -17,7 +17,7 @@ compatibility_date = "2024-01-01"
 # Zoho CRM OAuth (create Self Client at api-console.zoho.com)
 # ZOHO_CLIENT_ID = Zoho self-client ID
 # ZOHO_CLIENT_SECRET = Zoho self-client secret
-# ZOHO_REFRESH_TOKEN = Zoho offline refresh token (scope: ZohoCRM.modules.ALL,ZohoCRM.settings.fields.ALL,ZohoCRM.coql.READ)
+# ZOHO_REFRESH_TOKEN = Zoho offline refresh token (scope: ZohoCRM.modules.ALL,ZohoCRM.settings.fields.ALL,ZohoCRM.coql.READ, ZohoCRM.Zia.enrichment.READ, ZohoCRM.settings.intelligence.READ, ZohoCRM.settings.intelligence.CREATE)
 #
 # Gmail API OAuth (uses existing GCP project swift-catfish-474413-d5)
 # GOOGLE_CLIENT_ID = GCP OAuth client ID
@@ -105,4 +105,3 @@ dataset = "stratus_bot_metrics"
 [[r2_buckets]]
 binding = "BOT_STORAGE"
 bucket_name = "stratus-bot-storage"
-

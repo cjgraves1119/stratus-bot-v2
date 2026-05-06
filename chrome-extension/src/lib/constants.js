@@ -17,6 +17,9 @@ export const ZOHO = {
   SCOPES: [
     'ZohoCRM.modules.ALL',
     'ZohoCRM.settings.ALL',
+    'ZohoCRM.Zia.enrichment.READ',
+    'ZohoCRM.settings.intelligence.READ',
+    'ZohoCRM.settings.intelligence.CREATE',
     'ZohoCRM.users.READ',
   ].join(','),
   // Client ID is set per-install in options page
@@ -134,6 +137,9 @@ export const MSG = {
 
   // Enrich company info from domain (for Add Contact → New Account)
   ENRICH_COMPANY: 'ENRICH_COMPANY',
+
+  // Detect account/company from email thread, Zoho/Zia enrichment, then web fallback
+  DETECT_ACCOUNT: 'DETECT_ACCOUNT',
 
   // Create CRM task manually
   CRM_CREATE_TASK: 'CRM_CREATE_TASK',

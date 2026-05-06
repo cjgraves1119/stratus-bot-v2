@@ -301,6 +301,30 @@ export async function enrichCompany(domain) {
 }
 
 /**
+ * Detect account info using the selected email thread, Zoho/Zia enrichment,
+ * and only then web research as a fallback.
+ */
+export async function detectAccount({
+  emailBody,
+  senderDomain,
+  senderEmail,
+  senderName,
+  threadContacts,
+  threadEmails,
+  includeExternalEnrichment,
+}) {
+  return apiCall('/api/detect-account', {
+    emailBody: (emailBody || '').substring(0, MAX_EMAIL_BODY_CHARS),
+    senderDomain: senderDomain || '',
+    senderEmail: senderEmail || '',
+    senderName: senderName || '',
+    threadContacts: Array.isArray(threadContacts) ? threadContacts : [],
+    threadEmails: Array.isArray(threadEmails) ? threadEmails : [],
+    includeExternalEnrichment: !!includeExternalEnrichment,
+  }, { timeout: 60000 });
+}
+
+/**
  * Create a new CRM account.
  */
 export async function crmCreateAccount(name, street, city, state, zip, website) {
@@ -399,9 +423,9 @@ Hard rules:
 // ─────────────────────────────────────────────
 
 /**
- * Send a message to the CRM-aware Claude agent.
- * Routes through the same askClaude() tool-use loop as the GChat bot,
- * giving the extension chat full Zoho CRM capabilities.
+ * Send a message to the CRM-aware agent.
+ * The extension calls the gateway /api/chat route; the gateway forwards that
+ * request to the main worker waterfall so Llama/Gemma get first pass.
  */
 export async function chatWithCrm(requestText, emailContext, history, systemContext, progressId) {
   return apiCall('/api/chat', {

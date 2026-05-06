@@ -11,11 +11,21 @@
  * Use from: content scripts, sidebar, popup.
  * @param {string} type - Message type (from MSG constants)
  * @param {Object} [payload={}] - Message data
+ * @param {Object} [options={}] - {retryRuntimePortClose}
  * @returns {Promise<any>} Response from background
  */
-export function sendToBackground(type, payload = {}) {
+const MESSAGE_RETRY_DELAYS_MS = [150, 500];
+
+function isRetryableRuntimeError(message = '') {
+  const text = String(message).toLowerCase();
+  return text.includes('message port closed')
+    || text.includes('receiving end does not exist')
+    || text.includes('extension context invalidated');
+}
+
+function sendRuntimeMessage(message) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type, ...payload }, (response) => {
+    chrome.runtime.sendMessage(message, (response) => {
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
         return;
@@ -27,6 +37,30 @@ export function sendToBackground(type, payload = {}) {
       resolve(response);
     });
   });
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export async function sendToBackground(type, payload = {}, options = {}) {
+  const message = { type, ...payload };
+  const retryDelays = options.retryRuntimePortClose ? MESSAGE_RETRY_DELAYS_MS : [];
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      return await sendRuntimeMessage(message);
+    } catch (err) {
+      lastError = err;
+      if (!isRetryableRuntimeError(err.message) || attempt === retryDelays.length) {
+        throw err;
+      }
+      await wait(retryDelays[attempt]);
+    }
+  }
+
+  throw lastError;
 }
 
 /**

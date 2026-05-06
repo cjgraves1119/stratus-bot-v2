@@ -144,12 +144,37 @@ t('chat-tab write intent forces Claude unless forceModel is explicit', () => {
   assert.match(src, /forceClaude: forceModel === 'claude' \|\| forceClaudeForChatWrite/);
 });
 
+t('Stratus order URL edits are deterministic before the model waterfall', () => {
+  const urlEditAt = src.indexOf('updateStratusUrlQuantitiesFromText(wText)');
+  const waterfallAt = src.indexOf('askWithWaterfall(wEnrichedMessage');
+  assert.ok(urlEditAt > 0, 'chat-waterfall should call updateStratusUrlQuantitiesFromText(wText)');
+  assert.ok(waterfallAt > 0, 'chat-waterfall should call askWithWaterfall');
+  assert.ok(urlEditAt < waterfallAt, 'URL quantity edits must return before any LLM tier');
+  assert.match(src, /deterministic-url-editor/);
+  assert.match(src, /No Zoho records were created\./);
+});
+
+t('generic Quote creation includes same-build ecomm link and follow-up Task invariant', () => {
+  assert.match(src, /function buildStratusUrlFromQuotedItems\(quotedItems\)/);
+  assert.match(src, /Ecomm link for same build:/);
+  assert.match(src, /module_name === 'Quotes'[\s\S]*buildStratusUrlFromQuotedItems\(recordData\.Quoted_Items\)/);
+  assert.match(src, /module_name === 'Quotes' && recordData\.Deal_Name\?\.id/);
+  assert.match(src, /\$se_module: 'Deals'/);
+  assert.match(src, /Follow-up task created: \[View Task\]/);
+});
+
 t('create_deal_and_quote sets Cisco_Billing_Term explicitly and verifies it', () => {
   assert.match(src, /const VALID_BILLING_TERMS = \['Prepaid Term', 'Prepaid'\];/);
   assert.match(src, /Cisco_Billing_Term "\$\{before\}" invalid - coerced to "Prepaid Term"/);
   assert.match(src, /Cisco_Billing_Term: quoteBillingTerm/);
   assert.match(src, /Set Cisco_Billing_Term: Prepaid Term/);
   assert.match(src, /Quote_Stage,Cisco_Billing_Term,Quoted_Items/);
+});
+
+t('create_deal_and_quote reports the same-build ecomm URL with verified Quote summary', () => {
+  assert.match(src, /const sameBuildEcommUrl = buildStratusUrl\(resolvedProducts\.map/);
+  assert.match(src, /results\.records\.ecomm = \{ url: sameBuildEcommUrl \};/);
+  assert.match(src, /buildSameBuildEcommLine\(sameBuildEcommUrl\)/);
 });
 
 if (failed) {
