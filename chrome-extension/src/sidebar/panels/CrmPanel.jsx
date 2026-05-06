@@ -447,8 +447,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     }
 
     const suggestion = result?.suggestion || {};
-    if (allowCreateSuggestion && (suggestion.name || suggestion.street || suggestion.city)) {
-      setShowCreateAccount(true);
+    const hasCreateSuggestion = Boolean(suggestion.name || suggestion.street || suggestion.city);
+    const isSafeThreadSuggestion = suggestion.source === 'email_thread';
+    const canUseCreateSuggestion = hasCreateSuggestion && (allowCreateSuggestion || isSafeThreadSuggestion);
+
+    if (canUseCreateSuggestion) {
       setNewAccountSource(suggestion.source || '');
       setNewAccountData(prev => ({
         name: suggestion.name || prev.name,
@@ -466,15 +469,22 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
             ? 'Prefilled from web research after Zoho did not return enough data.'
             : 'Prefilled from company lookup.';
       setAccountDetectionStatus(label);
-      return;
+      if (detectedCandidates.length === 0) {
+        setShowCreateAccount(true);
+        return;
+      }
     }
 
     if (detectedCandidates.length > 0) {
-      setAccountDetectionStatus('Zoho found possible matches. Verify before linking.');
-    } else {
       setShowCreateAccount(false);
-      setAccountDetectionStatus('No existing Zoho account match found. Search Zoho manually, create an account, or run company lookup.');
+      setAccountDetectionStatus(canUseCreateSuggestion
+        ? 'Zoho found possible account matches. Verify before linking, or use Create new account if none match.'
+        : 'Zoho found possible matches. Verify before linking.');
+      return;
     }
+
+    setShowCreateAccount(false);
+    setAccountDetectionStatus('No existing Zoho account match found. Search Zoho manually, create an account, or run company lookup.');
   }
 
   function runAccountDetection(emailForForm, contact, { includeExternalEnrichment = false } = {}) {
@@ -487,7 +497,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       ? 'Running Zia and web lookup for new-account details...'
       : 'Checking Zoho for existing account options...');
 
-    return sendToBackground(MSG.DETECT_ACCOUNT, buildAccountDetectionPayload(emailForForm, contact, includeExternalEnrichment))
+    return sendToBackground(
+      MSG.DETECT_ACCOUNT,
+      buildAccountDetectionPayload(emailForForm, contact, includeExternalEnrichment),
+      { retryRuntimePortClose: true }
+    )
       .then(res => {
         if (res?.error) throw new Error(res.error);
         applyAccountDetectionResult(res, domain, { allowCreateSuggestion: includeExternalEnrichment });
@@ -1813,19 +1827,17 @@ function AddContactForm({
                   </div>
                 )}
               </div>
-              {!newAccountSource && (
-                <button type="button"
-                  onClick={onRunCompanyLookup}
-                  disabled={enrichLoading}
-                  style={{
-                    width: '100%', marginBottom: 8, background: 'white',
-                    border: `1px solid ${COLORS.BORDER}`, color: enrichLoading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
-                    borderRadius: 6, padding: '6px 8px', fontSize: 12,
-                    cursor: enrichLoading ? 'not-allowed' : 'pointer',
-                  }}>
-                  {enrichLoading ? 'Looking up company details...' : 'Look up company details'}
-                </button>
-              )}
+              <button type="button"
+                onClick={onRunCompanyLookup}
+                disabled={enrichLoading}
+                style={{
+                  width: '100%', marginBottom: 8, background: 'white',
+                  border: `1px solid ${COLORS.BORDER}`, color: enrichLoading ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+                  borderRadius: 6, padding: '6px 8px', fontSize: 12,
+                  cursor: enrichLoading ? 'not-allowed' : 'pointer',
+                }}>
+                {enrichLoading ? 'Looking up company details...' : 'Look up company details'}
+              </button>
               <input type="text" placeholder="Account Name *" value={newAccountData.name}
                 onChange={e => setNewAccountData(p => ({ ...p, name: e.target.value }))}
                 style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />
