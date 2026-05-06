@@ -659,8 +659,8 @@ function getStaticSpecsContext(message) {
 }
 
 // ─── Datasheet Context ───────────────────────────────────────────────────────
-async function getRelevantDatasheetContext(message) {
-  const upper = message.toUpperCase();
+function extractDatasheetKeys(message) {
+  const upper = String(message || '').toUpperCase();
   const modelPatterns = [
     /\b(MX\d+[A-Z]*)/g, /\b(MR\d+[A-Z]*)/g, /\b(CW\d+[A-Z]*\d*)/g,
     /\b(MS\d{3}[R]?(?:-\d+[A-Z]*(?:-\d+[A-Z])?)?)/g, /\b(MV\d+[A-Z]*)/g,
@@ -675,8 +675,12 @@ async function getRelevantDatasheetContext(message) {
       if (key) models.add(key);
     }
   }
-  if (models.size === 0) return null;
-  const keys = [...models].slice(0, MAX_DATASHEET_FETCH_MODELS);
+  return [...models].slice(0, MAX_DATASHEET_FETCH_MODELS);
+}
+
+async function getRelevantDatasheetContext(message) {
+  const keys = extractDatasheetKeys(message);
+  if (keys.length === 0) return null;
   const uniqueUrls = [...new Set(keys.map(k => DATASHEET_URLS[k]))];
   const fetches = uniqueUrls.map(async url => {
     const text = await fetchDatasheet(url);
@@ -695,6 +699,9 @@ async function getRelevantDatasheetContext(message) {
     }
   }
   let context = '## LIVE DATASHEET CONTENT (use this as your primary source for specs)\n' +
+    `REQUESTED/FETCHED MODELS: ${keys.join(', ')}\n` +
+    'SOURCE URL RULE: Quote source URLs exactly from the [Datasheet: ...] labels below. Do NOT rewrite, shorten, infer, or invent datasheet URLs.\n' +
+    'SCOPE RULE: Answer only for the requested/fetched models above. Do NOT add models from conversation history unless the current user explicitly asked for them.\n\n' +
     results.join('\n\n');
   if (staticSpecs.length > 0) {
     context += '\n\n## CACHED SPECS (fallback if datasheet content is unclear)\n' +
@@ -709,6 +716,31 @@ function isDatasheetRetryFollowup(message) {
 
 function looksLikeRecentDatasheetTurn(content) {
   return /Claude Sonnet|Live datasheet|LIVE DATASHEET CONTENT|datasheet|specs?\b|cached specs|browse|fetch|Source URL/i.test(String(content || ''));
+}
+
+async function getRecentDatasheetRequestContext(history) {
+  const recentTurns = [...(history || [])].reverse().slice(0, 8);
+  const explicitUserRequests = recentTurns.filter(turn =>
+    turn &&
+    turn.role === 'user' &&
+    /\b(datasheets?|spec\s+sheet|live\s+web\s+fetch|fetch|pull|scan|read|get)\b/i.test(String(turn.content || '')) &&
+    extractDatasheetKeys(String(turn.content || '')).length > 0
+  );
+
+  for (const turn of explicitUserRequests) {
+    const ctx = await getRelevantDatasheetContext(turn.content);
+    if (ctx) return ctx;
+  }
+
+  for (const role of ['user', 'assistant']) {
+    for (const turn of recentTurns) {
+      if (!turn || turn.role !== role) continue;
+      const ctx = await getRelevantDatasheetContext(turn.content);
+      if (ctx) return ctx;
+    }
+  }
+
+  return null;
 }
 
 // ─── Valid SKU Set ────────────────────────────────────────────────────────────
@@ -11089,18 +11121,15 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const datasheetContext = await getRelevantDatasheetContext(userMessage);
       if (!datasheetContext && personId) {
         const history = await getHistory(kv, personId);
-        const lastAssistant = [...history].reverse().find(h => h.role === 'assistant');
-        if (lastAssistant) {
-          const historyContext = await getRelevantDatasheetContext(lastAssistant.content);
-          if (historyContext) {
-            systemPrompt += '\n\n' + historyContext;
-            systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences.';
-            datasheetFetched = true;
-          }
+        const historyContext = await getRecentDatasheetRequestContext(history);
+        if (historyContext) {
+          systemPrompt += '\n\n' + historyContext;
+          systemPrompt += '\n\nThe user has asked you to verify specs against the latest datasheet. Compare the live datasheet data above with what you previously told them and note any differences. Answer only for the fetched models listed in the live datasheet content. Do not include other models from conversation history. Copy source URLs exactly from the [Datasheet: ...] labels.';
+          datasheetFetched = true;
         }
       } else if (datasheetContext) {
         systemPrompt += '\n\n' + datasheetContext;
-        systemPrompt += '\n\nThe user requested live datasheet verification. Use the live datasheet content above as the authoritative source.';
+        systemPrompt += '\n\nThe user requested live datasheet verification. Use the live datasheet content above as the authoritative source. Answer only for the fetched models listed in the live datasheet content. Do not include other models from conversation history. Copy source URLs exactly from the [Datasheet: ...] labels.';
         datasheetFetched = true;
       }
       // If datasheet fetch failed, tell Claude it has the capability but the fetch failed
