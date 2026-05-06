@@ -114,6 +114,12 @@ for (const phrase of phrasesShouldNotMatch) {
   check('cf-conversation retry path calls askClaude with history hint',
     /askClaude\([^)]*retrying/i.test(branch),
     'no askClaude with retry note');
+  check('cf-conversation retry note no longer lies that a fetch already ran',
+    !/already attempted a live datasheet fetch THIS turn/i.test(branch),
+    'retry note can still claim a fetch happened before askClaude enters live-datasheet branch');
+  check('cf-conversation retry note forbids one-model-at-a-time punts',
+    /do NOT ask them to try one model at a time/i.test(branch),
+    'retry note does not forbid observed one-at-a-time punt');
   check('cf-conversation retry path logs to D1 with response_path "claude-retry-rerouted"',
     /responsePath:\s*'claude-retry-rerouted'/.test(branch),
     'no claude-retry-rerouted log');
@@ -134,6 +140,22 @@ for (const phrase of phrasesShouldNotMatch) {
   check('source includes live-test rationale for not using Llama on datasheet pulls',
     /Llama can answer static specs[\s\S]*invent source URLs/.test(fn),
     'missing source-level rationale for routing live datasheet requests away from Llama');
+}
+
+// ─── C3. Datasheet retry phrases re-enter live-fetch branch ──────────────
+{
+  check('isDatasheetRetryFollowup helper exists',
+    /function isDatasheetRetryFollowup\(message\)/.test(src),
+    'retry followup helper missing');
+  check('looksLikeRecentDatasheetTurn helper exists',
+    /function looksLikeRecentDatasheetTurn\(content\)/.test(src),
+    'recent datasheet helper missing');
+  const askIdx = src.indexOf('async function askClaude');
+  check('askClaude found for retry followup source checks', askIdx > 0);
+  const askBlock = src.substring(askIdx, askIdx + 9000);
+  check('askClaude promotes retry phrases after datasheet history to wantsLiveDatasheet',
+    /isDatasheetRetryFollowup\(userMessage\)[\s\S]*looksLikeRecentDatasheetTurn[\s\S]*wantsLiveDatasheet\s*=\s*true/.test(askBlock),
+    'retry phrases can still reach Claude without fetching prior datasheet models');
 }
 
 // ─── D. Flag-it deterministic handler ────────────────────────────────────
