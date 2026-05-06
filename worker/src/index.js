@@ -5967,9 +5967,9 @@ If a product can't be found, ask the user to clarify. Suggest the closest altern
 ## LIVE DATASHEET CAPABILITY (you DO have this — never deny it)
 This worker has a built-in 'fetchDatasheet' function that pulls live content from documentation.meraki.com for every model in DATASHEET_URLS. When the user asks you to "pull the (full) datasheet", "fetch the latest datasheet", "scan the datasheet", "get specifics from the datasheet", or any equivalent phrasing, the worker fetches the page server-side BEFORE you see this prompt and injects the fetched content under the '## LIVE DATASHEET CONTENT' header below. Use that content as the authoritative source.
 
-NEVER reply with "I don't have the ability to browse URLs" or "I can only work with injected content" or "I cannot fetch live web pages". Those statements are FALSE for this bot. If the live-datasheet section is missing from this prompt for some reason, say "I couldn't pull the datasheet just now — want me to retry?" and offer to retry; do NOT claim the capability doesn't exist.
+NEVER reply with "I don't have the ability to browse URLs" or "I can only work with injected content" or "I cannot fetch live web pages". Those statements are FALSE for this bot. If the live-datasheet section is missing from this prompt for some reason, say "I couldn't pull the datasheet just now — the fetch came back empty or incomplete." Do NOT claim the capability doesn't exist and do NOT ask the user to send a new message to retry.
 
-When you offer to "pull the full datasheet" / "verify against the datasheet" / "check the latest specs", you ARE offering a real capability. The user's "yes please / pull it / try again" replies will trigger another live fetch on the next turn.
+When you offer to "pull the full datasheet" / "verify against the datasheet" / "check the latest specs", you ARE offering a real capability. The user's "yes please / pull it / try again" replies trigger a live fetch on THE SAME TURN they send — the worker re-runs fetchDatasheet server-side BEFORE you see the next prompt, then injects the fresh content under '## LIVE DATASHEET CONTENT' for you to use directly. NEVER tell the user to "send another message to trigger the fetch", "please resend your request as a new message", "a fresh trigger will pull the complete page", or "try again to fetch" — by the time you're answering THIS turn, the fetch already ran. If '## LIVE DATASHEET CONTENT' is present in this prompt, use it. If it's missing, the fetch came back empty — say so plainly and offer a different model or alternative.
 
 ## CRITICAL ANTI-HALLUCINATION RULES
 - NEVER state product specifications unless they are provided in this prompt via a "PRODUCT SPECS" section.
@@ -6483,6 +6483,99 @@ async function askLlamaProductInfo(userMessage, personId, env, classification = 
   }
 }
 
+// Strip echoed source/datasheet attribution lines from a Claude reply.
+// Claude sometimes parrots back lines the worker injected into the prompt
+// (the '## LIVE DATASHEET CONTENT' block contains the source URL). The
+// worker appends its OWN attribution footer in the final-reply assembly,
+// so without this strip the user sees the same source twice. We only
+// touch trailing attribution-style lines — anything else in the body
+// is preserved verbatim.
+function stripEchoedSourceFooter(reply) {
+  if (!reply || typeof reply !== 'string') return reply || '';
+  const lines = reply.split('\n');
+  // Walk from the end; drop trailing blank lines plus any line that looks
+  // like a source/attribution echo. Stop at the first non-attribution line.
+  while (lines.length > 0) {
+    const tail = lines[lines.length - 1].trim();
+    if (tail === '') { lines.pop(); continue; }
+    // Match Claude's typical echo shapes:
+    //   Source: live datasheet — MS150 (documentation.meraki.com)
+    //   *Live datasheet: MS150*
+    //   _Source: ..._
+    //   [Datasheet: https://documentation.meraki.com/...]
+    //   📄 Source: live datasheet ...
+    //   💎 Claude Sonnet 4.6 · 2.1s
+    if (/^[*_]?\s*(?:(?:📄|📊|📚)?\s*(?:Source:\s*(?:live\s+)?datasheet|Live\s+datasheet:|\[Datasheet:)|(?:💎\s*)?Claude\s+Sonnet\b)/i.test(tail)) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join('\n').trimEnd();
+}
+
+// Last-line defense for live-fetch retry wording. Prompt instructions alone are
+// not enough here: live testing showed Claude can still ask the user to resend
+// a new message to trigger another fetch, promise injection on a future turn,
+// or instruct the user to say "try again". Rewrite only those narrow failure
+// shapes before footer assembly. PR #28 round 2 (2026-05-06): broadened to
+// catch "next turn" injection promises, "didn't inject this round" failure
+// narration, and "say try again" retry-punt instructions.
+function sanitizeLiveFetchRetryWording(reply) {
+  if (!reply || typeof reply !== 'string') return reply || '';
+  if (!/(datasheet|fetch|worker|trigger|browse|inject|live\s+content)/i.test(reply)) return reply;
+  let out = reply;
+
+  // ─── PR #28 round 1 patterns ────────────────────────────────────────
+  out = out.replace(/Please resend your request as a new message[\s\S]*?(?:before I respond\.|before I answer\.|server-side and inject the full content before I respond\.)/gi,
+    'I tried the live fetch on this turn before answering.');
+  out = out.replace(/\bA fresh trigger will pull the complete page\./gi,
+    'The latest fetch still came back incomplete.');
+  out = out.replace(/\(The live fetch will trigger on this request[\s\S]*?I'll flag it and retry\.\)/gi,
+    '(The live fetch is attempted on this turn before I answer. If the content is incomplete, I will say so directly.)');
+  out = out.replace(/\bWant to send another message to trigger the fetch\?/gi,
+    'The live fetch came back empty or incomplete.');
+
+  // ─── PR #28 round 2 patterns (Codex live regression 2026-05-06) ─────
+  // Variant A — parenthetical "next turn" injection promise. Catches:
+  //   (The live fetch will inject the full spec table on the next turn. Once it loads, I'll compare...)
+  out = out.replace(/\(The live fetch will inject[\s\S]*?on the next turn\.[\s\S]*?\)/gi,
+    '(The live fetch is attempted on this turn before I answer. If the content is incomplete I will say so directly.)');
+  // Bare (non-parenthetical) "next turn" promise.
+  out = out.replace(/\bThe live fetch will inject[^.\n]*?on the next turn\.[^.\n]*?(?:\.|\n|$)/gi,
+    'The live fetch is attempted on this turn before I answer.');
+
+  // Variant B — full failure-narration block. Catches the run from
+  // "the live content didn't inject this round..." through the "usually
+  // succeed on a second attempt" close, including any "Here's what I'd
+  // suggest:" preamble and 'Want me to retry? Just say "try again"...' punt.
+  out = out.replace(
+    /(?:It looks like\s*)?[Tt]he live content didn'?t inject this round[\s\S]*?(?:second attempt|once more|usually succeed)\.?/gi,
+    'The live fetch came back empty or incomplete.'
+  );
+
+  // Original "Want me to retry?" alone (kept as fallback for variants where
+  // the failure block above didn't fire).
+  out = out.replace(/\bWant me to retry\?/gi,
+    'The live fetch came back empty or incomplete.');
+
+  // Variant C — closing sign-off that re-prompts a "try again" turn:
+  //   Say "try again" and I'll retry the fetch!
+  //   Just say "try again" and I'll retry...
+  out = out.replace(/\b(?:Just\s+)?[Ss]ay\s+["']?try again["']?[^.!?\n]*?(?:retry|attempt|fetch)[^.!?\n]*[.!?]/gi, '');
+
+  // Cleanup — orphan "Here's what I'd suggest:" preamble + leftover fragments
+  // left behind after the targeted replacements above.
+  out = out.replace(/\bHere'?s what I'?d suggest:?\s*/gi, '');
+  out = out.replace(/\bThese usually succeed on a second attempt\.?/gi, '');
+  out = out.replace(/\bthis can occasionally happen if the fetch times? out\.?/gi, '');
+
+  // Collapse 3+ consecutive newlines back to a paragraph break, trim trailing.
+  out = out.replace(/\n{3,}/g, '\n\n').trimEnd();
+
+  return out;
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, classification = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
 
@@ -6938,9 +7031,17 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     // Matches the Llama-path marker above for at-a-glance observability.
     const claudeSec = ((Date.now() - claudeStartMs) / 1000).toFixed(1);
     const modelMarker = `_💎 Claude Sonnet 4.6 · ${claudeSec}s_`;
+    // Footer dedupe: Claude occasionally echoes the worker-injected datasheet
+    // URL into the reply tail (e.g. "Source: live datasheet — MS150
+    // (documentation.meraki.com)" or "*Live datasheet: MS150*") because the
+    // injected '## LIVE DATASHEET CONTENT' block contains the URL. The worker
+    // ALSO appends its own attribution footer below — without dedupe the user
+    // sees the same source line twice. Strip Claude's echo before appending.
+    const sanitizedReply = sanitizeLiveFetchRetryWording(reply);
+    const dedupedReply = stripEchoedSourceFooter(sanitizedReply);
     const finalReply = sourceFooter
-      ? `${reply}\n\n${sourceFooter}\n\n${modelMarker}`
-      : `${reply}\n\n${modelMarker}`;
+      ? `${dedupedReply}\n\n${sourceFooter}\n\n${modelMarker}`
+      : `${dedupedReply}\n\n${modelMarker}`;
 
     if (personId) {
       await addToHistory(kv, personId, 'user', userMessage);
@@ -7737,7 +7838,7 @@ export default {
                 if (priorWasClaude) {
                   console.log('[CF-First] Retry phrase + prior Claude/datasheet context → reroute to Claude with history');
                   T.step('wx-claude', 'enter');
-                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model they were asking about, fetch the live datasheet via the worker's built-in capability, and answer. Do NOT claim you cannot browse — you can.)`, personId, env, null, activeClassification);
+                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model they asked about. The worker has already attempted a live datasheet fetch THIS turn — if '## LIVE DATASHEET CONTENT' is in your prompt, answer from it directly. If it's missing, say the fetch came back empty and suggest the user try a different model or rephrase. Do NOT claim you cannot browse, and do NOT ask the user to 'send another message to trigger the fetch' — this turn IS the retry.)`, personId, env, null, activeClassification);
                   T.step('wx-claude', 'exit');
                   await addToHistory(kv, personId, 'user', text);
                   await addToHistory(kv, personId, 'assistant', retryReply);
