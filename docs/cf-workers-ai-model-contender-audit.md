@@ -34,6 +34,28 @@ Full eval run:
 - `eval-contenders-full-1778092974`
 - D1 `bot_usage_eval`: 222 rows, 222 `live_llm_call`, 3 distinct executed models
 
+## Paid API Contender: DeepSeek V4
+
+DeepSeek V4 is not a free Cloudflare Workers AI model, so this was run through the direct DeepSeek API using JSON mode and `thinking.type="disabled"`. The API key was provided at runtime only and was not written to the repo.
+
+| Model | Prompt | Overall | Intent | Parse Fail | p50 | p95 | Token Use | Estimated Eval Cost | Assessment |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `deepseek-v4-flash` | production V2 + DeepSeek JSON contract | 93.7% | 95.9% | 0 | 3.6s | 4.5s | 341k in / 16k out | ~$0.05 | Cheap and usable, but below Llama overall |
+| `deepseek-v4-pro` | production V2 + DeepSeek JSON contract | 96.8% | 98.6% | 0 | 6.0s | 8.9s | 341k in / 15k out | ~$0.16 promo / ~$0.65 list | First tested non-Claude model to beat Llama 4 accuracy |
+
+DeepSeek V4 Pro is now the strongest candidate for a paid pre-Claude tier. It beats the Llama 4 Scout classifier baseline on accuracy, but has roughly 3x higher p95 latency than Llama. DeepSeek V4 Flash is operationally attractive and cheap, but it does not beat Llama overall.
+
+DeepSeek full eval result:
+
+- `deepseek-v4-full-results.json`
+- Direct API eval, not `bot_usage_eval` yet because DeepSeek is not wired into the deployed benchmark endpoint.
+
+Operational notes:
+
+- Use `response_format: { "type": "json_object" }`.
+- Disable thinking for classifier calls with `thinking: { "type": "disabled" }`; otherwise V4 Pro may spend output budget in reasoning and return empty final content.
+- Do not route production traffic to DeepSeek until the key is stored as a Cloudflare secret and requests are logged through `bot_usage_eval` / `bot_usage` with `requested_model`, `executed_model`, and `tier_path`.
+
 ## Smoke-Screened Models
 
 The following likely contenders were screened on 10 representative fixtures before deciding whether to promote them to a full pass.
@@ -66,15 +88,16 @@ Examples:
 
 ## Recommendation
 
-Do not replace Llama 4 Scout.
+Do not replace Llama 4 Scout with any free Cloudflare Workers AI model tested so far.
 
 Recommended waterfall order for future canary work:
 
 1. Tier 0 deterministic gates
 2. Llama 4 Scout for approved low-risk classes
-3. Optional shadow/fallback experiment: Gemma SEA-LION 27B
-4. Optional fallback only: Gemma 4 26B, when accuracy matters more than latency
-5. Claude
+3. Optional paid accuracy tier: DeepSeek V4 Pro, after secret storage and deployed benchmark wiring
+4. Optional free shadow/fallback experiment: Gemma SEA-LION 27B
+5. Optional fallback only: Gemma 4 26B, when accuracy matters more than latency
+6. Claude
 
 Do not place Kimi K2.6, Kimi K2.5, QwQ, DeepSeek R1 distill, GLM, Nemotron, GPT OSS, Granite, or Mistral Small before Claude in production yet.
 
