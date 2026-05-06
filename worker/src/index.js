@@ -8576,13 +8576,19 @@ export default {
         if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
         if (!env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
 
-        // Select system prompt by variant
-        const systemPrompt = promptVariant === 'legacy' ? CF_CLASSIFIER_PROMPT : CF_CLASSIFIER_PROMPT_V2;
+        // Select system prompt by variant. The strict variants are eval-only
+        // hardening probes for models that do not reliably emit JSON with the
+        // production prompt; production classifier routing still uses
+        // CF_CLASSIFIER_PROMPT_V2 above.
+        let systemPrompt = promptVariant === 'legacy' ? CF_CLASSIFIER_PROMPT : CF_CLASSIFIER_PROMPT_V2;
+        if (promptVariant === 'v2-strict-json' || promptVariant === 'v2-kimi-json') {
+          systemPrompt += `\n\nEVAL-ONLY OUTPUT CONTRACT:\nReturn exactly one complete JSON object matching the SCHEMA above. Start with { and end with }. Do not include prose, markdown fences, explanations, hidden thoughts, comments, or trailing text. Use null for unknown nullable fields and [] for empty arrays.`;
+        }
 
         const userText = priorCtx ? `Prior assistant context:\n${priorCtx}\n\nUser message:\n${input}` : input;
 
-        const isGemma = /gemma/i.test(model);
-        const requestBody = isGemma
+        const isCompletionStyleModel = /gemma|kimi|moonshot/i.test(model);
+        const requestBody = isCompletionStyleModel
           ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 4096, thinking: { type: 'disabled' } }
           : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 512 };
 
@@ -8596,16 +8602,28 @@ export default {
         // Extract response — handle both Llama (.response) and Gemma 4 (.choices[]) formats
         let raw = null, parsed = null, parseError = null;
         if (aiResult) {
-          // Try all known response formats (Llama=.response, Gemma4=.choices[].message.content, fallback to reasoning)
-          raw = aiResult.response ?? aiResult.choices?.[0]?.message?.content ?? null;
-          // Gemma 4 may put content in reasoning field if thinking is enabled
+          // Try all known response formats (Llama=.response, OpenAI-style
+          // .choices[].message.content, Responses-style .output_text, and
+          // provider-specific nested result shapes).
+          raw = aiResult.response
+            ?? aiResult.choices?.[0]?.message?.content
+            ?? aiResult.output_text
+            ?? aiResult.output?.[0]?.content?.[0]?.text
+            ?? aiResult.result?.response
+            ?? aiResult.result?.choices?.[0]?.message?.content
+            ?? aiResult.result?.output_text
+            ?? null;
+          // Some reasoning-capable models can put JSON into a reasoning field.
           if ((raw === null || raw === undefined) && aiResult.choices?.[0]?.message?.reasoning) {
             const reasoning = aiResult.choices[0].message.reasoning;
-            const jsonInReasoning = reasoning.match(/\{[\s\S]*\}/);
+            const jsonInReasoning = String(reasoning).match(/\{[\s\S]*\}/);
             if (jsonInReasoning) raw = jsonInReasoning[0];
           }
-          // Last resort: check result.response
-          if (raw === null || raw === undefined) raw = aiResult.result?.response ?? null;
+          if ((raw === null || raw === undefined) && aiResult.result?.choices?.[0]?.message?.reasoning) {
+            const reasoning = aiResult.result.choices[0].message.reasoning;
+            const jsonInReasoning = String(reasoning).match(/\{[\s\S]*\}/);
+            if (jsonInReasoning) raw = jsonInReasoning[0];
+          }
           if (typeof raw === 'object' && raw !== null) { parsed = raw; raw = JSON.stringify(raw); }
           else if (typeof raw === 'string' && !raw.startsWith('__DEBUG_')) {
             try {
@@ -8638,7 +8656,12 @@ export default {
           });
         }
 
-        return new Response(JSON.stringify({ model, prompt_variant: promptVariant, input, elapsed, raw, parsed, parseError, err }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
+        const debugShape = body.debug_response ? {
+          aiResultKeys: aiResult ? Object.keys(aiResult) : null,
+          aiResultPreview: aiResult ? JSON.stringify(aiResult).substring(0, 4000) : null,
+          requestBody
+        } : undefined;
+        return new Response(JSON.stringify({ model, prompt_variant: promptVariant, input, elapsed, raw, parsed, parseError, err, debugShape }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'content-type':'application/json' } });
       }

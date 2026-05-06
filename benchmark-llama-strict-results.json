@@ -1,0 +1,5145 @@
+{
+  "timestamp": "2026-05-06T17:59:28.559Z",
+  "evalMode": "live_benchmark_classifier",
+  "decisionGrade": true,
+  "liveLlmCallsRequired": true,
+  "simulatedResultsAllowedForRoutingDecisions": false,
+  "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+  "syntheticEval": true,
+  "evalRunId": "eval-llama-strict-1778090316",
+  "fixtureCount": 74,
+  "summary": {
+    "v2-llama-strict": {
+      "label": "V2 strict JSON (Llama)",
+      "model": "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "promptVariant": "v2-strict-json",
+      "overallScore": "386/411",
+      "overallPct": 93.9,
+      "intentAcc": 94.6,
+      "intentOk": 70,
+      "fixtures": 74,
+      "parseFail": 0,
+      "errors": 0,
+      "p50ms": 2810,
+      "p95ms": 3854,
+      "avgMs": 2611
+    }
+  },
+  "results": {
+    "v2-llama-strict": {
+      "quote-004": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ price_lookup",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3438,
+        "parsed": {
+          "intent": "price_lookup",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS130-24P",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"price_lookup\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MS130-24P\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":nul",
+        "error": null
+      },
+      "quote-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3449,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 10,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":10,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"tar",
+        "error": null
+      },
+      "quote-002": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3454,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX67",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX67\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "quote-003": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3669,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR44",
+              "qty": 2,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX67",
+              "qty": 3,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR44\",\"qty\":2,\"sku_type\":\"hardware\"},{\"sku\":\"MX67\",\"qty\":3,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_q",
+        "error": null
+      },
+      "quote-007-hw-only-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2827,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX67",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX67\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targe",
+        "error": null
+      },
+      "quote-006-hw-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2858,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR44",
+              "qty": 10,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR44\",\"qty\":10,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "quote-005": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": {
+          "pass": true,
+          "got": "SDW",
+          "note": "tier=SDW"
+        },
+        "swap": null,
+        "latency": 2891,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX85",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": "SDW",
+            "show_pricing": false,
+            "all_terms": true,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX85\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":\"SDW\",\"show_pricing\":false,\"all_terms\":true,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "quote-008-hw-only-alt2": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3078,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 3,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":3,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targe",
+        "error": null
+      },
+      "quote-009-lic-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 2,
+          "max": 7,
+          "intentOk": false,
+          "details": {
+            "intent": "✗ expected quote, got revise",
+            "items": "✗ missing MR44x5",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2841,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "toggle_hw_lic",
+            "target_sku": "MR44",
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": "license_only"
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"toggle_hw_lic\",\"target_sku\":\"MR44\",\"add_items\":[],\"ne",
+        "error": null
+      },
+      "quote-010-lic-only-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2926,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX67",
+              "qty": 2,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX67\",\"qty\":2,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targe",
+        "error": null
+      },
+      "quote-011-with-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3004,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS150-24P-4G",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": true,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MS150-24P-4G\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":true,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":nu",
+        "error": null
+      },
+      "quote-012-with-lic-term": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2876,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": true,
+            "term_years": 3,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":true,\"term_years\":3,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_",
+        "error": null
+      },
+      "quote-014-bare-sku": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3673,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "quote-013-with-lic-tier": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✗ missing MX85x1",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3840,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX85-SEC-5YR",
+              "qty": 1,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": true,
+            "term_years": 5,
+            "tier": "SEC",
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX85-SEC-5YR\",\"qty\":1,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":true,\"term_years\":5,\"tier\":\"SEC\",\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,",
+        "error": null
+      },
+      "quote-015-eol": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3675,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX64",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX64\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "quote-016-bare-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3884,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "LIC-ENT-3YR",
+              "qty": 1,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"LIC-ENT-3YR\",\"qty\":1,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null",
+        "error": null
+      },
+      "quote-018-word-numbers": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3389,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 2,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":2,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "quote-019-show-pricing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3395,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR44",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR44\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targe",
+        "error": null
+      },
+      "quote-017-multi-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3854,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "LIC-ENT-3YR",
+              "qty": 6,
+              "sku_type": "license"
+            },
+            {
+              "sku": "LIC-MX64-SEC-3YR",
+              "qty": 1,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"LIC-ENT-3YR\",\"qty\":6,\"sku_type\":\"license\"},{\"sku\":\"LIC-MX64-SEC-3YR\",\"qty\":1,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":",
+        "error": null
+      },
+      "price-001-cost-of": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ price_lookup",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3348,
+        "parsed": {
+          "intent": "price_lookup",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"price_lookup\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,",
+        "error": null
+      },
+      "price-003-reverse": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ price_lookup",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3116,
+        "parsed": {
+          "intent": "price_lookup",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"price_lookup\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"ad",
+        "error": null
+      },
+      "price-002-how-much": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ price_lookup",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3128,
+        "parsed": {
+          "intent": "price_lookup",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX67",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"price_lookup\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX67\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"ad",
+        "error": null
+      },
+      "price-004-qty": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ price_lookup",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3262,
+        "parsed": {
+          "intent": "price_lookup",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS150-48FP-4X",
+              "qty": 2,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"price_lookup\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MS150-48FP-4X\",\"qty\":2,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"act",
+        "error": null
+      },
+      "price-005-with-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ price_lookup",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3072,
+        "parsed": {
+          "intent": "price_lookup",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS150-24P-4G",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": true,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"price_lookup\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MS150-24P-4G\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":true,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"acti",
+        "error": null
+      },
+      "revise-001-license-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2841,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "toggle_hw_lic",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": "license_only"
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {}
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"toggle_hw_lic\",\"target_sku\":null,\"add_items\":[],\"new_",
+        "error": null
+      },
+      "price-006-with-3yr-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ price_lookup",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3239,
+        "parsed": {
+          "intent": "price_lookup",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS150-24P-4G",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": true,
+            "term_years": 3,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"price_lookup\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MS150-24P-4G\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":true,\"term_years\":3,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\"",
+        "error": null
+      },
+      "revise-002-hardware-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2901,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": true,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "toggle_hw_lic",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": "hardware_only"
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {}
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":true,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"toggle_hw_lic\",\"target_sku\":null,\"add_items\":[],\"new_",
+        "error": null
+      },
+      "revise-003-term": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2809,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "change_term",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": 3,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {}
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"change_term\",\"target_sku\":null,\"add_items\":[],\"new_t",
+        "error": null
+      },
+      "revise-004-term-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2324,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "change_term",
+            "target_sku": "MR46",
+            "add_items": [],
+            "new_term": 5,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"change_term\",\"target_sku\":\"MR46\",\"add_items\":[],\"new",
+        "error": null
+      },
+      "revise-005-add": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2361,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "add",
+            "target_sku": null,
+            "add_items": [
+              {
+                "sku": "MX67",
+                "qty": 2,
+                "sku_type": "hardware"
+              }
+            ],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {}
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"add\",\"target_sku\":null,\"add_items\":[{\"sku\":\"MX67\",\"q",
+        "error": null
+      },
+      "revise-007-remove": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2581,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 10,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": null,
+            "license_only": null,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "remove",
+            "target_sku": "MR44",
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":10,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":null,\"license_only\":null,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"remove\",\"",
+        "error": null
+      },
+      "revise-006-add-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3066,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 5,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MS130-24P",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "add",
+            "target_sku": null,
+            "add_items": [
+              {
+                "sku": "MS130-24P",
+                "qty": 1,
+                "sku_type": "hardware"
+              }
+            ],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":5,\"sku_type\":\"hardware\"},{\"sku\":\"MS130-24P\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"sepa",
+        "error": null
+      },
+      "revise-008-remove-alt": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2644,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "remove",
+            "target_sku": "MX67",
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"remove\",\"target_sku\":\"MX67\",\"add_items\":[],\"new_term",
+        "error": null
+      },
+      "revise-009-swap": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": {
+          "pass": true,
+          "got": "swap",
+          "note": "revision.action=swap"
+        },
+        "latency": 2579,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "swap",
+            "target_sku": "MR44",
+            "add_items": [
+              {
+                "sku": "MR46",
+                "qty": 1
+              }
+            ],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {}
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"swap\",\"target_sku\":\"MR44\",\"add_items\":[{\"sku\":\"MR46\"",
+        "error": null
+      },
+      "revise-010-change-qty": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2776,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "change_qty",
+            "target_sku": "MR46",
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": 5,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"change_q",
+        "error": null
+      },
+      "revise-011-change-tier": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2708,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX85",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "change_tier",
+            "target_sku": "MX85",
+            "add_items": [],
+            "new_term": null,
+            "new_tier": "SEC",
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX85\",\"qty\":1,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"change_t",
+        "error": null
+      },
+      "revise-012-add-pricing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 6,
+          "max": 6,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "modifiers": "✓ all modifiers matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2438,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "show_pricing",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku\":null,\"add_items\":[],\"new_t",
+        "error": null
+      },
+      "pron-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 8,
+          "max": 8,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "modifiers": "✓ all modifiers matched",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2570,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "show_pricing",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku\":null,\"add_items\":[],\"new_t",
+        "error": null
+      },
+      "pron-002": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 8,
+          "max": 8,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "modifiers": "✓ all modifiers matched",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2649,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "show_pricing",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku\":null,\"add_items\":[],\"new_t",
+        "error": null
+      },
+      "pron-003": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 8,
+          "max": 8,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "modifiers": "✓ all modifiers matched",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2686,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "show_pricing",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku\":null,\"add_items\":[],\"new",
+        "error": null
+      },
+      "pron-004": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 8,
+          "max": 8,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "modifiers": "✓ all modifiers matched",
+            "revision": "✓ revision matched",
+            "reference": "✓ reference matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2763,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": null,
+            "license_only": null,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "show_pricing",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":null,\"license_only\":null,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku\":null,\"add_items\":[],\"new_t",
+        "error": null
+      },
+      "option-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 8,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ revise",
+            "modifiers": "✓ all modifiers matched",
+            "revision": "✓ revision matched",
+            "reference": "✗ option_ref mismatch"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2761,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": true,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "show_pricing",
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": "2",
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":true,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"show_pricing\",\"target_sku\":null,\"add_items\":[],\"new_t",
+        "error": null
+      },
+      "clarify-001-vague-switch": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 3,
+          "intentOk": false,
+          "details": {
+            "intent": "✗ expected clarify, got quote"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2677,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": null,
+            "license_only": null,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":null,\"license_only\":null,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_term\":null,\"n",
+        "error": null
+      },
+      "clarify-004-price-alone": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ clarify"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 809,
+        "parsed": {
+          "intent": "clarify",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"clarify\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "clarify-002-vague-ap": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ clarify"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2739,
+        "parsed": {
+          "intent": "clarify",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"clarify\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_term\":n",
+        "error": null
+      },
+      "info-001-sizing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 782,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "info-002-compare": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 781,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "info-003-capability": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 790,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {},
+          "dashboard": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{},\"dashboard\":{}}",
+        "error": null
+      },
+      "clarify-003-variant": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 0,
+          "max": 3,
+          "intentOk": false,
+          "details": {
+            "intent": "✗ expected clarify, got quote"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2796,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS130-24",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MS130-24\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"",
+        "error": null
+      },
+      "info-004-eol-status": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 722,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "convo-001": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ conversation"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 704,
+        "parsed": {
+          "intent": "conversation",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"conversation\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "convo-002": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ conversation"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 759,
+        "parsed": {
+          "intent": "conversation",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"conversation\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "convo-003": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ conversation"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 732,
+        "parsed": {
+          "intent": "conversation",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"conversation\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "convo-004": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ conversation"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 734,
+        "parsed": {
+          "intent": "conversation",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"conversation\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "edge-001-typo": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2438,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": true,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":true,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "edge-002-mixed-hw-lic": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2694,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 5,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "LIC-ENT-3YR",
+              "qty": 3,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":5,\"sku_type\":\"hardware\"},{\"sku\":\"LIC-ENT-3YR\",\"qty\":3,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"sepa",
+        "error": null
+      },
+      "edge-003-renew-phrasing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2473,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR44",
+              "qty": 10,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR44\",\"qty\":10,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":true,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targe",
+        "error": null
+      },
+      "edge-004-refresh-phrasing": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2475,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX64",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX64\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "edge-005-natural-and": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2983,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 10,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX67",
+              "qty": 2,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":10,\"sku_type\":\"hardware\"},{\"sku\":\"MX67\",\"qty\":2,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_",
+        "error": null
+      },
+      "edge-006-five-year-only": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 2,
+          "max": 7,
+          "intentOk": false,
+          "details": {
+            "intent": "✗ expected quote, got revise",
+            "items": "✓ 1 items matched",
+            "modifiers": "✗ term_years: expected 5, got null"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2810,
+        "parsed": {
+          "intent": "revise",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR46",
+              "qty": 10,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": "change_term",
+            "target_sku": "MR46",
+            "add_items": [],
+            "new_term": 5,
+            "new_tier": null,
+            "new_qty": 10,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": true,
+            "option_ref": null,
+            "resolve_from_history": true
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"revise\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR46\",\"qty\":10,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":\"change_",
+        "error": null
+      },
+      "edge-008-sensors": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2917,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MT14",
+              "qty": 5,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MT14\",\"qty\":5,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"targ",
+        "error": null
+      },
+      "edge-007-cw-wifi7": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 1 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2975,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "CW9172I",
+              "qty": 3,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"CW9172I\",\"qty\":3,\"sku_type\":\"hardware\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"t",
+        "error": null
+      },
+      "shadow-003-recommend-firewall": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 763,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "shadow-004-recommend-ap": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 772,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "shadow-005-dns-bare": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 699,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 1,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":1,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "shadow-001-renewal-multiline": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 4 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3944,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MS220-24P",
+              "qty": 5,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MS225-48FP",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MS350-48LP",
+              "qty": 2,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX85",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MR46",
+              "qty": 18,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MS220-24P\",\"qty\":5,\"sku_type\":\"hardware\"},{\"sku\":\"MS225-48FP\",\"qty\":1,\"sku_type\":\"hardware\"},{\"sku\":\"MS350-48LP\",\"qty\":2,\"sku_type\":\"hardware\"},{\"sku\":\"MX85\",\"qty\":1,\"sku_type\":\"hardware\"},{\"sku\":\"MR46\",\"qty\":18,\"sku_type\":\"hardware\"}],\"mo",
+        "error": null
+      },
+      "shadow-002-renewal-inline": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 7,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 8 items matched",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 4799,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MR36",
+              "qty": 24,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MS120-8",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MS225-24P",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MS250-24P",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MS250-48FP",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX64",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX65",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "MX84",
+              "qty": 1,
+              "sku_type": "hardware"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MR36\",\"qty\":24,\"sku_type\":\"hardware\"},{\"sku\":\"MS120-8\",\"qty\":1,\"sku_type\":\"hardware\"},{\"sku\":\"MS225-24P\",\"qty\":1,\"sku_type\":\"hardware\"},{\"sku\":\"MS250-24P\",\"qty\":1,\"sku_type\":\"hardware\"},{\"sku\":\"MS250-48FP\",\"qty\":1,\"sku_type\":\"hardware\"},{\"",
+        "error": null
+      },
+      "shadow-006-url-echoback": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✓ 2 items matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3340,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "MX85",
+              "qty": 1,
+              "sku_type": "hardware"
+            },
+            {
+              "sku": "LIC-MX85-SEC-5Y",
+              "qty": 1,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"MX85\",\"qty\":1,\"sku_type\":\"hardware\"},{\"sku\":\"LIC-MX85-SEC-5Y\",\"qty\":1,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"",
+        "error": null
+      },
+      "shadow-007-sme-license": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✗ missing LIC-SMEx1",
+            "modifiers": "✗ all_terms: expected true, got false"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3471,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "LIC-SME-1YR",
+              "qty": 1,
+              "sku_type": "license"
+            },
+            {
+              "sku": "LIC-SME-3YR",
+              "qty": 1,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"LIC-SME-1YR\",\"qty\":1,\"sku_type\":\"license\"},{\"sku\":\"LIC-SME-3YR\",\"qty\":1,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false",
+        "error": null
+      },
+      "shadow-011-which-switch": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 710,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{}}",
+        "error": null
+      },
+      "shadow-008-lic-sme-all-terms": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 7,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "items": "✗ missing LIC-SMEx1",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3415,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "LIC-SME-1YR",
+              "qty": 1,
+              "sku_type": "license"
+            },
+            {
+              "sku": "LIC-SME-3YR",
+              "qty": 1,
+              "sku_type": "license"
+            },
+            {
+              "sku": "LIC-SME-5YR",
+              "qty": 1,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": true,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"LIC-SME-1YR\",\"qty\":1,\"sku_type\":\"license\"},{\"sku\":\"LIC-SME-3YR\",\"qty\":1,\"sku_type\":\"license\"},{\"sku\":\"LIC-SME-5YR\",\"qty\":1,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":null",
+        "error": null
+      },
+      "shadow-012-best-camera": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 3,
+          "max": 3,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ product_info"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 790,
+        "parsed": {
+          "intent": "product_info",
+          "confidence": 0.9,
+          "reply": "",
+          "items": [],
+          "modifiers": {},
+          "revision": {},
+          "reference": {},
+          "dashboard": {}
+        },
+        "raw": "{\"intent\":\"product_info\",\"confidence\":0.9,\"reply\":\"\",\"items\":[],\"modifiers\":{},\"revision\":{},\"reference\":{},\"dashboard\":{}}",
+        "error": null
+      },
+      "shadow-009-duo-essentials": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 2709,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "LIC-DUO-ESSENTIALS-1YR",
+              "qty": 4,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": false,
+            "with_license": null,
+            "term_years": 1,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": false,
+            "separate_quotes": false
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"LIC-DUO-ESSENTIALS-1YR\",\"qty\":4,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":false,\"with_license\":null,\"term_years\":1,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"acti",
+        "error": null
+      },
+      "shadow-010-duo-advantage-all-terms": {
+        "evalMode": "live_benchmark_classifier",
+        "decisionGrade": true,
+        "liveEndpointCall": true,
+        "liveLlmCall": true,
+        "simulated": false,
+        "endpoint": "https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier",
+        "syntheticEval": true,
+        "evalRunId": "eval-llama-strict-1778090316",
+        "requestedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "executedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "tierPath": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "observedModel": "@cf/meta/llama-4-scout-17b-16e-instruct",
+        "requestedPromptVariant": "v2-strict-json",
+        "observedPromptVariant": "v2-strict-json",
+        "attempts": 1,
+        "transientErrors": [],
+        "inputTokens": null,
+        "outputTokens": null,
+        "httpStatus": 200,
+        "grade": {
+          "total": 5,
+          "max": 5,
+          "intentOk": true,
+          "details": {
+            "intent": "✓ quote",
+            "modifiers": "✓ all modifiers matched"
+          }
+        },
+        "sdw": null,
+        "swap": null,
+        "latency": 3365,
+        "parsed": {
+          "intent": "quote",
+          "confidence": 1,
+          "reply": "",
+          "items": [
+            {
+              "sku": "LIC-DUO-ADVANTAGE-1YR",
+              "qty": 35,
+              "sku_type": "license"
+            },
+            {
+              "sku": "LIC-DUO-ADVANTAGE-3YR",
+              "qty": 35,
+              "sku_type": "license"
+            },
+            {
+              "sku": "LIC-DUO-ADVANTAGE-5YR",
+              "qty": 35,
+              "sku_type": "license"
+            }
+          ],
+          "modifiers": {
+            "hardware_only": false,
+            "license_only": true,
+            "with_license": null,
+            "term_years": null,
+            "tier": null,
+            "show_pricing": false,
+            "all_terms": true,
+            "separate_quotes": true
+          },
+          "revision": {
+            "action": null,
+            "target_sku": null,
+            "add_items": [],
+            "new_term": null,
+            "new_tier": null,
+            "new_qty": null,
+            "hw_lic_toggle": null
+          },
+          "reference": {
+            "is_pronoun_ref": false,
+            "option_ref": null,
+            "resolve_from_history": false
+          },
+          "dashboard": {
+            "is_meraki_license_page": false
+          }
+        },
+        "raw": "{\"intent\":\"quote\",\"confidence\":1,\"reply\":\"\",\"items\":[{\"sku\":\"LIC-DUO-ADVANTAGE-1YR\",\"qty\":35,\"sku_type\":\"license\"},{\"sku\":\"LIC-DUO-ADVANTAGE-3YR\",\"qty\":35,\"sku_type\":\"license\"},{\"sku\":\"LIC-DUO-ADVANTAGE-5YR\",\"qty\":35,\"sku_type\":\"license\"}],\"modifiers\":{\"hardware_only\":false,\"license_only\":true,\"with",
+        "error": null
+      }
+    }
+  }
+}

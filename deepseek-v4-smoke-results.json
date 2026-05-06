@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-05-06T19:03:58.096Z",
+  "fixtures": [
+    "quote-005",
+    "quote-009-lic-only",
+    "quote-013-with-lic-tier",
+    "price-006-with-3yr-lic",
+    "revise-009-swap",
+    "clarify-001-vague-switch",
+    "pron-001",
+    "shadow-001-renewal-multiline",
+    "shadow-006-url-echoback",
+    "shadow-007-sme-license"
+  ],
+  "results": [
+    {
+      "model": "deepseek-v4-flash",
+      "total": 57,
+      "max": 64,
+      "pct": 89.1,
+      "intent": "9/10",
+      "intentPct": 90,
+      "parse": 0,
+      "errs": 0,
+      "p50": 3816,
+      "p90": 5016,
+      "input_tokens": 45886,
+      "output_tokens": 2524,
+      "fails": [
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/7",
+          "intent": "product_info",
+          "error": "",
+          "reason": "intent product_info!=quote,items,modifiers",
+          "elapsed": 3122
+        }
+      ]
+    },
+    {
+      "model": "deepseek-v4-pro",
+      "total": 60,
+      "max": 64,
+      "pct": 93.8,
+      "intent": "10/10",
+      "intentPct": 100,
+      "parse": 0,
+      "errs": 0,
+      "p50": 6263,
+      "p90": 11671,
+      "input_tokens": 45886,
+      "output_tokens": 2143,
+      "fails": [
+        {
+          "id": "shadow-007-sme-license",
+          "score": "3/7",
+          "intent": "quote",
+          "error": "",
+          "reason": "items,modifiers",
+          "elapsed": 7288
+        }
+      ]
+    }
+  ]
+}

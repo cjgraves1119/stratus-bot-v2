@@ -1,7 +1,7 @@
 /**
- * 3-variant classifier benchmark — Legacy vs V2/Llama vs V2/Gemma 4.
+ * Classifier benchmark — Legacy, V2, strict JSON, and alternate model variants.
  *
- * Runs each of 74 fixtures through three configurations via the deployed
+ * Runs each fixture through selected configurations via the deployed
  * /api/benchmark-classifier endpoint (which now accepts prompt_variant).
  * Decision-grade runs call the live deployed Worker endpoint, which calls the
  * actual bound Workers AI model. Do not replace these with local simulations
@@ -11,6 +11,7 @@
  *   - legacy   → prompt_variant=legacy, model=Llama 4 Scout
  *   - v2-llama → prompt_variant=v2,     model=Llama 4 Scout
  *   - v2-gemma → prompt_variant=v2,     model=Gemma 4 26B
+ *   - v2-kimi  → prompt_variant=v2,     model=Kimi K2.6
  *
  * Grading:
  *   - For V2 variants: full rubric (intent 3 + items 2 + modifiers 2 + revision 2 + reference 1).
@@ -20,7 +21,7 @@
  *
  * SDW + swap breakdown reported separately.
  *
- * Usage: node benchmark-3variant.js [--limit N] [--concurrency C]
+ * Usage: node benchmark-3variant.js [--limit N] [--concurrency C] [--variants v2-llama,v2-gemma4]
  */
 
 const fs = require('fs');
@@ -35,8 +36,15 @@ const EVAL_RUN_ID = process.env.EVAL_RUN_ID || `classifier-${Date.now()}`;
 const VARIANTS = [
   { id: 'legacy',      label: 'Legacy prompt (Llama)',  promptVariant: 'legacy', model: '@cf/meta/llama-4-scout-17b-16e-instruct' },
   { id: 'v2-llama',    label: 'V2 prompt (Llama)',      promptVariant: 'v2',     model: '@cf/meta/llama-4-scout-17b-16e-instruct' },
+  { id: 'v2-llama-strict', label: 'V2 strict JSON (Llama)', promptVariant: 'v2-strict-json', model: '@cf/meta/llama-4-scout-17b-16e-instruct' },
   { id: 'v2-gemma4',   label: 'V2 prompt (Gemma 4 26B)', promptVariant: 'v2',    model: '@cf/google/gemma-4-26b-a4b-it' },
+  { id: 'v2-gemma4-strict', label: 'V2 strict JSON (Gemma 4 26B)', promptVariant: 'v2-strict-json', model: '@cf/google/gemma-4-26b-a4b-it' },
+  { id: 'v2-gemma-sealion-27b', label: 'V2 prompt (Gemma SEA-LION 27B)', promptVariant: 'v2', model: '@cf/aisingapore/gemma-sea-lion-v4-27b-it' },
   { id: 'v2-gemma3-12b', label: 'V2 prompt (Gemma 3 12B)', promptVariant: 'v2',  model: '@cf/google/gemma-3-12b-it' },
+  { id: 'v2-kimi-k26', label: 'V2 prompt (Kimi K2.6)',  promptVariant: 'v2',     model: '@cf/moonshotai/kimi-k2.6' },
+  { id: 'v2-kimi-k26-strict', label: 'V2 strict JSON (Kimi K2.6)', promptVariant: 'v2-kimi-json', model: '@cf/moonshotai/kimi-k2.6' },
+  { id: 'v2-llama33-70b-fast', label: 'V2 prompt (Llama 3.3 70B fast)', promptVariant: 'v2', model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' },
+  { id: 'v2-mistral-small-31-24b', label: 'V2 prompt (Mistral Small 3.1 24B)', promptVariant: 'v2', model: '@cf/mistralai/mistral-small-3.1-24b-instruct' },
 ];
 
 const fixtures = require('./classifier-fixtures.json').fixtures;
@@ -269,11 +277,19 @@ async function main() {
   const args = process.argv.slice(2);
   const limit = args.includes('--limit') ? parseInt(args[args.indexOf('--limit') + 1]) : fixtures.length;
   const concurrency = args.includes('--concurrency') ? parseInt(args[args.indexOf('--concurrency') + 1]) : 4;
+  const variantFilter = args.includes('--variants')
+    ? new Set(String(args[args.indexOf('--variants') + 1] || '').split(',').map(s => s.trim()).filter(Boolean))
+    : null;
+  const variants = variantFilter ? VARIANTS.filter(v => variantFilter.has(v.id)) : VARIANTS;
+  if (variantFilter && variants.length !== variantFilter.size) {
+    const known = VARIANTS.map(v => v.id).join(', ');
+    throw new Error(`Unknown --variants entry. Known variants: ${known}`);
+  }
   const subset = fixtures.slice(0, limit);
 
   console.log(`\n════════════════════════════════════════════════════════════`);
-  console.log(`  3-Variant Classifier Benchmark`);
-  console.log(`  ${subset.length} fixtures × ${VARIANTS.length} variants`);
+  console.log(`  Classifier Benchmark`);
+  console.log(`  ${subset.length} fixtures × ${variants.length} variants`);
   console.log(`  Concurrency: ${concurrency}`);
   console.log(`  Endpoint: ${ENDPOINT}`);
   console.log(`  Decision-grade eval: LIVE deployed endpoint + actual Workers AI calls (not simulated)`);
@@ -281,11 +297,11 @@ async function main() {
   console.log(`════════════════════════════════════════════════════════════\n`);
 
   const results = {};  // variant.id → { fixture_id → { grade, latency, parsed } }
-  for (const v of VARIANTS) results[v.id] = {};
+  for (const v of variants) results[v.id] = {};
 
   // Build all jobs (fixture × variant) and run with bounded concurrency
   const jobs = [];
-  for (const v of VARIANTS) for (const fx of subset) jobs.push({ variant: v, fixture: fx });
+  for (const v of variants) for (const fx of subset) jobs.push({ variant: v, fixture: fx });
 
   let completed = 0;
   async function worker() {
@@ -324,8 +340,8 @@ async function main() {
         error: r.error || r.err || r.parseError || null,
       };
       completed++;
-      if (completed % 10 === 0 || completed === subset.length * VARIANTS.length) {
-        process.stdout.write(`  Progress: ${completed}/${subset.length * VARIANTS.length}\n`);
+      if (completed % 10 === 0 || completed === subset.length * variants.length) {
+        process.stdout.write(`  Progress: ${completed}/${subset.length * variants.length}\n`);
       }
     }
   }
@@ -333,7 +349,7 @@ async function main() {
 
   // ─── Aggregate ───
   const summary = {};
-  for (const v of VARIANTS) {
+  for (const v of variants) {
     const perFixture = results[v.id];
     const latencies = [];
     let totalPts = 0, maxPts = 0, intentOk = 0, intentCount = 0, parseFail = 0, errors = 0;
@@ -370,7 +386,7 @@ async function main() {
   console.log(`════════════════════════════════════════════════════════════\n`);
   console.log(`  Variant                   | Overall     | Intent Acc | p50    | p95    | Parse-Fail`);
   console.log(`  --------------------------|-------------|------------|--------|--------|------------`);
-  for (const v of VARIANTS) {
+  for (const v of variants) {
     const s = summary[v.id];
     const pad = (x, n) => String(x).padEnd(n);
     console.log(`  ${pad(s.label, 26)}| ${pad(s.overallScore + ' (' + s.overallPct + '%)', 12)}| ${pad(s.intentOk + '/' + s.fixtures + ' (' + s.intentAcc + '%)', 11)}| ${pad(s.p50ms + 'ms', 7)}| ${pad(s.p95ms + 'ms', 7)}| ${s.parseFail}`);
@@ -380,7 +396,7 @@ async function main() {
   console.log(`\n── SDW tier extraction (fixtures with expected tier=SDW) ──`);
   const sdwFixtures = subset.filter(f => (f.expected.modifiers || {}).tier === 'SDW');
   console.log(`  Fixtures: ${sdwFixtures.length} → ${sdwFixtures.map(f => f.id).join(', ')}`);
-  for (const v of VARIANTS) {
+  for (const v of variants) {
     const pass = sdwFixtures.filter(f => results[v.id][f.id]?.sdw?.pass).length;
     console.log(`  ${v.label.padEnd(26)} ${pass}/${sdwFixtures.length} passed`);
     for (const f of sdwFixtures) {
@@ -394,7 +410,7 @@ async function main() {
   console.log(`\n── Swap action detection (fixtures with expected revision.action=swap) ──`);
   const swapFixtures = subset.filter(f => (f.expected.revision || {}).action === 'swap');
   console.log(`  Fixtures: ${swapFixtures.length} → ${swapFixtures.map(f => f.id).join(', ')}`);
-  for (const v of VARIANTS) {
+  for (const v of variants) {
     const pass = swapFixtures.filter(f => results[v.id][f.id]?.swap?.pass).length;
     console.log(`  ${v.label.padEnd(26)} ${pass}/${swapFixtures.length} passed`);
     for (const f of swapFixtures) {
@@ -406,7 +422,7 @@ async function main() {
 
   // Sample failures per variant
   console.log(`\n── Top intent failures per variant (up to 10) ──`);
-  for (const v of VARIANTS) {
+  for (const v of variants) {
     const fails = subset
       .map(f => ({ f, r: results[v.id][f.id] }))
       .filter(x => x.r && !x.r.grade.intentOk)
