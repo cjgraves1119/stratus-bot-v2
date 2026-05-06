@@ -97,6 +97,32 @@ async function trackUsage(env, model, usage, source) {
     const inputCost = (usage.input_tokens / 1_000_000) * pricing.input;
     const outputCost = (usage.output_tokens / 1_000_000) * pricing.output;
     const totalCost = inputCost + outputCost;
+    const evalRunId = env.__EVAL_RUN_ID || null;
+
+    if (evalRunId) {
+      await logBotUsageToD1(env, {
+        bot: env.__EVAL_BOT || (source.startsWith('addon') ? 'addon' : 'gchat'),
+        personId: env.__EVAL_PERSON_ID || null,
+        requestText: env.__EVAL_REQUEST_TEXT || null,
+        responsePath: source === 'crm-agent' ? 'crm_agent' : (source.includes('addon') ? 'claude' : 'claude'),
+        model,
+        requestedModel: env.__EVAL_REQUESTED_MODEL || null,
+        executedModel: model,
+        tierPath: model,
+        liveLlmCall: true,
+        tier0Deterministic: false,
+        attempts: 1,
+        transientErrors: [],
+        inputTokens: usage.input_tokens || 0,
+        outputTokens: usage.output_tokens || 0,
+        costUsd: Math.round(totalCost * 1_000_000) / 1_000_000,
+        durationMs: null,
+        errorMessage: null,
+        responseText: null,
+        endpoint: env.__EVAL_ENDPOINT || null
+      });
+      return;
+    }
 
     const now = new Date();
     const monthKey = `usage_${now.getFullYear()}_${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -261,10 +287,49 @@ async function logPriceChangeToD1(env, { sku, oldPrice, newPrice, listPrice }) {
  */
 async function logBotUsageToD1(env, {
   bot, personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage,
-  responseText, toolCallsJson
+  responseText, toolCallsJson, requestedModel, executedModel, tierPath, liveLlmCall, tier0Deterministic,
+  attempts, transientErrors, endpoint
 }) {
   if (!env?.ANALYTICS_DB) return;
   try {
+    const evalRunId = env.__EVAL_RUN_ID || null;
+    if (evalRunId) {
+      const resolvedExecutedModel = executedModel || model || null;
+      const resolvedTierPath = tierPath || resolvedExecutedModel || null;
+      const deterministic = tier0Deterministic === true || responsePath === 'deterministic' || model === 'deterministic';
+      await env.ANALYTICS_DB.prepare(
+        `INSERT INTO bot_usage_eval (
+          eval_run_id, bot, person_id, request_text, response_path, model,
+          requested_model, executed_model, tier_path, live_llm_call, tier_0_deterministic,
+          attempts, transient_errors, input_tokens, output_tokens, cost_usd, duration_ms,
+          error_message, response_text, tool_calls_json, endpoint
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        evalRunId,
+        bot || 'gchat',
+        personId || null,
+        (requestText || '').substring(0, 2000),
+        responsePath || null,
+        model || null,
+        requestedModel || env.__EVAL_REQUESTED_MODEL || null,
+        resolvedExecutedModel,
+        resolvedTierPath,
+        liveLlmCall === undefined ? !deterministic : !!liveLlmCall,
+        deterministic,
+        attempts || 1,
+        transientErrors ? (typeof transientErrors === 'string' ? transientErrors : JSON.stringify(transientErrors)).substring(0, 2000) : null,
+        inputTokens || 0,
+        outputTokens || 0,
+        costUsd || 0,
+        durationMs || null,
+        errorMessage || null,
+        responseText ? String(responseText).substring(0, 8000) : null,
+        toolCallsJson ? (typeof toolCallsJson === 'string' ? toolCallsJson : JSON.stringify(toolCallsJson)).substring(0, 8000) : null,
+        endpoint || env.__EVAL_ENDPOINT || null
+      ).run();
+      return;
+    }
+
     await env.ANALYTICS_DB.prepare(
       `INSERT INTO bot_usage (bot, person_id, request_text, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, error_message, response_text, tool_calls_json)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -13953,7 +14018,7 @@ ${(data.recentRequests || []).map(r => {
           headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-Gateway-Secret',
+            'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, X-Gateway-Secret, X-Eval-Run-Id',
           }
         });
       }
@@ -13965,6 +14030,13 @@ ${(data.recentRequests || []).map(r => {
       }
 
       const apiBody = await request.json();
+      const evalRunId = request.headers.get('X-Eval-Run-Id') || null;
+      env.__EVAL_RUN_ID = evalRunId;
+      env.__EVAL_ENDPOINT = evalRunId ? url.pathname : null;
+      env.__EVAL_REQUEST_TEXT = evalRunId ? (apiBody?.text || null) : null;
+      env.__EVAL_REQUESTED_MODEL = evalRunId ? (apiBody?.forceModel || null) : null;
+      env.__EVAL_PERSON_ID = null;
+      env.__EVAL_BOT = null;
       const jsonHeaders = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' };
 
       try {
@@ -18025,6 +18097,14 @@ Return ONLY a JSON object (no markdown, no explanation):
             const _bot = botFromPersonId(_pid || _hdrEmail);
             const _botDb = (_bot === 'chrome-chat' || _bot === 'chrome-quote' || _bot === 'chrome-ext')
               ? 'addon' : _bot;
+            if (evalRunId) {
+              env.__EVAL_PERSON_ID = _pid;
+              env.__EVAL_BOT = _botDb;
+            }
+            const _tierPath = Array.isArray(apiResult?.iterations)
+              ? apiResult.iterations.map(i => i.model || i.tier || i.name).filter(Boolean).join(',')
+              : (apiResult?.tierPath || apiResult?.tierUsed || apiResult?.model || null);
+            const _tier0Deterministic = apiResult?.tierUsed === 'deterministic' || apiResult?.model === 'deterministic' || apiResult?.model === 'deterministic-license-term-gate';
             ctx.waitUntil(logBotUsageToD1(env, {
               bot: _botDb,
               personId: _pid,
@@ -18037,11 +18117,19 @@ Return ONLY a JSON object (no markdown, no explanation):
                 ? 'error'
                 : (apiResult?.tierUsed === 'deterministic' ? 'deterministic' : 'crm_agent'),
               model: apiResult?.model || null,
+              requestedModel: apiBody.forceModel || null,
+              executedModel: apiResult?.model || null,
+              tierPath: _tierPath,
+              liveLlmCall: !_tier0Deterministic && !apiResult?.error,
+              tier0Deterministic: _tier0Deterministic,
+              attempts: 1,
+              transientErrors: apiResult?.error ? [apiResult.error] : [],
               durationMs: apiResult?.totalMs || null,
               responseText: typeof apiResult === 'string'
                 ? apiResult
                 : (apiResult?.reply || JSON.stringify(apiResult || '')),
-              errorMessage: apiResult?.error || null
+              errorMessage: apiResult?.error || null,
+              endpoint: url.pathname
             }));
           }
         } catch (_logErr) {

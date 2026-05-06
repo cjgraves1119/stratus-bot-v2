@@ -2,6 +2,11 @@
 /**
  * A/B Test: Step Order Comparison
  *
+ * NON-DECISION-SUPPORT FOR MODEL ROUTING: this file simulates pre-check and
+ * classifier routing. Do not use it as evidence for reducing Claude fallback.
+ * Decision-grade waterfall evals must call the deployed Worker and actual
+ * Llama/Gemma/Claude model endpoints.
+ *
  * Architecture A (CURRENT): Pre-checks → CF classifier → Deterministic → Claude
  * Architecture B (PROPOSED): CF classifier → Pre-checks → Deterministic → Claude
  *
