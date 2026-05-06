@@ -31,6 +31,17 @@ Every decision-grade row should preserve:
 - `inputTokens` and `outputTokens` when the provider returns usage metadata
 - elapsed milliseconds and raw response text
 
+`tierPath` is exact when the endpoint returns iteration or waterfall-hop
+metadata, for example `llama,gemma,claude`. A single value such as `claude` or
+`llama` means only one tier was observed or the endpoint did not expose full
+hop metadata; do not treat a single value as proof that other tiers were
+incapable.
+
+Token fields are decision-useful for Anthropic responses. Cloudflare Workers AI
+response shapes vary by model, so Llama/Gemma `inputTokens` and `outputTokens`
+may be `0` even when a live model call occurred. Treat CF token counts as
+best-effort until the harness has per-model usage extraction.
+
 For production gateway/chat eval traffic, the harness sends `X-Eval-Run-Id`.
 The gateway forwards that header to the GChat worker, and the GChat worker
 writes D1 telemetry to `bot_usage_eval` instead of normal `bot_usage` so
