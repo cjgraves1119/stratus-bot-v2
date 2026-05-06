@@ -59,10 +59,10 @@ function applySuffix(sku) {
 function getLicenseSkus(baseSku, requestedTier) {
   const upper = baseSku.toUpperCase();
 
-  const c8Match = upper.match(/^C(8111|8455)/);
+  const c8Match = upper.match(/^C(8111|8121|8455)/);
   if (c8Match) {
     const model = c8Match[1];
-    const tier = requestedTier || 'ENT';
+    const tier = requestedTier || 'SEC';
     return [
       { term: '1Y', sku: `LIC-C${model}-${tier}-1Y` },
       { term: '3Y', sku: `LIC-C${model}-${tier}-3Y` },
