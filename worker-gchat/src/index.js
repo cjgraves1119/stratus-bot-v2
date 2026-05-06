@@ -20,6 +20,7 @@
 // Dashboard: https://dash.cloudflare.com/ec1888c5a0b51dc3eebf6bae13a3922b/ai/ai-gateway/gateways/stratus-ai-bot
 const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
 const ANTHROPIC_API_DIRECT = 'https://api.anthropic.com/v1/messages'; // Fallback when gateway fails
+const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 
 // ─── Cloudflare Workflows (durable execution for CRM agentic loops) ─────────
 import { WorkflowEntrypoint } from 'cloudflare:workers';
@@ -81,6 +82,52 @@ const MODEL_PRICING = {
   'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00 },
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
 };
+
+const SEA_LION_MODEL_ID = '@cf/aisingapore/gemma-sea-lion-v4-27b-it';
+const DEEPSEEK_MODEL_IDS = new Set(['deepseek-v4-pro', 'deepseek-v4-flash']);
+const DEEPSEEK_COST_PER_1M = {
+  'deepseek-v4-pro': { inputCacheMiss: 1.74, inputCacheHit: 0.145, output: 3.48 },
+  'deepseek-v4-flash': { inputCacheMiss: 0.14, inputCacheHit: 0.028, output: 0.28 }
+};
+
+function isDeepSeekModel(model) {
+  return DEEPSEEK_MODEL_IDS.has(String(model || '').toLowerCase());
+}
+
+function normalizeForceModel(model) {
+  const raw = String(model || '').trim();
+  const normalized = raw.toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'sea-lion' || normalized === 'sea-lion-v4-27b' || normalized === 'sealion' || normalized === 'sealion-v4-27b') {
+    return SEA_LION_MODEL_ID;
+  }
+  return raw;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = 90000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function estimateDeepSeekCostUsd(model, usage = {}) {
+  const price = DEEPSEEK_COST_PER_1M[String(model || '').toLowerCase()] || DEEPSEEK_COST_PER_1M['deepseek-v4-pro'];
+  const promptTokens = usage.prompt_tokens || usage.input_tokens || 0;
+  const completionTokens = usage.completion_tokens || usage.output_tokens || 0;
+  const cacheHitTokens = usage.prompt_cache_hit_tokens || 0;
+  const cacheMissTokens = usage.prompt_cache_miss_tokens || Math.max(0, promptTokens - cacheHitTokens);
+  return ((cacheMissTokens / 1e6) * price.inputCacheMiss) +
+         ((cacheHitTokens / 1e6) * price.inputCacheHit) +
+         ((completionTokens / 1e6) * price.output);
+}
 
 /**
  * Track API usage from a Claude response.
@@ -12286,6 +12333,19 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
   return flat;
 }
 
+function anthropicToolsToOpenAiFormat(anthropicTools) {
+  return anthropicTools
+    .filter(t => !t.type || t.type === 'custom')
+    .map(t => ({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description || '',
+        parameters: t.input_schema || { type: 'object', properties: {} }
+      }
+    }));
+}
+
 // Normalized response extractor for CF Workers AI models.
 // Handles 4 format variants depending on which model is returning:
 //   - OpenAI-style: { choices: [{ message: { content, tool_calls: [{id, function:{name, arguments}}] } }] }  (Gemma 4)
@@ -12849,6 +12909,233 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   };
 }
 
+// DeepSeek OpenAI-compatible agentic loop for eval-only forced model runs.
+// Mirrors askCfModel's tool execution shape but uses chat.completions
+// tool_calls/tool messages instead of Workers AI's model-specific formats.
+async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15) {
+  const startMs = Date.now();
+  const toolCallsLog = [];
+  const errors = [];
+  const transientErrors = [];
+  const mutationSummaries = [];
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costUsd = 0;
+  let attempts = 0;
+  let finalReply = '';
+
+  if (!env.DEEPSEEK_API_KEY) {
+    return {
+      reply: 'DeepSeek failed: DEEPSEEK_API_KEY not bound',
+      toolCalls: [],
+      iterations: 0,
+      elapsedMs: Date.now() - startMs,
+      errors: [{ phase: 'config', error: 'DEEPSEEK_API_KEY not bound' }],
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+      attempts: 0,
+      transientErrors: []
+    };
+  }
+
+  const priorHistory = personId && env && env.CONVERSATION_KV
+    ? await getHistory(env.CONVERSATION_KV, personId).catch(() => [])
+    : [];
+  const historyWindow = priorHistory
+    .filter(h => h && h.role && h.content && (h.role === 'user' || h.role === 'assistant'))
+    .slice(-4)
+    .map(h => ({
+      role: h.role,
+      content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content)
+    }));
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    ...historyWindow,
+    { role: 'user', content: userMessage }
+  ];
+  const tools = anthropicToolsToOpenAiFormat(anthropicTools);
+
+  for (let iteration = 1; iteration <= maxIterations; iteration++) {
+    const requestBody = {
+      model: modelId,
+      messages,
+      tools,
+      tool_choice: 'auto',
+      temperature: 0.3,
+      max_tokens: 2048,
+      thinking: { type: 'disabled' },
+      stream: false
+    };
+
+    let data = null;
+    let responseText = '';
+    let ok = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      attempts++;
+      try {
+        const resp = await fetchWithTimeout(DEEPSEEK_API_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`
+          },
+          body: JSON.stringify(requestBody)
+        }, 90000);
+        responseText = await resp.text();
+        try { data = responseText ? JSON.parse(responseText) : null; } catch (_) { data = null; }
+
+        if (resp.ok) {
+          ok = true;
+          const usage = data?.usage || {};
+          inputTokens += usage.prompt_tokens || usage.input_tokens || 0;
+          outputTokens += usage.completion_tokens || usage.output_tokens || 0;
+          costUsd += estimateDeepSeekCostUsd(modelId, usage);
+          break;
+        }
+
+        const error = `DeepSeek ${resp.status}: ${responseText.substring(0, 500)}`;
+        if ((resp.status === 429 || resp.status >= 500) && attempt < 3) {
+          transientErrors.push(error);
+          const retryAfter = Number(resp.headers.get('retry-after'));
+          await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * Math.pow(2, attempt - 1));
+          continue;
+        }
+        errors.push({ phase: 'deepseek', error });
+        return {
+          reply: `DeepSeek failed: ${error}`,
+          toolCalls: toolCallsLog,
+          iterations: iteration,
+          elapsedMs: Date.now() - startMs,
+          errors,
+          inputTokens,
+          outputTokens,
+          costUsd: Math.round(costUsd * 1_000_000_000) / 1_000_000_000,
+          attempts,
+          transientErrors
+        };
+      } catch (err) {
+        const error = `DeepSeek fetch error: ${err.message}`;
+        if (attempt < 3) {
+          transientErrors.push(error);
+          await sleep(500 * Math.pow(2, attempt - 1));
+          continue;
+        }
+        errors.push({ phase: 'deepseek', error });
+        return {
+          reply: `DeepSeek failed: ${error}`,
+          toolCalls: toolCallsLog,
+          iterations: iteration,
+          elapsedMs: Date.now() - startMs,
+          errors,
+          inputTokens,
+          outputTokens,
+          costUsd: Math.round(costUsd * 1_000_000_000) / 1_000_000_000,
+          attempts,
+          transientErrors
+        };
+      }
+    }
+
+    if (!ok) break;
+    const message = data?.choices?.[0]?.message || {};
+    const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    if (calls.length === 0) {
+      finalReply = message.content || '(empty response)';
+      return {
+        reply: finalReply,
+        toolCalls: toolCallsLog,
+        iterations: iteration,
+        elapsedMs: Date.now() - startMs,
+        errors,
+        inputTokens,
+        outputTokens,
+        costUsd: Math.round(costUsd * 1_000_000_000) / 1_000_000_000,
+        attempts,
+        transientErrors,
+        mutationSummaries
+      };
+    }
+
+    const callsWithIds = calls.map((tc, i) => ({
+      ...tc,
+      id: tc.id || `call_${iteration}_${i}`
+    }));
+    messages.push({
+      role: 'assistant',
+      content: message.content || '',
+      tool_calls: callsWithIds
+    });
+
+    for (const tc of callsWithIds) {
+      const name = tc?.function?.name;
+      if (!name) continue;
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch (_) { args = {}; }
+      toolCallsLog.push({ iteration, name, arguments: args });
+      try {
+        const { result } = await executeToolCallDryRun(name, args, env, personId, dryRun);
+        if (result && typeof result === 'object') {
+          const resultIsError = result.success === false || !!result.error || !!result.validation_error;
+          const isWriteTool = typeof BENCHMARK_WRITE_TOOLS !== 'undefined' && BENCHMARK_WRITE_TOOLS.has(name);
+          const summary = result._user_visible_summary
+            || (resultIsError && isWriteTool
+              ? `That did not succeed: ${result.message || result.error || result.validation_error || 'the CRM write tool returned an error.'}`
+              : null);
+          if (summary && typeof summary === 'string') {
+            mutationSummaries.push({
+              toolName: name,
+              summary,
+              undoToken: result._undo_token || null,
+              recordUrl: result._record_url || null,
+              isError: resultIsError
+            });
+          }
+        }
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: typeof result === 'string' ? result : JSON.stringify(result ?? null)
+        });
+      } catch (err) {
+        errors.push({ phase: 'tool_execution', tool: name, error: err.message });
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: err.message })
+        });
+      }
+    }
+  }
+
+  finalReply = finalReply || '(max iterations reached without final response)';
+  const last = mutationSummaries[mutationSummaries.length - 1];
+  if (last && !last.isError) {
+    const hasToken = last.undoToken && finalReply.includes(last.undoToken);
+    const hasUrl = last.recordUrl && finalReply.includes(last.recordUrl);
+    if (last.summary && (!hasToken || !hasUrl)) {
+      finalReply = `${finalReply.trim()}\n\n${last.summary}`;
+    }
+  } else if (last?.isError && last.summary) {
+    finalReply = last.summary;
+  }
+
+  return {
+    reply: finalReply,
+    toolCalls: toolCallsLog,
+    iterations: maxIterations,
+    elapsedMs: Date.now() - startMs,
+    errors,
+    inputTokens,
+    outputTokens,
+    costUsd: Math.round(costUsd * 1_000_000_000) / 1_000_000_000,
+    attempts,
+    transientErrors,
+    mutationSummaries
+  };
+}
+
 // Wrapper for askClaude in benchmark context.
 // Sets env.__BENCHMARK_DRY_RUN so executeToolCall can intercept writes
 // at the case level without needing globalThis hooks.
@@ -12981,6 +13268,9 @@ const BENCHMARK_TASKS = [
 
 const BENCHMARK_MODELS = [
   { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
+  { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', type: 'deepseek' },
+  { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', type: 'deepseek' },
+  { id: SEA_LION_MODEL_ID, label: 'SEA-LION V4 27B (CF)', type: 'cf' },
   { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
   { id: '@cf/meta/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout 17B (CF)', type: 'cf' },
   { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B (CF)', type: 'cf' },
@@ -13240,6 +13530,9 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
 
   if (modelConfig.type === 'claude') {
     return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext);
+  }
+  if (modelConfig.type === 'deepseek') {
+    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10);
   }
   return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10);
 }
@@ -13512,6 +13805,8 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const useClaudeOnly = options.forceClaude === true;
   const useGemmaOnly = options.forceGemma === true;
   const useLlamaOnly = options.forceLlama === true;
+  const forceCfModelId = options.forceCfModelId || null;
+  const forceDeepSeekModelId = options.forceDeepSeekModelId || null;
   const dryRun = options.dryRun === true;
   const evalContext = options.evalContext || null;
 
@@ -13538,6 +13833,44 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       toolCalls: t.result?.toolCalls || [],
       iterations: t.result?.iterations || 0,
       elapsedMs: t.result?.elapsedMs || 0,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // Force an arbitrary CF model for eval harness runs outside the production
+  // Llama/Gemma waterfall. Used by Stream A3 for SEA-LION tool-use tests.
+  if (forceCfModelId) {
+    const t = await tryCfTier(forceCfModelId, userMessage, env, personId, dryRun);
+    return {
+      reply: t.result?.reply || `${forceCfModelId} failed: ${t.reason || 'unknown'}`,
+      model: forceCfModelId,
+      tierUsed: forceCfModelId === SEA_LION_MODEL_ID ? 'sea-lion' : 'cf-forced',
+      llamaResult: null,
+      gemmaResult: null,
+      claudeResult: null,
+      stallReason: t.winner ? null : t.reason,
+      toolCalls: t.result?.toolCalls || [],
+      iterations: t.result?.iterations || 0,
+      elapsedMs: t.result?.elapsedMs || 0,
+      totalMs: Date.now() - startMs
+    };
+  }
+
+  // Force DeepSeek for eval harness runs. This is intentionally outside the
+  // production waterfall so B3 can measure DeepSeek itself, not a fallback path.
+  if (forceDeepSeekModelId) {
+    const systemPrompt = typeof buildCrmSystemPrompt === 'function'
+      ? buildCrmSystemPrompt(userMessage)
+      : pickOptimizedPrompt(forceDeepSeekModelId);
+    const r = await askDeepSeekModel(forceDeepSeekModelId, userMessage, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 15);
+    return {
+      ...r,
+      model: forceDeepSeekModelId,
+      tierUsed: forceDeepSeekModelId,
+      llamaResult: null,
+      gemmaResult: null,
+      claudeResult: null,
+      stallReason: r.errors?.length ? r.errors.map(e => e.error || e.phase).join('|') : null,
       totalMs: Date.now() - startMs
     };
   }
@@ -14037,7 +14370,7 @@ ${(data.recentRequests || []).map(r => {
         runId: evalRunId,
         endpoint: url.pathname,
         requestText: apiBody?.text || null,
-        requestedModel: apiBody?.forceModel || null,
+        requestedModel: normalizeForceModel(apiBody?.forceModel) || null,
         personId: null,
         bot: null
       } : null;
@@ -16027,6 +16360,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           // Accepts: { text, emailContext, history, forceModel: 'gemma'|'claude'|undefined, dryRun }
           case '/api/chat-waterfall': {
             const { text: wText, emailContext: wEc, history: wHistory, forceModel, dryRun: wDryRun, progressId: wProgressId, source: wSource } = apiBody;
+            const forcedModel = normalizeForceModel(forceModel);
             if (!wText) {
               apiResult = { error: 'text is required' };
               break;
@@ -16216,7 +16550,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               if (_zohoIntent) {
                 console.log(`[WATERFALL] Tier 0 skipped: explicit Zoho-write intent detected in user text`);
               }
-              if (!forceModel && !skipDeterministic && !_zohoIntent) {
+              if (!forcedModel && !skipDeterministic && !_zohoIntent) {
                 try {
                   const classification = await classifyWithCF(wText, env);
                   if (classification?.intent === 'quote') {
@@ -16254,20 +16588,22 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 // detect in-prompt "confirm:true" phrases for destructive ops
                 // and auto-inject consent when Llama fails to propagate it.
                 env.__USER_PROMPT_RAW = wText || '';
-                const forceClaudeForChatWrite = !forceModel && skipDeterministic && shouldForceClaudeForWrite(wText);
+                const forceClaudeForChatWrite = !forcedModel && skipDeterministic && shouldForceClaudeForWrite(wText);
                 if (forceClaudeForChatWrite) {
                   console.log(`[WATERFALL] Forcing Claude for chat-tab write intent`);
                 }
                 // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
-                  forceLlama: forceModel === 'llama',
-                  forceGemma: forceModel === 'gemma',
-                  forceClaude: forceModel === 'claude' || forceClaudeForChatWrite,
+                  forceLlama: forcedModel === 'llama',
+                  forceGemma: forcedModel === 'gemma',
+                  forceClaude: forcedModel === 'claude' || forceClaudeForChatWrite,
+                  forceCfModelId: forcedModel === SEA_LION_MODEL_ID ? SEA_LION_MODEL_ID : null,
+                  forceDeepSeekModelId: isDeepSeekModel(forcedModel) ? forcedModel.toLowerCase() : null,
                   dryRun: wDryRun === true,
                   evalContext: evalContext ? {
                     ...evalContext,
                     requestText: wText,
-                    requestedModel: forceModel || null,
+                    requestedModel: forcedModel || null,
                     personId: wPersonId,
                     bot: 'gchat'
                   } : null
@@ -16288,7 +16624,10 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 'gemma': `🔷 Gemma 4 26B (forced) · ${outcome.elapsedMs}ms`,
                 'gemma-forced': `🔷 Gemma 4 26B (forced, stalled: ${outcome.stallReason || 'none'})`,
                 'claude-fallback': `🔶 Claude Sonnet 4.6 (fell back — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
-                'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`
+                'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`,
+                'sea-lion': `🟣 SEA-LION V4 27B (forced eval) · ${outcome.elapsedMs}ms`,
+                'deepseek-v4-pro': `🟧 DeepSeek V4 Pro (forced eval) · ${outcome.elapsedMs}ms`,
+                'deepseek-v4-flash': `🟧 DeepSeek V4 Flash (forced eval) · ${outcome.elapsedMs}ms`
               };
               const badge = tierBadges[outcome.tierUsed] || `model: ${outcome.model}`;
               const replyWithBadge = `${outcome.reply}\n\n---\n_${badge}_`;
@@ -16318,6 +16657,11 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 totalMs: outcome.totalMs,
                 iterations: outcome.iterations,
                 toolCallCount: (outcome.toolCalls || []).length,
+                inputTokens: outcome.inputTokens || undefined,
+                outputTokens: outcome.outputTokens || undefined,
+                costUsd: outcome.costUsd || undefined,
+                attempts: outcome.attempts || undefined,
+                transientErrors: outcome.transientErrors || undefined,
                 // Debug: surface tool call details when dryRun + debugEcho enabled
                 toolCalls: (wDryRun === true && apiBody.debugEcho === true) ? (outcome.toolCalls || []) : undefined
               };
@@ -18150,13 +18494,16 @@ Return ONLY a JSON object (no markdown, no explanation):
                 ? 'error'
                 : (apiResult?.tierUsed === 'deterministic' ? 'deterministic' : 'crm_agent'),
               model: apiResult?.model || null,
-              requestedModel: apiBody.forceModel || null,
+              requestedModel: normalizeForceModel(apiBody.forceModel) || null,
               executedModel: apiResult?.model || null,
               tierPath: _tierPath,
               liveLlmCall: !_tier0Deterministic && !apiResult?.error,
               tier0Deterministic: _tier0Deterministic,
-              attempts: 1,
-              transientErrors: apiResult?.error ? [apiResult.error] : [],
+              attempts: apiResult?.attempts || 1,
+              transientErrors: apiResult?.transientErrors || (apiResult?.error ? [apiResult.error] : []),
+              inputTokens: apiResult?.inputTokens || 0,
+              outputTokens: apiResult?.outputTokens || 0,
+              costUsd: apiResult?.costUsd || 0,
               durationMs: apiResult?.totalMs || null,
               responseText: typeof apiResult === 'string'
                 ? apiResult

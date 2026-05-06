@@ -9,6 +9,7 @@ compatibility_date = "2024-01-01"
 [vars]
 # Non-secret config (secrets set via `wrangler secret put`)
 # ANTHROPIC_API_KEY = set via wrangler secret
+# DEEPSEEK_API_KEY = set via wrangler secret (eval-only forced DeepSeek tool-use benchmark path)
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
 #
 # ─── CRM & Email Agent Secrets (POC) ───
@@ -105,4 +106,3 @@ dataset = "stratus_bot_metrics"
 [[r2_buckets]]
 binding = "BOT_STORAGE"
 bucket_name = "stratus-bot-storage"
-

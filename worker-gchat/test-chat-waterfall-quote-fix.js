@@ -140,8 +140,8 @@ t('product pre-resolution failures are caught in both chat routes', () => {
 });
 
 t('chat-tab write intent forces Claude unless forceModel is explicit', () => {
-  assert.match(src, /const forceClaudeForChatWrite = !forceModel && skipDeterministic && shouldForceClaudeForWrite\(wText\);/);
-  assert.match(src, /forceClaude: forceModel === 'claude' \|\| forceClaudeForChatWrite/);
+  assert.match(src, /const forceClaudeForChatWrite = !forcedModel && skipDeterministic && shouldForceClaudeForWrite\(wText\);/);
+  assert.match(src, /forceClaude: forcedModel === 'claude' \|\| forceClaudeForChatWrite/);
 });
 
 t('create_deal_and_quote sets Cisco_Billing_Term explicitly and verifies it', () => {
