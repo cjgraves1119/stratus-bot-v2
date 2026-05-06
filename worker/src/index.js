@@ -16,6 +16,7 @@
 // Routes Anthropic API calls through CF AI Gateway for caching, analytics,
 // and rate limiting. Dashboard: dash.cloudflare.com > AI > AI Gateway
 const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
+const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 
 // ─── Data Imports (embedded at build time by wrangler) ──────────────────────
 import pricesData from './data/prices.json';
@@ -1071,6 +1072,175 @@ async function classifyWithGemma4(userMessage, priorContext, env) {
     }
   } catch (err) {
     return { elapsed: Date.now() - startMs, error: err.message };
+  }
+}
+
+const DEEPSEEK_MODEL_IDS = new Set(['deepseek-v4-pro', 'deepseek-v4-flash']);
+const DEEPSEEK_COST_PER_1M = {
+  'deepseek-v4-pro': { inputCacheMiss: 1.74, inputCacheHit: 0.145, output: 3.48 },
+  'deepseek-v4-flash': { inputCacheMiss: 0.14, inputCacheHit: 0.028, output: 0.28 }
+};
+
+function isDeepSeekModel(model) {
+  return DEEPSEEK_MODEL_IDS.has(String(model || '').toLowerCase());
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options, timeoutMs = 45000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function extractJsonFromText(raw) {
+  if (typeof raw === 'object' && raw !== null) return { parsed: raw, raw: JSON.stringify(raw), parseError: null };
+  const text = typeof raw === 'string' ? raw.trim() : String(raw || '');
+  if (!text) return { parsed: null, raw: text, parseError: 'empty response' };
+  try {
+    return { parsed: JSON.parse(text), raw: text, parseError: null };
+  } catch (_) {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return { parsed: null, raw: text, parseError: 'no JSON found' };
+    try {
+      return { parsed: JSON.parse(m[0]), raw: text, parseError: null };
+    } catch (e) {
+      return { parsed: null, raw: text, parseError: e.message };
+    }
+  }
+}
+
+function estimateDeepSeekCostUsd(model, usage = {}) {
+  const price = DEEPSEEK_COST_PER_1M[String(model || '').toLowerCase()] || DEEPSEEK_COST_PER_1M['deepseek-v4-pro'];
+  const promptTokens = usage.prompt_tokens || usage.input_tokens || 0;
+  const completionTokens = usage.completion_tokens || usage.output_tokens || 0;
+  const cacheHitTokens = usage.prompt_cache_hit_tokens || 0;
+  const cacheMissTokens = usage.prompt_cache_miss_tokens || Math.max(0, promptTokens - cacheHitTokens);
+  return ((cacheMissTokens / 1e6) * price.inputCacheMiss) +
+         ((cacheHitTokens / 1e6) * price.inputCacheHit) +
+         ((completionTokens / 1e6) * price.output);
+}
+
+async function callDeepSeekChatCompletion(env, {
+  model,
+  systemPrompt,
+  userText,
+  thinkingType = 'disabled',
+  jsonMode = true,
+  maxTokens = 4096
+}) {
+  if (!env.DEEPSEEK_API_KEY) {
+    return { error: 'DEEPSEEK_API_KEY not bound', status: 500, attempts: 0, transientErrors: [], shouldFallbackToClaude: false };
+  }
+
+  const requestBody = {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userText }
+    ],
+    max_tokens: maxTokens,
+    thinking: { type: thinkingType },
+    stream: false
+  };
+  if (jsonMode) requestBody.response_format = { type: 'json_object' };
+
+  const transientErrors = [];
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const resp = await fetchWithTimeout(DEEPSEEK_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`
+        },
+        body: JSON.stringify(requestBody)
+      });
+      const text = await resp.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch (_) {}
+
+      if (resp.ok) {
+        const message = data?.choices?.[0]?.message || {};
+        const raw = message.content ?? '';
+        return {
+          model,
+          status: resp.status,
+          attempts: attempt,
+          transientErrors,
+          rawResult: data,
+          raw,
+          reasoningContent: message.reasoning_content || null,
+          usage: data?.usage || {},
+          costUsd: estimateDeepSeekCostUsd(model, data?.usage || {})
+        };
+      }
+
+      const error = `DeepSeek ${resp.status}: ${text.substring(0, 500)}`;
+      if ((resp.status === 429 || resp.status >= 500) && attempt < maxAttempts) {
+        transientErrors.push(error);
+        const retryAfter = Number(resp.headers.get('retry-after'));
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * Math.pow(2, attempt - 1));
+        continue;
+      }
+      return {
+        error,
+        status: resp.status,
+        attempts: attempt,
+        transientErrors,
+        rawResult: data || text,
+        usage: data?.usage || {},
+        costUsd: estimateDeepSeekCostUsd(model, data?.usage || {}),
+        shouldFallbackToClaude: resp.status >= 500
+      };
+    } catch (e) {
+      const error = `DeepSeek fetch error: ${e.message}`;
+      if (attempt < maxAttempts) {
+        transientErrors.push(error);
+        await sleep(500 * Math.pow(2, attempt - 1));
+        continue;
+      }
+      return { error, status: 0, attempts: attempt, transientErrors, shouldFallbackToClaude: false };
+    }
+  }
+}
+
+async function callClaudeClassifierJsonFallback(env, { systemPrompt, userText }) {
+  if (!env.ANTHROPIC_API_KEY) {
+    return { error: 'ANTHROPIC_API_KEY not bound', model: 'claude-sonnet-4-6', attempts: 0, usage: {}, costUsd: 0 };
+  }
+  try {
+    const resp = await fetchWithTimeout(ANTHROPIC_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        system: `${systemPrompt}\n\nReturn valid JSON only.`,
+        messages: [{ role: 'user', content: userText }]
+      })
+    });
+    const text = await resp.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) {}
+    if (!resp.ok) return { error: `Anthropic ${resp.status}: ${text.substring(0, 500)}`, model: 'claude-sonnet-4-6', attempts: 1, rawResult: data || text, usage: {}, costUsd: 0 };
+    const raw = (data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const usage = data?.usage || {};
+    const costUsd = ((usage.input_tokens || 0) / 1e6) * 3.0 + ((usage.output_tokens || 0) / 1e6) * 15.0;
+    return { model: 'claude-sonnet-4-6', attempts: 1, rawResult: data, raw, usage, costUsd };
+  } catch (e) {
+    return { error: e.message, model: 'claude-sonnet-4-6', attempts: 1, usage: {}, costUsd: 0 };
   }
 }
 
@@ -8549,8 +8719,12 @@ export default {
     }
 
     // ── /api/benchmark-classifier ── POST with {input, prior_context?, model?}
-    // Runs the Schema v2 classifier prompt against the named CF Workers AI model
-    // via the bound AI gateway (which works with the deployed worker's auth).
+    // Runs the Schema v2 classifier prompt against the named model. CF Workers AI
+    // models use env.AI; DeepSeek V4 Pro/Flash use the OpenAI-compatible
+    // /chat/completions API with JSON mode and thinking disabled for classifier
+    // calls. DeepSeek prose/advisory evals should call the same helper with
+    // thinkingType='enabled' so content and reasoning_content can be captured
+    // separately without changing the classifier path.
     // Used by the offline benchmark runner to A/B Llama vs Gemma vs Hermes.
     if (url.pathname === '/api/benchmark-classifier') {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key, X-Eval-Run-Id' } });
@@ -8574,28 +8748,66 @@ export default {
         // prompt_variant: "v2" (default, Schema v2 rich output) | "legacy" (CF_CLASSIFIER_PROMPT)
         const promptVariant = (body.prompt_variant || 'v2').toLowerCase();
         if (!input) return new Response(JSON.stringify({ error: 'input required' }), { status: 400, headers: { 'content-type':'application/json' } });
-        if (!env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
+        const deepSeekRequested = isDeepSeekModel(model);
+        if (!deepSeekRequested && !env.AI) return new Response(JSON.stringify({ error: 'env.AI not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
+        if (deepSeekRequested && !env.DEEPSEEK_API_KEY) return new Response(JSON.stringify({ error: 'DEEPSEEK_API_KEY not bound' }), { status: 500, headers: { 'content-type':'application/json' } });
 
         // Select system prompt by variant
         const systemPrompt = promptVariant === 'legacy' ? CF_CLASSIFIER_PROMPT : CF_CLASSIFIER_PROMPT_V2;
 
         const userText = priorCtx ? `Prior assistant context:\n${priorCtx}\n\nUser message:\n${input}` : input;
 
-        const isGemma = /gemma/i.test(model);
-        const requestBody = isGemma
-          ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 4096, thinking: { type: 'disabled' } }
-          : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 512 };
-
         const start = Date.now();
-        let aiResult, err = null;
-        try {
-          aiResult = await env.AI.run(model, requestBody);
-        } catch (e) { err = e.message; }
+        let aiResult, err = null, attempts = 1, transientErrors = [], tokenUsage = {}, costUsd = 0;
+        let executedModel = model;
+        let raw = null, parsed = null, parseError = null;
+
+        if (deepSeekRequested) {
+          aiResult = await callDeepSeekChatCompletion(env, {
+            model,
+            systemPrompt,
+            userText,
+            thinkingType: 'disabled',
+            jsonMode: true,
+            maxTokens: 4096
+          });
+          attempts = aiResult?.attempts || 1;
+          transientErrors = aiResult?.transientErrors || [];
+          tokenUsage = aiResult?.usage || {};
+          costUsd = aiResult?.costUsd || 0;
+          err = aiResult?.error || null;
+          raw = aiResult?.raw ?? null;
+
+          if (err && aiResult?.shouldFallbackToClaude) {
+            const fallback = await callClaudeClassifierJsonFallback(env, { systemPrompt, userText });
+            transientErrors = [...transientErrors, err];
+            attempts += fallback?.attempts || 0;
+            tokenUsage = fallback?.usage || {};
+            costUsd += fallback?.costUsd || 0;
+            executedModel = fallback?.model || 'claude-sonnet-4-6';
+            aiResult = fallback;
+            err = fallback?.error || null;
+            raw = fallback?.raw ?? null;
+          }
+
+          const extracted = extractJsonFromText(raw);
+          raw = extracted.raw;
+          parsed = extracted.parsed;
+          parseError = extracted.parseError;
+        } else {
+          const isGemma = /gemma/i.test(model);
+          const requestBody = isGemma
+            ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 4096, thinking: { type: 'disabled' } }
+            : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 512 };
+
+          try {
+            aiResult = await env.AI.run(model, requestBody);
+          } catch (e) { err = e.message; }
+        }
         const elapsed = Date.now() - start;
 
         // Extract response — handle both Llama (.response) and Gemma 4 (.choices[]) formats
-        let raw = null, parsed = null, parseError = null;
-        if (aiResult) {
+        if (!deepSeekRequested && aiResult) {
           // Try all known response formats (Llama=.response, Gemma4=.choices[].message.content, fallback to reasoning)
           raw = aiResult.response ?? aiResult.choices?.[0]?.message?.content ?? null;
           // Gemma 4 may put content in reasoning field if thinking is enabled
@@ -8613,6 +8825,7 @@ export default {
               if (m) parsed = JSON.parse(m[0]);
             } catch (e) { parseError = e.message; }
           }
+          tokenUsage = aiResult?.usage || aiResult?.result?.usage || {};
         }
 
         if (evalContext) {
@@ -8620,16 +8833,17 @@ export default {
             personId: 'benchmark-classifier',
             requestText: input,
             responsePath: err ? 'error' : 'crm_agent',
-            model,
+            model: executedModel,
             requestedModel: model,
-            executedModel: model,
-            tierPath: model,
+            executedModel,
+            tierPath: executedModel === model ? model : `${model},${executedModel}`,
             liveLlmCall: true,
             tier0Deterministic: false,
-            attempts: 1,
-            transientErrors: err ? [err] : [],
-            inputTokens: 0,
-            outputTokens: 0,
+            attempts,
+            transientErrors: err ? [...transientErrors, err] : transientErrors,
+            inputTokens: tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0,
+            outputTokens: tokenUsage.output_tokens || tokenUsage.completion_tokens || 0,
+            costUsd,
             durationMs: elapsed,
             errorMessage: err || parseError || null,
             responseText: raw || JSON.stringify(parsed || ''),
@@ -8638,7 +8852,21 @@ export default {
           });
         }
 
-        return new Response(JSON.stringify({ model, prompt_variant: promptVariant, input, elapsed, raw, parsed, parseError, err }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
+        return new Response(JSON.stringify({
+          model,
+          executed_model: executedModel,
+          prompt_variant: promptVariant,
+          input,
+          elapsed,
+          raw,
+          parsed,
+          parseError,
+          err,
+          attempts,
+          transientErrors,
+          usage: tokenUsage,
+          costUsd
+        }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'content-type':'application/json' } });
       }
