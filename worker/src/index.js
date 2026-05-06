@@ -271,6 +271,7 @@ const DATASHEET_URLS = {
   MX450: 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/MX450_Datasheet',
   'C8111-G2-MX': 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/C8111-G2-MX_and_C8121-G2-MX_Data_Sheet',
   'C8121-G2-MX': 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/C8111-G2-MX_and_C8121-G2-MX_Data_Sheet',
+  'C8455-G2-MX': 'https://documentation.meraki.com/SASE_and_SD-WAN/MX/Product_Information/Overviews_and_Datasheets/C8455-G2-MX_Data_Sheet',
   MR28: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR28_Datasheet',
   MR36: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36_Datasheet',
   MR36H: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/MR36H_Datasheet',
@@ -286,10 +287,14 @@ const DATASHEET_URLS = {
   CW9164I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9164_Datasheet',
   CW9166I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9166_Datasheet',
   CW9166D1: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9166_Datasheet',
+  CW9171I: 'https://www.cisco.com/c/en/us/products/collateral/wireless/catalyst-9100ax-access-points/wireless-9171-series-acc-point-ds.html',
+  CW9172I: 'https://www.cisco.com/c/en/us/products/collateral/wireless/catalyst-9100ax-access-points/wireless-9172-series-access-points-ds.html',
   CW9172H: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9172H_Datasheet',
+  CW9174I: 'https://www.cisco.com/c/en/us/products/collateral/wireless/catalyst-9100ax-access-points/wireless-9174-series-access-points-ds.html',
   CW9176I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9176I_%2F%2F_CW9176D1_Datasheet',
   CW9176D1: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9176I_%2F%2F_CW9176D1_Datasheet',
   CW9178I: 'https://documentation.meraki.com/Wireless/Product_Information/Overviews_and_Datasheets/CW9178I_Datasheet',
+  CW9179F: 'https://www.cisco.com/site/us/en/products/collateral/networking/wireless/access-points/catalyst-9100-series/wireless-9179f-access-point-ds.html',
   MS130: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS130_Datasheet',
   MS150: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS150_Datasheet',
   MS390: 'https://documentation.meraki.com/Switching/MS_-_Switches/Product_Information/Overviews_and_Datasheets/MS390_Datasheet',
@@ -324,9 +329,11 @@ function getDatasheetKey(model) {
   if (DATASHEET_URLS[upper]) return upper;
   const mxMatch = upper.match(/^(MX\d+[A-Z]*)/);
   if (mxMatch && DATASHEET_URLS[mxMatch[1]]) return mxMatch[1];
+  const mrMatch = upper.match(/^(MR\d+[A-Z]*)/);
+  if (mrMatch && DATASHEET_URLS[mrMatch[1]]) return mrMatch[1];
   const mgmtMatch = upper.match(/^(M[GT]\d+)/);
   if (mgmtMatch && DATASHEET_URLS[mgmtMatch[1]]) return mgmtMatch[1];
-  const mvMatch = upper.match(/^(MV\d+)/);
+  const mvMatch = upper.match(/^(MV\d+[A-Z]*)/);
   if (mvMatch && DATASHEET_URLS[mvMatch[1]]) return mvMatch[1];
   const cwMatch = upper.match(/^(CW\d+[A-Z]*\d*)/);
   if (cwMatch && DATASHEET_URLS[cwMatch[1]]) return cwMatch[1];
@@ -334,6 +341,7 @@ function getDatasheetKey(model) {
   if (msMatch && DATASHEET_URLS[msMatch[1]]) return msMatch[1];
   if (upper.startsWith('C8111-G2-MX')) return 'C8111-G2-MX';
   if (upper.startsWith('C8121-G2-MX')) return 'C8121-G2-MX';
+  if (upper.startsWith('C8455-G2-MX')) return 'C8455-G2-MX';
   if (upper.startsWith('C9300X')) return 'C9300X';
   if (upper.startsWith('C9300L')) return 'C9300L';
   if (upper.startsWith('C9300')) return 'C9300';
@@ -345,6 +353,8 @@ function getDatasheetKey(model) {
 // ─── Datasheet Fetch (in-memory cache per isolate lifecycle) ─────────────────
 const datasheetCache = new Map();
 const CACHE_TTL = 5 * 60 * 1000;
+const DATASHEET_FETCH_TIMEOUT_MS = 10000;
+const DATASHEET_TEXT_MAX_CHARS = 6000;
 
 async function fetchDatasheet(url) {
   const now = Date.now();
@@ -353,7 +363,7 @@ async function fetchDatasheet(url) {
   try {
     const res = await fetch(url, {
       headers: { 'User-Agent': 'StratusAI-Bot/1.0 (spec-lookup)' },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(DATASHEET_FETCH_TIMEOUT_MS)
     });
     if (!res.ok) return null;
     const html = await res.text();
@@ -371,7 +381,8 @@ async function fetchDatasheet(url) {
       .replace(/&#\d+;/g, '')
       .replace(/\s+/g, ' ')
       .trim();
-    const truncated = text.length > 3000 ? text.slice(0, 3000) + '...' : text;
+    if (/page not found|404\s*-\s*page/i.test(text.slice(0, 500))) return null;
+    const truncated = text.length > DATASHEET_TEXT_MAX_CHARS ? text.slice(0, DATASHEET_TEXT_MAX_CHARS) + '...' : text;
     datasheetCache.set(url, { text: truncated, time: now });
     return truncated;
   } catch (e) {
@@ -387,7 +398,7 @@ function getStaticSpecsContext(message) {
     /\b(MX\d+[A-Z]*)/g, /\b(MR\d+[A-Z]*)/g, /\b(CW\d+[A-Z]*\d*)/g,
     /\b(MS\d{3}[R]?(?:-\d+[A-Z]*(?:-\d+[A-Z])?)?)/g, /\b(MV\d+[A-Z]*)/g,
     /\b(MT\d+)/g, /\b(MG\d+[A-Z]*)/g, /\b(Z4[A-Z]*)/g,
-    /\b(C9\d{3}[A-Z]*)/g,
+    /\b(C[89]\d{3}(?:-[A-Z0-9]+)*)/g,
   ];
   const found = [];
   for (const pat of modelPatterns) {
@@ -399,8 +410,8 @@ function getStaticSpecsContext(message) {
         if (familyData[model]) {
           found.push({ model, specs: familyData[model] });
         }
-        // Base extraction now includes Catalyst C9xxx so bare "C9300" / "C9200L" resolve.
-        const baseMatch = model.match(/^(MS\d{3}|MX\d+|MR\d+|MV\d+|MG\d+|MT\d+|CW\d+[A-Z]*\d*|Z4|C9\d{3}[A-Z]*)/);
+        // Base extraction includes Catalyst C8/C9 families so bare C8455/C9300/C9200L resolve.
+        const baseMatch = model.match(/^(MS\d{3}|MX\d+|MR\d+|MV\d+|MG\d+|MT\d+|CW\d+[A-Z]*\d*|Z4|C[89]\d{3}(?:-[A-Z0-9]+)*)/);
         if (baseMatch && familyData[baseMatch[1]] && !found.some(f => f.model === baseMatch[1])) {
           found.push({ model: baseMatch[1], specs: familyData[baseMatch[1]] });
         }
@@ -458,7 +469,7 @@ async function getRelevantDatasheetContext(message) {
     /\b(MX\d+[A-Z]*)/g, /\b(MR\d+[A-Z]*)/g, /\b(CW\d+[A-Z]*\d*)/g,
     /\b(MS\d{3}[R]?(?:-\d+[A-Z]*(?:-\d+[A-Z])?)?)/g, /\b(MV\d+[A-Z]*)/g,
     /\b(MT\d+)/g, /\b(MG\d+[A-Z]*)/g, /\b(Z4[A-Z]*)/g,
-    /\b(C9\d{3}[A-Z]*)/g,
+    /\b(C[89]\d{3}(?:-[A-Z0-9]+)*)/g,
   ];
   const models = new Set();
   for (const pat of modelPatterns) {
