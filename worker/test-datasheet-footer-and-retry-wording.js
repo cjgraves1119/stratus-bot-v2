@@ -36,6 +36,9 @@ const check = (desc, cond, diag) => {
   check('Block forbids "send another message to trigger" wording',
     /NEVER tell the user to "send another message/i.test(block),
     block.substring(0, 400));
+  check('Block forbids observed live "resend your request" wording',
+    /please resend your request as a new message/i.test(block),
+    block.substring(0, 800));
 }
 
 // ─── A2. Source-level: cf-conversation retry-reroute note rewords ─────────
@@ -56,7 +59,8 @@ const check = (desc, cond, diag) => {
     /function stripEchoedSourceFooter\(reply\)/.test(fileSrc),
     'helper not found');
   check('Final-reply assembly calls stripEchoedSourceFooter',
-    /const dedupedReply = stripEchoedSourceFooter\(reply\);/.test(fileSrc) &&
+    /const sanitizedReply = sanitizeLiveFetchRetryWording\(reply\);/.test(fileSrc) &&
+    /const dedupedReply = stripEchoedSourceFooter\(sanitizedReply\);/.test(fileSrc) &&
     /\$\{dedupedReply\}.*\$\{sourceFooter\}/s.test(fileSrc),
     'dedupedReply not threaded into finalReply');
 }
@@ -80,12 +84,12 @@ function loadHelper() {
     }
     src = src.slice(0, edIdx) + src.slice(end + 1);
   }
-  src += '\nmodule.exports = { stripEchoedSourceFooter };';
+  src += '\nmodule.exports = { stripEchoedSourceFooter, sanitizeLiveFetchRetryWording };';
   const tmp = path.join(os.tmpdir(), `stratus-strip-${process.pid}.cjs`);
   fs.writeFileSync(tmp, src);
-  return require(tmp).stripEchoedSourceFooter;
+  return require(tmp);
 }
-const stripEchoedSourceFooter = loadHelper();
+const { stripEchoedSourceFooter, sanitizeLiveFetchRetryWording } = loadHelper();
 
 const cases = [
   // Echo shapes that should be stripped
@@ -113,6 +117,11 @@ const cases = [
     name: 'Strips multiple trailing attribution lines + blank lines',
     input: `Variants.\n\n*Live datasheet: MS150*\n\nSource: live datasheet — MS150 (documentation.meraki.com)\n`,
     expectStripped: ['Live datasheet:', 'Source:']
+  },
+  {
+    name: 'Strips Claude-echoed model marker before worker footer',
+    input: `Variants.\n\n_💎 Claude Sonnet 4.6 · 2.1s_\n\n_📄 Source: live datasheet — MS150 (documentation.meraki.com)_\n\n_💎 Claude Sonnet 4.6 · 4.2s_`,
+    expectStripped: ['Claude Sonnet', 'Source:']
   },
 ];
 for (const c of cases) {
@@ -149,6 +158,31 @@ for (const c of cases) {
   check('Reply with no echo passes through',
     stripEchoedSourceFooter(clean) === clean.trimEnd(),
     `out=${stripEchoedSourceFooter(clean)}`);
+}
+
+// ─── C. Functional: live-fetch retry wording sanitizer ────────────────────
+{
+  const liveFailure = `You're right — let me retry the live fetch now. Please resend your request as a new message saying something like **"fetch the full MS150 datasheet"** or **"pull the latest MS150 datasheet specs"** — that will trigger the worker to re-fetch the page server-side and inject the full content before I respond.\n\nThe truncation happened because the fetch on the previous turn only captured partial content. A fresh trigger will pull the complete page.\n\n_💎 Claude Sonnet 4.6 · 2.1s_`;
+  const out = sanitizeLiveFetchRetryWording(liveFailure);
+  check('Sanitizer removes observed "Please resend your request" live failure',
+    !/Please resend your request|new message saying|that will trigger the worker|fresh trigger/i.test(out),
+    `out=${out}`);
+  check('Sanitizer replaces retry failure with same-turn wording',
+    /tried the live fetch on this turn/i.test(out),
+    `out=${out}`);
+}
+{
+  const promptTwoFailure = `Let me fetch the full datasheet now — one moment!\n\n*(The live fetch will trigger on this request and inject the full content. If the datasheet content doesn't appear fully in my next response, I'll flag it and retry.)*\n\nI couldn't pull the full datasheet just now — want me to retry?`;
+  const out = sanitizeLiveFetchRetryWording(promptTwoFailure);
+  check('Sanitizer removes next-response retry wording',
+    !/next response|Want me to retry|will trigger on this request/i.test(out),
+    `out=${out}`);
+}
+{
+  const unrelated = `Here are the MS150 variants from the datasheet. Source for this is the injected content.`;
+  check('Sanitizer leaves normal datasheet prose unchanged',
+    sanitizeLiveFetchRetryWording(unrelated) === unrelated,
+    `out=${sanitizeLiveFetchRetryWording(unrelated)}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
