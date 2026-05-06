@@ -1239,6 +1239,69 @@ function buildStratusUrl(items) {
   return `https://stratusinfosystems.com/order/?item=${orderedSkus.join(',')}&qty=${qtys.join(',')}`;
 }
 
+function buildStratusUrlFromQuotedItems(quotedItems) {
+  if (!Array.isArray(quotedItems) || quotedItems.length === 0) return null;
+  const idMap = getProductIdToSkuMap();
+  const items = [];
+  for (const item of quotedItems) {
+    if (!item || item._delete !== undefined) continue;
+    const productId = item.Product_Name?.id || item.product_id;
+    const sku = productId ? idMap[productId] : (item.Product_Code || item.sku || null);
+    const qty = Number(item.Quantity || item.qty || 1);
+    if (sku && Number.isFinite(qty) && qty > 0) items.push({ sku, qty });
+  }
+  return items.length ? buildStratusUrl(items) : null;
+}
+
+function buildSameBuildEcommLine(url) {
+  return url ? `Ecomm link for same build: ${url}` : '';
+}
+
+function updateStratusUrlQuantitiesFromText(text) {
+  const rawText = String(text || '');
+  const urlMatch = rawText.match(/https:\/\/stratusinfosystems\.com\/order\/\?[^\s<>"')]+/i);
+  if (!urlMatch) return null;
+  const parsed = parseStratusUrl(urlMatch[0]);
+  if (!parsed) return null;
+
+  const lower = rawText.toLowerCase();
+  if (!/\b(add|include|another|additional|extra|more|bump|increase)\b/.test(lower)) return null;
+  if (/\b(zoho|crm|deal|quote\s+record|create\s+(?:a\s+)?zoho)\b/.test(lower)) return null;
+
+  const targetMatch = rawText.match(/\b(?:for\s+)?(?:another|additional|extra|more)?\s*(LIC-[A-Z0-9-]+|MS\d+[A-Z0-9-]*|MR\d+[A-Z0-9-]*|MX\d+[A-Z0-9-]*|MV\d+[A-Z0-9-]*|MT\d+[A-Z0-9-]*|MG\d+[A-Z0-9-]*|Z\d+[A-Z0-9-]*)\b/i);
+  if (!targetMatch) return null;
+  const target = targetMatch[1].toUpperCase();
+  const deltaMatch = rawText.match(/\badd\s+(\d+)\s+(?:more|additional|extra)?\b/i);
+  const delta = deltaMatch ? Math.max(1, parseInt(deltaMatch[1], 10) || 1) : 1;
+
+  const items = parsed.skus.map((sku, idx) => ({ sku: resolveCatalogSku(sku), qty: parsed.qtys[idx] || 1 }));
+  let hitIndex = -1;
+  if (target.startsWith('LIC-')) {
+    hitIndex = items.findIndex(item => item.sku.toUpperCase() === resolveCatalogSku(target));
+  } else if (lower.includes('license')) {
+    const targetBase = applySuffix(target).replace(/-HW(?:-NA)?$/i, '').toUpperCase();
+    hitIndex = items.findIndex(item => {
+      const sku = item.sku.toUpperCase();
+      return sku.startsWith(`LIC-${targetBase}-`) || sku.startsWith(`LIC-${targetBase.replace(/[A-Z]$/, '')}-`);
+    });
+  } else {
+    const targetSku = applySuffix(target);
+    hitIndex = items.findIndex(item => item.sku.toUpperCase() === targetSku);
+  }
+  if (hitIndex < 0) return null;
+
+  items[hitIndex] = { ...items[hitIndex], qty: items[hitIndex].qty + delta };
+  const updatedUrl = buildStratusUrl(items);
+  const updatedSku = items[hitIndex].sku;
+  return {
+    updatedUrl,
+    message:
+      `Updated ${updatedSku} quantity to ${items[hitIndex].qty}.\n\n` +
+      `${updatedUrl}\n\n` +
+      `No Zoho records were created.`
+  };
+}
+
 // ─── EOL Check ───────────────────────────────────────────────────────────────
 // Strip leading dash from variant when family name is a prefix of the full SKU.
 // e.g., MS220-8P → family "MS220", raw variant "-8P" → cleaned "8P"
@@ -6159,6 +6222,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           || null;
         const createIsError = parsed?.success === false || parsed?.data?.status === 'error';
         const createRecordName = recordData.Subject || recordData.Deal_Name || recordData.Last_Name || recordData.Account_Name || null;
+        const createEcommUrl = module_name === 'Quotes'
+          ? buildStratusUrlFromQuotedItems(recordData.Quoted_Items)
+          : null;
         let createUndoToken = null;
         let createUrl = null;
         let createUserSummary = null;
@@ -6179,7 +6245,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const fieldPart = createKV ? ` (${createKV})` : '';
           // Markdown-link the URL so autolinkers don't capture a trailing period
           // when the model echoes the summary into prose.
-          createUserSummary = `Created ${module_name.replace(/s$/, '')} "${createRecordName || createdId}"${fieldPart} — [Open in Zoho](${createUrl}) — Undo token: \`${createUndoToken}\` (say "undo" to reverse).`;
+          createUserSummary = `Created ${module_name.replace(/s$/, '')} "${createRecordName || createdId}"${fieldPart} — [Open in Zoho](${createUrl})` +
+            (createEcommUrl ? `\n${buildSameBuildEcommLine(createEcommUrl)}` : '') +
+            `\nUndo token: \`${createUndoToken}\` (say "undo" to reverse).`;
         }
         await logCrmOpToD1(env, {
           personId: personId || null,
@@ -6232,6 +6300,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // Attach verification markers for downstream guards / logging.
             parsed._quote_verified = true;
             parsed._quote_verified_number = verifyRec.Quote_Number || null;
+            if (createEcommUrl) parsed._ecomm_url = createEcommUrl;
           } catch (verifyErr) {
             console.warn(`[QUOTE-VERIFY] Exception verifying Quote ${createdId}: ${verifyErr.message}`);
             return {
@@ -6240,6 +6309,46 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               created_id_unverified: createdId,
               message: `Zoho reported Quote ${createdId} was created but the verification fetch threw: ${verifyErr.message}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render the quote URL.`,
             };
+          }
+        }
+
+        // If a model uses generic zoho_create_record for a Quote instead of
+        // create_deal_and_quote, still enforce the workflow invariant: every
+        // newly-created Deal/Quote path gets an open follow-up task.
+        if (!createIsError && createdId && module_name === 'Quotes' && recordData.Deal_Name?.id) {
+          try {
+            const taskDueDate = new Date();
+            let daysAdded = 0;
+            while (daysAdded < 3) {
+              taskDueDate.setDate(taskDueDate.getDate() + 1);
+              if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
+            }
+            const taskPayload = {
+              data: [{
+                Subject: `Follow up - ${recordData.Subject || createRecordName || 'Quote'}`,
+                Due_Date: taskDueDate.toISOString().split('T')[0],
+                Status: 'Not Started',
+                Priority: 'Normal',
+                Owner: { id: '2570562000141711002' },
+                What_Id: { id: recordData.Deal_Name.id },
+                $se_module: 'Deals'
+              }]
+            };
+            const taskResult = await zohoApiCall('POST', 'Tasks', env, taskPayload);
+            const taskId = taskResult?.data?.[0]?.details?.id;
+            if (taskId) {
+              const taskUrl = `https://crm.zoho.com/crm/org647122552/tab/Tasks/${taskId}`;
+              parsed._task_id = taskId;
+              parsed._task_url = taskUrl;
+              createUserSummary += `\nFollow-up task created: [View Task](${taskUrl})`;
+              parsed._user_visible_summary = createUserSummary;
+              parsed.message = createUserSummary;
+            }
+          } catch (taskErr) {
+            parsed._task_warning = `Follow-up task creation failed: ${taskErr.message}`;
+            createUserSummary += `\nWarning: follow-up task creation failed: ${taskErr.message}`;
+            parsed._user_visible_summary = createUserSummary;
+            parsed.message = createUserSummary;
           }
         }
 
@@ -8014,12 +8123,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.instruction = 'DONE. Report these results to the user with Zoho links. Do NOT call any more tools — the workflow is complete.';
           const quoteNumber = results.records.quote?.quote_number;
           const quoteLabel = quoteNumber ? `Quote #${quoteNumber}` : 'Quote';
+          const sameBuildEcommUrl = buildStratusUrl(resolvedProducts.map(p => ({ sku: p.sku, qty: p.qty })));
+          results.records.ecomm = { url: sameBuildEcommUrl };
           results._record_url = results.records.quote?.url || null;
           results._user_visible_summary =
             `Created ${quoteLabel} for ${results.records.account.name} — ` +
             `[Open in Zoho](${results.records.quote.url})` +
             (results.records.deal?.url ? ` — [View Deal](${results.records.deal.url})` : '') +
-            (results.records.task?.url ? ` — [View Task](${results.records.task.url})` : '');
+            (results.records.task?.url ? ` — [View Task](${results.records.task.url})` : '') +
+            `\n${buildSameBuildEcommLine(sameBuildEcommUrl)}`;
           return results;
         } catch (e) {
           results.errors.push(`Unexpected error: ${e.message}`);
@@ -12933,6 +13045,11 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
       // Missing the Zoho link but has a token — append just the link.
       finalReply = `${finalReply.trim()}\n\n[Open in Zoho](${last.recordUrl})`;
     }
+    if (!last.isError && /stratusinfosystems\.com\/order\/\?/i.test(last.summary || '')
+        && !/stratusinfosystems\.com\/order\/\?/i.test(finalReply)) {
+      const ecommLine = (last.summary || '').split('\n').find(line => /stratusinfosystems\.com\/order\/\?/i.test(line));
+      if (ecommLine) finalReply = `${finalReply.trim()}\n\n${ecommLine}`;
+    }
 
     // ── Error summary injection ─────────────────────────────────────────
     // For error responses (refusals, ambiguity) surface the verbatim
@@ -13646,6 +13763,11 @@ function gemmaStallDetected(result) {
 function shouldForceClaudeForWrite(userMessage) {
   if (!userMessage || typeof userMessage !== 'string') return false;
   const text = userMessage.toLowerCase();
+  if (/https:\/\/stratusinfosystems\.com\/order\/\?/i.test(userMessage)
+      && /\b(add|include|another|additional|extra|more|bump|increase)\b/i.test(userMessage)
+      && !/\b(zoho|crm|deal|quote\s+record|create\s+(?:a\s+)?zoho)\b/i.test(userMessage)) {
+    return false;
+  }
 
   // Quote/deal modification verbs paired with modification targets
   const writePatterns = [
@@ -16304,6 +16426,40 @@ Hard rules:
               }
 
               let outcome;
+
+              // ── TIER -1: deterministic Stratus URL quantity edit ───────────
+              // Chrome Chat users often paste an existing ecomm URL and ask for
+              // "another license". That is simple URL math, not a CRM write, so
+              // keep it off Claude/Gemma/Llama and always return the full URL.
+              const _urlEdit = !forceModel ? updateStratusUrlQuantitiesFromText(wText) : null;
+              if (_urlEdit) {
+                outcome = {
+                  reply: _urlEdit.message,
+                  model: 'deterministic-url-editor',
+                  tierUsed: 'deterministic',
+                  gemmaResult: null,
+                  claudeResult: null,
+                  stallReason: null,
+                  toolCalls: [],
+                  iterations: 0,
+                  elapsedMs: 0,
+                  totalMs: Date.now() - (typeof t0 !== 'undefined' ? t0 : Date.now())
+                };
+                await addToHistory(env.CONVERSATION_KV, wPersonId, 'user', wEnrichedMessage);
+                await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', _urlEdit.message);
+                apiResult = {
+                  success: true,
+                  reply: `${_urlEdit.message}\n\n---\n_⚡ Deterministic URL editor (free, instant)_`,
+                  model: 'deterministic-url-editor',
+                  tierUsed: 'deterministic',
+                  stallReason: null,
+                  elapsedMs: 0,
+                  totalMs: outcome.totalMs,
+                  iterations: 0,
+                  toolCallCount: 0
+                };
+                break;
+              }
 
               // ── 2026-05-05 council: ambiguous license-term hard gate ──
               // Runs BEFORE all other tiers (including Tier 0 deterministic),

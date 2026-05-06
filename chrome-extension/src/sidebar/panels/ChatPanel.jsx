@@ -46,12 +46,12 @@ function renderMarkdown(text) {
           </a>
         );
       } else if (match[3]) {
-        // Bare URL — link with the URL as its own text
+        // Bare URL — link with the URL as its own text. Do not shorten order
+        // links: Chris often needs to inspect/copy every item and qty parameter.
         const url = match[3];
-        const display = url.length > 80 ? url.substring(0, 77) + '...' : url;
         parts.push(
           <a key={`u-${i}-${match.index}`} href={url} target="_blank" rel="noopener" style={linkStyle}>
-            {display}
+            {url}
           </a>
         );
       }

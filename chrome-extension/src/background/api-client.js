@@ -423,9 +423,9 @@ Hard rules:
 // ─────────────────────────────────────────────
 
 /**
- * Send a message to the CRM-aware Claude agent.
- * Routes through the same askClaude() tool-use loop as the GChat bot,
- * giving the extension chat full Zoho CRM capabilities.
+ * Send a message to the CRM-aware agent.
+ * The extension calls the gateway /api/chat route; the gateway forwards that
+ * request to the main worker waterfall so Llama/Gemma get first pass.
  */
 export async function chatWithCrm(requestText, emailContext, history, systemContext, progressId) {
   return apiCall('/api/chat', {
