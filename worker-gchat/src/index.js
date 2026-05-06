@@ -17989,7 +17989,14 @@ Hard rules:
 
           // ── Detect Account: Extract company info from email signature + domain lookup ──
           case '/api/detect-account': {
-            const { emailBody: detectBody, senderDomain: detectDomain, senderEmail: detectEmail, senderName: detectSenderName } = apiBody;
+            const {
+              emailBody: detectBody,
+              senderDomain: detectDomain,
+              senderEmail: detectEmail,
+              senderName: detectSenderName,
+              threadContacts: detectThreadContacts = [],
+              threadEmails: detectThreadEmails = [],
+            } = apiBody;
             if (!detectDomain && !detectBody) {
               return new Response(JSON.stringify({ error: 'emailBody or senderDomain required' }), { status: 400, headers: jsonHeaders });
             }
@@ -18057,6 +18064,103 @@ Hard rules:
                 }
 
                 return exactMatches;
+              }
+
+              async function findZohoAccountsFromThreadParticipants() {
+                const selectedEmail = String(detectEmail || '').trim().toLowerCase();
+                const contactMap = new Map();
+
+                if (Array.isArray(detectThreadContacts)) {
+                  for (const contact of detectThreadContacts) {
+                    const email = String(contact?.email || '').trim().toLowerCase();
+                    if (!email || !email.includes('@')) continue;
+                    contactMap.set(email, {
+                      email,
+                      name: String(contact?.name || '').trim(),
+                      role: String(contact?.role || '').trim(),
+                    });
+                  }
+                }
+
+                if (Array.isArray(detectThreadEmails)) {
+                  for (const rawEmail of detectThreadEmails) {
+                    const email = String(rawEmail || '').trim().toLowerCase();
+                    if (!email || !email.includes('@') || contactMap.has(email)) continue;
+                    contactMap.set(email, { email, name: '', role: '' });
+                  }
+                }
+
+                const related = [...contactMap.values()].filter(contact => {
+                  if (contact.email === selectedEmail) return false;
+                  const domain = contact.email.split('@')[1] || '';
+                  if (!domain) return false;
+                  if (domain === 'cisco.com' || domain === 'stratusinfosystems.com') return false;
+                  return !isFreeEmailDomain(domain);
+                }).slice(0, 6);
+
+                if (!related.length) {
+                  stages.push({
+                    step: 'thread_participant_account_match',
+                    status: 'SKIPPED',
+                    detail: 'No related business-domain participants available for account matching',
+                  });
+                  return null;
+                }
+
+                const matches = [];
+                const seenAccounts = new Set();
+                for (const contact of related) {
+                  const domain = contact.email.split('@')[1] || '';
+                  const match = await resolveAccountWaterfall({
+                    domain,
+                    email: contact.email,
+                    nameHint: contact.name || null,
+                  }, env).catch(() => null);
+                  if (!match?.account?.id || seenAccounts.has(match.account.id)) continue;
+                  seenAccounts.add(match.account.id);
+                  matches.push({ ...match, threadContact: contact });
+                }
+
+                if (!matches.length) {
+                  stages.push({
+                    step: 'thread_participant_account_match',
+                    status: 'NONE',
+                    detail: `No Zoho account found for ${related.length} related participant(s)`,
+                  });
+                  return null;
+                }
+
+                const confidence = matches.length === 1 ? 'high' : 'medium';
+                for (const match of matches) {
+                  addCandidate(match.account, {
+                    isDomainMatch: false,
+                    matchType: 'thread_participant_account',
+                    matchConfidence: confidence,
+                    matchReason: `Related thread participant ${match.threadContact.email} is linked to this Zoho Account`,
+                  });
+                }
+
+                const best = matches[0];
+                if (confidence === 'high') {
+                  accountSuggestion.name = accountSuggestion.name || best.account.Account_Name || '';
+                  accountSuggestion.street = accountSuggestion.street || best.account.Billing_Street || '';
+                  accountSuggestion.city = accountSuggestion.city || best.account.Billing_City || '';
+                  accountSuggestion.state = accountSuggestion.state || best.account.Billing_State || '';
+                  accountSuggestion.zip = accountSuggestion.zip || best.account.Billing_Code || '';
+                  accountSuggestion.website = accountSuggestion.website || best.account.Website || '';
+                  accountSuggestion.confidence = 'high';
+                  accountSuggestion.source = 'thread_participant_account';
+                }
+
+                stages.push({
+                  step: 'thread_participant_account_match',
+                  status: confidence === 'high' ? 'FOUND_HIGH' : 'FOUND_MULTIPLE',
+                  detail: confidence === 'high'
+                    ? `Related participant ${best.threadContact.email} maps to ${best.account.Account_Name || best.account.id}`
+                    : `${matches.length} related participant account candidates found; user must choose`,
+                });
+
+                return confidence === 'high' ? best.account : null;
               }
 
               // ─── Phase 1: Parse email signature ───
@@ -18168,6 +18272,13 @@ Return ONLY a JSON object (no markdown, no explanation). Set website to an empty
                 }
               }
 
+              // ─── Phase 2b: Reuse exact CRM links from other thread participants ───
+              // When the selected address is a CC/third party (for example a DRW
+              // participant on an RSN Wireless thread), the selected email domain is
+              // often not the customer account. Prefer an exact Zoho account already
+              // attached to another non-Cisco participant in the same Gmail thread.
+              await findZohoAccountsFromThreadParticipants();
+
               // ─── Phase 3: Check native Zoho account data before web lookup ───
               if (isConsumerDomain) {
                 stages.push({
@@ -18221,7 +18332,8 @@ Return ONLY a JSON object (no markdown, no explanation). Set website to an empty
               }
 
               // ─── Phase 5: Last resort web search through Claude ───
-              const stillNeedsWebLookup = cleanDetectDomain && !isConsumerDomain && !(accountSuggestion.name && (accountSuggestion.street || accountSuggestion.city));
+              const hasThreadParticipantAccount = candidates.some(c => c.matchType === 'thread_participant_account' && c.matchConfidence === 'high');
+              const stillNeedsWebLookup = cleanDetectDomain && !isConsumerDomain && !hasThreadParticipantAccount && !(accountSuggestion.name && (accountSuggestion.street || accountSuggestion.city));
               if (stillNeedsWebLookup) {
                 const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
                   method: 'POST',

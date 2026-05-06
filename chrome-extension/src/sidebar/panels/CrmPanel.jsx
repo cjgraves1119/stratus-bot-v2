@@ -423,6 +423,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       senderDomain: domain,
       senderEmail: emailForForm || emailContext?.customerEmail || emailContext?.senderEmail || '',
       senderName: contact?.name || emailContext?.customerName || emailContext?.senderName || '',
+      threadContacts: emailContext?.threadContacts || [],
+      threadEmails: emailContext?.allEmails || [],
     };
   }
 
@@ -436,7 +438,10 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       setAddFormAccountId(result.existingAccount.id);
       setAddFormAccountName(result.existingAccount.name || '');
       setShowCreateAccount(false);
-      setAccountDetectionStatus(`Linked exact Zoho website match for ${domain}.`);
+      const linkedViaThread = result.existingAccount.matchType === 'thread_participant_account';
+      setAccountDetectionStatus(linkedViaThread
+        ? 'Linked Zoho Account from another participant in this thread.'
+        : `Linked exact Zoho website match for ${domain}.`);
       return;
     }
 
