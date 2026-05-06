@@ -1,0 +1,1505 @@
+{
+  "timestamp": "2026-05-06T18:41:47.338Z",
+  "fixtures": [
+    "quote-005",
+    "quote-009-lic-only",
+    "quote-013-with-lic-tier",
+    "price-006-with-3yr-lic",
+    "revise-009-swap",
+    "clarify-001-vague-switch",
+    "pron-001",
+    "shadow-001-renewal-multiline",
+    "shadow-006-url-echoback",
+    "shadow-007-sme-license"
+  ],
+  "results": [
+    {
+      "label": "gpt-oss-120b",
+      "model": "@cf/openai/gpt-oss-120b",
+      "prompt": "v2",
+      "total": 34,
+      "max": 78,
+      "pct": 43.6,
+      "intent": "6/10",
+      "intentPct": 60,
+      "parse": 4,
+      "errs": 0,
+      "p50": 4563,
+      "p90": 6290,
+      "fails": [
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4258
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "3/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "items,modifiers",
+          "elapsed": 3916
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4719
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 6290
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 6051
+        }
+      ]
+    },
+    {
+      "label": "gpt-oss-120b strict",
+      "model": "@cf/openai/gpt-oss-120b",
+      "prompt": "v2-strict-json",
+      "total": 22,
+      "max": 82,
+      "pct": 26.8,
+      "intent": "4/10",
+      "intentPct": 40,
+      "parse": 6,
+      "errs": 0,
+      "p50": 6125,
+      "p90": 11335,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 6673
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 6120
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 8698
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 11335
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 7670
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4277
+        }
+      ]
+    },
+    {
+      "label": "gpt-oss-20b",
+      "model": "@cf/openai/gpt-oss-20b",
+      "prompt": "v2",
+      "total": 11,
+      "max": 91,
+      "pct": 12.1,
+      "intent": "2/10",
+      "intentPct": 20,
+      "parse": 8,
+      "errs": 0,
+      "p50": 3314,
+      "p90": 4264,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3779
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3137
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3509
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3314
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3119
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4264
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3402
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3255
+        }
+      ]
+    },
+    {
+      "label": "gpt-oss-20b strict",
+      "model": "@cf/openai/gpt-oss-20b",
+      "prompt": "v2-strict-json",
+      "total": 11,
+      "max": 91,
+      "pct": 12.1,
+      "intent": "2/10",
+      "intentPct": 20,
+      "parse": 8,
+      "errs": 0,
+      "p50": 3370,
+      "p90": 4594,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3538
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3598
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3772
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3027
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4594
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3315
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3052
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3063
+        }
+      ]
+    },
+    {
+      "label": "llama-3.3-70b-fast",
+      "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      "prompt": "v2",
+      "total": 55,
+      "max": 64,
+      "pct": 85.9,
+      "intent": "9/10",
+      "intentPct": 90,
+      "parse": 0,
+      "errs": 0,
+      "p50": 5392,
+      "p90": 7087,
+      "fails": [
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "5/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "modifiers",
+          "elapsed": 4770
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/7",
+          "intent": "product_info",
+          "err": "",
+          "reason": "intent product_info!=quote,items,modifiers",
+          "elapsed": 5392
+        }
+      ]
+    },
+    {
+      "label": "mistral-small-3.1-24b",
+      "model": "@cf/mistralai/mistral-small-3.1-24b-instruct",
+      "prompt": "v2",
+      "total": 53,
+      "max": 64,
+      "pct": 82.8,
+      "intent": "9/10",
+      "intentPct": 90,
+      "parse": 0,
+      "errs": 0,
+      "p50": 4203,
+      "p90": 5802,
+      "fails": [
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "5/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "items",
+          "elapsed": 3120
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "5/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items",
+          "elapsed": 5675
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/7",
+          "intent": "clarify",
+          "err": "",
+          "reason": "intent clarify!=quote,items,modifiers",
+          "elapsed": 4203
+        }
+      ]
+    },
+    {
+      "label": "qwen3-30b-a3b",
+      "model": "@cf/qwen/qwen3-30b-a3b-fp8",
+      "prompt": "v2",
+      "total": 36,
+      "max": 76,
+      "pct": 47.4,
+      "intent": "6/10",
+      "intentPct": 60,
+      "parse": 4,
+      "errs": 0,
+      "p50": 8283,
+      "p90": 9257,
+      "fails": [
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 8283
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 8594
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 466 (line 1 column 467)",
+          "reason": "NO_PARSE",
+          "elapsed": 7882
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 8533
+        }
+      ]
+    },
+    {
+      "label": "qwen3-30b-a3b strict",
+      "model": "@cf/qwen/qwen3-30b-a3b-fp8",
+      "prompt": "v2-strict-json",
+      "total": 9,
+      "max": 89,
+      "pct": 10.1,
+      "intent": "2/10",
+      "intentPct": 20,
+      "parse": 8,
+      "errs": 0,
+      "p50": 7939,
+      "p90": 9837,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 6821
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 398 (line 1 column 399)",
+          "reason": "NO_PARSE",
+          "elapsed": 8973
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 8102
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or ']' after array element in JSON at position 115 (line 1 column 116)",
+          "reason": "NO_PARSE",
+          "elapsed": 7939
+        },
+        {
+          "id": "pron-001",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 366 (line 1 column 367)",
+          "reason": "NO_PARSE",
+          "elapsed": 9583
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or ']' after array element in JSON at position 296 (line 1 column 297)",
+          "reason": "NO_PARSE",
+          "elapsed": 7107
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 324 (line 1 column 325)",
+          "reason": "NO_PARSE",
+          "elapsed": 7504
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 9837
+        }
+      ]
+    },
+    {
+      "label": "qwq-32b",
+      "model": "@cf/qwen/qwq-32b",
+      "prompt": "v2",
+      "total": 28,
+      "max": 81,
+      "pct": 34.6,
+      "intent": "5/10",
+      "intentPct": 50,
+      "parse": 5,
+      "errs": 0,
+      "p50": 16892,
+      "p90": 17533,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 17533
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 17510
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "5/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "modifiers",
+          "elapsed": 17255
+        },
+        {
+          "id": "pron-001",
+          "score": "7/8",
+          "intent": "revise",
+          "err": "",
+          "reason": "reference",
+          "elapsed": 11283
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 16231
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 16892
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 17456
+        }
+      ]
+    },
+    {
+      "label": "qwq-32b strict",
+      "model": "@cf/qwen/qwq-32b",
+      "prompt": "v2-strict-json",
+      "total": 24,
+      "max": 84,
+      "pct": 28.6,
+      "intent": "4/10",
+      "intentPct": 40,
+      "parse": 6,
+      "errs": 0,
+      "p50": 15878,
+      "p90": 16668,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 16463
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 15776
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 396 (line 1 column 397)",
+          "reason": "NO_PARSE",
+          "elapsed": 16668
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 15878
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 453 (line 1 column 454)",
+          "reason": "NO_PARSE",
+          "elapsed": 16153
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 16453
+        }
+      ]
+    },
+    {
+      "label": "deepseek-r1-distill-qwen-32b",
+      "model": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+      "prompt": "v2",
+      "total": 27,
+      "max": 82,
+      "pct": 32.9,
+      "intent": "5/10",
+      "intentPct": 50,
+      "parse": 5,
+      "errs": 0,
+      "p50": 14611,
+      "p90": 14852,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 14769
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 553 (line 30 column 4)",
+          "reason": "NO_PARSE",
+          "elapsed": 14852
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "3/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "items,modifiers",
+          "elapsed": 11424
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 680 (line 35 column 4)",
+          "reason": "NO_PARSE",
+          "elapsed": 14658
+        },
+        {
+          "id": "pron-001",
+          "score": "7/8",
+          "intent": "revise",
+          "err": "",
+          "reason": "reference",
+          "elapsed": 12896
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or ']' after array element in JSON at position 238 (line 15 column 6)",
+          "reason": "NO_PARSE",
+          "elapsed": 14748
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or ']' after array element in JSON at position 149 (line 10 column 6)",
+          "reason": "NO_PARSE",
+          "elapsed": 14611
+        }
+      ]
+    },
+    {
+      "label": "deepseek-r1-distill-qwen-32b strict",
+      "model": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+      "prompt": "v2-strict-json",
+      "total": 32,
+      "max": 81,
+      "pct": 39.5,
+      "intent": "5/10",
+      "intentPct": 50,
+      "parse": 4,
+      "errs": 0,
+      "p50": 13197,
+      "p90": 14901,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/7",
+          "intent": "product_info",
+          "err": "",
+          "reason": "intent product_info!=quote,items,modifiers",
+          "elapsed": 13099
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "5/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "modifiers",
+          "elapsed": 8468
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 572 (line 30 column 4)",
+          "reason": "NO_PARSE",
+          "elapsed": 14741
+        },
+        {
+          "id": "clarify-001-vague-switch",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 371 (line 15 column 4)",
+          "reason": "NO_PARSE",
+          "elapsed": 14881
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or ']' after array element in JSON at position 403 (line 25 column 6)",
+          "reason": "NO_PARSE",
+          "elapsed": 14901
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 14606
+        }
+      ]
+    },
+    {
+      "label": "glm-4.7-flash",
+      "model": "@cf/zai-org/glm-4.7-flash",
+      "prompt": "v2",
+      "total": 0,
+      "max": 100,
+      "pct": 0,
+      "intent": "0/10",
+      "intentPct": 0,
+      "parse": 10,
+      "errs": 0,
+      "p50": 5001,
+      "p90": 5926,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4420
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5725
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3937
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4536
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "Unexpected non-whitespace character after JSON at position 49 (line 1 column 50)",
+          "reason": "NO_PARSE",
+          "elapsed": 5926
+        },
+        {
+          "id": "clarify-001-vague-switch",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 356 (line 15 column 8)",
+          "reason": "NO_PARSE",
+          "elapsed": 4565
+        },
+        {
+          "id": "pron-001",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 277 (line 14 column 8)",
+          "reason": "NO_PARSE",
+          "elapsed": 5338
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5121
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4867
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5001
+        }
+      ]
+    },
+    {
+      "label": "glm-4.7-flash strict",
+      "model": "@cf/zai-org/glm-4.7-flash",
+      "prompt": "v2-strict-json",
+      "total": 0,
+      "max": 100,
+      "pct": 0,
+      "intent": "0/10",
+      "intentPct": 0,
+      "parse": 10,
+      "errs": 0,
+      "p50": 5137,
+      "p90": 7007,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4628
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5137
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5213
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "Unexpected non-whitespace character after JSON at position 57 (line 1 column 58)",
+          "reason": "NO_PARSE",
+          "elapsed": 3657
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "Unexpected non-whitespace character after JSON at position 46 (line 1 column 47)",
+          "reason": "NO_PARSE",
+          "elapsed": 4343
+        },
+        {
+          "id": "clarify-001-vague-switch",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 7007
+        },
+        {
+          "id": "pron-001",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 6282
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4486
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4675
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 6346
+        }
+      ]
+    },
+    {
+      "label": "nemotron-3-120b-a12b",
+      "model": "@cf/nvidia/nemotron-3-120b-a12b",
+      "prompt": "v2",
+      "total": 17,
+      "max": 87,
+      "pct": 19.5,
+      "intent": "3/10",
+      "intentPct": 30,
+      "parse": 7,
+      "errs": 0,
+      "p50": 4621,
+      "p90": 5220,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected property name or '}' in JSON at position 1 (line 1 column 2)",
+          "reason": "NO_PARSE",
+          "elapsed": 3823
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3732
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5203
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 587 (line 29 column 4)",
+          "reason": "NO_PARSE",
+          "elapsed": 5184
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5220
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 335 (line 6 column 171)",
+          "reason": "NO_PARSE",
+          "elapsed": 4095
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 226 (line 1 column 227)",
+          "reason": "NO_PARSE",
+          "elapsed": 4574
+        }
+      ]
+    },
+    {
+      "label": "nemotron-3-120b-a12b strict",
+      "model": "@cf/nvidia/nemotron-3-120b-a12b",
+      "prompt": "v2-strict-json",
+      "total": 0,
+      "max": 100,
+      "pct": 0,
+      "intent": "0/10",
+      "intentPct": 0,
+      "parse": 10,
+      "errs": 0,
+      "p50": 4113,
+      "p90": 5084,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3934
+        },
+        {
+          "id": "quote-009-lic-only",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3726
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4310
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected property name or '}' in JSON at position 1 (line 1 column 2)",
+          "reason": "NO_PARSE",
+          "elapsed": 3649
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3953
+        },
+        {
+          "id": "clarify-001-vague-switch",
+          "score": "0/10",
+          "intent": null,
+          "err": "Expected ',' or '}' after property value in JSON at position 388 (line 15 column 4)",
+          "reason": "NO_PARSE",
+          "elapsed": 4210
+        },
+        {
+          "id": "pron-001",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 5084
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4113
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4317
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 3769
+        }
+      ]
+    },
+    {
+      "label": "granite-4.0-h-micro",
+      "model": "@cf/ibm-granite/granite-4.0-h-micro",
+      "prompt": "v2",
+      "total": 35,
+      "max": 67,
+      "pct": 52.2,
+      "intent": "6/10",
+      "intentPct": 60,
+      "parse": 1,
+      "errs": 0,
+      "p50": 3966,
+      "p90": 6957,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "3/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items,modifiers",
+          "elapsed": 4238
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "2/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "intent quote!=price_lookup,modifiers",
+          "elapsed": 3426
+        },
+        {
+          "id": "clarify-001-vague-switch",
+          "score": "0/3",
+          "intent": "quote",
+          "err": "",
+          "reason": "intent quote!=clarify",
+          "elapsed": 3211
+        },
+        {
+          "id": "pron-001",
+          "score": "5/8",
+          "intent": "revise",
+          "err": "",
+          "reason": "revision,reference",
+          "elapsed": 3123
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "Unexpected non-whitespace character after JSON at position 680 (line 1 column 681)",
+          "reason": "NO_PARSE",
+          "elapsed": 6957
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "2/5",
+          "intent": "dashboard_parse",
+          "err": "",
+          "reason": "intent dashboard_parse!=quote",
+          "elapsed": 2531
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "3/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items,modifiers",
+          "elapsed": 3966
+        }
+      ]
+    },
+    {
+      "label": "granite-4.0-h-micro strict",
+      "model": "@cf/ibm-granite/granite-4.0-h-micro",
+      "prompt": "v2-strict-json",
+      "total": 36,
+      "max": 66,
+      "pct": 54.5,
+      "intent": "7/10",
+      "intentPct": 70,
+      "parse": 1,
+      "errs": 0,
+      "p50": 4063,
+      "p90": 5185,
+      "fails": [
+        {
+          "id": "quote-005",
+          "score": "3/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items,modifiers",
+          "elapsed": 4263
+        },
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "5/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "modifiers",
+          "elapsed": 2841
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "4/6",
+          "intent": "revise",
+          "err": "",
+          "reason": "revision",
+          "elapsed": 5056
+        },
+        {
+          "id": "clarify-001-vague-switch",
+          "score": "0/3",
+          "intent": "quote",
+          "err": "",
+          "reason": "intent quote!=clarify",
+          "elapsed": 2981
+        },
+        {
+          "id": "pron-001",
+          "score": "0/10",
+          "intent": null,
+          "err": "Unexpected non-whitespace character after JSON at position 468 (line 1 column 469)",
+          "reason": "NO_PARSE",
+          "elapsed": 5119
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "5/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "modifiers",
+          "elapsed": 5185
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "2/5",
+          "intent": "dashboard_parse",
+          "err": "",
+          "reason": "intent dashboard_parse!=quote",
+          "elapsed": 3141
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "3/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items,modifiers",
+          "elapsed": 4063
+        }
+      ]
+    },
+    {
+      "label": "kimi-k2.5",
+      "model": "@cf/moonshotai/kimi-k2.5",
+      "prompt": "v2",
+      "total": 37,
+      "max": 74,
+      "pct": 50,
+      "intent": "6/10",
+      "intentPct": 60,
+      "parse": 3,
+      "errs": 2,
+      "p50": 14555,
+      "p90": 179234,
+      "fails": [
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "0/10",
+          "intent": null,
+          "err": "8004: Internal server error",
+          "reason": "NO_PARSE",
+          "elapsed": 446
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "0/10",
+          "intent": null,
+          "err": "8004: Internal server error",
+          "reason": "NO_PARSE",
+          "elapsed": 402
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "",
+          "reason": "NO_PARSE",
+          "elapsed": 4385
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/7",
+          "intent": "clarify",
+          "err": "",
+          "reason": "intent clarify!=quote,items,modifiers",
+          "elapsed": 27035
+        }
+      ]
+    },
+    {
+      "label": "kimi-k2.5 strict",
+      "model": "@cf/moonshotai/kimi-k2.5",
+      "prompt": "v2-kimi-json",
+      "total": 30,
+      "max": 80,
+      "pct": 37.5,
+      "intent": "5/10",
+      "intentPct": 50,
+      "parse": 5,
+      "errs": 5,
+      "p50": 13198,
+      "p90": 94088,
+      "fails": [
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "0/10",
+          "intent": null,
+          "err": "8004: Internal server error",
+          "reason": "NO_PARSE",
+          "elapsed": 424
+        },
+        {
+          "id": "pron-001",
+          "score": "0/10",
+          "intent": null,
+          "err": "8004: Internal server error",
+          "reason": "NO_PARSE",
+          "elapsed": 417
+        },
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "0/10",
+          "intent": null,
+          "err": "8004: Internal server error",
+          "reason": "NO_PARSE",
+          "elapsed": 445
+        },
+        {
+          "id": "shadow-006-url-echoback",
+          "score": "0/10",
+          "intent": null,
+          "err": "8004: Internal server error",
+          "reason": "NO_PARSE",
+          "elapsed": 464
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/10",
+          "intent": null,
+          "err": "8004: Internal server error",
+          "reason": "NO_PARSE",
+          "elapsed": 464
+        }
+      ]
+    },
+    {
+      "label": "gemma-sea-lion-v4-27b",
+      "model": "@cf/aisingapore/gemma-sea-lion-v4-27b-it",
+      "prompt": "v2",
+      "total": 58,
+      "max": 64,
+      "pct": 90.6,
+      "intent": "10/10",
+      "intentPct": 100,
+      "parse": 0,
+      "errs": 0,
+      "p50": 4218,
+      "p90": 5667,
+      "fails": [
+        {
+          "id": "price-006-with-3yr-lic",
+          "score": "5/7",
+          "intent": "price_lookup",
+          "err": "",
+          "reason": "modifiers",
+          "elapsed": 5476
+        },
+        {
+          "id": "revise-009-swap",
+          "score": "4/6",
+          "intent": "revise",
+          "err": "",
+          "reason": "revision",
+          "elapsed": 3383
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "5/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items",
+          "elapsed": 4442
+        }
+      ]
+    },
+    {
+      "label": "gemma-4-26b",
+      "model": "@cf/google/gemma-4-26b-a4b-it",
+      "prompt": "v2",
+      "total": 54,
+      "max": 64,
+      "pct": 84.4,
+      "intent": "8/10",
+      "intentPct": 80,
+      "parse": 0,
+      "errs": 0,
+      "p50": 34734,
+      "p90": 44488,
+      "fails": [
+        {
+          "id": "shadow-001-renewal-multiline",
+          "score": "4/7",
+          "intent": "clarify",
+          "err": "",
+          "reason": "intent clarify!=quote",
+          "elapsed": 44488
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "0/7",
+          "intent": "clarify",
+          "err": "",
+          "reason": "intent clarify!=quote,items,modifiers",
+          "elapsed": 34734
+        }
+      ]
+    },
+    {
+      "label": "llama-4-scout",
+      "model": "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "prompt": "v2",
+      "total": 52,
+      "max": 64,
+      "pct": 81.3,
+      "intent": "8/10",
+      "intentPct": 80,
+      "parse": 0,
+      "errs": 0,
+      "p50": 2332,
+      "p90": 3089,
+      "fails": [
+        {
+          "id": "quote-009-lic-only",
+          "score": "4/7",
+          "intent": "revise",
+          "err": "",
+          "reason": "intent revise!=quote",
+          "elapsed": 2395
+        },
+        {
+          "id": "quote-013-with-lic-tier",
+          "score": "5/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items",
+          "elapsed": 2354
+        },
+        {
+          "id": "clarify-001-vague-switch",
+          "score": "0/3",
+          "intent": "quote",
+          "err": "",
+          "reason": "intent quote!=clarify",
+          "elapsed": 1726
+        },
+        {
+          "id": "shadow-007-sme-license",
+          "score": "3/7",
+          "intent": "quote",
+          "err": "",
+          "reason": "items,modifiers",
+          "elapsed": 1991
+        }
+      ]
+    }
+  ]
+}

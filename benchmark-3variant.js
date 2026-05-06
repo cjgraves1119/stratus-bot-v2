@@ -39,9 +39,12 @@ const VARIANTS = [
   { id: 'v2-llama-strict', label: 'V2 strict JSON (Llama)', promptVariant: 'v2-strict-json', model: '@cf/meta/llama-4-scout-17b-16e-instruct' },
   { id: 'v2-gemma4',   label: 'V2 prompt (Gemma 4 26B)', promptVariant: 'v2',    model: '@cf/google/gemma-4-26b-a4b-it' },
   { id: 'v2-gemma4-strict', label: 'V2 strict JSON (Gemma 4 26B)', promptVariant: 'v2-strict-json', model: '@cf/google/gemma-4-26b-a4b-it' },
+  { id: 'v2-gemma-sealion-27b', label: 'V2 prompt (Gemma SEA-LION 27B)', promptVariant: 'v2', model: '@cf/aisingapore/gemma-sea-lion-v4-27b-it' },
   { id: 'v2-gemma3-12b', label: 'V2 prompt (Gemma 3 12B)', promptVariant: 'v2',  model: '@cf/google/gemma-3-12b-it' },
   { id: 'v2-kimi-k26', label: 'V2 prompt (Kimi K2.6)',  promptVariant: 'v2',     model: '@cf/moonshotai/kimi-k2.6' },
   { id: 'v2-kimi-k26-strict', label: 'V2 strict JSON (Kimi K2.6)', promptVariant: 'v2-kimi-json', model: '@cf/moonshotai/kimi-k2.6' },
+  { id: 'v2-llama33-70b-fast', label: 'V2 prompt (Llama 3.3 70B fast)', promptVariant: 'v2', model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast' },
+  { id: 'v2-mistral-small-31-24b', label: 'V2 prompt (Mistral Small 3.1 24B)', promptVariant: 'v2', model: '@cf/mistralai/mistral-small-3.1-24b-instruct' },
 ];
 
 const fixtures = require('./classifier-fixtures.json').fixtures;
