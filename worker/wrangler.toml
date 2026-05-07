@@ -18,6 +18,7 @@ USE_PRODUCT_INFO_WATERFALL = "true"
 binding = "ANALYTICS_DB"
 database_name = "stratus-bot-analytics"
 database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
+migrations_dir = "../migrations"
 
 [[kv_namespaces]]
 binding = "CONVERSATION_KV"
