@@ -5985,6 +5985,88 @@ function closeMoney(a, b, tolerance = 0.02) {
 
 const MAX_AUTO_TAX_RATE = 0.13;
 
+function booleanishTaxValue(value) {
+  if (value === true || value === false) return { known: true, value };
+  if (value === null || value === undefined || value === '') return { known: false };
+  if (typeof value === 'object') {
+    return booleanishTaxValue(value.display_value ?? value.name ?? value.value ?? value.actual_value ?? '');
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return { known: false };
+  if (/^(no|n|false|0|taxable|not exempt|not tax exempt|non[-_\s]?exempt)$/.test(normalized)) return { known: true, value: false };
+  if (/^(yes|y|true|1|exempt|tax exempt|non[-_\s]?taxable|government|govt|municipal|municipality|resale)$/.test(normalized)) return { known: true, value: true };
+  if (/^exempt[-_\s]/.test(normalized) || /[-_\s]exempt($|[-_\s])/.test(normalized)) return { known: true, value: true };
+  return { known: false };
+}
+
+function detectTaxExemptContext(sources = []) {
+  const knownSignals = [];
+  const unknownSignals = [];
+  for (const source of sources) {
+    const record = source?.record || source;
+    if (!record || typeof record !== 'object') continue;
+    let sourceHadTaxCandidate = false;
+    for (const [field, value] of Object.entries(record)) {
+      if (field === '__tax_context_fetch_error' || field === '__tax_context_account_unresolved') {
+        sourceHadTaxCandidate = true;
+        unknownSignals.push({ source: source?.source || null, field, value });
+        continue;
+      }
+      const normalizedField = String(field).replace(/[^a-z0-9]+/gi, '_').toLowerCase();
+      const isExemptField = /tax.*exempt|exempt.*tax|tax.*exemption|non.*taxable/.test(normalizedField);
+      const isTaxableField = /(^|_)taxable($|_)/.test(normalizedField);
+      const isTaxStatusField = /tax.*status|sales.*tax.*status|tax.*profile/.test(normalizedField);
+      const isExemptIdentifierField = /(?:exempt|exemption).*(?:number|id|certificate)|(?:number|id|certificate).*(?:exempt|exemption)/.test(normalizedField);
+      if (!isExemptField && !isTaxableField && !isTaxStatusField && !isExemptIdentifierField) continue;
+      sourceHadTaxCandidate = true;
+      const parsed = booleanishTaxValue(value);
+      if (parsed.known) {
+        knownSignals.push({
+          source: source?.source || null,
+          field,
+          value,
+          tax_exempt: isTaxableField && !isExemptField && !isTaxStatusField ? !parsed.value : parsed.value
+        });
+        continue;
+      }
+      if (isExemptIdentifierField && String(value ?? '').trim()) {
+        knownSignals.push({
+          source: source?.source || null,
+          field,
+          value,
+          tax_exempt: true
+        });
+        continue;
+      }
+      unknownSignals.push({
+        source: source?.source || null,
+        field,
+        value
+      });
+    }
+    if ((source?.source || null) === 'Account' && !sourceHadTaxCandidate) {
+      unknownSignals.push({
+        source: 'Account',
+        field: null,
+        value: null,
+        reason: 'tax_status_not_found_on_account'
+      });
+    }
+  }
+  const exemptSignal = knownSignals.find(signal => signal.tax_exempt === true);
+  if (exemptSignal) return { checked: true, ...exemptSignal, signals: knownSignals };
+  const taxableSignal = knownSignals.find(signal => signal.tax_exempt === false && signal.source === 'Account')
+    || (unknownSignals.length === 0 ? knownSignals.find(signal => signal.tax_exempt === false) : null);
+  if (taxableSignal) return { checked: true, ...taxableSignal, signals: knownSignals };
+  return {
+    checked: false,
+    tax_exempt: false,
+    reason: unknownSignals.length ? 'tax_signal_unparseable' : 'tax_status_not_found',
+    signals: knownSignals,
+    unknown_signals: unknownSignals
+  };
+}
+
 function recordTaxTotal(record = {}) {
   const direct = [
     'All_Taxes_Total',
@@ -6065,6 +6147,12 @@ function quotePoLineNet(item = {}) {
   return roundMoney((unit * qty) - discount);
 }
 
+function quotePoLineNetTotal(record = {}) {
+  const lineItems = quotePoLineItems(record);
+  if (lineItems.length === 0) return null;
+  return roundMoney(lineItems.reduce((sum, item) => sum + quotePoLineNet(item), 0));
+}
+
 function quotePoLineFingerprint(record = {}) {
   return quotePoLineItems(record)
     .map(item => ({
@@ -6095,35 +6183,55 @@ function quotePoLineItemsMatch(quote = {}, salesOrder = {}) {
   return { checked: true, match: true, quote_lines: quoteLines, sales_order_lines: soLines };
 }
 
-function validateQuoteToPoFinancialParity(quote = {}, salesOrder = {}) {
+function validateQuoteToPoFinancialParity(quote = {}, salesOrder = {}, options = {}) {
   const quoteGrand = recordGrandTotal(quote);
   const quoteTax = recordTaxTotal(quote);
-  const quotePreTax = recordPreTaxTotal(quote);
+  const quoteLinePreTax = quotePoLineNetTotal(quote);
+  const quotePreTax = quoteLinePreTax ?? recordPreTaxTotal(quote);
   const poGrand = recordGrandTotal(salesOrder);
   const poTax = recordTaxTotal(salesOrder);
-  const poPreTax = recordPreTaxTotal(salesOrder);
+  const poLinePreTax = quotePoLineNetTotal(salesOrder);
+  const poPreTax = poLinePreTax ?? recordPreTaxTotal(salesOrder);
   const rawDelta = roundMoney(poGrand - quoteGrand);
   const taxDelta = roundMoney(poTax - quoteTax);
   const unexplainedDelta = roundMoney(poPreTax - quotePreTax);
   const lines = quotePoLineItemsMatch(quote, salesOrder);
   const poTaxRate = poPreTax > 0 ? Number((poTax / poPreTax).toFixed(4)) : 0;
-  const taxRatePlausible = poTax <= 0 || poTaxRate <= MAX_AUTO_TAX_RATE;
+  const taxExemptContext = options.tax_exempt_context || detectTaxExemptContext([
+    { source: 'Quote', record: quote },
+    { source: 'Sales_Order', record: salesOrder }
+  ]);
+  const taxExemptWithTax = taxExemptContext.tax_exempt === true && poTax > 0.02;
+  const taxStatusUndeterminedWithTax = taxExemptContext.checked !== true && poTax > 0.02;
 
-  const ok = closeMoney(quotePreTax, poPreTax) && lines.checked === true && lines.match === true && taxRatePlausible;
+  const ok = closeMoney(quotePreTax, poPreTax)
+    && lines.checked === true
+    && lines.match === true;
   return {
     ok,
     quote_grand_total: quoteGrand,
     quote_tax_total: quoteTax,
     quote_pre_tax_total: quotePreTax,
+    quote_line_pre_tax_total: quoteLinePreTax,
     sales_order_grand_total: poGrand,
     sales_order_tax_total: poTax,
     sales_order_pre_tax_total: poPreTax,
+    sales_order_line_pre_tax_total: poLinePreTax,
     raw_total_delta: rawDelta,
     tax_delta: taxDelta,
     unexplained_pre_tax_delta: unexplainedDelta,
     sales_order_tax_rate: poTaxRate,
     max_allowed_tax_rate: MAX_AUTO_TAX_RATE,
-    tax_rate_plausible: taxRatePlausible,
+    tax_rate_plausible: true,
+    tax_exempt_context: taxExemptContext,
+    tax_exempt_with_tax: taxExemptWithTax,
+    tax_observation: {
+      tax_exempt_with_tax: taxExemptWithTax,
+      tax_status_undetermined_with_tax: taxStatusUndeterminedWithTax,
+      informational_only: true
+    },
+    tax_exempt_violation: false,
+    tax_status_undetermined_with_tax: false,
     mismatch_is_tax_only: closeMoney(unexplainedDelta, 0) && !closeMoney(rawDelta, 0),
     line_item_check: lines
   };
@@ -6143,8 +6251,20 @@ function buildPoFinancialMismatchPayload({ quote, salesOrder, validation }) {
     _user_visible_summary:
       `PO ${salesOrder?.SO_Number || salesOrder?.id || ''} was created, but I did not send it for e-signature because financial validation failed. ` +
       `Quote pre-tax: $${validation.quote_pre_tax_total.toFixed(2)}; PO pre-tax: $${validation.sales_order_pre_tax_total.toFixed(2)}; ` +
-      `tax delta: $${validation.tax_delta.toFixed(2)}; unexplained delta: $${validation.unexplained_pre_tax_delta.toFixed(2)}.`
+      `tax delta: $${validation.tax_delta.toFixed(2)}; unexplained pre-tax delta: $${validation.unexplained_pre_tax_delta.toFixed(2)}. Taxes are informational only; this blocks only when line items or pre-tax/ecomm pricing do not match.`
   };
+}
+
+async function fetchQuotePoTaxContext(quote, env) {
+  const sources = [{ source: 'Quote', record: quote }];
+  const accountId = zohoLookupId(quote?.Account_Name);
+  if (accountId) {
+    const account = await fetchRecordFull('Accounts', accountId, env).catch(err => ({ __tax_context_fetch_error: err?.message || String(err) }));
+    if (account) sources.push({ source: 'Account', record: account });
+  } else if (quote?.Account_Name) {
+    sources.push({ source: 'Account', record: { __tax_context_account_unresolved: 'Account_Name did not contain a readable Account id' } });
+  }
+  return detectTaxExemptContext(sources);
 }
 
 async function triggerAndPollAdminAction({ moduleName, recordId, actionName, env, maxPollMs = 60000, pollEveryMs = 4000 }) {
@@ -6361,6 +6481,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
   if (sendForEsign && !zohoLookupId(quote.Contact_Name)) {
     return finish({ success: false, quote_id: quoteId, quote_subject: quote.Subject, error: 'Quote has no Contact_Name; cannot send PO for e-signature.', _no_partial_success: true });
   }
+  const taxExemptContext = await fetchQuotePoTaxContext(quote, env);
 
   const existingSalesOrders = await findSalesOrdersForDeal(dealId, env);
   const existingIds = new Set(existingSalesOrders.map(so => String(so.id)));
@@ -6385,7 +6506,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
         _user_visible_summary: `PO ${requested.SO_Number || requested.id} is not linked to this Quote's Deal, so I did not send it for e-signature.`
       });
     }
-    const requestedValidation = validateQuoteToPoFinancialParity(quote, requested);
+    const requestedValidation = validateQuoteToPoFinancialParity(quote, requested, { tax_exempt_context: taxExemptContext });
     if (!requestedValidation.ok) {
       return finish(buildPoFinancialMismatchPayload({ quote, salesOrder: requested, validation: requestedValidation }), 'blocked');
     }
@@ -6411,7 +6532,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
   const quoteSpecificExisting = await findQuoteSpecificSalesOrders({ quote, dealSalesOrders: existingSalesOrders, env });
   if (quoteSpecificExisting.length > 0) {
     const existing = quoteSpecificExisting[0];
-    const existingValidation = validateQuoteToPoFinancialParity(quote, existing);
+    const existingValidation = validateQuoteToPoFinancialParity(quote, existing, { tax_exempt_context: taxExemptContext });
     if (!existingValidation.ok) {
       return finish(buildPoFinancialMismatchPayload({ quote, salesOrder: existing, validation: existingValidation }), 'blocked');
     }
@@ -6550,7 +6671,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     }, 'blocked');
   }
 
-  const financialValidation = validateQuoteToPoFinancialParity(quote, candidate);
+  const financialValidation = validateQuoteToPoFinancialParity(quote, candidate, { tax_exempt_context: taxExemptContext });
   if (!financialValidation.ok) {
     return finish(buildPoFinancialMismatchPayload({ quote, salesOrder: candidate, validation: financialValidation }), 'blocked');
   }
@@ -10931,7 +11052,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'quote_to_po_and_esign',
-    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing, only allows Grand_Total differences explained by plausible Zoho-computed tax, and blocks if line-item detail is unavailable. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
+    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing. Grand_Total and tax differences are allowed when pre-tax/ecomm economics match because Zoho may automatically tax only some line items, all line items, or no line items. It blocks if line-item detail is unavailable or if any pre-tax/ecomm line economics differ. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11753,7 +11874,7 @@ const CRM_PROMPT_ADMIN_ACTION = `
 
 Admin Actions are Zoho automations triggered by writing an action name to the Admin_Action field. Execute via API directly. NEVER tell user to click a button.
 
-Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, contract/PO creation, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, verifies that PO line items and pre-tax/ecomm economics match the Quote, allows Grand_Total differences only when explained by plausible Zoho-computed tax, blocks when line-item detail is unavailable, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only.
+Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, contract/PO creation, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, verifies that PO line items and pre-tax/ecomm economics match the Quote, allows Grand_Total and tax differences when pre-tax/ecomm economics match because Zoho may automatically tax hardware, licensing, both, or neither, blocks when line-item detail is unavailable, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only.
 
 **Trigger process:**
 1. TRIGGER: zoho_update_record(module_name="Quotes", record_id={id}, data={"Admin_Action": "{ACTION_NAME}"})
@@ -11773,7 +11894,7 @@ NEVER say "I don't have a tool to generate a DID" — you DO have zoho_update_re
 **Where the DID lives:** The DID is stored on Quote.CCW_Deal_Number (NOT Deal.CCW_Deal_ID). When verifying a DID, always check the QUOTE record. Deal.CCW_Deal_ID is a separate field that may be empty. After DID is confirmed, the server auto-syncs it to the Deal.
 
 **Step 3: LIVE_ConvertQuoteToSO**
-Show validation first: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion. After conversion, compare Quote line items and pre-tax/ecomm total to PO line items and pre-tax total. Do not flag a raw Grand_Total mismatch when the difference is explained by plausible PO taxes. If line-item detail is unavailable, or if pre-tax/ecomm totals or line items differ for any non-tax reason, do NOT send e-signature.
+Show validation first: Net_Terms, Contact, Tax, Grand Total, and pre-tax/ecomm total. Net_Terms CANNOT change after conversion. After conversion, compare Quote line items and pre-tax/ecomm total to PO line items and pre-tax total. Do not flag a raw Grand_Total mismatch, tax mismatch, or mixed taxable/non-taxable line behavior when the pre-tax/ecomm line economics match. If line-item detail is unavailable, or if pre-tax/ecomm totals or line items differ for any non-tax reason, do NOT send e-signature.
 Do not set Deal.Stage, Quote.Stage, or Quote_Stage manually. The PO automation handles downstream stage behavior.
 
 **Step 4: LIVE_SendToEsign**
