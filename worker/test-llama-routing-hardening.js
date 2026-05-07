@@ -30,7 +30,9 @@ function buildShim() {
   src += `
 module.exports = {
   buildClassifierClarifyReply,
-  normalizeV2ClassifierForRouting
+  normalizeV2ClassifierForRouting,
+  parseMessage,
+  buildQuoteResponse
 };`;
   const tmp = path.join(os.tmpdir(), `stratus-llama-routing-${process.pid}.cjs`);
   fs.writeFileSync(tmp, src);
@@ -40,12 +42,19 @@ module.exports = {
 const {
   buildClassifierClarifyReply,
   normalizeV2ClassifierForRouting,
+  parseMessage,
+  buildQuoteResponse,
 } = buildShim();
 
 let pass = 0, fail = 0;
 function check(desc, cond, diag) {
   if (cond) { console.log(`PASS ${desc}`); pass++; }
   else { console.log(`FAIL ${desc}${diag ? '\n   ' + diag : ''}`); fail++; }
+}
+
+function renderQuote(text) {
+  const parsed = parseMessage(text);
+  return parsed && buildQuoteResponse(parsed);
 }
 
 {
@@ -125,11 +134,100 @@ function check(desc, cond, diag) {
     items: [],
     modifiers: {}
   };
-  const normalized = normalizeV2ClassifierForRouting(v2, 'quote 5 LIC-MS130-24P-3YR', false);
-  check('license SKU containing MS130-24P is not treated as ambiguous stem',
+  const normalized = normalizeV2ClassifierForRouting(v2, 'quote 5 LIC-MS130-24-3Y', false);
+  check('valid MS130 license SKU is not treated as ambiguous stem',
     normalized.intent === 'quote' && !normalized._deterministicRouting,
     JSON.stringify(normalized));
 }
+
+{
+  const out = renderQuote('quote 5 LIC-MS130-24P-3YR');
+  check('invalid MS130 PoE direct license canonicalizes to port-count license',
+    out && /LIC-MS130-24-3Y/.test(out.message) && !/item=LIC-MS130-24P-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote 2 LIC-MS130-48X-5Y');
+  check('invalid MS130 X direct license canonicalizes to port-count license',
+    out && /LIC-MS130-48-5Y/.test(out.message) && !/item=LIC-MS130-48X-5Y/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS150-24P-4G-3YR');
+  check('invalid MS150 variant direct license canonicalizes to port-count license',
+    out && /LIC-MS150-24-3Y/.test(out.message) && !/item=LIC-MS150-24P-4G-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS390-24UX-3YR');
+  check('invalid MS390 variant direct license canonicalizes to tiered port license',
+    out && /LIC-MS390-24E-3Y/.test(out.message) && !/item=LIC-MS390-24UX-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS350-48X-3YR');
+  check('invalid MS350 48X direct license canonicalizes to 48-port legacy license',
+    out && /LIC-MS350-48-3YR/.test(out.message) && !/item=LIC-MS350-48X-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS125-24P-3YR');
+  check('MS125 direct license keeps P variant but normalizes YR to Y',
+    out && /LIC-MS125-24P-3Y/.test(out.message) && !/item=LIC-MS125-24P-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+[
+  ['LIC-MS210-48LP-3Y', 'LIC-MS210-48LP-3YR'],
+  ['LIC-MS225-48FP-3Y', 'LIC-MS225-48FP-3YR'],
+  ['LIC-MS250-48FP-3Y', 'LIC-MS250-48FP-3YR'],
+  ['LIC-MS425-32-3Y', 'LIC-MS425-32-3YR'],
+].forEach(([inputSku, expectedSku]) => {
+  const out = renderQuote(`quote ${inputSku}`);
+  check(`${inputSku} canonicalizes to catalog SKU ${expectedSku}`,
+    out && new RegExp(expectedSku).test(out.message)
+      && !out.message.includes(`item=${inputSku}&`)
+      && !out.message.includes(`item=${inputSku},`),
+    out ? out.message : 'no output');
+});
+
+{
+  const out = renderQuote('quote LIC-MS999-24P-3YR');
+  check('unknown MS direct license is blocked instead of quoted',
+    out && /not a recognized switch license SKU/.test(out.message) && !/stratusinfosystems\.com\/order/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MX67-SEC-3YR');
+  check('valid MX direct license passes through untouched',
+    out && /item=LIC-MX67-SEC-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-ENT-3YR');
+  check('valid MR ENT direct license passes through untouched',
+    out && /item=LIC-ENT-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+[
+  'LIC-MR-ENT-3YR',
+  'LIC-DUO-ESSENTIALS-3YR',
+  'LIC-SME-3YR',
+  'LIC-L-AC-APX-3Y-S1',
+].forEach(sku => {
+  const out = renderQuote(`quote ${sku}`);
+  check(`${sku} direct license is not touched by MS canonicalizer`,
+    out && new RegExp(`item=${sku}`).test(out.message),
+    out ? out.message : 'no output');
+});
 
 {
   const reply24 = buildClassifierClarifyReply('quote MS150-24', {
