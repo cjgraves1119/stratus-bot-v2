@@ -82,6 +82,14 @@ function check(desc, cond, diag) {
 }
 
 {
+  const cls = { intent: 'quote', confidence: 1, reply: '', extracted: '' };
+  const normalized = normalizeClassifierForRouting(cls, 'quote 5 LIC-MS130-24P-3YR', false);
+  check('license SKU containing MS130-24P is not treated as ambiguous stem',
+    normalized.intent === 'quote' && !normalized._deterministicRouting,
+    JSON.stringify(normalized));
+}
+
+{
   const reply24 = buildClassifierClarifyReply('quote MS150-24', { intent: 'quote', extracted: 'quote MS150-24' });
   const reply48 = buildClassifierClarifyReply('quote MS150-48', { intent: 'quote', extracted: 'quote MS150-48' });
   check('MS150 clarify copy includes MP variants',

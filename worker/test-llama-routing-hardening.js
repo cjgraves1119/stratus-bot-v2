@@ -55,7 +55,7 @@ function check(desc, cond, diag) {
     normalized.intent === 'clarify' && /switch model/i.test(normalized.reply),
     JSON.stringify(normalized));
   check('generic switch clarify is deterministic',
-    normalized._deterministicRouting === 'clarify-known-empty-or-ambiguous',
+    normalized._deterministicRouting === 'deterministic-guard-empty-items',
     JSON.stringify(normalized));
 }
 
@@ -118,6 +118,20 @@ function check(desc, cond, diag) {
 }
 
 {
+  const v2 = {
+    intent: 'quote',
+    confidence: 1,
+    reply: '',
+    items: [],
+    modifiers: {}
+  };
+  const normalized = normalizeV2ClassifierForRouting(v2, 'quote 5 LIC-MS130-24P-3YR', false);
+  check('license SKU containing MS130-24P is not treated as ambiguous stem',
+    normalized.intent === 'quote' && !normalized._deterministicRouting,
+    JSON.stringify(normalized));
+}
+
+{
   const reply24 = buildClassifierClarifyReply('quote MS150-24', {
     intent: 'quote',
     items: [{ sku: 'MS150-24', qty: 1, sku_type: 'hardware' }]
@@ -144,6 +158,9 @@ function check(desc, cond, diag) {
   const normalized = normalizeV2ClassifierForRouting(v2, 'just show me the 5 year for 10 MR46', false);
   check('no-history revise with concrete fresh quote language becomes quote',
     normalized.intent === 'quote' && normalized.items[0].sku === 'MR46' && normalized.modifiers.term_years === 5,
+    JSON.stringify(normalized));
+  check('fresh quote rewrite gets telemetry tag',
+    normalized._deterministicRouting === 'deterministic-guard-revise-to-quote',
     JSON.stringify(normalized));
   check('fresh quote rewrite clears history reference',
     normalized.reference && normalized.reference.resolve_from_history === false,

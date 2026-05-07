@@ -11348,13 +11348,14 @@ async function classifyWithCF(userMessage, env) {
 }
 
 const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)$/i;
+const ROUTING_AMBIGUOUS_TEXT_STEM = /\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)\b(?![A-Z0-9-])/i;
 
 function getClassifierItems(classification) {
   return Array.isArray(classification?.items) ? classification.items : [];
 }
 
 function findRoutingAmbiguousStem(text) {
-  const m = String(text || '').match(/\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425(?!-))\b/i);
+  const m = String(text || '').match(ROUTING_AMBIGUOUS_TEXT_STEM);
   return m ? m[1].toUpperCase() : '';
 }
 
@@ -17060,11 +17061,13 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               if (_zohoIntent) {
                 console.log(`[WATERFALL] Tier 0 skipped: explicit Zoho-write intent detected in user text`);
               }
+              let deterministicTelemetryModel = 'deterministic';
               if (!forcedModel && !skipDeterministic && !_zohoIntent) {
                 try {
                   let classification = await classifyWithCF(wText, env);
                   classification = normalizeClassifierForRouting(classification, wText, false);
                   if (classification?._deterministicRouting) {
+                    deterministicTelemetryModel = classification._deterministicRouting;
                     console.log(`[WATERFALL] Tier 0 deterministic guard fired: ${classification._deterministicRouting}`);
                   }
                   if (classification?.intent === 'clarify' && classification.reply) {
@@ -17090,7 +17093,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 // Return the deterministic answer without invoking any LLM
                 outcome = {
                   reply: deterministicResult,
-                  model: 'deterministic',
+                  model: deterministicTelemetryModel,
                   tierUsed: 'deterministic',
                   gemmaResult: null,
                   claudeResult: null,
@@ -19694,6 +19697,7 @@ Return ONLY a JSON object (no markdown, no explanation):
         T.step('gc-addon', 'enter'); T.step('gc-addon', 'exit', { result: isAddon ? 'addon' : 'direct' });
         T.step('gc-text', 'enter'); T.step('gc-text', 'exit', { len: text?.length || 0 });
         let reply;
+        let routingTelemetryModel = null;
 
         // Check for Gmail "Share to Chat" (Gmail links or annotations)
         const gmailShare = detectGmailShare(text, event, isAddon);
@@ -19915,6 +19919,7 @@ Return ONLY a JSON object (no markdown, no explanation):
                 await addToHistory(kv, personId, 'user', text);
                 await addToHistory(kv, personId, 'assistant', classification.reply);
                 reply = classification.reply;
+                routingTelemetryModel = classification._deterministicRouting || null;
                 console.log(`[CF-First] Clarification sent (${classification.elapsed}ms)`);
               }
 
@@ -19953,6 +19958,7 @@ Return ONLY a JSON object (no markdown, no explanation):
                     await addToHistory(kv, personId, 'user', text);
                     await addToHistory(kv, personId, 'assistant', quoteResult.message);
                     reply = quoteResult.message;
+                    routingTelemetryModel = classification._deterministicRouting || null;
                     console.log(`[CF-First] Quote executed by deterministic engine (cf-deterministic)`);
                   } else if (quoteResult && quoteResult.errors && quoteResult.errors.length > 0) {
                     const errorContext = quoteResult.errors.join('\n');
@@ -20147,6 +20153,7 @@ Return ONLY a JSON object (no markdown, no explanation):
           personId,
           requestText: text,
           responsePath: _responsePath,
+          model: routingTelemetryModel,
           durationMs: _durationMs,
           responseText: typeof reply === 'string' ? reply : JSON.stringify(reply || ''),
           toolCallsJson: globalThis.__lastToolCalls ? JSON.stringify(globalThis.__lastToolCalls).substring(0, 8000) : null

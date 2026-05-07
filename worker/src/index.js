@@ -1132,6 +1132,7 @@ async function classifyWithGemma4(userMessage, priorContext, env) {
 }
 
 const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)$/i;
+const ROUTING_AMBIGUOUS_TEXT_STEM = /\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)\b(?![A-Z0-9-])/i;
 
 function getClassifierItems(v2) {
   return Array.isArray(v2?.items) ? v2.items : [];
@@ -1147,7 +1148,7 @@ function buildClassifierClarifyReply(rawText, classification) {
   const itemSku = items
     .map(i => (i && typeof i.sku === 'string' ? i.sku.trim().toUpperCase() : ''))
     .find(sku => ROUTING_AMBIGUOUS_STEM.test(sku));
-  const rawSku = (text.match(/\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425(?!-))\b/i) || [])[1];
+  const rawSku = (text.match(ROUTING_AMBIGUOUS_TEXT_STEM) || [])[1];
   const ambiguousSku = itemSku || (rawSku ? rawSku.toUpperCase() : '');
 
   if (ambiguousSku) {
@@ -1238,7 +1239,7 @@ function normalizeV2ClassifierForRouting(v2, rawText, hasPriorCtx) {
       intent: 'clarify',
       reply: clarifyReply,
       confidence: 1,
-      _deterministicRouting: 'clarify-known-empty-or-ambiguous'
+      _deterministicRouting: classifierHasAmbiguousStem(v2) ? 'deterministic-guard-ambig-stem' : 'deterministic-guard-empty-items'
     };
   }
 
@@ -1249,7 +1250,7 @@ function normalizeV2ClassifierForRouting(v2, rawText, hasPriorCtx) {
       confidence: Math.max(Number(v2.confidence) || 0, 0.9),
       revision: { action: null, target_sku: null, add_items: [], new_term: null, new_tier: null, new_qty: null, hw_lic_toggle: null },
       reference: { is_pronoun_ref: false, option_ref: null, resolve_from_history: false },
-      _deterministicRouting: 'revise-no-prior-fresh-quote'
+      _deterministicRouting: 'deterministic-guard-revise-to-quote'
     };
   }
 
@@ -8363,6 +8364,10 @@ export default {
             if (activeClassification.intent === 'clarify') {
               const clarifyReply = activeClassification.reply
                 || buildClassifierClarifyReply(text, activeClassification._v2 || activeClassification._gemma || activeClassification);
+              const routingTag = activeClassification._v2?._deterministicRouting
+                || activeClassification._gemma?._deterministicRouting
+                || activeClassification._deterministicRouting
+                || null;
               if (!clarifyReply) {
                 console.log('[CF-First] Clarify intent without usable reply, falling through');
               } else {
@@ -8372,7 +8377,7 @@ export default {
                 await sendMessage(roomId, `${clarifyReply}\n\n_⚡ Workers AI (${activeClassification.elapsed}ms, free)_`, token);
                 T.step('wx-send', 'exit');
                 T.step('wx-d1', 'enter');
-                logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', durationMs: Date.now() - _wxStartMs, responseText: clarifyReply }).catch(() => {});
+                logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', model: routingTag, durationMs: Date.now() - _wxStartMs, responseText: clarifyReply }).catch(() => {});
                 writeMetric(env, { path: 'cf-clarify', durationMs: Date.now() - _wxStartMs, personId });
                 T.step('wx-d1', 'exit');
                 ctx.waitUntil(T.flush());
@@ -8456,6 +8461,10 @@ export default {
             else if (activeClassification.intent === 'quote') {
               // Use CF's extracted clean text if available, otherwise original text
               const quoteText = activeClassification.extracted || text;
+              const routingTag = activeClassification._v2?._deterministicRouting
+                || activeClassification._gemma?._deterministicRouting
+                || activeClassification._deterministicRouting
+                || null;
               console.log(`[CF-First] Quote intent, executing deterministic with: ${quoteText}`);
 
               // ── Step 2: Deterministic engine only runs when CF routes to "quote" ──
@@ -8555,7 +8564,7 @@ export default {
                   await sendMessage(roomId, `${quoteResult.message}\n\n_⚡ CF-routed deterministic (${activeClassification.elapsed}ms classify, free)_`, token);
                   T.step('wx-send', 'exit');
                   T.step('wx-d1', 'enter');
-                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-deterministic', durationMs: Date.now() - _wxStartMs, responseText: quoteResult.message }).catch(() => {});
+                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-deterministic', model: routingTag, durationMs: Date.now() - _wxStartMs, responseText: quoteResult.message }).catch(() => {});
                   writeMetric(env, { path: 'cf-deterministic', durationMs: Date.now() - _wxStartMs, personId });
                   T.step('wx-d1', 'exit');
                   ctx.waitUntil(T.flush());
