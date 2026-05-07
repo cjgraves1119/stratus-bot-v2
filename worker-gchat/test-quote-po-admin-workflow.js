@@ -29,6 +29,17 @@ function getFunction(name) {
 
 const shouldForceClaudeForWrite = getFunction('shouldForceClaudeForWrite');
 const isHardwareOnlyQuoteIntent = getFunction('isHardwareOnlyQuoteIntent');
+const salesOrderEsignErrorMessage = getFunction('salesOrderEsignErrorMessage');
+const salesOrderVendorReference = Function(`"use strict";
+function zohoLookupId(value) {
+  if (!value) return null;
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (typeof value === 'object') return value.id || value.ID || value.value || value.name || null;
+  return null;
+}
+${extractFunction('salesOrderVendorReference')}
+return salesOrderVendorReference;
+`)();
 const zohoTopLevelModuleFromCreatePath = Function(`"use strict";
 const ZOHO_AI_CREATED_TAG_MODULES = new Set([
   'Accounts',
@@ -83,6 +94,19 @@ assert.equal(shouldForceClaudeForWrite('what is the most recent Zanesville quote
 assert.equal(isHardwareOnlyQuoteIntent('1 MV73M hardware only'), true);
 assert.equal(isHardwareOnlyQuoteIntent('just the hardware, no license'), true);
 assert.deepEqual(collectQuotePreResolveSkuTokens('MV73M-HW plus LIC-MV-1YR hardware only'), ['MV73M-HW']);
+assert.equal(
+  salesOrderEsignErrorMessage({ Admin_Action: 'LIVE_SendToEsign__Done', Client_Send_Status: 'Error', Log_Message: 'No any Vendor in Sales_Orders (+ trigger)' }),
+  'Error | LIVE_SendToEsign__Done | No any Vendor in Sales_Orders (+ trigger)',
+  'Sales Order send errors override generic admin-action done status'
+);
+assert.equal(salesOrderEsignErrorMessage({ Client_Send_Status: 'Envelope Sent' }), null, 'sent statuses are not treated as errors');
+assert.match(source, /const DEFAULT_QUOTE_VENDOR = 'TD SYNNEX CORPORATION'/, 'Quote default vendor uses the exact existing Zoho picklist value');
+assert.match(source, /Vendor: DEFAULT_QUOTE_VENDOR/, 'Quote creation writes the default vendor picklist value');
+assert.match(source, /data: \[\{ id: quoteId, Vendor: DEFAULT_QUOTE_VENDOR \}\]/, 'Quote-to-PO repairs missing Vendor using the same default picklist value');
+assert.match(source, /existing Zoho picklist value "TD SYNNEX CORPORATION"/, 'tool descriptions tell the model to use the existing picklist value');
+assert.doesNotMatch(source, /TD Synnex/, 'Quote default vendor never uses the informal display label');
+assert.equal(salesOrderVendorReference({ Vendor: { id: 'v123', name: 'TD SYNNEX CORPORATION' } }), 'v123', 'Sales Order vendor lookup accepts Zoho lookup fields');
+assert.equal(salesOrderVendorReference({ Vendor_SO_Number: 'not-a-vendor' }), null, 'Sales Order vendor preflight does not confuse vendor SO number with Vendor');
 
 assert.match(source, /case 'quote_to_po_and_esign'/, 'tool executor handles quote_to_po_and_esign');
 assert.match(source, /name: 'quote_to_po_and_esign'/, 'tool schema exposes quote_to_po_and_esign');
@@ -98,6 +122,11 @@ assert.match(source, /findLinkedSalesOrderFromQuote/, 'quote linkage fallback is
 assert.match(source, /fetchSalesOrderByReference/, 'quote linkage can resolve SO id or SO_Number');
 assert.match(source, /LIVE_SendToEsign/, 'e-sign admin action is present');
 assert.match(source, /moduleName: 'Sales_Orders'[\s\S]{0,180}actionName: 'LIVE_SendToEsign'/, 'LIVE_SendToEsign runs on Sales_Orders');
+assert.match(source, /actionName: 'LIVE_GetQuoteData'[\s\S]{0,900}actionName: 'LIVE_ConvertQuoteToSO'/, 'quote workflow refreshes vendor/disti data before PO conversion');
+assert.match(source, /salesOrderEsignErrorMessage\(finalState\)[\s\S]{0,500}Admin_Action === `\$\{actionName\}__Done`/, 'e-sign polling checks explicit send errors before treating Admin_Action__Done as success');
+assert.match(source, /e-signature was not sent/, 'e-sign failures are reported without claiming the PO was sent');
+assert.match(source, /state: 'po_missing_vendor'/, 'workflow blocks e-signature when converted PO has no Vendor');
+assert.match(source, /salesOrderVendorReference\(candidate\)/, 'newly converted PO has deterministic Vendor preflight before e-signature');
 assert.match(source, /include_licenses/, 'hardware-only quote path exposes include_licenses');
 assert.match(source, /hardware_only_no_licenses/, 'hardware-only quote path records license policy');
 assert.match(source, /Admin_Action updates must not include Quote_Stage/, 'Quote admin-action stage guard is present');
