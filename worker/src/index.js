@@ -1131,6 +1131,131 @@ async function classifyWithGemma4(userMessage, priorContext, env) {
   }
 }
 
+const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)$/i;
+
+function getClassifierItems(v2) {
+  return Array.isArray(v2?.items) ? v2.items : [];
+}
+
+function classifierHasAmbiguousStem(v2) {
+  return getClassifierItems(v2).some(i => i && typeof i.sku === 'string' && ROUTING_AMBIGUOUS_STEM.test(i.sku.trim()));
+}
+
+function buildClassifierClarifyReply(rawText, classification) {
+  const text = typeof rawText === 'string' ? rawText : '';
+  const items = getClassifierItems(classification);
+  const itemSku = items
+    .map(i => (i && typeof i.sku === 'string' ? i.sku.trim().toUpperCase() : ''))
+    .find(sku => ROUTING_AMBIGUOUS_STEM.test(sku));
+  const rawSku = (text.match(/\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425(?!-))\b/i) || [])[1];
+  const ambiguousSku = itemSku || (rawSku ? rawSku.toUpperCase() : '');
+
+  if (ambiguousSku) {
+    if (/^MS125-24$/i.test(ambiguousSku)) {
+      return 'Which MS125-24 variant should I quote: MS125-24 or MS125-24P?';
+    }
+    if (/^MS125-48$/i.test(ambiguousSku)) {
+      return 'Which MS125-48 variant should I quote: MS125-48, MS125-48LP, or MS125-48FP?';
+    }
+    if (/^MS130-24$/i.test(ambiguousSku)) {
+      return 'Which MS130-24 variant should I quote: MS130-24, MS130-24P, or MS130-24X?';
+    }
+    if (/^MS130-48$/i.test(ambiguousSku)) {
+      return 'Which MS130-48 variant should I quote: MS130-48, MS130-48P, or MS130-48X?';
+    }
+    if (/^MS150-24$/i.test(ambiguousSku)) {
+      return 'Which MS150-24 variant should I quote: MS150-24T-4G, MS150-24T-4X, MS150-24P-4G, MS150-24P-4X, or MS150-24MP-4X?';
+    }
+    if (/^MS150-48$/i.test(ambiguousSku)) {
+      return 'Which MS150-48 variant should I quote: MS150-48T-4G, MS150-48T-4X, MS150-48LP-4G, MS150-48LP-4X, MS150-48FP-4G, MS150-48FP-4X, or MS150-48MP-4X?';
+    }
+    if (/^MS210-24$/i.test(ambiguousSku)) {
+      return 'Which MS210-24 variant should I quote: MS210-24 or MS210-24P?';
+    }
+    if (/^MS210-48$/i.test(ambiguousSku)) {
+      return 'Which MS210-48 variant should I quote: MS210-48, MS210-48LP, or MS210-48FP?';
+    }
+    if (/^MS225-24$/i.test(ambiguousSku)) {
+      return 'Which MS225-24 variant should I quote: MS225-24 or MS225-24P?';
+    }
+    if (/^MS225-48$/i.test(ambiguousSku)) {
+      return 'Which MS225-48 variant should I quote: MS225-48, MS225-48LP, or MS225-48FP?';
+    }
+    if (/^MS250-24$/i.test(ambiguousSku)) {
+      return 'Which MS250-24 variant should I quote: MS250-24 or MS250-24P?';
+    }
+    if (/^MS250-48$/i.test(ambiguousSku)) {
+      return 'Which MS250-48 variant should I quote: MS250-48 or MS250-48FP?';
+    }
+    if (/^MS350-24$/i.test(ambiguousSku)) {
+      return 'Which MS350-24 variant should I quote: MS350-24, MS350-24P, or MS350-24X?';
+    }
+    if (/^MS350-48$/i.test(ambiguousSku)) {
+      return 'Which MS350-48 variant should I quote: MS350-48, MS350-48FP, or MS350-48LP?';
+    }
+    if (/^MS390-24$/i.test(ambiguousSku)) {
+      return 'Which MS390-24 variant should I quote: MS390-24P, MS390-24U, or MS390-24UX?';
+    }
+    if (/^MS390-48$/i.test(ambiguousSku)) {
+      return 'Which MS390-48 variant should I quote: MS390-48P, MS390-48U, MS390-48UX, or MS390-48UX2?';
+    }
+    if (/^MS/i.test(ambiguousSku)) {
+      return 'Which exact switch model should I quote? Please include the full model and variant, such as MS130-24P or MS150-24P-4G.';
+    }
+  }
+
+  const genericQuote = /\b(quote|price|pricing|cost|how\s+much|show\s+me|get\s+me|give\s+me|need|want|looking\s+for)\b/i.test(text);
+  if (genericQuote && /\bswitch(?:es)?\b/i.test(text) && !/\b(MS\d{2,4}|C9\d{3}|C8\d{3})/i.test(text)) {
+    return 'Which switch model should I quote? Common options are MS130-24P, MS130-24X, MS150-24P-4G, and MS150-24P-4X.';
+  }
+  if (genericQuote && /\b(AP|APs|access\s+points?|wireless)\b/i.test(text) && !/\b(MR\d{2,4}|CW\d{4,5})\b/i.test(text)) {
+    return 'Which AP model should I quote? Common options are MR44, MR46, MR57, CW9164, CW9166, and CW9172I.';
+  }
+  if (genericQuote && items.length === 0 && /\b(price|pricing|cost|how\s+much)\b/i.test(text)) {
+    return 'Which SKU or product should I price?';
+  }
+  return null;
+}
+
+function shouldTreatNoPriorReviseAsFreshQuote(v2, rawText) {
+  const items = getClassifierItems(v2);
+  if (items.length === 0) return false;
+  const text = typeof rawText === 'string' ? rawText : '';
+  const freshQuoteLanguage = /\b(just\s+show|show\s+me|quote|price|pricing|cost|how\s+much|get\s+me|give\s+me|send\s+me|need|want|looking\s+for|renewal|renew|license|licenses)\b/i.test(text);
+  const editLanguage = /\b(add|remove|delete|swap|replace|change|revise|modify|update|instead|make\s+it|bump|drop|same|previous|that|this|option)\b/i.test(text);
+  return freshQuoteLanguage && !editLanguage;
+}
+
+function normalizeV2ClassifierForRouting(v2, rawText, hasPriorCtx) {
+  if (!v2 || typeof v2 !== 'object' || !v2.intent) return v2;
+  const intent = String(v2.intent).toLowerCase();
+  const items = getClassifierItems(v2);
+  const clarifyReply = buildClassifierClarifyReply(rawText, v2);
+
+  if (intent === 'quote' && clarifyReply && (items.length === 0 || classifierHasAmbiguousStem(v2))) {
+    return {
+      ...v2,
+      intent: 'clarify',
+      reply: clarifyReply,
+      confidence: 1,
+      _deterministicRouting: 'clarify-known-empty-or-ambiguous'
+    };
+  }
+
+  if (intent === 'revise' && !hasPriorCtx && shouldTreatNoPriorReviseAsFreshQuote(v2, rawText)) {
+    return {
+      ...v2,
+      intent: 'quote',
+      confidence: Math.max(Number(v2.confidence) || 0, 0.9),
+      revision: { action: null, target_sku: null, add_items: [], new_term: null, new_tier: null, new_qty: null, hw_lic_toggle: null },
+      reference: { is_pronoun_ref: false, option_ref: null, resolve_from_history: false },
+      _deterministicRouting: 'revise-no-prior-fresh-quote'
+    };
+  }
+
+  return v2;
+}
+
 const DEEPSEEK_MODEL_IDS = new Set(['deepseek-v4-pro', 'deepseek-v4-flash']);
 const DEEPSEEK_COST_PER_1M = {
   'deepseek-v4-pro': { inputCacheMiss: 1.74, inputCacheHit: 0.145, output: 3.48 },
@@ -8075,6 +8200,7 @@ export default {
           // tail-latency spike can't stall the hot path.
           let classification;                  // legacy result (always fetched)
           let v2Classification = null;         // V2 result (fetched only when flag on)
+          let v2RoutingClassification = null;  // V2 plus deterministic routing normalizations
           let gemma4Classification = null;     // Gemma result (null unless waterfall escalates)
           let _rollbackShadowPromise = null;   // V2 shadow promise for rollback-mode logging only
 
@@ -8099,28 +8225,27 @@ export default {
             // suit and escalating them burns a Gemma call for nothing.
             const LOW_CONF_THRESHOLD = 0.7;
             const GEMMA_TIMEOUT_MS = 5000;
-            // SKU stems that require a variant/port suffix before they can be quoted.
-            // Matches family + base model number with NO trailing -\d suffix (e.g.
-            // MS130-24 needs -4G / -2X; MS250 needs -24P/-48P etc.). If Llama emits
-            // one of these as a hard "quote" item, the user actually wants clarify.
-            const AMBIGUOUS_STEM = /^(MS130-24|MS150-24|MS150-48|MS250-24|MS250-48|MS350-24|MS350-48|MS425-16|MS425-32|MS130|MS150|MS250|MS350|MS425|MR|MX|MV|MT|MG|CW)$/i;
-            const v2Intent = v2Classification?.intent;
-            const v2ConfRaw = v2Classification?.confidence;
-            const v2Conf = typeof v2ConfRaw === 'number' ? v2ConfRaw : Number(v2ConfRaw) || 0;
-            const v2Broken = !v2Intent || v2Classification?.parseError || v2Classification?.error;
-            const v2Items = Array.isArray(v2Classification?.items) ? v2Classification.items : [];
             const hasPriorCtx = !!(priorCtxForV2 && String(priorCtxForV2).trim());
+            v2RoutingClassification = normalizeV2ClassifierForRouting(v2Classification, text, hasPriorCtx);
+            if (v2RoutingClassification?._deterministicRouting) {
+              console.log(`[Waterfall] Deterministic routing normalization: ${v2Classification?.intent || 'ERR'} -> ${v2RoutingClassification.intent} (${v2RoutingClassification._deterministicRouting})`);
+            }
+            const v2Intent = v2RoutingClassification?.intent;
+            const v2ConfRaw = v2RoutingClassification?.confidence;
+            const v2Conf = typeof v2ConfRaw === 'number' ? v2ConfRaw : Number(v2ConfRaw) || 0;
+            const v2Broken = !v2Intent || v2RoutingClassification?.parseError || v2RoutingClassification?.error;
+            const v2Items = Array.isArray(v2RoutingClassification?.items) ? v2RoutingClassification.items : [];
+            const deterministicHandled = !!v2RoutingClassification?._deterministicRouting;
             // Structural checks — catch confidently-wrong outputs the confidence gate misses.
             const structQuoteEmptyItems = v2Intent === 'quote' && v2Items.length === 0;
             const structReviseNoPrior = v2Intent === 'revise' && !hasPriorCtx;
-            const structAmbiguousStem = v2Intent === 'quote'
-              && v2Items.some(i => i && typeof i.sku === 'string' && AMBIGUOUS_STEM.test(i.sku.trim()));
-            const structuralEscalate = structQuoteEmptyItems || structReviseNoPrior || structAmbiguousStem;
+            const structAmbiguousStem = v2Intent === 'quote' && classifierHasAmbiguousStem(v2RoutingClassification);
+            const structuralEscalate = !deterministicHandled && (structQuoteEmptyItems || structReviseNoPrior || structAmbiguousStem);
             // Weak-intent bucket — only escalate price_lookup when prior_context exists
             // (pronoun/ambiguity territory); bare clarify always benefits from Gemma's
             // second opinion. Both are cheap: Llama resolves clarify in ~2s, so an
             // extra Gemma call is only ~3s added budget.
-            const weakHit = (v2Intent === 'price_lookup' && hasPriorCtx) || v2Intent === 'clarify';
+            const weakHit = !deterministicHandled && ((v2Intent === 'price_lookup' && hasPriorCtx) || v2Intent === 'clarify');
             const escalate = v2Broken || v2Conf < LOW_CONF_THRESHOLD || weakHit || structuralEscalate;
 
             if (escalate) {
@@ -8179,21 +8304,21 @@ export default {
           // Gemma's second opinion rescues the call.
           let activeClassification = classification; // legacy by default
           const v2Valid = USE_V2_CLASSIFIER
-            && v2Classification
-            && !v2Classification.parseError
-            && !v2Classification.error
-            && v2Classification.intent;
+            && v2RoutingClassification
+            && !v2RoutingClassification.parseError
+            && !v2RoutingClassification.error
+            && v2RoutingClassification.intent;
           if (v2Valid) {
             // Map V2 schema intent to legacy format for routing compatibility
             activeClassification = {
-              intent: v2Classification.intent,
-              reply: v2Classification.reply || '',
-              extracted: v2Classification.items?.map(i => `${i.qty || 1} ${i.sku}`).join(', ') || '',
-              elapsed: v2Classification.elapsed,
+              intent: v2RoutingClassification.intent,
+              reply: v2RoutingClassification.reply || '',
+              extracted: v2RoutingClassification.items?.map(i => `${i.qty || 1} ${i.sku}`).join(', ') || '',
+              elapsed: v2RoutingClassification.elapsed,
               // Preserve V2 rich structure for downstream use
-              _v2: v2Classification
+              _v2: v2RoutingClassification
             };
-            console.log(`[V2-Active] intent=${activeClassification.intent} (V2 ${v2Classification.elapsed}ms / legacy ${classification?.elapsed}ms)`);
+            console.log(`[V2-Active] intent=${activeClassification.intent} (V2 ${v2RoutingClassification.elapsed}ms / legacy ${classification?.elapsed}ms)`);
           } else if (USE_V2_CLASSIFIER) {
             console.log(`[V2-Fallback] V2 failed (${v2Classification?.error || v2Classification?.parseError || 'null'}), using legacy classifier`);
           }
@@ -8222,7 +8347,7 @@ export default {
                 extracted: gemma4Classification.items?.map(i => `${i.qty || 1} ${i.sku}`).join(', ') || '',
                 elapsed: gemma4Classification.elapsed,
                 _gemma: gemma4Classification,
-                _v2: v2Valid ? v2Classification : undefined
+                _v2: v2Valid ? v2RoutingClassification : undefined
               };
             } else {
               console.log(`[Waterfall] Gemma agrees or below win threshold: gemmaIntent=${gemmaIntent} conf=${gemmaConf} (keeping ${v2Valid ? 'V2' : 'legacy'}: ${activeIntentLower})`);
@@ -8232,19 +8357,27 @@ export default {
           if (activeClassification) {
             console.log(`[CF-First] Intent: ${activeClassification.intent} (${activeClassification.elapsed}ms)`);
 
-            // CF: clarify — ambiguous input needs more info
-            if (activeClassification.intent === 'clarify' && activeClassification.reply) {
-              await addToHistory(kv, personId, 'user', text);
-              await addToHistory(kv, personId, 'assistant', activeClassification.reply);
-              T.step('wx-send', 'enter');
-              await sendMessage(roomId, `${activeClassification.reply}\n\n_⚡ Workers AI (${activeClassification.elapsed}ms, free)_`, token);
-              T.step('wx-send', 'exit');
-              T.step('wx-d1', 'enter');
-              logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', durationMs: Date.now() - _wxStartMs, responseText: activeClassification.reply }).catch(() => {});
-              writeMetric(env, { path: 'cf-clarify', durationMs: Date.now() - _wxStartMs, personId });
-              T.step('wx-d1', 'exit');
-              ctx.waitUntil(T.flush());
-              return;
+            // CF: clarify — ambiguous input needs more info. If the classifier
+            // left reply empty, use deterministic wording for known Llama gaps
+            // instead of falling through to Claude for a simple clarification.
+            if (activeClassification.intent === 'clarify') {
+              const clarifyReply = activeClassification.reply
+                || buildClassifierClarifyReply(text, activeClassification._v2 || activeClassification._gemma || activeClassification);
+              if (!clarifyReply) {
+                console.log('[CF-First] Clarify intent without usable reply, falling through');
+              } else {
+                await addToHistory(kv, personId, 'user', text);
+                await addToHistory(kv, personId, 'assistant', clarifyReply);
+                T.step('wx-send', 'enter');
+                await sendMessage(roomId, `${clarifyReply}\n\n_⚡ Workers AI (${activeClassification.elapsed}ms, free)_`, token);
+                T.step('wx-send', 'exit');
+                T.step('wx-d1', 'enter');
+                logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-clarify', durationMs: Date.now() - _wxStartMs, responseText: clarifyReply }).catch(() => {});
+                writeMetric(env, { path: 'cf-clarify', durationMs: Date.now() - _wxStartMs, personId });
+                T.step('wx-d1', 'exit');
+                ctx.waitUntil(T.flush());
+                return;
+              }
             }
 
             // CF: product_info — route to Claude (CF classifies, Claude answers)
