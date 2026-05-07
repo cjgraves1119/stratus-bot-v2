@@ -1327,6 +1327,16 @@ function applySuffix(sku) {
   return upper;
 }
 
+function isAmbiguousMv73HardwareSku(sku) {
+  const upper = String(sku || '').trim().toUpperCase();
+  return upper === 'MV73' || upper === 'MV73-HW';
+}
+
+function ambiguousMv73Instruction(rawSkus) {
+  const listed = Array.isArray(rawSkus) && rawSkus.length ? rawSkus.join(', ') : 'MV73';
+  return `STOP. The user requested ${listed}, which is ambiguous. Do NOT create a Deal, Quote, PO, Sales Order, DID, or e-signature. The valid MV73 variants are MV73M-HW and MV73X-HW. Ask the user which one they want. Never use legacy/plain MV73-HW for a bare MV73 request.`;
+}
+
 // ─── License SKU Rules ───────────────────────────────────────────────────────
 function getLicenseSkus(baseSku, requestedTier) {
   if (requiresMsLicenseModelInputValidation(baseSku) && !hasKnownMsLicenseModelInput(baseSku)) {
@@ -8986,6 +8996,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const lookupPromises = skus.map(async (entry) => {
           const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
           const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
+          if (isAmbiguousMv73HardwareSku(rawSku)) {
+            batchResults[rawSku] = {
+              suffixed_sku: rawSku,
+              qty,
+              found: false,
+              ambiguous: true,
+              error: 'ambiguous_mv73_variant',
+              valid_variants: ['MV73M-HW', 'MV73X-HW'],
+              hint: ambiguousMv73Instruction([rawSku])
+            };
+            return;
+          }
           const suffixed = applySuffix(rawSku);
           // Resolve -Y ↔ -YR license term variants against the catalog so
           // a mis-typed term (LIC-MX75-ENT-3YR vs -3Y) doesn't falsely
@@ -9541,6 +9563,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // (e.g. "2 CW9172l" typo silently dropped while MX75/MX85 succeed).
           const missingUserHardware = [];
           const defaultTerm = license_term || '1';
+          const ambiguousMv73Skus = skus
+            .map(entry => (typeof entry === 'string' ? entry : entry?.sku))
+            .filter(sku => isAmbiguousMv73HardwareSku(sku))
+            .map(sku => String(sku).trim().toUpperCase());
+          if (ambiguousMv73Skus.length > 0) {
+            return {
+              success: false,
+              error: 'ambiguous_mv73_variant',
+              ambiguous_skus: ambiguousMv73Skus,
+              valid_variants: ['MV73M-HW', 'MV73X-HW'],
+              instruction: ambiguousMv73Instruction(ambiguousMv73Skus),
+              _user_visible_summary: 'Which MV73 variant should I use: MV73M-HW or MV73X-HW?',
+              wall_ms: Date.now() - _startMs
+            };
+          }
 
           function resolveFromCache(sku) {
             const suffixed = applySuffix(sku);
@@ -11960,7 +11997,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set and verify Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION" plus the complete required quote payload before reporting success. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set and verify Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION" plus the complete required quote payload before reporting success. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Bare MV73 or MV73-HW is ambiguous/legacy; ask whether the user wants MV73M-HW or MV73X-HW and do not create records until they choose. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {
@@ -12002,7 +12039,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'create_quote_on_deal',
-    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets and verifies Quote Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals plus required quote fields. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
+    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets and verifies Quote Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals plus required quote fields. Bare MV73 or MV73-HW is ambiguous/legacy; ask whether the user wants MV73M-HW or MV73X-HW and do not create records until they choose. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
     input_schema: {
       type: 'object',
       properties: {
@@ -12546,6 +12583,7 @@ SKU suffixes and hardware→license pairing are handled automatically by the too
 - License quantity always equals hardware quantity (1:1 ratio)
 - If a user explicitly names a license SKU (e.g., "LIC-ENT-3YR"), pass it as-is to batch_product_lookup
 - If the user asks for licenses only, do NOT convert that into hardware. In create_deal_and_quote, use the explicit license SKU or the model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN).
+- Bare MV73 or MV73-HW is ambiguous/legacy. Ask which valid MV73 variant they want: MV73M-HW or MV73X-HW. Never create MV73-HW from a bare MV73 request.
 
 **MR Enterprise License — UNIVERSAL across all MR APs.** The only valid SKUs are:
 - LIC-ENT-1YR (1 year)
@@ -13363,6 +13401,7 @@ MV cameras: MV2, MV12, MV22, MV32, MV72, MV93
 MT sensors: MT14, MT15, MT20, MT40
 Teleworker: Z4, Z4C
 Cellular: MG51, MG52
+MV73 camera variant rule: bare MV73 or MV73-HW is ambiguous/legacy. Ask which variant: MV73M-HW or MV73X-HW. Never pick MV73-HW automatically.
 IMPORTANT — Unknown/EOL model rule: If a user mentions a model number that follows Cisco/Meraki naming patterns (MR##, MX##, MS###-##, MV##, CW####, MT##, Z#, MG##) but is NOT in the active product list above, it is likely end-of-life or a typo. ALWAYS classify as "quote" if they want pricing — NEVER "clarify". The backend has full EOL data and handles replacement mapping automatically.
 
 Respond with ONLY this JSON:
@@ -13426,8 +13465,8 @@ async function classifyWithCF(userMessage, env) {
   }
 }
 
-const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)$/i;
-const ROUTING_AMBIGUOUS_TEXT_STEM = /\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)\b(?![A-Z0-9-])/i;
+const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MV73(?:-HW)?|MR|MX|MV|MT|MG|CW)$/i;
+const ROUTING_AMBIGUOUS_TEXT_STEM = /\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MV73(?:-HW)?|MR|MX|MV|MT|MG|CW)\b(?![A-Z0-9-])/i;
 
 function getClassifierItems(classification) {
   return Array.isArray(classification?.items) ? classification.items : [];
@@ -13510,6 +13549,9 @@ function buildClassifierClarifyReply(rawText, classification) {
     }
     if (/^MS390-48$/i.test(ambiguousSku)) {
       return 'Which MS390-48 variant should I quote: MS390-48P, MS390-48U, MS390-48UX, or MS390-48UX2?';
+    }
+    if (/^MV73(?:-HW)?$/i.test(ambiguousSku)) {
+      return 'Which MV73 variant should I quote: MV73M-HW or MV73X-HW?';
     }
     if (/^MS/i.test(ambiguousSku)) {
       return 'Which exact switch model should I quote? Please include the full model and variant, such as MS130-24P or MS150-24P-4G.';
