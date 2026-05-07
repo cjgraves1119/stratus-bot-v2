@@ -194,7 +194,29 @@ function applySuffix(sku) {
   return upper;
 }
 
+const MS390_LICENSE_MODEL_TOKENS = new Set([
+  'MS390-24', 'MS390-24P', 'MS390-24U', 'MS390-24UX',
+  'MS390-48', 'MS390-48P', 'MS390-48U', 'MS390-48UX', 'MS390-48UX2'
+]);
+
+function requiresMsLicenseModelInputValidation(modelToken) {
+  const upper = String(modelToken || '').toUpperCase();
+  return /^(MS130R|MS130|MS150|MS390)-/.test(upper);
+}
+
+function hasKnownMsLicenseModelInput(modelToken) {
+  const upper = String(modelToken || '').toUpperCase();
+  if (MS390_LICENSE_MODEL_TOKENS.has(upper)) return true;
+  const suffixed = applySuffix(upper);
+  return Boolean(prices[upper] || prices[suffixed]);
+}
+
 function getLicenseSkus(baseSku, requestedTier) {
+  if (requiresMsLicenseModelInputValidation(baseSku) && !hasKnownMsLicenseModelInput(baseSku)) {
+    console.warn(`[LICENSE] Invalid switch model token for license generation: ${baseSku}`);
+    return null;
+  }
+
   const raw = _getLicenseSkusRaw(baseSku, requestedTier);
   if (!raw || raw.length === 0) return null;
 
@@ -304,19 +326,21 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
 
   // MS130R (compact) — uses LIC-MS130-CMPT
   if (/^MS130R-/.test(upper)) {
+    const suffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'CMPTA' : 'CMPT';
     return [
-      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
-      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
-      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
+      { term: '1Y', sku: `LIC-MS130-${suffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS130-${suffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS130-${suffix}-5Y` }
     ];
   }
 
   // MS130-8P, MS130-12P (small form factor) — uses LIC-MS130-CMPT
   if (/^MS130-(8|12)/.test(upper)) {
+    const suffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'CMPTA' : 'CMPT';
     return [
-      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
-      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
-      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
+      { term: '1Y', sku: `LIC-MS130-${suffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS130-${suffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS130-${suffix}-5Y` }
     ];
   }
 
@@ -324,10 +348,11 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
   const ms130Match = upper.match(/^MS130-(24|48)/);
   if (ms130Match) {
     const ports = ms130Match[1];
+    const tierSuffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'A' : '';
     return [
-      { term: '1Y', sku: `LIC-MS130-${ports}-1Y` },
-      { term: '3Y', sku: `LIC-MS130-${ports}-3Y` },
-      { term: '5Y', sku: `LIC-MS130-${ports}-5Y` }
+      { term: '1Y', sku: `LIC-MS130-${ports}${tierSuffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS130-${ports}${tierSuffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS130-${ports}${tierSuffix}-5Y` }
     ];
   }
 
@@ -335,10 +360,11 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
   const ms150Match = upper.match(/^MS150-(24|48)/);
   if (ms150Match) {
     const ports = ms150Match[1];
+    const tierSuffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'A' : '';
     return [
-      { term: '1Y', sku: `LIC-MS150-${ports}-1Y` },
-      { term: '3Y', sku: `LIC-MS150-${ports}-3Y` },
-      { term: '5Y', sku: `LIC-MS150-${ports}-5Y` }
+      { term: '1Y', sku: `LIC-MS150-${ports}${tierSuffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS150-${ports}${tierSuffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS150-${ports}${tierSuffix}-5Y` }
     ];
   }
 
@@ -369,8 +395,7 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
   const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
   if (legacyMsMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
     const model = legacyMsMatch[1];
-    let port = legacyMsMatch[2];
-    if (model === 'MS350' && port === '48X') port = '48';
+    const port = legacyMsMatch[2];
     return [
       { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
       { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
@@ -1041,7 +1066,7 @@ const tests = [
 
   // MS130 small (8, 12) → CMPT
   ...[
-    'MS130-8', 'MS130-8P', 'MS130-8X', 'MS130-12X',
+    'MS130-8', 'MS130-8P', 'MS130-8P-I', 'MS130-8X', 'MS130-12X',
   ].map(sku => ({
     name: `[LICENSE] ${sku} → LIC-MS130-CMPT-*`,
     customTest: () => {
@@ -1055,8 +1080,10 @@ const tests = [
   ...[
     ['MS130-24', ['LIC-MS130-24-1Y', 'LIC-MS130-24-3Y', 'LIC-MS130-24-5Y']],
     ['MS130-24P', ['LIC-MS130-24-1Y', 'LIC-MS130-24-3Y', 'LIC-MS130-24-5Y']],
+    ['MS130-24X', ['LIC-MS130-24-1Y', 'LIC-MS130-24-3Y', 'LIC-MS130-24-5Y']],
     ['MS130-48', ['LIC-MS130-48-1Y', 'LIC-MS130-48-3Y', 'LIC-MS130-48-5Y']],
     ['MS130-48P', ['LIC-MS130-48-1Y', 'LIC-MS130-48-3Y', 'LIC-MS130-48-5Y']],
+    ['MS130-48X', ['LIC-MS130-48-1Y', 'LIC-MS130-48-3Y', 'LIC-MS130-48-5Y']],
   ].map(([sku, expected]) => ({
     name: `[LICENSE] ${sku} → port-based`,
     customTest: () => {
@@ -1067,15 +1094,67 @@ const tests = [
     }
   })),
 
+  // MS130 Advanced → port-based A-tier
+  ...[
+    ['MS130-8P-I', ['LIC-MS130-CMPTA-1Y', 'LIC-MS130-CMPTA-3Y', 'LIC-MS130-CMPTA-5Y']],
+    ['MS130-12X', ['LIC-MS130-CMPTA-1Y', 'LIC-MS130-CMPTA-3Y', 'LIC-MS130-CMPTA-5Y']],
+    ['MS130-8P', ['LIC-MS130-CMPTA-1Y', 'LIC-MS130-CMPTA-3Y', 'LIC-MS130-CMPTA-5Y']],
+    ['MS130-24P', ['LIC-MS130-24A-1Y', 'LIC-MS130-24A-3Y', 'LIC-MS130-24A-5Y']],
+    ['MS130-24X', ['LIC-MS130-24A-1Y', 'LIC-MS130-24A-3Y', 'LIC-MS130-24A-5Y']],
+    ['MS130-48P', ['LIC-MS130-48A-1Y', 'LIC-MS130-48A-3Y', 'LIC-MS130-48A-5Y']],
+    ['MS130-48X', ['LIC-MS130-48A-1Y', 'LIC-MS130-48A-3Y', 'LIC-MS130-48A-5Y']],
+  ].map(([sku, expected]) => ({
+    name: `[LICENSE] ${sku} A → source-backed MS130 Advanced mapping`,
+    customTest: () => {
+      const lics = getLicenseSkus(sku, 'A');
+      const actual = lics?.map(l => l.sku);
+      const pass = JSON.stringify(actual) === JSON.stringify(expected);
+      return { pass, actual: JSON.stringify(actual) };
+    }
+  })),
+
   // MS150 → port-based -Y
   ...[
+    ['MS150-24T-4G', ['LIC-MS150-24-1Y', 'LIC-MS150-24-3Y', 'LIC-MS150-24-5Y']],
     ['MS150-24P-4G', ['LIC-MS150-24-1Y', 'LIC-MS150-24-3Y', 'LIC-MS150-24-5Y']],
-    ['MS150-48FP-4X', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
+    ['MS150-24T-4X', ['LIC-MS150-24-1Y', 'LIC-MS150-24-3Y', 'LIC-MS150-24-5Y']],
+    ['MS150-24P-4X', ['LIC-MS150-24-1Y', 'LIC-MS150-24-3Y', 'LIC-MS150-24-5Y']],
+    ['MS150-24MP-4X', ['LIC-MS150-24-1Y', 'LIC-MS150-24-3Y', 'LIC-MS150-24-5Y']],
+    ['MS150-48T-4G', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
     ['MS150-48LP-4G', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
+    ['MS150-48FP-4G', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
+    ['MS150-48T-4X', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
+    ['MS150-48LP-4X', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
+    ['MS150-48FP-4X', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
+    ['MS150-48MP-4X', ['LIC-MS150-48-1Y', 'LIC-MS150-48-3Y', 'LIC-MS150-48-5Y']],
   ].map(([sku, expected]) => ({
     name: `[LICENSE] ${sku} → ${expected[0]}`,
     customTest: () => {
       const lics = getLicenseSkus(sku);
+      const actual = lics?.map(l => l.sku);
+      const pass = JSON.stringify(actual) === JSON.stringify(expected);
+      return { pass, actual: JSON.stringify(actual) };
+    }
+  })),
+
+  // MS150 Advanced → port-based A-tier
+  ...[
+    ['MS150-24T-4G', ['LIC-MS150-24A-1Y', 'LIC-MS150-24A-3Y', 'LIC-MS150-24A-5Y']],
+    ['MS150-24P-4G', ['LIC-MS150-24A-1Y', 'LIC-MS150-24A-3Y', 'LIC-MS150-24A-5Y']],
+    ['MS150-24T-4X', ['LIC-MS150-24A-1Y', 'LIC-MS150-24A-3Y', 'LIC-MS150-24A-5Y']],
+    ['MS150-24P-4X', ['LIC-MS150-24A-1Y', 'LIC-MS150-24A-3Y', 'LIC-MS150-24A-5Y']],
+    ['MS150-24MP-4X', ['LIC-MS150-24A-1Y', 'LIC-MS150-24A-3Y', 'LIC-MS150-24A-5Y']],
+    ['MS150-48T-4G', ['LIC-MS150-48A-1Y', 'LIC-MS150-48A-3Y', 'LIC-MS150-48A-5Y']],
+    ['MS150-48LP-4G', ['LIC-MS150-48A-1Y', 'LIC-MS150-48A-3Y', 'LIC-MS150-48A-5Y']],
+    ['MS150-48FP-4G', ['LIC-MS150-48A-1Y', 'LIC-MS150-48A-3Y', 'LIC-MS150-48A-5Y']],
+    ['MS150-48T-4X', ['LIC-MS150-48A-1Y', 'LIC-MS150-48A-3Y', 'LIC-MS150-48A-5Y']],
+    ['MS150-48LP-4X', ['LIC-MS150-48A-1Y', 'LIC-MS150-48A-3Y', 'LIC-MS150-48A-5Y']],
+    ['MS150-48FP-4X', ['LIC-MS150-48A-1Y', 'LIC-MS150-48A-3Y', 'LIC-MS150-48A-5Y']],
+    ['MS150-48MP-4X', ['LIC-MS150-48A-1Y', 'LIC-MS150-48A-3Y', 'LIC-MS150-48A-5Y']],
+  ].map(([sku, expected]) => ({
+    name: `[LICENSE] ${sku} A → source-backed MS150 Advanced mapping`,
+    customTest: () => {
+      const lics = getLicenseSkus(sku, 'A');
       const actual = lics?.map(l => l.sku);
       const pass = JSON.stringify(actual) === JSON.stringify(expected);
       return { pass, actual: JSON.stringify(actual) };
@@ -1099,8 +1178,10 @@ const tests = [
   ...[
     ['MS390-24UX', null, ['LIC-MS390-24E-1Y', 'LIC-MS390-24E-3Y', 'LIC-MS390-24E-5Y']],
     ['MS390-48P', null, ['LIC-MS390-48E-1Y', 'LIC-MS390-48E-3Y', 'LIC-MS390-48E-5Y']],
+    ['MS390-48UX', null, ['LIC-MS390-48E-1Y', 'LIC-MS390-48E-3Y', 'LIC-MS390-48E-5Y']],
     ['MS390-48UX2', null, ['LIC-MS390-48E-1Y', 'LIC-MS390-48E-3Y', 'LIC-MS390-48E-5Y']],
-    ['MS390-24', 'A', ['LIC-MS390-24A-1Y', 'LIC-MS390-24A-3Y', 'LIC-MS390-24A-5Y']],
+    ['MS390-24P', 'A', ['LIC-MS390-24A-1Y', 'LIC-MS390-24A-3Y', 'LIC-MS390-24A-5Y']],
+    ['MS390-24UX', 'A', ['LIC-MS390-24A-1Y', 'LIC-MS390-24A-3Y', 'LIC-MS390-24A-5Y']],
   ].map(([sku, tier, expected]) => ({
     name: `[LICENSE] ${sku} ${tier || 'E'} → MS390 format`,
     customTest: () => {
@@ -1246,7 +1327,6 @@ const tests = [
     ['MS225-48FP', ['LIC-MS225-48FP-1YR', 'LIC-MS225-48FP-3YR', 'LIC-MS225-48FP-5YR']],
     ['MS250-48FP', ['LIC-MS250-48FP-1YR', 'LIC-MS250-48FP-3YR', 'LIC-MS250-48FP-5YR']],
     ['MS350-24X', ['LIC-MS350-24X-1YR', 'LIC-MS350-24X-3YR', 'LIC-MS350-24X-5YR']],
-    ['MS350-48X', ['LIC-MS350-48-1YR', 'LIC-MS350-48-3YR', 'LIC-MS350-48-5YR']], // 48X → 48
     ['MS350-48', ['LIC-MS350-48-1YR', 'LIC-MS350-48-3YR', 'LIC-MS350-48-5YR']],
     ['MS355-24X', ['LIC-MS355-24X-1YR', 'LIC-MS355-24X-3YR', 'LIC-MS355-24X-5YR']],
     ['MS355-48X2', ['LIC-MS355-48X2-1YR', 'LIC-MS355-48X2-3YR', 'LIC-MS355-48X2-5YR']],
@@ -1332,7 +1412,7 @@ const tests = [
     ['MS120-8FP', 'MS130-8P'], ['MS120-24P', 'MS130-24P'], ['MS120-48LP', 'MS130-48P'],
     ['MS220-24P', 'MS130-24P'], ['MS220-48FP', 'MS130-48P'],
     ['MS250-24P', 'C9300L-24P-4X-M'], ['MS250-48FP', 'C9300L-48PF-4X-M'],
-    ['MS350-48FP', 'C9300-48P-M'], ['MS350-48X', 'C9300-48UXM-M'],
+    ['MS350-48FP', 'C9300-48P-M'],
     ['MS390-48UX', 'C9300-48UXM-M'], ['MS390-24UX', 'C9300-24UX-M'],
     ['MS390-48UX2', 'C9300-48UN-M'],
     ['MS425-16', 'C9300X-24Y-M'], ['MS425-32', 'C9300X-24Y-M'],
@@ -1434,7 +1514,6 @@ const tests = [
     ['MS425-32', 'C9300X-24Y-M', 'C9300X-24Y-M', 'LIC-C9300-24E-3Y'],
     ['MS250-48FP', 'C9300L-48PF-4X-M', 'C9300L-48PF-4X-M', 'LIC-C9300-48E-3Y'],
     ['MS355-24X', 'C9300X-24HX-M', 'C9300X-24HX-M', 'LIC-C9300-24E-3Y'],
-    ['MS350-48X', 'C9300-48UXM-M', 'C9300-48UXM-M', 'LIC-C9300-48E-3Y'],
   ].map(([eol, expectedRepl, expectedSuffix, expectedLic]) => ({
     name: `[CHAIN] ${eol} → ${expectedRepl} → suffix → license → price`,
     customTest: () => {
@@ -1560,14 +1639,25 @@ const tests = [
   { name: '[EDGE] MX67W → MX67W-HW (W variant, not cellular)',
     customTest: () => ({ pass: applySuffix('MX67W') === 'MX67W-HW', actual: applySuffix('MX67W') }) },
 
-  // MS350-24X vs MS350-48X license difference
-  { name: '[EDGE] MS350-24X keeps X in license, MS350-48X strips X',
+  // MS350-24X is real; MS350-48X is not.
+  { name: '[EDGE] MS350-24X keeps X in license, MS350-48X blocks',
     customTest: () => {
       const lics24x = getLicenseSkus('MS350-24X');
       const lics48x = getLicenseSkus('MS350-48X');
       const pass24 = lics24x && lics24x[0].sku === 'LIC-MS350-24X-1YR';
-      const pass48 = lics48x && lics48x[0].sku === 'LIC-MS350-48-1YR';
-      return { pass: pass24 && pass48, actual: `24X→${lics24x?.[0]?.sku}, 48X→${lics48x?.[0]?.sku}` };
+      const pass48 = lics48x === null;
+      return { pass: pass24 && pass48, actual: `24X→${lics24x?.[0]?.sku}, 48X→${lics48x?.[0]?.sku || 'BLOCK'}` };
+    }
+  },
+
+  // Port-count-collapse families must validate the input hardware token first.
+  { name: '[EDGE] MS130 fake variant blocks instead of collapsing to LIC-MS130-24',
+    customTest: () => {
+      const valid = getLicenseSkus('MS130-24P');
+      const invalid = getLicenseSkus('MS130-24Z');
+      const passValid = valid && valid[0].sku === 'LIC-MS130-24-1Y';
+      const passInvalid = invalid === null;
+      return { pass: passValid && passInvalid, actual: `MS130-24P→${valid?.[0]?.sku}, MS130-24Z→${invalid?.[0]?.sku || 'BLOCK'}` };
     }
   },
 

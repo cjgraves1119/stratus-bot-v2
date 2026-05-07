@@ -289,9 +289,39 @@ export function validateSku(baseSku) {
 // LICENSE SKU GENERATION
 // ============================================================================
 
-export function getLicenseSkus(baseSku, requestedTerm = null) {
+function hasMsAdvancedTierIntent(text) {
+  const upper = String(text || '').toUpperCase();
+  if (!/\b(MS130|MS150|MS390|C9\d{3}|C9200L|C9300)\b/.test(upper)) return false;
+  if (/\bADVANCED\s+SECURITY\b/.test(upper)) return false;
+  return /\b(ADVANCED|ADV)\s*(LICENSE|LICENSING|LICENCE|LIC|FEATURES?|TIER)?\b/.test(upper)
+    || /\bADAPTIVE\s+POLICY\b/.test(upper);
+}
+
+const MS390_LICENSE_MODEL_TOKENS = new Set([
+  'MS390-24', 'MS390-24P', 'MS390-24U', 'MS390-24UX',
+  'MS390-48', 'MS390-48P', 'MS390-48U', 'MS390-48UX', 'MS390-48UX2',
+]);
+
+function requiresMsLicenseModelInputValidation(modelToken) {
+  const upper = String(modelToken || '').toUpperCase();
+  return /^(MS130R|MS130|MS150|MS390)-/.test(upper);
+}
+
+function hasKnownMsLicenseModelInput(modelToken) {
+  const upper = String(modelToken || '').toUpperCase();
+  if (MS390_LICENSE_MODEL_TOKENS.has(upper)) return true;
+  const suffixed = applySuffix(upper);
+  return VALID_SKUS.has(upper) || VALID_SKUS.has(suffixed);
+}
+
+export function getLicenseSkus(baseSku, requestedTerm = null, requestedTier = null) {
   const upper = baseSku.toUpperCase();
   const terms = requestedTerm ? [String(requestedTerm)] : ['1', '3', '5'];
+  const switchTier = String(requestedTier || '').toUpperCase() === 'A' ? 'A' : 'E';
+
+  if (requiresMsLicenseModelInputValidation(upper) && !hasKnownMsLicenseModelInput(upper)) {
+    return [];
+  }
 
   // ── MR Access Points & CW Wi-Fi — LIC-ENT ──
   if (/^MR\d/.test(upper) || /^CW9\d/.test(upper)) {
@@ -354,24 +384,28 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
 
   // ── MS130R (compact ruggedized) — LIC-MS130-CMPT ──
   if (/^MS130R-/.test(upper)) {
-    return terms.map(t => `LIC-MS130-CMPT-${t}Y`);
+    const suffix = switchTier === 'A' ? 'CMPTA' : 'CMPT';
+    return terms.map(t => `LIC-MS130-${suffix}-${t}Y`);
   }
 
   // ── MS130-8P, MS130-12P (small form factor) — LIC-MS130-CMPT ──
   if (/^MS130-(8|12)/.test(upper)) {
-    return terms.map(t => `LIC-MS130-CMPT-${t}Y`);
+    const suffix = switchTier === 'A' ? 'CMPTA' : 'CMPT';
+    return terms.map(t => `LIC-MS130-${suffix}-${t}Y`);
   }
 
   // ── MS130-24/48 — LIC-MS130-{portCount} ──
   const ms130Match = upper.match(/^MS130-(24|48)/);
   if (ms130Match) {
-    return terms.map(t => `LIC-MS130-${ms130Match[1]}-${t}Y`);
+    const tierSuffix = switchTier === 'A' ? 'A' : '';
+    return terms.map(t => `LIC-MS130-${ms130Match[1]}${tierSuffix}-${t}Y`);
   }
 
   // ── MS150 — LIC-MS150-{portCount} ──
   const ms150Match = upper.match(/^MS150-(24|48)/);
   if (ms150Match) {
-    return terms.map(t => `LIC-MS150-${ms150Match[1]}-${t}Y`);
+    const tierSuffix = switchTier === 'A' ? 'A' : '';
+    return terms.map(t => `LIC-MS150-${ms150Match[1]}${tierSuffix}-${t}Y`);
   }
 
   // ── MS125 — LIC-MS125-{variant} ──
@@ -383,7 +417,7 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
   // ── MS390 — LIC-MS390-{portCount}E ──
   const ms390Match = upper.match(/^MS390-(\d+)/);
   if (ms390Match) {
-    return terms.map(t => `LIC-MS390-${ms390Match[1]}E-${t}Y`);
+    return terms.map(t => `LIC-MS390-${ms390Match[1]}${switchTier}-${t}Y`);
   }
 
   // ── MS450 — LIC-MS450-{portCount} ──
@@ -396,8 +430,7 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
   const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
   if (legacyMsMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
     const model = legacyMsMatch[1];
-    let port = legacyMsMatch[2];
-    if (model === 'MS350' && port === '48X') port = '48';
+    const port = legacyMsMatch[2];
     return terms.map(t => `LIC-${model}-${port}-${t}YR`);
   }
 
@@ -410,13 +443,12 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
     if (family === 'C9300X' || family === 'C9300L') family = 'C9300';
     // C9300X-12Y uses 24-port license
     if (catMatch[1] === 'C9300X' && portCount === '12') portCount = '24';
-    const tier = 'E';
     if (family === 'C9350') {
       // C9350 has only 3Y and 5Y
       const c9350terms = terms.filter(t => t !== '1');
-      return c9350terms.map(t => `LIC-${family}-${portCount}${tier}-${t}Y`);
+      return c9350terms.map(t => `LIC-${family}-${portCount}${switchTier}-${t}Y`);
     }
-    return terms.map(t => `LIC-${family}-${portCount}${tier}-${t}Y`);
+    return terms.map(t => `LIC-${family}-${portCount}${switchTier}-${t}Y`);
   }
 
   // ── C8111 / C8455 Secure Routers ──
@@ -432,6 +464,25 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
 // Direct LIC-MS... requests sometimes include a hardware variant shape or the
 // wrong Y/YR suffix. Normalize through the same license rules used for hardware
 // quotes before rendering local extension URLs.
+function canonicalDirectMsLicenseSku(modelToken, term) {
+  const model = String(modelToken || '').toUpperCase();
+  const suffix = `${term}Y`;
+
+  if (/^MS130-CMPTA$/.test(model)) return `LIC-MS130-CMPTA-${suffix}`;
+  if (/^MS130-CMPT$/.test(model)) return `LIC-MS130-CMPT-${suffix}`;
+
+  const ms130Adv = model.match(/^MS130-(24|48)A$/);
+  if (ms130Adv) return `LIC-MS130-${ms130Adv[1]}A-${suffix}`;
+
+  const ms150Adv = model.match(/^MS150-(24|48)A$/);
+  if (ms150Adv) return `LIC-MS150-${ms150Adv[1]}A-${suffix}`;
+
+  const ms390Tiered = model.match(/^MS390-(24|48)(A|E)$/);
+  if (ms390Tiered) return `LIC-MS390-${ms390Tiered[1]}${ms390Tiered[2]}-${suffix}`;
+
+  return null;
+}
+
 export function normalizeDirectLicenseSku(sku) {
   const upper = String(sku || '').trim().toUpperCase();
   if (VALID_SKUS.has(upper)) return { sku: upper };
@@ -439,6 +490,23 @@ export function normalizeDirectLicenseSku(sku) {
   const msDirect = upper.match(/^LIC-(MS\d{3}-[A-Z0-9-]+)-([135])Y(?:R)?$/);
   if (msDirect) {
     const [, modelToken, term] = msDirect;
+    const directCanonical = canonicalDirectMsLicenseSku(modelToken, term);
+    if (directCanonical) {
+      if (directCanonical === upper) return { sku: upper };
+      return {
+        sku: directCanonical,
+        note: `${upper} is not a valid switch license SKU; using ${directCanonical}.`,
+      };
+    }
+
+    if (requiresMsLicenseModelInputValidation(modelToken) && !hasKnownMsLicenseModelInput(modelToken)) {
+      return {
+        sku: upper,
+        invalid: true,
+        note: `${upper} is not a recognized switch license SKU.`,
+      };
+    }
+
     if (!detectFamily(modelToken)) {
       return {
         sku: upper,
@@ -574,6 +642,7 @@ export function parseSkuInput(text) {
 
   // ── Detect modifiers ──
   const modifiers = { hardwareOnly: false, licenseOnly: false };
+  if (hasMsAdvancedTierIntent(upper)) modifiers.switchTier = 'A';
   if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper)
       && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
     modifiers.hardwareOnly = true;
@@ -707,7 +776,7 @@ export function buildStratusUrl(items, modifiers = {}) {
 
     // Licenses — single term if specified, all terms otherwise
     if (!modifiers.hardwareOnly && !isLic) {
-      const licSkus = getLicenseSkus(baseSku, term);
+      const licSkus = getLicenseSkus(baseSku, term, modifiers.switchTier);
       for (const licSku of licSkus) {
         merged.set(licSku, (merged.get(licSku) || 0) + qty);
       }
