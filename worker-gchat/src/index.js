@@ -5127,6 +5127,7 @@ async function getGmailAccessToken(env) {
 // ─── Zoho CRM API Client ─────────────────────────────────────────────────────
 const ZOHO_AI_CREATED_TAG = 'Stratus AI Created';
 const ZOHO_AI_CREATED_TAG_COLOR = '#57B1FD';
+const DEFAULT_QUOTE_VENDOR = 'TD SYNNEX CORPORATION';
 const ZOHO_AI_CREATED_TAG_MODULES = new Set([
   'Accounts',
   'Contacts',
@@ -5942,12 +5943,12 @@ function validateCrmWrite(module_name, data, isCreate = false) {
   }
 
   if (module_name === 'Quotes' && isCreate) {
-    const required = ['Subject', 'Deal_Name', 'Valid_Till'];
-    for (const field of required) {
-      if (!data[field]) {
-        errors.push(`❌ Missing required field "${field}" for Quote creation.`);
-      }
-    }
+    if (!quoteRequiredVendorValue(data)) data.Vendor = DEFAULT_QUOTE_VENDOR;
+    // Auto-fill commonly skipped fields with safe defaults before enforcing
+    // the complete quote payload. These are required for downstream admin actions.
+    if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
+    if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
+    if (!data.Owner) data.Owner = { id: '2570562000141711002' };
     // Server-side Valid_Till enforcement: if Claude passes a past date or invalid date,
     // override with today + 30 days. LLMs frequently miscalculate dates.
     if (data.Valid_Till) {
@@ -5963,14 +5964,32 @@ function validateCrmWrite(module_name, data, isCreate = false) {
       // Missing Valid_Till — set default
       data.Valid_Till = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
     }
-    // Auto-fill commonly skipped fields with safe defaults
-    if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
-    if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
-    if (!data.Owner) data.Owner = { id: '2570562000141711002' };
     // Contact_Name enforcement: every quote must have a contact
     if (!data.Contact_Name) {
       console.log('[VALIDATE] Quote missing Contact_Name — applying Stratus Sales placeholder');
       data.Contact_Name = { id: '2570562000116205038' }; // Stratus Sales placeholder
+    }
+    const required = [
+      'Subject',
+      'Deal_Name',
+      'Contact_Name',
+      'Valid_Till',
+      'Vendor',
+      'Cisco_Billing_Term',
+      'Billing_Street',
+      'Billing_City',
+      'Billing_State',
+      'Billing_Code',
+      'Billing_Country',
+      'Shipping_Country'
+    ];
+    for (const field of required) {
+      if (!data[field]) {
+        errors.push(`❌ Missing required field "${field}" for Quote creation.`);
+      }
+    }
+    if (!Array.isArray(data.Quoted_Items) || data.Quoted_Items.length === 0) {
+      errors.push('❌ Missing required field "Quoted_Items" for Quote creation.');
     }
   }
 
@@ -6026,6 +6045,87 @@ function zohoLookupId(value) {
   if (!value) return null;
   if (typeof value === 'string') return value;
   return value.id || value.ID || value.record_id || null;
+}
+
+function vendorDisplayValue(value) {
+  if (!value) return '';
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+  if (typeof value === 'object') {
+    return String(value.name || value.display_value || value.value || value.actual_value || value.id || '').trim();
+  }
+  return '';
+}
+
+function quoteRequiredVendorValue(record) {
+  if (!record) return '';
+  return vendorDisplayValue(record.Vendor);
+}
+
+function quoteVendorDiagnostics(record) {
+  if (!record) return {};
+  return {
+    Vendor: vendorDisplayValue(record.Vendor) || null,
+    Vendor_Name: vendorDisplayValue(record.Vendor_Name) || null,
+    Vendor_Lookup: vendorDisplayValue(record.Vendor_Lookup) || null,
+    Distributor: vendorDisplayValue(record.Distributor) || null,
+    Disti: vendorDisplayValue(record.Disti) || null,
+    Supplier: vendorDisplayValue(record.Supplier) || null
+  };
+}
+
+function quoteVendorValue(record) {
+  return quoteRequiredVendorValue(record);
+}
+
+function quoteRequiredFieldIssues(record, options = {}) {
+  const issues = [];
+  const requireContact = options.requireContact !== false;
+  const requireNetTerms = options.requireNetTerms === true;
+  const items = quotePoLineItems(record);
+  const required = [
+    ['Subject', record?.Subject],
+    ['Deal_Name', zohoLookupId(record?.Deal_Name)],
+    ['Account_Name', zohoLookupId(record?.Account_Name)],
+    ['Valid_Till', record?.Valid_Till],
+    ['Cisco_Billing_Term', record?.Cisco_Billing_Term],
+    ['Billing_Street', record?.Billing_Street],
+    ['Billing_City', record?.Billing_City],
+    ['Billing_State', record?.Billing_State],
+    ['Billing_Code', record?.Billing_Code],
+    ['Billing_Country', record?.Billing_Country],
+    ['Shipping_Country', record?.Shipping_Country]
+  ];
+  if (requireContact) required.push(['Contact_Name', zohoLookupId(record?.Contact_Name)]);
+  if (requireNetTerms) required.push(['Net_Terms', record?.Net_Terms]);
+  for (const [field, value] of required) {
+    if (value === null || value === undefined || String(value).trim() === '') {
+      issues.push({ field, reason: 'missing' });
+    }
+  }
+  const vendor = quoteRequiredVendorValue(record);
+  if (!vendor) {
+    issues.push({ field: 'Vendor', reason: 'missing', expected: DEFAULT_QUOTE_VENDOR });
+  } else if (vendor !== DEFAULT_QUOTE_VENDOR) {
+    issues.push({ field: 'Vendor', reason: 'wrong_value', expected: DEFAULT_QUOTE_VENDOR, actual: vendor });
+  }
+  if (!items.length) {
+    issues.push({ field: 'Quoted_Items', reason: 'missing_or_empty' });
+  }
+  return issues;
+}
+
+function quoteRequiredFieldPayload({ quote, quoteId, state, errorPrefix, requireContact = true, requireNetTerms = false }) {
+  const issues = quoteRequiredFieldIssues(quote, { requireContact, requireNetTerms });
+  return {
+    success: false,
+    state,
+    quote_id: quoteId || quote?.id || null,
+    quote_subject: quote?.Subject || null,
+    required_field_issues: issues,
+    vendor_diagnostics: quoteVendorDiagnostics(quote),
+    error: `${errorPrefix}: ${issues.map(issue => issue.actual ? `${issue.field}=${issue.actual} (expected ${issue.expected})` : issue.field).join(', ')}`,
+    _no_partial_success: true
+  };
 }
 
 function isLikelyLicenseSku(sku) {
@@ -6086,6 +6186,7 @@ function salesOrderLooksEsignSent(record) {
   if (!record) return false;
   const statusText = [
     record.Client_Send_Status,
+    record.Purchase_Order_Status,
     record.Signature_Status,
     record.Esignature_Status,
     record.Esign_Status,
@@ -6094,6 +6195,56 @@ function salesOrderLooksEsignSent(record) {
   ].filter(Boolean).join(' ').toLowerCase();
   // Do not treat plain "Pending" as sent; in this org it can mean "not sent yet".
   return /\b(envelope\s+sent|sent|delivered|viewed|signed|completed|complete|executed|out\s+for\s+signature|waiting\s+for\s+customer)\b/.test(statusText);
+}
+
+function salesOrderEsignErrorMessage(record) {
+  if (!record) return null;
+  const fields = [
+    record.Client_Send_Status,
+    record.Purchase_Order_Status,
+    record.Signature_Status,
+    record.Esignature_Status,
+    record.Esign_Status,
+    record.DocuSign_Status,
+    record.ZohoSign_Status,
+    record.Admin_Action,
+    record.Log_Message,
+    record.Event_Log,
+    record.Error_Message,
+    record.Last_Error
+  ].filter(v => v !== null && v !== undefined && v !== '');
+  const combined = fields.map(v => {
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  }).join(' | ');
+  if (!combined) return null;
+  if (/\b(error|failed|failure|exception|not\s+found|missing|invalid|no\s+any\s+vendor)\b/i.test(combined)) {
+    return combined.slice(0, 500);
+  }
+  return null;
+}
+
+function salesOrderVendorReference(record) {
+  if (!record) return null;
+  const candidates = [
+    record.Vendor,
+    record.Vendor_Name,
+    record.Vendor_Lookup,
+    record.Distributor,
+    record.Disti,
+    record.Supplier
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const id = zohoLookupId(candidate);
+    if (id) return id;
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    if (typeof candidate === 'object') {
+      const label = candidate.name || candidate.display_value || candidate.value;
+      if (label) return String(label).trim();
+    }
+  }
+  return null;
 }
 
 function sortSalesOrdersNewestFirst(records = []) {
@@ -6136,7 +6287,10 @@ function summarizeSalesOrdersForUser(records = []) {
     grand_total: so.Grand_Total || null,
     status: so.Status || null,
     client_send_status: so.Client_Send_Status || null,
+    purchase_order_status: so.Purchase_Order_Status || null,
+    vendor_ref: salesOrderVendorReference(so),
     signature_status: so.Signature_Status || so.Esignature_Status || so.Esign_Status || so.DocuSign_Status || so.ZohoSign_Status || null,
+    esign_error: salesOrderEsignErrorMessage(so),
     created_time: so.Created_Time || null,
     url: so.id ? `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${so.id}` : null
   }));
@@ -6671,6 +6825,27 @@ function buildPoFinancialMismatchPayload({ quote, salesOrder, validation }) {
   };
 }
 
+function buildPoMissingVendorPayload({ quote, salesOrder, validation, did, velocity, convert, quoteData, aiTag, netTermsNotice }) {
+  const soNumber = salesOrder?.SO_Number || salesOrder?.id || '';
+  const terms = netTermsNotice ? ` ${netTermsNotice}` : '';
+  return {
+    success: false,
+    state: 'po_missing_vendor',
+    quote_id: quote?.id || null,
+    quote_subject: quote?.Subject || null,
+    ccw_deal_number: did?.ccw_deal_number || null,
+    velocity_hub_submission: velocity || did?.velocity_hub_submission || null,
+    sales_order: summarizeSalesOrdersForUser([salesOrder])[0],
+    financial_validation: validation || null,
+    quote_data_admin_action: quoteData || null,
+    convert_admin_action: convert || null,
+    ai_created_tag: aiTag || null,
+    error: 'PO was created with correct pricing but has no Vendor populated, so I did not send it for e-signature.',
+    _record_url: salesOrder?.id ? `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${salesOrder.id}` : null,
+    _user_visible_summary: `PO ${soNumber} was created and pricing was verified, but e-signature was not sent because the Sales Order has no Vendor populated. Set Vendor on the Sales Order in Zoho, then retry with sales_order_id.${terms}`
+  };
+}
+
 async function fetchQuotePoTaxContext(quote, env) {
   const sources = [{ source: 'Quote', record: quote }];
   const accountId = zohoLookupId(quote?.Account_Name);
@@ -6689,12 +6864,19 @@ async function triggerAndPollAdminAction({ moduleName, recordId, actionName, env
   let preState = null;
   try {
     preState = await fetchRecordFull(moduleName, recordId, env);
-    snapshots.push({ at_ms: 0, Admin_Action: preState?.Admin_Action || null, Client_Send_Status: preState?.Client_Send_Status || null });
-    if (preState?.Admin_Action === `${actionName}__Done`) {
+    snapshots.push({
+      at_ms: 0,
+      Admin_Action: preState?.Admin_Action || null,
+      Client_Send_Status: preState?.Client_Send_Status || null,
+      Purchase_Order_Status: preState?.Purchase_Order_Status || null,
+      esign_error: moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign' ? salesOrderEsignErrorMessage(preState) : null
+    });
+    if (moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign') {
+      if (salesOrderLooksEsignSent(preState)) {
+        return { success: true, state: 'already_sent', final_state: preState, poll_snapshots: snapshots };
+      }
+    } else if (preState?.Admin_Action === `${actionName}__Done`) {
       return { success: true, state: 'already_done', final_state: preState, poll_snapshots: snapshots };
-    }
-    if (moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign' && salesOrderLooksEsignSent(preState)) {
-      return { success: true, state: 'already_sent', final_state: preState, poll_snapshots: snapshots };
     }
   } catch (err) {
     snapshots.push({ at_ms: 0, preflight_error: err.message });
@@ -6715,22 +6897,43 @@ async function triggerAndPollAdminAction({ moduleName, recordId, actionName, env
         at_ms: Date.now() - start,
         Admin_Action: finalState?.Admin_Action || null,
         Client_Send_Status: finalState?.Client_Send_Status || null,
+        Purchase_Order_Status: finalState?.Purchase_Order_Status || null,
+        esign_error: moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign' ? salesOrderEsignErrorMessage(finalState) : null,
         Modified_Time: finalState?.Modified_Time || null
       });
+      if (moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign') {
+        const sendError = salesOrderEsignErrorMessage(finalState);
+        if (String(finalState?.Admin_Action || '').includes('__Error')) {
+          return { success: false, state: 'error', error: sendError || 'LIVE_SendToEsign returned an admin action error.', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+        }
+        if (finalState?.Admin_Action === `${actionName}__Done`) {
+          if (sendError) {
+            return { success: false, state: 'send_error_status', error: sendError, final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+          }
+          return { success: true, state: 'done', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+        }
+        if (salesOrderLooksEsignSent(finalState)) {
+          return { success: true, state: 'sent', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+        }
+        continue;
+      }
       if (finalState?.Admin_Action === `${actionName}__Done`) {
         return { success: true, state: 'done', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
       }
       if (String(finalState?.Admin_Action || '').includes('__Error')) {
         return { success: false, state: 'error', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
       }
-      if (moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign' && salesOrderLooksEsignSent(finalState)) {
-        return { success: true, state: 'sent', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
-      }
     } catch (err) {
       snapshots.push({ at_ms: Date.now() - start, poll_error: err.message });
     }
   }
 
+  if (moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign') {
+    const sendError = salesOrderEsignErrorMessage(finalState);
+    if (sendError) {
+      return { success: false, state: 'send_error_status', error: sendError, final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+    }
+  }
   return { success: true, state: 'processing', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
 }
 
@@ -6853,6 +7056,55 @@ async function setAndVerifyQuoteNetTerms(quoteId, netTerms, env) {
   return { success: false, state: 'not_persisted', error: `Net_Terms did not verify as "${netTerms}" after update.` };
 }
 
+async function setAndVerifyQuoteDefaultVendor(quoteId, quote, env) {
+  const current = quoteRequiredVendorValue(quote);
+  if (current === DEFAULT_QUOTE_VENDOR) {
+    return {
+      success: true,
+      state: 'already_set',
+      vendor: current,
+      vendor_diagnostics: quoteVendorDiagnostics(quote),
+      quote
+    };
+  }
+  const write = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, {
+    data: [{ id: quoteId, Vendor: DEFAULT_QUOTE_VENDOR }]
+  });
+  const parsed = parseZohoResponse(write, 'Quote Vendor update');
+  if (parsed?.success === false) {
+    return {
+      success: false,
+      state: 'write_rejected',
+      error: parsed.message,
+      vendor_diagnostics: quoteVendorDiagnostics(quote),
+      write_result: write
+    };
+  }
+  for (let i = 0; i < 3; i++) {
+    await sleep(i === 0 ? 1000 : 2500);
+    const refreshed = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => null);
+    const vendor = quoteRequiredVendorValue(refreshed);
+    if (vendor === DEFAULT_QUOTE_VENDOR) {
+      return {
+        success: true,
+        state: 'verified',
+        vendor,
+        vendor_diagnostics: quoteVendorDiagnostics(refreshed),
+        quote: refreshed
+      };
+    }
+  }
+  const refreshed = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => null);
+  return {
+    success: false,
+    state: 'not_persisted',
+    error: `Quote Vendor did not verify as "${DEFAULT_QUOTE_VENDOR}" after update. Secondary fields such as Vendor_Name do not satisfy the admin-action preflight.`,
+    vendor_diagnostics: quoteVendorDiagnostics(refreshed || quote),
+    write_result: write,
+    quote: refreshed || quote
+  };
+}
+
 async function handleQuoteToPoAndEsign(toolInput, env, personId) {
   const start = Date.now();
   const quoteId = toolInput.quote_id;
@@ -6897,6 +7149,33 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
   if (sendForEsign && !zohoLookupId(quote.Contact_Name)) {
     return finish({ success: false, quote_id: quoteId, quote_subject: quote.Subject, error: 'Quote has no Contact_Name; cannot send PO for e-signature.', _no_partial_success: true });
   }
+  const quoteVendor = await setAndVerifyQuoteDefaultVendor(quoteId, quote, env);
+  if (!quoteVendor.success) {
+    return finish({
+      success: false,
+      state: 'quote_default_vendor_not_verified',
+      quote_id: quoteId,
+      quote_subject: quote.Subject,
+      default_vendor: DEFAULT_QUOTE_VENDOR,
+      vendor_update: quoteVendor,
+      error: `Quote Vendor could not be verified as ${DEFAULT_QUOTE_VENDOR}; I did not convert it to a PO.`,
+      _no_partial_success: true
+    }, 'blocked');
+  }
+  quote = quoteVendor.quote || quote;
+  const adminReadyIssues = quoteRequiredFieldIssues(quote, { requireContact: sendForEsign, requireNetTerms: false });
+  if (adminReadyIssues.length > 0) {
+    return finish({
+      ...quoteRequiredFieldPayload({
+        quote,
+        quoteId,
+        state: 'quote_required_fields_not_verified',
+        errorPrefix: 'Quote required fields are not verified, so no admin actions were run',
+        requireContact: sendForEsign
+      }),
+      instruction: 'STOP. Do not run LIVE_CiscoQuote_Deal, LIVE_GetQuoteData, LIVE_ConvertQuoteToSO, or LIVE_SendToEsign until these required fields persist on the Quote.'
+    }, 'blocked');
+  }
   const taxExemptContext = await fetchQuotePoTaxContext(quote, env);
 
   const existingSalesOrders = await findSalesOrdersForDeal(dealId, env);
@@ -6932,6 +7211,13 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     if (salesOrderLooksEsignSent(requested)) {
       return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([requested])[0], financial_validation: requestedValidation });
     }
+    if (!salesOrderVendorReference(requested)) {
+      return finish(buildPoMissingVendorPayload({
+        quote,
+        salesOrder: requested,
+        validation: requestedValidation
+      }), 'blocked');
+    }
     const esign = await triggerAndPollAdminAction({ moduleName: 'Sales_Orders', recordId: requested.id, actionName: 'LIVE_SendToEsign', env, maxPollMs: 60000 });
     return finish({
       success: esign.success !== false,
@@ -6941,7 +7227,9 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       financial_validation: requestedValidation,
       esign_admin_action: esign,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${requested.id}`,
-      _user_visible_summary: `PO ${requested.SO_Number || requested.id} is ${esign.success === false ? 'not sent' : 'sent/processing'} for e-signature.`
+      _user_visible_summary: esign.success === false
+        ? `PO ${requested.SO_Number || requested.id} pricing is verified, but e-signature was not sent. ${esign.error ? `Zoho reported: ${esign.error}` : 'Zoho reported an e-signature error.'}`
+        : `PO ${requested.SO_Number || requested.id} is sent/processing for e-signature.`
     }, esign.success === false ? 'error' : 'success');
   }
 
@@ -6958,6 +7246,13 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     if (salesOrderLooksEsignSent(existing)) {
       return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([existing])[0], financial_validation: existingValidation });
     }
+    if (!salesOrderVendorReference(existing)) {
+      return finish(buildPoMissingVendorPayload({
+        quote,
+        salesOrder: existing,
+        validation: existingValidation
+      }), 'blocked');
+    }
     const esign = await triggerAndPollAdminAction({ moduleName: 'Sales_Orders', recordId: existing.id, actionName: 'LIVE_SendToEsign', env, maxPollMs: 60000 });
     return finish({
       success: esign.success !== false,
@@ -6965,7 +7260,10 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       quote_id: quoteId,
       sales_order: summarizeSalesOrdersForUser([esign.final_state || existing])[0],
       financial_validation: existingValidation,
-      esign_admin_action: esign
+      esign_admin_action: esign,
+      _user_visible_summary: esign.success === false
+        ? `PO ${existing.SO_Number || existing.id} pricing is verified, but e-signature was not sent. ${esign.error ? `Zoho reported: ${esign.error}` : 'Zoho reported an e-signature error.'}`
+        : `PO ${existing.SO_Number || existing.id} is sent/processing for e-signature.`
     }, esign.success === false ? 'error' : 'success');
   }
 
@@ -7027,6 +7325,38 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     netTermsNotice = `Net_Terms was blank, so it was defaulted to Cash because Grand_Total is $${grandTotal.toFixed(2)} (under $5,000).`;
     progress(netTermsNotice);
   }
+  const conversionReadyIssues = quoteRequiredFieldIssues(quote, { requireContact: sendForEsign, requireNetTerms: true });
+  if (conversionReadyIssues.length > 0) {
+    return finish({
+      ...quoteRequiredFieldPayload({
+        quote,
+        quoteId,
+        state: 'quote_required_fields_not_verified_before_po',
+        errorPrefix: 'Quote required fields are not verified, so PO conversion did not run',
+        requireContact: sendForEsign,
+        requireNetTerms: true
+      }),
+      instruction: 'STOP. Do not create a PO until every required Quote field is verified.'
+    }, 'blocked');
+  }
+
+  progress('Refreshing quote vendor/disti data before PO conversion...');
+  const quoteData = await triggerAndPollAdminAction({
+    moduleName: 'Quotes',
+    recordId: quoteId,
+    actionName: 'LIVE_GetQuoteData',
+    env,
+    maxPollMs: 60000,
+    pollEveryMs: 5000
+  }).catch(err => ({
+    success: false,
+    state: 'exception',
+    error: err.message
+  }));
+  if (quoteData.success === false) {
+    progress(`Vendor/disti data refresh returned ${quoteData.state || 'an error'}; continuing because ecomm pricing has already been validated.`);
+  }
+  quote = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => quote) || quote;
 
   progress('Converting Quote to PO using Zoho admin action...');
   const convert = await triggerAndPollAdminAction({
@@ -7117,6 +7447,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       financial_validation: financialValidation,
       net_terms_notice: netTermsNotice,
       ai_created_tag: salesOrderAiTag,
+      quote_data_admin_action: quoteData,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}.`)
     });
@@ -7134,9 +7465,25 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       financial_validation: financialValidation,
       net_terms_notice: netTermsNotice,
       ai_created_tag: salesOrderAiTag,
+      quote_data_admin_action: quoteData,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}; e-signature already appears sent or in progress.`)
     });
+  }
+
+  if (!salesOrderVendorReference(candidate)) {
+    progress(`PO ${candidate.SO_Number || candidate.id} has no Vendor populated; e-signature was not sent.`);
+    return finish(buildPoMissingVendorPayload({
+      quote,
+      salesOrder: candidate,
+      validation: financialValidation,
+      did,
+      velocity: did.velocity_hub_submission,
+      convert,
+      quoteData,
+      aiTag: salesOrderAiTag,
+      netTermsNotice
+    }), 'blocked');
   }
 
   progress(`Sending PO ${candidate.SO_Number || candidate.id} for e-signature using Zoho admin action...`);
@@ -7159,11 +7506,12 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     financial_validation: financialValidation,
     net_terms_notice: netTermsNotice,
     ai_created_tag: salesOrderAiTag,
+    quote_data_admin_action: quoteData,
     convert_admin_action: convert,
     esign_admin_action: esign,
     _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
     _user_visible_summary: esign.success === false
-      ? withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}, but e-signature failed.`)
+      ? withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id} and verified pricing, but e-signature was not sent. ${esign.error ? `Zoho reported: ${esign.error}` : 'Zoho reported an e-signature error.'}`)
       : withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id} and sent it for e-signature.`)
   }, esign.success === false ? 'error' : 'success');
 }
@@ -7515,6 +7863,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 Cisco_Billing_Term: full.Cisco_Billing_Term,
                 Net_Terms: full.Net_Terms,
                 Source: full.Source,
+                Vendor: full.Vendor,
+                Vendor_Name: full.Vendor_Name,
                 // Admin Action fields — needed for DID generation and quote-to-PO workflow
                 CCW_Deal_Number: full.CCW_Deal_Number,
                 Admin_Action: full.Admin_Action,
@@ -7653,6 +8003,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
         }
+        if (module_name === 'Quotes' && !quoteRequiredVendorValue(recordData)) {
+          recordData.Vendor = DEFAULT_QUOTE_VENDOR;
+        }
         // Auto-correct Quoted_Items discounts using live Zoho pricing
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
           const discountFix = await correctQuotedItemDiscounts(recordData.Quoted_Items, env);
@@ -7741,7 +8094,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // the model cannot claim creation.
         if (!createIsError && createdId && module_name === 'Quotes') {
           try {
-            const verifyRes = await zohoApiCall('GET', `Quotes/${createdId}?fields=id,Quote_Number,Grand_Total`, env);
+            const verifyRes = await zohoApiCall('GET', `Quotes/${createdId}`, env);
             const verifyRec = verifyRes?.data?.[0];
             if (!verifyRec?.id) {
               console.warn(`[QUOTE-VERIFY] POST reported Quote ${createdId} created but GET returned no record.`);
@@ -7752,9 +8105,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 message: `Zoho reported Quote ${createdId} was created but a verification fetch returned no record. Treat this as a FAILED create — do NOT claim the quote was created, do NOT render any quote URL, and do NOT include [Open in Zoho] links.`,
               };
             }
+            const requiredIssues = quoteRequiredFieldIssues(verifyRec, { requireContact: true });
+            if (requiredIssues.length > 0) {
+              console.warn(`[QUOTE-VERIFY] Quote ${createdId} created but required fields are not verified: ${JSON.stringify(requiredIssues).slice(0, 500)}`);
+              return {
+                success: false,
+                error: 'quote_required_fields_not_verified',
+                created_id_unverified: createdId,
+                required_field_issues: requiredIssues,
+                vendor_diagnostics: quoteVendorDiagnostics(verifyRec),
+                message: `Zoho created Quote ${createdId}, but required fields did not verify after save: ${requiredIssues.map(issue => issue.field).join(', ')}. Treat this as a FAILED quote workflow — do NOT convert to PO or send for signature.`,
+              };
+            }
             // Attach verification markers for downstream guards / logging.
             parsed._quote_verified = true;
             parsed._quote_verified_number = verifyRec.Quote_Number || null;
+            parsed._quote_required_fields_verified = true;
           } catch (verifyErr) {
             console.warn(`[QUOTE-VERIFY] Exception verifying Quote ${createdId}: ${verifyErr.message}`);
             return {
@@ -9514,6 +9880,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Billing_Code: billingAddr.zip,
             Billing_Country: billingAddr.country,
             Shipping_Country: billingAddr.country || 'United States',
+            Vendor: DEFAULT_QUOTE_VENDOR,
             Cisco_Billing_Term: quoteBillingTerm,
             Owner: { id: '2570562000141711002' },
             Do_Not_Auto_Update_Prices: true,
@@ -9563,17 +9930,25 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (pricingReconcile.changed) {
               results.steps.push(`Reconciled ${pricingReconcile.details.length} quote line item(s) to ecomm pre-tax pricing`);
             }
-            const fetchedQuote = pricingReconcile.quote
-              ? { data: [pricingReconcile.quote] }
-              : await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Cisco_Billing_Term,Quoted_Items`, env);
+            const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}`, env);
             const fq = fetchedQuote?.data?.[0];
             if (fq?.id) {
+              const requiredIssues = quoteRequiredFieldIssues(fq, { requireContact: true });
+              if (requiredIssues.length > 0) {
+                quoteVerifyFailed = true;
+                quoteVerifyError = `required fields did not verify: ${requiredIssues.map(issue => issue.field).join(', ')}`;
+                quoteVerification = {
+                  required_field_issues: requiredIssues,
+                  vendor_diagnostics: quoteVendorDiagnostics(fq)
+                };
+              } else {
               quoteVerification = {
                 Quote_Number: fq.Quote_Number || null,
                 Grand_Total: fq.Grand_Total,
                 Sub_Total: fq.Sub_Total,
                 Quote_Stage: fq.Quote_Stage,
                 Cisco_Billing_Term: fq.Cisco_Billing_Term,
+                Vendor: quoteRequiredVendorValue(fq),
                 item_count: fq.Quoted_Items?.length || 0,
                 items: (fq.Quoted_Items || []).map(item => ({
                   product: item.Product_Name?.name || item.product?.name || 'Unknown',
@@ -9585,7 +9960,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (fq.Quote_Number) {
                 results.records.quote.quote_number = fq.Quote_Number;
               }
-              results.steps.push(`Verified: ${quoteVerification.item_count} items, Grand Total: $${quoteVerification.Grand_Total}${fq.Quote_Number ? ', Quote #' + fq.Quote_Number : ''}`);
+              results.steps.push(`Verified: ${quoteVerification.item_count} items, Vendor: ${quoteVerification.Vendor}, Grand Total: $${quoteVerification.Grand_Total}${fq.Quote_Number ? ', Quote #' + fq.Quote_Number : ''}`);
+              }
             } else {
               quoteVerifyFailed = true;
               quoteVerifyError = 'GET returned no record';
@@ -9611,6 +9987,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               success: false,
               error: 'quote_create_verify_failed',
               created_id_unverified: quoteId,
+              quote_verification: quoteVerification,
               instruction: `Zoho reported Quote ${quoteId} was created but the verification fetch ${quoteVerifyError}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render any quote URL.`,
               wall_ms: Date.now() - _startMs
             };
@@ -11459,7 +11836,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_create_record',
-    description: 'Create a new record in Zoho CRM. Successful creates are automatically tagged "Stratus AI Created" for cleanup/audit. Server-side validation enforces required fields: Deals need Deal_Name, Stage, Lead_Source, Owner, Closing_Date. Quotes need Subject, Deal_Name, Valid_Till. Invalid picklist values are blocked before reaching Zoho. Response includes clear success/failure status. IMPORTANT for Quotes: line items go in the Quoted_Items array, each with: {"Product_Name": {"id": "<product_id>"}, "Quantity": <integer, REQUIRED even if 1>, "List_Price": <number>, "Discount": <percentage_as_dollar_amount>}. Quantity on the root Quote object is IGNORED by Zoho — it MUST be inside each Quoted_Items entry.',
+    description: 'Create a new record in Zoho CRM. Successful creates are automatically tagged "Stratus AI Created" for cleanup/audit. Server-side validation enforces required fields: Deals need Deal_Name, Stage, Lead_Source, Owner, Closing_Date. Quotes need Subject, Deal_Name, Contact_Name, Valid_Till, Vendor, Cisco_Billing_Term, Billing address fields, Shipping_Country, and non-empty Quoted_Items; Vendor defaults to the existing picklist value "TD SYNNEX CORPORATION" and is verified after save. Invalid picklist values are blocked before reaching Zoho. Response includes clear success/failure status. IMPORTANT for Quotes: line items go in the Quoted_Items array, each with: {"Product_Name": {"id": "<product_id>"}, "Quantity": <integer, REQUIRED even if 1>, "List_Price": <number>, "Discount": <percentage_as_dollar_amount>}. Quantity on the root Quote object is IGNORED by Zoho — it MUST be inside each Quoted_Items entry.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11583,7 +11960,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set and verify Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION" plus the complete required quote payload before reporting success. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11625,7 +12002,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'create_quote_on_deal',
-    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", applies ecomm pricing, and verifies persisted pre-tax line totals. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
+    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets and verifies Quote Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals plus required quote fields. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11664,7 +12041,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'quote_to_po_and_esign',
-    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing. Grand_Total and tax differences are allowed when pre-tax/ecomm economics match because Zoho may automatically tax only some line items, all line items, or no line items. It blocks if line-item detail is unavailable or if any pre-tax/ecomm line economics differ. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
+    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → vendor/disti refresh → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool verifies/repairs missing Quote Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION", then blocks before any admin action if required Quote fields are missing. It writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It revalidates required fields before PO conversion, and verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing. Grand_Total and tax differences are allowed when pre-tax/ecomm economics match because Zoho may automatically tax only some line items, all line items, or no line items. It blocks if line-item detail is unavailable, if any pre-tax/ecomm line economics differ, or if the Sales Order has no Vendor before e-signature. It treats explicit Sales Order e-sign/send errors as failures and will not claim sent unless Zoho shows a sent/processing status. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
     input_schema: {
       type: 'object',
       properties: {
@@ -12114,6 +12491,7 @@ Every Quote Create call MUST include ALL of these fields:
   "Account_Name": {"id": "{account_id}"},
   "Contact_Name": {"id": "{contact_id_or_placeholder}"},
   "Valid_Till": "{YYYY-MM-DD, today + 30 days}",
+  "Vendor": "TD SYNNEX CORPORATION",
   "Cisco_Billing_Term": "Prepaid Term",
   "Billing_Street": "{from Account record or lookup}",
   "Billing_City": "{from Account record or lookup}",
@@ -12133,6 +12511,7 @@ Every Quote Create call MUST include ALL of these fields:
 \`\`\`
 
 Billing address lookup order: (1) Zoho Account record fields → (2) Gmail thread/email signature → (3) Ask user. Never create a Quote with blank address fields.
+Vendor must be the existing Zoho picklist value "TD SYNNEX CORPORATION" on the top-level Quote Vendor field. Secondary/display fields like Vendor_Name do not satisfy admin-action readiness.
 
 ---
 
@@ -12486,7 +12865,7 @@ const CRM_PROMPT_ADMIN_ACTION = `
 
 Admin Actions are Zoho automations triggered by writing an action name to the Admin_Action field. Execute via API directly. NEVER tell user to click a button.
 
-Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, contract/PO creation, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, verifies that PO line items and pre-tax/ecomm economics match the Quote, allows Grand_Total and tax differences when pre-tax/ecomm economics match because Zoho may automatically tax hardware, licensing, both, or neither, blocks when line-item detail is unavailable, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only.
+Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, contract/PO creation, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, verifies/repairs missing Quote Vendor to "TD SYNNEX CORPORATION", runs LIVE_GetQuoteData before conversion to refresh vendor/disti context, verifies that PO line items and pre-tax/ecomm economics match the Quote, allows Grand_Total and tax differences when pre-tax/ecomm economics match because Zoho may automatically tax hardware, licensing, both, or neither, blocks when line-item detail is unavailable, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only after the Sales Order has a Vendor populated. If the Sales Order is missing Vendor or reports a client-send/signature error, report "PO created, pricing verified, but e-signature was not sent" and include the Zoho reason.
 
 **Trigger process:**
 1. TRIGGER: zoho_update_record(module_name="Quotes", record_id={id}, data={"Admin_Action": "{ACTION_NAME}"})
