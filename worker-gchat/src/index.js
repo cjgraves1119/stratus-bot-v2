@@ -11347,6 +11347,151 @@ async function classifyWithCF(userMessage, env) {
   }
 }
 
+const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)$/i;
+
+function getClassifierItems(classification) {
+  return Array.isArray(classification?.items) ? classification.items : [];
+}
+
+function findRoutingAmbiguousStem(text) {
+  const m = String(text || '').match(/\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425(?!-))\b/i);
+  return m ? m[1].toUpperCase() : '';
+}
+
+function classifierHasAmbiguousStem(classification, rawText) {
+  const itemStem = getClassifierItems(classification)
+    .map(i => (i && typeof i.sku === 'string' ? i.sku.trim().toUpperCase() : ''))
+    .find(sku => ROUTING_AMBIGUOUS_STEM.test(sku));
+  return !!(itemStem || findRoutingAmbiguousStem(classification?.extracted) || findRoutingAmbiguousStem(rawText));
+}
+
+function hasSpecificSkuForRouting(classification, rawText) {
+  const text = `${classification?.extracted || ''} ${rawText || ''}`;
+  const hasSku = /\b(?:MR|MV|MT|MG|MX|Z)\d[A-Z0-9-]*\b/i.test(text)
+    || /\bCW\d{4,5}[A-Z0-9-]*\b/i.test(text)
+    || /\bC[89]\d{3}[A-Z0-9-]*\b/i.test(text)
+    || /\bLIC-[A-Z0-9-]+\b/i.test(text)
+    || /\bMS\d{2,4}-[A-Z0-9]+(?:-[A-Z0-9]+)?\b/i.test(text);
+  return hasSku && !classifierHasAmbiguousStem(classification, rawText);
+}
+
+function buildClassifierClarifyReply(rawText, classification) {
+  const text = `${classification?.extracted || ''} ${rawText || ''}`;
+  const itemSku = getClassifierItems(classification)
+    .map(i => (i && typeof i.sku === 'string' ? i.sku.trim().toUpperCase() : ''))
+    .find(sku => ROUTING_AMBIGUOUS_STEM.test(sku));
+  const ambiguousSku = itemSku || findRoutingAmbiguousStem(text);
+
+  if (ambiguousSku) {
+    if (/^MS125-24$/i.test(ambiguousSku)) {
+      return 'Which MS125-24 variant should I quote: MS125-24 or MS125-24P?';
+    }
+    if (/^MS125-48$/i.test(ambiguousSku)) {
+      return 'Which MS125-48 variant should I quote: MS125-48, MS125-48LP, or MS125-48FP?';
+    }
+    if (/^MS130-24$/i.test(ambiguousSku)) {
+      return 'Which MS130-24 variant should I quote: MS130-24, MS130-24P, or MS130-24X?';
+    }
+    if (/^MS130-48$/i.test(ambiguousSku)) {
+      return 'Which MS130-48 variant should I quote: MS130-48, MS130-48P, or MS130-48X?';
+    }
+    if (/^MS150-24$/i.test(ambiguousSku)) {
+      return 'Which MS150-24 variant should I quote: MS150-24T-4G, MS150-24T-4X, MS150-24P-4G, MS150-24P-4X, or MS150-24MP-4X?';
+    }
+    if (/^MS150-48$/i.test(ambiguousSku)) {
+      return 'Which MS150-48 variant should I quote: MS150-48T-4G, MS150-48T-4X, MS150-48LP-4G, MS150-48LP-4X, MS150-48FP-4G, MS150-48FP-4X, or MS150-48MP-4X?';
+    }
+    if (/^MS210-24$/i.test(ambiguousSku)) {
+      return 'Which MS210-24 variant should I quote: MS210-24 or MS210-24P?';
+    }
+    if (/^MS210-48$/i.test(ambiguousSku)) {
+      return 'Which MS210-48 variant should I quote: MS210-48, MS210-48LP, or MS210-48FP?';
+    }
+    if (/^MS225-24$/i.test(ambiguousSku)) {
+      return 'Which MS225-24 variant should I quote: MS225-24 or MS225-24P?';
+    }
+    if (/^MS225-48$/i.test(ambiguousSku)) {
+      return 'Which MS225-48 variant should I quote: MS225-48, MS225-48LP, or MS225-48FP?';
+    }
+    if (/^MS250-24$/i.test(ambiguousSku)) {
+      return 'Which MS250-24 variant should I quote: MS250-24 or MS250-24P?';
+    }
+    if (/^MS250-48$/i.test(ambiguousSku)) {
+      return 'Which MS250-48 variant should I quote: MS250-48 or MS250-48FP?';
+    }
+    if (/^MS350-24$/i.test(ambiguousSku)) {
+      return 'Which MS350-24 variant should I quote: MS350-24, MS350-24P, or MS350-24X?';
+    }
+    if (/^MS350-48$/i.test(ambiguousSku)) {
+      return 'Which MS350-48 variant should I quote: MS350-48, MS350-48FP, or MS350-48LP?';
+    }
+    if (/^MS390-24$/i.test(ambiguousSku)) {
+      return 'Which MS390-24 variant should I quote: MS390-24P, MS390-24U, or MS390-24UX?';
+    }
+    if (/^MS390-48$/i.test(ambiguousSku)) {
+      return 'Which MS390-48 variant should I quote: MS390-48P, MS390-48U, MS390-48UX, or MS390-48UX2?';
+    }
+    if (/^MS/i.test(ambiguousSku)) {
+      return 'Which exact switch model should I quote? Please include the full model and variant, such as MS130-24P or MS150-24P-4G.';
+    }
+  }
+
+  const genericQuote = /\b(quote|price|pricing|cost|how\s+much|show\s+me|get\s+me|give\s+me|need|want|looking\s+for)\b/i.test(text);
+  if (genericQuote && /\bswitch(?:es)?\b/i.test(text) && !/\b(MS\d{2,4}|C9\d{3}|C8\d{3})/i.test(text)) {
+    return 'Which switch model should I quote? Common options are MS130-24P, MS130-24X, MS150-24P-4G, and MS150-24P-4X.';
+  }
+  if (genericQuote && /\b(AP|APs|access\s+points?|wireless)\b/i.test(text) && !/\b(MR\d{2,4}|CW\d{4,5})\b/i.test(text)) {
+    return 'Which AP model should I quote? Common options are MR44, MR46, MR57, CW9164, CW9166, and CW9172I.';
+  }
+  if (genericQuote && !hasSpecificSkuForRouting(classification, rawText) && /\b(price|pricing|cost|how\s+much)\b/i.test(text)) {
+    return 'Which SKU or product should I price?';
+  }
+  return null;
+}
+
+function shouldTreatNoPriorReviseAsFreshQuote(classification, rawText, hasPriorCtx) {
+  if (hasPriorCtx) return false;
+  const text = typeof rawText === 'string' ? rawText : '';
+  const parsed = parseMessage(text);
+  const items = Array.isArray(parsed?.items) ? parsed.items : [];
+  if (items.length === 0) return false;
+  const hasExplicitQty = items.some(i => i && Number(i.qty) > 1)
+    || /\b\d+\s*(?:x\s*)?(?:MR|MV|MT|MG|MX|MS|CW|C8|C9|Z|LIC-)/i.test(text);
+  if (!hasExplicitQty) return false;
+  const freshQuoteLanguage = /\b(just\s+show|show\s+me|quote|price|pricing|cost|how\s+much|get\s+me|give\s+me|send\s+me|need|want|looking\s+for|renewal|renew|license|licenses)\b/i.test(text);
+  const editLanguage = /\b(add|remove|delete|swap|replace|change|revise|modify|update|instead|make\s+it|bump|drop|same|previous|that|this|option)\b/i.test(text);
+  return freshQuoteLanguage && !editLanguage && classification?.intent === 'revise';
+}
+
+function normalizeClassifierForRouting(classification, rawText, hasPriorCtx = false) {
+  if (!classification || typeof classification !== 'object' || !classification.intent) return classification;
+  const intent = String(classification.intent).toLowerCase();
+  const clarifyReply = buildClassifierClarifyReply(rawText, classification);
+  const ambiguousStem = classifierHasAmbiguousStem(classification, rawText);
+  const quoteNeedsClarify = clarifyReply && (ambiguousStem || !hasSpecificSkuForRouting(classification, rawText));
+
+  if (intent === 'quote' && quoteNeedsClarify) {
+    return {
+      ...classification,
+      intent: 'clarify',
+      reply: clarifyReply,
+      _deterministicRouting: ambiguousStem ? 'deterministic-guard-ambig-stem' : 'deterministic-guard-empty-items'
+    };
+  }
+
+  if (intent === 'revise' && shouldTreatNoPriorReviseAsFreshQuote(classification, rawText, hasPriorCtx)) {
+    return {
+      ...classification,
+      intent: 'quote',
+      extracted: classification.extracted || rawText,
+      reply: '',
+      _deterministicRouting: 'deterministic-guard-revise-to-quote'
+    };
+  }
+
+  return classification;
+}
+
 async function askCFConversation(userMessage, env) {
   if (!env.AI) return null;
   const startMs = Date.now();
@@ -16917,8 +17062,15 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               }
               if (!forcedModel && !skipDeterministic && !_zohoIntent) {
                 try {
-                  const classification = await classifyWithCF(wText, env);
-                  if (classification?.intent === 'quote') {
+                  let classification = await classifyWithCF(wText, env);
+                  classification = normalizeClassifierForRouting(classification, wText, false);
+                  if (classification?._deterministicRouting) {
+                    console.log(`[WATERFALL] Tier 0 deterministic guard fired: ${classification._deterministicRouting}`);
+                  }
+                  if (classification?.intent === 'clarify' && classification.reply) {
+                    deterministicResult = classification.reply;
+                    console.log(`[WATERFALL] Tier 0 hit: deterministic guard handled clarification`);
+                  } else if (classification?.intent === 'quote') {
                     const quoteText = classification.extracted || wText;
                     const parsed = parseMessage(quoteText);
                     if (parsed && !parsed.isClarification && !parsed.isRevision) {
@@ -19238,12 +19390,14 @@ Return ONLY a JSON object (no markdown, no explanation):
         }
 
         // CF-FIRST: CF classifies, deterministic executes quotes
-        const classification = await classifyWithCF(input, env);
+        let classification = await classifyWithCF(input, env);
+        classification = normalizeClassifierForRouting(classification, input, false);
         result.details.cf = classification ? {
           intent: classification.intent,
           elapsed: classification.elapsed,
           reply: classification.reply || '',
-          extracted: classification.extracted || ''
+          extracted: classification.extracted || '',
+          deterministicRouting: classification._deterministicRouting || null
         } : null;
 
         if (classification) {
@@ -19751,7 +19905,8 @@ Return ONLY a JSON object (no markdown, no explanation):
           // ── CF Workers AI intent classifier — the brain of the waterfall ──
           if (!reply) {
             T.step('gc-cf', 'enter');
-            const classification = await classifyWithCF(text, env);
+            let classification = await classifyWithCF(text, env);
+            classification = normalizeClassifierForRouting(classification, text, false);
             T.step('gc-cf', 'exit', { intent: classification?.intent || 'null' });
 
             if (classification) {
