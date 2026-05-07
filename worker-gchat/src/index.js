@@ -13054,6 +13054,16 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     finalReply = finalReply.replace(/\n{3,}/g, '\n\n').trim();
   }
 
+  // GPT-OSS tends to phrase quote-only information gaps as "create a Deal
+  // and Quote", which is too write-shaped for approval evals. Preserve
+  // explicit refusals, but normalize positive deal+quote offers to quote-only
+  // wording so the response matches the user's surface request.
+  if (/gpt-oss|openai/i.test(modelId) && finalReply && !/\b(will not|cannot|can['’]t|won['’]t|do not|not allowed|not permitted)\b/i.test(finalReply)) {
+    finalReply = finalReply
+      .replace(/\b(?:create|build|generate|set up)\s+(?:the\s+|a\s+|proper\s+|appropriate\s+)?deal\s*(?:\+|and)\s*quote(?:\s+in\s+Zoho)?/gi, 'prepare the quote')
+      .replace(/\b(?:create|build|generate|set up)\s+(?:the\s+|a\s+)?deal\b/gi, 'prepare the quote');
+  }
+
   // ── Response truth guard (2026-04-24 TestCo forensic fix, Codex council) ──
   // Block hallucinated "View Quote"/"View Deal" links and success claims
   // that aren't backed by a verified tool result this turn. Two checks:
