@@ -5781,31 +5781,41 @@ function preflightQuotedItemsProductActive(quotedItems) {
 }
 
 // ── Server-side discount correction for Quoted_Items ──
-// Prevents Claude from applying hallucinated discount percentages.
-// For each line item with a Product_Name.id, looks up the correct discount_per_unit
-// from live KV prices (via Proxy) and replaces whatever Claude set. Delete markers
-// (_delete: null) and items without Product_Name are left untouched.
-function correctQuotedItemDiscounts(quotedItems) {
-  if (!Array.isArray(quotedItems)) return;
+// Prevents models from applying hallucinated or stale discount percentages.
+// For each line item with a Product_Name.id, fetches the current Stratus ecomm
+// price from Zoho WooProducts and the current Product Unit_Price from Zoho, then
+// replaces whatever the model set. Delete markers (_delete: null) and
+// modify-only items without Product_Name are left untouched.
+async function correctQuotedItemDiscounts(quotedItems, env) {
+  if (!Array.isArray(quotedItems)) return { success: true, corrected: 0, failures: [] };
   const idMap = getProductIdToSkuMap();
   let corrected = 0;
+  const failures = [];
   for (const item of quotedItems) {
     // Skip delete markers and modify-only items (no Product_Name = qty change only)
     if (item._delete !== undefined || !item.Product_Name?.id) continue;
     const qty = item.Quantity || 1;
     const productId = item.Product_Name.id;
-    // Reverse lookup: product_id → SKU → live price data (via Proxy: KV first, static fallback)
+    // Reverse lookup: product_id → SKU, then fetch current live pricing.
     const sku = idMap[productId];
     if (!sku) continue;
-    const liveData = prices[sku]; // Goes through Proxy → checks livePrices (KV) first
-    if (!liveData?.discount_per_unit) continue;
-    const correctDiscount = liveData.discount_per_unit * qty;
+    const liveData = await fetchLiveSkuPricing(sku, productId, env);
+    if (!liveData.success) {
+      failures.push({ sku, product_id: productId, error: liveData.error });
+      continue;
+    }
+    const listPrice = liveData.list_price || moneyValue(item.List_Price);
+    if (!(listPrice > 0)) {
+      failures.push({ sku, product_id: productId, error: 'Live Zoho Product Unit_Price was not found' });
+      continue;
+    }
+    const correctDiscount = roundMoney((listPrice - liveData.ecomm_price) * qty);
     if (item.Discount !== undefined && Math.abs(item.Discount - correctDiscount) > 1) {
-      console.log(`[DISCOUNT-FIX] ${sku} (${productId}): Claude set Discount=${item.Discount}, correcting to ${correctDiscount} (discount_per_unit=${liveData.discount_per_unit} × qty=${qty})`);
+      console.log(`[DISCOUNT-FIX] ${sku} (${productId}): Model set Discount=${item.Discount}, correcting to live ${correctDiscount} (list=${listPrice}, ecomm=${liveData.ecomm_price}, qty=${qty})`);
       item.Discount = correctDiscount;
       corrected++;
     } else if (item.Discount === undefined) {
-      // Claude didn't set a discount at all — apply ecomm default
+      // Model didn't set a discount at all — apply current ecomm default
       console.log(`[DISCOUNT-FIX] ${sku} (${productId}): No Discount set, applying ecomm default ${correctDiscount}`);
       item.Discount = correctDiscount;
       corrected++;
@@ -5814,6 +5824,7 @@ function correctQuotedItemDiscounts(quotedItems) {
   if (corrected > 0) {
     console.log(`[DISCOUNT-FIX] Corrected ${corrected}/${quotedItems.length} line items`);
   }
+  return { success: failures.length === 0, corrected, failures };
 }
 
 function validateCrmWrite(module_name, data, isCreate = false) {
@@ -6315,6 +6326,247 @@ function quotePoLineNetTotal(record = {}) {
   const lineItems = quotePoLineItems(record);
   if (lineItems.length === 0) return null;
   return roundMoney(lineItems.reduce((sum, item) => sum + quotePoLineNet(item), 0));
+}
+
+function productRefId(item = {}) {
+  return String(
+    item.Product_Name?.id
+    || item.product?.id
+    || item.product_id
+    || ''
+  );
+}
+
+function lineListTotal(item = {}) {
+  const qty = moneyValue(item.Quantity ?? item.quantity ?? 1) || 1;
+  const unit = moneyValue(
+    item.List_Price
+    ?? item.Unit_Price
+    ?? item.unit_price
+    ?? item.Rate
+    ?? item.rate
+  );
+  return roundMoney(unit * qty);
+}
+
+function targetEcommUnitPrice(product = {}) {
+  if (product.ecomm_price != null && product.ecomm_price !== '') return moneyValue(product.ecomm_price);
+  const list = moneyValue(product.list_price);
+  const discount = moneyValue(product.discount_per_unit);
+  return roundMoney(list - discount);
+}
+
+async function fetchLiveSkuPricing(sku, productId, env) {
+  const suffixed = applySuffix(sku);
+  const [wooResult, productResult] = await Promise.allSettled([
+    zohoApiCall(
+      'GET',
+      `WooProducts/search?criteria=(WooProduct_Code:equals:${encodeURIComponent(suffixed)})&fields=WooProduct_Code,Stratus_Price`,
+      env
+    ),
+    productId
+      ? zohoApiCall('GET', `Products/${productId}?fields=id,Product_Code,Unit_Price`, env)
+      : zohoApiCall(
+          'GET',
+          `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(suffixed)})&fields=id,Product_Code,Unit_Price`,
+          env
+        )
+  ]);
+
+  const wooData = wooResult.status === 'fulfilled' ? wooResult.value?.data || [] : [];
+  const wooMatch = wooData.find(record =>
+    record.WooProduct_Code === suffixed && !String(record.WooProduct_Code || '').includes('+')
+  );
+  const ecommPrice = moneyValue(wooMatch?.Stratus_Price);
+  if (!(ecommPrice > 0)) {
+    return {
+      success: false,
+      sku: suffixed,
+      error: wooResult.status === 'rejected'
+        ? `Live WooProducts lookup failed: ${wooResult.reason?.message || wooResult.reason}`
+        : 'Live WooProducts Stratus_Price was not found'
+    };
+  }
+
+  const productData = productResult.status === 'fulfilled' ? productResult.value?.data || [] : [];
+  let productRecord = productId
+    ? productData[0]
+    : productData.find(record => record.Product_Code === suffixed);
+  if (productRecord?.Product_Code && productRecord.Product_Code !== suffixed) {
+    productRecord = null;
+  }
+  if (!productRecord || !(moneyValue(productRecord.Unit_Price) > 0)) {
+    try {
+      const productSearch = await zohoApiCall(
+        'GET',
+        `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(suffixed)})&fields=id,Product_Code,Unit_Price`,
+        env
+      );
+      productRecord = (productSearch?.data || []).find(record => record.Product_Code === suffixed) || productRecord;
+    } catch (err) {
+      console.warn(`[LIVE-PRICING] Product search fallback failed for ${suffixed}: ${err?.message || err}`);
+    }
+  }
+  const listPrice = moneyValue(productRecord?.Unit_Price);
+
+  return {
+    success: true,
+    sku: suffixed,
+    product_id: productRecord?.id || productId || null,
+    ecomm_price: roundMoney(ecommPrice),
+    list_price: listPrice > 0 ? roundMoney(listPrice) : null,
+    product_code: productRecord?.Product_Code || null
+  };
+}
+
+async function hydrateResolvedProductsWithLivePricing(resolvedProducts, env) {
+  const lookups = await Promise.all((resolvedProducts || []).map(async product => {
+    const live = await fetchLiveSkuPricing(product.sku, product.product_id, env);
+    if (!live.success) return live;
+
+    const liveList = live.list_price || product.list_price || null;
+    if (live.product_id) product.product_id = live.product_id;
+    product.ecomm_price = live.ecomm_price;
+    product.live_ecomm_price = live.ecomm_price;
+    product.pricing_source = 'live_zoho_wooproducts';
+    if (liveList) {
+      product.list_price = liveList;
+      product.discount_per_unit = Math.max(0, roundMoney(liveList - live.ecomm_price));
+      product.discount_pct = liveList > 0 ? Math.round((1 - (live.ecomm_price / liveList)) * 100) : 0;
+    } else {
+      product.discount_per_unit = 0;
+      product.discount_pct = 0;
+    }
+    return { success: true, sku: product.sku, ecomm_price: live.ecomm_price, list_price: liveList };
+  }));
+
+  const failures = lookups.filter(result => !result.success);
+  return {
+    success: failures.length === 0,
+    failures,
+    lookups
+  };
+}
+
+async function reconcileQuoteToEcommPricing(quoteId, resolvedProducts, env) {
+  const expectedByProduct = new Map();
+  for (const product of resolvedProducts || []) {
+    const productId = String(product.product_id || '');
+    if (!productId) continue;
+    expectedByProduct.set(productId, product);
+  }
+
+  const fetched = await zohoApiCall('GET',
+    `Quotes/${quoteId}?fields=id,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Cisco_Billing_Term,Quoted_Items`,
+    env);
+  const quote = fetched?.data?.[0];
+  const items = quotePoLineItems(quote);
+  const patches = [];
+  const details = [];
+  const failures = [];
+
+  for (const item of items) {
+    const productId = productRefId(item);
+    const expected = expectedByProduct.get(productId);
+    if (!expected) continue;
+
+    const qty = moneyValue(item.Quantity ?? item.quantity ?? expected.qty ?? 1) || 1;
+    const targetUnit = targetEcommUnitPrice(expected);
+    const targetNet = roundMoney(targetUnit * qty);
+    const currentNet = quotePoLineNet(item);
+    if (closeMoney(currentNet, targetNet)) continue;
+
+    if (!item.id) {
+      failures.push({
+        sku: expected.sku,
+        product_id: productId,
+        reason: 'quoted_item_subform_id_missing',
+        prior_net_total: currentNet,
+        expected_ecomm_total: targetNet
+      });
+      continue;
+    }
+
+    const listTotal = lineListTotal(item);
+    if (listTotal <= 0 || targetNet < 0) {
+      failures.push({
+        sku: expected.sku,
+        product_id: productId,
+        reason: 'quoted_item_list_total_unusable',
+        persisted_list_total: listTotal,
+        prior_net_total: currentNet,
+        expected_ecomm_total: targetNet
+      });
+      continue;
+    }
+
+    const discount = Math.max(0, roundMoney(listTotal - targetNet));
+    patches.push({
+      id: item.id,
+      Quantity: qty,
+      Discount: discount
+    });
+    details.push({
+      sku: expected.sku,
+      product_id: productId,
+      quantity: qty,
+      persisted_list_total: listTotal,
+      prior_net_total: currentNet,
+      expected_ecomm_total: targetNet,
+      corrected_discount: discount
+    });
+  }
+
+  for (const [productId, expected] of expectedByProduct.entries()) {
+    if (!items.find(item => productRefId(item) === productId)) {
+      failures.push({
+        sku: expected.sku,
+        product_id: productId,
+        reason: 'expected_product_missing_from_created_quote'
+      });
+    }
+  }
+
+  if (failures.length > 0 && patches.length === 0) {
+    return { changed: false, success: false, quote, details, unresolved: failures };
+  }
+
+  if (patches.length === 0) {
+    return { changed: false, quote, details };
+  }
+
+  const updateResult = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, {
+    data: [{
+      Do_Not_Auto_Update_Prices: true,
+      Quoted_Items: patches
+    }]
+  });
+  const parsed = parseZohoResponse(updateResult, 'Quote ecomm pricing reconciliation');
+  if (parsed?.success === false || parsed?.data?.status === 'error') {
+    return {
+      changed: false,
+      success: false,
+      error: parsed?.message || JSON.stringify(updateResult?.data?.[0] || updateResult),
+      details
+    };
+  }
+
+  const verified = await zohoApiCall('GET',
+    `Quotes/${quoteId}?fields=id,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Cisco_Billing_Term,Quoted_Items`,
+    env);
+  const verifiedQuote = verified?.data?.[0];
+  const unresolved = details.filter(detail => {
+    const item = quotePoLineItems(verifiedQuote).find(i => productRefId(i) === detail.product_id);
+    return !item || !closeMoney(quotePoLineNet(item), detail.expected_ecomm_total);
+  }).concat(failures);
+
+  return {
+    changed: true,
+    success: unresolved.length === 0,
+    quote: verifiedQuote,
+    details,
+    unresolved
+  };
 }
 
 function quotePoLineFingerprint(record = {}) {
@@ -7006,6 +7258,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
         'clone_quote': { success: true, source_quote_id: toolInput.quote_id, cloned_quote_id: `DRY_CLONE_${mockId}`, dry_run: true },
         'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
+        'create_quote_on_deal': { success: true, deal_id: toolInput.deal_id, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
         'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
         'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
@@ -7400,9 +7653,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
         }
-        // Auto-correct Quoted_Items discounts using prices.json (prevents Claude from applying wrong discounts)
+        // Auto-correct Quoted_Items discounts using live Zoho pricing
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
-          correctQuotedItemDiscounts(recordData.Quoted_Items);
+          const discountFix = await correctQuotedItemDiscounts(recordData.Quoted_Items, env);
+          if (!discountFix.success) {
+            return {
+              validation_error: true,
+              action: 'create_blocked',
+              message: `Cannot create Quote because current live ecomm pricing could not be verified for ${discountFix.failures.map(f => f.sku).join(', ')}. Do not quote from cached or remembered discounts.`,
+              failures: discountFix.failures
+            };
+          }
         }
         // Set Do_Not_Auto_Update_Prices on new Quotes so user-supplied Discount values
         // are preserved across subsequent updates (see zoho_update_record for rationale).
@@ -7531,9 +7792,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
         }
-        // Auto-correct Quoted_Items discounts using prices.json (prevents Claude from applying wrong discounts)
+        // Auto-correct Quoted_Items discounts using live Zoho pricing
         if (module_name === 'Quotes' && data.Quoted_Items) {
-          correctQuotedItemDiscounts(data.Quoted_Items);
+          const discountFix = await correctQuotedItemDiscounts(data.Quoted_Items, env);
+          if (!discountFix.success) {
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              message: `Cannot update Quote because current live ecomm pricing could not be verified for ${discountFix.failures.map(f => f.sku).join(', ')}. Do not quote from cached or remembered discounts.`,
+              failures: discountFix.failures
+            };
+          }
         }
 
         // ── CRITICAL: Do_Not_Auto_Update_Prices ──────────────────────────────
@@ -8605,20 +8874,70 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
       }
 
+      // ── Compound: Create Quote on Existing Deal ──
+      case 'create_quote_on_deal': {
+        const { deal_id, ...rest } = toolInput || {};
+        if (!deal_id) {
+          return {
+            success: false,
+            error: 'deal_id is required',
+            instruction: 'STOP. A current or explicit Deal ID is required. Do NOT create a new Deal.'
+          };
+        }
+        return await executeToolCall('create_deal_and_quote', {
+          ...rest,
+          existing_deal_id: deal_id
+        }, env, personId);
+      }
+
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id } = toolInput;
         let { lead_source } = toolInput;
         const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         const results = { steps: [], errors: [], records: {} };
         const _startMs = Date.now();
 
         try {
+          let existingDealData = null;
+          let existingDealId = existing_deal_id ? String(existing_deal_id) : '';
+          if (!Array.isArray(skus) || skus.length === 0) {
+            return {
+              success: false,
+              error: 'missing_skus',
+              instruction: 'STOP. Ask the user which SKU(s) and quantities to quote before creating a Deal or Quote.',
+              wall_ms: Date.now() - _startMs
+            };
+          }
+          if (existingDealId) {
+            const dealResp = await zohoApiCall('GET',
+              `Deals/${existingDealId}?fields=id,Deal_Name,Account_Name,Contact_Name,Lead_Source,Owner,Closing_Date`, env);
+            existingDealData = dealResp?.data?.[0];
+            if (!existingDealData?.id) {
+              return {
+                success: false,
+                error: `Existing Deal ${existingDealId} was not found.`,
+                instruction: 'STOP. Do NOT create a new Deal. Ask the user to confirm the Deal ID.',
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            if (!existingDealData.Account_Name?.id) {
+              return {
+                success: false,
+                error: `Existing Deal ${existingDealId} has no Account_Name; cannot create a Quote safely.`,
+                instruction: 'STOP. Do NOT create a Quote or a new Deal. Ask the user to fix the Deal Account first.',
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            results.steps.push(`Using existing Deal: ${existingDealData.Deal_Name || existingDealId} (${existingDealId})`);
+            if (!lead_source && existingDealData.Lead_Source) lead_source = existingDealData.Lead_Source;
+          }
+
           // ── HARD GATE #1: Account_Name must not be a bare domain ──
           // Added 2026-04-21. Blocks the Skty Trading LLC class of bug where
           // Llama passed "sktydev.com" as account_name after failing to find
           // the real Account via Account_Name:equals.
-          if (!account_name || typeof account_name !== 'string' || account_name.trim() === '') {
+          if (!existingDealId && (!account_name || typeof account_name !== 'string' || account_name.trim() === '')) {
             return {
               success: false,
               needs_account_info: true,
@@ -8627,7 +8946,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               wall_ms: Date.now() - _startMs
             };
           }
-          if (isDomainLike(account_name)) {
+          if (!existingDealId && isDomainLike(account_name)) {
             return {
               success: false,
               needs_account_info: true,
@@ -8639,11 +8958,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           // STEP 1: Find an Account — by Website (if caller passed a domain-ish email),
           // then by Account_Name:equals. Never auto-create without complete billing info.
-          let accountId = null;
-          let accountData = null;
+          let accountId = existingDealData?.Account_Name?.id || null;
+          let accountData = existingDealData?.Account_Name
+            ? { id: existingDealData.Account_Name.id, Account_Name: existingDealData.Account_Name.name }
+            : null;
 
           // 1a: If we have a contact_email, try the domain first
-          if (contact_email && contact_email.includes('@')) {
+          if (!accountId && contact_email && contact_email.includes('@')) {
             const dom = contact_email.split('@')[1];
             const byDomain = await resolveAccountByDomain(dom, env).catch(() => null);
             if (byDomain) {
@@ -8762,9 +9083,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
 
           // STEP 2: Find or create Contact — no placeholder fallback
-          let contactId = null;
-          let contactData = null;
-          if (contact_email) {
+          let contactId = existingDealData?.Contact_Name?.id || null;
+          let contactData = existingDealData?.Contact_Name
+            ? { id: existingDealData.Contact_Name.id, Full_Name: existingDealData.Contact_Name.name }
+            : null;
+          if (contactId) {
+            results.steps.push(`Using Contact from existing Deal: ${contactData.Full_Name || contactId} (${contactId})`);
+          }
+          if (!contactId && contact_email) {
             const contactSearch = await zohoApiCall('GET',
               `Contacts/search?criteria=(Email:equals:${encodeURIComponent(contact_email)})&fields=id,Full_Name,Email,Account_Name&per_page=1`, env);
             if (contactSearch?.data?.[0]) {
@@ -8809,6 +9135,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               error: `No Contact found or provided for Account "${accountData.Account_Name || account_name}"`,
               missing_fields: ['Contact Name', 'Contact Email'],
               account_id: accountId,
+              deal_id: existingDealId || undefined,
               instruction: `STOP. Do NOT retry this tool. Ask the user for the Contact First Name, Last Name, and Email. Retry only when all three are provided.`,
               wall_ms: Date.now() - _startMs
             };
@@ -9031,8 +9358,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // Detect the common CW9172 ambiguity (bare CW9172, or L/O typos) and
             // emit a specific disambiguation hint alongside the generic refusal.
             const cw9172Ambig = missingUserHardware.filter(s => /^CW9172(L|O|$|[^IHD])/i.test(s));
-            const disambigHint = cw9172Ambig.length > 0
-              ? ` Note: ${cw9172Ambig.join(', ')} is ambiguous — valid CW9172 variants are CW9172I (mid-range, default) or CW9172H (hospitality). Ask the user which they want.`
+            const mv73Ambig = missingUserHardware.filter(s => /^MV73(-?HW)?$/i.test(s));
+            const hints = [];
+            if (cw9172Ambig.length > 0) {
+              hints.push(`Note: ${cw9172Ambig.join(', ')} is ambiguous — valid CW9172 variants are CW9172I (mid-range, default) or CW9172H (hospitality). Ask the user which they want.`);
+            }
+            if (mv73Ambig.length > 0) {
+              hints.push(`Note: ${mv73Ambig.join(', ')} is ambiguous — valid MV73 variants are MV73M-HW and MV73X-HW. Ask the user which one they want.`);
+            }
+            const disambigHint = hints.length > 0
+              ? ` ${hints.join(' ')}`
               : '';
             return {
               success: false,
@@ -9111,9 +9446,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
 
-          // STEP 5: Create Deal
+          const livePricing = await hydrateResolvedProductsWithLivePricing(resolvedProducts, env);
+          if (!livePricing.success) {
+            return {
+              success: false,
+              error: 'live_ecomm_pricing_unavailable',
+              live_pricing_failures: livePricing.failures,
+              instruction: 'STOP. Current live ecomm pricing could not be fetched from Zoho WooProducts. Do NOT create a Deal or Quote from cached or remembered discounts. Retry later or verify live pricing in Zoho.',
+              ...results,
+              wall_ms: Date.now() - _startMs
+            };
+          }
+          results.steps.push(`Fetched current live ecomm pricing for ${resolvedProducts.length} line item(s) from Zoho WooProducts`);
+
+          // STEP 5: Create Deal, or reuse the current Deal for create_quote_on_deal
           const dealData = {
-            Deal_Name: deal_name || `${account_name} - ${skuSummary}`,
+            Deal_Name: deal_name || existingDealData?.Deal_Name || `${accountData?.Account_Name || account_name} - ${skuSummary}`,
             Account_Name: { id: accountId },
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
@@ -9123,13 +9471,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           };
           if (contactId) dealData.Contact_Name = { id: contactId };
 
-          const dealResult = await zohoApiCall('POST', 'Deals', env, { data: [dealData] });
-          const dealId = dealResult?.data?.[0]?.details?.id;
-          if (!dealId) {
-            results.errors.push('Failed to create Deal: ' + JSON.stringify(dealResult?.data?.[0]));
-            return { success: false, ...results, wall_ms: Date.now() - _startMs };
+          let dealId = existingDealId || null;
+          if (existingDealId) {
+            results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
+          } else {
+            const dealResult = await zohoApiCall('POST', 'Deals', env, { data: [dealData] });
+            dealId = dealResult?.data?.[0]?.details?.id;
+            if (!dealId) {
+              results.errors.push('Failed to create Deal: ' + JSON.stringify(dealResult?.data?.[0]));
+              return { success: false, ...results, wall_ms: Date.now() - _startMs };
+            }
+            results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})`);
           }
-          results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})`);
           results.records.deal = { id: dealId, name: dealData.Deal_Name, url: `https://crm.zoho.com/crm/org647122552/tab/Deals/${dealId}` };
 
           // STEP 6: Create Quote with line items
@@ -9151,7 +9504,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           });
 
           const quoteData = {
-            Subject: deal_name || `${account_name} - ${skuSummary}`,
+            Subject: deal_name || existingDealData?.Deal_Name || `${accountData?.Account_Name || account_name} - ${skuSummary}`,
             Deal_Name: { id: dealId },
             Account_Name: { id: accountId },
             Valid_Till: validTill,
@@ -9163,6 +9516,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Shipping_Country: billingAddr.country || 'United States',
             Cisco_Billing_Term: quoteBillingTerm,
             Owner: { id: '2570562000141711002' },
+            Do_Not_Auto_Update_Prices: true,
             Quoted_Items: quotedItems
           };
           if (contactId) quoteData.Contact_Name = { id: contactId };
@@ -9181,7 +9535,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
           results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
 
-          // STEP 7: Fetch the created quote to confirm durability and pull Quote_Number / totals.
+          // STEP 7: Fetch the created quote to confirm durability, then reconcile
+          // persisted line totals to the ecomm target. Zoho may use a live Product
+          // Unit_Price that differs from the Stratus ecomm cache; when that happens
+          // the initial flat discount can leave the line above ecomm (for example
+          // MV73M-HW: live list $2,720.41 - old $689 discount = $2,031.41). The
+          // correction keeps Zoho-owned list price intact and adjusts Discount so
+          // the pre-tax line net equals the ecomm price before any PO conversion.
           // 2026-04-24 Codex council hardening: if the GET fails or returns no record, treat
           // the create as FAILED and scrub the quote record from results so the response-truth
           // guard upstream strips the URL and no success claim reaches the user.
@@ -9189,7 +9549,23 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let quoteVerifyFailed = false;
           let quoteVerifyError = null;
           try {
-            const fetchedQuote = await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Cisco_Billing_Term,Quoted_Items`, env);
+            const pricingReconcile = await reconcileQuoteToEcommPricing(quoteId, resolvedProducts, env);
+            if (pricingReconcile.success === false) {
+              return {
+                success: false,
+                error: 'quote_ecomm_pricing_reconciliation_failed',
+                details: pricingReconcile,
+                instruction: 'STOP. The Quote was created, but the ecomm price correction could not be verified. Do NOT convert to PO or send for signature.',
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            if (pricingReconcile.changed) {
+              results.steps.push(`Reconciled ${pricingReconcile.details.length} quote line item(s) to ecomm pre-tax pricing`);
+            }
+            const fetchedQuote = pricingReconcile.quote
+              ? { data: [pricingReconcile.quote] }
+              : await zohoApiCall('GET', `Quotes/${quoteId}?fields=id,Subject,Quote_Number,Grand_Total,Sub_Total,Quote_Stage,Cisco_Billing_Term,Quoted_Items`, env);
             const fq = fetchedQuote?.data?.[0];
             if (fq?.id) {
               quoteVerification = {
@@ -11248,6 +11624,45 @@ const CRM_EMAIL_TOOLS = [
     }
   },
   {
+    name: 'create_quote_on_deal',
+    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", applies ecomm pricing, and verifies persisted pre-tax line totals. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        deal_id: { type: 'string', description: 'Existing Zoho Deal record ID from the active CRM page/context or user prompt.' },
+        deal_name: { type: 'string', description: 'Optional Quote subject override. Omit to reuse the existing Deal name.' },
+        skus: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes.' },
+              qty: { type: 'number', description: 'Quantity (default 1)' }
+            },
+            required: ['sku']
+          },
+          description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses unless hardware_only/include_licenses=false.'
+        },
+        license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
+        hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses.' },
+        cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
+        billing_address: {
+          type: 'object',
+          description: 'Billing address override. Omit to inherit from the Deal Account.',
+          properties: {
+            street: { type: 'string' },
+            city: { type: 'string' },
+            state: { type: 'string' },
+            zip: { type: 'string' },
+            country: { type: 'string' }
+          }
+        }
+      },
+      required: ['deal_id', 'skus']
+    }
+  },
+  {
     name: 'quote_to_po_and_esign',
     description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing. Grand_Total and tax differences are allowed when pre-tax/ecomm economics match because Zoho may automatically tax only some line items, all line items, or no line items. It blocks if line-item detail is unavailable or if any pre-tax/ecomm line economics differ. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
     input_schema: {
@@ -11944,7 +12359,7 @@ For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) �
 1. You are in CRM mode — always create Zoho CRM quotes, NEVER fall back to URL quotes.
 2. Parse user input for intent, not literal strings. Don't re-ask for already-provided info.
 3. **CRM-FIRST:** Search Zoho CRM before web searching. Only use web_search_domain for NEW accounts not in CRM.
-4. **create_deal_and_quote:** Pass ONLY requested SKUs. Hardware auto-adds licenses unless hardware_only/include_licenses=false. Call it ALONE for quote-only requests. If the same request naturally asks for a customer contract, PO, signature, e-signature, DocuSign, or "send PO", immediately continue with quote_to_po_and_esign using the created Quote ID.
+4. **create_quote_on_deal vs create_deal_and_quote:** If the current CRM context is a Deal/Potentials record or the user gives a Deal ID, call create_quote_on_deal so the Quote stays on that existing Deal. Only call create_deal_and_quote for a brand-new Deal. Pass ONLY requested SKUs. Hardware auto-adds licenses unless hardware_only/include_licenses=false. If the same request naturally asks for a customer contract, PO, signature, e-signature, DocuSign, or "send PO", immediately continue with quote_to_po_and_esign using the created Quote ID.
 5. **batch_product_lookup / parse_quote_url:** Use for all SKU lookups and URL parsing. Never search Products individually.
 6. **RESELLER / VAR PATTERN:** "this is for [Customer]" or "on behalf of [Customer]" = sender is VAR. Billing Account = sender's company. Deal name: "[Sender Account] - [End Customer] - [Description]". Contact = sender.
 7. **ALWAYS END WITH ZOHO LINKS:** [Record Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID) for every record created.
@@ -13801,6 +14216,7 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'zoho_delete_record',
   'clone_quote',
   'create_deal_and_quote',
+  'create_quote_on_deal',
   'quote_to_po_and_esign',
   'velocity_hub_submit',
   'assign_cisco_rep_to_deal',
@@ -13899,6 +14315,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
       'clone_quote': { success: true, source_quote_id: toolInput.quote_id, cloned_quote_id: `DRY_CLONE_${mockId}`, dry_run: true },
       'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
+      'create_quote_on_deal': { success: true, deal_id: toolInput.deal_id, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
       'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
       'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
@@ -14942,7 +15359,7 @@ const GEMMA_OPTIMIZED_PROMPT = `You are a Stratus sales assistant with Zoho CRM 
 
 CRITICAL RULES:
 1. When the user asks you to find/lookup something, use zoho_search_records ONE TIME, then summarize what you found and STOP.
-2. When creating a deal or quote, use create_deal_and_quote (one call) and report the result.
+2. When creating a quote from an existing Deal/Potentials context or explicit Deal ID, use create_quote_on_deal. For a brand-new deal plus quote, use create_deal_and_quote (one call) and report the result.
 3. When the search returns 0 records, respond "No records found" and STOP — do NOT create anything.
 4. NEVER call the same search repeatedly. If a search returns results, summarize them and stop calling tools.
 5. For product/technical questions with no tool match, answer from your knowledge directly — do NOT search Zoho.
@@ -15010,6 +15427,8 @@ REFUSAL ON BAD INPUT (do NOT call tools):
 
 TOOL CHOICE — EXISTING DEAL vs NEW DEAL (HARD RULE):
 - User gives an explicit deal id (e.g. "on deal 2570562000...") → CALL create_quote_on_deal with that deal_id. Do NOT call create_deal_and_quote — that would create a duplicate deal.
+- Current CRM context/page is a Deal/Potentials record and the user asks for a quote, contract, PO, signature, or e-signature → CALL create_quote_on_deal with the current Deal ID. Do NOT create a new Deal.
+- If the request includes PO/contract/signature/e-signature after creating the Quote on the existing Deal, immediately continue with quote_to_po_and_esign using the returned quote_id.
 - Only use create_deal_and_quote for a brand-new deal+quote combo where no deal_id is provided.
 
 LICENSE TERM VARIANTS (DO NOT FLAG AS INACTIVE):
@@ -15138,6 +15557,8 @@ REFUSAL ON BAD INPUT (NO TOOL CALL):
 
 TOOL CHOICE — EXISTING DEAL vs NEW DEAL (HARD RULE):
 - User gives an explicit deal id (e.g. "on deal 2570562000...") → CALL create_quote_on_deal with that deal_id. Do NOT call create_deal_and_quote — that creates a NEW deal and you'll end up with a duplicate.
+- Current CRM context/page is a Deal/Potentials record and the user asks for a quote, contract, PO, signature, or e-signature → CALL create_quote_on_deal with the current Deal ID. Do NOT create a new Deal.
+- If the request includes PO/contract/signature/e-signature after creating the Quote on the existing Deal, immediately continue with quote_to_po_and_esign using the returned quote_id.
 - Only call create_deal_and_quote when the user asks to create a brand-new deal AND quote together from scratch (no existing deal_id in the message).
 
 LICENSE TERM VARIANTS (DO NOT FLAG AS INACTIVE):
@@ -21817,12 +22238,24 @@ Return ONLY a JSON object (no markdown, no explanation):
         const results = await Promise.allSettled(
           batch.map(async (sku) => {
             try {
-              const result = await zohoApiCall(
-                'GET',
-                `WooProducts/search?criteria=(WooProduct_Code:equals:${encodeURIComponent(sku)})&fields=WooProduct_Code,Stratus_Price`,
-                env
-              );
+              const existing = updatedPrices[sku] || {};
+              const [wooResult, productResult] = await Promise.allSettled([
+                zohoApiCall(
+                  'GET',
+                  `WooProducts/search?criteria=(WooProduct_Code:equals:${encodeURIComponent(sku)})&fields=WooProduct_Code,Stratus_Price`,
+                  env
+                ),
+                existing.zoho_product_id
+                  ? zohoApiCall('GET', `Products/${existing.zoho_product_id}?fields=id,Product_Code,Unit_Price`, env)
+                  : zohoApiCall(
+                      'GET',
+                      `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(sku)})&fields=id,Product_Code,Unit_Price`,
+                      env
+                    )
+              ]);
 
+              if (wooResult.status === 'rejected') throw wooResult.reason;
+              const result = wooResult.value;
               if (!result?.data?.length) return { sku, price: null };
 
               // Filter out bundles (codes with '+') and find exact match
@@ -21830,7 +22263,24 @@ Return ONLY a JSON object (no markdown, no explanation):
                 r.WooProduct_Code === sku && !r.WooProduct_Code.includes('+')
               );
 
-              return { sku, price: match?.Stratus_Price ?? null };
+              const productData = productResult.status === 'fulfilled' ? productResult.value?.data || [] : [];
+              let productMatch = existing.zoho_product_id
+                ? productData[0]
+                : productData.find(r => r.Product_Code === sku);
+              if (productMatch?.Product_Code && productMatch.Product_Code !== sku) {
+                productMatch = null;
+              }
+              if (!productMatch || !(moneyValue(productMatch.Unit_Price) > 0)) {
+                const productSearch = await zohoApiCall(
+                  'GET',
+                  `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(sku)})&fields=id,Product_Code,Unit_Price`,
+                  env
+                );
+                productMatch = (productSearch?.data || []).find(r => r.Product_Code === sku) || productMatch;
+              }
+              const liveListPrice = productMatch?.Unit_Price ?? null;
+
+              return { sku, price: match?.Stratus_Price ?? null, liveListPrice, liveProductId: productMatch?.id || null };
             } catch (err) {
               console.error(`[PRICE-CRON] Error fetching ${sku}: ${err.message}`);
               return { sku, price: null, error: true };
@@ -21840,34 +22290,36 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         for (const result of results) {
           if (result.status === 'rejected') { errors++; continue; }
-          const { sku, price, error } = result.value;
+          const { sku, price, liveListPrice, liveProductId, error } = result.value;
 
           if (error) { errors++; continue; }
           if (price == null || price === 0) { skipped++; continue; }
 
           const existing = updatedPrices[sku];
-          const listPrice = existing?.list || 0;
+          const listPrice = liveListPrice || existing?.list || 0;
 
-          // Outlier check: Stratus price should never exceed list price
+          // Outlier check: Stratus price should never exceed Zoho's live Product list price
           if (listPrice > 0 && price > listPrice) {
             outliers++;
             continue; // Keep existing price
           }
 
           // Track if price actually changed
-          if (existing?.price !== price) {
-            priceChanges.push({ sku, oldPrice: existing?.price, newPrice: price });
+          if (existing?.price !== price || (liveListPrice && existing?.list !== liveListPrice)) {
+            priceChanges.push({ sku, oldPrice: existing?.price, newPrice: price, oldListPrice: existing?.list, newListPrice: liveListPrice || existing?.list });
             // D1: Log price change (fire-and-forget)
             ctx.waitUntil(logPriceChangeToD1(env, {
               sku,
               oldPrice: existing?.price,
               newPrice: price,
-              listPrice: existing?.list || null
+              listPrice
             }));
           }
 
           // Merge into existing entry — preserve zoho_product_id and all other fields
           existing.price = price;
+          if (liveListPrice && liveListPrice > 0) existing.list = liveListPrice;
+          if (liveProductId) existing.zoho_product_id = liveProductId;
           if (listPrice > 0) {
             existing.discount = Math.round(((listPrice - price) / listPrice) * 10000) / 10000;
             existing.discount_per_unit = Math.round((listPrice - price) * 100) / 100;

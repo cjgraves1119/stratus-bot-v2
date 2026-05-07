@@ -5,6 +5,7 @@ const { dirname, join } = require('node:path');
 
 const here = __dirname;
 const source = readFileSync(join(here, 'src/index.js'), 'utf8');
+const priceSource = readFileSync(join(here, 'src/data/prices.json'), 'utf8');
 
 function extractFunction(name) {
   const start = source.indexOf(`function ${name}(`);
@@ -85,6 +86,12 @@ assert.deepEqual(collectQuotePreResolveSkuTokens('MV73M-HW plus LIC-MV-1YR hardw
 
 assert.match(source, /case 'quote_to_po_and_esign'/, 'tool executor handles quote_to_po_and_esign');
 assert.match(source, /name: 'quote_to_po_and_esign'/, 'tool schema exposes quote_to_po_and_esign');
+assert.match(source, /case 'create_quote_on_deal'/, 'tool executor handles quote creation on existing deals');
+assert.match(source, /name: 'create_quote_on_deal'/, 'tool schema exposes quote creation on existing deals');
+assert.match(source, /existing_deal_id: deal_id/, 'create_quote_on_deal delegates without creating a duplicate Deal');
+assert.match(source, /Reused existing Deal/, 'existing Deal quote path records that it reused the Deal');
+assert.match(source, /Current CRM context\/page is a Deal\/Potentials record/, 'prompt routes Deal page quote requests to create_quote_on_deal');
+assert.match(source, /valid MV73 variants are MV73M-HW and MV73X-HW/, 'bare MV73 requests trigger variant clarification');
 assert.match(source, /force_create_po/, 'existing PO override is explicit');
 assert.match(source, /state: 'existing_po_found'/, 'existing PO block is present');
 assert.match(source, /findLinkedSalesOrderFromQuote/, 'quote linkage fallback is present');
@@ -107,6 +114,21 @@ assert.match(source, /state: 'po_financial_mismatch'/, 'workflow blocks e-signat
 assert.match(source, /automatically tax only some line items, all line items, or no line items/, 'tool schema allows mixed automatic tax behavior');
 assert.match(source, /Taxes are informational only/, 'workflow does not block e-signature solely because of tax');
 assert.match(source, /pre-tax\/ecomm line economics match/, 'admin prompt treats pre-tax ecomm economics as the approval gate');
+assert.match(source, /reconcileQuoteToEcommPricing/, 'compound quote creation reconciles persisted quote lines to ecomm pricing');
+assert.match(source, /fetchLiveSkuPricing/, 'compound quote creation fetches live SKU pricing before writing quotes');
+assert.match(source, /WooProducts\/search\?criteria=\(WooProduct_Code:equals:/, 'live ecomm pricing comes from Zoho WooProducts, not remembered discounts');
+assert.match(source, /Products\/\$\{existing\.zoho_product_id\}\?fields=id,Product_Code,Unit_Price/, 'price refresh reads live Zoho Product Unit_Price');
+assert.match(source, /Product_Code !== sku[\s\S]{0,500}Products\/search\?criteria=\(Product_Code:equals:/, 'price refresh falls back by SKU when cached product id does not match');
+assert.match(source, /existing\.list = liveListPrice/, 'price refresh stores live Zoho Product list price before recalculating discounts');
+assert.match(source, /existing\.zoho_product_id = liveProductId/, 'price refresh refreshes cached Zoho product id from live SKU lookup');
+assert.match(source, /if \(live\.product_id\) product\.product_id = live\.product_id/, 'quote creation uses live SKU product id before writing line items');
+assert.match(source, /live_ecomm_pricing_unavailable/, 'quote creation blocks when live ecomm pricing is unavailable');
+assert.match(source, /Do NOT create a Deal or Quote from cached or remembered discounts/, 'live pricing failure refuses cached discount fallback');
+assert.match(source, /quote_ecomm_pricing_reconciliation_failed/, 'quote creation blocks PO conversion if ecomm correction does not persist');
+assert.match(source, /expected_product_missing_from_created_quote/, 'reconciliation fails when persisted quote products do not match expected products');
+assert.match(source, /if \(pricingReconcile\.success === false\)/, 'quote creation blocks failed reconciliation even when no patch was attempted');
+assert.match(source, /Do_Not_Auto_Update_Prices: true[\s\S]{0,120}Quoted_Items: patches/, 'ecomm reconciliation preserves quote line pricing via Zoho control flag');
+assert.match(priceSource, /MV73M-HW"[\s\S]{0,120}"list": 2720\.41[\s\S]{0,120}"price": 1830[\s\S]{0,120}"discount_per_unit": 890\.41/, 'MV73M-HW fallback snapshot mirrors current live Zoho list and ecomm pricing');
 assert.match(source, /blocks if line-item detail is unavailable/, 'tool schema blocks when line detail is unavailable');
 assert.equal(shouldForceClaudeForWrite('send Lisa a contract for 1 MV73M'), true);
 assert.match(source, /const ZOHO_AI_CREATED_TAG = 'Stratus AI Created'/, 'Zoho AI-created tag name is centralized');
