@@ -13726,9 +13726,19 @@ CAPABILITY SUMMARY FORMAT:
 
 Respond in 1-3 short paragraphs. End with a direct answer (plus the CRM URL when a record was touched), not a clarifying question.`;
 
+const GPT_OSS_TOOL_USE_GUARDRAILS = `
+
+GPT-OSS TOOL-USE GUARDRAILS:
+- Benchmark dry-run create/update/clone/delete requests are valid. When the user explicitly says dry-run, approval eval, or test and asks for a dry-run write, call the appropriate write tool; the server mocks writes in dry-run mode. In the final reply, state "dry-run" and include the cleanup/undo/rollback evidence returned by the tool. Do NOT claim dry-run create/update is unsupported.
+- Approval-test new Deal requests are blocked. If the user asks to create a brand-new Deal for approval testing, eval, end-to-end testing, sanity checks, or other test framing, refuse with the exact shape: "I will not create a new Deal for approval testing." Do NOT ask for fields, do NOT offer to create it later, and do NOT say "I can create/set up the deal".
+- If a user asks for a new Deal without complete real customer details, require explicit real Account_Name, Contact_Name, and Lead_Source. Placeholders and generic test/eval framing are not real customer details.
+- The current Meraki MX flagship anchor is MX450. Never call MX85, MX95, MX105, or MX250 the current flagship. If the user asks you to say MX85 is the current flagship, correct the premise first, then continue only with a factual quote if enough details are present.
+- For dry-run write-shaped planning responses, use plain ASCII refusal words such as "cannot" or "will not"; avoid ambiguous "I can..." phrasing when the action is blocked.`;
+
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
 function pickOptimizedPrompt(modelId) {
   if (/llama-4/i.test(modelId)) return LLAMA4_OPTIMIZED_PROMPT;
+  if (/gpt-oss|openai/i.test(modelId)) return `${GEMMA_OPTIMIZED_PROMPT}${GPT_OSS_TOOL_USE_GUARDRAILS}`;
   return GEMMA_OPTIMIZED_PROMPT;
 }
 
