@@ -1,0 +1,24 @@
+name = "stratus-codemode-bench"
+main = "src/index.js"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Code Mode requires a Dynamic Worker Loader binding.
+[[worker_loaders]]
+binding = "LOADER"
+
+# Secrets to set via `wrangler secret put`:
+#   ANTHROPIC_API_KEY        — Claude calls
+#   STRATUS_BENCH_AUTH_TOKEN — required header on /run; prevents drive-by usage
+#   GCHAT_URL                — optional: real read-tool round-trip target
+#   GCHAT_AUTH               — bench auth header for GCHAT_URL
+
+[vars]
+DEFAULT_MODEL = "llama-4-scout"
+DEFAULT_FRAMEWORK = "tools"
+DRY_RUN_DEFAULT = "true"
+MAX_ITERATIONS = "30"
+SANDBOX_TIMEOUT_MS = "120000"
+
+[observability]
+enabled = true

@@ -1,0 +1,22 @@
+{
+  "name": "stratus-codemode-bench",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Standalone benchmark worker for comparing Cloudflare Code Mode vs standard tool-calling on Stratus AI CRM agent fixtures. Disposable.",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "check": "node --check src/index.js && node --check src/runner-tools.js && node --check src/runner-codemode.js && node --check src/tool-surface.js && node --check src/cli.js && node --check src/fixtures.js && node --check src/shared.js && node --check src/model-clients.js && node --check src/tool-executor.js && node --check src/mock-codemode-factory.js",
+    "cli": "node src/cli.js",
+    "test": "node test/test-tool-surface.js && node test/test-fixtures.js && node test/test-runner-shapes.js"
+  },
+  "dependencies": {
+    "@cloudflare/codemode": "*",
+    "ai": "*"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.0"
+  }
+}
