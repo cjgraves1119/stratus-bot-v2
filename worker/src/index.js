@@ -8969,7 +8969,7 @@ export default {
           const isGemma = /gemma/i.test(model);
           const requestBody = isGemma
             ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 4096 }
-            : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 512 };
+            : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 1024 };
           // Apply reasoning control via the policy helper rather than hardcoded
           // thinking:{type:'disabled'} on Gemma. This lets enabled_ablation
           // skip the disable param, and Kimi/etc use their model-specific shape.
