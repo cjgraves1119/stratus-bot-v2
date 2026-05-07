@@ -16936,12 +16936,13 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 if (forceClaudeForChatWrite) {
                   console.log(`[WATERFALL] Forcing Claude for chat-tab write intent`);
                 }
+                const forcedBenchmarkModel = BENCHMARK_MODELS.find(m => m.id === forcedModel);
                 // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
                   forceLlama: forcedModel === 'llama',
                   forceGemma: forcedModel === 'gemma',
                   forceClaude: forcedModel === 'claude' || forceClaudeForChatWrite,
-                  forceCfModelId: forcedModel === SEA_LION_MODEL_ID ? SEA_LION_MODEL_ID : null,
+                  forceCfModelId: forcedBenchmarkModel?.type === 'cf' ? forcedModel : null,
                   forceDeepSeekModelId: isDeepSeekModel(forcedModel) ? forcedModel.toLowerCase() : null,
                   dryRun: wDryRun === true,
                   reasoningPolicy: wReasoningPolicy,
