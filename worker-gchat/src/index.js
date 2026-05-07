@@ -5125,7 +5125,104 @@ async function getGmailAccessToken(env) {
 }
 
 // ─── Zoho CRM API Client ─────────────────────────────────────────────────────
-async function zohoApiCall(method, path, env, body = null) {
+const ZOHO_AI_CREATED_TAG = 'Stratus AI Created';
+const ZOHO_AI_CREATED_TAG_MODULES = new Set([
+  'Accounts',
+  'Contacts',
+  'Deals',
+  'Leads',
+  'Quotes',
+  'Sales_Orders',
+  'Purchase_Orders',
+  'Invoices',
+  'Tasks'
+]);
+
+function zohoTopLevelModuleFromCreatePath(method, path, body, options = {}) {
+  if (options?.tagCreatedRecord === false) return null;
+  if (String(method || '').toUpperCase() !== 'POST') return null;
+  if (!body || typeof body !== 'object' || !Array.isArray(body.data)) return null;
+  const moduleName = String(path || '').split('?')[0];
+  if (!/^[A-Za-z_]+$/.test(moduleName)) return null;
+  if (!ZOHO_AI_CREATED_TAG_MODULES.has(moduleName)) return null;
+  return moduleName;
+}
+
+function zohoCreatedRecordIds(response) {
+  const rows = Array.isArray(response?.data) ? response.data : [];
+  return rows
+    .filter(row => {
+      const status = String(row?.status || row?.code || '').toLowerCase();
+      return status === 'success' || row?.code === 'SUCCESS';
+    })
+    .map(row => row?.details?.id || row?.id)
+    .filter(Boolean);
+}
+
+async function addZohoAiCreatedTag(moduleName, recordId, token) {
+  const url = `https://www.zohoapis.com/crm/v8/${moduleName}/${recordId}/actions/add_tags`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Zoho-oauthtoken ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      tags: [{ name: ZOHO_AI_CREATED_TAG }]
+    })
+  });
+  const text = await res.text();
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { parsed = { error: text, status: res.status }; }
+  const row = parsed?.data?.[0];
+  const ok = res.ok && (row?.code === 'SUCCESS' || String(row?.status || '').toLowerCase() === 'success');
+  if (!ok) {
+    return {
+      success: false,
+      tag: ZOHO_AI_CREATED_TAG,
+      module: moduleName,
+      record_id: recordId,
+      status: res.status,
+      error: row?.message || parsed?.message || parsed?.error || 'Tag update failed'
+    };
+  }
+  return {
+    success: true,
+    tag: ZOHO_AI_CREATED_TAG,
+    module: moduleName,
+    record_id: recordId
+  };
+}
+
+async function tagZohoCreatedRecordsIfNeeded(method, path, env, token, body, response, options = {}) {
+  const moduleName = zohoTopLevelModuleFromCreatePath(method, path, body, options);
+  if (!moduleName) return null;
+  const ids = zohoCreatedRecordIds(response);
+  if (ids.length === 0) {
+    return { success: false, tag: ZOHO_AI_CREATED_TAG, module: moduleName, skipped: 'no_created_record_id' };
+  }
+  const results = [];
+  for (const id of ids) {
+    try {
+      results.push(await addZohoAiCreatedTag(moduleName, id, token));
+    } catch (err) {
+      results.push({
+        success: false,
+        tag: ZOHO_AI_CREATED_TAG,
+        module: moduleName,
+        record_id: id,
+        error: err.message
+      });
+    }
+  }
+  const success = results.every(r => r.success);
+  if (!success) {
+    console.warn(`[ZOHO-TAG] ${moduleName} create succeeded but AI-created tag failed for one or more records: ${JSON.stringify(results).substring(0, 500)}`);
+  }
+  return { success, tag: ZOHO_AI_CREATED_TAG, module: moduleName, results };
+}
+
+async function zohoApiCall(method, path, env, body = null, options = {}) {
   const token = await getZohoAccessToken(env);
   // v8 (not v2) — v2 omits subform data (Quoted_Items, Invoiced_Items, etc.)
   const url = `https://www.zohoapis.com/crm/v8/${path}`;
@@ -5141,7 +5238,10 @@ async function zohoApiCall(method, path, env, body = null) {
   const res = await fetch(url, opts);
   const text = await res.text();
   try {
-    return JSON.parse(text);
+    const parsed = JSON.parse(text);
+    const tagResult = await tagZohoCreatedRecordsIfNeeded(method, path, env, token, body, parsed, options);
+    if (tagResult) parsed._ai_created_tag = tagResult;
+    return parsed;
   } catch {
     return { error: text, status: res.status };
   }
@@ -9329,6 +9429,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
 
+          let cloneTagResult = null;
+          if (!usedFallback) {
+            try {
+              cloneTagResult = await addZohoAiCreatedTag('Quotes', clonedId, token);
+            } catch (tagErr) {
+              cloneTagResult = {
+                success: false,
+                tag: ZOHO_AI_CREATED_TAG,
+                module: 'Quotes',
+                record_id: clonedId,
+                error: tagErr.message
+              };
+              console.warn(`[ZOHO-TAG] native clone produced Quote ${clonedId} but AI-created tag failed: ${tagErr.message}`);
+            }
+          }
+
           // Optional Subject rename on the cloned record (only if not already handled in fallback)
           if (new_subject && typeof new_subject === 'string' && !usedFallback) {
             try {
@@ -9536,7 +9652,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               status: 'error',
               durationMs: Date.now() - cloneStart,
               errorMessage: `structural_fidelity_failed: ${structuralIssues.join('; ')}`,
-              details: { source_quote_id: quote_id, new_subject: new_subject || null, used_fallback: usedFallback, structural_issues: structuralIssues, info_notes: infoNotes },
+              details: { source_quote_id: quote_id, new_subject: new_subject || null, used_fallback: usedFallback, ai_created_tag: cloneTagResult, structural_issues: structuralIssues, info_notes: infoNotes },
               requestPayload: { source_quote_id: quote_id, new_subject: new_subject || null },
               responsePayload: { partial_cloned_quote_id: clonedId, facts: cloneFacts }
             });
@@ -9595,7 +9711,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             status: 'success',
             durationMs: Date.now() - cloneStart,
             errorMessage: null,
-            details: { source_quote_id: quote_id, new_subject: new_subject || null, used_fallback: usedFallback },
+            details: { source_quote_id: quote_id, new_subject: new_subject || null, used_fallback: usedFallback, ai_created_tag: cloneTagResult },
             requestPayload: { source_quote_id: quote_id, new_subject: new_subject || null },
             responsePayload: { cloned_id: clonedId, facts: cloneFacts },
             postState: { id: clonedId, ...cloneFacts },
@@ -9619,6 +9735,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // debug visibility but the model is told not to narrate them
             // as problems (see _user_visible_summary phrasing).
             info_notes: infoNotes,
+            _ai_created_tag: cloneTagResult,
             _undo_token: cloneUndoToken,
             _record_url: cloneUrlLink,
             _user_visible_summary: cloneUserSummary,
@@ -9768,7 +9885,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (origModule === 'Quotes' && restoreData.Quoted_Items) {
               restoreData.Do_Not_Auto_Update_Prices = true;
             }
-            const recreateRes = await zohoApiCall('POST', origModule, env, { data: [restoreData] });
+            const recreateRes = await zohoApiCall('POST', origModule, env, { data: [restoreData] }, { tagCreatedRecord: false });
             const newId = recreateRes?.data?.[0]?.details?.id || null;
             const newStatus = recreateRes?.data?.[0]?.status;
             if (newStatus !== 'success' || !newId) {
@@ -10886,7 +11003,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_create_record',
-    description: 'Create a new record in Zoho CRM. Server-side validation enforces required fields: Deals need Deal_Name, Stage, Lead_Source, Owner, Closing_Date. Quotes need Subject, Deal_Name, Valid_Till. Invalid picklist values are blocked before reaching Zoho. Response includes clear success/failure status. IMPORTANT for Quotes: line items go in the Quoted_Items array, each with: {"Product_Name": {"id": "<product_id>"}, "Quantity": <integer, REQUIRED even if 1>, "List_Price": <number>, "Discount": <percentage_as_dollar_amount>}. Quantity on the root Quote object is IGNORED by Zoho — it MUST be inside each Quoted_Items entry.',
+    description: 'Create a new record in Zoho CRM. Successful creates are automatically tagged "Stratus AI Created" for cleanup/audit. Server-side validation enforces required fields: Deals need Deal_Name, Stage, Lead_Source, Owner, Closing_Date. Quotes need Subject, Deal_Name, Valid_Till. Invalid picklist values are blocked before reaching Zoho. Response includes clear success/failure status. IMPORTANT for Quotes: line items go in the Quoted_Items array, each with: {"Product_Name": {"id": "<product_id>"}, "Quantity": <integer, REQUIRED even if 1>, "List_Price": <number>, "Discount": <percentage_as_dollar_amount>}. Quantity on the root Quote object is IGNORED by Zoho — it MUST be inside each Quoted_Items entry.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11010,7 +11127,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {

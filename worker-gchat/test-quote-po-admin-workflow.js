@@ -28,6 +28,22 @@ function getFunction(name) {
 
 const shouldForceClaudeForWrite = getFunction('shouldForceClaudeForWrite');
 const isHardwareOnlyQuoteIntent = getFunction('isHardwareOnlyQuoteIntent');
+const zohoTopLevelModuleFromCreatePath = Function(`"use strict";
+const ZOHO_AI_CREATED_TAG_MODULES = new Set([
+  'Accounts',
+  'Contacts',
+  'Deals',
+  'Leads',
+  'Quotes',
+  'Sales_Orders',
+  'Purchase_Orders',
+  'Invoices',
+  'Tasks'
+]);
+${extractFunction('zohoTopLevelModuleFromCreatePath')}
+return zohoTopLevelModuleFromCreatePath;
+`)();
+const zohoCreatedRecordIds = getFunction('zohoCreatedRecordIds');
 const collectQuotePreResolveSkuTokens = Function(`"use strict";
 ${extractFunction('isHardwareOnlyQuoteIntent')}
 ${extractFunction('collectQuotePreResolveSkuTokens')}
@@ -93,6 +109,17 @@ assert.match(source, /Taxes are informational only/, 'workflow does not block e-
 assert.match(source, /pre-tax\/ecomm line economics match/, 'admin prompt treats pre-tax ecomm economics as the approval gate');
 assert.match(source, /blocks if line-item detail is unavailable/, 'tool schema blocks when line detail is unavailable');
 assert.equal(shouldForceClaudeForWrite('send Lisa a contract for 1 MV73M'), true);
+assert.match(source, /const ZOHO_AI_CREATED_TAG = 'Stratus AI Created'/, 'Zoho AI-created tag name is centralized');
+assert.match(source, /actions\/add_tags/, 'Zoho native add_tags endpoint is used');
+assert.match(source, /tagZohoCreatedRecordsIfNeeded\(method, path, env, token, body, parsed, options\)/, 'central Zoho create path tags created records');
+assert.match(source, /addZohoAiCreatedTag\('Quotes', clonedId, token\)/, 'native quote clone path tags cloned Quotes');
+assert.match(source, /tagCreatedRecord: false/, 'undo restore can suppress AI-created tagging');
+assert.equal(zohoTopLevelModuleFromCreatePath('POST', 'Deals', { data: [{}] }), 'Deals', 'Deal creates are taggable');
+assert.equal(zohoTopLevelModuleFromCreatePath('POST', 'Quotes', { data: [{}] }), 'Quotes', 'Quote creates are taggable');
+assert.equal(zohoTopLevelModuleFromCreatePath('POST', 'coql', { select_query: 'select id from Deals' }), null, 'COQL reads are not taggable');
+assert.equal(zohoTopLevelModuleFromCreatePath('POST', 'Deals/123/Notes', { data: [{}] }), null, 'nested note creates are not treated as top-level CRM records');
+assert.equal(zohoTopLevelModuleFromCreatePath('POST', 'Deals', { data: [{}] }, { tagCreatedRecord: false }), null, 'suppression option disables tagging');
+assert.deepEqual(zohoCreatedRecordIds({ data: [{ code: 'SUCCESS', details: { id: '123' } }, { status: 'error', details: { id: '456' } }] }), ['123'], 'created record id extraction ignores failed rows');
 
 const workflowBody = extractFunction('handleQuoteToPoAndEsign');
 assert.doesNotMatch(workflowBody, /Stage\s*:/, 'quote_to_po workflow never writes Stage');
