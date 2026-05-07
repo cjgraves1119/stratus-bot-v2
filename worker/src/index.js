@@ -45,11 +45,61 @@ function writeMetric(env, { path, model, durationMs, inputTokens, outputTokens, 
 async function logBotUsageToD1(env, {
   personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage,
   responseText, toolCallsJson, requestedModel, executedModel, tierPath, liveLlmCall, tier0Deterministic,
-  attempts, transientErrors, endpoint, evalContext
+  attempts, transientErrors, endpoint, evalContext, reasoningPolicy, reasoningDisableSupported, reasoningControlJson
 }) {
   if (!env?.ANALYTICS_DB) return;
   try {
     if (evalContext?.runId) {
+      const resolvedReasoningPolicy = reasoningPolicy || evalContext?.reasoningPolicy || null;
+      const resolvedReasoningDisableSupported = reasoningDisableSupported === undefined
+        ? (evalContext?.reasoningDisableSupported ?? null)
+        : !!reasoningDisableSupported;
+      const resolvedReasoningControlJson = reasoningControlJson
+        ? (typeof reasoningControlJson === 'string' ? reasoningControlJson : JSON.stringify(reasoningControlJson))
+        : (evalContext?.reasoningControlJson || null);
+      // Try new schema (with reasoning_* columns) first; fall back to old schema if D1 hasn't migrated.
+      try {
+        await env.ANALYTICS_DB.prepare(
+          `INSERT INTO bot_usage_eval (
+            eval_run_id, bot, person_id, request_text, response_path, model,
+            requested_model, executed_model, tier_path, live_llm_call, tier_0_deterministic,
+            attempts, transient_errors, input_tokens, output_tokens, cost_usd, duration_ms,
+            error_message, response_text, tool_calls_json, endpoint,
+            reasoning_policy, reasoning_disable_supported, reasoning_control_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          evalContext.runId,
+          'webex',
+          personId || null,
+          (requestText || '').substring(0, 2000),
+          responsePath || null,
+          model || null,
+          requestedModel || evalContext.requestedModel || null,
+          executedModel || model || null,
+          tierPath || executedModel || model || null,
+          liveLlmCall === undefined ? true : !!liveLlmCall,
+          !!tier0Deterministic,
+          attempts || 1,
+          transientErrors ? (typeof transientErrors === 'string' ? transientErrors : JSON.stringify(transientErrors)).substring(0, 2000) : null,
+          inputTokens || 0,
+          outputTokens || 0,
+          costUsd || 0,
+          durationMs || null,
+          errorMessage || null,
+          responseText ? String(responseText).substring(0, 8000) : null,
+          toolCallsJson ? String(toolCallsJson).substring(0, 8000) : null,
+          endpoint || evalContext.endpoint || null,
+          resolvedReasoningPolicy,
+          resolvedReasoningDisableSupported,
+          resolvedReasoningControlJson ? String(resolvedReasoningControlJson).substring(0, 2000) : null
+        ).run();
+        return;
+      } catch (schemaErr) {
+        if (!/reasoning_policy|reasoning_disable_supported|reasoning_control_json|no such column/i.test(schemaErr.message || '')) {
+          throw schemaErr;
+        }
+        // Fall through to legacy schema below.
+      }
       await env.ANALYTICS_DB.prepare(
         `INSERT INTO bot_usage_eval (
           eval_run_id, bot, person_id, request_text, response_path, model,
@@ -1085,6 +1135,107 @@ function isDeepSeekModel(model) {
   return DEEPSEEK_MODEL_IDS.has(String(model || '').toLowerCase());
 }
 
+// ─── Reasoning-Off Policy (Webex worker) ────────────────────────────────────
+// Policy: default ALL candidate models to fastest non-reasoning mode for
+// classifier and routine CRM tool-use. Reasoning-enabled is an opt-in ablation
+// for advisory/prose only. Approval comparison uses fastest passing config.
+const REASONING_POLICY_DISABLED = 'disabled';
+const REASONING_POLICY_UNSUPPORTED = 'unsupported';
+const REASONING_POLICY_ENABLED_ABLATION = 'enabled_ablation';
+const REASONING_POLICY_UNKNOWN = 'unknown';
+
+function normalizeReasoningPolicy(policy) {
+  const normalized = String(policy || REASONING_POLICY_DISABLED).trim().toLowerCase().replace(/-/g, '_');
+  if (normalized === 'enabled' || normalized === 'reasoning' || normalized === 'on' || normalized === 'enabled_ablation') {
+    return REASONING_POLICY_ENABLED_ABLATION;
+  }
+  if (normalized === REASONING_POLICY_UNSUPPORTED) return REASONING_POLICY_UNSUPPORTED;
+  if (normalized === REASONING_POLICY_UNKNOWN) return REASONING_POLICY_UNKNOWN;
+  return REASONING_POLICY_DISABLED;
+}
+
+// Model-specific reasoning-control map. Mirrors worker-gchat. Returns the
+// request-shape modifications + telemetry policy fields.
+function getReasoningControl(modelId, requestedPolicy = REASONING_POLICY_DISABLED) {
+  const reasoningPolicy = normalizeReasoningPolicy(requestedPolicy);
+  const id = String(modelId || '').toLowerCase();
+
+  if (reasoningPolicy === REASONING_POLICY_ENABLED_ABLATION) {
+    return {
+      reasoningPolicy: REASONING_POLICY_ENABLED_ABLATION,
+      reasoningDisableSupported: false,
+      requestOptions: {},
+      reasoningControl: 'reasoning_enabled_ablation'
+    };
+  }
+
+  if (isDeepSeekModel(modelId)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { thinking: { type: 'disabled' } },
+      reasoningControl: 'deepseek_thinking_disabled'
+    };
+  }
+
+  if (/gemma-4|gemma4/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { thinking: { type: 'disabled' } },
+      reasoningControl: 'cf_thinking_disabled'
+    };
+  }
+
+  if (/kimi-k2\.6|kimi/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { chat_template_kwargs: { thinking: { type: 'disabled' } } },
+      reasoningControl: 'cf_chat_template_thinking_disabled'
+    };
+  }
+
+  if (/nemotron|gpt-oss|qwen|qwq|mistral|llama|sea-lion|sealion|hermes/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_UNSUPPORTED,
+      reasoningDisableSupported: false,
+      requestOptions: {},
+      reasoningControl: 'disable_not_supported_or_not_verified'
+    };
+  }
+
+  return {
+    reasoningPolicy: REASONING_POLICY_UNKNOWN,
+    reasoningDisableSupported: false,
+    requestOptions: {},
+    reasoningControl: 'unknown_model'
+  };
+}
+
+function isReasoningControlRejection(error) {
+  const text = String(error?.message || error || '');
+  return /(thinking|reasoning|chat_template_kwargs|enable_thinking|unknown.*(field|parameter)|invalid.*(field|parameter)|unexpected.*(field|parameter)|schema)/i.test(text);
+}
+
+function applyReasoningRequestOptions(requestBody, reasoningControl) {
+  const options = reasoningControl?.requestOptions || {};
+  for (const [key, value] of Object.entries(options)) requestBody[key] = value;
+}
+
+function reasoningResultFields(reasoningControl) {
+  const policy = reasoningControl?.reasoningPolicy || REASONING_POLICY_UNKNOWN;
+  const disableSupported = reasoningControl?.reasoningDisableSupported === true;
+  return {
+    reasoningPolicy: policy,
+    reasoning_policy: policy,
+    reasoningDisableSupported: disableSupported,
+    reasoning_disable_supported: disableSupported,
+    reasoningControl: reasoningControl?.reasoningControl || null,
+    reasoning_control: reasoningControl?.reasoningControl || null
+  };
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -1133,11 +1284,19 @@ async function callDeepSeekChatCompletion(env, {
   userText,
   thinkingType = 'disabled',
   jsonMode = true,
-  maxTokens = 4096
+  maxTokens = 4096,
+  reasoningPolicy = REASONING_POLICY_DISABLED
 }) {
   if (!env.DEEPSEEK_API_KEY) {
-    return { error: 'DEEPSEEK_API_KEY not bound', status: 500, attempts: 0, transientErrors: [], shouldFallbackToClaude: false };
+    return { error: 'DEEPSEEK_API_KEY not bound', status: 500, attempts: 0, transientErrors: [], shouldFallbackToClaude: false, reasoningPolicy: REASONING_POLICY_UNKNOWN, reasoningDisableSupported: false };
   }
+
+  // Reasoning policy resolution: caller may explicitly pass thinkingType (legacy
+  // behavior) OR pass reasoningPolicy (new policy). Policy 'enabled_ablation'
+  // overrides thinkingType to 'enabled'; policy 'disabled' (default) keeps
+  // thinkingType='disabled'.
+  const reasoningControl = getReasoningControl(model, reasoningPolicy);
+  const effectiveThinkingType = reasoningControl.reasoningPolicy === REASONING_POLICY_ENABLED_ABLATION ? 'enabled' : thinkingType;
 
   const requestBody = {
     model,
@@ -1146,7 +1305,7 @@ async function callDeepSeekChatCompletion(env, {
       { role: 'user', content: userText }
     ],
     max_tokens: maxTokens,
-    thinking: { type: thinkingType },
+    thinking: { type: effectiveThinkingType },
     stream: false
   };
   if (jsonMode) requestBody.response_format = { type: 'json_object' };
@@ -1179,7 +1338,8 @@ async function callDeepSeekChatCompletion(env, {
           raw,
           reasoningContent: message.reasoning_content || null,
           usage: data?.usage || {},
-          costUsd: estimateDeepSeekCostUsd(model, data?.usage || {})
+          costUsd: estimateDeepSeekCostUsd(model, data?.usage || {}),
+          ...reasoningResultFields(reasoningControl)
         };
       }
 
@@ -1198,7 +1358,8 @@ async function callDeepSeekChatCompletion(env, {
         rawResult: data || text,
         usage: data?.usage || {},
         costUsd: estimateDeepSeekCostUsd(model, data?.usage || {}),
-        shouldFallbackToClaude: resp.status >= 500
+        shouldFallbackToClaude: resp.status >= 500,
+        ...reasoningResultFields(reasoningControl)
       };
     } catch (e) {
       const error = `DeepSeek fetch error: ${e.message}`;
@@ -1207,7 +1368,7 @@ async function callDeepSeekChatCompletion(env, {
         await sleep(500 * Math.pow(2, attempt - 1));
         continue;
       }
-      return { error, status: 0, attempts: attempt, transientErrors, shouldFallbackToClaude: false };
+      return { error, status: 0, attempts: attempt, transientErrors, shouldFallbackToClaude: false, ...reasoningResultFields(reasoningControl) };
     }
   }
 }
@@ -8736,6 +8897,10 @@ export default {
         const input = body.input;
         const priorCtx = body.prior_context || '';
         const model = body.model || '@cf/meta/llama-4-scout-17b-16e-instruct';
+        // Reasoning-Off Policy: classifier defaults to 'disabled'. Caller may
+        // explicitly request 'enabled_ablation' via reasoning_policy/reasoningPolicy.
+        const requestedReasoningPolicy = normalizeReasoningPolicy(body.reasoning_policy || body.reasoningPolicy || REASONING_POLICY_DISABLED);
+        const reasoningControl = getReasoningControl(model, requestedReasoningPolicy);
         const evalRunId = request.headers.get('X-Eval-Run-Id') || null;
         const evalContext = evalRunId ? {
           runId: evalRunId,
@@ -8743,7 +8908,10 @@ export default {
           requestText: input,
           requestedModel: model,
           personId: 'benchmark-classifier',
-          bot: 'webex'
+          bot: 'webex',
+          reasoningPolicy: reasoningControl.reasoningPolicy,
+          reasoningDisableSupported: reasoningControl.reasoningDisableSupported,
+          reasoningControlJson: JSON.stringify({ control: reasoningControl.reasoningControl, requestedPolicy: requestedReasoningPolicy })
         } : null;
         // prompt_variant: "v2" (default, Schema v2 rich output) | "legacy" (CF_CLASSIFIER_PROMPT)
         const promptVariant = (body.prompt_variant || 'v2').toLowerCase();
@@ -8761,15 +8929,18 @@ export default {
         let aiResult, err = null, attempts = 1, transientErrors = [], tokenUsage = {}, costUsd = 0;
         let executedModel = model;
         let raw = null, parsed = null, parseError = null;
+        // Track effective policy after potential rejection fallback
+        let effectiveReasoningControl = reasoningControl;
 
         if (deepSeekRequested) {
           aiResult = await callDeepSeekChatCompletion(env, {
             model,
             systemPrompt,
             userText,
-            thinkingType: 'disabled',
+            thinkingType: requestedReasoningPolicy === REASONING_POLICY_ENABLED_ABLATION ? 'enabled' : 'disabled',
             jsonMode: true,
-            maxTokens: 4096
+            maxTokens: 4096,
+            reasoningPolicy: requestedReasoningPolicy
           });
           attempts = aiResult?.attempts || 1;
           transientErrors = aiResult?.transientErrors || [];
@@ -8797,12 +8968,35 @@ export default {
         } else {
           const isGemma = /gemma/i.test(model);
           const requestBody = isGemma
-            ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 4096, thinking: { type: 'disabled' } }
+            ? { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_completion_tokens: 4096 }
             : { messages: [{ role:'system', content: systemPrompt }, { role:'user', content: userText }], max_tokens: 512 };
+          // Apply reasoning control via the policy helper rather than hardcoded
+          // thinking:{type:'disabled'} on Gemma. This lets enabled_ablation
+          // skip the disable param, and Kimi/etc use their model-specific shape.
+          applyReasoningRequestOptions(requestBody, reasoningControl);
 
           try {
             aiResult = await env.AI.run(model, requestBody);
-          } catch (e) { err = e.message; }
+          } catch (e) {
+            // Reasoning-control rejection fallback: retry once without disable param.
+            const optionKeys = Object.keys(reasoningControl?.requestOptions || {});
+            if (optionKeys.length > 0 && isReasoningControlRejection(e)) {
+              for (const key of optionKeys) delete requestBody[key];
+              effectiveReasoningControl = {
+                ...reasoningControl,
+                reasoningPolicy: REASONING_POLICY_UNSUPPORTED,
+                reasoningDisableSupported: false,
+                reasoningControl: `${reasoningControl.reasoningControl}_rejected`
+              };
+              try {
+                aiResult = await env.AI.run(model, requestBody);
+              } catch (e2) {
+                err = e2.message;
+              }
+            } else {
+              err = e.message;
+            }
+          }
         }
         const elapsed = Date.now() - start;
 
@@ -8828,6 +9022,22 @@ export default {
           tokenUsage = aiResult?.usage || aiResult?.result?.usage || {};
         }
 
+        // Resolve effective reasoning policy from result (DeepSeek path may
+        // have set it via reasoningResultFields; CF path may have flipped to
+        // 'unsupported' on rejection).
+        const resultReasoningPolicy = aiResult?.reasoningPolicy
+          ?? aiResult?.reasoning_policy
+          ?? effectiveReasoningControl?.reasoningPolicy
+          ?? reasoningControl?.reasoningPolicy;
+        const resultReasoningDisableSupported = aiResult?.reasoningDisableSupported
+          ?? aiResult?.reasoning_disable_supported
+          ?? effectiveReasoningControl?.reasoningDisableSupported
+          ?? reasoningControl?.reasoningDisableSupported;
+        const resultReasoningControl = aiResult?.reasoningControl
+          ?? aiResult?.reasoning_control
+          ?? effectiveReasoningControl?.reasoningControl
+          ?? reasoningControl?.reasoningControl;
+
         if (evalContext) {
           await logBotUsageToD1(env, {
             personId: 'benchmark-classifier',
@@ -8848,7 +9058,10 @@ export default {
             errorMessage: err || parseError || null,
             responseText: raw || JSON.stringify(parsed || ''),
             endpoint: url.pathname,
-            evalContext
+            evalContext,
+            reasoningPolicy: resultReasoningPolicy,
+            reasoningDisableSupported: resultReasoningDisableSupported,
+            reasoningControlJson: JSON.stringify({ control: resultReasoningControl, requestedPolicy: requestedReasoningPolicy })
           });
         }
 
@@ -8865,7 +9078,13 @@ export default {
           attempts,
           transientErrors,
           usage: tokenUsage,
-          costUsd
+          costUsd,
+          reasoning_policy: resultReasoningPolicy,
+          reasoningPolicy: resultReasoningPolicy,
+          reasoning_disable_supported: resultReasoningDisableSupported,
+          reasoningDisableSupported: resultReasoningDisableSupported,
+          reasoning_control: resultReasoningControl,
+          reasoningControl: resultReasoningControl
         }), { headers: { 'content-type':'application/json', 'Access-Control-Allow-Origin':'*' } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { 'content-type':'application/json' } });
@@ -8894,6 +9113,10 @@ export default {
         const body = await request.json();
         const input = body.input;
         const modelKey = (body.model || 'claude').toLowerCase();
+        // Reasoning-Off Policy: prose/advisory defaults disabled-first; only an
+        // explicit reasoning_policy='enabled_ablation' opts into reasoning.
+        const requestedReasoningPolicy = normalizeReasoningPolicy(body.reasoning_policy || body.reasoningPolicy || REASONING_POLICY_DISABLED);
+        const reasoningControl = getReasoningControl(modelKey, requestedReasoningPolicy);
         const evalRunId = request.headers.get('X-Eval-Run-Id') || null;
         const evalContext = evalRunId ? {
           runId: evalRunId,
@@ -8901,7 +9124,10 @@ export default {
           requestText: input,
           requestedModel: modelKey,
           personId: 'benchmark-product-info',
-          bot: 'webex'
+          bot: 'webex',
+          reasoningPolicy: reasoningControl.reasoningPolicy,
+          reasoningDisableSupported: reasoningControl.reasoningDisableSupported,
+          reasoningControlJson: JSON.stringify({ control: reasoningControl.reasoningControl, requestedPolicy: requestedReasoningPolicy })
         } : null;
         const priorCtx = body.prior_context || '';
         const wantLiveDatasheet = !!body.want_live_datasheet;

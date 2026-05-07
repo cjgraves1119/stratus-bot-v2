@@ -32,6 +32,9 @@ const FORCE_MODEL = process.env.FORCE_MODEL || null; // 'llama' | 'gemma' | 'cla
 const RUN_LABEL = process.env.RUN_LABEL || (FORCE_MODEL || 'auto');
 const AUTO_RESEED = process.env.AUTO_RESEED !== '0'; // default on
 const DRY_RUN = process.env.DRY_RUN !== '0'; // default on; set DRY_RUN=0 only for approved live-write validation
+// Reasoning-Off Policy: routine harness defaults disabled. Set REASONING_POLICY=enabled_ablation
+// only for explicit reasoning-on ablation runs.
+const REASONING_POLICY = process.env.REASONING_POLICY || process.env.REASONING || 'disabled';
 const SEED_CONTACT = process.env.SEED_CONTACT || '2570562000401235755';
 const GATEWAY_API_KEY = process.env.STRATUS_GATEWAY_API_KEY || process.env.GATEWAY_API_KEY || '';
 
@@ -112,6 +115,8 @@ async function sendChat(text, history, progressId, sessionId) {
     },
     progressId,
     dryRun: DRY_RUN,
+    reasoning_policy: REASONING_POLICY,
+    reasoningPolicy: REASONING_POLICY,
   };
   if (FORCE_MODEL) body.forceModel = FORCE_MODEL;
   const t0 = Date.now();
