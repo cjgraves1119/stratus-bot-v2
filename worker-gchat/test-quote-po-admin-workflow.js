@@ -29,7 +29,6 @@ function getFunction(name) {
 
 const shouldForceClaudeForWrite = getFunction('shouldForceClaudeForWrite');
 const isHardwareOnlyQuoteIntent = getFunction('isHardwareOnlyQuoteIntent');
-const isAmbiguousMv73HardwareSku = getFunction('isAmbiguousMv73HardwareSku');
 const salesOrderEsignErrorMessage = getFunction('salesOrderEsignErrorMessage');
 const salesOrderVendorReference = Function(`"use strict";
 function zohoLookupId(value) {
@@ -72,6 +71,26 @@ ${extractFunction('zohoTopLevelModuleFromCreatePath')}
 return zohoTopLevelModuleFromCreatePath;
 `)();
 const zohoCreatedRecordIds = getFunction('zohoCreatedRecordIds');
+const catalogHelpers = Function(`"use strict";
+const staticPrices = ${JSON.stringify(JSON.parse(priceSource).prices)};
+let livePrices = null;
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+${extractFunction('applySuffix')}
+${extractFunction('resolveApprovedCatalogSku')}
+${extractFunction('approvedCatalogEntry')}
+${extractFunction('approvedCatalogAlternatives')}
+${extractFunction('notApprovedCatalogMessage')}
+return { resolveApprovedCatalogSku, approvedCatalogAlternatives, notApprovedCatalogMessage };
+`)();
 const collectQuotePreResolveSkuTokens = Function(`"use strict";
 ${extractFunction('isHardwareOnlyQuoteIntent')}
 ${extractFunction('collectQuotePreResolveSkuTokens')}
@@ -109,10 +128,14 @@ assert.equal(shouldForceClaudeForWrite('what is the most recent Zanesville quote
 
 assert.equal(isHardwareOnlyQuoteIntent('1 MV73M hardware only'), true);
 assert.equal(isHardwareOnlyQuoteIntent('just the hardware, no license'), true);
-assert.equal(isAmbiguousMv73HardwareSku('MV73'), true, 'bare MV73 must clarify instead of creating MV73-HW');
-assert.equal(isAmbiguousMv73HardwareSku('MV73-HW'), true, 'legacy/plain MV73-HW must clarify instead of creating records');
-assert.equal(isAmbiguousMv73HardwareSku('MV73M-HW'), false, 'MV73M-HW is a valid selected variant');
-assert.equal(isAmbiguousMv73HardwareSku('MV73X-HW'), false, 'MV73X-HW is a valid selected variant');
+assert.equal(catalogHelpers.resolveApprovedCatalogSku('MV73-HW'), null, 'legacy/plain MV73-HW is not in the approved ecomm catalog');
+assert.equal(catalogHelpers.resolveApprovedCatalogSku('MV73M-HW'), 'MV73M-HW', 'MV73M-HW is approved');
+assert.deepEqual(
+  catalogHelpers.approvedCatalogAlternatives('MV73'),
+  ['MV73M-HW', 'MV73X-HW'],
+  'bare MV73 suggestions come from the approved catalog, not a hardcoded SKU gate'
+);
+assert.match(catalogHelpers.notApprovedCatalogMessage('MV73', 'MV73-HW'), /MV73M-HW, MV73X-HW/, 'unapproved SKU failures surface approved alternatives');
 assert.deepEqual(collectQuotePreResolveSkuTokens('MV73M-HW plus LIC-MV-1YR hardware only'), ['MV73M-HW']);
 assert.equal(
   salesOrderEsignErrorMessage({ Admin_Action: 'LIVE_SendToEsign__Done', Client_Send_Status: 'Error', Log_Message: 'No any Vendor in Sales_Orders (+ trigger)' }),
@@ -195,11 +218,11 @@ assert.match(source, /name: 'create_quote_on_deal'/, 'tool schema exposes quote 
 assert.match(source, /existing_deal_id: deal_id/, 'create_quote_on_deal delegates without creating a duplicate Deal');
 assert.match(source, /Reused existing Deal/, 'existing Deal quote path records that it reused the Deal');
 assert.match(source, /Current CRM context\/page is a Deal\/Potentials record/, 'prompt routes Deal page quote requests to create_quote_on_deal');
-assert.match(source, /valid MV73 variants are MV73M-HW and MV73X-HW/, 'bare MV73 requests trigger variant clarification');
-assert.match(source, /ambiguous_mv73_variant/, 'bare MV73 has a deterministic server-side hard gate');
-assert.match(source, /Never use legacy\/plain MV73-HW/, 'MV73 hard gate blocks legacy MV73-HW fallback');
-assert.match(source, /Bare MV73 or MV73-HW is ambiguous\/legacy/, 'model prompt marks MV73 and MV73-HW ambiguous');
-assert.match(source, /Which MV73 variant should I quote: MV73M-HW or MV73X-HW\?/, 'routing clarification asks for MV73M vs MV73X');
+assert.match(source, /not_approved_ecomm_catalog/, 'non-approved SKUs have a deterministic server-side hard gate');
+assert.match(source, /Do not fall back to stale Zoho Products or WooProducts records/, 'catalog failures block stale Zoho fallback');
+assert.match(source, /Only SKUs in the approved Stratus ecomm catalog are quotable/, 'model prompt uses the general catalog rule');
+assert.match(source, /QUOTED_ITEMS_MISSING_PRODUCT_ID/, 'quote line items cannot be created from product-name text');
+assert.match(source, /return 'Potentials'/, 'Deal URLs use the valid Zoho Potentials tab path');
 assert.match(source, /force_create_po/, 'existing PO override is explicit');
 assert.match(source, /state: 'existing_po_found'/, 'existing PO block is present');
 assert.match(source, /findLinkedSalesOrderFromQuote/, 'quote linkage fallback is present');

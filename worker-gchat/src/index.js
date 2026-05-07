@@ -72,6 +72,17 @@ const prices = new Proxy(staticPrices, {
   }
 });
 
+function zohoCrmTabModule(moduleName) {
+  const mod = String(moduleName || '').trim();
+  if (mod === 'Deals' || mod === 'Potentials') return 'Potentials';
+  return mod;
+}
+
+function zohoRecordUrl(moduleName, recordId) {
+  if (!recordId) return null;
+  return `https://crm.zoho.com/crm/org647122552/tab/${zohoCrmTabModule(moduleName)}/${recordId}`;
+}
+
 function canonicalDirectMsLicenseSku(modelToken, term) {
   const model = String(modelToken || '').toUpperCase();
   const suffix = `${term}Y`;
@@ -1327,16 +1338,6 @@ function applySuffix(sku) {
   return upper;
 }
 
-function isAmbiguousMv73HardwareSku(sku) {
-  const upper = String(sku || '').trim().toUpperCase();
-  return upper === 'MV73' || upper === 'MV73-HW';
-}
-
-function ambiguousMv73Instruction(rawSkus) {
-  const listed = Array.isArray(rawSkus) && rawSkus.length ? rawSkus.join(', ') : 'MV73';
-  return `STOP. The user requested ${listed}, which is ambiguous. Do NOT create a Deal, Quote, PO, Sales Order, DID, or e-signature. The valid MV73 variants are MV73M-HW and MV73X-HW. Ask the user which one they want. Never use legacy/plain MV73-HW for a bare MV73 request.`;
-}
-
 // ─── License SKU Rules ───────────────────────────────────────────────────────
 function getLicenseSkus(baseSku, requestedTier) {
   if (requiresMsLicenseModelInputValidation(baseSku) && !hasKnownMsLicenseModelInput(baseSku)) {
@@ -1387,8 +1388,9 @@ function preResolveProductsForQuoteText(text, options = {}) {
   const preSkuTokens = collectQuotePreResolveSkuTokens(text, { hardwareOnly });
   const preResolved = {};
   for (const raw of [...new Set(preSkuTokens)]) {
-    const suffixed = applySuffix(raw);
-    const cached = prices[suffixed] || prices[raw] || null;
+    const approved = approvedCatalogEntry(raw);
+    const suffixed = approved?.sku || applySuffix(raw);
+    const cached = approved?.data || null;
     if (!cached?.zoho_product_id) continue;
 
     preResolved[raw] = {
@@ -1406,10 +1408,11 @@ function preResolveProductsForQuoteText(text, options = {}) {
     const licOptions = getLicenseSkus(raw);
     if (licOptions?.length) {
       for (const lic of licOptions) {
-        const licCached = prices[lic.sku] || null;
+        const licApproved = approvedCatalogEntry(lic.sku);
+        const licCached = licApproved?.data || null;
         if (licCached?.zoho_product_id) {
           preResolved[lic.sku] = {
-            suffixed_sku: lic.sku,
+            suffixed_sku: licApproved.sku,
             product_id: licCached.zoho_product_id,
             list_price: licCached.list || null,
             ecomm_price: licCached.price || null,
@@ -1910,9 +1913,11 @@ function detectFamily(sku) {
 // ─── Price Lookup ────────────────────────────────────────────────────────────
 function getPrice(sku) {
   const upper = sku.toUpperCase();
-  if (prices[upper]) return prices[upper];
+  const approved = approvedCatalogEntry(upper);
+  if (approved?.data) return approved.data;
   const noHw = upper.replace(/-HW(-NA)?$/, '');
-  if (prices[noHw]) return prices[noHw];
+  const approvedNoHw = approvedCatalogEntry(noHw);
+  if (approvedNoHw?.data) return approvedNoHw.data;
   return null;
 }
 
@@ -1933,6 +1938,64 @@ function resolveCatalogSku(sku) {
   const yrToY = upper.replace(/-(\d+)YR$/, '-$1Y');
   if (yrToY !== upper && prices[yrToY]) return yrToY;
   return upper;
+}
+
+function resolveApprovedCatalogSku(sku) {
+  if (!sku) return null;
+  const upper = String(sku).trim().toUpperCase();
+  if (Object.prototype.hasOwnProperty.call(staticPrices, upper)) return upper;
+  if (!upper.startsWith('LIC-')) return null;
+  const yToYr = upper.replace(/-(\d+)Y$/, '-$1YR');
+  if (yToYr !== upper && Object.prototype.hasOwnProperty.call(staticPrices, yToYr)) return yToYr;
+  const yrToY = upper.replace(/-(\d+)YR$/, '-$1Y');
+  if (yrToY !== upper && Object.prototype.hasOwnProperty.call(staticPrices, yrToY)) return yrToY;
+  return null;
+}
+
+function approvedCatalogEntry(sku) {
+  const suffixed = applySuffix(String(sku || '').trim().toUpperCase());
+  const approvedSku = resolveApprovedCatalogSku(suffixed) || resolveApprovedCatalogSku(sku);
+  if (!approvedSku) return null;
+  return {
+    sku: approvedSku,
+    data: prices[approvedSku] || staticPrices[approvedSku] || null
+  };
+}
+
+function approvedCatalogAlternatives(rawSku, limit = 8) {
+  const upper = String(rawSku || '').trim().toUpperCase();
+  if (!upper) return [];
+  const suffixed = applySuffix(upper);
+  const stems = [
+    upper,
+    suffixed,
+    upper.replace(/-HW(?:-NA)?$/, ''),
+    suffixed.replace(/-HW(?:-NA)?$/, ''),
+    upper.replace(/-RTG$/, ''),
+    suffixed.replace(/-RTG$/, '')
+  ].filter(Boolean);
+  const prefixes = [...new Set(stems.flatMap(stem => {
+    const base = stem.replace(/-HW(?:-NA)?$/, '').replace(/-RTG$/, '');
+    const familyMatch = base.match(/^([A-Z]+\d+)/);
+    return [base, familyMatch?.[1]].filter(Boolean);
+  }))].sort((a, b) => b.length - a.length);
+  const matches = [];
+  for (const sku of Object.keys(staticPrices)) {
+    if (resolveApprovedCatalogSku(sku) !== sku) continue;
+    if (prefixes.some(prefix => sku.startsWith(prefix)) && sku !== upper && sku !== suffixed) {
+      matches.push(sku);
+    }
+  }
+  return [...new Set(matches)].sort().slice(0, limit);
+}
+
+function notApprovedCatalogMessage(rawSku, suffixedSku) {
+  const suffixNote = suffixedSku && suffixedSku !== rawSku ? ` (normalized to ${suffixedSku})` : '';
+  const alternatives = approvedCatalogAlternatives(rawSku);
+  const altText = alternatives.length
+    ? ` Approved alternatives with the same prefix include: ${alternatives.join(', ')}. Ask the user which one they want.`
+    : ' Ask the user to clarify or choose a current sellable SKU.';
+  return `SKU "${rawSku}"${suffixNote} is not in the approved Stratus ecomm catalog. Do NOT create a Deal, Quote, PO, DID, or e-signature for this SKU.${altText} Do not fall back to stale Zoho Products or WooProducts records.`;
 }
 
 // ─── Pricing Calculator ──────────────────────────────────────────────────────
@@ -5742,12 +5805,20 @@ function preflightQuotedItemsProductActive(quotedItems) {
   const errors = [];
   const blocked = [];
   const hallucinated = [];
+  const missingProductIds = [];
   for (const item of quotedItems) {
     // Skip deletes and in-place modifies (existing ids)
     if (item._delete !== undefined) continue;
     if (item.id) continue;
     const productId = item.Product_Name?.id;
-    if (!productId) continue;
+    if (!productId) {
+      missingProductIds.push({
+        product_name: typeof item.Product_Name === 'object'
+          ? (item.Product_Name.name || item.Product_Name.Product_Code || JSON.stringify(item.Product_Name).slice(0, 80))
+          : (item.Product_Name == null ? null : String(item.Product_Name))
+      });
+      continue;
+    }
     const sku = idMap[productId];
     if (!sku) {
       // Unknown product_id — not in our reverse cache. This is almost always
@@ -5780,12 +5851,20 @@ function preflightQuotedItemsProductActive(quotedItems) {
       `If you didn't call batch_product_lookup for this SKU in THIS conversation, the id is fake.`
     );
   }
+  if (missingProductIds.length > 0) {
+    errors.unshift(
+      `❌ QUOTED_ITEMS_MISSING_PRODUCT_ID: ${missingProductIds.length} new line item(s) did not include Product_Name.id. ` +
+      `Do NOT create quote line items by Product_Name text or Product_Code text. ` +
+      `Call batch_product_lookup first and use the returned product_id from the approved Stratus ecomm catalog.`
+    );
+  }
   if (errors.length > 0) {
     return {
       valid: false,
       errors,
       blocked_items: blocked,
-      hallucinated_ids: hallucinated.length > 0 ? hallucinated : undefined
+      hallucinated_ids: hallucinated.length > 0 ? hallucinated : undefined,
+      missing_product_ids: missingProductIds.length > 0 ? missingProductIds : undefined
     };
   }
   return { valid: true };
@@ -6302,7 +6381,7 @@ function summarizeSalesOrdersForUser(records = []) {
     signature_status: so.Signature_Status || so.Esignature_Status || so.Esign_Status || so.DocuSign_Status || so.ZohoSign_Status || null,
     esign_error: salesOrderEsignErrorMessage(so),
     created_time: so.Created_Time || null,
-    url: so.id ? `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${so.id}` : null
+    url: so.id ? zohoRecordUrl('Sales_Orders', so.id) : null
   }));
 }
 
@@ -6521,7 +6600,18 @@ function targetEcommUnitPrice(product = {}) {
 }
 
 async function fetchLiveSkuPricing(sku, productId, env) {
-  const suffixed = applySuffix(sku);
+  const requested = String(sku || '').trim().toUpperCase();
+  const suffixedInput = applySuffix(requested);
+  const approvedSku = resolveApprovedCatalogSku(suffixedInput) || resolveApprovedCatalogSku(requested);
+  if (!approvedSku) {
+    return {
+      success: false,
+      sku: suffixedInput,
+      error: notApprovedCatalogMessage(requested, suffixedInput),
+      not_approved_catalog: true
+    };
+  }
+  const suffixed = approvedSku;
   const [wooResult, productResult] = await Promise.allSettled([
     zohoApiCall(
       'GET',
@@ -6851,7 +6941,7 @@ function buildPoMissingVendorPayload({ quote, salesOrder, validation, did, veloc
     convert_admin_action: convert || null,
     ai_created_tag: aiTag || null,
     error: 'PO was created with correct pricing but has no Vendor populated, so I did not send it for e-signature.',
-    _record_url: salesOrder?.id ? `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${salesOrder.id}` : null,
+    _record_url: salesOrder?.id ? zohoRecordUrl('Sales_Orders', salesOrder.id) : null,
     _user_visible_summary: `PO ${soNumber} was created and pricing was verified, but e-signature was not sent because the Sales Order has no Vendor populated. Set Vendor on the Sales Order in Zoho, then retry with sales_order_id.${terms}`
   };
 }
@@ -7236,7 +7326,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       sales_order: summarizeSalesOrdersForUser([esign.final_state || requested])[0],
       financial_validation: requestedValidation,
       esign_admin_action: esign,
-      _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${requested.id}`,
+      _record_url: zohoRecordUrl('Sales_Orders', requested.id),
       _user_visible_summary: esign.success === false
         ? `PO ${requested.SO_Number || requested.id} pricing is verified, but e-signature was not sent. ${esign.error ? `Zoho reported: ${esign.error}` : 'Zoho reported an e-signature error.'}`
         : `PO ${requested.SO_Number || requested.id} is sent/processing for e-signature.`
@@ -7458,7 +7548,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       net_terms_notice: netTermsNotice,
       ai_created_tag: salesOrderAiTag,
       quote_data_admin_action: quoteData,
-      _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
+      _record_url: zohoRecordUrl('Sales_Orders', candidate.id),
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}.`)
     });
   }
@@ -7476,7 +7566,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       net_terms_notice: netTermsNotice,
       ai_created_tag: salesOrderAiTag,
       quote_data_admin_action: quoteData,
-      _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
+      _record_url: zohoRecordUrl('Sales_Orders', candidate.id),
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}; e-signature already appears sent or in progress.`)
     });
   }
@@ -7519,7 +7609,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     quote_data_admin_action: quoteData,
     convert_admin_action: convert,
     esign_admin_action: esign,
-    _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
+    _record_url: zohoRecordUrl('Sales_Orders', candidate.id),
     _user_visible_summary: esign.success === false
       ? withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id} and verified pricing, but e-signature was not sent. ${esign.error ? `Zoho reported: ${esign.error}` : 'Zoho reported an e-signature error.'}`)
       : withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id} and sent it for e-signature.`)
@@ -7556,15 +7646,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const activeCheck = preflightQuotedItemsProductActive(items);
         if (!activeCheck.valid) {
           const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+          const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
           const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';
           return {
             validation_error: true,
             action: blockAction,
-            message: hasHallucination
+            message: (hasHallucination || hasMissingProductIds)
               ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
               : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
             blocked_items: activeCheck.blocked_items,
-            hallucinated_ids: activeCheck.hallucinated_ids
+            hallucinated_ids: activeCheck.hallucinated_ids,
+            missing_product_ids: activeCheck.missing_product_ids
           };
         }
       }
@@ -7810,7 +7902,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 parsed.data[0] = { ...parsed.data[0], ...slim };
                 // Inject _url for narration
                 parsed.data.forEach(rec => {
-                  if (rec?.id) rec._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${rec.id}`;
+                  if (rec?.id) rec._url = zohoRecordUrl(module_name, rec.id);
                 });
                 parsed._url_hint = `When narrating this quote, INCLUDE the record id (${parsed.data[0].id}) in the reply AND cite the _url as a markdown link [Subject](url). The record id is REQUIRED — customers need both Quote_Number and record_id to locate the quote in Zoho.`;
                 return JSON.stringify(parsed);
@@ -7826,7 +7918,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const parsed = typeof searchResult === 'string' ? JSON.parse(searchResult) : searchResult;
           if (parsed?.data?.length > 0) {
             parsed.data.forEach(rec => {
-              if (rec?.id) rec._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${rec.id}`;
+              if (rec?.id) rec._url = zohoRecordUrl(module_name, rec.id);
             });
             parsed._url_hint = `Each record includes an _url field. When narrating these results to the user, cite the record ID and include the _url as a markdown link, e.g. [${module_name === 'Deals' ? 'Deal Name' : 'Record'}](url).`;
             return JSON.stringify(parsed);
@@ -7896,7 +7988,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   Net_Total: item.Net_Total
                 })),
                 _line_item_count: (full.Quoted_Items || []).length,
-                _url: `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${full.id}`
+                _url: zohoRecordUrl(module_name, full.id)
               };
               return JSON.stringify(parsed);
             }
@@ -7911,7 +8003,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         try {
           const parsed = typeof getResult === 'string' ? JSON.parse(getResult) : getResult;
           if (parsed?.data?.[0]?.id) {
-            parsed.data[0]._url = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${parsed.data[0].id}`;
+            parsed.data[0]._url = zohoRecordUrl(module_name, parsed.data[0].id);
             return JSON.stringify(parsed);
           }
           // ── Quote_Number-as-record_id hint ──────────────────────────────
@@ -8002,14 +8094,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const activeCheck = preflightQuotedItemsProductActive(recordData.Quoted_Items);
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
             return {
               validation_error: true,
               action: 'create_blocked',
-              message: hasHallucination
+              message: (hasHallucination || hasMissingProductIds)
                 ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
                 : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
               blocked_items: activeCheck.blocked_items,
-              hallucinated_ids: activeCheck.hallucinated_ids
+              hallucinated_ids: activeCheck.hallucinated_ids,
+              missing_product_ids: activeCheck.missing_product_ids
             };
           }
         }
@@ -8050,7 +8144,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         let createUserSummary = null;
         if (!createIsError && createdId) {
           createUndoToken = generateUndoToken();
-          createUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${createdId}`;
+          createUrl = zohoRecordUrl(module_name, createdId);
           // Surface key picklist values (post-validation-correction) so models
           // can't paraphrase the user's original input back verbatim when
           // we've auto-corrected e.g. "Referral" → "Stratus Referal".
@@ -8157,14 +8251,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const activeCheck = preflightQuotedItemsProductActive(data.Quoted_Items);
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
             return {
               validation_error: true,
               action: 'update_blocked',
-              message: hasHallucination
+              message: (hasHallucination || hasMissingProductIds)
                 ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
                 : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
               blocked_items: activeCheck.blocked_items,
-              hallucinated_ids: activeCheck.hallucinated_ids
+              hallucinated_ids: activeCheck.hallucinated_ids,
+              missing_product_ids: activeCheck.missing_product_ids
             };
           }
         }
@@ -8410,7 +8506,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         let updateUserSummary = null;
         if (!updateIsError) {
           updateUndoToken = generateUndoToken();
-          updateUrl = `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${record_id}`;
+          updateUrl = zohoRecordUrl(module_name, record_id);
           // Embed key field VALUES (post-validation-correction) so models can't
           // paraphrase away the corrected picklist value. E.g. if user asked for
           // Stage "Closed Lost", the validator auto-corrected to "Closed (Lost)"
@@ -8996,25 +9092,25 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const lookupPromises = skus.map(async (entry) => {
           const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
           const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
-          if (isAmbiguousMv73HardwareSku(rawSku)) {
+          const suffixed = applySuffix(rawSku);
+          const approvedSku = resolveApprovedCatalogSku(suffixed) || resolveApprovedCatalogSku(rawSku);
+          if (!approvedSku) {
             batchResults[rawSku] = {
-              suffixed_sku: rawSku,
+              suffixed_sku: suffixed,
               qty,
               found: false,
-              ambiguous: true,
-              error: 'ambiguous_mv73_variant',
-              valid_variants: ['MV73M-HW', 'MV73X-HW'],
-              hint: ambiguousMv73Instruction([rawSku])
+              not_approved_catalog: true,
+              error: 'not_approved_ecomm_catalog',
+              hint: notApprovedCatalogMessage(rawSku, suffixed)
             };
             return;
           }
-          const suffixed = applySuffix(rawSku);
           // Resolve -Y ↔ -YR license term variants against the catalog so
           // a mis-typed term (LIC-MX75-ENT-3YR vs -3Y) doesn't falsely
           // flag the product as inactive.
-          const resolved = resolveCatalogSku(suffixed);
+          const resolved = approvedSku;
           // Get cached price data (live KV → static prices.json via Proxy)
-          const cachedPrice = prices[resolved] || null;
+          const cachedPrice = prices[resolved] || staticPrices[resolved] || null;
           // If prices.json has zoho_product_id, skip the API call entirely
           if (cachedPrice?.zoho_product_id) {
             cacheHits++;
@@ -9229,12 +9325,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let apiNeeded = 0;
           const resolvedItems = orderedItems.map(item => {
             const suffixed = applySuffix(item.sku);
-            const cached = prices[suffixed] || prices[item.sku] || null;
+            const approved = approvedCatalogEntry(item.sku);
+            const cached = approved?.data || null;
             if (cached?.zoho_product_id) {
               cacheHits++;
               return {
                 ...item,
-                suffixed_sku: suffixed,
+                suffixed_sku: approved.sku,
                 product_id: cached.zoho_product_id,
                 list_price: cached.list || null,
                 ecomm_price: cached.price || null,
@@ -9244,8 +9341,27 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               };
             }
             apiNeeded++;
-            return { ...item, suffixed_sku: suffixed, found: false };
+            return {
+              ...item,
+              suffixed_sku: suffixed,
+              found: false,
+              not_approved_catalog: !approved,
+              hint: !approved ? notApprovedCatalogMessage(item.sku, suffixed) : undefined
+            };
           });
+          const blockedItems = resolvedItems.filter(item => item.not_approved_catalog);
+          if (blockedItems.length > 0) {
+            return {
+              success: false,
+              error: 'not_approved_ecomm_catalog',
+              blocked_items: blockedItems.map(item => ({
+                sku: item.sku,
+                suffixed_sku: item.suffixed_sku,
+                hint: item.hint
+              })),
+              instruction: 'STOP. One or more URL SKUs are not in the approved Stratus ecomm catalog. Do NOT create or update a Quote from this URL until the user chooses approved alternatives.'
+            };
+          }
 
           console.log(`[PARSE-URL] ${rawSkus.length} SKUs parsed, ${orderedItems.length} ordered items, ${cacheHits} cache hits, ${apiNeeded} need API`);
 
@@ -9468,7 +9584,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               }
             }
           }
-          results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
+          results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: zohoRecordUrl('Accounts', accountId) };
 
           // STEP 2: Find or create Contact — no placeholder fallback
           let contactId = existingDealData?.Contact_Name?.id || null;
@@ -9529,7 +9645,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
           if (contactId) {
-            results.records.contact = { id: contactId, url: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contactId}` };
+            results.records.contact = { id: contactId, url: zohoRecordUrl('Contacts', contactId) };
           }
 
           // ── Lead_Source validation (Fix #3) ──
@@ -9550,7 +9666,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             results.steps.push(`Cisco_Billing_Term "${before}" invalid - coerced to "Prepaid Term"`);
           }
           if (contactId) {
-            results.records.contact = { id: contactId, url: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${contactId}` };
+            results.records.contact = { id: contactId, url: zohoRecordUrl('Contacts', contactId) };
           }
 
           // STEP 3: Resolve ALL products from cache using getLicenseSkus for auto-license
@@ -9563,33 +9679,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // (e.g. "2 CW9172l" typo silently dropped while MX75/MX85 succeed).
           const missingUserHardware = [];
           const defaultTerm = license_term || '1';
-          const ambiguousMv73Skus = skus
-            .map(entry => (typeof entry === 'string' ? entry : entry?.sku))
-            .filter(sku => isAmbiguousMv73HardwareSku(sku))
-            .map(sku => String(sku).trim().toUpperCase());
-          if (ambiguousMv73Skus.length > 0) {
-            return {
-              success: false,
-              error: 'ambiguous_mv73_variant',
-              ambiguous_skus: ambiguousMv73Skus,
-              valid_variants: ['MV73M-HW', 'MV73X-HW'],
-              instruction: ambiguousMv73Instruction(ambiguousMv73Skus),
-              _user_visible_summary: 'Which MV73 variant should I use: MV73M-HW or MV73X-HW?',
-              wall_ms: Date.now() - _startMs
-            };
-          }
 
           function resolveFromCache(sku) {
-            const suffixed = applySuffix(sku);
-            return prices[suffixed] || prices[sku] || null;
+            const approved = approvedCatalogEntry(sku);
+            return approved?.data || null;
           }
 
           // Collect SKUs needing product IDs, then batch-resolve via API
           const pendingProducts = []; // {suffixed, qty, cached} waiting for product ID
 
           function stageProduct(sku, qty) {
-            const suffixed = applySuffix(sku);
-            const cached = prices[suffixed] || prices[sku] || null;
+            const requestedSuffixed = applySuffix(sku);
+            const approvedSku = resolveApprovedCatalogSku(requestedSuffixed) || resolveApprovedCatalogSku(sku);
+            const suffixed = approvedSku || requestedSuffixed;
+            const cached = approvedSku ? (prices[approvedSku] || staticPrices[approvedSku] || null) : null;
             console.log(`[COMPOUND] stageProduct: sku=${sku} suffixed=${suffixed} hasPid=${!!cached?.zoho_product_id} hasPrice=${!!cached?.price}`);
             if (cached) {
               pendingProducts.push({ suffixed, qty, cached, hasPid: !!cached.zoho_product_id });
@@ -9777,7 +9880,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               error: 'unresolved_user_hardware',
               missing_user_hardware: missingUserHardware,
               resolved_so_far: resolvedProducts.map(p => p.sku),
-              instruction: `STOP. The user requested hardware SKU(s) that do not exist in the catalog: ${missingUserHardware.join(', ')}. Do NOT create any Deal or Quote. Do NOT silently omit the missing SKUs. Report to the user and ask them to clarify or correct them.${disambigHint}`,
+              instruction: `STOP. The user requested hardware SKU(s) that are not in the approved Stratus ecomm catalog: ${missingUserHardware.join(', ')}. Do NOT create any Deal, Quote, PO, DID, or e-signature. Do NOT fall back to stale Zoho Products/WooProducts matches and do NOT silently omit the missing SKUs. Report to the user and ask them to clarify or correct them.${disambigHint}`,
               wall_ms: Date.now() - _startMs
             };
           }
@@ -9844,7 +9947,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               error: 'no_products_resolved',
               missing_products: missingProducts,
               requested_skus: skus.map(s => typeof s === 'string' ? s : s.sku),
-              instruction: `STOP. No products could be resolved from ${JSON.stringify(skus)}. Missing: ${missingProducts.join(', ')}. Do NOT create any Deal or Quote. Report the missing SKUs to the user and ask them to clarify or correct them. NEVER fabricate a quote_id or record URL.`,
+              instruction: `STOP. No products could be resolved from the approved Stratus ecomm catalog for ${JSON.stringify(skus)}. Missing: ${missingProducts.join(', ')}. Do NOT create any Deal or Quote. Report the missing SKUs to the user and ask them to clarify or correct them. NEVER fabricate a quote_id or record URL.`,
               wall_ms: Date.now() - _startMs
             };
           }
@@ -9886,7 +9989,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
             results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})`);
           }
-          results.records.deal = { id: dealId, name: dealData.Deal_Name, url: `https://crm.zoho.com/crm/org647122552/tab/Deals/${dealId}` };
+          results.records.deal = { id: dealId, name: dealData.Deal_Name, url: zohoRecordUrl('Deals', dealId) };
 
           // STEP 6: Create Quote with line items
           const billingAddr = billing_address || {
@@ -9937,7 +10040,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             return { success: false, ...results, wall_ms: Date.now() - _startMs };
           }
           results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
-          results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
+          results.records.quote = { id: quoteId, url: zohoRecordUrl('Quotes', quoteId) };
 
           // STEP 7: Fetch the created quote to confirm durability, then reconcile
           // persisted line totals to the ecomm target. Zoho may use a live Product
@@ -10053,7 +10156,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             const taskId = taskResult?.data?.[0]?.details?.id;
             if (taskId) {
               results.steps.push(`Created follow-up Task due ${taskData.Due_Date} (${taskId})`);
-              results.records.task = { id: taskId, url: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${taskId}` };
+              results.records.task = { id: taskId, url: zohoRecordUrl('Tasks', taskId) };
             }
           } catch (e) {
             results.steps.push(`Task creation failed: ${e.message}`);
@@ -10510,7 +10613,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
 
           if (structuralIssues.length > 0) {
-            const partialUrl = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
+            const partialUrl = zohoRecordUrl('Quotes', clonedId);
             console.warn(`[CLONE-QUOTE] Structural verification failed for clone ${clonedId}: ${structuralIssues.join('; ')}`);
             await logCrmOpToD1(env, {
               personId: personId || null,
@@ -10548,7 +10651,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
 
           const cloneUndoToken = generateUndoToken();
-          const cloneUrlLink = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${clonedId}`;
+          const cloneUrlLink = zohoRecordUrl('Quotes', clonedId);
           // Markdown-link the URL so autolinkers don't grab a trailing period.
           // NOTE: the fallback flag is intentionally NOT surfaced in the
           // user-visible summary — it's internal plumbing and the word
@@ -10762,7 +10865,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               return { success: false, error: `Undo restore failed: ${recreateRes?.data?.[0]?.message || 'unknown'}`, detail: recreateRes };
             }
             reversalResult = recreateRes;
-            reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${newId}`;
+            reversalUrl = zohoRecordUrl(origModule, newId);
             reversalSummary = `Undid delete on ${origModule.replace(/s$/, '')} — recreated as ${newId} — [Open in Zoho](${reversalUrl})`;
           } else if (lookup.operation === 'update') {
             // Reverse an update by restoring the captured pre-state.
@@ -11098,9 +11201,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 // explicitly (and only after verification confirmed it).
                 if (scalarPutHappened) {
                   const fieldList = scalarRestoreKeys.slice(0, 4).join(', ');
-                  reversalSummary = `Undid update on ${quoteRefLabel} — Quoted_Items already matched preState; restored ${scalarRestoreKeys.length} scalar field(s) (${fieldList}) and verified persistence. [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                  reversalSummary = `Undid update on ${quoteRefLabel} — Quoted_Items already matched preState; restored ${scalarRestoreKeys.length} scalar field(s) (${fieldList}) and verified persistence. [Open in Zoho](${zohoRecordUrl(origModule, origRecordId)})`;
                 } else {
-                  reversalSummary = `Nothing to undo on ${quoteRefLabel} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state and no scalar fields needed restoration). [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId})`;
+                  reversalSummary = `Nothing to undo on ${quoteRefLabel} — the prior mutation didn't actually change the quote (Quoted_Items still match the original state and no scalar fields needed restoration). [Open in Zoho](${zohoRecordUrl(origModule, origRecordId)})`;
                 }
                 // Fall through to the shared logging/return at the bottom.
               } else {
@@ -11337,7 +11440,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               }
             }
 
-            reversalUrl = `https://crm.zoho.com/crm/org647122552/tab/${origModule}/${origRecordId}`;
+            reversalUrl = zohoRecordUrl(origModule, origRecordId);
             // Honor a no-op-path summary set above (Quote no-op fast path).
             // Otherwise build the standard "Undid update" summary.
             if (!reversalSummary) {
@@ -11962,7 +12065,7 @@ const CRM_EMAIL_TOOLS = [
   // Batch Product Lookup (parallel, with KV pricing)
   {
     name: 'batch_product_lookup',
-    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU. IMPORTANT: Use quote_unit_price (ecomm price) for Quoted_Items.unit_price when creating quotes — this is the Stratus default. Use this for ALL product lookups — never search Products/WooProducts individually.',
+    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Only SKUs in the approved Stratus ecomm catalog are quotable; if found:false/not_approved_catalog is returned, ask the user to clarify and do NOT create a quote. Uses embedded Zoho product IDs from the local approved price cache, with API fallback only for approved SKUs missing cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU. IMPORTANT: Use the returned product_id in Quoted_Items. Never search Products/WooProducts directly or fall back to stale Zoho product records.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11997,7 +12100,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set and verify Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION" plus the complete required quote payload before reporting success. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Bare MV73 or MV73-HW is ambiguous/legacy; ask whether the user wants MV73M-HW or MV73X-HW and do not create records until they choose. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set and verify Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION" plus the complete required quote payload before reporting success. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Only SKUs in the approved Stratus ecomm catalog are quotable; if a SKU is not approved, ask the user to clarify or choose one of the approved alternatives returned by the tool. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {
@@ -12039,7 +12142,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'create_quote_on_deal',
-    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets and verifies Quote Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals plus required quote fields. Bare MV73 or MV73-HW is ambiguous/legacy; ask whether the user wants MV73M-HW or MV73X-HW and do not create records until they choose. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
+    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets and verifies Quote Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals plus required quote fields. Only SKUs in the approved Stratus ecomm catalog are quotable; if a SKU is not approved, ask the user to clarify or choose one of the approved alternatives returned by the tool. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
     input_schema: {
       type: 'object',
       properties: {
@@ -12378,7 +12481,7 @@ These four rules OVERRIDE any conflicting guidance elsewhere in this prompt.
 
 **Rule 2 — Always confirm the exact action with the record URL.** After any successful CRM mutation (create, update, clone, delete), your reply to the user MUST include:
 1. A one-sentence confirmation of what was changed (module, record name/id, specific fields or action).
-2. The direct Zoho CRM URL to the record, in \`https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}\` form. When the tool response already contains \`_record_url\` or \`_user_visible_summary\`, use those verbatim — do not reconstruct them.
+2. The direct Zoho CRM URL to the record, in \`https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}\` form. Use the tool-provided URL verbatim; Deals must use the Zoho tab path \`Potentials\`, not \`Deals\`. When the tool response already contains \`_record_url\` or \`_user_visible_summary\`, use those verbatim — do not reconstruct them.
 3. The \`_undo_token\` if one was returned, in the form: "Undo token: \`u_xxxxxxxx\` (say 'undo' to reverse)."
 
 **Rule 3 — Restate the undo token for every mutation.** Every \`zoho_create_record\`, \`zoho_update_record\`, \`zoho_delete_record\`, and \`clone_quote\` response that succeeds now returns \`_undo_token\` AND embeds it directly in the \`message\` field. Your reply to the user MUST echo the \`message\` verbatim (or include the token as "Undo token: \`u_xxxxxxxx\`") — do NOT silently drop the token even for single-field updates like renames. Undo tokens never expire within the evaluation period.
@@ -12454,7 +12557,7 @@ You now have access to Zoho CRM and Gmail tools. Use them to help with CRM and e
 
 ### ZOHO CRM CONTEXT
 - Org ID: org647122552
-- CRM link format: https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}
+- CRM link format: https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}; for Deals, the Zoho URL module is Potentials.
 - Owner default: Chris Graves — ID 2570562000141711002
 - Always filter queries by Owner = 2570562000141711002 unless told otherwise
 
@@ -12583,7 +12686,7 @@ SKU suffixes and hardware→license pairing are handled automatically by the too
 - License quantity always equals hardware quantity (1:1 ratio)
 - If a user explicitly names a license SKU (e.g., "LIC-ENT-3YR"), pass it as-is to batch_product_lookup
 - If the user asks for licenses only, do NOT convert that into hardware. In create_deal_and_quote, use the explicit license SKU or the model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN).
-- Bare MV73 or MV73-HW is ambiguous/legacy. Ask which valid MV73 variant they want: MV73M-HW or MV73X-HW. Never create MV73-HW from a bare MV73 request.
+- Only SKUs in the approved Stratus ecomm catalog are quotable. If the exact normalized SKU is not approved, do not search live Zoho Products/WooProducts as a fallback; ask the user to clarify or choose an approved alternative returned by the tool.
 
 **MR Enterprise License — UNIVERSAL across all MR APs.** The only valid SKUs are:
 - LIC-ENT-1YR (1 year)
@@ -12779,7 +12882,7 @@ For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) �
 4. **create_quote_on_deal vs create_deal_and_quote:** If the current CRM context is a Deal/Potentials record or the user gives a Deal ID, call create_quote_on_deal so the Quote stays on that existing Deal. Only call create_deal_and_quote for a brand-new Deal. Pass ONLY requested SKUs. Hardware auto-adds licenses unless hardware_only/include_licenses=false. If the same request naturally asks for a customer contract, PO, signature, e-signature, DocuSign, or "send PO", immediately continue with quote_to_po_and_esign using the created Quote ID.
 5. **batch_product_lookup / parse_quote_url:** Use for all SKU lookups and URL parsing. Never search Products individually.
 6. **RESELLER / VAR PATTERN:** "this is for [Customer]" or "on behalf of [Customer]" = sender is VAR. Billing Account = sender's company. Deal name: "[Sender Account] - [End Customer] - [Description]". Contact = sender.
-7. **ALWAYS END WITH ZOHO LINKS:** [Record Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID) for every record created.
+7. **ALWAYS END WITH ZOHO LINKS:** [Record Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID) for every record created. Deal URLs use MODULE=Potentials.
 
 ---
 
@@ -13401,7 +13504,6 @@ MV cameras: MV2, MV12, MV22, MV32, MV72, MV93
 MT sensors: MT14, MT15, MT20, MT40
 Teleworker: Z4, Z4C
 Cellular: MG51, MG52
-MV73 camera variant rule: bare MV73 or MV73-HW is ambiguous/legacy. Ask which variant: MV73M-HW or MV73X-HW. Never pick MV73-HW automatically.
 IMPORTANT — Unknown/EOL model rule: If a user mentions a model number that follows Cisco/Meraki naming patterns (MR##, MX##, MS###-##, MV##, CW####, MT##, Z#, MG##) but is NOT in the active product list above, it is likely end-of-life or a typo. ALWAYS classify as "quote" if they want pricing — NEVER "clarify". The backend has full EOL data and handles replacement mapping automatically.
 
 Respond with ONLY this JSON:
@@ -13465,8 +13567,8 @@ async function classifyWithCF(userMessage, env) {
   }
 }
 
-const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MV73(?:-HW)?|MR|MX|MV|MT|MG|CW)$/i;
-const ROUTING_AMBIGUOUS_TEXT_STEM = /\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MV73(?:-HW)?|MR|MX|MV|MT|MG|CW)\b(?![A-Z0-9-])/i;
+const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)$/i;
+const ROUTING_AMBIGUOUS_TEXT_STEM = /\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)\b(?![A-Z0-9-])/i;
 
 function getClassifierItems(classification) {
   return Array.isArray(classification?.items) ? classification.items : [];
@@ -13549,9 +13651,6 @@ function buildClassifierClarifyReply(rawText, classification) {
     }
     if (/^MS390-48$/i.test(ambiguousSku)) {
       return 'Which MS390-48 variant should I quote: MS390-48P, MS390-48U, MS390-48UX, or MS390-48UX2?';
-    }
-    if (/^MV73(?:-HW)?$/i.test(ambiguousSku)) {
-      return 'Which MV73 variant should I quote: MV73M-HW or MV73X-HW?';
     }
     if (/^MS/i.test(ambiguousSku)) {
       return 'Which exact switch model should I quote? Please include the full model and variant, such as MS130-24P or MS150-24P-4G.';
@@ -14682,16 +14781,18 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
           const activeCheck = preflightQuotedItemsProductActive(items);
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
             const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';
             return {
               result: {
                 validation_error: true,
                 action: blockAction,
-                message: hasHallucination
+                message: (hasHallucination || hasMissingProductIds)
                   ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
                   : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
                 blocked_items: activeCheck.blocked_items,
-                hallucinated_ids: activeCheck.hallucinated_ids
+                hallucinated_ids: activeCheck.hallucinated_ids,
+                missing_product_ids: activeCheck.missing_product_ids
               },
               mocked: true,
               payloadPreview: JSON.stringify(toolInput).substring(0, 500)
@@ -15033,10 +15134,14 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   const verifiedRecordsByModule = new Map();
   function addVerifiedRef(module, id) {
     if (!module || id == null) return;
-    const key = String(module);
+    const key = zohoCrmTabModule(module);
     const val = String(id);
     if (!verifiedRecordsByModule.has(key)) verifiedRecordsByModule.set(key, new Set());
     verifiedRecordsByModule.get(key).add(val);
+    if (key === 'Potentials') {
+      if (!verifiedRecordsByModule.has('Deals')) verifiedRecordsByModule.set('Deals', new Set());
+      verifiedRecordsByModule.get('Deals').add(val);
+    }
   }
   let iteration = 0;
   let finalReply = '';
@@ -15164,7 +15269,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
           // appear in the result string if the worker put them there, so
           // model fabrication risk does not apply to path 1.
           if (resultStrForGuard) {
-            const urlRe = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+            const urlRe = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Potentials|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
             let _mm;
             while ((_mm = urlRe.exec(resultStrForGuard)) !== null) {
               addVerifiedRef(_mm[1], _mm[2]);
@@ -15343,7 +15448,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   //   (b) If the reply contains record-creation language but zero create/
   //       update/clone mutations succeeded this turn, prepend a warning.
   if (finalReply && !/^API error:/.test(finalReply)) {
-    const zohoUrlRegex = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+    const zohoUrlRegex = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Potentials|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
     const urlsFound = [];
     let m;
     while ((m = zohoUrlRegex.exec(finalReply)) !== null) {
@@ -15353,7 +15458,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     // Prevents cross-module attacks where a successful Task mutation whitelists a
     // Quote URL reusing the Task id.
     const unverified = urlsFound.filter(u => {
-      const set = verifiedRecordsByModule.get(u.module);
+      const set = verifiedRecordsByModule.get(zohoCrmTabModule(u.module));
       return !(set && set.has(u.id));
     });
 
@@ -15857,7 +15962,7 @@ LICENSE TERM VARIANTS (DO NOT FLAG AS INACTIVE):
 - A batch_product_lookup result of found:false on ONE line item means the exact SKU string is not in the catalog. Do NOT abort the whole quote, do NOT say "inactive"/"discontinued" unless Product_Active:false is explicitly returned. Ask the user which variant they want.
 
 ENDING THE REPLY — ALWAYS INCLUDE CRM URLs:
-- After any successful create (quote, deal, account, contact, task), end the reply with a clickable link: [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>). Swap the module for deals/accounts/contacts/tasks.
+- After any successful create (quote, deal, account, contact, task), end the reply with a clickable link: [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>). Swap the module for accounts/contacts/tasks; use Potentials for Deals.
 - After reading/updating an existing record, include the URL to that record.
 - record_id is the internal id field (NOT Quote_Number). Pull it from the tool result.
 
@@ -15987,7 +16092,7 @@ LICENSE TERM VARIANTS (DO NOT FLAG AS INACTIVE):
 - If batch_product_lookup returns found:false for a single SKU, quote the user the other lines and ask which replacement they want — do NOT abort the whole quote, do NOT say the product is "inactive" or "discontinued" unless the tool explicitly returns Product_Active:false.
 
 ENDING THE REPLY — ALWAYS INCLUDE CRM URLs:
-- After any successful create (quote, deal, account, contact, task), end the reply with a clickable link in the format [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>) — substitute the correct module for deals/accounts/contacts/tasks.
+- After any successful create (quote, deal, account, contact, task), end the reply with a clickable link in the format [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>) — substitute the correct module for accounts/contacts/tasks; use Potentials for Deals.
 - After any successful read/update on an existing record, include the URL to that record.
 - The record_id is Zoho's internal id field (NOT Quote_Number). Pull it from the tool result — never reconstruct from Quote_Number.
 
@@ -20006,7 +20111,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                           amount: d.Amount || 0, closingDate: d.Closing_Date || '',
                           probability: d.Probability || 0, contactName: d.Contact_Name?.name || '',
                           ownerName: d.Owner?.name || '',
-                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Deals/${d.id}`,
+                          zohoUrl: zohoRecordUrl('Deals', d.id),
                         }));
                       } catch (_) { return []; }
                     })()
@@ -20102,7 +20207,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                           grandTotal: q.Grand_Total || 0, stage: q.Stage || '',
                           validTill: q.Valid_Till || '', dealName: q.Deal_Name?.name || '',
                           createdTime: q.Created_Time ? q.Created_Time.split('T')[0] : '',
-                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
+                          zohoUrl: zohoRecordUrl('Quotes', q.id),
                         }));
                       } catch (_) { return []; }
                     })()
@@ -20127,7 +20232,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                           webOrderId: so.Web_Order_ID || '',
                           createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
                           ownerName: so.Owner?.name || '',
-                          zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/SalesOrders/${so.id}`,
+                          zohoUrl: zohoRecordUrl('Sales_Orders', so.id),
                         }));
                       } catch (_) { return []; }
                     })()
@@ -20380,7 +20485,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                     probability: d.Probability || 0,
                     contactName: d.Contact_Name?.name || '',
                     ownerName: d.Owner?.name || '',
-                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Deals/${d.id}`,
+                    zohoUrl: zohoRecordUrl('Deals', d.id),
                   }));
                 }
 
@@ -20402,7 +20507,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                           webOrderId: so.Web_Order_ID || '',
                       createdTime: so.Created_Time ? so.Created_Time.split('T')[0] : '',
                       ownerName: so.Owner?.name || '',
-                      zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/SalesOrders/${so.id}`,
+                      zohoUrl: zohoRecordUrl('Sales_Orders', so.id),
                     }));
                   }
                 } catch (_) {}
