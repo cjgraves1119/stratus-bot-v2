@@ -33,6 +33,22 @@ ${extractFunction('isHardwareOnlyQuoteIntent')}
 ${extractFunction('collectQuotePreResolveSkuTokens')}
 return collectQuotePreResolveSkuTokens;
 `)();
+const validateQuoteToPoFinancialParity = Function(`"use strict";
+const MAX_AUTO_TAX_RATE = 0.13;
+${extractFunction('moneyValue')}
+${extractFunction('roundMoney')}
+${extractFunction('closeMoney')}
+${extractFunction('quotePoLineItems')}
+${extractFunction('recordTaxTotal')}
+${extractFunction('recordGrandTotal')}
+${extractFunction('recordPreTaxTotal')}
+${extractFunction('quotePoProductKey')}
+${extractFunction('quotePoLineNet')}
+${extractFunction('quotePoLineFingerprint')}
+${extractFunction('quotePoLineItemsMatch')}
+${extractFunction('validateQuoteToPoFinancialParity')}
+return validateQuoteToPoFinancialParity;
+`)();
 
 assert.equal(shouldForceClaudeForWrite('convert quote to PO, then send PO using admin actions'), true);
 assert.equal(shouldForceClaudeForWrite('fire the DID and submit to CCW'), true);
@@ -63,9 +79,76 @@ assert.match(source, /requestedDealId !== dealId/, 'Sales Order mismatch prevent
 assert.match(source, /Net_Terms was blank, so it was defaulted to Cash/, 'automatic Cash terms are surfaced to the user');
 assert.match(source, /writeProgressEvent\(env, env\.__PROGRESS_ID/, 'compound quote workflow emits progress events');
 assert.match(source, /slice\(0, 20\)/, 'quote-specific SO matching checks more than the first eight Sales Orders');
+assert.match(source, /state: 'po_financial_mismatch'/, 'workflow blocks e-signature on non-tax financial mismatch');
+assert.match(source, /plausible Zoho-computed tax/, 'tool schema describes plausible tax-only total differences');
+assert.match(source, /blocks if line-item detail is unavailable/, 'tool schema blocks when line detail is unavailable');
+assert.equal(shouldForceClaudeForWrite('send Lisa a contract for 1 MV73M'), true);
 
 const workflowBody = extractFunction('handleQuoteToPoAndEsign');
 assert.doesNotMatch(workflowBody, /Stage\s*:/, 'quote_to_po workflow never writes Stage');
 assert.doesNotMatch(workflowBody, /Quote_Stage\s*:/, 'quote_to_po workflow never writes Quote_Stage');
+
+const quote = {
+  Grand_Total: 1830,
+  All_Taxes_Total: 0,
+  Quoted_Items: [
+    { Product_Name: { id: 'MV73M-HW' }, Quantity: 1, Total_After_Discount: 1830 }
+  ]
+};
+const taxablePo = {
+  Grand_Total: 2031.41,
+  All_Taxes_Total: 201.41,
+  Ordered_Items: [
+    { Product_Name: { id: 'MV73M-HW' }, Quantity: 1, Total_After_Discount: 1830 }
+  ]
+};
+const taxExemptBadPo = {
+  Grand_Total: 2031.41,
+  All_Taxes_Total: 0,
+  Ordered_Items: [
+    { Product_Name: { id: 'MV73M-HW' }, Quantity: 1, Total_After_Discount: 2031.41 }
+  ]
+};
+const excessiveTaxPo = {
+  Grand_Total: 2130,
+  All_Taxes_Total: 300,
+  Ordered_Items: [
+    { Product_Name: { id: 'MV73M-HW' }, Quantity: 1, Total_After_Discount: 1830 }
+  ]
+};
+const noLineDetailPo = {
+  Grand_Total: 2031.41,
+  All_Taxes_Total: 201.41
+};
+const productMismatchPo = {
+  Grand_Total: 1830,
+  All_Taxes_Total: 0,
+  Ordered_Items: [
+    { Product_Name: { id: 'MV73X-HW' }, Quantity: 1, Total_After_Discount: 1830 }
+  ]
+};
+const qtyMismatchPo = {
+  Grand_Total: 1830,
+  All_Taxes_Total: 0,
+  Ordered_Items: [
+    { Product_Name: { id: 'MV73M-HW' }, Quantity: 2, Total_After_Discount: 1830 }
+  ]
+};
+const lowerTotalPo = {
+  Grand_Total: 1628.59,
+  All_Taxes_Total: 0,
+  Ordered_Items: [
+    { Product_Name: { id: 'MV73M-HW' }, Quantity: 1, Total_After_Discount: 1628.59 }
+  ]
+};
+
+assert.equal(validateQuoteToPoFinancialParity(quote, taxablePo).ok, true, 'tax-only grand total drift is allowed');
+assert.equal(validateQuoteToPoFinancialParity(quote, taxablePo).mismatch_is_tax_only, true, 'tax-only drift is identified');
+assert.equal(validateQuoteToPoFinancialParity(quote, taxExemptBadPo).ok, false, 'tax-exempt non-tax drift is blocked');
+assert.equal(validateQuoteToPoFinancialParity(quote, excessiveTaxPo).ok, false, 'implausibly high tax is blocked');
+assert.equal(validateQuoteToPoFinancialParity(quote, noLineDetailPo).ok, false, 'missing PO line detail is blocked');
+assert.equal(validateQuoteToPoFinancialParity(quote, productMismatchPo).ok, false, 'product mismatch is blocked even when totals match');
+assert.equal(validateQuoteToPoFinancialParity(quote, qtyMismatchPo).ok, false, 'quantity mismatch is blocked even when totals match');
+assert.equal(validateQuoteToPoFinancialParity(quote, lowerTotalPo).ok, false, 'lower PO total is not explained by tax and is blocked');
 
 console.log('quote/PO admin workflow regression checks passed');

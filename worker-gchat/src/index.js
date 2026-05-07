@@ -5967,6 +5967,186 @@ function summarizeSalesOrdersForUser(records = []) {
   }));
 }
 
+function moneyValue(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const cleaned = String(value).replace(/[$,\s]/g, '');
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function roundMoney(value) {
+  return Math.round(moneyValue(value) * 100) / 100;
+}
+
+function closeMoney(a, b, tolerance = 0.02) {
+  return Math.abs(roundMoney(a) - roundMoney(b)) <= tolerance;
+}
+
+const MAX_AUTO_TAX_RATE = 0.13;
+
+function recordTaxTotal(record = {}) {
+  const direct = [
+    'All_Taxes_Total',
+    'Tax_Total',
+    'Taxes_Total',
+    'Total_Tax',
+    'Tax_Amount',
+    'Tax'
+  ];
+  for (const field of direct) {
+    if (record[field] !== null && record[field] !== undefined && record[field] !== '') {
+      const value = moneyValue(record[field]);
+      if (value) return roundMoney(value);
+    }
+  }
+
+  const summed = [
+    'Tax_1_Total',
+    'Tax_2_Total',
+    'Tax_3_Total',
+    'Tax_4_Total'
+  ].reduce((sum, field) => sum + moneyValue(record[field]), 0);
+  if (summed) return roundMoney(summed);
+
+  const lineItems = quotePoLineItems(record);
+  const lineTax = lineItems.reduce((sum, item) => (
+    sum
+    + moneyValue(item.Tax)
+    + moneyValue(item.Tax_Amount)
+    + moneyValue(item.Total_Tax)
+    + moneyValue(item.$line_tax)
+  ), 0);
+  return roundMoney(lineTax);
+}
+
+function recordGrandTotal(record = {}) {
+  return roundMoney(record.Grand_Total ?? record.Total ?? record.Sub_Total ?? 0);
+}
+
+function recordPreTaxTotal(record = {}) {
+  const grand = recordGrandTotal(record);
+  return roundMoney(grand - recordTaxTotal(record));
+}
+
+function quotePoLineItems(record = {}) {
+  const candidates = [
+    record.Quoted_Items,
+    record.Ordered_Items,
+    record.Product_Details,
+    record.Sales_Order_Items,
+    record.Line_Items
+  ];
+  return candidates.find(Array.isArray) || [];
+}
+
+function quotePoProductKey(item = {}) {
+  const product = item.Product_Name || item.Product || item.product || item.Item || {};
+  return String(
+    product.Product_Code
+    || product.product_code
+    || product.name
+    || product.display_value
+    || product.id
+    || item.Product_Code
+    || item.SKU
+    || item.sku
+    || item.Description
+    || ''
+  ).trim();
+}
+
+function quotePoLineNet(item = {}) {
+  const explicit = item.Total_After_Discount ?? item.Net_Total ?? item.Total ?? item.Sub_Total ?? item.total;
+  if (explicit !== null && explicit !== undefined && explicit !== '') return roundMoney(explicit);
+  const qty = moneyValue(item.Quantity ?? item.quantity ?? 1) || 1;
+  const unit = moneyValue(item.List_Price ?? item.Unit_Price ?? item.unit_price ?? item.Rate ?? item.rate);
+  const discount = moneyValue(item.Discount ?? item.discount);
+  return roundMoney((unit * qty) - discount);
+}
+
+function quotePoLineFingerprint(record = {}) {
+  return quotePoLineItems(record)
+    .map(item => ({
+      key: quotePoProductKey(item),
+      qty: roundMoney(item.Quantity ?? item.quantity ?? 1),
+      net: quotePoLineNet(item)
+    }))
+    .filter(item => item.key || item.qty || item.net)
+    .sort((a, b) => `${a.key}:${a.qty}:${a.net}`.localeCompare(`${b.key}:${b.qty}:${b.net}`));
+}
+
+function quotePoLineItemsMatch(quote = {}, salesOrder = {}) {
+  const quoteLines = quotePoLineFingerprint(quote);
+  const soLines = quotePoLineFingerprint(salesOrder);
+  if (quoteLines.length === 0 || soLines.length === 0) {
+    return { checked: false, reason: 'line_items_not_available' };
+  }
+  if (quoteLines.length !== soLines.length) {
+    return { checked: true, match: false, reason: 'line_count_mismatch', quote_lines: quoteLines, sales_order_lines: soLines };
+  }
+  for (let i = 0; i < quoteLines.length; i++) {
+    const q = quoteLines[i];
+    const so = soLines[i];
+    if (q.key !== so.key || !closeMoney(q.qty, so.qty, 0.001) || !closeMoney(q.net, so.net, 0.02)) {
+      return { checked: true, match: false, reason: 'line_value_mismatch', quote_lines: quoteLines, sales_order_lines: soLines };
+    }
+  }
+  return { checked: true, match: true, quote_lines: quoteLines, sales_order_lines: soLines };
+}
+
+function validateQuoteToPoFinancialParity(quote = {}, salesOrder = {}) {
+  const quoteGrand = recordGrandTotal(quote);
+  const quoteTax = recordTaxTotal(quote);
+  const quotePreTax = recordPreTaxTotal(quote);
+  const poGrand = recordGrandTotal(salesOrder);
+  const poTax = recordTaxTotal(salesOrder);
+  const poPreTax = recordPreTaxTotal(salesOrder);
+  const rawDelta = roundMoney(poGrand - quoteGrand);
+  const taxDelta = roundMoney(poTax - quoteTax);
+  const unexplainedDelta = roundMoney(poPreTax - quotePreTax);
+  const lines = quotePoLineItemsMatch(quote, salesOrder);
+  const poTaxRate = poPreTax > 0 ? Number((poTax / poPreTax).toFixed(4)) : 0;
+  const taxRatePlausible = poTax <= 0 || poTaxRate <= MAX_AUTO_TAX_RATE;
+
+  const ok = closeMoney(quotePreTax, poPreTax) && lines.checked === true && lines.match === true && taxRatePlausible;
+  return {
+    ok,
+    quote_grand_total: quoteGrand,
+    quote_tax_total: quoteTax,
+    quote_pre_tax_total: quotePreTax,
+    sales_order_grand_total: poGrand,
+    sales_order_tax_total: poTax,
+    sales_order_pre_tax_total: poPreTax,
+    raw_total_delta: rawDelta,
+    tax_delta: taxDelta,
+    unexplained_pre_tax_delta: unexplainedDelta,
+    sales_order_tax_rate: poTaxRate,
+    max_allowed_tax_rate: MAX_AUTO_TAX_RATE,
+    tax_rate_plausible: taxRatePlausible,
+    mismatch_is_tax_only: closeMoney(unexplainedDelta, 0) && !closeMoney(rawDelta, 0),
+    line_item_check: lines
+  };
+}
+
+function buildPoFinancialMismatchPayload({ quote, salesOrder, validation }) {
+  return {
+    success: false,
+    state: 'po_financial_mismatch',
+    quote_id: quote?.id || null,
+    quote_subject: quote?.Subject || null,
+    sales_order_id: salesOrder?.id || null,
+    sales_order: summarizeSalesOrdersForUser([salesOrder])[0],
+    financial_validation: validation,
+    error: 'PO financial validation failed before e-signature. I did not send it for e-signature.',
+    _no_partial_success: true,
+    _user_visible_summary:
+      `PO ${salesOrder?.SO_Number || salesOrder?.id || ''} was created, but I did not send it for e-signature because financial validation failed. ` +
+      `Quote pre-tax: $${validation.quote_pre_tax_total.toFixed(2)}; PO pre-tax: $${validation.sales_order_pre_tax_total.toFixed(2)}; ` +
+      `tax delta: $${validation.tax_delta.toFixed(2)}; unexplained delta: $${validation.unexplained_pre_tax_delta.toFixed(2)}.`
+  };
+}
+
 async function triggerAndPollAdminAction({ moduleName, recordId, actionName, env, maxPollMs = 60000, pollEveryMs = 4000 }) {
   const start = Date.now();
   const snapshots = [];
@@ -6205,11 +6385,15 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
         _user_visible_summary: `PO ${requested.SO_Number || requested.id} is not linked to this Quote's Deal, so I did not send it for e-signature.`
       });
     }
+    const requestedValidation = validateQuoteToPoFinancialParity(quote, requested);
+    if (!requestedValidation.ok) {
+      return finish(buildPoFinancialMismatchPayload({ quote, salesOrder: requested, validation: requestedValidation }), 'blocked');
+    }
     if (!sendForEsign) {
-      return finish({ success: true, state: 'existing_po_selected', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([requested])[0] });
+      return finish({ success: true, state: 'existing_po_selected', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([requested])[0], financial_validation: requestedValidation });
     }
     if (salesOrderLooksEsignSent(requested)) {
-      return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([requested])[0] });
+      return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([requested])[0], financial_validation: requestedValidation });
     }
     const esign = await triggerAndPollAdminAction({ moduleName: 'Sales_Orders', recordId: requested.id, actionName: 'LIVE_SendToEsign', env, maxPollMs: 60000 });
     return finish({
@@ -6217,6 +6401,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       state: esign.success === false ? 'esign_failed' : 'esign_triggered',
       quote_id: quoteId,
       sales_order: summarizeSalesOrdersForUser([esign.final_state || requested])[0],
+      financial_validation: requestedValidation,
       esign_admin_action: esign,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${requested.id}`,
       _user_visible_summary: `PO ${requested.SO_Number || requested.id} is ${esign.success === false ? 'not sent' : 'sent/processing'} for e-signature.`
@@ -6226,11 +6411,15 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
   const quoteSpecificExisting = await findQuoteSpecificSalesOrders({ quote, dealSalesOrders: existingSalesOrders, env });
   if (quoteSpecificExisting.length > 0) {
     const existing = quoteSpecificExisting[0];
+    const existingValidation = validateQuoteToPoFinancialParity(quote, existing);
+    if (!existingValidation.ok) {
+      return finish(buildPoFinancialMismatchPayload({ quote, salesOrder: existing, validation: existingValidation }), 'blocked');
+    }
     if (!sendForEsign) {
-      return finish({ success: true, state: 'existing_po_for_quote_found', quote_id: quoteId, sales_orders: summarizeSalesOrdersForUser(quoteSpecificExisting) });
+      return finish({ success: true, state: 'existing_po_for_quote_found', quote_id: quoteId, sales_orders: summarizeSalesOrdersForUser(quoteSpecificExisting), financial_validation: existingValidation });
     }
     if (salesOrderLooksEsignSent(existing)) {
-      return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([existing])[0] });
+      return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([existing])[0], financial_validation: existingValidation });
     }
     const esign = await triggerAndPollAdminAction({ moduleName: 'Sales_Orders', recordId: existing.id, actionName: 'LIVE_SendToEsign', env, maxPollMs: 60000 });
     return finish({
@@ -6238,6 +6427,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       state: esign.success === false ? 'esign_failed' : 'existing_po_sent_for_esign',
       quote_id: quoteId,
       sales_order: summarizeSalesOrdersForUser([esign.final_state || existing])[0],
+      financial_validation: existingValidation,
       esign_admin_action: esign
     }, esign.success === false ? 'error' : 'success');
   }
@@ -6360,6 +6550,11 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     }, 'blocked');
   }
 
+  const financialValidation = validateQuoteToPoFinancialParity(quote, candidate);
+  if (!financialValidation.ok) {
+    return finish(buildPoFinancialMismatchPayload({ quote, salesOrder: candidate, validation: financialValidation }), 'blocked');
+  }
+
   if (!sendForEsign) {
     progress(`PO ${candidate.SO_Number || candidate.id} created.`);
     return finish({
@@ -6369,6 +6564,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       ccw_deal_number: did.ccw_deal_number,
       velocity_hub_submission: did.velocity_hub_submission,
       sales_order: summarizeSalesOrdersForUser([candidate])[0],
+      financial_validation: financialValidation,
       net_terms_notice: netTermsNotice,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}.`)
@@ -6384,6 +6580,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       ccw_deal_number: did.ccw_deal_number,
       velocity_hub_submission: did.velocity_hub_submission,
       sales_order: summarizeSalesOrdersForUser([candidate])[0],
+      financial_validation: financialValidation,
       net_terms_notice: netTermsNotice,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}; e-signature already appears sent or in progress.`)
@@ -6407,6 +6604,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     ccw_deal_number: did.ccw_deal_number,
     velocity_hub_submission: did.velocity_hub_submission,
     sales_order: summarizeSalesOrdersForUser([esign.final_state || candidate])[0],
+    financial_validation: financialValidation,
     net_terms_notice: netTermsNotice,
     convert_admin_action: convert,
     esign_admin_action: esign,
@@ -10691,7 +10889,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results — do NOT make additional tool calls to modify the quote unless the user explicitly asks for admin actions/PO/e-sign.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {
@@ -10733,7 +10931,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'quote_to_po_and_esign',
-    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, or Quote_Stage for this workflow. This tool writes only Admin_Action fields plus Net_Terms when safely blank under $5k. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
+    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing, only allows Grand_Total differences explained by plausible Zoho-computed tax, and blocks if line-item detail is unavailable. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11428,7 +11626,7 @@ For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) �
 1. You are in CRM mode — always create Zoho CRM quotes, NEVER fall back to URL quotes.
 2. Parse user input for intent, not literal strings. Don't re-ask for already-provided info.
 3. **CRM-FIRST:** Search Zoho CRM before web searching. Only use web_search_domain for NEW accounts not in CRM.
-4. **create_deal_and_quote:** Pass ONLY requested SKUs. Hardware auto-adds licenses unless hardware_only/include_licenses=false. Call it ALONE. After it returns, STOP unless the same user request explicitly asks for DID/PO/e-sign admin actions.
+4. **create_deal_and_quote:** Pass ONLY requested SKUs. Hardware auto-adds licenses unless hardware_only/include_licenses=false. Call it ALONE for quote-only requests. If the same request naturally asks for a customer contract, PO, signature, e-signature, DocuSign, or "send PO", immediately continue with quote_to_po_and_esign using the created Quote ID.
 5. **batch_product_lookup / parse_quote_url:** Use for all SKU lookups and URL parsing. Never search Products individually.
 6. **RESELLER / VAR PATTERN:** "this is for [Customer]" or "on behalf of [Customer]" = sender is VAR. Billing Account = sender's company. Deal name: "[Sender Account] - [End Customer] - [Description]". Contact = sender.
 7. **ALWAYS END WITH ZOHO LINKS:** [Record Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID) for every record created.
@@ -11436,7 +11634,7 @@ For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) �
 ---
 
 ## ADMIN ACTION WORKFLOW
-(Full workflow loaded conditionally when admin action intent is detected.) For Quote → DID → PO → e-signature requests, prefer quote_to_po_and_esign over hand-chaining zoho_update_record calls.
+(Full workflow loaded conditionally when admin action intent is detected.) For Quote → DID → PO → e-signature requests, prefer quote_to_po_and_esign over hand-chaining zoho_update_record calls. "Contract" means PO/Sales Order sent for e-signature unless the user says otherwise.
 
 **Self-report discipline:** Before saying you lack a tool or capability, check your tool list. You have zoho_update_record which can trigger Admin Actions, assign_cisco_rep_to_deal for rep assignment, and batch_product_lookup for products. NEVER report "I don't have a tool" when you have a tool that can accomplish the task. If you used a tool, state plainly what you did in your response.
 
@@ -11555,7 +11753,7 @@ const CRM_PROMPT_ADMIN_ACTION = `
 
 Admin Actions are Zoho automations triggered by writing an action name to the Admin_Action field. Execute via API directly. NEVER tell user to click a button.
 
-Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only.
+Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, contract/PO creation, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, verifies that PO line items and pre-tax/ecomm economics match the Quote, allows Grand_Total differences only when explained by plausible Zoho-computed tax, blocks when line-item detail is unavailable, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only.
 
 **Trigger process:**
 1. TRIGGER: zoho_update_record(module_name="Quotes", record_id={id}, data={"Admin_Action": "{ACTION_NAME}"})
@@ -11566,8 +11764,8 @@ Preferred path: call quote_to_po_and_esign for any request that combines DID gen
 |------|--------|----------------|-------------|
 | 1 | LIVE_CiscoQuote_Deal | "create deal id", "generate DID", "get me a DID", "submit for DID", "fire the DID", "need a DID", "submit to CCW" | CCW_Deal_Number (8-digit) |
 | 2 | LIVE_GetQuoteData | "get quote data", "get disti pricing" | Vendor_Lines populated |
-| 3 | LIVE_ConvertQuoteToSO | "convert to PO", "create purchase order" | Sales_Orders linked |
-| 4 | LIVE_SendToEsign | "send for signature", "send PO", "esign" | Quote_Stage updates |
+| 3 | LIVE_ConvertQuoteToSO | "convert to PO", "create purchase order", "create contract" | Sales_Orders linked |
+| 4 | LIVE_SendToEsign | "send for signature", "send PO", "send contract", "esign" | Sales_Orders send status |
 
 **Step 1: LIVE_CiscoQuote_Deal (DID generation)**
 To generate a Cisco DID, call zoho_update_record on Quotes with {"Admin_Action": "LIVE_CiscoQuote_Deal"}. This is async (30-90 seconds). Re-fetch the Quote after 30s and read CCW_Deal_Number. When present, it is an 8-digit string — THAT is the DID. Report it + auto-submit to Velocity Hub (velocity_hub_submit). If null → tell user it is processing, offer to check back.
@@ -11575,7 +11773,7 @@ NEVER say "I don't have a tool to generate a DID" — you DO have zoho_update_re
 **Where the DID lives:** The DID is stored on Quote.CCW_Deal_Number (NOT Deal.CCW_Deal_ID). When verifying a DID, always check the QUOTE record. Deal.CCW_Deal_ID is a separate field that may be empty. After DID is confirmed, the server auto-syncs it to the Deal.
 
 **Step 3: LIVE_ConvertQuoteToSO**
-Show validation first: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion.
+Show validation first: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion. After conversion, compare Quote line items and pre-tax/ecomm total to PO line items and pre-tax total. Do not flag a raw Grand_Total mismatch when the difference is explained by plausible PO taxes. If line-item detail is unavailable, or if pre-tax/ecomm totals or line items differ for any non-tax reason, do NOT send e-signature.
 Do not set Deal.Stage, Quote.Stage, or Quote_Stage manually. The PO automation handles downstream stage behavior.
 
 **Step 4: LIVE_SendToEsign**
@@ -11633,7 +11831,7 @@ The advisor should respond in under 100 words and use enumerated steps, not expl
 
   // Detect admin action intent
   const adminActionPatterns = [
-    /\b(admin\s*action|generate\s*(the\s+)?did|deal\s*id|submit\s+(for\s+|to\s+|.*)?did\b|submit.*ccw|convert.*po|purchase\s*order|esign|send.*signature|quote.to.po|did\s+generation|(get|need|fire|kick\s*off|create|run)\s+(a\s+|the\s+|me\s+a\s+)?did\b)/i,
+    /\b(admin\s*action|generate\s*(the\s+)?did|deal\s*id|submit\s+(for\s+|to\s+|.*)?did\b|submit.*ccw|convert.*po|purchase\s*order|contract|esign|send.*signature|quote.to.po|did\s+generation|(get|need|fire|kick\s*off|create|run)\s+(a\s+|the\s+|me\s+a\s+)?did\b)/i,
     /\bLIVE_/i,
     /\b(get\s+quote\s+data|disti\s+pricing|vendor\s+lines)\b/i,
   ];
@@ -14910,7 +15108,7 @@ function shouldForceClaudeForWrite(userMessage) {
     /\bdelete\b.{0,20}\b(line|item|row|sku|product|task|note)/i,
     /\b(hardware\s*only|no\s+licen[cs]e|without\s+licen[cs]e|just\s+(?:the\s+)?hardware|remove\s+(?:the\s+)?licen[cs]e)\b/i,
     /\b(generate|create|get|need|fire|kick\s*off|submit|run|rerun|redo|push|shoot)\b.{0,40}\b(did|deal\s*id|ccw)\b/i,
-    /\b(convert|create|generate|send|submit|rerun|redo|push|shoot)\b.{0,50}\b(po|purchase\s*order|sales\s*order|esign|e-?sign|signature|docusign|zoho\s*sign)\b/i,
+    /\b(convert|create|generate|send|submit|rerun|redo|push|shoot)\b.{0,50}\b(po|purchase\s*order|sales\s*order|contract|esign|e-?sign|signature|docusign|zoho\s*sign)\b/i,
     /\b(cancel|kill|redo|rerun|push|shoot)\b.{0,40}\b(quote|deal|po|purchase\s*order|sales\s*order|did|admin\s*action)\b/i,
     /\bquote_to_po|quote[-\s]*to[-\s]*po|admin\s*action\b/i,
     /\bmake\s+(it|the\s+\w+)\b.{0,30}\b(\d+%|\d+\s*%|\d+\s*year|\d+y|\d+\s*yr)/i,
