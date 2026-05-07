@@ -110,8 +110,10 @@ assert.match(source, /pre-tax\/ecomm line economics match/, 'admin prompt treats
 assert.match(source, /blocks if line-item detail is unavailable/, 'tool schema blocks when line detail is unavailable');
 assert.equal(shouldForceClaudeForWrite('send Lisa a contract for 1 MV73M'), true);
 assert.match(source, /const ZOHO_AI_CREATED_TAG = 'Stratus AI Created'/, 'Zoho AI-created tag name is centralized');
+assert.match(source, /settings\/tags\?module=/, 'Zoho tag is created or reused per module before assignment');
 assert.match(source, /actions\/add_tags/, 'Zoho native add_tags endpoint is used');
 assert.match(source, /tagZohoCreatedRecordsIfNeeded\(method, path, env, token, body, parsed, options\)/, 'central Zoho create path tags created records');
+assert.match(source, /addZohoAiCreatedTagWithEnv\('Sales_Orders', candidate\.id, env\)/, 'admin-action-created Sales Orders are tagged after conversion');
 assert.match(source, /addZohoAiCreatedTag\('Quotes', clonedId, token\)/, 'native quote clone path tags cloned Quotes');
 assert.match(source, /tagCreatedRecord: false/, 'undo restore can suppress AI-created tagging');
 assert.equal(zohoTopLevelModuleFromCreatePath('POST', 'Deals', { data: [{}] }), 'Deals', 'Deal creates are taggable');

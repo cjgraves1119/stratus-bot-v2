@@ -5126,6 +5126,7 @@ async function getGmailAccessToken(env) {
 
 // ─── Zoho CRM API Client ─────────────────────────────────────────────────────
 const ZOHO_AI_CREATED_TAG = 'Stratus AI Created';
+const ZOHO_AI_CREATED_TAG_COLOR = '#57B1FD';
 const ZOHO_AI_CREATED_TAG_MODULES = new Set([
   'Accounts',
   'Contacts',
@@ -5137,6 +5138,7 @@ const ZOHO_AI_CREATED_TAG_MODULES = new Set([
   'Invoices',
   'Tasks'
 ]);
+const zohoAiCreatedTagReadyByModule = new Map();
 
 function zohoTopLevelModuleFromCreatePath(method, path, body, options = {}) {
   if (options?.tagCreatedRecord === false) return null;
@@ -5159,7 +5161,62 @@ function zohoCreatedRecordIds(response) {
     .filter(Boolean);
 }
 
+async function ensureZohoAiCreatedTagForModule(moduleName, token) {
+  const cacheKey = String(moduleName || '');
+  if (!cacheKey) return { success: false, tag: ZOHO_AI_CREATED_TAG, module: moduleName, error: 'missing_module' };
+  if (zohoAiCreatedTagReadyByModule.get(cacheKey)) {
+    return { success: true, tag: ZOHO_AI_CREATED_TAG, module: moduleName, cached: true };
+  }
+
+  const headers = {
+    'Authorization': `Zoho-oauthtoken ${token}`,
+    'Content-Type': 'application/json'
+  };
+  const settingsUrl = `https://www.zohoapis.com/crm/v8/settings/tags?module=${encodeURIComponent(moduleName)}`;
+
+  try {
+    const listRes = await fetch(settingsUrl, { method: 'GET', headers });
+    const listText = await listRes.text();
+    let listed;
+    try { listed = JSON.parse(listText); } catch { listed = { error: listText, status: listRes.status }; }
+    if (listRes.ok && Array.isArray(listed?.tags) && listed.tags.some(tag => tag?.name === ZOHO_AI_CREATED_TAG)) {
+      zohoAiCreatedTagReadyByModule.set(cacheKey, true);
+      return { success: true, tag: ZOHO_AI_CREATED_TAG, module: moduleName, found: true };
+    }
+
+    const createRes = await fetch(settingsUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        tags: [{ name: ZOHO_AI_CREATED_TAG, color_code: ZOHO_AI_CREATED_TAG_COLOR }]
+      })
+    });
+    const createText = await createRes.text();
+    let created;
+    try { created = JSON.parse(createText); } catch { created = { error: createText, status: createRes.status }; }
+    const rows = Array.isArray(created?.tags) ? created.tags : [];
+    const ok = createRes.ok && rows.some(row => row?.code === 'SUCCESS' || String(row?.status || '').toLowerCase() === 'success');
+    const duplicate = String(created?.code || rows[0]?.code || '').toUpperCase() === 'DUPLICATE_DATA'
+      || /duplicate|already/i.test(String(created?.message || rows[0]?.message || ''));
+    if (ok || duplicate) {
+      zohoAiCreatedTagReadyByModule.set(cacheKey, true);
+      return { success: true, tag: ZOHO_AI_CREATED_TAG, module: moduleName, created: ok, duplicate };
+    }
+
+    return {
+      success: false,
+      tag: ZOHO_AI_CREATED_TAG,
+      module: moduleName,
+      status: createRes.status,
+      error: rows[0]?.message || created?.message || created?.error || listed?.message || listed?.error || 'Tag ensure failed'
+    };
+  } catch (err) {
+    return { success: false, tag: ZOHO_AI_CREATED_TAG, module: moduleName, error: err.message };
+  }
+}
+
 async function addZohoAiCreatedTag(moduleName, recordId, token) {
+  const ensure = await ensureZohoAiCreatedTagForModule(moduleName, token);
   const url = `https://www.zohoapis.com/crm/v8/${moduleName}/${recordId}/actions/add_tags`;
   const res = await fetch(url, {
     method: 'POST',
@@ -5183,6 +5240,7 @@ async function addZohoAiCreatedTag(moduleName, recordId, token) {
       module: moduleName,
       record_id: recordId,
       status: res.status,
+      ensure,
       error: row?.message || parsed?.message || parsed?.error || 'Tag update failed'
     };
   }
@@ -5190,8 +5248,14 @@ async function addZohoAiCreatedTag(moduleName, recordId, token) {
     success: true,
     tag: ZOHO_AI_CREATED_TAG,
     module: moduleName,
-    record_id: recordId
+    record_id: recordId,
+    ensure
   };
+}
+
+async function addZohoAiCreatedTagWithEnv(moduleName, recordId, env) {
+  const token = await getZohoAccessToken(env);
+  return await addZohoAiCreatedTag(moduleName, recordId, token);
 }
 
 async function tagZohoCreatedRecordsIfNeeded(method, path, env, token, body, response, options = {}) {
@@ -6771,9 +6835,22 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     }, 'blocked');
   }
 
+  const salesOrderAiTag = await addZohoAiCreatedTagWithEnv('Sales_Orders', candidate.id, env).catch(err => ({
+    success: false,
+    tag: ZOHO_AI_CREATED_TAG,
+    module: 'Sales_Orders',
+    record_id: candidate.id,
+    error: err.message
+  }));
+  if (salesOrderAiTag?.success === false) {
+    console.warn(`[ZOHO-TAG] Sales_Orders admin-action create succeeded but AI-created tag failed for ${candidate.id}: ${JSON.stringify(salesOrderAiTag).substring(0, 500)}`);
+  }
+
   const financialValidation = validateQuoteToPoFinancialParity(quote, candidate, { tax_exempt_context: taxExemptContext });
   if (!financialValidation.ok) {
-    return finish(buildPoFinancialMismatchPayload({ quote, salesOrder: candidate, validation: financialValidation }), 'blocked');
+    const mismatchPayload = buildPoFinancialMismatchPayload({ quote, salesOrder: candidate, validation: financialValidation });
+    mismatchPayload.ai_created_tag = salesOrderAiTag;
+    return finish(mismatchPayload, 'blocked');
   }
 
   if (!sendForEsign) {
@@ -6787,6 +6864,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       sales_order: summarizeSalesOrdersForUser([candidate])[0],
       financial_validation: financialValidation,
       net_terms_notice: netTermsNotice,
+      ai_created_tag: salesOrderAiTag,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}.`)
     });
@@ -6803,6 +6881,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       sales_order: summarizeSalesOrdersForUser([candidate])[0],
       financial_validation: financialValidation,
       net_terms_notice: netTermsNotice,
+      ai_created_tag: salesOrderAiTag,
       _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
       _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}; e-signature already appears sent or in progress.`)
     });
@@ -6827,6 +6906,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     sales_order: summarizeSalesOrdersForUser([esign.final_state || candidate])[0],
     financial_validation: financialValidation,
     net_terms_notice: netTermsNotice,
+    ai_created_tag: salesOrderAiTag,
     convert_admin_action: convert,
     esign_admin_action: esign,
     _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
