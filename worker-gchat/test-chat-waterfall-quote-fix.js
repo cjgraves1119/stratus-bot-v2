@@ -128,7 +128,7 @@ t('/api/chat-waterfall pre-resolution fires for the original no-quote-keyword pr
   assert.equal(resolved['MS130-8P'].suffixed_sku, 'MS130-8P-HW');
   assert.equal(resolved['LIC-ENT-1YR'].suffixed_sku, 'LIC-ENT-1YR');
   assert.equal(resolved['LIC-MS130-CMPT-1Y'].suffixed_sku, 'LIC-MS130-CMPT-1Y');
-  assert.match(src, /function collectQuotePreResolveSkuTokens\(text\)/);
+  assert.match(src, /function collectQuotePreResolveSkuTokens\(text, options = \{\}\)/);
   assert.match(src, /return collectQuotePreResolveSkuTokens\(text\)\.length > 0;/);
   assert.match(src, /const shouldPreResolveWaterfallProducts =/);
   assert.match(src, /skipDeterministic && hasQuotePreResolveSkuToken\(wText\)/);
@@ -139,9 +139,11 @@ t('product pre-resolution failures are caught in both chat routes', () => {
   assert.match(src, /\[API\/chat\] Product pre-resolution skipped/);
 });
 
-t('chat-tab write intent forces Claude unless forceModel is explicit', () => {
-  assert.match(src, /const forceClaudeForChatWrite = !forcedModel && skipDeterministic && shouldForceClaudeForWrite\(wText\);/);
-  assert.match(src, /forceClaude: forcedModel === 'claude' \|\| forceClaudeForChatWrite/);
+t('chat-tab write intent uses shared Claude-first cascade unless forceModel is explicit', () => {
+  assert.doesNotMatch(src, /forceClaudeForChatWrite/);
+  assert.match(src, /forceClaude: forcedModel === 'claude'/);
+  assert.match(src, /const autoForceClaudeForWrite = shouldForceClaudeForWrite\(userMessage\);/);
+  assert.match(src, /cascading to normal waterfall/);
 });
 
 t('create_deal_and_quote sets Cisco_Billing_Term explicitly and verifies it', () => {

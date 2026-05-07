@@ -1352,8 +1352,13 @@ function getLicenseSkus(baseSku, requestedTier) {
   return validated;
 }
 
-function collectQuotePreResolveSkuTokens(text) {
+function isHardwareOnlyQuoteIntent(text) {
+  return /\b(hardware\s*only|hw\s*only|no\s+licen[cs]e|without\s+licen[cs]e|remove\s+(?:the\s+)?licen[cs]e|just\s+(?:the\s+)?hardware)\b/i.test(String(text || ''));
+}
+
+function collectQuotePreResolveSkuTokens(text, options = {}) {
   const preSkuTokens = [];
+  const hardwareOnly = options.hardwareOnly === true || isHardwareOnlyQuoteIntent(text);
   const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C8|C9|Z)\d[A-Z0-9-]*/gi;
   let m;
   while ((m = skuRegex.exec((text || '').toUpperCase())) !== null) {
@@ -1362,13 +1367,14 @@ function collectQuotePreResolveSkuTokens(text) {
   // Also detect license SKUs directly mentioned.
   const licRegex = /\bLIC-[A-Z0-9-]+/gi;
   while ((m = licRegex.exec((text || '').toUpperCase())) !== null) {
-    preSkuTokens.push(m[0]);
+    if (!hardwareOnly) preSkuTokens.push(m[0]);
   }
   return preSkuTokens;
 }
 
-function preResolveProductsForQuoteText(text) {
-  const preSkuTokens = collectQuotePreResolveSkuTokens(text);
+function preResolveProductsForQuoteText(text, options = {}) {
+  const hardwareOnly = options.hardwareOnly === true || isHardwareOnlyQuoteIntent(text);
+  const preSkuTokens = collectQuotePreResolveSkuTokens(text, { hardwareOnly });
   const preResolved = {};
   for (const raw of [...new Set(preSkuTokens)]) {
     const suffixed = applySuffix(raw);
@@ -1386,6 +1392,7 @@ function preResolveProductsForQuoteText(text) {
 
     // Also pre-resolve auto-added licenses so quote creation can skip the
     // batch_product_lookup iteration entirely.
+    if (hardwareOnly) continue;
     const licOptions = getLicenseSkus(raw);
     if (licOptions?.length) {
       for (const lic of licOptions) {
@@ -5739,6 +5746,18 @@ function validateCrmWrite(module_name, data, isCreate = false) {
     if (!data.Owner) data.Owner = { id: '2570562000141711002' }; // Chris Graves
   }
 
+  if (module_name === 'Quotes') {
+    if ('Stage' in data) {
+      errors.push('❌ Quotes do not use the Deal Stage field. Do not set Stage on Quotes. For quote-to-PO workflows, trigger Admin_Action only.');
+    }
+    if (data.Admin_Action && data.Quote_Stage) {
+      errors.push('❌ Admin_Action updates must not include Quote_Stage. Trigger the Admin_Action by itself, then verify the automation result.');
+    }
+    if (data.Quote_Stage && /\b(won|sold|closed[-\s]*(?:\(?won\)?|sale))\b/i.test(String(data.Quote_Stage))) {
+      errors.push('❌ Quote_Stage cannot be manually set to Won/Sold/Closed Won. Deals close won automatically after a completed PO is attached.');
+    }
+  }
+
   if (module_name === 'Tasks') {
     if (data.Status) {
       if (!VALID_TASK_STATUSES.includes(data.Status)) {
@@ -5822,6 +5841,580 @@ function parseZohoResponse(result, action = 'operation') {
   }
 
   return { success: true, message: `✅ ${action} completed.`, data: result };
+}
+
+function isCiscoDid(value) {
+  return /^\d{8}$/.test(String(value || '').trim());
+}
+
+function zohoLookupId(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  return value.id || value.ID || value.record_id || null;
+}
+
+function isLikelyLicenseSku(sku) {
+  return /^LIC-/i.test(String(sku || '').trim());
+}
+
+function coqlEscape(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function logQuoteToPoTerminal(env, personId, quoteId, status, details = {}) {
+  await logCrmOpToD1(env, {
+    personId: personId || null,
+    bot: botFromPersonId(personId),
+    operation: 'quote_to_po_and_esign',
+    module: 'Quotes',
+    recordId: quoteId || null,
+    recordName: details.quote_subject || null,
+    status: status === 'success' || status === 'blocked' ? 'success' : 'error',
+    durationMs: details.duration_ms || null,
+    errorMessage: details.error || null,
+    details: { terminal_status: status, ...details },
+    requestPayload: details.request_payload || null,
+    responsePayload: details.response_payload || null,
+    userVisibleSummary: details.user_visible_summary || null
+  });
+}
+
+async function submitVelocityHubDid(dealId, country = 'United States') {
+  if (!isCiscoDid(dealId)) {
+    return { success: false, error: `Invalid DID format: "${dealId}". Must be exactly 8 digits.`, deal_id: dealId };
+  }
+  try {
+    const vhResponse = await fetch('https://eo44ez435h7vzp2.m.pipedream.net', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deal_id: dealId, country })
+    });
+    const body = await vhResponse.text().catch(() => '');
+    return {
+      success: vhResponse.status >= 200 && vhResponse.status < 300,
+      status: vhResponse.status,
+      deal_id: dealId,
+      response_preview: body.slice(0, 300),
+      message: `Deal ${dealId} submitted to Velocity Hub for approval.`
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err.message,
+      deal_id: dealId,
+      message: `Velocity Hub submission failed; DID ${dealId} was generated successfully.`
+    };
+  }
+}
+
+function salesOrderLooksEsignSent(record) {
+  if (!record) return false;
+  const statusText = [
+    record.Client_Send_Status,
+    record.Signature_Status,
+    record.Esignature_Status,
+    record.Esign_Status,
+    record.DocuSign_Status,
+    record.ZohoSign_Status
+  ].filter(Boolean).join(' ').toLowerCase();
+  // Do not treat plain "Pending" as sent; in this org it can mean "not sent yet".
+  return /\b(envelope\s+sent|sent|delivered|viewed|signed|completed|complete|executed|out\s+for\s+signature|waiting\s+for\s+customer)\b/.test(statusText);
+}
+
+function sortSalesOrdersNewestFirst(records = []) {
+  return [...records].sort((a, b) => {
+    const bTime = Date.parse(b.Created_Time || b.Modified_Time || 0) || 0;
+    const aTime = Date.parse(a.Created_Time || a.Modified_Time || 0) || 0;
+    if (bTime !== aTime) return bTime - aTime;
+    return String(b.id || '').localeCompare(String(a.id || ''));
+  });
+}
+
+async function fetchQuoteForPoWorkflow(recordId, env) {
+  const result = await zohoApiCall('GET', `Quotes/${recordId}`, env);
+  return result?.data?.[0] || null;
+}
+
+async function fetchRecordFull(moduleName, recordId, env) {
+  const result = await zohoApiCall('GET', `${moduleName}/${recordId}`, env);
+  return result?.data?.[0] || null;
+}
+
+async function fetchSalesOrderByReference(value, env) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (/^\d{15,20}$/.test(raw)) {
+    const byId = await fetchRecordFull('Sales_Orders', raw, env).catch(() => null);
+    if (byId?.id) return byId;
+  }
+  const fields = 'id,Subject,SO_Number,Grand_Total,Status,Deal_Name,Account_Name,Client_Send_Status,Disti_Tracking_Number,Disti_Estimated_Ship_Date,Vendor_SO_Number,Created_Time,Modified_Time';
+  const query = `select ${fields} from Sales_Orders where SO_Number = '${coqlEscape(raw)}' order by Created_Time desc limit 1`;
+  const byNumber = await zohoApiCall('POST', 'coql', env, { select_query: query }).catch(() => null);
+  return byNumber?.data?.[0] || null;
+}
+
+function summarizeSalesOrdersForUser(records = []) {
+  return sortSalesOrdersNewestFirst(records).map(so => ({
+    id: so.id,
+    so_number: so.SO_Number || so.Sales_Order_Number || null,
+    subject: so.Subject || null,
+    grand_total: so.Grand_Total || null,
+    status: so.Status || null,
+    client_send_status: so.Client_Send_Status || null,
+    signature_status: so.Signature_Status || so.Esignature_Status || so.Esign_Status || so.DocuSign_Status || so.ZohoSign_Status || null,
+    created_time: so.Created_Time || null,
+    url: so.id ? `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${so.id}` : null
+  }));
+}
+
+async function triggerAndPollAdminAction({ moduleName, recordId, actionName, env, maxPollMs = 60000, pollEveryMs = 4000 }) {
+  const start = Date.now();
+  const snapshots = [];
+  let preState = null;
+  try {
+    preState = await fetchRecordFull(moduleName, recordId, env);
+    snapshots.push({ at_ms: 0, Admin_Action: preState?.Admin_Action || null, Client_Send_Status: preState?.Client_Send_Status || null });
+    if (preState?.Admin_Action === `${actionName}__Done`) {
+      return { success: true, state: 'already_done', final_state: preState, poll_snapshots: snapshots };
+    }
+    if (moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign' && salesOrderLooksEsignSent(preState)) {
+      return { success: true, state: 'already_sent', final_state: preState, poll_snapshots: snapshots };
+    }
+  } catch (err) {
+    snapshots.push({ at_ms: 0, preflight_error: err.message });
+  }
+
+  const writeResult = await zohoApiCall('PUT', `${moduleName}/${recordId}`, env, { data: [{ id: recordId, Admin_Action: actionName }] });
+  const parsedWrite = parseZohoResponse(writeResult, `${moduleName} ${actionName}`);
+  if (parsedWrite?.success === false) {
+    return { success: false, state: 'write_rejected', error: parsedWrite.message, write_result: writeResult, poll_snapshots: snapshots };
+  }
+
+  let finalState = preState;
+  while (Date.now() - start < maxPollMs) {
+    await sleep(pollEveryMs);
+    try {
+      finalState = await fetchRecordFull(moduleName, recordId, env);
+      snapshots.push({
+        at_ms: Date.now() - start,
+        Admin_Action: finalState?.Admin_Action || null,
+        Client_Send_Status: finalState?.Client_Send_Status || null,
+        Modified_Time: finalState?.Modified_Time || null
+      });
+      if (finalState?.Admin_Action === `${actionName}__Done`) {
+        return { success: true, state: 'done', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+      }
+      if (String(finalState?.Admin_Action || '').includes('__Error')) {
+        return { success: false, state: 'error', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+      }
+      if (moduleName === 'Sales_Orders' && actionName === 'LIVE_SendToEsign' && salesOrderLooksEsignSent(finalState)) {
+        return { success: true, state: 'sent', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+      }
+    } catch (err) {
+      snapshots.push({ at_ms: Date.now() - start, poll_error: err.message });
+    }
+  }
+
+  return { success: true, state: 'processing', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
+}
+
+async function ensureQuoteDidAndVelocity(quote, env) {
+  const quoteId = quote?.id;
+  if (isCiscoDid(quote?.CCW_Deal_Number)) {
+    return {
+      success: true,
+      state: 'already_done',
+      quote: quote,
+      ccw_deal_number: String(quote.CCW_Deal_Number).trim(),
+      velocity_hub_submission: { skipped: true, reason: 'existing_did' }
+    };
+  }
+
+  const action = await triggerAndPollAdminAction({
+    moduleName: 'Quotes',
+    recordId: quoteId,
+    actionName: 'LIVE_CiscoQuote_Deal',
+    env,
+    maxPollMs: 70000,
+    pollEveryMs: 5000
+  });
+  const refreshedQuote = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => action.final_state || quote);
+  if (!isCiscoDid(refreshedQuote?.CCW_Deal_Number)) {
+    return {
+      success: false,
+      state: action.state === 'error' ? 'did_error' : 'did_processing',
+      quote: refreshedQuote,
+      admin_action: action,
+      message: `LIVE_CiscoQuote_Deal is ${action.state || 'processing'}; CCW_Deal_Number is not populated yet.`
+    };
+  }
+  const did = String(refreshedQuote.CCW_Deal_Number).trim();
+  const velocity = await submitVelocityHubDid(did);
+  return {
+    success: true,
+    state: 'did_ready',
+    quote: refreshedQuote,
+    ccw_deal_number: did,
+    admin_action: action,
+    velocity_hub_submission: velocity
+  };
+}
+
+async function findSalesOrdersForDeal(dealId, env) {
+  if (!dealId) return [];
+  const fields = 'id,Subject,SO_Number,Grand_Total,Status,Deal_Name,Account_Name,Client_Send_Status,Disti_Tracking_Number,Disti_Estimated_Ship_Date,Vendor_SO_Number,Created_Time,Modified_Time';
+  const query = `select ${fields} from Sales_Orders where Deal_Name.id = '${coqlEscape(dealId)}' order by Created_Time desc limit 50`;
+  const result = await zohoApiCall('POST', 'coql', env, { select_query: query }).catch(() => null);
+  return sortSalesOrdersNewestFirst(result?.data || []);
+}
+
+function salesOrderMatchesQuote(so, quote) {
+  if (!so || !quote) return false;
+  const quoteId = String(quote.id || '');
+  const quoteNumber = String(quote.Quote_Number || '');
+  const values = [
+    so.Quote_Name, so.Quote, so.Original_Quote, so.Source_Quote, so.Quote_ID,
+    so.Quote_Number, so.Source_Quote_Number
+  ];
+  for (const value of values) {
+    if (!value) continue;
+    if (typeof value === 'object') {
+      if (String(value.id || '') === quoteId) return true;
+      if (quoteNumber && String(value.name || value.display_value || '').includes(quoteNumber)) return true;
+    } else {
+      const s = String(value);
+      if (s === quoteId || (quoteNumber && s.includes(quoteNumber))) return true;
+    }
+  }
+  const text = `${so.Subject || ''} ${so.Description || ''}`;
+  return !!(quoteNumber && text.includes(quoteNumber));
+}
+
+async function findQuoteSpecificSalesOrders({ quote, dealSalesOrders, env }) {
+  const matches = [];
+  for (const partial of (dealSalesOrders || []).slice(0, 20)) {
+    const full = await fetchRecordFull('Sales_Orders', partial.id, env).catch(() => partial);
+    if (salesOrderMatchesQuote(full || partial, quote)) matches.push(full || partial);
+  }
+  return sortSalesOrdersNewestFirst(matches);
+}
+
+async function findLinkedSalesOrderFromQuote(quoteId, dealSalesOrders, env) {
+  const quote = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => null);
+  if (!quote) return null;
+  const possible = [];
+  for (const [key, value] of Object.entries(quote)) {
+    if (!/(^SO_|Sales[_\s-]?Order|Sales[_\s-]?Orders|Purchase[_\s-]?Order)/i.test(key)) continue;
+    const id = zohoLookupId(value);
+    if (id) possible.push({ id, source_field: key });
+    if (typeof value === 'string' || typeof value === 'number') {
+      possible.push({ id: value, source_field: key });
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const itemId = zohoLookupId(item);
+        if (itemId) possible.push({ id: itemId, source_field: key });
+      }
+    }
+  }
+  for (const ref of possible) {
+    const byId = await fetchSalesOrderByReference(ref.id, env).catch(() => null);
+    if (byId?.id) return { ...byId, _quote_linkage_field: ref.source_field };
+  }
+  const quoteSpecific = await findQuoteSpecificSalesOrders({ quote, dealSalesOrders, env });
+  return quoteSpecific[0] || null;
+}
+
+async function setAndVerifyQuoteNetTerms(quoteId, netTerms, env) {
+  const write = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, { data: [{ id: quoteId, Net_Terms: netTerms }] });
+  const parsed = parseZohoResponse(write, 'Quote Net_Terms update');
+  if (parsed?.success === false) return { success: false, state: 'write_rejected', error: parsed.message };
+  for (let i = 0; i < 3; i++) {
+    await sleep(i === 0 ? 1000 : 2500);
+    const refreshed = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => null);
+    if (refreshed?.Net_Terms === netTerms) return { success: true, state: 'verified', quote: refreshed };
+  }
+  return { success: false, state: 'not_persisted', error: `Net_Terms did not verify as "${netTerms}" after update.` };
+}
+
+async function handleQuoteToPoAndEsign(toolInput, env, personId) {
+  const start = Date.now();
+  const quoteId = toolInput.quote_id;
+  const sendForEsign = toolInput.send_for_esign !== false;
+  const forceCreatePo = toolInput.force_create_po === true;
+  const requestedSalesOrderId = toolInput.sales_order_id || null;
+  const finish = async (payload, status = payload.success ? 'success' : 'error') => {
+    await logQuoteToPoTerminal(env, personId, quoteId, status, {
+      quote_subject: payload.quote_subject || payload.quote?.Subject || null,
+      duration_ms: Date.now() - start,
+      error: payload.error || null,
+      request_payload: toolInput,
+      response_payload: payload,
+      user_visible_summary: payload._user_visible_summary || payload.message || null
+    });
+    return { ...payload, wall_ms: Date.now() - start };
+  };
+  const progress = (message) => {
+    try {
+      if (!env?.__PROGRESS_ID) return;
+      const p = writeProgressEvent(env, env.__PROGRESS_ID, message);
+      if (env.__PROGRESS_CTX && typeof env.__PROGRESS_CTX.waitUntil === 'function') {
+        env.__PROGRESS_CTX.waitUntil(p);
+      }
+    } catch (_) {}
+  };
+  let netTermsNotice = null;
+  const withTermsNotice = (message) => netTermsNotice ? `${message} ${netTermsNotice}` : message;
+
+  if (!quoteId) {
+    return finish({ success: false, error: 'quote_id is required', _no_partial_success: true });
+  }
+
+  let quote = await fetchQuoteForPoWorkflow(quoteId, env);
+  if (!quote?.id) {
+    return finish({ success: false, quote_id: quoteId, error: 'Quote not found', _no_partial_success: true });
+  }
+  const dealId = zohoLookupId(quote.Deal_Name);
+  if (!dealId) {
+    return finish({ success: false, quote_id: quoteId, quote_subject: quote.Subject, error: 'Quote has no linked Deal_Name; cannot create a PO safely.', _no_partial_success: true });
+  }
+  if (sendForEsign && !zohoLookupId(quote.Contact_Name)) {
+    return finish({ success: false, quote_id: quoteId, quote_subject: quote.Subject, error: 'Quote has no Contact_Name; cannot send PO for e-signature.', _no_partial_success: true });
+  }
+
+  const existingSalesOrders = await findSalesOrdersForDeal(dealId, env);
+  const existingIds = new Set(existingSalesOrders.map(so => String(so.id)));
+
+  if (requestedSalesOrderId) {
+    const requested = await fetchRecordFull('Sales_Orders', requestedSalesOrderId, env);
+    if (!requested?.id) {
+      return finish({ success: false, quote_id: quoteId, error: `Sales Order ${requestedSalesOrderId} was not found.`, _no_partial_success: true });
+    }
+    const requestedDealId = zohoLookupId(requested.Deal_Name);
+    if (!requestedDealId || requestedDealId !== dealId) {
+      return finish({
+        success: false,
+        state: 'sales_order_deal_mismatch',
+        quote_id: quoteId,
+        quote_deal_id: dealId,
+        sales_order_id: requested.id,
+        sales_order_deal_id: requestedDealId || null,
+        sales_order: summarizeSalesOrdersForUser([requested])[0],
+        error: 'The supplied Sales Order is not linked to the same Deal as this Quote. I did not send it for e-signature.',
+        _no_partial_success: true,
+        _user_visible_summary: `PO ${requested.SO_Number || requested.id} is not linked to this Quote's Deal, so I did not send it for e-signature.`
+      });
+    }
+    if (!sendForEsign) {
+      return finish({ success: true, state: 'existing_po_selected', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([requested])[0] });
+    }
+    if (salesOrderLooksEsignSent(requested)) {
+      return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([requested])[0] });
+    }
+    const esign = await triggerAndPollAdminAction({ moduleName: 'Sales_Orders', recordId: requested.id, actionName: 'LIVE_SendToEsign', env, maxPollMs: 60000 });
+    return finish({
+      success: esign.success !== false,
+      state: esign.success === false ? 'esign_failed' : 'esign_triggered',
+      quote_id: quoteId,
+      sales_order: summarizeSalesOrdersForUser([esign.final_state || requested])[0],
+      esign_admin_action: esign,
+      _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${requested.id}`,
+      _user_visible_summary: `PO ${requested.SO_Number || requested.id} is ${esign.success === false ? 'not sent' : 'sent/processing'} for e-signature.`
+    }, esign.success === false ? 'error' : 'success');
+  }
+
+  const quoteSpecificExisting = await findQuoteSpecificSalesOrders({ quote, dealSalesOrders: existingSalesOrders, env });
+  if (quoteSpecificExisting.length > 0) {
+    const existing = quoteSpecificExisting[0];
+    if (!sendForEsign) {
+      return finish({ success: true, state: 'existing_po_for_quote_found', quote_id: quoteId, sales_orders: summarizeSalesOrdersForUser(quoteSpecificExisting) });
+    }
+    if (salesOrderLooksEsignSent(existing)) {
+      return finish({ success: true, state: 'po_created_esign_already_sent', quote_id: quoteId, sales_order: summarizeSalesOrdersForUser([existing])[0] });
+    }
+    const esign = await triggerAndPollAdminAction({ moduleName: 'Sales_Orders', recordId: existing.id, actionName: 'LIVE_SendToEsign', env, maxPollMs: 60000 });
+    return finish({
+      success: esign.success !== false,
+      state: esign.success === false ? 'esign_failed' : 'existing_po_sent_for_esign',
+      quote_id: quoteId,
+      sales_order: summarizeSalesOrdersForUser([esign.final_state || existing])[0],
+      esign_admin_action: esign
+    }, esign.success === false ? 'error' : 'success');
+  }
+
+  if (existingSalesOrders.length > 0 && !forceCreatePo) {
+    return finish({
+      success: false,
+      state: 'existing_po_found',
+      quote_id: quoteId,
+      quote_subject: quote.Subject,
+      message: 'This Deal already has Sales Orders. I did not create another PO. Re-run with force_create_po:true only after the user confirms this should create an additional PO, or pass sales_order_id to send an existing PO.',
+      existing_sales_orders: summarizeSalesOrdersForUser(existingSalesOrders),
+      next_action: 'Confirm whether to create an additional PO with force_create_po:true, or provide sales_order_id for the existing PO.',
+      _no_partial_success: true
+    }, 'blocked');
+  }
+
+  progress('Checking Cisco DID and submitting to Velocity Hub...');
+  const did = await ensureQuoteDidAndVelocity(quote, env);
+  quote = did.quote || quote;
+  if (!did.success) {
+    return finish({
+      success: false,
+      state: did.state,
+      quote_id: quoteId,
+      quote_subject: quote.Subject,
+      did_admin_action: did,
+      error: did.message || 'DID is not ready yet; PO conversion did not run.',
+      _no_partial_success: true
+    });
+  }
+  progress(`Cisco DID ${did.ccw_deal_number || ''} is ready; preparing PO conversion...`.trim());
+
+  const grandTotal = Number(quote.Grand_Total || 0);
+  if (!quote.Net_Terms) {
+    if (grandTotal >= 5000) {
+      return finish({
+        success: false,
+        state: 'net_terms_required',
+        quote_id: quoteId,
+        quote_subject: quote.Subject,
+        grand_total: grandTotal,
+        error: 'Net_Terms is blank and quote total is $5,000 or more. Ask the user to choose terms before converting to PO; Net_Terms locks after conversion.',
+        _no_partial_success: true
+      }, 'blocked');
+    }
+    const terms = await setAndVerifyQuoteNetTerms(quoteId, 'Cash', env);
+    if (!terms.success) {
+      return finish({
+        success: false,
+        state: 'net_terms_not_verified',
+        quote_id: quoteId,
+        quote_subject: quote.Subject,
+        error: terms.error,
+        net_terms_update: terms,
+        _no_partial_success: true
+      });
+    }
+    quote = terms.quote || quote;
+    netTermsNotice = `Net_Terms was blank, so it was defaulted to Cash because Grand_Total is $${grandTotal.toFixed(2)} (under $5,000).`;
+    progress(netTermsNotice);
+  }
+
+  progress('Converting Quote to PO using Zoho admin action...');
+  const convert = await triggerAndPollAdminAction({
+    moduleName: 'Quotes',
+    recordId: quoteId,
+    actionName: 'LIVE_ConvertQuoteToSO',
+    env,
+    maxPollMs: 90000,
+    pollEveryMs: 5000
+  });
+  if (convert.success === false) {
+    return finish({
+      success: false,
+      state: 'convert_po_failed',
+      quote_id: quoteId,
+      quote_subject: quote.Subject,
+      convert_admin_action: convert,
+      error: 'LIVE_ConvertQuoteToSO failed or returned an error.',
+      _no_partial_success: true
+    });
+  }
+
+  let candidate = null;
+  let latestSalesOrders = [];
+  for (let i = 0; i < 8; i++) {
+    await sleep(i === 0 ? 1500 : 5000);
+    latestSalesOrders = await findSalesOrdersForDeal(dealId, env);
+    const newOnes = latestSalesOrders.filter(so => !existingIds.has(String(so.id)));
+    if (newOnes.length === 1) {
+      candidate = await fetchRecordFull('Sales_Orders', newOnes[0].id, env).catch(() => newOnes[0]);
+      break;
+    }
+    if (newOnes.length > 1) {
+      return finish({
+        success: false,
+        state: 'multi_new_pos_found',
+        quote_id: quoteId,
+        quote_subject: quote.Subject,
+        new_sales_orders: summarizeSalesOrdersForUser(newOnes),
+        message: 'Zoho created more than one new Sales Order. I did not send e-signature because the correct PO is ambiguous.',
+        _no_partial_success: true
+      }, 'blocked');
+    }
+    candidate = await findLinkedSalesOrderFromQuote(quoteId, latestSalesOrders, env);
+    if (candidate?.id && !existingIds.has(String(candidate.id))) break;
+  }
+
+  if (!candidate?.id) {
+    return finish({
+      success: false,
+      state: 'po_not_found_yet',
+      quote_id: quoteId,
+      quote_subject: quote.Subject,
+      convert_admin_action: convert,
+      latest_sales_orders: summarizeSalesOrdersForUser(latestSalesOrders),
+      message: 'LIVE_ConvertQuoteToSO was triggered, but no new or quote-linked Sales Order was found yet. Re-check shortly before sending e-signature.',
+      _no_partial_success: true
+    }, 'blocked');
+  }
+
+  if (!sendForEsign) {
+    progress(`PO ${candidate.SO_Number || candidate.id} created.`);
+    return finish({
+      success: true,
+      state: 'po_created',
+      quote_id: quoteId,
+      ccw_deal_number: did.ccw_deal_number,
+      velocity_hub_submission: did.velocity_hub_submission,
+      sales_order: summarizeSalesOrdersForUser([candidate])[0],
+      net_terms_notice: netTermsNotice,
+      _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
+      _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}.`)
+    });
+  }
+
+  if (salesOrderLooksEsignSent(candidate)) {
+    progress(`PO ${candidate.SO_Number || candidate.id} already appears sent for e-signature.`);
+    return finish({
+      success: true,
+      state: 'po_created_esign_already_sent',
+      quote_id: quoteId,
+      ccw_deal_number: did.ccw_deal_number,
+      velocity_hub_submission: did.velocity_hub_submission,
+      sales_order: summarizeSalesOrdersForUser([candidate])[0],
+      net_terms_notice: netTermsNotice,
+      _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
+      _user_visible_summary: withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}; e-signature already appears sent or in progress.`)
+    });
+  }
+
+  progress(`Sending PO ${candidate.SO_Number || candidate.id} for e-signature using Zoho admin action...`);
+  const esign = await triggerAndPollAdminAction({
+    moduleName: 'Sales_Orders',
+    recordId: candidate.id,
+    actionName: 'LIVE_SendToEsign',
+    env,
+    maxPollMs: 60000,
+    pollEveryMs: 5000
+  });
+
+  return finish({
+    success: esign.success !== false,
+    state: esign.success === false ? 'esign_failed' : 'po_created_esign_sent',
+    quote_id: quoteId,
+    ccw_deal_number: did.ccw_deal_number,
+    velocity_hub_submission: did.velocity_hub_submission,
+    sales_order: summarizeSalesOrdersForUser([esign.final_state || candidate])[0],
+    net_terms_notice: netTermsNotice,
+    convert_admin_action: convert,
+    esign_admin_action: esign,
+    _record_url: `https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/${candidate.id}`,
+    _user_visible_summary: esign.success === false
+      ? withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id}, but e-signature failed.`)
+      : withTermsNotice(`Created PO ${candidate.SO_Number || candidate.id} and sent it for e-signature.`)
+  }, esign.success === false ? 'error' : 'success');
 }
 
 // ─── Tool Execution Router ────────────────────────────────────────────────────
@@ -5914,6 +6507,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
         'clone_quote': { success: true, source_quote_id: toolInput.quote_id, cloned_quote_id: `DRY_CLONE_${mockId}`, dry_run: true },
         'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
+        'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
         'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
         'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
@@ -7516,6 +8110,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'create_deal_and_quote': {
         const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term } = toolInput;
         let { lead_source } = toolInput;
+        const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         const results = { steps: [], errors: [], records: {} };
         const _startMs = Date.now();
 
@@ -7788,6 +8383,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
             // If it's already a license SKU, just resolve it directly
             if (rawSku.startsWith('LIC-')) {
+              if (!includeLicenses) {
+                results.steps.push(`Skipped license SKU ${rawSku} because hardware_only/include_licenses=false was requested`);
+                continue;
+              }
               if (!stageProduct(rawSku, qty)) {
                 missingProducts.push(rawSku);
               }
@@ -7846,7 +8445,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
 
             // Auto-add matching license using getLicenseSkus
-            const licenseOptions = getLicenseSkus(rawSku);
+            const licenseOptions = includeLicenses ? getLicenseSkus(rawSku) : null;
             console.log(`[COMPOUND] getLicenseSkus(${rawSku}): ${licenseOptions ? JSON.stringify(licenseOptions[0]) : 'null'}`);
             let resolvedLicSku = null;
             if (licenseOptions) {
@@ -8176,6 +8775,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.pricing_summary = resolvedProducts.map(p =>
             `${p.sku} x${p.qty}: list $${p.list_price}, ecomm $${p.ecomm_price} (${p.discount_pct}% off, $${p.discount_per_unit}/unit discount)`
           );
+          results.license_policy = includeLicenses ? 'auto_add_matching_licenses' : 'hardware_only_no_licenses';
           if (missingProducts.length > 0) {
             results.missing_products = missingProducts;
             results.note = 'Some products were not found. Mention this to the user but do NOT attempt to fix it with additional tool calls.';
@@ -8196,6 +8796,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.wall_ms = Date.now() - _startMs;
           return results;
         }
+      }
+
+      // ── Compound: Quote → DID → Velocity Hub → PO → e-sign ──
+      case 'quote_to_po_and_esign': {
+        return await handleQuoteToPoAndEsign(toolInput, env, personId);
       }
 
       // ── Web Enrichment Tools ──
@@ -10086,7 +10691,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results — do NOT make additional tool calls to modify the quote.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results — do NOT make additional tool calls to modify the quote unless the user explicitly asks for admin actions/PO/e-sign.',
     input_schema: {
       type: 'object',
       properties: {
@@ -10107,6 +10712,8 @@ const CRM_EMAIL_TOOLS = [
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses. License-only requests must stay license-only.'
         },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
+        hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
         billing_address: {
@@ -10122,6 +10729,20 @@ const CRM_EMAIL_TOOLS = [
         }
       },
       required: ['account_name', 'skus']
+    }
+  },
+  {
+    name: 'quote_to_po_and_esign',
+    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, or Quote_Stage for this workflow. This tool writes only Admin_Action fields plus Net_Terms when safely blank under $5k. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string', description: 'Zoho Quote record ID, not the Quote_Number.' },
+        send_for_esign: { type: 'boolean', description: 'Default true. Set false to only convert to PO without sending for e-signature.' },
+        force_create_po: { type: 'boolean', description: 'Default false. Set true only after the user confirms creating an additional PO even though the deal already has Sales Orders.' },
+        sales_order_id: { type: 'string', description: 'Optional existing Sales_Orders record ID to send for e-signature instead of creating a new PO. The workflow verifies the Sales Order is linked to the same Deal as the Quote before sending.' }
+      },
+      required: ['quote_id']
     }
   },
   // Web enrichment
@@ -10610,6 +11231,7 @@ Proceed-first rule: Create with Stratus Referal + Stratus Sales defaults. Ask ab
 SKU suffixes and hardware→license pairing are handled automatically by the tools:
 - batch_product_lookup and parse_quote_url apply suffixes automatically (MR44 → MR44-HW, CW9172I → CW9172I-RTG, etc.)
 - create_deal_and_quote auto-adds licenses for each hardware SKU using getLicenseSkus()
+- If the user says "hardware only", "no license", "remove the license", or "just the hardware", pass hardware_only:true and include_licenses:false to create_deal_and_quote. Do not add or keep LIC-* rows.
 - You do NOT need to manually apply suffixes or figure out license SKUs — just pass base SKUs to the tools
 - License quantity always equals hardware quantity (1:1 ratio)
 - If a user explicitly names a license SKU (e.g., "LIC-ENT-3YR"), pass it as-is to batch_product_lookup
@@ -10806,7 +11428,7 @@ For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) �
 1. You are in CRM mode — always create Zoho CRM quotes, NEVER fall back to URL quotes.
 2. Parse user input for intent, not literal strings. Don't re-ask for already-provided info.
 3. **CRM-FIRST:** Search Zoho CRM before web searching. Only use web_search_domain for NEW accounts not in CRM.
-4. **create_deal_and_quote:** Pass ONLY hardware SKUs (auto-adds licenses). Call it ALONE. After it returns, STOP — report results only.
+4. **create_deal_and_quote:** Pass ONLY requested SKUs. Hardware auto-adds licenses unless hardware_only/include_licenses=false. Call it ALONE. After it returns, STOP unless the same user request explicitly asks for DID/PO/e-sign admin actions.
 5. **batch_product_lookup / parse_quote_url:** Use for all SKU lookups and URL parsing. Never search Products individually.
 6. **RESELLER / VAR PATTERN:** "this is for [Customer]" or "on behalf of [Customer]" = sender is VAR. Billing Account = sender's company. Deal name: "[Sender Account] - [End Customer] - [Description]". Contact = sender.
 7. **ALWAYS END WITH ZOHO LINKS:** [Record Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID) for every record created.
@@ -10814,7 +11436,7 @@ For picklist fields in general (Stage, Lead_Source, Reason, Quote_Stage, etc.) �
 ---
 
 ## ADMIN ACTION WORKFLOW
-(Full workflow loaded conditionally when admin action intent is detected.)
+(Full workflow loaded conditionally when admin action intent is detected.) For Quote → DID → PO → e-signature requests, prefer quote_to_po_and_esign over hand-chaining zoho_update_record calls.
 
 **Self-report discipline:** Before saying you lack a tool or capability, check your tool list. You have zoho_update_record which can trigger Admin Actions, assign_cisco_rep_to_deal for rep assignment, and batch_product_lookup for products. NEVER report "I don't have a tool" when you have a tool that can accomplish the task. If you used a tool, state plainly what you did in your response.
 
@@ -10933,6 +11555,8 @@ const CRM_PROMPT_ADMIN_ACTION = `
 
 Admin Actions are Zoho automations triggered by writing an action name to the Admin_Action field. Execute via API directly. NEVER tell user to click a button.
 
+Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only.
+
 **Trigger process:**
 1. TRIGGER: zoho_update_record(module_name="Quotes", record_id={id}, data={"Admin_Action": "{ACTION_NAME}"})
 2. VERIFY: zoho_get_record on same ID. Check Admin_Action shows "{ACTION_NAME}__Done". Re-fetch once more if unchanged.
@@ -10952,6 +11576,7 @@ NEVER say "I don't have a tool to generate a DID" — you DO have zoho_update_re
 
 **Step 3: LIVE_ConvertQuoteToSO**
 Show validation first: Net_Terms, Contact, Tax, Grand Total. Net_Terms CANNOT change after conversion.
+Do not set Deal.Stage, Quote.Stage, or Quote_Stage manually. The PO automation handles downstream stage behavior.
 
 **Step 4: LIVE_SendToEsign**
 Run on Sales_Orders module (PO record), NOT Quotes. Search Sales_Orders by Deal_Name, then trigger on PO record.
@@ -11072,6 +11697,8 @@ function toolProgressMessage(toolName, toolInput) {
       const skuCount = toolInput.skus?.length || 0;
       return `🚀 Creating Deal + Quote for ${acct} (${skuCount} products)...`;
     }
+    case 'quote_to_po_and_esign':
+      return `🧾 Running Quote → DID → PO → e-sign admin workflow...`;
     case 'web_search_domain': {
       return `🌐 Looking up ${toolInput.domain || 'domain'}...`;
     }
@@ -12658,6 +13285,7 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'zoho_delete_record',
   'clone_quote',
   'create_deal_and_quote',
+  'quote_to_po_and_esign',
   'velocity_hub_submit',
   'assign_cisco_rep_to_deal',
   'gmail_create_draft',
@@ -12755,6 +13383,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'zoho_delete_record': { data: [{ code: 'SUCCESS', details: { id: toolInput.record_id } }] },
       'clone_quote': { success: true, source_quote_id: toolInput.quote_id, cloned_quote_id: `DRY_CLONE_${mockId}`, dry_run: true },
       'create_deal_and_quote': { success: true, deal_id: `DRY_DEAL_${mockId}`, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
+      'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
       'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
       'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
@@ -14279,11 +14908,27 @@ function shouldForceClaudeForWrite(userMessage) {
     /\bapprove\b.{0,20}\b(deal|quote|discount|request)/i,
     /\bcreate\b.{0,20}\b(deal|quote|task|contact|account|note)/i,
     /\bdelete\b.{0,20}\b(line|item|row|sku|product|task|note)/i,
+    /\b(hardware\s*only|no\s+licen[cs]e|without\s+licen[cs]e|just\s+(?:the\s+)?hardware|remove\s+(?:the\s+)?licen[cs]e)\b/i,
+    /\b(generate|create|get|need|fire|kick\s*off|submit|run|rerun|redo|push|shoot)\b.{0,40}\b(did|deal\s*id|ccw)\b/i,
+    /\b(convert|create|generate|send|submit|rerun|redo|push|shoot)\b.{0,50}\b(po|purchase\s*order|sales\s*order|esign|e-?sign|signature|docusign|zoho\s*sign)\b/i,
+    /\b(cancel|kill|redo|rerun|push|shoot)\b.{0,40}\b(quote|deal|po|purchase\s*order|sales\s*order|did|admin\s*action)\b/i,
+    /\bquote_to_po|quote[-\s]*to[-\s]*po|admin\s*action\b/i,
     /\bmake\s+(it|the\s+\w+)\b.{0,30}\b(\d+%|\d+\s*%|\d+\s*year|\d+y|\d+\s*yr)/i,
     /^\s*(change|update|modify|set|make)\b/i, // Bare "change X to Y" openings
   ];
 
   return writePatterns.some(p => p.test(userMessage));
+}
+
+function claudeResultLooksUsable(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (Array.isArray(result.errors) && result.errors.length > 0) return false;
+  if (result.error) return false;
+  if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return true;
+  if (typeof result.reply === 'string' && result.reply.trim().length > 0) {
+    return !/\b(api\s*error|rate\s*limit|timeout|timed\s*out|failed\s+to\s+call|overloaded)\b/i.test(result.reply);
+  }
+  return false;
 }
 
 function isAdvisoryQuery(userMessage) {
@@ -14475,6 +15120,36 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       elapsedMs: t.result?.elapsedMs || 0,
       totalMs: Date.now() - startMs
     };
+  }
+
+  // High-stakes CRM writes go to Claude first because cheaper CF models have
+  // historically paraphrased write intent instead of invoking tools. If Claude
+  // stalls or fails, fall back to the normal waterfall instead of dead-ending.
+  const autoForceClaudeForWrite = shouldForceClaudeForWrite(userMessage);
+  let autoClaudeResult = null;
+  let autoClaudeFailure = null;
+  if (autoForceClaudeForWrite) {
+    try {
+      console.log(`[WATERFALL] Write/admin-action intent detected; trying Claude first for personId=${personId}`);
+      autoClaudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
+      if (claudeResultLooksUsable(autoClaudeResult)) {
+        return {
+          ...autoClaudeResult,
+          model: 'claude-sonnet-4-6',
+          tierUsed: 'claude-write-intent',
+          llamaResult: null,
+          gemmaResult: null,
+          deepSeekResult: null,
+          claudeResult: autoClaudeResult,
+          stallReason: null,
+          totalMs: Date.now() - startMs
+        };
+      }
+      autoClaudeFailure = autoClaudeResult?.errors?.length ? autoClaudeResult.errors.map(e => e.error || e.phase).join('|') : 'unusable_response';
+    } catch (err) {
+      autoClaudeFailure = err.message || 'exception';
+    }
+    console.warn(`[WATERFALL] Claude write-intent attempt failed (${autoClaudeFailure}); cascading to normal waterfall for personId=${personId}`);
   }
 
   // ── Tier 1: Llama 4 Scout (primary) ──
@@ -17250,16 +17925,12 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 // detect in-prompt "confirm:true" phrases for destructive ops
                 // and auto-inject consent when Llama fails to propagate it.
                 env.__USER_PROMPT_RAW = wText || '';
-                const forceClaudeForChatWrite = !forcedModel && skipDeterministic && shouldForceClaudeForWrite(wText);
-                if (forceClaudeForChatWrite) {
-                  console.log(`[WATERFALL] Forcing Claude for chat-tab write intent`);
-                }
                 const forcedBenchmarkModel = BENCHMARK_MODELS.find(m => m.id === forcedModel);
                 // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
                   forceLlama: forcedModel === 'llama',
                   forceGemma: forcedModel === 'gemma',
-                  forceClaude: forcedModel === 'claude' || forceClaudeForChatWrite,
+                  forceClaude: forcedModel === 'claude',
                   forceCfModelId: forcedBenchmarkModel?.type === 'cf' ? forcedModel : null,
                   forceDeepSeekModelId: isDeepSeekModel(forcedModel) ? forcedModel.toLowerCase() : null,
                   dryRun: wDryRun === true,
