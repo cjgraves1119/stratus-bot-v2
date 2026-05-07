@@ -7,6 +7,39 @@
 import { generateQuote, crmSearch } from './api-client.js';
 
 /**
+ * Detect which Zoho CRM module a highlighted string most likely belongs to,
+ * so we can auto-select the right tab in the Search panel.
+ *
+ * Order matters — tighter patterns first.
+ */
+export function detectSearchModule(text) {
+  const t = (text || '').trim();
+  if (!t) return 'Accounts';
+
+  // Email address → Contacts (find by email)
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)) return 'Contacts';
+
+  // Stratus uses 18-19 digit Zoho-style IDs as SO_Number — long pure numeric → POs
+  if (/^\d{15,}$/.test(t)) return 'Sales_Orders';
+
+  // Invoice patterns: "INV-12345", "INV12345", "INV 12345"
+  if (/^inv[\s\-_]?\d+$/i.test(t)) return 'Invoices';
+
+  // Quote patterns: "QT-12345", "Q-12345", "Quote-12345"
+  if (/^(qt|q|quote)[\s\-_]?\d+$/i.test(t)) return 'Quotes';
+
+  // Two-word "First Last" → Contacts. Single word or 3+ words → Accounts.
+  // Keep simple: alphabetic two words with no punctuation other than apostrophes/hyphens.
+  const words = t.split(/\s+/);
+  if (words.length === 2 && words.every(w => /^[A-Za-z][A-Za-z'\-]*\.?$/.test(w))) {
+    return 'Contacts';
+  }
+
+  // Default — covers single-word company names, multi-word company names with commas/LLC etc.
+  return 'Accounts';
+}
+
+/**
  * Create context menu items. Called once on extension install.
  */
 export function setupContextMenus() {
@@ -106,14 +139,16 @@ export async function handleContextMenuClick(info, tab) {
     }
 
     case 'stratus-crm-lookup': {
-      if (!selectedText.trim()) return;
+      const trimmed = selectedText.trim();
+      if (!trimmed) return;
+      const module = detectSearchModule(trimmed);
       try {
         await chrome.sidePanel.open({ tabId: tab.id });
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
             panel: 'search',
-            data: { query: selectedText.trim() },
+            data: { query: trimmed, module },
           });
         }, 500);
       } catch (err) {
