@@ -106,6 +106,20 @@ function renderQuote(text) {
 }
 
 {
+  const out = renderQuote('quote LIC-MS130-8P-I-3YR');
+  check('MS130 compact direct license canonicalizes to CMPT license',
+    out && /LIC-MS130-CMPT-3Y/.test(out.message) && !/item=LIC-MS130-8P-I-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS130-24Z-3YR');
+  check('hallucinated MS130 direct license variant is blocked',
+    out && /not a recognized switch license SKU/.test(out.message) && !/Order in Stratus/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
   const out = renderQuote('quote 2 LIC-MS130-48X-5Y');
   check('invalid MS130 X direct license canonicalizes to port-count license',
     out && /LIC-MS130-48-5Y/.test(out.message) && !/item=LIC-MS130-48X-5Y/.test(out.message),
@@ -120,6 +134,20 @@ function renderQuote(text) {
 }
 
 {
+  const out = renderQuote('quote LIC-MS150-24MP-4X-3YR');
+  check('MS150 24-port MP direct license canonicalizes to port-count license',
+    out && /LIC-MS150-24-3Y/.test(out.message) && !/item=LIC-MS150-24MP-4X-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS150-48MP-4X-3YR');
+  check('MS150 48-port MP direct license canonicalizes to port-count license',
+    out && /LIC-MS150-48-3Y/.test(out.message) && !/item=LIC-MS150-48MP-4X-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
   const out = renderQuote('quote LIC-MS390-24UX-3YR');
   check('invalid MS390 variant direct license canonicalizes to tiered port license',
     out && /LIC-MS390-24E-3Y/.test(out.message) && !/item=LIC-MS390-24UX-3YR/.test(out.message),
@@ -127,9 +155,58 @@ function renderQuote(text) {
 }
 
 {
+  const out = renderQuote('quote LIC-MS390-24P-3YR');
+  check('MS390 24-port renewal direct license canonicalizes from real non-stocked variant',
+    out && /LIC-MS390-24E-3Y/.test(out.message) && !/item=LIC-MS390-24P-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS390-48P-3YR');
+  check('MS390 48-port renewal direct license canonicalizes from real non-stocked variant',
+    out && /LIC-MS390-48E-3Y/.test(out.message) && !/item=LIC-MS390-48P-3YR/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote 1 MS130-24P with 3 year advanced license');
+  check('MS130 advanced request maps to port-count A-tier license',
+    out && /LIC-MS130-24A-3Y/.test(out.message) && !/LIC-MS130-24-3Y/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote 1 MS150-24P-4G with 3 year advanced license');
+  check('MS150 advanced request maps to port-count A-tier license',
+    out && /LIC-MS150-24A-3Y/.test(out.message) && !/LIC-MS150-24-3Y/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote 1 MS390-24UX with 3 year advanced license');
+  check('MS390 advanced request maps to A-tier port license',
+    out && /LIC-MS390-24A-3Y/.test(out.message) && !/LIC-MS390-24E-3Y/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS130-24A-3YR');
+  check('direct MS130 Advanced license normalizes suffix without downgrading tier',
+    out && /LIC-MS130-24A-3Y/.test(out.message) && !/LIC-MS130-24-3Y/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
+  const out = renderQuote('quote LIC-MS390-24A-3YR');
+  check('direct MS390 Advanced license normalizes suffix without downgrading tier',
+    out && /LIC-MS390-24A-3Y/.test(out.message) && !/LIC-MS390-24E-3Y/.test(out.message),
+    out ? out.message : 'no output');
+}
+
+{
   const out = renderQuote('quote LIC-MS350-48X-3YR');
-  check('invalid MS350 48X direct license canonicalizes to 48-port legacy license',
-    out && /LIC-MS350-48-3YR/.test(out.message) && !/item=LIC-MS350-48X-3YR/.test(out.message),
+  check('invalid MS350 48X direct license blocks instead of canonicalizing',
+    out && /couldn't quote LIC-MS350-48X-3YR/.test(out.message) && /not a recognized switch license SKU/.test(out.message) && !/Order in Stratus/.test(out.message),
     out ? out.message : 'no output');
 }
 

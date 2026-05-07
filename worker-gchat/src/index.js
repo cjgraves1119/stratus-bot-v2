@@ -72,6 +72,42 @@ const prices = new Proxy(staticPrices, {
   }
 });
 
+function canonicalDirectMsLicenseSku(modelToken, term) {
+  const model = String(modelToken || '').toUpperCase();
+  const suffix = `${term}Y`;
+
+  if (/^MS130-CMPTA$/.test(model)) return `LIC-MS130-CMPTA-${suffix}`;
+  if (/^MS130-CMPT$/.test(model)) return `LIC-MS130-CMPT-${suffix}`;
+
+  const ms130Adv = model.match(/^MS130-(24|48)A$/);
+  if (ms130Adv) return `LIC-MS130-${ms130Adv[1]}A-${suffix}`;
+
+  const ms150Adv = model.match(/^MS150-(24|48)A$/);
+  if (ms150Adv) return `LIC-MS150-${ms150Adv[1]}A-${suffix}`;
+
+  const ms390Tiered = model.match(/^MS390-(24|48)(A|E)$/);
+  if (ms390Tiered) return `LIC-MS390-${ms390Tiered[1]}${ms390Tiered[2]}-${suffix}`;
+
+  return null;
+}
+
+const MS390_LICENSE_MODEL_TOKENS = new Set([
+  'MS390-24', 'MS390-24P', 'MS390-24U', 'MS390-24UX',
+  'MS390-48', 'MS390-48P', 'MS390-48U', 'MS390-48UX', 'MS390-48UX2'
+]);
+
+function requiresMsLicenseModelInputValidation(modelToken) {
+  const upper = String(modelToken || '').toUpperCase();
+  return /^(MS130R|MS130|MS150|MS390)-/.test(upper);
+}
+
+function hasKnownMsLicenseModelInput(modelToken) {
+  const upper = String(modelToken || '').toUpperCase();
+  if (MS390_LICENSE_MODEL_TOKENS.has(upper)) return true;
+  const suffixed = applySuffix(upper);
+  return Boolean(prices[upper] || prices[suffixed]);
+}
+
 // Direct LIC-MS... requests sometimes include the hardware variant shape or the
 // wrong Y/YR suffix. Normalize through the existing license rules before
 // rendering so direct license URLs follow the same catalog mapping as hardware
@@ -83,6 +119,24 @@ function normalizeDirectLicenseSku(sku) {
   const msDirect = upper.match(/^LIC-(MS\d{3}-[A-Z0-9-]+)-([135])Y(?:R)?$/);
   if (msDirect) {
     const [, modelToken, term] = msDirect;
+    const directCanonical = canonicalDirectMsLicenseSku(modelToken, term);
+    if (directCanonical && prices[directCanonical]) {
+      return directCanonical === upper
+        ? { sku: upper }
+        : {
+            sku: directCanonical,
+            note: `${upper} is not a valid switch license SKU; using ${directCanonical}.`
+          };
+    }
+
+    if (requiresMsLicenseModelInputValidation(modelToken) && !hasKnownMsLicenseModelInput(modelToken)) {
+      return {
+        sku: upper,
+        invalid: true,
+        note: `${upper} is not a recognized switch license SKU.`
+      };
+    }
+
     const licenses = getLicenseSkus(modelToken);
     const canonical = licenses?.find(l => l.term === `${term}Y`)?.sku || null;
     if (canonical && prices[canonical]) {
@@ -127,6 +181,21 @@ function normalizeParsedDirectLicenses(parsed) {
     parsed.clarificationNote = [parsed.clarificationNote, ...notes].filter(Boolean).join(' ');
   }
   return invalidSkus;
+}
+
+function hasMsAdvancedTierIntent(text) {
+  const upper = String(text || '').toUpperCase();
+  if (!/\b(MS130|MS150|MS390|C9\d{3}|C9200L|C9300)\b/.test(upper)) return false;
+  if (/\bADVANCED\s+SECURITY\b/.test(upper)) return false;
+  return /\b(ADVANCED|ADV)\s*(LICENSE|LICENSING|LICENCE|LIC|FEATURES?|TIER)?\b/.test(upper)
+    || /\bADAPTIVE\s+POLICY\b/.test(upper);
+}
+
+function preserveMsAdvancedTier(parsed, rawText) {
+  if (parsed && !parsed.requestedTier && hasMsAdvancedTierIntent(rawText)) {
+    parsed.requestedTier = 'A';
+  }
+  return parsed;
 }
 
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
@@ -1260,6 +1329,11 @@ function applySuffix(sku) {
 
 // ─── License SKU Rules ───────────────────────────────────────────────────────
 function getLicenseSkus(baseSku, requestedTier) {
+  if (requiresMsLicenseModelInputValidation(baseSku) && !hasKnownMsLicenseModelInput(baseSku)) {
+    console.warn(`[LICENSE] Invalid switch model token for license generation: ${baseSku}`);
+    return null;
+  }
+
   const raw = _getLicenseSkusRaw(baseSku, requestedTier);
   if (!raw || raw.length === 0) return null;
 
@@ -1433,19 +1507,21 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
 
   // MS130R (compact) — uses LIC-MS130-CMPT
   if (/^MS130R-/.test(upper)) {
+    const suffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'CMPTA' : 'CMPT';
     return [
-      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
-      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
-      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
+      { term: '1Y', sku: `LIC-MS130-${suffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS130-${suffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS130-${suffix}-5Y` }
     ];
   }
 
   // MS130-8P, MS130-12P (small form factor) — uses LIC-MS130-CMPT
   if (/^MS130-(8|12)/.test(upper)) {
+    const suffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'CMPTA' : 'CMPT';
     return [
-      { term: '1Y', sku: 'LIC-MS130-CMPT-1Y' },
-      { term: '3Y', sku: 'LIC-MS130-CMPT-3Y' },
-      { term: '5Y', sku: 'LIC-MS130-CMPT-5Y' }
+      { term: '1Y', sku: `LIC-MS130-${suffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS130-${suffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS130-${suffix}-5Y` }
     ];
   }
 
@@ -1453,10 +1529,11 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
   const ms130Match = upper.match(/^MS130-(24|48)/);
   if (ms130Match) {
     const ports = ms130Match[1];
+    const tierSuffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'A' : '';
     return [
-      { term: '1Y', sku: `LIC-MS130-${ports}-1Y` },
-      { term: '3Y', sku: `LIC-MS130-${ports}-3Y` },
-      { term: '5Y', sku: `LIC-MS130-${ports}-5Y` }
+      { term: '1Y', sku: `LIC-MS130-${ports}${tierSuffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS130-${ports}${tierSuffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS130-${ports}${tierSuffix}-5Y` }
     ];
   }
 
@@ -1464,10 +1541,11 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
   const ms150Match = upper.match(/^MS150-(24|48)/);
   if (ms150Match) {
     const ports = ms150Match[1];
+    const tierSuffix = (String(requestedTier || '').toUpperCase() === 'A') ? 'A' : '';
     return [
-      { term: '1Y', sku: `LIC-MS150-${ports}-1Y` },
-      { term: '3Y', sku: `LIC-MS150-${ports}-3Y` },
-      { term: '5Y', sku: `LIC-MS150-${ports}-5Y` }
+      { term: '1Y', sku: `LIC-MS150-${ports}${tierSuffix}-1Y` },
+      { term: '3Y', sku: `LIC-MS150-${ports}${tierSuffix}-3Y` },
+      { term: '5Y', sku: `LIC-MS150-${ports}${tierSuffix}-5Y` }
     ];
   }
 
@@ -1500,9 +1578,7 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
   const legacyMsMatch = upper.match(/^(MS\d{3})-(.+)/);
   if (legacyMsMatch && !upper.startsWith('MS130') && !upper.startsWith('MS150')) {
     const model = legacyMsMatch[1];
-    let port = legacyMsMatch[2];
-    // MS350-48X uses the 48-port license (no X)
-    if (model === 'MS350' && port === '48X') port = '48';
+    const port = legacyMsMatch[2];
     return [
       { term: '1Y', sku: `LIC-${model}-${port}-1YR` },
       { term: '3Y', sku: `LIC-${model}-${port}-3YR` },
@@ -3168,7 +3244,9 @@ function parseMessage(text) {
   const showPricing = /\b(HOW\s+MUCH|PRICE[SD]?|PRICING|COST[S]?|WITH\s+PRIC(E|ING|ES))\b/.test(upper);
 
   let requestedTier = null;
-  if (/\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/.test(upper) && !/\bENTERPRISE\b/.test(upper)) {
+  if (hasMsAdvancedTierIntent(upper)) {
+    requestedTier = 'A';
+  } else if (/\b(ADVANCED\s+SECURITY|SEC(URITY)?)\b/.test(upper) && !/\bENTERPRISE\b/.test(upper)) {
     requestedTier = 'SEC';
   } else if (/\bENT(ERPRISE)?\b/.test(upper) && !/\bSEC(URITY)?\b/.test(upper)) {
     requestedTier = 'ENT';
@@ -4325,7 +4403,6 @@ EXACT license SKU mappings by product family:
 ### Legacy Switches (all EOL) — -YR suffix
 - MS120/125/210/220/225/250/320/350/355/410/420/425 → LIC-{model}-{variant}-1YR, -3YR, -5YR
   Examples: LIC-MS250-48FP-1YR, LIC-MS350-24X-1YR
-  Exception: MS350-48X uses LIC-MS350-48-1YR (drop the X from 48-port only)
 
 ## VALID PRODUCT CATALOG
 APs (MR): MR28, MR36, MR36H, MR44, MR46, MR46E, MR52, MR57, MR76, MR78, MR86
@@ -17140,7 +17217,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                     console.log(`[WATERFALL] Tier 0 hit: deterministic guard handled clarification`);
                   } else if (classification?.intent === 'quote') {
                     const quoteText = classification.extracted || wText;
-                    const parsed = parseMessage(quoteText);
+                    const parsed = preserveMsAdvancedTier(parseMessage(quoteText), wText);
                     if (parsed && !parsed.isClarification && !parsed.isRevision) {
                       const qResult = buildQuoteResponse(parsed);
                       if (qResult && qResult.message && !qResult.needsLlm) {
@@ -19496,7 +19573,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 
           if (classification.intent === 'quote') {
             const quoteText = classification.extracted || input;
-            const quoteParsed = parseMessage(quoteText);
+            const quoteParsed = preserveMsAdvancedTier(parseMessage(quoteText), input);
             if (quoteParsed && !quoteParsed.isClarification) {
               const quoteResult = buildQuoteResponse(quoteParsed);
               if (quoteResult && quoteResult.message && !quoteResult.needsLlm) {
@@ -20016,7 +20093,7 @@ Return ONLY a JSON object (no markdown, no explanation):
               // CF: quote — deterministic engine executes the quote
               if (!reply && classification.intent === 'quote') {
                 const quoteText = classification.extracted || text;
-                const quoteParsed = parseMessage(quoteText);
+                const quoteParsed = preserveMsAdvancedTier(parseMessage(quoteText), text);
                 if (quoteParsed && !quoteParsed.isClarification) {
                   const quoteResult = buildQuoteResponse(quoteParsed);
                   if (quoteResult && quoteResult.message && !quoteResult.needsLlm) {
