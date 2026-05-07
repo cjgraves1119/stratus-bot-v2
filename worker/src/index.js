@@ -313,6 +313,63 @@ const prices = new Proxy(staticPrices, {
   }
 });
 
+// Direct LIC-MS... requests sometimes include the hardware variant shape or the
+// wrong Y/YR suffix. Normalize through the existing license rules before
+// rendering so direct license URLs follow the same catalog mapping as hardware
+// quotes.
+function normalizeDirectLicenseSku(sku) {
+  const upper = String(sku || '').trim().toUpperCase();
+  if (prices[upper]) return { sku: upper };
+
+  const msDirect = upper.match(/^LIC-(MS\d{3}-[A-Z0-9-]+)-([135])Y(?:R)?$/);
+  if (msDirect) {
+    const [, modelToken, term] = msDirect;
+    const licenses = getLicenseSkus(modelToken);
+    const canonical = licenses?.find(l => l.term === `${term}Y`)?.sku || null;
+    if (canonical && prices[canonical]) {
+      return {
+        sku: canonical,
+        note: `${upper} is not a valid switch license SKU; using ${canonical}.`
+      };
+    }
+    return {
+      sku: upper,
+      invalid: true,
+      note: `${upper} is not a recognized switch license SKU.`
+    };
+  }
+  return { sku: upper };
+}
+
+function normalizeParsedDirectLicenses(parsed) {
+  const notes = [];
+  const invalidSkus = [];
+  const addNote = note => {
+    if (note && !notes.includes(note)) notes.push(note);
+  };
+
+  if (Array.isArray(parsed.directLicenseList)) {
+    parsed.directLicenseList = parsed.directLicenseList.map(item => {
+      const normalized = normalizeDirectLicenseSku(item.sku);
+      addNote(normalized.note);
+      if (normalized.invalid) invalidSkus.push(normalized.sku);
+      return { ...item, sku: normalized.sku };
+    });
+  }
+
+  if (parsed.directLicense) {
+    const normalized = normalizeDirectLicenseSku(parsed.directLicense.sku);
+    addNote(normalized.note);
+    if (normalized.invalid) invalidSkus.push(normalized.sku);
+    parsed.directLicense = { ...parsed.directLicense, sku: normalized.sku };
+  }
+
+  if (notes.length > 0) {
+    parsed.clarificationNote = [parsed.clarificationNote, ...notes].filter(Boolean).join(' ');
+  }
+  return invalidSkus;
+}
+
 // ─── Term-in-SKU rewrite helper ──────────────────────────────────────────────
 // Some product families embed the term directly in the SKU rather than carrying
 // it as separate metadata. When the user asks to switch terms on a prior quote
@@ -5720,6 +5777,14 @@ function buildPricingBlock(urlItems, showPricing) {
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
 function buildQuoteResponse(parsed) {
+  const invalidDirectLicenses = normalizeParsedDirectLicenses(parsed);
+  if (invalidDirectLicenses.length > 0) {
+    return {
+      message: `I couldn't quote ${invalidDirectLicenses.join(', ')} because it is not a recognized switch license SKU.`,
+      needsLlm: false
+    };
+  }
+
   // Build "source→target" upgrade mapping string for refresh option headers
   // eolList: array of { baseSku/baseModel, replacement } objects
   const _buildUpgradeMap = (eolList, uplinkIdx) => {

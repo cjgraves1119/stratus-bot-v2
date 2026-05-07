@@ -429,6 +429,62 @@ export function getLicenseSkus(baseSku, requestedTerm = null) {
   return [];
 }
 
+// Direct LIC-MS... requests sometimes include a hardware variant shape or the
+// wrong Y/YR suffix. Normalize through the same license rules used for hardware
+// quotes before rendering local extension URLs.
+export function normalizeDirectLicenseSku(sku) {
+  const upper = String(sku || '').trim().toUpperCase();
+  if (VALID_SKUS.has(upper)) return { sku: upper };
+
+  const msDirect = upper.match(/^LIC-(MS\d{3}-[A-Z0-9-]+)-([135])Y(?:R)?$/);
+  if (msDirect) {
+    const [, modelToken, term] = msDirect;
+    if (!detectFamily(modelToken)) {
+      return {
+        sku: upper,
+        invalid: true,
+        note: `${upper} is not a recognized switch license SKU.`,
+      };
+    }
+    const licenses = getLicenseSkus(modelToken);
+    const canonical = licenses.find(lic => new RegExp(`-${term}Y(?:R)?$`).test(lic)) || null;
+    if (canonical) {
+      if (canonical === upper) return { sku: upper };
+      return {
+        sku: canonical,
+        note: `${upper} is not a valid switch license SKU; using ${canonical}.`,
+      };
+    }
+    return {
+      sku: upper,
+      invalid: true,
+      note: `${upper} is not a recognized switch license SKU.`,
+    };
+  }
+
+  return { sku: upper };
+}
+
+function normalizeDirectLicenseItems(items) {
+  const notes = [];
+  const invalidSkus = [];
+  const addNote = note => {
+    if (note && !notes.includes(note)) notes.push(note);
+  };
+
+  const normalizedItems = items.map(item => {
+    const upper = String(item.baseSku || '').trim().toUpperCase();
+    if (!upper.startsWith('LIC-MS')) return item;
+
+    const normalized = normalizeDirectLicenseSku(upper);
+    addNote(normalized.note);
+    if (normalized.invalid) invalidSkus.push(normalized.sku);
+    return { ...item, baseSku: normalized.sku };
+  });
+
+  return { items: normalizedItems, notes, invalidSkus };
+}
+
 // ============================================================================
 // PARSING — Ported from the proven Webex/GChat bot's parseMessage()
 // Uses per-family SKU regex patterns with context-based quantity extraction
@@ -633,8 +689,11 @@ export function buildStratusUrl(items, modifiers = {}) {
 
   const merged = new Map();
   const term = modifiers.term || null; // Optional: '1', '3', or '5' for single-term URLs
+  const normalized = normalizeDirectLicenseItems(items);
 
-  for (const item of items) {
+  if (normalized.invalidSkus.length > 0) return null;
+
+  for (const item of normalized.items) {
     const { baseSku, qty } = item;
     if (!baseSku) continue;
     const upper = baseSku.toUpperCase();
@@ -682,7 +741,7 @@ export function generateLocalQuote(text) {
 
   try {
     const parsed = parseSkuInput(text);
-    const { items, modifiers } = parsed;
+    let { items, modifiers } = parsed;
 
     if (!items || items.length === 0) {
       // Check for model-agnostic family suggestions (e.g., "quote MR" → suggest MR44, MR46, etc.)
@@ -704,6 +763,19 @@ export function generateLocalQuote(text) {
         };
       }
       return { url: null, needsApi: true, error: 'No valid SKUs found in input' };
+    }
+
+    const directLicenseNormalization = normalizeDirectLicenseItems(items);
+    items = directLicenseNormalization.items;
+    if (directLicenseNormalization.invalidSkus.length > 0) {
+      return {
+        url: null,
+        needsApi: false,
+        error: `I couldn't quote ${directLicenseNormalization.invalidSkus.join(', ')} because it is not a recognized switch license SKU.`,
+        parsed: items,
+        suggestions: null,
+        eolWarnings: directLicenseNormalization.notes,
+      };
     }
 
     // Validate each SKU and collect results
@@ -846,6 +918,10 @@ export function generateLocalQuote(text) {
       }
       return `${w.sku} is End-of-Life` + (rep ? ` → replaced by ${rep}` : '');
     });
+    const warningStrings = [
+      ...directLicenseNormalization.notes,
+      ...eolWarningStrings,
+    ];
 
     return {
       urls,
@@ -853,7 +929,7 @@ export function generateLocalQuote(text) {
       error: null,
       parsed: validationResults,
       suggestions: suggestions.length > 0 ? suggestions : null,
-      eolWarnings: eolWarningStrings,
+      eolWarnings: warningStrings,
       modifiers,
     };
   } catch (error) {
