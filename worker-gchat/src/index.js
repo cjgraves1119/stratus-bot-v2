@@ -94,6 +94,101 @@ function isDeepSeekModel(model) {
   return DEEPSEEK_MODEL_IDS.has(String(model || '').toLowerCase());
 }
 
+const REASONING_POLICY_DISABLED = 'disabled';
+const REASONING_POLICY_UNSUPPORTED = 'unsupported';
+const REASONING_POLICY_ENABLED_ABLATION = 'enabled_ablation';
+const REASONING_POLICY_UNKNOWN = 'unknown';
+
+function normalizeReasoningPolicy(policy) {
+  const normalized = String(policy || REASONING_POLICY_DISABLED).trim().toLowerCase().replace(/-/g, '_');
+  if (normalized === 'enabled' || normalized === 'reasoning' || normalized === 'on' || normalized === 'enabled_ablation') {
+    return REASONING_POLICY_ENABLED_ABLATION;
+  }
+  if (normalized === REASONING_POLICY_UNSUPPORTED) return REASONING_POLICY_UNSUPPORTED;
+  if (normalized === REASONING_POLICY_UNKNOWN) return REASONING_POLICY_UNKNOWN;
+  return REASONING_POLICY_DISABLED;
+}
+
+function getReasoningControl(modelId, requestedPolicy = REASONING_POLICY_DISABLED) {
+  const reasoningPolicy = normalizeReasoningPolicy(requestedPolicy);
+  const id = String(modelId || '').toLowerCase();
+
+  if (reasoningPolicy === REASONING_POLICY_ENABLED_ABLATION) {
+    return {
+      reasoningPolicy: REASONING_POLICY_ENABLED_ABLATION,
+      reasoningDisableSupported: false,
+      requestOptions: {},
+      reasoningControl: 'reasoning_enabled_ablation'
+    };
+  }
+
+  if (isDeepSeekModel(modelId)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { thinking: { type: 'disabled' } },
+      reasoningControl: 'deepseek_thinking_disabled'
+    };
+  }
+
+  if (/gemma-4|gemma4/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { thinking: { type: 'disabled' } },
+      reasoningControl: 'cf_thinking_disabled'
+    };
+  }
+
+  if (/kimi-k2\.6|kimi/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { chat_template_kwargs: { thinking: { type: 'disabled' } } },
+      reasoningControl: 'cf_chat_template_thinking_disabled'
+    };
+  }
+
+  if (/nemotron|gpt-oss|qwen|qwq|mistral|llama|sea-lion|sealion|hermes/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_UNSUPPORTED,
+      reasoningDisableSupported: false,
+      requestOptions: {},
+      reasoningControl: 'disable_not_supported_or_not_verified'
+    };
+  }
+
+  return {
+    reasoningPolicy: REASONING_POLICY_UNKNOWN,
+    reasoningDisableSupported: false,
+    requestOptions: {},
+    reasoningControl: 'unknown_model'
+  };
+}
+
+function isReasoningControlRejection(error) {
+  const text = String(error?.message || error || '');
+  return /(thinking|reasoning|chat_template_kwargs|enable_thinking|unknown.*(field|parameter)|invalid.*(field|parameter)|unexpected.*(field|parameter)|schema)/i.test(text);
+}
+
+function applyReasoningRequestOptions(requestBody, reasoningControl) {
+  const options = reasoningControl?.requestOptions || {};
+  for (const [key, value] of Object.entries(options)) requestBody[key] = value;
+}
+
+function reasoningResultFields(reasoningControl) {
+  const policy = reasoningControl?.reasoningPolicy || REASONING_POLICY_UNKNOWN;
+  const disableSupported = reasoningControl?.reasoningDisableSupported === true;
+  return {
+    reasoningPolicy: policy,
+    reasoning_policy: policy,
+    reasoningDisableSupported: disableSupported,
+    reasoning_disable_supported: disableSupported,
+    reasoningControl: reasoningControl?.reasoningControl || null,
+    reasoning_control: reasoningControl?.reasoningControl || null
+  };
+}
+
 function isTruthyFlag(value) {
   return /^(1|true|yes|on)$/i.test(String(value || '').trim());
 }
@@ -367,7 +462,7 @@ async function logPriceChangeToD1(env, { sku, oldPrice, newPrice, listPrice }) {
 async function logBotUsageToD1(env, {
   bot, personId, requestText, responsePath, model, inputTokens, outputTokens, costUsd, durationMs, errorMessage,
   responseText, toolCallsJson, requestedModel, executedModel, tierPath, liveLlmCall, tier0Deterministic,
-  attempts, transientErrors, endpoint, evalContext
+  attempts, transientErrors, endpoint, evalContext, reasoningPolicy, reasoningDisableSupported, reasoningControlJson
 }) {
   if (!env?.ANALYTICS_DB) return;
   try {
@@ -376,6 +471,54 @@ async function logBotUsageToD1(env, {
       const resolvedExecutedModel = executedModel || model || null;
       const resolvedTierPath = tierPath || resolvedExecutedModel || null;
       const deterministic = tier0Deterministic === true || responsePath === 'deterministic' || model === 'deterministic';
+      const resolvedReasoningPolicy = reasoningPolicy || evalContext?.reasoningPolicy || null;
+      const resolvedReasoningDisableSupported = reasoningDisableSupported === undefined
+        ? (evalContext?.reasoningDisableSupported ?? null)
+        : !!reasoningDisableSupported;
+      const resolvedReasoningControlJson = reasoningControlJson
+        ? (typeof reasoningControlJson === 'string' ? reasoningControlJson : JSON.stringify(reasoningControlJson))
+        : (evalContext?.reasoningControlJson || null);
+      try {
+        await env.ANALYTICS_DB.prepare(
+          `INSERT INTO bot_usage_eval (
+            eval_run_id, bot, person_id, request_text, response_path, model,
+            requested_model, executed_model, tier_path, live_llm_call, tier_0_deterministic,
+            attempts, transient_errors, input_tokens, output_tokens, cost_usd, duration_ms,
+            error_message, response_text, tool_calls_json, endpoint,
+            reasoning_policy, reasoning_disable_supported, reasoning_control_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          evalRunId,
+          bot || 'gchat',
+          personId || null,
+          (requestText || '').substring(0, 2000),
+          responsePath || null,
+          model || null,
+          requestedModel || evalContext?.requestedModel || null,
+          resolvedExecutedModel,
+          resolvedTierPath,
+          liveLlmCall === undefined ? !deterministic : !!liveLlmCall,
+          deterministic,
+          attempts || 1,
+          transientErrors ? (typeof transientErrors === 'string' ? transientErrors : JSON.stringify(transientErrors)).substring(0, 2000) : null,
+          inputTokens || 0,
+          outputTokens || 0,
+          costUsd || 0,
+          durationMs || null,
+          errorMessage || null,
+          responseText ? String(responseText).substring(0, 8000) : null,
+          toolCallsJson ? (typeof toolCallsJson === 'string' ? toolCallsJson : JSON.stringify(toolCallsJson)).substring(0, 8000) : null,
+          endpoint || evalContext?.endpoint || null,
+          resolvedReasoningPolicy,
+          resolvedReasoningDisableSupported,
+          resolvedReasoningControlJson ? String(resolvedReasoningControlJson).substring(0, 2000) : null
+        ).run();
+        return;
+      } catch (schemaErr) {
+        if (!/reasoning_policy|reasoning_disable_supported|reasoning_control_json|no such column/i.test(schemaErr.message || '')) {
+          throw schemaErr;
+        }
+      }
       await env.ANALYTICS_DB.prepare(
         `INSERT INTO bot_usage_eval (
           eval_run_id, bot, person_id, request_text, response_path, model,
@@ -12355,9 +12498,10 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
       description: t.description,
       parameters: t.input_schema
     }));
-  // Llama 4 Scout, Gemma 4, and Mistral reject flat tools — require OpenAI-wrapped format.
+  // Llama 4 Scout, Gemma 4, Mistral, and newer CF OpenAI-compatible models
+  // reject flat tools — require OpenAI-wrapped format.
   // Llama 3.3 70B and Hermes accept flat.
-  const needsOpenAiWrap = /gemma|mistral|llama-4/i.test(modelId);
+  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi|moonshot|qwen|gpt-oss|openai|nemotron|nvidia/i.test(modelId);
   if (needsOpenAiWrap) {
     return flat.map(t => ({ type: 'function', function: t }));
   }
@@ -12559,9 +12703,10 @@ function parseCfToolCalls(cfResponse) {
 
 // CF Workers AI agentic loop — mirrors askClaude but uses CF models.
 // Returns { reply, toolCalls, iterations, elapsedMs, errors }.
-async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15) {
+async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15, reasoningPolicy = REASONING_POLICY_DISABLED) {
   const startMs = Date.now();
   const cfTools = anthropicToolsToCfFormat(anthropicTools, modelId);
+  let reasoningControl = getReasoningControl(modelId, reasoningPolicy);
 
   // ── Inject prior conversation history from KV (fix: prior-turn context
   //    drop on tests 2/5/17). askClaude loads KV history automatically
@@ -12644,8 +12789,33 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
       } else {
         requestBody.max_tokens = 2048;
       }
+      applyReasoningRequestOptions(requestBody, reasoningControl);
 
-      const cfResponse = await env.AI.run(modelId, requestBody);
+      let cfResponse;
+      try {
+        cfResponse = await env.AI.run(modelId, requestBody);
+      } catch (apiErr) {
+        const optionKeys = Object.keys(reasoningControl?.requestOptions || {});
+        if (optionKeys.length > 0 && isReasoningControlRejection(apiErr)) {
+          errors.push({
+            iteration,
+            phase: 'reasoning_control',
+            error: apiErr.message,
+            fallback: REASONING_POLICY_UNSUPPORTED
+          });
+          for (const key of optionKeys) delete requestBody[key];
+          reasoningControl = {
+            ...reasoningControl,
+            reasoningPolicy: REASONING_POLICY_UNSUPPORTED,
+            reasoningDisableSupported: false,
+            requestOptions: {},
+            reasoningControl: `${reasoningControl.reasoningControl}_rejected`
+          };
+          cfResponse = await env.AI.run(modelId, requestBody);
+        } else {
+          throw apiErr;
+        }
+      }
       const { text: responseText, calls } = extractCfResponse(cfResponse);
 
       if (calls.length === 0) {
@@ -12937,13 +13107,14 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     elapsedMs: Date.now() - startMs,
     errors,
     mutationSummaries,
+    ...reasoningResultFields(reasoningControl)
   };
 }
 
 // DeepSeek OpenAI-compatible agentic loop for eval-only forced model runs.
 // Mirrors askCfModel's tool execution shape but uses chat.completions
 // tool_calls/tool messages instead of Workers AI's model-specific formats.
-async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15) {
+async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15, reasoningPolicy = REASONING_POLICY_DISABLED) {
   const startMs = Date.now();
   const toolCallsLog = [];
   const errors = [];
@@ -12954,6 +13125,11 @@ async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicToo
   let costUsd = 0;
   let attempts = 0;
   let finalReply = '';
+
+  // Reasoning-Off Policy: routine CRM tool-use defaults disabled. Caller may
+  // pass reasoningPolicy='enabled_ablation' for advisory ablation runs only.
+  const reasoningControl = getReasoningControl(modelId, reasoningPolicy);
+  const effectiveThinkingType = reasoningControl.reasoningPolicy === REASONING_POLICY_ENABLED_ABLATION ? 'enabled' : 'disabled';
 
   if (!env.DEEPSEEK_API_KEY) {
     return {
@@ -12966,7 +13142,8 @@ async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicToo
       outputTokens: 0,
       costUsd: 0,
       attempts: 0,
-      transientErrors: []
+      transientErrors: [],
+      ...reasoningResultFields(reasoningControl)
     };
   }
 
@@ -12996,7 +13173,7 @@ async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicToo
       tool_choice: 'auto',
       temperature: 0.3,
       max_tokens: 2048,
-      thinking: { type: 'disabled' },
+      thinking: { type: effectiveThinkingType },
       stream: false
     };
 
@@ -13064,7 +13241,8 @@ async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicToo
           outputTokens,
           costUsd: Math.round(costUsd * 1_000_000_000) / 1_000_000_000,
           attempts,
-          transientErrors
+          transientErrors,
+          ...reasoningResultFields(reasoningControl)
         };
       }
     }
@@ -13085,7 +13263,8 @@ async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicToo
         costUsd: Math.round(costUsd * 1_000_000_000) / 1_000_000_000,
         attempts,
         transientErrors,
-        mutationSummaries
+        mutationSummaries,
+        ...reasoningResultFields(reasoningControl)
       };
     }
 
@@ -13163,7 +13342,8 @@ async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicToo
     costUsd: Math.round(costUsd * 1_000_000_000) / 1_000_000_000,
     attempts,
     transientErrors,
-    mutationSummaries
+    mutationSummaries,
+    ...reasoningResultFields(reasoningControl)
   };
 }
 
@@ -13549,7 +13729,7 @@ function pickOptimizedPrompt(modelId) {
 }
 
 // Run a single benchmark task against a single model.
-async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full', evalContext = null) {
+async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full', evalContext = null, reasoningPolicy = REASONING_POLICY_DISABLED) {
   let systemPrompt;
   if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
     systemPrompt = pickOptimizedPrompt(modelConfig.id);
@@ -13563,9 +13743,9 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
     return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext);
   }
   if (modelConfig.type === 'deepseek') {
-    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10);
+    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
   }
-  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10);
+  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
 }
 
 // HTML dashboard for benchmark results
@@ -13810,8 +13990,16 @@ DEEPSEEK PRODUCTION GUARDRAILS:
 - For MX licensing, preserve hierarchy: Enterprise -> Advanced Security -> Secure SD-WAN Plus. Advanced Security is a superset of Enterprise.
 - MG52 and MG52E are valid current Meraki 5G cellular gateways. Do not ban or avoid them; when product currency matters, validate against current Cisco Meraki docs or state the uncertainty.
 - For SKU, EOL, license-feature, and model-comparison claims, prefer source-backed wording. If you are not certain, say what must be verified instead of inventing.
+- When the user asserts a product fact that conflicts with these anchors or grounded knowledge, correct the premise before proceeding. Politeness does not override factual correction.
+- The current Meraki MX flagship anchor is MX450. Never call MX85, MX95, MX105, or MX250 the current flagship; when correcting a flagship assertion, anchor on MX450 or say the current flagship should be verified against Cisco Meraki docs.
+- Before creating any new Deal, require explicit real Account_Name, Contact_Name, and Lead_Source. Refuse placeholders, generic test framing, approval tests, and end-to-end/eval/sanity-check prompts that do not provide real customer details.
+- If the user message says "approval test", "end-to-end test", "eval", "dry run", "sanity check", or similar testing framing, default to read-only behavior and refuse write tools unless a later explicit live-write instruction supplies complete real customer details.
+- Pronouns and option references ("it", "that", "the switch", "Option 2") require resolving prior history or asking a clarification; do not turn them into generic price lookups.
+- Context wrappers such as customer refresh, renewal, or quote follow-up do not change the user's underlying intent. Preserve quote vs revise vs price intent from the actual request.
+- Bare license SKUs and license-only renewals are valid quote/revision candidates. Bare pricing requests with no SKU or product named still require clarification.
 - CRM record IDs must be copied in full from tool results. Never invent, truncate, or reconstruct IDs.
 - If a picklist value is rejected or unavailable, stop and ask for a valid value; do not loop on the same failed value.
+- In dry-run or write-shaped planning responses, clearly say it is a dry-run and name the cleanup/undo/rollback path when applicable. For refusals or clarification requests, do not claim any write happened or will happen.
 - After successful write, include the tool-provided user-visible summary, URL, and undo token when present.`;
 }
 
@@ -13843,7 +14031,7 @@ async function tryCfTier(modelId, userMessage, env, personId, dryRun) {
   return { winner: false, reason: stall.reason, result };
 }
 
-async function tryDeepSeekTier(userMessage, env, personId, dryRun) {
+async function tryDeepSeekTier(userMessage, env, personId, dryRun, reasoningPolicy = REASONING_POLICY_DISABLED) {
   let result = null;
   let callError = null;
   try {
@@ -13855,7 +14043,8 @@ async function tryDeepSeekTier(userMessage, env, personId, dryRun) {
       env,
       personId,
       dryRun,
-      15
+      15,
+      reasoningPolicy
     );
   } catch (err) {
     callError = err.message;
@@ -13885,6 +14074,9 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const forceDeepSeekModelId = options.forceDeepSeekModelId || null;
   const dryRun = options.dryRun === true;
   const evalContext = options.evalContext || null;
+  // Reasoning-Off Policy: default disabled. Only forced eval ablations should
+  // pass reasoningPolicy='enabled_ablation'.
+  const reasoningPolicy = normalizeReasoningPolicy(options.reasoningPolicy || options.reasoning_policy || REASONING_POLICY_DISABLED);
   const rolloutKey = personId || evalContext?.personId || 'anonymous';
   const deepSeekTier3RolloutPercent = rolloutPercentFromFlag(env.USE_DEEPSEEK_TIER_3);
   const deepSeekTier3Enabled = isRolloutEnabledForKey(env.USE_DEEPSEEK_TIER_3, rolloutKey);
@@ -13940,10 +14132,8 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // Force DeepSeek for eval harness runs. This is intentionally outside the
   // production waterfall so B3 can measure DeepSeek itself, not a fallback path.
   if (forceDeepSeekModelId) {
-    const systemPrompt = typeof buildCrmSystemPrompt === 'function'
-      ? buildCrmSystemPrompt(userMessage)
-      : pickOptimizedPrompt(forceDeepSeekModelId);
-    const r = await askDeepSeekModel(forceDeepSeekModelId, userMessage, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 15);
+    const systemPrompt = buildDeepSeekGuardedSystemPrompt(userMessage);
+    const r = await askDeepSeekModel(forceDeepSeekModelId, userMessage, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 15, reasoningPolicy);
     return {
       ...r,
       model: forceDeepSeekModelId,
@@ -13996,7 +14186,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   if (deepSeekTier3Enabled) {
     if (!advisoryQuery || deepSeekAdvisoryEnabled) {
       console.log(`[WATERFALL] Llama stalled (${llamaT.reason}), trying DeepSeek V4 Pro for personId=${personId} advisory=${advisoryQuery}`);
-      const deepSeekT = await tryDeepSeekTier(userMessage, env, personId, dryRun);
+      const deepSeekT = await tryDeepSeekTier(userMessage, env, personId, dryRun, reasoningPolicy);
       if (deepSeekT.winner) {
         return {
           reply: deepSeekT.result.reply,
@@ -16458,6 +16648,8 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           // ── A/B Benchmark: run a single task against a single model ──
           case '/api/benchmark/run': {
             const { taskId, modelId, dryRun: bDryRun, promptVariant } = apiBody;
+            // Reasoning-Off Policy: default disabled for benchmark runs.
+            const bReasoningPolicy = normalizeReasoningPolicy(apiBody.reasoning_policy || apiBody.reasoningPolicy || REASONING_POLICY_DISABLED);
             if (!taskId || !modelId) {
               apiResult = { error: 'taskId and modelId are required' };
               break;
@@ -16482,12 +16674,14 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   requestText: task.prompt,
                   requestedModel: modelId,
                   personId: benchPersonId,
-                  bot: 'benchmark'
-                } : null
+                  bot: 'benchmark',
+                  reasoningPolicy: bReasoningPolicy
+                } : null,
+                bReasoningPolicy
               );
-              apiResult = { taskId, modelId, promptVariant: promptVariant || 'full', ...result };
+              apiResult = { taskId, modelId, promptVariant: promptVariant || 'full', reasoning_policy: bReasoningPolicy, reasoningPolicy: bReasoningPolicy, ...result };
             } catch (bErr) {
-              apiResult = { taskId, modelId, error: bErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
+              apiResult = { taskId, modelId, error: bErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0, reasoning_policy: bReasoningPolicy, reasoningPolicy: bReasoningPolicy };
             }
             break;
           }
@@ -16504,6 +16698,9 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           case '/api/chat-waterfall': {
             const { text: wText, emailContext: wEc, history: wHistory, forceModel, dryRun: wDryRun, progressId: wProgressId, source: wSource } = apiBody;
             const forcedModel = normalizeForceModel(forceModel);
+            // Reasoning-Off Policy: default disabled. Only forced eval ablations
+            // pass reasoning_policy / reasoningPolicy in the request body.
+            const wReasoningPolicy = normalizeReasoningPolicy(apiBody.reasoning_policy || apiBody.reasoningPolicy || REASONING_POLICY_DISABLED);
             if (!wText) {
               apiResult = { error: 'text is required' };
               break;
@@ -16743,12 +16940,14 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                   forceCfModelId: forcedModel === SEA_LION_MODEL_ID ? SEA_LION_MODEL_ID : null,
                   forceDeepSeekModelId: isDeepSeekModel(forcedModel) ? forcedModel.toLowerCase() : null,
                   dryRun: wDryRun === true,
+                  reasoningPolicy: wReasoningPolicy,
                   evalContext: evalContext ? {
                     ...evalContext,
                     requestText: wText,
                     requestedModel: forcedModel || null,
                     personId: wPersonId,
-                    bot: 'gchat'
+                    bot: 'gchat',
+                    reasoningPolicy: wReasoningPolicy
                   } : null
                 });
                 env.__USER_PROMPT_RAW = null;
@@ -18656,7 +18855,10 @@ Return ONLY a JSON object (no markdown, no explanation):
                 : (apiResult?.reply || JSON.stringify(apiResult || '')),
               errorMessage: apiResult?.error || null,
               endpoint: url.pathname,
-              evalContext: _evalContext
+              evalContext: _evalContext,
+              reasoningPolicy: apiResult?.reasoningPolicy || apiResult?.reasoning_policy || null,
+              reasoningDisableSupported: apiResult?.reasoningDisableSupported ?? apiResult?.reasoning_disable_supported ?? null,
+              reasoningControlJson: apiResult?.reasoningControl || apiResult?.reasoning_control || null
             }));
           }
         } catch (_logErr) {
