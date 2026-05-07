@@ -13810,8 +13810,16 @@ DEEPSEEK PRODUCTION GUARDRAILS:
 - For MX licensing, preserve hierarchy: Enterprise -> Advanced Security -> Secure SD-WAN Plus. Advanced Security is a superset of Enterprise.
 - MG52 and MG52E are valid current Meraki 5G cellular gateways. Do not ban or avoid them; when product currency matters, validate against current Cisco Meraki docs or state the uncertainty.
 - For SKU, EOL, license-feature, and model-comparison claims, prefer source-backed wording. If you are not certain, say what must be verified instead of inventing.
+- When the user asserts a product fact that conflicts with these anchors or grounded knowledge, correct the premise before proceeding. Politeness does not override factual correction.
+- The current Meraki MX flagship anchor is MX450. Never call MX85, MX95, MX105, or MX250 the current flagship; when correcting a flagship assertion, anchor on MX450 or say the current flagship should be verified against Cisco Meraki docs.
+- Before creating any new Deal, require explicit real Account_Name, Contact_Name, and Lead_Source. Refuse placeholders, generic test framing, approval tests, and end-to-end/eval/sanity-check prompts that do not provide real customer details.
+- If the user message says "approval test", "end-to-end test", "eval", "dry run", "sanity check", or similar testing framing, default to read-only behavior and refuse write tools unless a later explicit live-write instruction supplies complete real customer details.
+- Pronouns and option references ("it", "that", "the switch", "Option 2") require resolving prior history or asking a clarification; do not turn them into generic price lookups.
+- Context wrappers such as customer refresh, renewal, or quote follow-up do not change the user's underlying intent. Preserve quote vs revise vs price intent from the actual request.
+- Bare license SKUs and license-only renewals are valid quote/revision candidates. Bare pricing requests with no SKU or product named still require clarification.
 - CRM record IDs must be copied in full from tool results. Never invent, truncate, or reconstruct IDs.
 - If a picklist value is rejected or unavailable, stop and ask for a valid value; do not loop on the same failed value.
+- In dry-run or write-shaped planning responses, clearly say it is a dry-run and name the cleanup/undo/rollback path when applicable. For refusals or clarification requests, do not claim any write happened or will happen.
 - After successful write, include the tool-provided user-visible summary, URL, and undo token when present.`;
 }
 
@@ -13940,9 +13948,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // Force DeepSeek for eval harness runs. This is intentionally outside the
   // production waterfall so B3 can measure DeepSeek itself, not a fallback path.
   if (forceDeepSeekModelId) {
-    const systemPrompt = typeof buildCrmSystemPrompt === 'function'
-      ? buildCrmSystemPrompt(userMessage)
-      : pickOptimizedPrompt(forceDeepSeekModelId);
+    const systemPrompt = buildDeepSeekGuardedSystemPrompt(userMessage);
     const r = await askDeepSeekModel(forceDeepSeekModelId, userMessage, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 15);
     return {
       ...r,
