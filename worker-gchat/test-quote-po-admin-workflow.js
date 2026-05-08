@@ -6,10 +6,12 @@ const { dirname, join } = require('node:path');
 const here = __dirname;
 const source = readFileSync(join(here, 'src/index.js'), 'utf8');
 const priceSource = readFileSync(join(here, 'src/data/prices.json'), 'utf8');
+const staticPriceSnapshot = JSON.parse(priceSource).prices;
 
 function extractFunction(name) {
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `${name} exists`);
+  const sliceStart = source.slice(Math.max(0, start - 6), start) === 'async ' ? start - 6 : start;
   const signatureEnd = source.indexOf(') {', start);
   assert.notEqual(signatureEnd, -1, `${name} signature has an opening body brace`);
   const bodyStart = signatureEnd + 2;
@@ -18,7 +20,7 @@ function extractFunction(name) {
     const ch = source[i];
     if (ch === '{') depth++;
     if (ch === '}') depth--;
-    if (depth === 0) return source.slice(start, i + 1);
+    if (depth === 0) return source.slice(sliceStart, i + 1);
   }
   throw new Error(`Could not extract ${name}`);
 }
@@ -41,19 +43,39 @@ ${extractFunction('salesOrderVendorReference')}
 return salesOrderVendorReference;
 `)();
 const quoteVendorHelpers = Function(`"use strict";
+const staticPrices = ${JSON.stringify(staticPriceSnapshot)};
+let livePrices = null;
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+let _productIdToSku = null;
 function zohoLookupId(value) {
   if (!value) return null;
   if (typeof value === 'string') return value;
   return value.id || value.ID || value.record_id || null;
 }
 const DEFAULT_QUOTE_VENDOR = 'TD SYNNEX CORPORATION';
+${extractFunction('applySuffix')}
+${extractFunction('resolveApprovedCatalogSku')}
+${extractFunction('approvedCatalogEntry')}
+${extractFunction('getProductIdToSkuMap')}
+${extractFunction('quoteLineItemSku')}
+${extractFunction('productRefId')}
 ${extractFunction('vendorDisplayValue')}
 ${extractFunction('quoteRequiredVendorValue')}
 ${extractFunction('quoteVendorDiagnostics')}
 ${extractFunction('quoteVendorValue')}
 ${extractFunction('quotePoLineItems')}
 ${extractFunction('quoteRequiredFieldIssues')}
-return { quoteRequiredVendorValue, quoteVendorDiagnostics, quoteVendorValue, quoteRequiredFieldIssues };
+${extractFunction('quoteRequiredFieldPayload')}
+return { quoteRequiredVendorValue, quoteVendorDiagnostics, quoteVendorValue, quoteRequiredFieldIssues, quoteRequiredFieldPayload };
 `)();
 const zohoTopLevelModuleFromCreatePath = Function(`"use strict";
 const ZOHO_AI_CREATED_TAG_MODULES = new Set([
@@ -89,7 +111,118 @@ ${extractFunction('resolveApprovedCatalogSku')}
 ${extractFunction('approvedCatalogEntry')}
 ${extractFunction('approvedCatalogAlternatives')}
 ${extractFunction('notApprovedCatalogMessage')}
-return { resolveApprovedCatalogSku, approvedCatalogAlternatives, notApprovedCatalogMessage };
+return { resolveApprovedCatalogSku, approvedCatalogEntry, approvedCatalogAlternatives, notApprovedCatalogMessage };
+`)();
+const rawQuoteGuardHelpers = Function(`"use strict";
+const staticPrices = ${JSON.stringify(staticPriceSnapshot)};
+let livePrices = null;
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+${extractFunction('isHardwareOnlyQuoteIntent')}
+${extractFunction('applySuffix')}
+${extractFunction('collectQuotePreResolveSkuTokens')}
+${extractFunction('resolveApprovedCatalogSku')}
+${extractFunction('approvedCatalogEntry')}
+${extractFunction('approvedCatalogAlternatives')}
+${extractFunction('notApprovedCatalogMessage')}
+${extractFunction('rawUserPromptFromEnv')}
+${extractFunction('rawUserPromptFromIncomingText')}
+${extractFunction('rawPromptRequestsPoOrEsign')}
+${extractFunction('rawPromptQuoteOnly')}
+${extractFunction('requestedSkuBlocksFromRawPrompt')}
+${extractFunction('rawQuoteSkuBlockPayload')}
+${extractFunction('toolLooksLikeQuoteWrite')}
+${extractFunction('validateRawQuoteSkuIntent')}
+${extractFunction('validatePoOrEsignRequested')}
+${extractFunction('validateStaleCatalogLookup')}
+return {
+  rawUserPromptFromIncomingText,
+  rawPromptQuoteOnly,
+  rawPromptRequestsPoOrEsign,
+  requestedSkuBlocksFromRawPrompt,
+  toolLooksLikeQuoteWrite,
+  validateRawQuoteSkuIntent,
+  validatePoOrEsignRequested,
+  validateStaleCatalogLookup
+};
+`)();
+const executeToolCallGuardOnly = Function(`"use strict";
+const staticPrices = ${JSON.stringify(staticPriceSnapshot)};
+let livePrices = null;
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+${extractFunction('isHardwareOnlyQuoteIntent')}
+${extractFunction('applySuffix')}
+${extractFunction('collectQuotePreResolveSkuTokens')}
+${extractFunction('resolveApprovedCatalogSku')}
+${extractFunction('approvedCatalogEntry')}
+${extractFunction('approvedCatalogAlternatives')}
+${extractFunction('notApprovedCatalogMessage')}
+${extractFunction('rawUserPromptFromEnv')}
+${extractFunction('rawPromptRequestsPoOrEsign')}
+${extractFunction('rawPromptQuoteOnly')}
+${extractFunction('requestedSkuBlocksFromRawPrompt')}
+${extractFunction('rawQuoteSkuBlockPayload')}
+${extractFunction('toolLooksLikeQuoteWrite')}
+${extractFunction('validateRawQuoteSkuIntent')}
+${extractFunction('validatePoOrEsignRequested')}
+${extractFunction('executeToolCall')}
+return executeToolCall;
+`)();
+const truthGuardHelpers = Function(`"use strict";
+${extractFunction('zohoCrmTabModule')}
+${extractFunction('verifiedSetHas')}
+${extractFunction('addVerifiedSetValue')}
+${extractFunction('quoteOrSalesOrderNumber')}
+${extractFunction('collectVerifiedZohoRecordNumbers')}
+${extractFunction('zohoRecordClaimSentenceBounds')}
+${extractFunction('zohoRecordClaimLooksActionable')}
+${extractFunction('sanitizeUnverifiedZohoRecordNumberClaims')}
+${extractFunction('sanitizeUnverifiedZohoUrls')}
+return {
+  addVerifiedSetValue,
+  collectVerifiedZohoRecordNumbers,
+  sanitizeUnverifiedZohoRecordNumberClaims,
+  sanitizeUnverifiedZohoUrls
+};
+`)();
+const quotePreflightHelpers = Function(`"use strict";
+const staticPrices = ${JSON.stringify(staticPriceSnapshot)};
+let livePrices = null;
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+let _productIdToSku = null;
+${extractFunction('applySuffix')}
+${extractFunction('resolveApprovedCatalogSku')}
+${extractFunction('approvedCatalogEntry')}
+${extractFunction('getProductIdToSkuMap')}
+${extractFunction('isLikelyLicenseSku')}
+${extractFunction('preflightQuotedItemsProductActive')}
+return { preflightQuotedItemsProductActive };
 `)();
 const collectQuotePreResolveSkuTokens = Function(`"use strict";
 ${extractFunction('isHardwareOnlyQuoteIntent')}
@@ -129,6 +262,7 @@ assert.equal(shouldForceClaudeForWrite('what is the most recent Zanesville quote
 assert.equal(isHardwareOnlyQuoteIntent('1 MV73M hardware only'), true);
 assert.equal(isHardwareOnlyQuoteIntent('just the hardware, no license'), true);
 assert.equal(catalogHelpers.resolveApprovedCatalogSku('MV73-HW'), null, 'legacy/plain MV73-HW is not in the approved ecomm catalog');
+assert.equal(catalogHelpers.approvedCatalogEntry('MV73-HW'), null, 'legacy MV73-HW has no approved ecomm catalog entry');
 assert.equal(catalogHelpers.resolveApprovedCatalogSku('MV73M-HW'), 'MV73M-HW', 'MV73M-HW is approved');
 assert.deepEqual(
   catalogHelpers.approvedCatalogAlternatives('MV73'),
@@ -137,6 +271,77 @@ assert.deepEqual(
 );
 assert.match(catalogHelpers.notApprovedCatalogMessage('MV73', 'MV73-HW'), /MV73M-HW, MV73X-HW/, 'unapproved SKU failures surface approved alternatives');
 assert.deepEqual(collectQuotePreResolveSkuTokens('MV73M-HW plus LIC-MV-1YR hardware only'), ['MV73M-HW']);
+
+const badMv73Env = { __RAW_USER_PROMPT: 'Create a quote for 1 MV73 hardware only.' };
+const badMv73Block = rawQuoteGuardHelpers.validateRawQuoteSkuIntent('create_deal_and_quote', { skus: ['MV73-HW'] }, badMv73Env);
+assert.equal(badMv73Block.success, false, 'raw MV73 hardware-only request is blocked before compound quote creation');
+assert.equal(badMv73Block.error, 'not_approved_ecomm_catalog', 'raw MV73 block uses the catalog hard-gate error');
+assert.equal(badMv73Block.action, 'create_blocked', 'raw MV73 block is marked as a pre-create stop');
+assert.match(badMv73Block.message, /No Deal, Quote, PO, DID, Sales Order, or e-signature was created/, 'raw MV73 block explicitly says no CRM records were created');
+assert.match(badMv73Block._user_visible_summary, /MV73M-HW/, 'raw MV73 block suggests MV73M-HW');
+assert.match(badMv73Block._user_visible_summary, /MV73X-HW/, 'raw MV73 block suggests MV73X-HW');
+assert.equal(
+  rawQuoteGuardHelpers.validateRawQuoteSkuIntent('zoho_create_record', { module_name: 'Quotes', data: { Quoted_Items: [] } }, badMv73Env).error,
+  'not_approved_ecomm_catalog',
+  'raw MV73 block also catches direct Quote create attempts'
+);
+assert.equal(rawQuoteGuardHelpers.toolLooksLikeQuoteWrite('clone_quote', { quote_id: 'q1' }), true, 'quote clone is covered by quote-write guards');
+assert.equal(rawQuoteGuardHelpers.toolLooksLikeQuoteWrite('zoho_create_record', { module_name: 'Sales_Orders', data: {} }), true, 'direct Sales_Orders writes are covered by quote-write guards');
+
+const goodMv73mEnv = { __RAW_USER_PROMPT: 'Create a quote for 1 MV73M hardware only.' };
+assert.equal(
+  rawQuoteGuardHelpers.validateRawQuoteSkuIntent('create_deal_and_quote', { skus: ['MV73M'], hardware_only: true, include_licenses: false }, goodMv73mEnv),
+  null,
+  'approved MV73M hardware-only quote may proceed through quote creation'
+);
+assert.equal(
+  rawQuoteGuardHelpers.validatePoOrEsignRequested('create_deal_and_quote', { skus: ['MV73M'], hardware_only: true, include_licenses: false }, goodMv73mEnv),
+  null,
+  'approved MV73M hardware-only quote is not blocked as PO/e-signature work'
+);
+const mv73mProductId = staticPriceSnapshot['MV73M-HW'].zoho_product_id;
+const mvLicenseProductId = staticPriceSnapshot['LIC-MV-1YR'].zoho_product_id;
+assert.equal(
+  quotePreflightHelpers.preflightQuotedItemsProductActive([{ Product_Name: { id: mv73mProductId }, Quantity: 1 }], { hardwareOnly: true }).valid,
+  true,
+  'approved MV73M hardware-only line passes preflight without a license'
+);
+const quoteOnlyPoBlock = rawQuoteGuardHelpers.validatePoOrEsignRequested('quote_to_po_and_esign', { quote_id: '2570562000000000001' }, goodMv73mEnv);
+assert.equal(quoteOnlyPoBlock.error, 'po_or_esign_not_requested', 'quote-only prompt blocks quote_to_po_and_esign');
+assert.match(quoteOnlyPoBlock.message, /Do not run Quote Admin_Action, quote-to-PO, Sales_Order creation, or LIVE_SendToEsign/, 'quote-only PO block names the prohibited tool paths');
+assert.equal(
+  rawQuoteGuardHelpers.validatePoOrEsignRequested('zoho_create_record', { module_name: 'Sales_Orders', data: {} }, goodMv73mEnv).error,
+  'po_or_esign_not_requested',
+  'quote-only prompt blocks direct Sales_Orders creation'
+);
+assert.equal(
+  rawQuoteGuardHelpers.validatePoOrEsignRequested('zoho_update_record', { module_name: 'Sales_Orders', data: { Admin_Action: 'LIVE_SendToEsign' } }, goodMv73mEnv).error,
+  'po_or_esign_not_requested',
+  'quote-only prompt blocks direct Sales_Orders e-signature admin action'
+);
+assert.equal(
+  rawQuoteGuardHelpers.validatePoOrEsignRequested('zoho_update_record', { module_name: 'Quotes', data: { Admin_Action: 'LIVE_ConvertQuoteToSO' } }, goodMv73mEnv).error,
+  'po_or_esign_not_requested',
+  'quote-only prompt blocks direct Quote conversion admin action'
+);
+const wrappedChatText = '[Current Zoho page: Sales_Orders SO-01012. This is context only.]\n(Source: active-tab)\n\nUser message: Create a quote for 1 MV73M hardware only.';
+assert.equal(
+  rawQuoteGuardHelpers.rawUserPromptFromIncomingText(wrappedChatText),
+  'Create a quote for 1 MV73M hardware only.',
+  'raw prompt extraction strips extension context wrappers'
+);
+assert.equal(
+  rawQuoteGuardHelpers.validatePoOrEsignRequested('quote_to_po_and_esign', { quote_id: '2570562000000000001' }, { __RAW_USER_PROMPT: rawQuoteGuardHelpers.rawUserPromptFromIncomingText(wrappedChatText) }).error,
+  'po_or_esign_not_requested',
+  'context text mentioning Sales_Orders does not opt in quote-to-PO when user only asked for a quote'
+);
+const hwOnlyLicenseCheck = quotePreflightHelpers.preflightQuotedItemsProductActive([{ Product_Name: { id: mvLicenseProductId }, Quantity: 1 }], { hardwareOnly: true });
+assert.equal(hwOnlyLicenseCheck.valid, false, 'hardware-only preflight rejects license line items');
+assert.match(hwOnlyLicenseCheck.errors.join('\n'), /UNREQUESTED_LICENSE_LINE_ITEM: LIC-MV-1YR/, 'hardware-only preflight reports LIC-MV-1YR as unrequested');
+const missingProductIdCheck = quotePreflightHelpers.preflightQuotedItemsProductActive([{ Product_Name: { name: 'MV73M-HW' }, Quantity: 1 }], { hardwareOnly: false });
+assert.equal(missingProductIdCheck.valid, false, 'preflight rejects quote line items missing Product_Name.id');
+assert.match(missingProductIdCheck.errors.join('\n'), /QUOTED_ITEMS_MISSING_PRODUCT_ID/, 'missing Product_Name.id failures are explicit');
+
 assert.equal(
   salesOrderEsignErrorMessage({ Admin_Action: 'LIVE_SendToEsign__Done', Client_Send_Status: 'Error', Log_Message: 'No any Vendor in Sales_Orders (+ trigger)' }),
   'Error | LIVE_SendToEsign__Done | No any Vendor in Sales_Orders (+ trigger)',
@@ -200,10 +405,77 @@ assert.deepEqual(
   [],
   'required-field preflight passes only when top-level Vendor and line items are present'
 );
+assert.deepEqual(
+  quoteVendorHelpers.quoteRequiredFieldIssues({
+    Subject: 'Test',
+    Deal_Name: { id: 'd1' },
+    Account_Name: { id: 'a1' },
+    Contact_Name: { id: 'c1' },
+    Valid_Till: '2026-06-06',
+    Cisco_Billing_Term: 'Prepaid Term',
+    Billing_Street: '123 Main St',
+    Billing_City: 'Cedar Rapids',
+    Billing_State: 'IA',
+    Billing_Code: '52402',
+    Billing_Country: 'US',
+    Shipping_Country: 'US',
+    Vendor: 'TD SYNNEX CORPORATION',
+    Quoted_Items: [{ Product_Name: { id: mv73mProductId }, Quantity: 1 }]
+  }, { requireApprovedCatalog: true }),
+  [],
+  'required-field preflight accepts approved catalog line items with Product_Name.id'
+);
+assert.deepEqual(
+  quoteVendorHelpers.quoteRequiredFieldIssues({
+    Subject: 'Test',
+    Deal_Name: { id: 'd1' },
+    Account_Name: { id: 'a1' },
+    Contact_Name: { id: 'c1' },
+    Valid_Till: '2026-06-06',
+    Cisco_Billing_Term: 'Prepaid Term',
+    Billing_Street: '123 Main St',
+    Billing_City: 'Cedar Rapids',
+    Billing_State: 'IA',
+    Billing_Code: '52402',
+    Billing_Country: 'US',
+    Shipping_Country: 'US',
+    Vendor: 'TD SYNNEX CORPORATION',
+    Quoted_Items: [{ Product_Name: { name: 'MV73M-HW' }, Quantity: 1 }]
+  }, { requireApprovedCatalog: true }).filter(issue => issue.field === 'Quoted_Items[1].Product_Name'),
+  [{ field: 'Quoted_Items[1].Product_Name', reason: 'missing_product_id' }],
+  'required-field preflight rejects missing Product_Name IDs'
+);
+assert.deepEqual(
+  quoteVendorHelpers.quoteRequiredFieldPayload({
+    quote: {
+      id: 'q1',
+      Subject: 'Test',
+      Deal_Name: { id: 'd1' },
+      Account_Name: { id: 'a1' },
+      Contact_Name: { id: 'c1' },
+      Valid_Till: '2026-06-06',
+      Cisco_Billing_Term: 'Prepaid Term',
+      Billing_Street: '123 Main St',
+      Billing_City: 'Cedar Rapids',
+      Billing_State: 'IA',
+      Billing_Code: '52402',
+      Billing_Country: 'US',
+      Shipping_Country: 'US',
+      Vendor: 'TD SYNNEX CORPORATION',
+      Quoted_Items: [{ Product_Name: { id: 'legacy-mv73-id', name: 'MV73-HW' }, Quantity: 1 }]
+    },
+    state: 'quote_required_fields_not_verified',
+    errorPrefix: 'blocked',
+    requireApprovedCatalog: true
+  }).required_field_issues.filter(issue => issue.reason === 'not_approved_ecomm_catalog'),
+  [{ field: 'Quoted_Items[1].Product_Name', reason: 'not_approved_ecomm_catalog', product_id: 'legacy-mv73-id', sku: 'MV73-HW' }],
+  'required-field payload preserves approved-catalog failures in quote-to-PO blocks'
+);
 assert.match(source, /const current = quoteRequiredVendorValue\(quote\)/, 'Quote-to-PO verifies the required top-level Vendor field');
 assert.match(source, /const vendor = quoteRequiredVendorValue\(refreshed\)/, 'Quote vendor repair verifies the refreshed top-level Vendor field');
 assert.match(source, /Secondary fields such as Vendor_Name do not satisfy the admin-action preflight/, 'Vendor failure explains why Vendor_Name is insufficient');
 assert.match(source, /module_name === 'Quotes' && !quoteRequiredVendorValue\(recordData\)/, 'generic Quote create defaulting checks the required Vendor field only');
+assert.match(source, /quote_vendor_not_persisted/, 'Quote create verification returns a vendor-specific failure when Zoho drops Vendor');
 assert.match(source, /state: 'quote_required_fields_not_verified'/, 'quote-to-PO blocks before admin actions when required fields are missing');
 assert.match(source, /state: 'quote_required_fields_not_verified_before_po'/, 'quote-to-PO revalidates required fields before PO conversion');
 assert.match(source, /_quote_required_fields_verified = true/, 'generic Quote creation records required-field verification');
@@ -241,6 +513,8 @@ assert.match(source, /Quotes do not use the Deal Stage field/, 'Quote Stage guar
 assert.match(source, /claude-write-intent/, 'Claude-first write routing is tagged');
 assert.match(source, /cascading to normal waterfall/, 'Claude-first routing has fallback');
 assert.doesNotMatch(source, /forceClaudeForChatWrite/, 'chat tab uses the same Claude-first cascade path as chat-waterfall');
+assert.match(source, /case '\/api\/chat-waterfall':[\s\S]{0,900}env\.__RAW_USER_PROMPT = rawUserPromptFromIncomingText\(wText\);/, '/api/chat-waterfall preserves only the raw user prompt before enrichment');
+assert.match(source, /case '\/api\/chat':[\s\S]{0,320}env\.__RAW_USER_PROMPT = rawUserPromptFromIncomingText\(chatText\);/, 'direct /api/chat preserves only the raw user prompt before enrichment');
 assert.match(source, /state: 'sales_order_deal_mismatch'/, 'explicit Sales Order e-sign path validates Deal linkage');
 assert.match(source, /requestedDealId !== dealId/, 'Sales Order mismatch prevents wrong-Deal e-signature send');
 assert.match(source, /Net_Terms was blank, so it was defaulted to Cash/, 'automatic Cash terms are surfaced to the user');
@@ -264,6 +538,47 @@ assert.match(source, /quote_ecomm_pricing_reconciliation_failed/, 'quote creatio
 assert.match(source, /expected_product_missing_from_created_quote/, 'reconciliation fails when persisted quote products do not match expected products');
 assert.match(source, /if \(pricingReconcile\.success === false\)/, 'quote creation blocks failed reconciliation even when no patch was attempted');
 assert.match(source, /Do_Not_Auto_Update_Prices: true[\s\S]{0,120}Quoted_Items: patches/, 'ecomm reconciliation preserves quote line pricing via Zoho control flag');
+assert.match(extractFunction('correctQuotedItemDiscounts'), /product_id_not_in_idMap/, 'discount correction fails closed when Product_Name.id is not in the approved id map');
+
+const unverifiedClaim = truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims(
+  'Quote QUO-02207, $3,063.68. Sales Order SO-01012 sent for e-signature.',
+  new Map()
+);
+assert.equal(unverifiedClaim.changed, true, 'plain-text unverified Quote/Sales Order number claims are sanitized');
+assert.doesNotMatch(unverifiedClaim.text, /QUO-02207|SO-01012/, 'unverified bare record numbers are removed from final summaries');
+assert.doesNotMatch(unverifiedClaim.text, /SO-01012 sent for e-signature/, 'unverified e-signature action claims are removed');
+const verifiedNumbers = new Map();
+truthGuardHelpers.addVerifiedSetValue(verifiedNumbers, 'Quotes', 'QUO-02208');
+truthGuardHelpers.addVerifiedSetValue(verifiedNumbers, 'Sales_Orders', 'SO-01013');
+assert.equal(
+  truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims('Quote QUO-02208 and Sales Order SO-01013 are verified.', verifiedNumbers).changed,
+  false,
+  'verified Quote/Sales Order numbers survive the final-summary sanitizer'
+);
+const harvestedNumbers = new Map();
+truthGuardHelpers.collectVerifiedZohoRecordNumbers(
+  'create_deal_and_quote',
+  {},
+  { records: { quote: { id: 'q1', quote_number: 'QUO-02209' } } },
+  harvestedNumbers
+);
+assert.equal(
+  truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims('Created Quote QUO-02209.', harvestedNumbers).changed,
+  false,
+  'compound quote creation whitelists the verified Quote_Number returned by the tool'
+);
+const urlMap = new Map();
+truthGuardHelpers.addVerifiedSetValue(urlMap, 'Quotes', '2570562000000000001');
+assert.equal(
+  truthGuardHelpers.sanitizeUnverifiedZohoUrls('Open https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000000000001', urlMap).changed,
+  false,
+  'verified Zoho URLs survive the shared sanitizer'
+);
+assert.equal(
+  truthGuardHelpers.sanitizeUnverifiedZohoUrls('Open https://crm.zoho.com/crm/org647122552/tab/Sales_Orders/2570562000000000002', urlMap).changed,
+  true,
+  'unverified Zoho URLs are stripped by the shared sanitizer'
+);
 assert.match(priceSource, /MV73M-HW"[\s\S]{0,120}"list": 2720\.41[\s\S]{0,120}"price": 1830[\s\S]{0,120}"discount_per_unit": 890\.41/, 'MV73M-HW fallback snapshot mirrors current live Zoho list and ecomm pricing');
 assert.match(source, /blocks if line-item detail is unavailable/, 'tool schema blocks when line detail is unavailable');
 assert.equal(shouldForceClaudeForWrite('send Lisa a contract for 1 MV73M'), true);
@@ -407,4 +722,22 @@ assert.equal(validateQuoteToPoFinancialParity(quote, productMismatchPo).ok, fals
 assert.equal(validateQuoteToPoFinancialParity(quote, qtyMismatchPo).ok, false, 'quantity mismatch is blocked even when totals match');
 assert.equal(validateQuoteToPoFinancialParity(quote, lowerTotalPo).ok, false, 'lower PO total is not explained by tax and is blocked');
 
-console.log('quote/PO admin workflow regression checks passed');
+async function runAsyncRegressionChecks() {
+  const executeBlock = await executeToolCallGuardOnly(
+    'create_deal_and_quote',
+    { skus: ['MV73-HW'] },
+    { __RAW_USER_PROMPT: 'Create a quote for 1 MV73 hardware only.' },
+    'test-person'
+  );
+  assert.equal(executeBlock.success, false, 'executeToolCall itself blocks raw MV73 before entering CRM write logic');
+  assert.equal(executeBlock.error, 'not_approved_ecomm_catalog', 'executeToolCall raw guard returns the approved-catalog error');
+  assert.match(executeBlock._user_visible_summary, /MV73M-HW/, 'executeToolCall raw guard suggests MV73M-HW');
+  assert.match(executeBlock._user_visible_summary, /MV73X-HW/, 'executeToolCall raw guard suggests MV73X-HW');
+}
+
+runAsyncRegressionChecks()
+  .then(() => console.log('quote/PO admin workflow regression checks passed'))
+  .catch(err => {
+    console.error(err);
+    process.exit(1);
+  });

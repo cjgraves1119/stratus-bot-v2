@@ -83,6 +83,136 @@ function zohoRecordUrl(moduleName, recordId) {
   return `https://crm.zoho.com/crm/org647122552/tab/${zohoCrmTabModule(moduleName)}/${recordId}`;
 }
 
+function verifiedSetHas(map, module, value) {
+  if (!map || value == null) return false;
+  const key = zohoCrmTabModule(module);
+  const set = map.get(key);
+  return !!(set && set.has(String(value)));
+}
+
+function addVerifiedSetValue(map, module, value) {
+  if (!map || !module || value == null) return;
+  const key = zohoCrmTabModule(module);
+  const val = String(value);
+  if (!map.has(key)) map.set(key, new Set());
+  map.get(key).add(val);
+  if (key === 'Potentials') {
+    if (!map.has('Deals')) map.set('Deals', new Set());
+    map.get('Deals').add(val);
+  }
+}
+
+function quoteOrSalesOrderNumber(module, record = {}) {
+  const key = zohoCrmTabModule(module);
+  if (key === 'Quotes') return record.Quote_Number || record.quote_number || record.quoteNumber || null;
+  if (key === 'Sales_Orders') return record.SO_Number || record.so_number || record.sales_order_number || record.salesOrderNumber || null;
+  return null;
+}
+
+function collectVerifiedZohoRecordNumbers(toolName, toolInput = {}, parsedResult, verifiedRecordNumbersByModule) {
+  if (!parsedResult || !verifiedRecordNumbersByModule) return;
+
+  const addRecord = (module, record) => {
+    const number = quoteOrSalesOrderNumber(module, record || {});
+    if (number) addVerifiedSetValue(verifiedRecordNumbersByModule, module, String(number).toUpperCase());
+  };
+  const addNumber = (module, number) => {
+    if (number) addVerifiedSetValue(verifiedRecordNumbersByModule, module, String(number).toUpperCase());
+  };
+
+  if (toolInput?.module_name) {
+    if (Array.isArray(parsedResult.data)) {
+      for (const rec of parsedResult.data) addRecord(toolInput.module_name, rec);
+    } else if (parsedResult.data && typeof parsedResult.data === 'object') {
+      addRecord(toolInput.module_name, parsedResult.data);
+    }
+    addRecord(toolInput.module_name, parsedResult);
+    if (toolInput.module_name === 'Quotes') addNumber('Quotes', parsedResult._quote_verified_number);
+  }
+
+  if (toolName === 'create_deal_and_quote' || toolName === 'create_quote_on_deal') {
+    addRecord('Quotes', parsedResult.records?.quote);
+    addNumber('Quotes', parsedResult.quote_number);
+    addNumber('Quotes', parsedResult.records?.quote?.quote_number);
+  }
+
+  if (toolName === 'quote_to_po_and_esign') {
+    addRecord('Quotes', parsedResult.quote);
+    addNumber('Quotes', parsedResult.quote_number);
+    addRecord('Sales_Orders', parsedResult.sales_order);
+    addRecord('Sales_Orders', parsedResult.records?.sales_order);
+    addNumber('Sales_Orders', parsedResult.so_number || parsedResult.sales_order_number);
+    addNumber('Sales_Orders', parsedResult.records?.sales_order?.so_number);
+  }
+}
+
+function zohoRecordClaimSentenceBounds(text, index) {
+  const starts = ['\n', '.', '!', '?'].map(ch => text.lastIndexOf(ch, Math.max(0, index - 1))).filter(i => i >= 0);
+  const start = starts.length ? Math.max(...starts) + 1 : 0;
+  const ends = ['\n', '.', '!', '?'].map(ch => text.indexOf(ch, index)).filter(i => i >= 0);
+  const end = ends.length ? Math.min(...ends) + 1 : text.length;
+  return [start, end];
+}
+
+function zohoRecordClaimLooksActionable(sentence) {
+  return /\b(created|generated|converted|sent|send|submitted|e-?sign(?:ature)?|signature|contract|successfully|done|completed)\b/i.test(String(sentence || ''));
+}
+
+function sanitizeUnverifiedZohoRecordNumberClaims(text, verifiedRecordNumbersByModule) {
+  let out = String(text || '');
+  const removals = [];
+  const specs = [
+    { module: 'Sales_Orders', label: 'Sales Order', regex: /\bSO-\d{3,}\b/gi },
+    { module: 'Quotes', label: 'Quote', regex: /\bQUO-\d{3,}\b/gi }
+  ];
+
+  for (const spec of specs) {
+    let m;
+    const matches = [];
+    while ((m = spec.regex.exec(out)) !== null) {
+      const number = m[0].toUpperCase();
+      if (!verifiedSetHas(verifiedRecordNumbersByModule, spec.module, number)) {
+        matches.push({ number, index: m.index });
+      }
+    }
+    for (const match of matches.reverse()) {
+      const [start, end] = zohoRecordClaimSentenceBounds(out, match.index);
+      const sentence = out.slice(start, end);
+      const sentenceActionable = zohoRecordClaimLooksActionable(sentence);
+      const replacement = sentenceActionable
+        ? `[unverified ${spec.label} action claim removed]`
+        : `[${spec.label} number removed: unverified]`;
+      const replaceStart = sentenceActionable ? start : match.index;
+      const replaceEnd = sentenceActionable ? end : match.index + match.number.length;
+      out = out.slice(0, replaceStart) + replacement + out.slice(replaceEnd);
+      removals.push({ module: spec.module, number: match.number, sentence_removed: sentenceActionable });
+    }
+  }
+
+  if (removals.length > 0) {
+    const removed = [...new Set(removals.map(r => zohoCrmTabModule(r.module)))].join(', ');
+    out = `I removed unverified CRM record/action claim(s) for: ${removed}. I can only report records and actions verified by tool results from this turn.\n\n${out.trim()}`;
+  }
+  return { text: out, changed: removals.length > 0, removals };
+}
+
+function sanitizeUnverifiedZohoUrls(text, verifiedRecordsByModule) {
+  let out = String(text || '');
+  const zohoUrlRegex = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Potentials|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+  const urlsFound = [];
+  let m;
+  while ((m = zohoUrlRegex.exec(out)) !== null) {
+    urlsFound.push({ full: m[0], module: m[1], id: m[2] });
+  }
+  const unverified = urlsFound.filter(u => !verifiedSetHas(verifiedRecordsByModule, u.module, u.id));
+  for (const u of unverified) {
+    const urlEsc = u.full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`\\[([^\\]]*)\\]\\(${urlEsc}\\)`, 'g'), '[link removed: unverified]');
+    out = out.replace(new RegExp(urlEsc, 'g'), '[URL removed: unverified]');
+  }
+  return { text: out, changed: unverified.length > 0, unverified };
+}
+
 function canonicalDirectMsLicenseSku(modelToken, term) {
   const model = String(modelToken || '').toUpperCase();
   const suffix = `${term}Y`;
@@ -1996,6 +2126,134 @@ function notApprovedCatalogMessage(rawSku, suffixedSku) {
     ? ` Approved alternatives with the same prefix include: ${alternatives.join(', ')}. Ask the user which one they want.`
     : ' Ask the user to clarify or choose a current sellable SKU.';
   return `SKU "${rawSku}"${suffixNote} is not in the approved Stratus ecomm catalog. Do NOT create a Deal, Quote, PO, DID, or e-signature for this SKU.${altText} Do not fall back to stale Zoho Products or WooProducts records.`;
+}
+
+function rawUserPromptFromEnv(env) {
+  return String(env?.__RAW_USER_PROMPT || env?.__RAW_USER_MESSAGE || '').trim();
+}
+
+function rawUserPromptFromIncomingText(text) {
+  const rawText = String(text || '');
+  const userMessageMatch = rawText.match(/(?:^|\n)User message:\s*([\s\S]*)$/i);
+  return (userMessageMatch ? userMessageMatch[1] : rawText).trim();
+}
+
+function rawPromptRequestsPoOrEsign(text) {
+  return /\b(po|p\.o\.|purchase\s*order|sales\s*order|contract|esign|e-?sign|signature|docusign|zoho\s*sign|send\s+(?:it|the\s+po|the\s+sales\s*order|for\s+signature))\b/i.test(String(text || ''));
+}
+
+function rawPromptQuoteOnly(text) {
+  const t = String(text || '');
+  return /\b(quote|create\s+(?:a\s+)?quote|build\s+(?:a\s+)?quote|make\s+(?:a\s+)?quote)\b/i.test(t)
+    && !rawPromptRequestsPoOrEsign(t);
+}
+
+function requestedSkuBlocksFromRawPrompt(text) {
+  const rawText = String(text || '');
+  if (!rawText) return [];
+  const hardwareOnly = isHardwareOnlyQuoteIntent(rawText);
+  const tokens = [...new Set(collectQuotePreResolveSkuTokens(rawText, { hardwareOnly }))];
+  return tokens
+    .map(rawSku => {
+      const suffixed = applySuffix(rawSku);
+      const approved = approvedCatalogEntry(rawSku);
+      return approved ? null : {
+        sku: rawSku,
+        suffixed_sku: suffixed,
+        hint: notApprovedCatalogMessage(rawSku, suffixed),
+        alternatives: approvedCatalogAlternatives(rawSku)
+      };
+    })
+    .filter(Boolean);
+}
+
+function rawQuoteSkuBlockPayload(blockedItems, source = 'raw_user_prompt') {
+  const blocked = Array.isArray(blockedItems) ? blockedItems : [];
+  const skuList = blocked.map(item => item.sku).join(', ');
+  const altList = [...new Set(blocked.flatMap(item => item.alternatives || []))];
+  const altText = altList.length
+    ? ` Approved alternatives include: ${altList.join(', ')}.`
+    : '';
+  const summary = `I did not create any CRM records. ${skuList || 'The requested SKU'} is not in the approved Stratus ecomm catalog.${altText} Please choose an approved SKU before I create a quote.`;
+  return {
+    success: false,
+    validation_error: true,
+    error: 'not_approved_ecomm_catalog',
+    action: 'create_blocked',
+    source,
+    blocked_items: blocked,
+    message: `${blocked.map(item => item.hint).join('\n')}\nSTOP. No Deal, Quote, PO, DID, Sales Order, or e-signature was created.`,
+    instruction: 'STOP. Do NOT create or report any CRM record. Ask the user to choose an approved alternative.',
+    _user_visible_summary: summary
+  };
+}
+
+function toolLooksLikeQuoteWrite(toolName, toolInput = {}) {
+  if (toolName === 'create_deal_and_quote' || toolName === 'create_quote_on_deal' || toolName === 'clone_quote') return true;
+  if (toolName === 'quote_to_po_and_esign') return true;
+  if (toolName === 'parse_quote_url') return true;
+  if (toolName === 'batch_product_lookup') return Array.isArray(toolInput?.skus);
+  if ((toolName === 'zoho_create_record' || toolName === 'zoho_update_record') && toolInput?.module_name === 'Quotes') return true;
+  if ((toolName === 'zoho_create_record' || toolName === 'zoho_update_record') && toolInput?.module_name === 'Sales_Orders') return true;
+  return false;
+}
+
+function validateRawQuoteSkuIntent(toolName, toolInput, env) {
+  const rawPrompt = rawUserPromptFromEnv(env);
+  if (!rawPrompt || !toolLooksLikeQuoteWrite(toolName, toolInput)) return null;
+  const blockedItems = requestedSkuBlocksFromRawPrompt(rawPrompt);
+  return blockedItems.length > 0 ? rawQuoteSkuBlockPayload(blockedItems) : null;
+}
+
+function validatePoOrEsignRequested(toolName, toolInput, env) {
+  const rawPrompt = rawUserPromptFromEnv(env);
+  if (!rawPrompt) return null;
+  const quoteOnly = rawPromptQuoteOnly(rawPrompt);
+  const adminAction = String(
+    toolInput?.record_data?.Admin_Action
+    || toolInput?.recordData?.Admin_Action
+    || toolInput?.data?.Admin_Action
+    || toolInput?.Admin_Action
+    || ''
+  );
+  const directQuotePoAction = toolName === 'zoho_update_record'
+    && toolInput?.module_name === 'Quotes'
+    && /LIVE_(CiscoQuote_Deal|GetQuoteData|ConvertQuoteToSO)/i.test(adminAction);
+  const directSalesOrderCreate = toolName === 'zoho_create_record' && toolInput?.module_name === 'Sales_Orders';
+  const directSalesOrderEsign = toolName === 'zoho_update_record'
+    && toolInput?.module_name === 'Sales_Orders'
+    && /LIVE_SendToEsign/i.test(adminAction);
+  const poTool = toolName === 'quote_to_po_and_esign' || directQuotePoAction || directSalesOrderCreate || directSalesOrderEsign;
+  if (!poTool || !quoteOnly) return null;
+  const summary = 'I did not create a PO, Sales Order, or e-signature request because the user only asked for a quote.';
+  return {
+    success: false,
+    validation_error: true,
+    error: 'po_or_esign_not_requested',
+    action: 'create_blocked',
+    message: `${summary} STOP. Do not run Quote Admin_Action, quote-to-PO, Sales_Order creation, or LIVE_SendToEsign unless the user explicitly asks for DID/PO/contract/signature/e-signature.`,
+    instruction: 'STOP. Report quote-only status; do not fabricate DID, PO, Sales Order, or e-signature success.',
+    _user_visible_summary: summary
+  };
+}
+
+function validateStaleCatalogLookup(moduleName, criteria) {
+  const module = String(moduleName || '');
+  const field = module === 'Products' ? 'Product_Code' : module === 'WooProducts' ? 'WooProduct_Code' : null;
+  if (!field || !criteria) return null;
+  const equals = String(criteria).match(new RegExp(`${field}:equals:([A-Z0-9\\-]+)`, 'i'));
+  if (!equals) return null;
+  const rawSku = equals[1].toUpperCase();
+  const suffixed = applySuffix(rawSku);
+  if (resolveApprovedCatalogSku(suffixed) || resolveApprovedCatalogSku(rawSku)) return null;
+  return {
+    data: [],
+    info: { count: 0, more_records: false },
+    error: 'not_approved_ecomm_catalog',
+    blocked_sku: rawSku,
+    hint: notApprovedCatalogMessage(rawSku, suffixed),
+    _user_visible_summary: `I did not look up ${rawSku} in live Zoho ${module}. It is not in the approved Stratus ecomm catalog.`
+  };
 }
 
 // ─── Pricing Calculator ──────────────────────────────────────────────────────
@@ -5779,6 +6037,21 @@ function getProductIdToSkuMap() {
   return _productIdToSku;
 }
 
+function quoteLineItemSku(item = {}) {
+  const idMap = getProductIdToSkuMap();
+  const productId = item.Product_Name?.id || item.product?.id || item.product_id || '';
+  return String(
+    item.Product_Name?.Product_Code
+    || item.Product_Code
+    || item.SKU
+    || item.sku
+    || (productId ? idMap[productId] : '')
+    || item.Product_Name?.name
+    || item.Product_Name?.display_value
+    || ''
+  ).trim().toUpperCase();
+}
+
 // ── Product_Active preflight for Quoted_Items ──
 // Blocks NEW line items that reference EOL / inactive products OR fabricated
 // product_ids BEFORE hitting Zoho.
@@ -5799,13 +6072,15 @@ function getProductIdToSkuMap() {
 //   - Uses product_id → SKU reverse map, then isEol(sku) + EOL_REPLACEMENTS.
 //   - Unknown product_ids: fail-fast with guidance to call batch_product_lookup.
 //   - Returns { valid: true } or { valid: false, errors: [...], blocked_items: [...] }.
-function preflightQuotedItemsProductActive(quotedItems) {
+function preflightQuotedItemsProductActive(quotedItems, options = {}) {
   if (!Array.isArray(quotedItems)) return { valid: true };
   const idMap = getProductIdToSkuMap();
   const errors = [];
   const blocked = [];
   const hallucinated = [];
   const missingProductIds = [];
+  const unapprovedItems = [];
+  const unrequestedLicenses = [];
   for (const item of quotedItems) {
     // Skip deletes and in-place modifies (existing ids)
     if (item._delete !== undefined) continue;
@@ -5827,6 +6102,14 @@ function preflightQuotedItemsProductActive(quotedItems) {
       // it with "NOT_ALLOWED can't add inactive product in the inventory".
       // Block pre-flight with actionable guidance instead of letting it round-trip.
       hallucinated.push({ product_id: productId });
+      continue;
+    }
+    if (!approvedCatalogEntry(sku)) {
+      unapprovedItems.push({ sku, product_id: productId });
+      continue;
+    }
+    if (options.hardwareOnly === true && isLikelyLicenseSku(sku)) {
+      unrequestedLicenses.push({ sku, product_id: productId });
       continue;
     }
     if (typeof isEol === 'function' && isEol(sku)) {
@@ -5851,6 +6134,21 @@ function preflightQuotedItemsProductActive(quotedItems) {
       `If you didn't call batch_product_lookup for this SKU in THIS conversation, the id is fake.`
     );
   }
+  if (unapprovedItems.length > 0) {
+    const skuList = unapprovedItems.map(i => i.sku).join(', ');
+    errors.unshift(
+      `❌ UNAPPROVED_ECOMM_CATALOG_SKU: ${skuList}. ` +
+      `Only SKUs in the approved Stratus ecomm catalog can be quoted. ` +
+      `Do NOT create Quote line items from stale Zoho Products/WooProducts records.`
+    );
+  }
+  if (unrequestedLicenses.length > 0) {
+    const skuList = unrequestedLicenses.map(i => i.sku).join(', ');
+    errors.unshift(
+      `❌ UNREQUESTED_LICENSE_LINE_ITEM: ${skuList}. ` +
+      `The user requested hardware only/no licenses, so license line items are blocked.`
+    );
+  }
   if (missingProductIds.length > 0) {
     errors.unshift(
       `❌ QUOTED_ITEMS_MISSING_PRODUCT_ID: ${missingProductIds.length} new line item(s) did not include Product_Name.id. ` +
@@ -5864,7 +6162,9 @@ function preflightQuotedItemsProductActive(quotedItems) {
       errors,
       blocked_items: blocked,
       hallucinated_ids: hallucinated.length > 0 ? hallucinated : undefined,
-      missing_product_ids: missingProductIds.length > 0 ? missingProductIds : undefined
+      missing_product_ids: missingProductIds.length > 0 ? missingProductIds : undefined,
+      unapproved_items: unapprovedItems.length > 0 ? unapprovedItems : undefined,
+      unrequested_licenses: unrequestedLicenses.length > 0 ? unrequestedLicenses : undefined
     };
   }
   return { valid: true };
@@ -5888,7 +6188,10 @@ async function correctQuotedItemDiscounts(quotedItems, env) {
     const productId = item.Product_Name.id;
     // Reverse lookup: product_id → SKU, then fetch current live pricing.
     const sku = idMap[productId];
-    if (!sku) continue;
+    if (!sku) {
+      failures.push({ sku: null, product_id: productId, error: 'product_id_not_in_idMap' });
+      continue;
+    }
     const liveData = await fetchLiveSkuPricing(sku, productId, env);
     if (!liveData.success) {
       failures.push({ sku, product_id: productId, error: liveData.error });
@@ -6200,11 +6503,27 @@ function quoteRequiredFieldIssues(record, options = {}) {
   if (!items.length) {
     issues.push({ field: 'Quoted_Items', reason: 'missing_or_empty' });
   }
+  items.forEach((item, idx) => {
+    const productId = productRefId(item);
+    const sku = quoteLineItemSku(item);
+    if (!productId) {
+      issues.push({ field: `Quoted_Items[${idx + 1}].Product_Name`, reason: 'missing_product_id' });
+      return;
+    }
+    if (options.requireApprovedCatalog === true && (!sku || !approvedCatalogEntry(sku))) {
+      issues.push({
+        field: `Quoted_Items[${idx + 1}].Product_Name`,
+        reason: 'not_approved_ecomm_catalog',
+        product_id: productId,
+        sku: sku || null
+      });
+    }
+  });
   return issues;
 }
 
-function quoteRequiredFieldPayload({ quote, quoteId, state, errorPrefix, requireContact = true, requireNetTerms = false }) {
-  const issues = quoteRequiredFieldIssues(quote, { requireContact, requireNetTerms });
+function quoteRequiredFieldPayload({ quote, quoteId, state, errorPrefix, requireContact = true, requireNetTerms = false, requireApprovedCatalog = false }) {
+  const issues = quoteRequiredFieldIssues(quote, { requireContact, requireNetTerms, requireApprovedCatalog });
   return {
     success: false,
     state,
@@ -7263,7 +7582,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     }, 'blocked');
   }
   quote = quoteVendor.quote || quote;
-  const adminReadyIssues = quoteRequiredFieldIssues(quote, { requireContact: sendForEsign, requireNetTerms: false });
+  const adminReadyIssues = quoteRequiredFieldIssues(quote, { requireContact: sendForEsign, requireNetTerms: false, requireApprovedCatalog: true });
   if (adminReadyIssues.length > 0) {
     return finish({
       ...quoteRequiredFieldPayload({
@@ -7271,7 +7590,8 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
         quoteId,
         state: 'quote_required_fields_not_verified',
         errorPrefix: 'Quote required fields are not verified, so no admin actions were run',
-        requireContact: sendForEsign
+        requireContact: sendForEsign,
+        requireApprovedCatalog: true
       }),
       instruction: 'STOP. Do not run LIVE_CiscoQuote_Deal, LIVE_GetQuoteData, LIVE_ConvertQuoteToSO, or LIVE_SendToEsign until these required fields persist on the Quote.'
     }, 'blocked');
@@ -7425,7 +7745,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
     netTermsNotice = `Net_Terms was blank, so it was defaulted to Cash because Grand_Total is $${grandTotal.toFixed(2)} (under $5,000).`;
     progress(netTermsNotice);
   }
-  const conversionReadyIssues = quoteRequiredFieldIssues(quote, { requireContact: sendForEsign, requireNetTerms: true });
+  const conversionReadyIssues = quoteRequiredFieldIssues(quote, { requireContact: sendForEsign, requireNetTerms: true, requireApprovedCatalog: true });
   if (conversionReadyIssues.length > 0) {
     return finish({
       ...quoteRequiredFieldPayload({
@@ -7434,7 +7754,8 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
         state: 'quote_required_fields_not_verified_before_po',
         errorPrefix: 'Quote required fields are not verified, so PO conversion did not run',
         requireContact: sendForEsign,
-        requireNetTerms: true
+        requireNetTerms: true,
+        requireApprovedCatalog: true
       }),
       instruction: 'STOP. Do not create a PO until every required Quote field is verified.'
     }, 'blocked');
@@ -7618,6 +7939,11 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
 
 // ─── Tool Execution Router ────────────────────────────────────────────────────
 async function executeToolCall(toolName, toolInput, env, personId) {
+  const rawSkuBlock = validateRawQuoteSkuIntent(toolName, toolInput, env);
+  if (rawSkuBlock) return rawSkuBlock;
+  const poIntentBlock = validatePoOrEsignRequested(toolName, toolInput, env);
+  if (poIntentBlock) return poIntentBlock;
+
   // ── Progress event emission ──
   // If env.__PROGRESS_ID is set (smuggled in from /api/chat-waterfall), write a
   // human-readable step message to KV so the client can display progress.
@@ -7643,7 +7969,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
       const isQuotesModule = toolInput?.module_name === 'Quotes';
       if (isQuotesModule && Array.isArray(items)) {
-        const activeCheck = preflightQuotedItemsProductActive(items);
+        const activeCheck = preflightQuotedItemsProductActive(items, {
+          hardwareOnly: isHardwareOnlyQuoteIntent(rawUserPromptFromEnv(env))
+        });
         if (!activeCheck.valid) {
           const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
           const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
@@ -7653,7 +7981,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             action: blockAction,
             message: (hasHallucination || hasMissingProductIds)
               ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
-              : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+              : `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`,
             blocked_items: activeCheck.blocked_items,
             hallucinated_ids: activeCheck.hallucinated_ids,
             missing_product_ids: activeCheck.missing_product_ids
@@ -7724,6 +8052,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       // ── Zoho CRM Tools ──
       case 'zoho_search_records': {
         const { module_name, criteria, fields, page, per_page } = toolInput;
+        const staleCatalogBlock = validateStaleCatalogLookup(module_name, criteria);
+        if (staleCatalogBlock) return staleCatalogBlock;
 
         // ── INTERCEPT: Redirect Products module lookups through batch cache ──
         // When Claude searches Products by Product_Code, resolve from prices.json cache instead.
@@ -8091,7 +8421,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids before writing
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
-          const activeCheck = preflightQuotedItemsProductActive(recordData.Quoted_Items);
+          const activeCheck = preflightQuotedItemsProductActive(recordData.Quoted_Items, {
+            hardwareOnly: isHardwareOnlyQuoteIntent(rawUserPromptFromEnv(env))
+          });
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
             const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
@@ -8100,7 +8432,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               action: 'create_blocked',
               message: (hasHallucination || hasMissingProductIds)
                 ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
-                : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+                : `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`,
               blocked_items: activeCheck.blocked_items,
               hallucinated_ids: activeCheck.hallucinated_ids,
               missing_product_ids: activeCheck.missing_product_ids
@@ -8211,10 +8543,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             }
             const requiredIssues = quoteRequiredFieldIssues(verifyRec, { requireContact: true });
             if (requiredIssues.length > 0) {
+              const vendorIssue = requiredIssues.find(issue => issue.field === 'Vendor');
               console.warn(`[QUOTE-VERIFY] Quote ${createdId} created but required fields are not verified: ${JSON.stringify(requiredIssues).slice(0, 500)}`);
               return {
                 success: false,
-                error: 'quote_required_fields_not_verified',
+                error: vendorIssue ? 'quote_vendor_not_persisted' : 'quote_required_fields_not_verified',
                 created_id_unverified: createdId,
                 required_field_issues: requiredIssues,
                 vendor_diagnostics: quoteVendorDiagnostics(verifyRec),
@@ -8248,7 +8581,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids in Quoted_Items appends
         if (module_name === 'Quotes' && data.Quoted_Items) {
-          const activeCheck = preflightQuotedItemsProductActive(data.Quoted_Items);
+          const activeCheck = preflightQuotedItemsProductActive(data.Quoted_Items, {
+            hardwareOnly: isHardwareOnlyQuoteIntent(rawUserPromptFromEnv(env))
+          });
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
             const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
@@ -8257,7 +8592,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               action: 'update_blocked',
               message: (hasHallucination || hasMissingProductIds)
                 ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
-                : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+                : `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`,
               blocked_items: activeCheck.blocked_items,
               hallucinated_ids: activeCheck.hallucinated_ids,
               missing_product_ids: activeCheck.missing_product_ids
@@ -9398,7 +9733,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'create_deal_and_quote': {
         const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id } = toolInput;
         let { lead_source } = toolInput;
-        const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
+        const rawHardwareOnly = isHardwareOnlyQuoteIntent(rawUserPromptFromEnv(env));
+        const includeLicenses = !rawHardwareOnly && toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         const results = { steps: [], errors: [], records: {} };
         const _startMs = Date.now();
 
@@ -9854,6 +10190,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.steps.push(`Resolved ${resolvedProducts.length}/${skus.length} products from cache` +
             (missingProducts.length ? ` (missing: ${missingProducts.join(', ')})` : ''));
 
+          // ── HARD GATE: never create partial Quotes ─────────────────────
+          // If any requested/staged SKU could not be backed by an approved
+          // catalog entry plus Product_Name.id, stop before Deal/Quote writes.
+          if (missingProducts.length > 0) {
+            return {
+              success: false,
+              error: 'product_resolution_failed',
+              missing_products: [...new Set(missingProducts)],
+              requested_skus: skus.map(s => typeof s === 'string' ? s : s.sku),
+              instruction: `STOP. Product_Name.id/ecomm pricing could not be verified for: ${[...new Set(missingProducts)].join(', ')}. Do NOT create any Deal, Quote, PO, DID, or e-signature, and do NOT silently omit missing SKUs.`,
+              _user_visible_summary: `I did not create any CRM records because Product_Name IDs/ecomm pricing could not be verified for: ${[...new Set(missingProducts)].join(', ')}.`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
+
           // ── HARD GATE #6: Any user-named hardware SKU unresolved → refuse ──
           // Added 2026-04-24 (CW9172l forensic fix). Previously missing_products
           // was a soft warning appended to the success payload; successful partial
@@ -10055,6 +10406,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let quoteVerification = null;
           let quoteVerifyFailed = false;
           let quoteVerifyError = null;
+          let quoteVerifyFailureCode = 'quote_create_verify_failed';
           try {
             const pricingReconcile = await reconcileQuoteToEcommPricing(quoteId, resolvedProducts, env);
             if (pricingReconcile.success === false) {
@@ -10075,8 +10427,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (fq?.id) {
               const requiredIssues = quoteRequiredFieldIssues(fq, { requireContact: true });
               if (requiredIssues.length > 0) {
+                const vendorIssue = requiredIssues.find(issue => issue.field === 'Vendor');
                 quoteVerifyFailed = true;
-                quoteVerifyError = `required fields did not verify: ${requiredIssues.map(issue => issue.field).join(', ')}`;
+                quoteVerifyFailureCode = vendorIssue ? 'quote_vendor_not_persisted' : 'quote_create_verify_failed';
+                quoteVerifyError = vendorIssue
+                  ? `Vendor did not verify as ${DEFAULT_QUOTE_VENDOR}`
+                  : `required fields did not verify: ${requiredIssues.map(issue => issue.field).join(', ')}`;
                 quoteVerification = {
                   required_field_issues: requiredIssues,
                   vendor_diagnostics: quoteVendorDiagnostics(fq)
@@ -10125,7 +10481,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             return {
               ...results,
               success: false,
-              error: 'quote_create_verify_failed',
+              error: quoteVerifyFailureCode,
               created_id_unverified: quoteId,
               quote_verification: quoteVerification,
               instruction: `Zoho reported Quote ${quoteId} was created but the verification fetch ${quoteVerifyError}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render any quote URL.`,
@@ -13740,6 +14096,7 @@ async function askCFConversation(userMessage, env) {
 async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null, evalContext = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
+    if (env && !env.__RAW_USER_PROMPT) env.__RAW_USER_PROMPT = rawUserPromptFromIncomingText(userMessage);
     const upper = userMessage.toUpperCase();
     let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|READ\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
 
@@ -13893,6 +14250,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     // we cache the expanded data here. If Claude later calls zoho_get_record on the same Quote,
     // we return the cached data instantly instead of making another API call.
     const _expandedQuoteCache = {}; // { recordId: expandedDataString }
+    const crmMutationSummaries = [];
+    const verifiedRecordsByModule = new Map();
+    const verifiedRecordNumbersByModule = new Map();
+    function addVerifiedRef(module, id) {
+      addVerifiedSetValue(verifiedRecordsByModule, module, id);
+    }
 
     // Helper: call Anthropic API with retry for 429/529 + model fallback
     // Supports advisor tool beta header when advisor is in the tools array
@@ -14194,6 +14557,58 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           console.log(`[GCHAT-AGENT] Tool result (${block.name}): ${resultStr.substring(0, 200)}`);
 
+          let resultIsError = false;
+          let parsedResultForGuard = null;
+          if (result && typeof result === 'object') {
+            resultIsError = result.success === false || !!result.error || !!result.validation_error;
+            parsedResultForGuard = result;
+            const isWriteTool = typeof BENCHMARK_WRITE_TOOLS !== 'undefined' && BENCHMARK_WRITE_TOOLS.has(block.name);
+            const summary = result._user_visible_summary
+              || (resultIsError && isWriteTool
+                ? `That did not succeed: ${result.message || result.error || result.validation_error || 'the CRM write tool returned an error.'}`
+                : null);
+            if (summary && typeof summary === 'string') {
+              crmMutationSummaries.push({
+                toolName: block.name,
+                summary,
+                undoToken: result._undo_token || null,
+                recordUrl: result._record_url || null,
+                isError: resultIsError
+              });
+            }
+          } else if (typeof result === 'string' && result) {
+            try {
+              parsedResultForGuard = JSON.parse(result);
+              resultIsError = parsedResultForGuard.success === false || !!parsedResultForGuard.error || !!parsedResultForGuard.validation_error;
+            } catch (_) {}
+          }
+
+          if (resultStr) {
+            const urlRe = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Potentials|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
+            let _mm;
+            while ((_mm = urlRe.exec(resultStr)) !== null) addVerifiedRef(_mm[1], _mm[2]);
+          }
+          if (!resultIsError && parsedResultForGuard) {
+            if (block.input?.module_name && block.input?.record_id) {
+              const ridStr = String(block.input.record_id);
+              const dataArr = Array.isArray(parsedResultForGuard.data) ? parsedResultForGuard.data : null;
+              const recordPresent =
+                (dataArr && dataArr.some(r => r && r.id && String(r.id) === ridStr)) ||
+                (parsedResultForGuard.id && String(parsedResultForGuard.id) === ridStr) ||
+                (parsedResultForGuard.record_id && String(parsedResultForGuard.record_id) === ridStr);
+              if (recordPresent) addVerifiedRef(block.input.module_name, block.input.record_id);
+            }
+            if (block.input?.module_name && Array.isArray(parsedResultForGuard.data)) {
+              for (const rec of parsedResultForGuard.data) {
+                if (rec && rec.id) addVerifiedRef(block.input.module_name, rec.id);
+              }
+            }
+            if (block.input?.module_name && parsedResultForGuard.record_id) {
+              addVerifiedRef(block.input.module_name, parsedResultForGuard.record_id);
+            }
+            collectVerifiedZohoRecordNumbers(block.name, block.input, parsedResultForGuard, verifiedRecordNumbersByModule);
+          }
+
           // Cache auto-expanded Quote results for future get_record calls
           if (block.name === 'zoho_search_records' && block.input?.module_name === 'Quotes') {
             try {
@@ -14283,6 +14698,38 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       } else {
         // CRM path or no tool-use: use final text as-is
         reply = textBlocks.map(b => b.text).join('\n');
+      }
+      if (useTools && reply && !/^API error:/.test(reply)) {
+        const last = crmMutationSummaries[crmMutationSummaries.length - 1];
+        if (last?.isError && last.summary) {
+          reply = last.summary;
+        } else if (last && !last.isError) {
+          const replyHasToken = last.undoToken && reply.includes(last.undoToken);
+          const replyHasUrl = last.recordUrl && reply.includes(last.recordUrl);
+          if (last.summary && ((!replyHasToken && last.undoToken) || (!replyHasUrl && last.recordUrl))) {
+            reply = `${reply.trim()}\n\n${last.summary}`;
+          }
+        }
+
+        const urlSanitized = sanitizeUnverifiedZohoUrls(reply, verifiedRecordsByModule);
+        if (urlSanitized.changed) {
+          console.warn(`[TRUTH-GUARD] Claude reply contained ${urlSanitized.unverified.length} unverified Zoho URL(s)`);
+          reply = urlSanitized.text;
+        }
+        const numberSanitized = sanitizeUnverifiedZohoRecordNumberClaims(reply, verifiedRecordNumbersByModule);
+        if (numberSanitized.changed) {
+          console.warn(`[TRUTH-GUARD] Claude reply contained unverified CRM number claim(s): ${numberSanitized.removals.map(r => `${r.module}:${r.number}`).join(', ')}`);
+          reply = numberSanitized.text;
+        }
+
+        const successfulMutation = crmMutationSummaries.some(s => !s.isError);
+        const claimsSuccess = /\b(quote|deal|task|record|contact|account|sales\s*order|po)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|sent|submitted|converted)\b/i.test(reply)
+          || /\bcreated\s+(?:a\s+new\s+)?(?:quote|deal|task|contact|account|sales\s*order|po)\b/i.test(reply)
+          || /\b(sent|submitted)\s+(?:the\s+)?(?:po|sales\s*order|contract).*\b(e-?sign|signature|docusign)\b/i.test(reply);
+        if (claimsSuccess && !successfulMutation) {
+          console.warn('[TRUTH-GUARD] Claude reply claims CRM success but no mutation tool succeeded this turn');
+          reply = `The assistant claimed a CRM record/action succeeded, but no verified CRM write tool ran successfully this turn. I removed unverified success claims; please retry if needed.\n\n${reply}`;
+        }
       }
       console.log(`[GCHAT-AGENT] Final response at iteration ${iteration}, stop_reason=${data.stop_reason}, reply_len=${reply.length}, reply_preview="${reply.substring(0, 150)}"`);
 
@@ -14767,6 +15214,11 @@ const BENCHMARK_READ_TOOLS = new Set([
 // Wrapper for executeToolCall that mocks writes in dry-run mode.
 // Returns { result, mocked, payloadPreview }.
 async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun) {
+  const rawSkuBlock = validateRawQuoteSkuIntent(toolName, toolInput, env);
+  if (rawSkuBlock) return { result: rawSkuBlock, mocked: dryRun === true, payloadPreview: JSON.stringify(toolInput || {}).substring(0, 500) };
+  const poIntentBlock = validatePoOrEsignRequested(toolName, toolInput, env);
+  if (poIntentBlock) return { result: poIntentBlock, mocked: dryRun === true, payloadPreview: JSON.stringify(toolInput || {}).substring(0, 500) };
+
   if (dryRun && BENCHMARK_WRITE_TOOLS.has(toolName)) {
     // ── Universal correctness preflight (runs BEFORE dry-run mock) ──
     // Without this, CF-model dry-run tests mock a SUCCESS response even when
@@ -14778,7 +15230,9 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
         const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
         const isQuotesModule = toolInput?.module_name === 'Quotes';
         if (isQuotesModule && Array.isArray(items)) {
-          const activeCheck = preflightQuotedItemsProductActive(items);
+          const activeCheck = preflightQuotedItemsProductActive(items, {
+            hardwareOnly: isHardwareOnlyQuoteIntent(rawUserPromptFromEnv(env))
+          });
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
             const hasMissingProductIds = activeCheck.missing_product_ids && activeCheck.missing_product_ids.length > 0;
@@ -14789,7 +15243,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
                 action: blockAction,
                 message: (hasHallucination || hasMissingProductIds)
                   ? `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`
-                  : `EOL SKU detected — cannot add to quote:\n${activeCheck.errors.join('\n')}`,
+                  : `Cannot add line item(s) to quote:\n${activeCheck.errors.join('\n')}`,
                 blocked_items: activeCheck.blocked_items,
                 hallucinated_ids: activeCheck.hallucinated_ids,
                 missing_product_ids: activeCheck.missing_product_ids
@@ -15077,6 +15531,7 @@ function parseCfToolCalls(cfResponse) {
 // Returns { reply, toolCalls, iterations, elapsedMs, errors }.
 async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15, reasoningPolicy = REASONING_POLICY_DISABLED) {
   const startMs = Date.now();
+  if (env && !env.__RAW_USER_PROMPT) env.__RAW_USER_PROMPT = rawUserPromptFromIncomingText(userMessage);
   const cfTools = anthropicToolsToCfFormat(anthropicTools, modelId);
   let reasoningControl = getReasoningControl(modelId, reasoningPolicy);
 
@@ -15132,16 +15587,9 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   // record_id} args on success, zoho_search_records data arrays, and
   // zoho_create_record responses (module_name + result.record_id).
   const verifiedRecordsByModule = new Map();
+  const verifiedRecordNumbersByModule = new Map();
   function addVerifiedRef(module, id) {
-    if (!module || id == null) return;
-    const key = zohoCrmTabModule(module);
-    const val = String(id);
-    if (!verifiedRecordsByModule.has(key)) verifiedRecordsByModule.set(key, new Set());
-    verifiedRecordsByModule.get(key).add(val);
-    if (key === 'Potentials') {
-      if (!verifiedRecordsByModule.has('Deals')) verifiedRecordsByModule.set('Deals', new Set());
-      verifiedRecordsByModule.get('Deals').add(val);
-    }
+    addVerifiedSetValue(verifiedRecordsByModule, module, id);
   }
   let iteration = 0;
   let finalReply = '';
@@ -15309,6 +15757,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
             if (args.module_name && parsedResultForGuard && parsedResultForGuard.record_id) {
               addVerifiedRef(args.module_name, parsedResultForGuard.record_id);
             }
+            collectVerifiedZohoRecordNumbers(call.name, args, parsedResultForGuard, verifiedRecordNumbersByModule);
           }
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
           messages.push({
@@ -15474,6 +15923,12 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
         // Then any bare occurrence of the URL itself
         finalReply = finalReply.replace(new RegExp(urlEsc, 'g'), '[URL removed: unverified]');
       }
+    }
+
+    const numberSanitized = sanitizeUnverifiedZohoRecordNumberClaims(finalReply, verifiedRecordNumbersByModule);
+    if (numberSanitized.changed) {
+      console.warn(`[TRUTH-GUARD] finalReply contained unverified CRM number claim(s): ${numberSanitized.removals.map(r => `${r.module}:${r.number}`).join(', ')}`);
+      finalReply = numberSanitized.text;
     }
 
     // Detect success-claim language paired with ZERO successful mutations.
@@ -19156,6 +19611,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               apiResult = { error: 'text is required' };
               break;
             }
+            env.__RAW_USER_PROMPT = rawUserPromptFromIncomingText(wText);
             // Wire progressId into env so executeToolCall can emit step events
             // as each tool fires. Safe to set even when undefined — the hook
             // no-ops without it.
@@ -19530,6 +19986,7 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               apiResult = { error: 'text is required' };
               break;
             }
+            env.__RAW_USER_PROMPT = rawUserPromptFromIncomingText(chatText);
 
             try {
               const chatUserEmail = request.headers.get('x-user-email') || 'chrome-extension-user';
