@@ -194,11 +194,21 @@ ${extractFunction('collectVerifiedZohoRecordNumbers')}
 ${extractFunction('zohoRecordClaimSentenceBounds')}
 ${extractFunction('zohoRecordClaimLooksActionable')}
 ${extractFunction('sanitizeUnverifiedZohoRecordNumberClaims')}
+${extractFunction('crmSummaryContainsRecordActionClaims')}
+${extractFunction('verifiedCrmMutationSummaryReply')}
+${extractFunction('unverifiedCrmMutationClaimFallback')}
+${extractFunction('normalizeUndoTokenClaim')}
+${extractFunction('sanitizeUnverifiedUndoTokenClaims')}
+${extractFunction('replaceMixedUnverifiedCrmSummaryClaim')}
 ${extractFunction('sanitizeUnverifiedZohoUrls')}
 return {
   addVerifiedSetValue,
   collectVerifiedZohoRecordNumbers,
   sanitizeUnverifiedZohoRecordNumberClaims,
+  crmSummaryContainsRecordActionClaims,
+  verifiedCrmMutationSummaryReply,
+  sanitizeUnverifiedUndoTokenClaims,
+  replaceMixedUnverifiedCrmSummaryClaim,
   sanitizeUnverifiedZohoUrls
 };
 `)();
@@ -547,6 +557,23 @@ const unverifiedClaim = truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClai
 assert.equal(unverifiedClaim.changed, true, 'plain-text unverified Quote/Sales Order number claims are sanitized');
 assert.doesNotMatch(unverifiedClaim.text, /QUO-02207|SO-01012/, 'unverified bare record numbers are removed from final summaries');
 assert.doesNotMatch(unverifiedClaim.text, /SO-01012 sent for e-signature/, 'unverified e-signature action claims are removed');
+const unverifiedNumericQuoteClaim = truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims(
+  'Done! Quote #2570562000401481079 — Hardware Only.',
+  new Map()
+);
+assert.equal(unverifiedNumericQuoteClaim.changed, true, 'numeric Zoho Quote_Number claims are sanitized when unverified');
+assert.doesNotMatch(unverifiedNumericQuoteClaim.text, /2570562000401481079/, 'unverified numeric Quote_Number is removed');
+const unverifiedPurchaseOrderClaim = truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims(
+  'Purchase Order #2570562000401481099 was sent for e-signature.',
+  new Map()
+);
+assert.equal(unverifiedPurchaseOrderClaim.changed, true, 'numeric Purchase Order claims are sanitized when unverified');
+assert.doesNotMatch(unverifiedPurchaseOrderClaim.text, /2570562000401481099/, 'unverified Purchase Order number is removed');
+assert.equal(
+  truthGuardHelpers.crmSummaryContainsRecordActionClaims('Purchase Order #2570562000401481099 was sent for e-signature.'),
+  true,
+  'Purchase Order e-signature success text is recognized as an action claim'
+);
 const verifiedNumbers = new Map();
 truthGuardHelpers.addVerifiedSetValue(verifiedNumbers, 'Quotes', 'QUO-02208');
 truthGuardHelpers.addVerifiedSetValue(verifiedNumbers, 'Sales_Orders', 'SO-01013');
@@ -554,6 +581,12 @@ assert.equal(
   truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims('Quote QUO-02208 and Sales Order SO-01013 are verified.', verifiedNumbers).changed,
   false,
   'verified Quote/Sales Order numbers survive the final-summary sanitizer'
+);
+truthGuardHelpers.addVerifiedSetValue(verifiedNumbers, 'Quotes', '2570562000401481080');
+assert.equal(
+  truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims('Quote #2570562000401481080 is verified.', verifiedNumbers).changed,
+  false,
+  'verified numeric Quote_Number survives the final-summary sanitizer'
 );
 const harvestedNumbers = new Map();
 truthGuardHelpers.collectVerifiedZohoRecordNumbers(
@@ -566,6 +599,50 @@ assert.equal(
   truthGuardHelpers.sanitizeUnverifiedZohoRecordNumberClaims('Created Quote QUO-02209.', harvestedNumbers).changed,
   false,
   'compound quote creation whitelists the verified Quote_Number returned by the tool'
+);
+const mixedUnverifiedSummary = [
+  'Done! Here is the summary:',
+  'Deal: TestCo Stress Eval LLC - MV73M - Quote',
+  '[URL removed: unverified]',
+  'Quote #2570562000401481079 — Hardware Only',
+  'Follow-up Task due 2025-07-17 ✓',
+  'Undo tokens: Deal `u_45f6c7d8` · Quote `u_b3e8a1f2`'
+].join('\n');
+assert.equal(
+  truthGuardHelpers.crmSummaryContainsRecordActionClaims(mixedUnverifiedSummary),
+  true,
+  'CRM summary-shaped success text is recognized as an action claim'
+);
+const collapsedNoVerifiedSummary = truthGuardHelpers.replaceMixedUnverifiedCrmSummaryClaim(
+  mixedUnverifiedSummary,
+  mixedUnverifiedSummary.replace('2570562000401481079', '[Quote number removed: unverified]'),
+  true,
+  []
+);
+assert.equal(collapsedNoVerifiedSummary.changed, true, 'mixed unverified CRM success summaries are collapsed');
+assert.match(collapsedNoVerifiedSummary.text, /could not verify the CRM records\/actions claimed/i, 'collapsed summary fails closed when no verified mutation summary exists');
+assert.doesNotMatch(collapsedNoVerifiedSummary.text, /u_45f6c7d8|u_b3e8a1f2|2570562000401481079/, 'collapsed summary removes unverified undo tokens and record numbers');
+const unverifiedUndoTokens = truthGuardHelpers.sanitizeUnverifiedUndoTokenClaims(
+  'Undo tokens: Deal `u_45f6c7d8` · Quote `u_b3e8a1f2` · Task `u d9c2e4a7` (say "undo" to reverse)',
+  []
+);
+assert.equal(unverifiedUndoTokens.changed, true, 'unverified CRM undo tokens are sanitized');
+assert.doesNotMatch(unverifiedUndoTokens.text, /u_45f6c7d8|u_b3e8a1f2|u d9c2e4a7/, 'unverified undo tokens are removed');
+assert.equal(
+  truthGuardHelpers.sanitizeUnverifiedUndoTokenClaims('Undo token: `u_45f6c7d8`', [{ undoToken: 'u_45f6c7d8' }]).changed,
+  false,
+  'verified undo token survives sanitizer'
+);
+const collapsedWithVerifiedSummary = truthGuardHelpers.replaceMixedUnverifiedCrmSummaryClaim(
+  mixedUnverifiedSummary,
+  mixedUnverifiedSummary,
+  true,
+  [{ isError: false, summary: 'Created Quote #2570562000404940066 for TestCo Stress Eval LLC — [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000404940064)' }]
+);
+assert.equal(
+  collapsedWithVerifiedSummary.text,
+  'Created Quote #2570562000404940066 for TestCo Stress Eval LLC — [Open in Zoho](https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000404940064)',
+  'mixed summary is replaced by the verified mutation summary when one exists'
 );
 const urlMap = new Map();
 truthGuardHelpers.addVerifiedSetValue(urlMap, 'Quotes', '2570562000000000001');

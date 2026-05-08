@@ -162,17 +162,20 @@ function sanitizeUnverifiedZohoRecordNumberClaims(text, verifiedRecordNumbersByM
   let out = String(text || '');
   const removals = [];
   const specs = [
-    { module: 'Sales_Orders', label: 'Sales Order', regex: /\bSO-\d{3,}\b/gi },
-    { module: 'Quotes', label: 'Quote', regex: /\bQUO-\d{3,}\b/gi }
+    { module: 'Sales_Orders', label: 'Sales Order', regex: /\b(SO-\d{3,})\b/gi },
+    { module: 'Sales_Orders', label: 'Sales Order', regex: /\b(?:Sales\s*Order|Purchase\s*Order|SO|PO)\s*(?:Number|No\.?|#|:)?\s*(\d{6,20})\b/gi },
+    { module: 'Quotes', label: 'Quote', regex: /\b(QUO-\d{3,})\b/gi },
+    { module: 'Quotes', label: 'Quote', regex: /\bQuote\s*(?:Number|No\.?|#|:)?\s*(\d{6,20})\b/gi }
   ];
 
   for (const spec of specs) {
     let m;
     const matches = [];
     while ((m = spec.regex.exec(out)) !== null) {
-      const number = m[0].toUpperCase();
+      const number = String(m[1] || m[0]).toUpperCase();
       if (!verifiedSetHas(verifiedRecordNumbersByModule, spec.module, number)) {
-        matches.push({ number, index: m.index });
+        const numberOffset = m[1] ? m[0].toUpperCase().lastIndexOf(number) : 0;
+        matches.push({ number, index: m.index + Math.max(0, numberOffset) });
       }
     }
     for (const match of matches.reverse()) {
@@ -194,6 +197,80 @@ function sanitizeUnverifiedZohoRecordNumberClaims(text, verifiedRecordNumbersByM
     out = `I removed unverified CRM record/action claim(s) for: ${removed}. I can only report records and actions verified by tool results from this turn.\n\n${out.trim()}`;
   }
   return { text: out, changed: removals.length > 0, removals };
+}
+
+function crmSummaryContainsRecordActionClaims(text) {
+  const s = String(text || '');
+  return /(^|\n)\s*(Done!?|Deal\s*:|Quote\s*(#|Number|No\.?|:)|(?:Sales|Purchase)\s*Order\s*(#|Number|No\.?|:)?|PO\s*(#|Number|No\.?|:)?|Follow-?up\s+Task|Undo\s+tokens?\s*:)/i.test(s)
+    || /\b(quote|deal|task|record|contact|account|sales\s*order|purchase\s*order|po)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made|sent|submitted|converted)\b/i.test(s)
+    || /\bcreated\s+(?:a\s+new\s+)?(?:quote|deal|task|contact|account|sales\s*order|purchase\s*order|po)\b/i.test(s)
+    || /\b(sent|submitted)\s+(?:the\s+)?(?:po|sales\s*order|purchase\s*order|contract).*\b(e-?sign|signature|docusign)\b/i.test(s)
+    || /\b(e-?signature|docusign|contract)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?sent\b/i.test(s);
+}
+
+function verifiedCrmMutationSummaryReply(mutationSummaries) {
+  const summaries = (mutationSummaries || [])
+    .filter(s => s && !s.isError && typeof s.summary === 'string' && s.summary.trim())
+    .map(s => s.summary.trim());
+  const unique = [...new Set(summaries)];
+  if (unique.length === 0) return null;
+  return unique.join('\n\n');
+}
+
+function unverifiedCrmMutationClaimFallback() {
+  return [
+    'I could not verify the CRM records/actions claimed in the draft response, so I am not reporting any Deal, Quote, Task, PO, Sales Order, or e-signature as created.',
+    'Please retry the request. If anything was partially created, verify it directly in Zoho before acting on it.'
+  ].join('\n\n');
+}
+
+function normalizeUndoTokenClaim(token) {
+  return String(token || '').trim().toLowerCase().replace(/^u[\s_-]+/, 'u_');
+}
+
+function sanitizeUnverifiedUndoTokenClaims(text, mutationSummaries) {
+  let out = String(text || '');
+  const verified = new Set((mutationSummaries || [])
+    .map(s => normalizeUndoTokenClaim(s?.undoToken))
+    .filter(Boolean));
+  const removals = [];
+  const regex = /\bu[\s_-][a-z0-9]{6,}\b/gi;
+  let m;
+  const matches = [];
+  while ((m = regex.exec(out)) !== null) {
+    const token = m[0];
+    if (!verified.has(normalizeUndoTokenClaim(token))) {
+      matches.push({ token, index: m.index });
+    }
+  }
+  for (const match of matches.reverse()) {
+    const [start, end] = zohoRecordClaimSentenceBounds(out, match.index);
+    const sentence = out.slice(start, end);
+    const sentenceActionable = /\bundo\s+tokens?\s*:|\bsay\s+["']?undo["']?\s+to\s+reverse\b/i.test(sentence);
+    const replacement = sentenceActionable
+      ? '[unverified undo token claim removed]'
+      : '[undo token removed: unverified]';
+    const replaceStart = sentenceActionable ? start : match.index;
+    const replaceEnd = sentenceActionable ? end : match.index + match.token.length;
+    out = out.slice(0, replaceStart) + replacement + out.slice(replaceEnd);
+    removals.push({ token: match.token, sentence_removed: sentenceActionable });
+  }
+  if (removals.length > 0) {
+    out = `I removed unverified CRM undo token claim(s). I can only report undo tokens verified by tool results from this turn.\n\n${out.trim()}`;
+  }
+  return { text: out, changed: removals.length > 0, removals };
+}
+
+function replaceMixedUnverifiedCrmSummaryClaim(originalText, sanitizedText, changed, mutationSummaries) {
+  if (!changed || !crmSummaryContainsRecordActionClaims(originalText)) {
+    return { text: sanitizedText, changed: false, usedVerifiedSummary: false };
+  }
+  const verifiedSummary = verifiedCrmMutationSummaryReply(mutationSummaries);
+  return {
+    text: verifiedSummary || unverifiedCrmMutationClaimFallback(),
+    changed: true,
+    usedVerifiedSummary: !!verifiedSummary
+  };
 }
 
 function sanitizeUnverifiedZohoUrls(text, verifiedRecordsByModule) {
@@ -14700,6 +14777,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         reply = textBlocks.map(b => b.text).join('\n');
       }
       if (useTools && reply && !/^API error:/.test(reply)) {
+        const replyBeforeTruthSanitize = reply;
         const last = crmMutationSummaries[crmMutationSummaries.length - 1];
         if (last?.isError && last.summary) {
           reply = last.summary;
@@ -14720,6 +14798,28 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         if (numberSanitized.changed) {
           console.warn(`[TRUTH-GUARD] Claude reply contained unverified CRM number claim(s): ${numberSanitized.removals.map(r => `${r.module}:${r.number}`).join(', ')}`);
           reply = numberSanitized.text;
+        }
+        const undoTokenSanitized = sanitizeUnverifiedUndoTokenClaims(reply, crmMutationSummaries);
+        if (undoTokenSanitized.changed) {
+          console.warn(`[TRUTH-GUARD] Claude reply contained unverified CRM undo token claim(s): ${undoTokenSanitized.removals.map(r => r.token).join(', ')}`);
+          reply = undoTokenSanitized.text;
+        }
+
+        const mixedSummaryReplacement = replaceMixedUnverifiedCrmSummaryClaim(
+          replyBeforeTruthSanitize,
+          reply,
+          urlSanitized.changed || numberSanitized.changed || undoTokenSanitized.changed,
+          crmMutationSummaries
+        );
+        if (mixedSummaryReplacement.changed) {
+          console.warn('[TRUTH-GUARD] Claude reply mixed CRM success-summary language with unverified record references; replacing with verified mutation summary only');
+          reply = mixedSummaryReplacement.text;
+          const retryUrlSanitized = sanitizeUnverifiedZohoUrls(reply, verifiedRecordsByModule);
+          reply = retryUrlSanitized.text;
+          const retryNumberSanitized = sanitizeUnverifiedZohoRecordNumberClaims(reply, verifiedRecordNumbersByModule);
+          reply = retryNumberSanitized.text;
+          const retryUndoTokenSanitized = sanitizeUnverifiedUndoTokenClaims(reply, crmMutationSummaries);
+          reply = retryUndoTokenSanitized.text;
         }
 
         const successfulMutation = crmMutationSummaries.some(s => !s.isError);
@@ -15897,6 +15997,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   //   (b) If the reply contains record-creation language but zero create/
   //       update/clone mutations succeeded this turn, prepend a warning.
   if (finalReply && !/^API error:/.test(finalReply)) {
+    const finalReplyBeforeTruthSanitize = finalReply;
     const zohoUrlRegex = /https:\/\/crm\.zoho\.com\/crm\/org\d+\/tab\/(Quotes|Deals|Potentials|Accounts|Contacts|Tasks|Sales_Orders|Invoices|Products)\/(\d{15,19})/g;
     const urlsFound = [];
     let m;
@@ -15929,6 +16030,28 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     if (numberSanitized.changed) {
       console.warn(`[TRUTH-GUARD] finalReply contained unverified CRM number claim(s): ${numberSanitized.removals.map(r => `${r.module}:${r.number}`).join(', ')}`);
       finalReply = numberSanitized.text;
+    }
+    const undoTokenSanitized = sanitizeUnverifiedUndoTokenClaims(finalReply, mutationSummaries);
+    if (undoTokenSanitized.changed) {
+      console.warn(`[TRUTH-GUARD] finalReply contained unverified CRM undo token claim(s): ${undoTokenSanitized.removals.map(r => r.token).join(', ')}`);
+      finalReply = undoTokenSanitized.text;
+    }
+
+    const mixedSummaryReplacement = replaceMixedUnverifiedCrmSummaryClaim(
+      finalReplyBeforeTruthSanitize,
+      finalReply,
+      unverified.length > 0 || numberSanitized.changed || undoTokenSanitized.changed,
+      mutationSummaries
+    );
+    if (mixedSummaryReplacement.changed) {
+      console.warn('[TRUTH-GUARD] finalReply mixed CRM success-summary language with unverified record references; replacing with verified mutation summary only');
+      finalReply = mixedSummaryReplacement.text;
+      const retryUrlSanitized = sanitizeUnverifiedZohoUrls(finalReply, verifiedRecordsByModule);
+      finalReply = retryUrlSanitized.text;
+      const retryNumberSanitized = sanitizeUnverifiedZohoRecordNumberClaims(finalReply, verifiedRecordNumbersByModule);
+      finalReply = retryNumberSanitized.text;
+      const retryUndoTokenSanitized = sanitizeUnverifiedUndoTokenClaims(finalReply, mutationSummaries);
+      finalReply = retryUndoTokenSanitized.text;
     }
 
     // Detect success-claim language paired with ZERO successful mutations.
