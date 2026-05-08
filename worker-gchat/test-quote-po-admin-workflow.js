@@ -280,6 +280,8 @@ assert.deepEqual(
   'bare MV73 suggestions come from the approved catalog, not a hardcoded SKU gate'
 );
 assert.match(catalogHelpers.notApprovedCatalogMessage('MV73', 'MV73-HW'), /MV73M-HW, MV73X-HW/, 'unapproved SKU failures surface approved alternatives');
+assert.match(catalogHelpers.notApprovedCatalogMessage('MV73', 'MV73-HW'), /not found as a quoteable model\/SKU/, 'unapproved SKU copy is user-friendly model disambiguation');
+assert.doesNotMatch(catalogHelpers.notApprovedCatalogMessage('MV73', 'MV73-HW'), /ecomm catalog/, 'unapproved SKU copy does not expose internal ecomm catalog wording');
 assert.deepEqual(collectQuotePreResolveSkuTokens('MV73M-HW plus LIC-MV-1YR hardware only'), ['MV73M-HW']);
 
 const badMv73Env = { __RAW_USER_PROMPT: 'Create a quote for 1 MV73 hardware only.' };
@@ -288,8 +290,10 @@ assert.equal(badMv73Block.success, false, 'raw MV73 hardware-only request is blo
 assert.equal(badMv73Block.error, 'not_approved_ecomm_catalog', 'raw MV73 block uses the catalog hard-gate error');
 assert.equal(badMv73Block.action, 'create_blocked', 'raw MV73 block is marked as a pre-create stop');
 assert.match(badMv73Block.message, /No Deal, Quote, PO, DID, Sales Order, or e-signature was created/, 'raw MV73 block explicitly says no CRM records were created');
+assert.match(badMv73Block._user_visible_summary, /could not find MV73 as a quoteable model\/SKU/, 'raw MV73 block uses model-not-found wording');
 assert.match(badMv73Block._user_visible_summary, /MV73M-HW/, 'raw MV73 block suggests MV73M-HW');
 assert.match(badMv73Block._user_visible_summary, /MV73X-HW/, 'raw MV73 block suggests MV73X-HW');
+assert.doesNotMatch(badMv73Block._user_visible_summary, /ecomm catalog|approved Stratus/i, 'raw MV73 user summary avoids internal catalog wording');
 assert.equal(
   rawQuoteGuardHelpers.validateRawQuoteSkuIntent('zoho_create_record', { module_name: 'Quotes', data: { Quoted_Items: [] } }, badMv73Env).error,
   'not_approved_ecomm_catalog',

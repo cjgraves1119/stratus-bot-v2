@@ -2200,9 +2200,9 @@ function notApprovedCatalogMessage(rawSku, suffixedSku) {
   const suffixNote = suffixedSku && suffixedSku !== rawSku ? ` (normalized to ${suffixedSku})` : '';
   const alternatives = approvedCatalogAlternatives(rawSku);
   const altText = alternatives.length
-    ? ` Approved alternatives with the same prefix include: ${alternatives.join(', ')}. Ask the user which one they want.`
+    ? ` Similar quoteable options include: ${alternatives.join(', ')}. Ask the user which one they want.`
     : ' Ask the user to clarify or choose a current sellable SKU.';
-  return `SKU "${rawSku}"${suffixNote} is not in the approved Stratus ecomm catalog. Do NOT create a Deal, Quote, PO, DID, or e-signature for this SKU.${altText} Do not fall back to stale Zoho Products or WooProducts records.`;
+  return `SKU "${rawSku}"${suffixNote} was not found as a quoteable model/SKU. Do NOT create a Deal, Quote, PO, DID, or e-signature for this SKU.${altText} Do not fall back to stale Zoho Products or WooProducts records.`;
 }
 
 function rawUserPromptFromEnv(env) {
@@ -2249,9 +2249,9 @@ function rawQuoteSkuBlockPayload(blockedItems, source = 'raw_user_prompt') {
   const skuList = blocked.map(item => item.sku).join(', ');
   const altList = [...new Set(blocked.flatMap(item => item.alternatives || []))];
   const altText = altList.length
-    ? ` Approved alternatives include: ${altList.join(', ')}.`
+    ? ` Similar options include: ${altList.join(', ')}.`
     : '';
-  const summary = `I did not create any CRM records. ${skuList || 'The requested SKU'} is not in the approved Stratus ecomm catalog.${altText} Please choose an approved SKU before I create a quote.`;
+  const summary = `I did not create any CRM records. I could not find ${skuList || 'the requested model'} as a quoteable model/SKU.${altText} Please choose one before I create a quote.`;
   return {
     success: false,
     validation_error: true,
@@ -2260,7 +2260,7 @@ function rawQuoteSkuBlockPayload(blockedItems, source = 'raw_user_prompt') {
     source,
     blocked_items: blocked,
     message: `${blocked.map(item => item.hint).join('\n')}\nSTOP. No Deal, Quote, PO, DID, Sales Order, or e-signature was created.`,
-    instruction: 'STOP. Do NOT create or report any CRM record. Ask the user to choose an approved alternative.',
+    instruction: 'STOP. Do NOT create or report any CRM record. Ask the user to choose one of the suggested similar quoteable models/SKUs.',
     _user_visible_summary: summary
   };
 }
@@ -10308,7 +10308,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               error: 'unresolved_user_hardware',
               missing_user_hardware: missingUserHardware,
               resolved_so_far: resolvedProducts.map(p => p.sku),
-              instruction: `STOP. The user requested hardware SKU(s) that are not in the approved Stratus ecomm catalog: ${missingUserHardware.join(', ')}. Do NOT create any Deal, Quote, PO, DID, or e-signature. Do NOT fall back to stale Zoho Products/WooProducts matches and do NOT silently omit the missing SKUs. Report to the user and ask them to clarify or correct them.${disambigHint}`,
+              instruction: `STOP. The requested hardware model/SKU was not found as quoteable: ${missingUserHardware.join(', ')}. Do NOT create any Deal, Quote, PO, DID, or e-signature. Do NOT fall back to stale Zoho Products/WooProducts matches and do NOT silently omit the missing SKUs. Report to the user and ask them to clarify or choose a similar option.${disambigHint}`,
               wall_ms: Date.now() - _startMs
             };
           }
