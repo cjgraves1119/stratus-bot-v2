@@ -2196,13 +2196,203 @@ function approvedCatalogAlternatives(rawSku, limit = 8) {
   return [...new Set(matches)].sort().slice(0, limit);
 }
 
+function suggestionSkuMatchesRequestedClass(rawSku, candidateSku) {
+  const raw = String(rawSku || '').trim().toUpperCase();
+  const candidate = String(candidateSku || '').trim().toUpperCase();
+  if (!candidate) return false;
+  const rawIsLicense = /^LIC-/.test(raw) || /^(MR|MV|MT)-(ENT|AGN)$/.test(raw);
+  const candidateIsLicense = /^LIC-/.test(candidate) || /^(MR|MV|MT)-(ENT|AGN)$/.test(candidate);
+  if (!rawIsLicense && candidateIsLicense) return false;
+  if (rawIsLicense && !candidateIsLicense) return false;
+  return true;
+}
+
+function quoteableCatalogAlternativeDetails(rawSku, limit = 8) {
+  return approvedCatalogAlternatives(rawSku, limit)
+    .filter(sku => suggestionSkuMatchesRequestedClass(rawSku, sku))
+    .map(sku => {
+      const cached = prices[sku] || staticPrices[sku] || null;
+      const productId = cached?.zoho_product_id || null;
+      const ecommPrice = Number(cached?.price || 0);
+      return {
+        sku,
+        source: 'quote_cache',
+        product_id: productId,
+        list_price: cached?.list || null,
+        ecomm_price: Number.isFinite(ecommPrice) && ecommPrice > 0 ? ecommPrice : null,
+        quoteable: !!productId && Number.isFinite(ecommPrice) && ecommPrice > 0
+      };
+    })
+    .filter(item => item.quoteable)
+    .slice(0, limit);
+}
+
+function liveProductSearchPrefixes(rawSku, limit = 4) {
+  const upper = String(rawSku || '').trim().toUpperCase();
+  if (!upper) return [];
+  const suffixed = applySuffix(upper);
+  const baseValues = [
+    upper,
+    suffixed,
+    upper.replace(/-HW(?:-NA)?$/, '').replace(/-RTG$/, ''),
+    suffixed.replace(/-HW(?:-NA)?$/, '').replace(/-RTG$/, '')
+  ].filter(Boolean);
+  const prefixes = [];
+  for (const value of baseValues) {
+    prefixes.push(value);
+    const modelPrefix = value.match(/^([A-Z]+\d+)/)?.[1];
+    if (modelPrefix) prefixes.push(modelPrefix);
+    if (value.startsWith('LIC-')) {
+      const familyPrefix = value.split('-').slice(0, -1).join('-');
+      if (familyPrefix) prefixes.push(`${familyPrefix}-`);
+    }
+  }
+  return [...new Set(prefixes)]
+    .filter(prefix => prefix.length >= 3)
+    .sort((a, b) => a.length - b.length)
+    .slice(0, limit);
+}
+
+function hasZohoProductSearchConfig(env) {
+  return !!(env?.CONVERSATION_KV && env?.ZOHO_CLIENT_ID && env?.ZOHO_CLIENT_SECRET && env?.ZOHO_REFRESH_TOKEN);
+}
+
+async function liveZohoProductAlternatives(rawSku, env, limit = 12) {
+  if (!hasZohoProductSearchConfig(env)) {
+    return {
+      checked: false,
+      reason: 'zoho_credentials_unavailable',
+      product_matches: [],
+      woo_matches: [],
+      errors: []
+    };
+  }
+
+  const productMap = new Map();
+  const wooMap = new Map();
+  const errors = [];
+  const prefixes = liveProductSearchPrefixes(rawSku);
+  for (const prefix of prefixes) {
+    const [productsResult, wooResult] = await Promise.allSettled([
+      zohoApiCall(
+        'GET',
+        `Products/search?criteria=(Product_Code:starts_with:${encodeURIComponent(prefix)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`,
+        env
+      ),
+      zohoApiCall(
+        'GET',
+        `WooProducts/search?criteria=(WooProduct_Code:starts_with:${encodeURIComponent(prefix)})&fields=id,WooProduct_Code,Stratus_Price,Product_Name`,
+        env
+      )
+    ]);
+
+    if (productsResult.status === 'fulfilled') {
+      for (const rec of productsResult.value?.data || []) {
+        const code = String(rec.Product_Code || '').trim().toUpperCase();
+        if (!code || productMap.has(code)) continue;
+        productMap.set(code, {
+          sku: code,
+          id: rec.id || null,
+          product_name: rec.Product_Name || null,
+          unit_price: rec.Unit_Price || null,
+          product_active: rec.Product_Active !== false,
+          source: 'zoho_products'
+        });
+      }
+    } else {
+      errors.push(`Products starts_with ${prefix}: ${productsResult.reason?.message || productsResult.reason}`);
+    }
+
+    if (wooResult.status === 'fulfilled') {
+      for (const rec of wooResult.value?.data || []) {
+        const code = String(rec.WooProduct_Code || '').trim().toUpperCase();
+        if (!code || wooMap.has(code)) continue;
+        wooMap.set(code, {
+          sku: code,
+          id: rec.id || null,
+          product_name: rec.Product_Name || null,
+          stratus_price: rec.Stratus_Price || null,
+          source: 'zoho_wooproducts'
+        });
+      }
+    } else {
+      errors.push(`WooProducts starts_with ${prefix}: ${wooResult.reason?.message || wooResult.reason}`);
+    }
+  }
+
+  return {
+    checked: true,
+    prefixes,
+    product_matches: [...productMap.values()].sort((a, b) => a.sku.localeCompare(b.sku)).slice(0, limit),
+    woo_matches: [...wooMap.values()].sort((a, b) => a.sku.localeCompare(b.sku)).slice(0, limit),
+    errors
+  };
+}
+
+async function quoteableSkuSuggestionBundle(rawSku, env, limit = 8) {
+  const cacheAlternatives = quoteableCatalogAlternativeDetails(rawSku, limit);
+  const live = await liveZohoProductAlternatives(rawSku, env, limit * 2);
+  const quoteableBySku = new Map(cacheAlternatives.map(item => [item.sku, item]));
+
+  if (live.checked) {
+    for (const rec of [...live.product_matches, ...live.woo_matches]) {
+      const approved = resolveApprovedCatalogSku(rec.sku) || resolveApprovedCatalogSku(applySuffix(rec.sku));
+      if (!approved || quoteableBySku.has(approved)) continue;
+      if (!suggestionSkuMatchesRequestedClass(rawSku, approved)) continue;
+      const cached = prices[approved] || staticPrices[approved] || null;
+      const ecommPrice = Number(cached?.price || 0);
+      if (!cached?.zoho_product_id || !(Number.isFinite(ecommPrice) && ecommPrice > 0)) continue;
+      quoteableBySku.set(approved, {
+        sku: approved,
+        source: rec.source,
+        product_id: cached.zoho_product_id,
+        list_price: cached.list || rec.unit_price || null,
+        ecomm_price: ecommPrice,
+        quoteable: true
+      });
+    }
+  }
+
+  const quoteableAlternatives = [...quoteableBySku.values()]
+    .sort((a, b) => a.sku.localeCompare(b.sku))
+    .slice(0, limit);
+  const quoteableSet = new Set(quoteableAlternatives.map(item => item.sku));
+  const liveNonQuoteable = live.checked
+    ? live.product_matches.filter(rec => !quoteableSet.has(rec.sku)).slice(0, limit)
+    : [];
+
+  return {
+    suggestion_search: {
+      quote_cache_checked: true,
+      live_zoho_checked: live.checked,
+      live_zoho_reason: live.reason || null,
+      live_zoho_errors: live.errors || [],
+      prefixes: live.prefixes || []
+    },
+    cache_alternatives: cacheAlternatives,
+    live_product_matches: live.product_matches || [],
+    live_woo_matches: live.woo_matches || [],
+    live_non_quoteable_matches: liveNonQuoteable,
+    quoteable_alternatives: quoteableAlternatives,
+    alternatives: quoteableAlternatives.map(item => item.sku)
+  };
+}
+
+function blockedItemAlternativeSkus(item) {
+  if (!item) return [];
+  if (Array.isArray(item.quoteable_alternatives) && item.quoteable_alternatives.length) {
+    return item.quoteable_alternatives.map(alt => alt.sku || alt).filter(Boolean);
+  }
+  return Array.isArray(item.alternatives) ? item.alternatives.filter(Boolean) : [];
+}
+
 function notApprovedCatalogMessage(rawSku, suffixedSku) {
   const suffixNote = suffixedSku && suffixedSku !== rawSku ? ` (normalized to ${suffixedSku})` : '';
   const alternatives = approvedCatalogAlternatives(rawSku);
   const altText = alternatives.length
     ? ` Similar quoteable options include: ${alternatives.join(', ')}. Ask the user which one they want.`
     : ' Ask the user to clarify or choose a current sellable SKU.';
-  return `SKU "${rawSku}"${suffixNote} was not found as a quoteable model/SKU. Do NOT create a Deal, Quote, PO, DID, or e-signature for this SKU.${altText} Do not fall back to stale Zoho Products or WooProducts records.`;
+  return `SKU "${rawSku}"${suffixNote} was not found as a quoteable model/SKU. Do NOT create a Deal, Quote, PO, DID, or e-signature for this SKU.${altText} Use live Zoho Products/WooProducts only as read-only suggestion evidence; quote creation still requires a verified quoteable SKU from batch_product_lookup.`;
 }
 
 function rawUserPromptFromEnv(env) {
@@ -2247,11 +2437,16 @@ function requestedSkuBlocksFromRawPrompt(text) {
 function rawQuoteSkuBlockPayload(blockedItems, source = 'raw_user_prompt') {
   const blocked = Array.isArray(blockedItems) ? blockedItems : [];
   const skuList = blocked.map(item => item.sku).join(', ');
-  const altList = [...new Set(blocked.flatMap(item => item.alternatives || []))];
+  const altList = [...new Set(blocked.flatMap(blockedItemAlternativeSkus))];
   const altText = altList.length
     ? ` Similar options include: ${altList.join(', ')}.`
     : '';
-  const summary = `I did not create any CRM records. I could not find ${skuList || 'the requested model'} as a quoteable model/SKU.${altText} Please choose one before I create a quote.`;
+  const liveChecked = blocked.some(item => item?.suggestion_search?.live_zoho_checked);
+  const lookupScope = liveChecked ? ' after checking the quote cache and live Zoho Products/WooProducts' : ' in the quote cache';
+  const nextStep = altList.length
+    ? ' Please confirm which model you want before I create a quote.'
+    : ' Please confirm the exact model/SKU before I create a quote.';
+  const summary = `I did not create any CRM records. I could not find ${skuList || 'the requested model'} as a quoteable model/SKU${lookupScope}.${altText}${nextStep}`;
   return {
     success: false,
     validation_error: true,
@@ -2265,11 +2460,35 @@ function rawQuoteSkuBlockPayload(blockedItems, source = 'raw_user_prompt') {
   };
 }
 
+async function enrichRawQuoteSkuBlockPayload(blockPayload, env, options = {}) {
+  const blocked = Array.isArray(blockPayload?.blocked_items) ? blockPayload.blocked_items : [];
+  if (!blocked.length) return blockPayload;
+  const liveEnabled = options.live !== false;
+  const enrichedBlocked = await Promise.all(blocked.map(async item => {
+    const bundle = await quoteableSkuSuggestionBundle(item.sku, liveEnabled ? env : null);
+    const liveMatchText = bundle.live_product_matches?.length
+      ? ` Live Zoho Products matches: ${bundle.live_product_matches.map(rec => rec.sku).join(', ')}.`
+      : '';
+    const quoteableText = bundle.alternatives?.length
+      ? ` Quoteable similar options: ${bundle.alternatives.join(', ')}.`
+      : '';
+    return {
+      ...item,
+      ...bundle,
+      hint: `${item.hint}${liveMatchText}${quoteableText}`
+    };
+  }));
+  return {
+    ...blockPayload,
+    ...rawQuoteSkuBlockPayload(enrichedBlocked, blockPayload.source),
+    blocked_items: enrichedBlocked
+  };
+}
+
 function toolLooksLikeQuoteWrite(toolName, toolInput = {}) {
   if (toolName === 'create_deal_and_quote' || toolName === 'create_quote_on_deal' || toolName === 'clone_quote') return true;
   if (toolName === 'quote_to_po_and_esign') return true;
   if (toolName === 'parse_quote_url') return true;
-  if (toolName === 'batch_product_lookup') return Array.isArray(toolInput?.skus);
   if ((toolName === 'zoho_create_record' || toolName === 'zoho_update_record') && toolInput?.module_name === 'Quotes') return true;
   if ((toolName === 'zoho_create_record' || toolName === 'zoho_update_record') && toolInput?.module_name === 'Sales_Orders') return true;
   return false;
@@ -2318,18 +2537,16 @@ function validateStaleCatalogLookup(moduleName, criteria) {
   const module = String(moduleName || '');
   const field = module === 'Products' ? 'Product_Code' : module === 'WooProducts' ? 'WooProduct_Code' : null;
   if (!field || !criteria) return null;
-  const equals = String(criteria).match(new RegExp(`${field}:equals:([A-Z0-9\\-]+)`, 'i'));
+  const equals = String(criteria).match(new RegExp(`${field}:(?:equals|starts_with):([A-Z0-9\\-]+)`, 'i'));
   if (!equals) return null;
   const rawSku = equals[1].toUpperCase();
   const suffixed = applySuffix(rawSku);
   if (resolveApprovedCatalogSku(suffixed) || resolveApprovedCatalogSku(rawSku)) return null;
   return {
-    data: [],
-    info: { count: 0, more_records: false },
     error: 'not_approved_ecomm_catalog',
     blocked_sku: rawSku,
     hint: notApprovedCatalogMessage(rawSku, suffixed),
-    _user_visible_summary: `I did not look up ${rawSku} in live Zoho ${module}. It is not in the approved Stratus ecomm catalog.`
+    _quoteability_warning: `Live Zoho ${module} records for ${rawSku} are read-only suggestions, not quote approval. Do not create a quote unless batch_product_lookup returns a verified product_id and ecomm price for a quoteable SKU.`
   };
 }
 
@@ -6214,9 +6431,9 @@ function preflightQuotedItemsProductActive(quotedItems, options = {}) {
   if (unapprovedItems.length > 0) {
     const skuList = unapprovedItems.map(i => i.sku).join(', ');
     errors.unshift(
-      `❌ UNAPPROVED_ECOMM_CATALOG_SKU: ${skuList}. ` +
-      `Only SKUs in the approved Stratus ecomm catalog can be quoted. ` +
-      `Do NOT create Quote line items from stale Zoho Products/WooProducts records.`
+      `❌ UNAPPROVED_QUOTEABLE_SKU: ${skuList}. ` +
+      `This SKU was not resolved as a quoteable model/SKU. ` +
+      `Do NOT create Quote line items from live Zoho Products/WooProducts search results unless batch_product_lookup returns a verified product_id and ecomm price for the chosen SKU.`
     );
   }
   if (unrequestedLicenses.length > 0) {
@@ -6230,7 +6447,7 @@ function preflightQuotedItemsProductActive(quotedItems, options = {}) {
     errors.unshift(
       `❌ QUOTED_ITEMS_MISSING_PRODUCT_ID: ${missingProductIds.length} new line item(s) did not include Product_Name.id. ` +
       `Do NOT create quote line items by Product_Name text or Product_Code text. ` +
-      `Call batch_product_lookup first and use the returned product_id from the approved Stratus ecomm catalog.`
+      `Call batch_product_lookup first and use the returned product_id for a verified quoteable SKU.`
     );
   }
   if (errors.length > 0) {
@@ -8017,7 +8234,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
 // ─── Tool Execution Router ────────────────────────────────────────────────────
 async function executeToolCall(toolName, toolInput, env, personId) {
   const rawSkuBlock = validateRawQuoteSkuIntent(toolName, toolInput, env);
-  if (rawSkuBlock) return rawSkuBlock;
+  if (rawSkuBlock) return await enrichRawQuoteSkuBlockPayload(rawSkuBlock, env);
   const poIntentBlock = validatePoOrEsignRequested(toolName, toolInput, env);
   if (poIntentBlock) return poIntentBlock;
 
@@ -8129,8 +8346,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       // ── Zoho CRM Tools ──
       case 'zoho_search_records': {
         const { module_name, criteria, fields, page, per_page } = toolInput;
-        const staleCatalogBlock = validateStaleCatalogLookup(module_name, criteria);
-        if (staleCatalogBlock) return staleCatalogBlock;
+        const staleCatalogNotice = validateStaleCatalogLookup(module_name, criteria);
 
         // ── INTERCEPT: Redirect Products module lookups through batch cache ──
         // When Claude searches Products by Product_Code, resolve from prices.json cache instead.
@@ -8158,7 +8374,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   discount_pct: cached.discount_pct || 0
                 }],
                 info: { count: 1, more_records: false },
-                _cache_note: `Resolved from prices.json cache (zero API calls). Use batch_product_lookup for multiple SKUs.`
+                _cache_note: `Resolved from prices.json cache (zero API calls). Use batch_product_lookup for multiple SKUs.`,
+                ...(staleCatalogNotice ? {
+                  _quoteability_warning: staleCatalogNotice._quoteability_warning,
+                  hint: staleCatalogNotice.hint
+                } : {})
               };
             }
             // Not in cache — fall through to normal API search
@@ -8186,7 +8406,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               return {
                 data: matches,
                 info: { count: matches.length, more_records: false },
-                _cache_note: `Resolved ${matches.length} SKUs from prices.json cache (zero API calls). Use batch_product_lookup for better performance.`
+                _cache_note: `Resolved ${matches.length} SKUs from prices.json cache (zero API calls). Use batch_product_lookup for better performance.`,
+                ...(staleCatalogNotice ? {
+                  _quoteability_warning: staleCatalogNotice._quoteability_warning,
+                  hint: staleCatalogNotice.hint
+                } : {})
               };
             }
             // No cache hits — fall through to API
@@ -8233,6 +8457,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (page) params.set('page', String(page));
         if (per_page) params.set('per_page', String(per_page));
         const searchResult = await zohoApiCall('GET', `${module_name}/search?${params}`, env);
+
+        if (staleCatalogNotice) {
+          try {
+            const parsed = typeof searchResult === 'string' ? JSON.parse(searchResult) : searchResult;
+            parsed._quoteability_warning = staleCatalogNotice._quoteability_warning;
+            parsed.hint = staleCatalogNotice.hint;
+            return JSON.stringify(parsed);
+          } catch (_) {
+            return searchResult;
+          }
+        }
 
         // AUTO-EXPAND: For Quote searches, automatically fetch full details of the first result
         // including Quoted_Items (line items). This eliminates the need for a separate get_record
@@ -9507,13 +9742,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const suffixed = applySuffix(rawSku);
           const approvedSku = resolveApprovedCatalogSku(suffixed) || resolveApprovedCatalogSku(rawSku);
           if (!approvedSku) {
+            const suggestionBundle = await quoteableSkuSuggestionBundle(rawSku, env);
             batchResults[rawSku] = {
               suffixed_sku: suffixed,
               qty,
               found: false,
               not_approved_catalog: true,
               error: 'not_approved_ecomm_catalog',
-              hint: notApprovedCatalogMessage(rawSku, suffixed)
+              hint: notApprovedCatalogMessage(rawSku, suffixed),
+              ...suggestionBundle
             };
             return;
           }
@@ -12498,7 +12735,7 @@ const CRM_EMAIL_TOOLS = [
   // Batch Product Lookup (parallel, with KV pricing)
   {
     name: 'batch_product_lookup',
-    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Only SKUs in the approved Stratus ecomm catalog are quotable; if found:false/not_approved_catalog is returned, ask the user to clarify and do NOT create a quote. Uses embedded Zoho product IDs from the local approved price cache, with API fallback only for approved SKUs missing cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU. IMPORTANT: Use the returned product_id in Quoted_Items. Never search Products/WooProducts directly or fall back to stale Zoho product records.',
+    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Checks the quote cache first, then uses live Zoho Products/WooProducts read-only searches for similar-SKU suggestions when the exact SKU is not quoteable. If found:false/not_approved_catalog is returned, ask the user to clarify or choose a returned quoteable_alternative and do NOT create a quote. Returns product_id, list_price, ecomm_price, and quote_unit_price only for verified quoteable SKUs. IMPORTANT: Use the returned product_id in Quoted_Items. Live Zoho matches are suggestion evidence only, not quote approval.',
     input_schema: {
       type: 'object',
       properties: {
@@ -12533,7 +12770,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set and verify Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION" plus the complete required quote payload before reporting success. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Only SKUs in the approved Stratus ecomm catalog are quotable; if a SKU is not approved, ask the user to clarify or choose one of the approved alternatives returned by the tool. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set and verify Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION" plus the complete required quote payload before reporting success. For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. If a SKU is not quoteable, ask the user to clarify or choose one of the similar quoteable alternatives returned by the tool before creating any CRM records. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {
@@ -12575,7 +12812,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'create_quote_on_deal',
-    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets and verifies Quote Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals plus required quote fields. Only SKUs in the approved Stratus ecomm catalog are quotable; if a SKU is not approved, ask the user to clarify or choose one of the approved alternatives returned by the tool. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
+    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets and verifies Quote Vendor as the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals plus required quote fields. If a SKU is not quoteable, ask the user to clarify or choose one of the similar quoteable alternatives returned by the tool before creating the Quote. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
     input_schema: {
       type: 'object',
       properties: {
@@ -13119,7 +13356,7 @@ SKU suffixes and hardware→license pairing are handled automatically by the too
 - License quantity always equals hardware quantity (1:1 ratio)
 - If a user explicitly names a license SKU (e.g., "LIC-ENT-3YR"), pass it as-is to batch_product_lookup
 - If the user asks for licenses only, do NOT convert that into hardware. In create_deal_and_quote, use the explicit license SKU or the model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN).
-- Only SKUs in the approved Stratus ecomm catalog are quotable. If the exact normalized SKU is not approved, do not search live Zoho Products/WooProducts as a fallback; ask the user to clarify or choose an approved alternative returned by the tool.
+- If the exact normalized SKU is not quoteable, batch_product_lookup checks the quote cache first and live Zoho Products/WooProducts read-only second for similar models. Ask the user to clarify or choose a returned quoteable alternative before any CRM write.
 
 **MR Enterprise License — UNIVERSAL across all MR APs.** The only valid SKUs are:
 - LIC-ENT-1YR (1 year)
@@ -13158,13 +13395,13 @@ Same pattern for other Meraki families (memorize the universal license per famil
 
 ## PRODUCT LOOKUP & PRICING
 
-Use **batch_product_lookup** for ALL product lookups. Use **parse_quote_url** for Stratus URLs. Both resolve product IDs from cache with zero API calls. NEVER search Products/WooProducts individually.
+Use **batch_product_lookup** for ALL product lookups. Use **parse_quote_url** for Stratus URLs. batch_product_lookup checks the quote cache first and, when needed, performs server-side read-only live Zoho Products/WooProducts searches for similar options. Do not treat direct live Products/WooProducts matches as quote approval.
 
-**When found: false for a LIC-* SKU:** Search Zoho Products directly before giving up. found: false does NOT mean invalid. Only report "not available" if both batch_product_lookup AND Products search fail.
+**When found:false/not_approved_catalog:** Inspect quoteable_alternatives, live_product_matches, live_non_quoteable_matches, and hint. Recommend returned quoteable alternatives when present; otherwise say you could not find that exact model/SKU and ask the user which model they meant. Do NOT create a Deal or Quote until the chosen SKU returns a verified product_id and ecomm_price from batch_product_lookup.
 
 **NEVER claim a product is "inactive", "discontinued", or "marked inactive in inventory" unless Zoho explicitly returns a Product_Active: false field on the specific product record.** If batch_product_lookup returns found: false, it means the exact SKU string you generated did not match any Product_Code in Zoho — it does NOT mean the product is inactive, discontinued, or unavailable. Non-standard license terms (7YR, 10YR, etc.) may exist in the catalog even if the common 1/3/5 year variants are the defaults.
 
-**When found: false:** Check the tool response for a "live_alternatives" array or "hint" field. batch_product_lookup automatically queries live Zoho Products for SKUs starting with the same family prefix and returns whatever actually exists. Use the live_alternatives list to propose the closest match to what the user asked for (e.g. user asked for LIC-MV-7YR → live_alternatives shows LIC-MV-7YR exists → retry with that exact SKU; or shows only 1/3/5/10 year exists → ask which one). Never invent a reason why a SKU isn't available — always rely on the tool's live catalog query.
+**When found:false but live Zoho has nearby matches:** Use those live matches only to explain what was found and to ask for clarification. If the response includes quoteable_alternatives, suggest those first. If it only includes live_non_quoteable_matches, ask which current sellable/quoteable model they meant. Never invent a reason why a SKU is unavailable.
 
 ### Ecomm Pricing (DEFAULT)
 - Discount is a DOLLAR AMOUNT: Discount = discount_per_unit * Quantity
@@ -13572,7 +13809,7 @@ function toolProgressMessage(toolName, toolInput) {
       return `🔍 Validating ${toolInput.field_name || 'field'} picklist values...`;
     case 'batch_product_lookup': {
       const skuCount = toolInput.skus?.length || 0;
-      return `📦 Resolving ${skuCount} product${skuCount !== 1 ? 's' : ''} (cached IDs + pricing)...`;
+      return `📦 Resolving ${skuCount} product${skuCount !== 1 ? 's' : ''} (quote cache + live Zoho suggestions)...`;
     }
     case 'parse_quote_url':
       return `📦 Parsing URL → ordered line items with cached pricing...`;
@@ -15315,7 +15552,7 @@ const BENCHMARK_READ_TOOLS = new Set([
 // Returns { result, mocked, payloadPreview }.
 async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun) {
   const rawSkuBlock = validateRawQuoteSkuIntent(toolName, toolInput, env);
-  if (rawSkuBlock) return { result: rawSkuBlock, mocked: dryRun === true, payloadPreview: JSON.stringify(toolInput || {}).substring(0, 500) };
+  if (rawSkuBlock) return { result: await enrichRawQuoteSkuBlockPayload(rawSkuBlock, env, { live: dryRun !== true }), mocked: dryRun === true, payloadPreview: JSON.stringify(toolInput || {}).substring(0, 500) };
   const poIntentBlock = validatePoOrEsignRequested(toolName, toolInput, env);
   if (poIntentBlock) return { result: poIntentBlock, mocked: dryRun === true, payloadPreview: JSON.stringify(toolInput || {}).substring(0, 500) };
 

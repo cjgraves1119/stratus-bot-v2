@@ -132,6 +132,13 @@ ${extractFunction('collectQuotePreResolveSkuTokens')}
 ${extractFunction('resolveApprovedCatalogSku')}
 ${extractFunction('approvedCatalogEntry')}
 ${extractFunction('approvedCatalogAlternatives')}
+${extractFunction('suggestionSkuMatchesRequestedClass')}
+${extractFunction('quoteableCatalogAlternativeDetails')}
+${extractFunction('liveProductSearchPrefixes')}
+${extractFunction('hasZohoProductSearchConfig')}
+${extractFunction('liveZohoProductAlternatives')}
+${extractFunction('quoteableSkuSuggestionBundle')}
+${extractFunction('blockedItemAlternativeSkus')}
 ${extractFunction('notApprovedCatalogMessage')}
 ${extractFunction('rawUserPromptFromEnv')}
 ${extractFunction('rawUserPromptFromIncomingText')}
@@ -139,6 +146,7 @@ ${extractFunction('rawPromptRequestsPoOrEsign')}
 ${extractFunction('rawPromptQuoteOnly')}
 ${extractFunction('requestedSkuBlocksFromRawPrompt')}
 ${extractFunction('rawQuoteSkuBlockPayload')}
+${extractFunction('enrichRawQuoteSkuBlockPayload')}
 ${extractFunction('toolLooksLikeQuoteWrite')}
 ${extractFunction('validateRawQuoteSkuIntent')}
 ${extractFunction('validatePoOrEsignRequested')}
@@ -148,6 +156,8 @@ return {
   rawPromptQuoteOnly,
   rawPromptRequestsPoOrEsign,
   requestedSkuBlocksFromRawPrompt,
+  rawQuoteSkuBlockPayload,
+  enrichRawQuoteSkuBlockPayload,
   toolLooksLikeQuoteWrite,
   validateRawQuoteSkuIntent,
   validatePoOrEsignRequested,
@@ -155,6 +165,56 @@ return {
 };
 `)();
 const executeToolCallGuardOnly = Function(`"use strict";
+const staticPrices = ${JSON.stringify(staticPriceSnapshot)};
+let livePrices = null;
+let _productIdToSku = null;
+const prices = new Proxy(staticPrices, {
+  get(target, prop) {
+    if (livePrices && livePrices[prop]) return livePrices[prop];
+    return target[prop];
+  },
+  has(target, prop) {
+    if (livePrices && prop in livePrices) return true;
+    return prop in target;
+  }
+});
+const apiCalls = [];
+async function zohoApiCall(method, path, env, body) {
+  apiCalls.push({ method, path, body });
+  return { data: [], info: { count: 0, more_records: false } };
+}
+${extractFunction('isHardwareOnlyQuoteIntent')}
+${extractFunction('applySuffix')}
+${extractFunction('collectQuotePreResolveSkuTokens')}
+${extractFunction('resolveApprovedCatalogSku')}
+${extractFunction('approvedCatalogEntry')}
+${extractFunction('approvedCatalogAlternatives')}
+${extractFunction('suggestionSkuMatchesRequestedClass')}
+${extractFunction('quoteableCatalogAlternativeDetails')}
+${extractFunction('liveProductSearchPrefixes')}
+${extractFunction('hasZohoProductSearchConfig')}
+${extractFunction('liveZohoProductAlternatives')}
+${extractFunction('quoteableSkuSuggestionBundle')}
+${extractFunction('blockedItemAlternativeSkus')}
+${extractFunction('notApprovedCatalogMessage')}
+${extractFunction('rawUserPromptFromEnv')}
+${extractFunction('rawPromptRequestsPoOrEsign')}
+${extractFunction('rawPromptQuoteOnly')}
+${extractFunction('requestedSkuBlocksFromRawPrompt')}
+${extractFunction('rawQuoteSkuBlockPayload')}
+${extractFunction('enrichRawQuoteSkuBlockPayload')}
+${extractFunction('toolLooksLikeQuoteWrite')}
+${extractFunction('validateRawQuoteSkuIntent')}
+${extractFunction('validatePoOrEsignRequested')}
+${extractFunction('validateStaleCatalogLookup')}
+${extractFunction('getProductIdToSkuMap')}
+${extractFunction('isLikelyLicenseSku')}
+${extractFunction('preflightQuotedItemsProductActive')}
+${extractFunction('executeToolCall')}
+executeToolCall.apiCalls = apiCalls;
+return executeToolCall;
+`)();
+const liveSuggestionHelpers = Function(`"use strict";
 const staticPrices = ${JSON.stringify(staticPriceSnapshot)};
 let livePrices = null;
 const prices = new Proxy(staticPrices, {
@@ -167,23 +227,43 @@ const prices = new Proxy(staticPrices, {
     return prop in target;
   }
 });
-${extractFunction('isHardwareOnlyQuoteIntent')}
+const liveZohoCalls = [];
+async function zohoApiCall(method, path, env) {
+  liveZohoCalls.push({ method, path });
+  const decodedPath = decodeURIComponent(path);
+  if (decodedPath.includes('Products/search') && decodedPath.includes('Product_Code:starts_with:MV73')) {
+    return {
+      data: [
+        { id: 'legacy-mv73-id', Product_Code: 'MV73-HW', Product_Name: 'Legacy MV73', Unit_Price: 2168.78, Product_Active: true },
+        { id: staticPrices['MV73M-HW'].zoho_product_id, Product_Code: 'MV73M-HW', Product_Name: 'Meraki MV73M', Unit_Price: 2720.41, Product_Active: true },
+        { id: staticPrices['MV73X-HW'].zoho_product_id, Product_Code: 'MV73X-HW', Product_Name: 'Meraki MV73X', Unit_Price: 4000, Product_Active: true },
+        { id: staticPrices['LIC-MV-1YR'].zoho_product_id, Product_Code: 'LIC-MV-1YR', Product_Name: 'Meraki MV License 1YR', Unit_Price: 239.90, Product_Active: true }
+      ],
+      info: { count: 3, more_records: false }
+    };
+  }
+  if (decodedPath.includes('WooProducts/search') && decodedPath.includes('WooProduct_Code:starts_with:MV73')) {
+    return {
+      data: [
+        { id: 'woo-mv73m', WooProduct_Code: 'MV73M-HW', Product_Name: 'Meraki MV73M', Stratus_Price: 1830 },
+        { id: 'woo-mv73x', WooProduct_Code: 'MV73X-HW', Product_Name: 'Meraki MV73X', Stratus_Price: 3000 },
+        { id: 'woo-mv-lic', WooProduct_Code: 'LIC-MV-1YR', Product_Name: 'Meraki MV License 1YR', Stratus_Price: 239.90 }
+      ],
+      info: { count: 2, more_records: false }
+    };
+  }
+  return { data: [], info: { count: 0, more_records: false } };
+}
 ${extractFunction('applySuffix')}
-${extractFunction('collectQuotePreResolveSkuTokens')}
 ${extractFunction('resolveApprovedCatalogSku')}
-${extractFunction('approvedCatalogEntry')}
 ${extractFunction('approvedCatalogAlternatives')}
-${extractFunction('notApprovedCatalogMessage')}
-${extractFunction('rawUserPromptFromEnv')}
-${extractFunction('rawPromptRequestsPoOrEsign')}
-${extractFunction('rawPromptQuoteOnly')}
-${extractFunction('requestedSkuBlocksFromRawPrompt')}
-${extractFunction('rawQuoteSkuBlockPayload')}
-${extractFunction('toolLooksLikeQuoteWrite')}
-${extractFunction('validateRawQuoteSkuIntent')}
-${extractFunction('validatePoOrEsignRequested')}
-${extractFunction('executeToolCall')}
-return executeToolCall;
+${extractFunction('suggestionSkuMatchesRequestedClass')}
+${extractFunction('quoteableCatalogAlternativeDetails')}
+${extractFunction('liveProductSearchPrefixes')}
+${extractFunction('hasZohoProductSearchConfig')}
+${extractFunction('liveZohoProductAlternatives')}
+${extractFunction('quoteableSkuSuggestionBundle')}
+return { liveZohoCalls, liveProductSearchPrefixes, liveZohoProductAlternatives, quoteableSkuSuggestionBundle };
 `)();
 const truthGuardHelpers = Function(`"use strict";
 ${extractFunction('zohoCrmTabModule')}
@@ -301,6 +381,30 @@ assert.equal(
 );
 assert.equal(rawQuoteGuardHelpers.toolLooksLikeQuoteWrite('clone_quote', { quote_id: 'q1' }), true, 'quote clone is covered by quote-write guards');
 assert.equal(rawQuoteGuardHelpers.toolLooksLikeQuoteWrite('zoho_create_record', { module_name: 'Sales_Orders', data: {} }), true, 'direct Sales_Orders writes are covered by quote-write guards');
+assert.equal(rawQuoteGuardHelpers.toolLooksLikeQuoteWrite('batch_product_lookup', { skus: ['MV73-HW'] }), false, 'batch_product_lookup is allowed to run for read-only suggestion evidence');
+assert.equal(
+  rawQuoteGuardHelpers.validateRawQuoteSkuIntent('batch_product_lookup', { skus: ['MV73-HW'] }, badMv73Env),
+  null,
+  'raw MV73 hardware-only request does not block the read-only cache/live lookup path'
+);
+assert.equal(
+  rawQuoteGuardHelpers.validateRawQuoteSkuIntent('create_deal_and_quote', { skus: ['MV73M-HW'], hardware_only: true, include_licenses: false }, badMv73Env).error,
+  'not_approved_ecomm_catalog',
+  'raw MV73 hardware-only request still blocks if the model silently substitutes a suggested MV73M-HW before user confirmation'
+);
+const staleCatalogLookup = rawQuoteGuardHelpers.validateStaleCatalogLookup('Products', '(Product_Code:starts_with:MV73)');
+assert.equal(staleCatalogLookup.error, 'not_approved_ecomm_catalog', 'direct live Product lookup is marked as suggestion-only for unapproved exact models');
+assert.equal(Object.hasOwn(staleCatalogLookup, 'data'), false, 'direct live Product lookup is no longer replaced with an empty fake result');
+assert.match(staleCatalogLookup._quoteability_warning, /read-only suggestions, not quote approval/, 'direct live Product lookup warning preserves fail-closed quote creation');
+assert.match(
+  rawQuoteGuardHelpers.rawQuoteSkuBlockPayload([{
+    sku: 'MV73',
+    quoteable_alternatives: [{ sku: 'MV73M-HW' }],
+    suggestion_search: { live_zoho_checked: true }
+  }])._user_visible_summary,
+  /quote cache and live Zoho Products\/WooProducts/,
+  'live-enriched MV73 block tells the user both cache and Zoho suggestion sources were checked'
+);
 
 const goodMv73mEnv = { __RAW_USER_PROMPT: 'Create a quote for 1 MV73M hardware only.' };
 assert.equal(
@@ -501,12 +605,18 @@ assert.match(source, /case 'quote_to_po_and_esign'/, 'tool executor handles quot
 assert.match(source, /name: 'quote_to_po_and_esign'/, 'tool schema exposes quote_to_po_and_esign');
 assert.match(source, /case 'create_quote_on_deal'/, 'tool executor handles quote creation on existing deals');
 assert.match(source, /name: 'create_quote_on_deal'/, 'tool schema exposes quote creation on existing deals');
+const createDealToolSchema = source.slice(
+  source.indexOf("name: 'create_deal_and_quote'"),
+  source.indexOf("name: 'create_quote_on_deal'")
+);
+assert.match(createDealToolSchema, /required: \['account_name', 'skus'\]/, 'compound quote tool accepts requested SKUs, not model-supplied quote line IDs');
+assert.doesNotMatch(createDealToolSchema, /\bproduct_id\b|Product_Name/, 'compound quote tool schema does not expose Product_Name/product_id inputs from live Product search');
 assert.match(source, /existing_deal_id: deal_id/, 'create_quote_on_deal delegates without creating a duplicate Deal');
 assert.match(source, /Reused existing Deal/, 'existing Deal quote path records that it reused the Deal');
 assert.match(source, /Current CRM context\/page is a Deal\/Potentials record/, 'prompt routes Deal page quote requests to create_quote_on_deal');
 assert.match(source, /not_approved_ecomm_catalog/, 'non-approved SKUs have a deterministic server-side hard gate');
-assert.match(source, /Do not fall back to stale Zoho Products or WooProducts records/, 'catalog failures block stale Zoho fallback');
-assert.match(source, /Only SKUs in the approved Stratus ecomm catalog are quotable/, 'model prompt uses the general catalog rule');
+assert.match(source, /live Zoho Products\/WooProducts only as read-only suggestion evidence/, 'catalog failures allow live suggestions without quote approval');
+assert.match(source, /batch_product_lookup checks the quote cache first and live Zoho Products\/WooProducts read-only second/, 'model prompt uses cache-first then live suggestion guidance');
 assert.match(source, /QUOTED_ITEMS_MISSING_PRODUCT_ID/, 'quote line items cannot be created from product-name text');
 assert.match(source, /return 'Potentials'/, 'Deal URLs use the valid Zoho Potentials tab path');
 assert.match(source, /force_create_po/, 'existing PO override is explicit');
@@ -626,6 +736,18 @@ const collapsedNoVerifiedSummary = truthGuardHelpers.replaceMixedUnverifiedCrmSu
 assert.equal(collapsedNoVerifiedSummary.changed, true, 'mixed unverified CRM success summaries are collapsed');
 assert.match(collapsedNoVerifiedSummary.text, /could not verify the CRM records\/actions claimed/i, 'collapsed summary fails closed when no verified mutation summary exists');
 assert.doesNotMatch(collapsedNoVerifiedSummary.text, /u_45f6c7d8|u_b3e8a1f2|2570562000401481079/, 'collapsed summary removes unverified undo tokens and record numbers');
+const productIdLiftedFabrication = [
+  'Done! I created the quote using Product_ID legacy-mv73-id from Products search.',
+  'Quote #2570562000401481079 was created for TestCo Stress Eval LLC.'
+].join('\n');
+const productIdLiftedCollapsed = truthGuardHelpers.replaceMixedUnverifiedCrmSummaryClaim(
+  productIdLiftedFabrication,
+  productIdLiftedFabrication.replace('2570562000401481079', '[Quote number removed: unverified]'),
+  true,
+  []
+);
+assert.equal(productIdLiftedCollapsed.changed, true, 'fabricated quote summaries based on lifted Product_IDs collapse fail-closed');
+assert.match(productIdLiftedCollapsed.text, /could not verify the CRM records\/actions claimed/i, 'lifted Product_ID fabricated summary reports verification failure');
 const unverifiedUndoTokens = truthGuardHelpers.sanitizeUnverifiedUndoTokenClaims(
   'Undo tokens: Deal `u_45f6c7d8` · Quote `u_b3e8a1f2` · Task `u d9c2e4a7` (say "undo" to reverse)',
   []
@@ -814,6 +936,128 @@ async function runAsyncRegressionChecks() {
   assert.equal(executeBlock.error, 'not_approved_ecomm_catalog', 'executeToolCall raw guard returns the approved-catalog error');
   assert.match(executeBlock._user_visible_summary, /MV73M-HW/, 'executeToolCall raw guard suggests MV73M-HW');
   assert.match(executeBlock._user_visible_summary, /MV73X-HW/, 'executeToolCall raw guard suggests MV73X-HW');
+  assert.match(executeBlock._user_visible_summary, /in the quote cache/, 'executeToolCall raw guard reports cache-only lookup when live Zoho credentials are unavailable');
+  assert.equal(executeBlock.blocked_items[0].suggestion_search.quote_cache_checked, true, 'executeToolCall raw guard records the quote-cache suggestion check');
+  assert.equal(executeBlock.blocked_items[0].suggestion_search.live_zoho_checked, false, 'executeToolCall raw guard records that live Zoho suggestions were not checked without credentials');
+
+  const liveBundle = await liveSuggestionHelpers.quoteableSkuSuggestionBundle('MV73-HW', {
+    CONVERSATION_KV: {},
+    ZOHO_CLIENT_ID: 'test-client',
+    ZOHO_CLIENT_SECRET: 'test-secret',
+    ZOHO_REFRESH_TOKEN: 'test-refresh'
+  });
+  assert.equal(liveBundle.suggestion_search.quote_cache_checked, true, 'suggestion bundle checks the quote cache first');
+  assert.equal(liveBundle.suggestion_search.live_zoho_checked, true, 'suggestion bundle checks live Zoho after cache when credentials are available');
+  assert.equal(liveSuggestionHelpers.liveZohoCalls.some(call => call.path.includes('Products/search')), true, 'suggestion bundle searches live Zoho Products read-only');
+  assert.equal(liveSuggestionHelpers.liveZohoCalls.some(call => call.path.includes('WooProducts/search')), true, 'suggestion bundle searches live Zoho WooProducts read-only');
+  assert.deepEqual(
+    liveBundle.alternatives.filter(sku => sku === 'MV73M-HW' || sku === 'MV73X-HW').sort(),
+    ['MV73M-HW', 'MV73X-HW'],
+    'suggestion bundle recommends valid quoteable MV73M/MV73X alternatives'
+  );
+  assert.equal(
+    liveBundle.live_product_matches.some(rec => rec.sku === 'MV73-HW'),
+    true,
+    'suggestion bundle preserves live legacy MV73-HW match as suggestion evidence'
+  );
+  assert.equal(
+    liveBundle.live_non_quoteable_matches.some(rec => rec.sku === 'MV73-HW'),
+    true,
+    'suggestion bundle does not treat live legacy MV73-HW as quoteable'
+  );
+  assert.equal(
+    liveBundle.live_product_matches.some(rec => rec.sku === 'LIC-MV-1YR'),
+    true,
+    'test fixture includes a license returned from live Zoho suggestion search'
+  );
+  assert.equal(
+    liveBundle.alternatives.some(sku => sku.startsWith('LIC-')),
+    false,
+    'hardware-model suggestion bundle excludes license SKUs from quoteable alternatives'
+  );
+
+  const successfulResponse = { success: true, quote_id: 'q1', records: { quote: { id: 'q1' } } };
+  assert.equal(
+    await rawQuoteGuardHelpers.enrichRawQuoteSkuBlockPayload(successfulResponse, badMv73Env),
+    successfulResponse,
+    'raw SKU block enrichment is inert for success payloads and cannot mutate a valid quote response'
+  );
+
+  executeToolCallGuardOnly.apiCalls.length = 0;
+  const directQuoteFromSuggestedSku = await executeToolCallGuardOnly(
+    'zoho_create_record',
+    {
+      module_name: 'Quotes',
+      data: {
+        Quoted_Items: [{ Product_Name: { id: mv73mProductId }, Quantity: 1 }]
+      }
+    },
+    badMv73Env,
+    'test-person'
+  );
+  assert.equal(directQuoteFromSuggestedSku.error, 'not_approved_ecomm_catalog', 'raw MV73 still blocks direct Quote creation even if the model lifts a valid suggested MV73M product_id');
+  assert.equal(
+    executeToolCallGuardOnly.apiCalls.some(call => call.method === 'POST' && call.path === 'Quotes'),
+    false,
+    'raw MV73 direct Quote block returns before any CRM create call'
+  );
+
+  executeToolCallGuardOnly.apiCalls.length = 0;
+  const compoundQuoteWithLiftedProductId = await executeToolCallGuardOnly(
+    'create_deal_and_quote',
+    {
+      account_name: 'TestCo Stress Eval LLC',
+      skus: [{ sku: 'MV73M-HW', qty: 1, product_id: 'legacy-mv73-id' }],
+      hardware_only: true,
+      include_licenses: false
+    },
+    badMv73Env,
+    'test-person'
+  );
+  assert.equal(compoundQuoteWithLiftedProductId.error, 'not_approved_ecomm_catalog', 'raw MV73 blocks compound quote creation even if the model passes a suggested SKU plus lifted Product_ID');
+  assert.equal(
+    executeToolCallGuardOnly.apiCalls.some(call => call.method === 'POST'),
+    false,
+    'raw MV73 compound Product_ID-lift attempt returns before any CRM mutation call'
+  );
+
+  executeToolCallGuardOnly.apiCalls.length = 0;
+  const directQuoteFromLegacyProductId = await executeToolCallGuardOnly(
+    'zoho_create_record',
+    {
+      module_name: 'Quotes',
+      data: {
+        Quoted_Items: [{ Product_Name: { id: 'legacy-mv73-id' }, Quantity: 1 }]
+      }
+    },
+    goodMv73mEnv,
+    'test-person'
+  );
+  assert.equal(directQuoteFromLegacyProductId.validation_error, true, 'direct Quote create blocks Product_IDs lifted from live Products search when they are not in the verified quote cache');
+  assert.equal(directQuoteFromLegacyProductId.action, 'create_blocked', 'lifted Product_ID direct Quote create is fail-closed before Zoho');
+  assert.match(directQuoteFromLegacyProductId.message, /FABRICATED PRODUCT ID/, 'lifted Product_ID block tells the model to use batch_product_lookup');
+  assert.equal(
+    executeToolCallGuardOnly.apiCalls.some(call => call.method === 'POST' && call.path === 'Quotes'),
+    false,
+    'lifted Product_ID direct Quote block returns before any CRM create call'
+  );
+
+  const directProductStartsWith = await executeToolCallGuardOnly(
+    'zoho_search_records',
+    { module_name: 'Products', criteria: '(Product_Code:starts_with:MV73)', fields: 'id,Product_Code,Product_Name,Unit_Price,Product_Active' },
+    badMv73Env,
+    'test-person'
+  );
+  assert.equal(
+    directProductStartsWith.data.some(rec => rec.Product_Code === 'MV73M-HW'),
+    true,
+    'direct Products starts_with MV73 lookup can still surface similar quoteable cache suggestions'
+  );
+  assert.match(
+    directProductStartsWith._quoteability_warning,
+    /read-only suggestions, not quote approval/,
+    'direct Products starts_with MV73 lookup labels results as suggestion evidence, not quote approval'
+  );
 }
 
 runAsyncRegressionChecks()
