@@ -20614,6 +20614,12 @@ Return ONLY a JSON object (no markdown, no explanation):
       // PHASE 1: Price refresh (update Stratus_Price for all known SKUs)
       // ═══════════════════════════════════════════════════════════════════
       const BATCH_SIZE = 5;
+      const parseMoney = value => {
+        if (value == null || value === '') return null;
+        const num = Number(String(value).replace(/[$,]/g, ''));
+        return Number.isFinite(num) ? num : null;
+      };
+      const roundCents = value => Math.round(Number(value || 0) * 100) / 100;
       // Deep-copy existing entries to preserve all 6 fields
       const updatedPrices = {};
       for (const [sku, entry] of Object.entries(staticPrices)) {
@@ -20630,12 +20636,24 @@ Return ONLY a JSON object (no markdown, no explanation):
         const results = await Promise.allSettled(
           batch.map(async (sku) => {
             try {
-              const result = await zohoApiCall(
-                'GET',
-                `WooProducts/search?criteria=(WooProduct_Code:equals:${encodeURIComponent(sku)})&fields=WooProduct_Code,Stratus_Price`,
-                env
-              );
+              const existing = updatedPrices[sku] || {};
+              const [wooResult, productResult] = await Promise.allSettled([
+                zohoApiCall(
+                  'GET',
+                  `WooProducts/search?criteria=(WooProduct_Code:equals:${encodeURIComponent(sku)})&fields=WooProduct_Code,Stratus_Price`,
+                  env
+                ),
+                existing.zoho_product_id
+                  ? zohoApiCall('GET', `Products/${existing.zoho_product_id}?fields=id,Product_Code,Unit_Price`, env)
+                  : zohoApiCall(
+                      'GET',
+                      `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(sku)})&fields=id,Product_Code,Unit_Price`,
+                      env
+                    )
+              ]);
 
+              if (wooResult.status === 'rejected') throw wooResult.reason;
+              const result = wooResult.value;
               if (!result?.data?.length) return { sku, price: null };
 
               // Filter out bundles (codes with '+') and find exact match
@@ -20643,7 +20661,28 @@ Return ONLY a JSON object (no markdown, no explanation):
                 r.WooProduct_Code === sku && !r.WooProduct_Code.includes('+')
               );
 
-              return { sku, price: match?.Stratus_Price ?? null };
+              const productData = productResult.status === 'fulfilled' ? productResult.value?.data || [] : [];
+              let productMatch = existing.zoho_product_id
+                ? productData[0]
+                : productData.find(r => r.Product_Code === sku);
+              if (productMatch?.Product_Code && productMatch.Product_Code !== sku) {
+                productMatch = null;
+              }
+              if (!productMatch || !(parseMoney(productMatch.Unit_Price) > 0)) {
+                const productSearch = await zohoApiCall(
+                  'GET',
+                  `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(sku)})&fields=id,Product_Code,Unit_Price`,
+                  env
+                );
+                productMatch = (productSearch?.data || []).find(r => r.Product_Code === sku) || productMatch;
+              }
+
+              return {
+                sku,
+                price: match?.Stratus_Price ?? null,
+                liveListPrice: parseMoney(productMatch?.Unit_Price),
+                liveProductId: productMatch?.id || null
+              };
             } catch (err) {
               console.error(`[PRICE-CRON] Error fetching ${sku}: ${err.message}`);
               return { sku, price: null, error: true };
@@ -20653,38 +20692,47 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         for (const result of results) {
           if (result.status === 'rejected') { errors++; continue; }
-          const { sku, price, error } = result.value;
+          const { sku, price, liveListPrice, liveProductId, error } = result.value;
 
           if (error) { errors++; continue; }
           if (price == null || price === 0) { skipped++; continue; }
 
           const existing = updatedPrices[sku];
-          const listPrice = existing?.list || 0;
+          const ecommPrice = parseMoney(price);
+          const listPrice = liveListPrice || parseMoney(existing?.list) || 0;
 
-          // Outlier check: Stratus price should never exceed list price
-          if (listPrice > 0 && price > listPrice) {
+          // Outlier check: Stratus price should never exceed Zoho's live Product list price.
+          if (listPrice > 0 && ecommPrice > listPrice) {
             outliers++;
             continue; // Keep existing price
           }
 
           // Track if price actually changed
-          if (existing?.price !== price) {
-            priceChanges.push({ sku, oldPrice: existing?.price, newPrice: price });
+          if (existing?.price !== ecommPrice || (liveListPrice && existing?.list !== liveListPrice)) {
+            priceChanges.push({
+              sku,
+              oldPrice: existing?.price,
+              newPrice: ecommPrice,
+              oldListPrice: existing?.list,
+              newListPrice: liveListPrice || existing?.list
+            });
             // D1: Log price change (fire-and-forget)
             ctx.waitUntil(logPriceChangeToD1(env, {
               sku,
               oldPrice: existing?.price,
-              newPrice: price,
-              listPrice: existing?.list || null
+              newPrice: ecommPrice,
+              listPrice
             }));
           }
 
           // Merge into existing entry — preserve zoho_product_id and all other fields
-          existing.price = price;
+          existing.price = ecommPrice;
+          if (liveListPrice && liveListPrice > 0) existing.list = liveListPrice;
+          if (liveProductId) existing.zoho_product_id = liveProductId;
           if (listPrice > 0) {
-            existing.discount = Math.round(((listPrice - price) / listPrice) * 10000) / 10000;
-            existing.discount_per_unit = Math.round((listPrice - price) * 100) / 100;
-            existing.discount_pct = Math.round((1 - price / listPrice) * 100);
+            existing.discount = Math.round(((listPrice - ecommPrice) / listPrice) * 10000) / 10000;
+            existing.discount_per_unit = roundCents(listPrice - ecommPrice);
+            existing.discount_pct = Math.round((1 - ecommPrice / listPrice) * 100);
           }
           updated++;
         }
