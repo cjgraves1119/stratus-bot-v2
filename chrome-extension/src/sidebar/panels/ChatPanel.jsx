@@ -257,7 +257,12 @@ export default function ChatPanel({
     return () => { cancelled = true; clearInterval(interval); };
   }, [zohoPageContextProp]);
 
-  // Build a context hint string for "this quote"-style references
+  // Build a context hint string for "this {record}"-style references.
+  // MODULE-SCOPED wording (Phase 1, 2026-05-12): "this quote" on an Account
+  // page must NOT be interpreted as the Account itself. Same for Deals and
+  // every non-Quotes module. Quote-specific follow-ups should defer to the
+  // most-recent-quote session header injected by the worker. The active page
+  // is parent/customer context for new creates, not the quote itself.
   function buildZohoPageContextHint(ctx) {
     if (!ctx || !ctx.recordId) return '';
     const moduleLabel = ({
@@ -279,7 +284,17 @@ export default function ChatPanel({
     lines.push(`URL: ${url}`);
     if (ctx.accountName) lines.push(`Account: ${ctx.accountName}`);
     if (ctx.email) lines.push(`Contact email: ${ctx.email}`);
-    lines.push(`When the user says "this", "this quote", "the quote", "modify this", etc., they mean ${moduleLabel} ${ctx.recordId}. Act on it directly without asking which one.`);
+
+    // Module-specific interpretation of deictic phrases ("this quote", etc.)
+    if (ctx.module === 'Quotes') {
+      lines.push(`Quote-specific wording — "this quote", "that quote", "the quote", "modify this", "convert this", "send this for signature" — means Quote ${ctx.recordId}. Act on it directly without asking which quote.`);
+    } else if (ctx.module === 'Accounts') {
+      lines.push(`This Account is the CUSTOMER/PARENT CONTEXT for any new Deals, Quotes, Contacts, or Tasks the user asks you to create. Do NOT treat this Account as "this quote". If the user says "the quote", "that quote", or "the quote you just created", use the most-recent quote from the chat/session (see [Session: Most recently worked quote] header if present). If no recent quote exists in this session, ASK which quote rather than assuming this Account is one.`);
+    } else if (ctx.module === 'Potentials' || ctx.module === 'Deals') {
+      lines.push(`This Deal is the PARENT CONTEXT for quote creation, line edits, and PO/e-sign workflows on this deal. Do NOT treat this Deal as "this quote". If the user says "the quote", "that quote", or "the quote you just created", prefer the most-recent quote from the chat/session linked to this Deal (see [Session: Most recently worked quote] header if present). If no recent session quote exists, ASK which quote on this Deal rather than assuming.`);
+    } else {
+      lines.push(`When the user says "this" or "modify this", they mean ${moduleLabel} ${ctx.recordId}. For quote-specific follow-ups ("the quote", "that quote", "send this for signature"), prefer the most-recent quote from the chat/session (see [Session: Most recently worked quote] header if present). Do NOT assume this ${moduleLabel} is a quote unless the module is Quotes.`);
+    }
     return lines.join('\n');
   }
 

@@ -9904,8 +9904,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       // ── Compound: Quote → DID → Velocity Hub → PO → e-sign ──
+      // Phase 3 (2026-05-12): Routes through QuotePoWorkflow when the
+      // env.QUOTE_PO_WORKFLOW_ENABLED kill switch is on. Falls back to inline
+      // synchronous execution when off, when the binding is missing, or when
+      // workflow create errors. Caller-aware hybrid wait window: completes in
+      // the same turn on happy-path, returns in_progress on slow Cisco days.
       case 'quote_to_po_and_esign': {
-        return await handleQuoteToPoAndEsign(toolInput, env, personId);
+        return await handleQuoteToPoAndEsignViaWorkflow(toolInput, env, personId);
+      }
+      case 'quote_to_po_status': {
+        return await handleQuotePoStatus(toolInput, env, personId);
       }
 
       // ── Web Enrichment Tools ──
@@ -11894,7 +11902,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'quote_to_po_and_esign',
-    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → vendor/disti refresh → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool verifies/repairs missing Quote Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION" before conversion, then writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing. Grand_Total and tax differences are allowed when pre-tax/ecomm economics match because Zoho may automatically tax only some line items, all line items, or no line items. It blocks if line-item detail is unavailable, if any pre-tax/ecomm line economics differ, or if the Sales Order has no Vendor before e-signature. It treats explicit Sales Order e-sign/send errors as failures and will not claim sent unless Zoho shows a sent/processing status. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied.',
+    description: 'Deterministic admin-action workflow for Quote → Cisco DID → Velocity Hub submission → vendor/disti refresh → PO/Sales Order conversion → PO e-signature. Use this when the user says convert quote to PO, send PO/contract for signature/e-sign/DocuSign, generate DID then send PO, or similar. NEVER manually set Deal.Stage, Quote.Stage, Quote_Stage, tax, or pricing fields for this workflow. This tool verifies/repairs missing Quote Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION" before conversion, then writes only Admin_Action fields plus Net_Terms when safely blank under $5k. It verifies the Sales Order preserves the Quote line items and pre-tax/ecomm pricing. Grand_Total and tax differences are allowed when pre-tax/ecomm economics match because Zoho may automatically tax only some line items, all line items, or no line items. It blocks if line-item detail is unavailable, if any pre-tax/ecomm line economics differ, or if the Sales Order has no Vendor before e-signature. It treats explicit Sales Order e-sign/send errors as failures and will not claim sent unless Zoho shows a sent/processing status. If the deal already has Sales Orders, it blocks unless force_create_po:true is explicitly confirmed by the user or sales_order_id is supplied. WHEN ENABLED (server-side QUOTE_PO_WORKFLOW_ENABLED kill switch on), this is routed through a durable Cloudflare Workflow: on happy-path runs (~2–3 min) the full payload returns in the same turn; on slow Cisco days the tool returns state:"in_progress" with a workflow_id — call quote_to_po_status(workflow_id) on a follow-up turn to read terminal state. NEVER manually chain LIVE_CiscoQuote_Deal + LIVE_GetQuoteData + LIVE_ConvertQuoteToSO + LIVE_SendToEsign yourself when this tool is available; that approach hits Cisco timing race conditions and the model drifts off the quote_id.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11904,6 +11912,17 @@ const CRM_EMAIL_TOOLS = [
         sales_order_id: { type: 'string', description: 'Optional existing Sales_Orders record ID to send for e-signature instead of creating a new PO. The workflow verifies the Sales Order is linked to the same Deal as the Quote before sending.' }
       },
       required: ['quote_id']
+    }
+  },
+  {
+    name: 'quote_to_po_status',
+    description: 'Check the status of a quote-to-PO/esign workflow that previously returned state:"in_progress" with a workflow_id. Call this on a follow-up turn (1–2 minutes after the in_progress response). Returns state:"terminal" with the full result payload when complete, or state:"running"/"queued" if still in flight. Does NOT trigger any Zoho writes — read-only status poll. Status TTL is 24 hours; older workflow_ids return state:"not_found".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        workflow_id: { type: 'string', description: 'The workflow_id returned by an earlier quote_to_po_and_esign call.' }
+      },
+      required: ['workflow_id']
     }
   },
   // Web enrichment
@@ -12716,13 +12735,20 @@ const CRM_PROMPT_ADMIN_ACTION = `
 
 Admin Actions are Zoho automations triggered by writing an action name to the Admin_Action field. Execute via API directly. NEVER tell user to click a button.
 
-Preferred path: call quote_to_po_and_esign for any request that combines DID generation, Velocity Hub submission, PO conversion, contract/PO creation, or e-signature sending. It performs the whole workflow deterministically, verifies Net_Terms/Contact/DID/PO linkage, verifies/repairs missing Quote Vendor to "TD SYNNEX CORPORATION", runs LIVE_GetQuoteData before conversion to refresh vendor/disti context, verifies that PO line items and pre-tax/ecomm economics match the Quote, allows Grand_Total and tax differences when pre-tax/ecomm economics match because Zoho may automatically tax hardware, licensing, both, or neither, blocks when line-item detail is unavailable, blocks duplicate PO creation unless force_create_po:true is explicitly confirmed, and sends LIVE_SendToEsign on Sales_Orders only after the Sales Order has a Vendor populated. If the Sales Order is missing Vendor or reports a client-send/signature error, report "PO created, pricing verified, but e-signature was not sent" and include the Zoho reason.
+**REQUIRED PATH — quote_to_po_and_esign:**
 
-**Trigger process:**
+For ANY request that combines two or more of {DID generation / Velocity Hub submission / PO conversion / contract creation / e-signature sending}, call \`quote_to_po_and_esign(quote_id=...)\`. This is the ONLY supported way to chain these admin actions. It runs the full deterministic sequence end-to-end, verifies Net_Terms/Contact/DID/PO linkage, verifies/repairs missing Quote Vendor to "TD SYNNEX CORPORATION", runs LIVE_GetQuoteData to refresh vendor/disti context, verifies PO line items + pre-tax/ecomm economics match the Quote (Grand_Total/tax differences are allowed when pre-tax economics match because Zoho may auto-tax hardware, licensing, both, or neither), blocks when line-item detail is unavailable, blocks duplicate PO creation unless \`force_create_po:true\` is explicitly confirmed by the user, and sends LIVE_SendToEsign on the Sales_Orders module only after Vendor is populated. If the Sales Order is missing Vendor or reports a client-send/signature error, the tool itself returns success:false — relay "PO created, pricing verified, but e-signature was not sent" plus the Zoho reason from the result payload, NEVER fabricate a "sent" status.
+
+The tool MAY return \`state:"in_progress"\` with a \`workflow_id\` on slow Cisco days. When that happens, tell the user the workflow is running in the background, then call \`quote_to_po_status(workflow_id="...")\` on a follow-up turn (after 60–120 seconds) to read the terminal state. NEVER assume success on an in_progress response.
+
+**DO NOT manually chain LIVE_CiscoQuote_Deal + LIVE_GetQuoteData + LIVE_ConvertQuoteToSO + LIVE_SendToEsign via zoho_update_record yourself.** The model historically drifts on quote_id selection between steps, mis-times the async polling for CCW_Deal_Number, fails to discover the new Sales_Order after conversion, and trusts the \`Admin_Action__Done\` flag even when the Sales_Order trigger errored ("No any Vendor"-style lying-status). The wrapper handles all of that. The single-step admin-action procedure below is documented ONLY for the rare diagnostic case of generating a DID by itself or repairing a stuck record after the wrapper has failed and surfaced a specific recovery path. Never use it for compound DID→PO→esign requests.
+
+**Single-step admin-action procedure (diagnostic only):**
 1. TRIGGER: zoho_update_record(module_name="Quotes", record_id={id}, data={"Admin_Action": "{ACTION_NAME}"})
 2. VERIFY: zoho_get_record on same ID. Check Admin_Action shows "{ACTION_NAME}__Done". Re-fetch once more if unchanged.
+3. For LIVE_SendToEsign specifically, the module_name MUST be "Sales_Orders" — never "Quotes".
 
-**Admin Action Sequence:**
+**Admin Action Sequence (reference table — use quote_to_po_and_esign instead of chaining manually):**
 | Step | Action | Trigger Phrases | Verify Field |
 |------|--------|----------------|-------------|
 | 1 | LIVE_CiscoQuote_Deal | "create deal id", "generate DID", "get me a DID", "submit for DID", "fire the DID", "need a DID", "submit to CCW" | CCW_Deal_Number (8-digit) |
@@ -12860,6 +12886,8 @@ function toolProgressMessage(toolName, toolInput) {
     }
     case 'quote_to_po_and_esign':
       return `🧾 Running Quote → DID → PO → e-sign admin workflow...`;
+    case 'quote_to_po_status':
+      return `🔍 Checking quote-to-PO workflow status...`;
     case 'web_search_domain': {
       return `🌐 Looking up ${toolInput.domain || 'domain'}...`;
     }
@@ -14306,6 +14334,54 @@ async function verifyGoogleChatToken(request, env) {
  */
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Phase 1: Most-recent-quote session header helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+// Shared between /api/chat and /api/chat-waterfall (gateway path). Scans the
+// conversation history for the most recently mentioned Zoho Quote, returns a
+// {recordId, quoteNumber} pair if found. The session header tells the model
+// which quote "the quote" / "that quote" refers to on a follow-up turn — this
+// is the grounding fix for the Electrocraft 148/151 mismatch class of bugs.
+//
+// MODULE-SCOPED on the extension side (ChatPanel.jsx buildZohoPageContextHint):
+// the active page hint no longer claims an Account/Deal record IS a quote.
+// The session header is the authoritative source for "the quote" on
+// Account-context follow-ups.
+// ═══════════════════════════════════════════════════════════════════════════════
+function extractMostRecentQuoteRefFromHistory(history) {
+  if (!Array.isArray(history) || history.length === 0) return null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msg = history[i];
+    if (!msg || msg.role !== 'assistant') continue;
+    const content = typeof msg.content === 'string'
+      ? msg.content
+      : (msg.content ? JSON.stringify(msg.content) : '');
+    if (!content) continue;
+    // Match Zoho Quote URLs: https://crm.zoho.com/crm/org{N}/tab/Quotes/{id}
+    const urlMatch = content.match(/crm\.zoho\.com\/crm\/org\d+\/tab\/Quotes\/(\d+)/);
+    // Match 14+ digit record id near "Quote" (e.g. "Quote 2570562000404932151")
+    const numMatch = content.match(/Quote[:\s#]+(\d{14,})/i);
+    // Match Zoho Quote_Number (typically "QU-..." or numeric short form near "Quote_Number")
+    const quoteNumMatch = content.match(/Quote_Number[:\s]+(QU-[A-Z0-9-]+|\d{5,})/i);
+    if (urlMatch || numMatch || quoteNumMatch) {
+      return {
+        recordId: urlMatch ? urlMatch[1] : (numMatch ? numMatch[1] : null),
+        quoteNumber: quoteNumMatch ? quoteNumMatch[1] : null
+      };
+    }
+  }
+  return null;
+}
+
+function buildMostRecentQuoteSessionHeader(history) {
+  const ref = extractMostRecentQuoteRefFromHistory(history);
+  if (!ref || (!ref.recordId && !ref.quoteNumber)) return '';
+  const parts = [];
+  if (ref.quoteNumber) parts.push(`Quote_Number: ${ref.quoteNumber}`);
+  if (ref.recordId) parts.push(`Record_ID: ${ref.recordId} — URL: https://crm.zoho.com/crm/org647122552/tab/Quotes/${ref.recordId}`);
+  return `[Session: Most recently worked quote — ${parts.join(', ')}. When user says "the quote", "that quote", or "same quote" without specifying another, use THIS quote. Do NOT ask which quote. An active Account or Deal page is parent/customer context, not "the quote" — defer to THIS session quote on quote-specific follow-ups.]`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Cloudflare Workflow: Durable CRM Execution
 // ═══════════════════════════════════════════════════════════════════════════════
 // Replaces Queue-based CRM dispatch with per-step retries and durable state.
@@ -14433,6 +14509,338 @@ export class CrmWorkflow extends WorkflowEntrypoint {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 3 (2026-05-12) — QuotePoWorkflow: durable quote→DID→PO→e-sign
+// ═══════════════════════════════════════════════════════════════════════════════
+// Wraps the existing synchronous handleQuoteToPoAndEsign orchestrator in a
+// Cloudflare Workflow so:
+//   - Execution survives the in-request wall-clock cap (workflows run on a
+//     separate isolate with per-step retry & sleep semantics).
+//   - The starter tool can return immediately on slow Cisco days while the
+//     workflow keeps running, then the user (via the model) polls status via
+//     `quote_to_po_status(workflow_id)`.
+//   - Failures are logged once per terminal state in D1.quote_po_workflow_runs
+//     for diagnostic visibility.
+//
+// Kill switch: env.QUOTE_PO_WORKFLOW_ENABLED.
+//   - "true" / true / "1" → use the workflow path
+//   - anything else (default) → fall back to inline synchronous execution
+//     (identical to pre-Phase-3 behavior)
+// Flip without redeploy:
+//   wrangler secret put QUOTE_PO_WORKFLOW_ENABLED --name stratus-ai-bot-gchat
+//
+// MVP scope: single step.do wrapping handleQuoteToPoAndEsign. Worst-case 322s
+// fits inside the 5-minute step ceiling on happy paths. Future split into
+// per-action steps (DID / convert / esign) for true per-step retry is queued.
+//
+// NO advisor() call inside the workflow — failed-closed payloads only.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const QUOTE_PO_WORKFLOW_STATUS_TTL = 86400; // 24h KV TTL for status records
+
+function isQuotePoWorkflowEnabled(env) {
+  const v = env?.QUOTE_PO_WORKFLOW_ENABLED;
+  return v === true || v === 'true' || v === '1';
+}
+
+async function writeQuotePoStatus(env, workflowId, payload) {
+  if (!env?.CONVERSATION_KV || !workflowId) return;
+  try {
+    const record = { ...payload, updated_at: Date.now() };
+    await env.CONVERSATION_KV.put(
+      `quote_po_workflow:${workflowId}`,
+      JSON.stringify(record),
+      { expirationTtl: QUOTE_PO_WORKFLOW_STATUS_TTL }
+    );
+  } catch (err) {
+    console.log(`[QPO-KV] writeQuotePoStatus skipped: ${err.message}`);
+  }
+}
+
+async function readQuotePoStatus(env, workflowId) {
+  if (!env?.CONVERSATION_KV || !workflowId) return null;
+  try {
+    return await env.CONVERSATION_KV.get(`quote_po_workflow:${workflowId}`, 'json');
+  } catch (err) {
+    console.log(`[QPO-KV] readQuotePoStatus error: ${err.message}`);
+    return null;
+  }
+}
+
+async function logQuotePoWorkflowRun(env, {
+  workflow_id, quote_id, person_id, status, error_message, duration_ms,
+  result, caller_source
+}) {
+  if (!env?.ANALYTICS_DB) return;
+  try {
+    const resultSummary = result
+      ? JSON.stringify({
+          success: !!result.success,
+          state: result.state || null,
+          sales_order_id: result.sales_order?.id || result.sales_order_id || null,
+          error: result.error || null
+        }).substring(0, 4000)
+      : null;
+    const salesOrderId = result?.sales_order?.id || result?.sales_order_id || null;
+    const createdPo = result?.sales_order?.id ? 1 : 0;
+    const esignSent = result?.esign_admin_action?.success || result?._user_visible_summary?.toLowerCase?.()?.includes?.('sent for e-signature') ? 1 : 0;
+    await env.ANALYTICS_DB.prepare(
+      `INSERT INTO quote_po_workflow_runs (
+        workflow_id, quote_id, person_id, status, error_message, duration_ms,
+        result_summary, sales_order_id, created_po, esign_sent, caller_source, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      workflow_id || null,
+      quote_id || null,
+      person_id || null,
+      status || 'unknown',
+      error_message || null,
+      duration_ms || null,
+      resultSummary,
+      salesOrderId,
+      createdPo,
+      esignSent,
+      caller_source || null,
+      new Date().toISOString()
+    ).run();
+  } catch (err) {
+    console.log(`[QPO-D1] logQuotePoWorkflowRun skipped: ${err.message}`);
+  }
+}
+
+export class QuotePoWorkflow extends WorkflowEntrypoint {
+  async run(event, step) {
+    const env = this.env;
+    const payload = event?.payload || {};
+    const workflowId = payload.workflow_id;
+    const quoteId = payload.quote_id;
+    const personId = payload.person_id || 'workflow-system';
+    const callerSource = payload.caller_source || null;
+    const t0 = payload._t0 || Date.now();
+
+    if (!workflowId || !quoteId) {
+      throw new Error(`[QPO-WORKFLOW] missing workflow_id or quote_id (got workflow_id=${workflowId}, quote_id=${quoteId})`);
+    }
+
+    console.log(`[QPO-WORKFLOW] Starting workflow_id=${workflowId} quote_id=${quoteId}`);
+
+    await writeQuotePoStatus(env, workflowId, {
+      state: 'running',
+      step: 'execute',
+      quote_id: quoteId,
+      person_id: personId,
+      started_at: t0
+    });
+
+    let result;
+    try {
+      result = await step.do('execute',
+        { retries: { limit: 1, delay: '10 seconds' }, timeout: '5 minutes' },
+        async () => {
+          // Module state is lost across step retries; reload prices defensively.
+          if (env.CONVERSATION_KV) {
+            try { await loadLivePrices(env); } catch (_) {}
+          }
+          return await handleQuoteToPoAndEsign(
+            {
+              quote_id: quoteId,
+              send_for_esign: payload.send_for_esign !== false,
+              force_create_po: payload.force_create_po === true,
+              sales_order_id: payload.sales_order_id || null
+            },
+            env,
+            personId
+          );
+        }
+      );
+    } catch (stepErr) {
+      const errMsg = stepErr?.message || String(stepErr);
+      console.error(`[QPO-WORKFLOW] step.do threw: ${errMsg}`);
+      await writeQuotePoStatus(env, workflowId, {
+        state: 'terminal',
+        success: false,
+        error: errMsg,
+        completed_at: Date.now()
+      });
+      await logQuotePoWorkflowRun(env, {
+        workflow_id: workflowId,
+        quote_id: quoteId,
+        person_id: personId,
+        status: 'error',
+        error_message: errMsg,
+        duration_ms: Date.now() - t0,
+        caller_source: callerSource
+      });
+      throw stepErr;
+    }
+
+    await writeQuotePoStatus(env, workflowId, {
+      state: 'terminal',
+      success: !!result?.success,
+      result,
+      completed_at: Date.now()
+    });
+
+    await logQuotePoWorkflowRun(env, {
+      workflow_id: workflowId,
+      quote_id: quoteId,
+      person_id: personId,
+      status: result?.success ? 'success' : 'error',
+      error_message: result?.error || null,
+      duration_ms: Date.now() - t0,
+      result,
+      caller_source: callerSource
+    });
+
+    console.log(`[QPO-WORKFLOW] Completed workflow_id=${workflowId} success=${!!result?.success} duration=${Date.now() - t0}ms`);
+    return result;
+  }
+}
+
+// Hybrid sync/async wait wrapper. Triggers QuotePoWorkflow then blocks on
+// KV-based status polling for a caller-aware window. Falls back to inline
+// synchronous execution when the kill switch is off, the binding is missing,
+// or workflow create() fails.
+async function handleQuoteToPoAndEsignViaWorkflow(toolInput, env, personId) {
+  const quoteId = toolInput?.quote_id;
+  if (!quoteId) {
+    return { success: false, error: 'quote_id is required', _no_partial_success: true };
+  }
+
+  // Kill switch — when disabled, behave exactly like before Phase 3.
+  if (!isQuotePoWorkflowEnabled(env)) {
+    return await handleQuoteToPoAndEsign(toolInput, env, personId);
+  }
+
+  if (!env?.QUOTE_PO_WORKFLOW || typeof env.QUOTE_PO_WORKFLOW.create !== 'function') {
+    console.log('[QPO] QUOTE_PO_WORKFLOW binding missing; falling back to inline');
+    return await handleQuoteToPoAndEsign(toolInput, env, personId);
+  }
+
+  // Source-aware wait window. Async-capable callers can hold longer; sync
+  // HTTP callers (extension /api/chat, /api/chat-waterfall) need a tighter
+  // budget so the HTTP response doesn't time out before we return.
+  const callerSource = env.__CALLER_SOURCE || 'unknown';
+  const waitMs = (callerSource === 'gchat' || callerSource === 'workflow' || callerSource === 'async')
+    ? 150000
+    : 95000;
+
+  let workflowId;
+  try {
+    workflowId = crypto.randomUUID();
+  } catch (_) {
+    workflowId = `qpo-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  const t0 = Date.now();
+
+  // Pre-seed KV with 'queued' so a status poll between create() and the
+  // workflow's first KV write returns coherent state.
+  await writeQuotePoStatus(env, workflowId, {
+    state: 'queued',
+    quote_id: quoteId,
+    person_id: personId,
+    started_at: t0
+  });
+
+  try {
+    await env.QUOTE_PO_WORKFLOW.create({
+      params: {
+        workflow_id: workflowId,
+        quote_id: quoteId,
+        send_for_esign: toolInput.send_for_esign !== false,
+        force_create_po: toolInput.force_create_po === true,
+        sales_order_id: toolInput.sales_order_id || null,
+        person_id: personId,
+        caller_source: callerSource,
+        _t0: t0
+      }
+    });
+  } catch (createErr) {
+    console.log(`[QPO] Workflow create failed (${createErr.message}); falling back to inline`);
+    // Log the fall-back so we can spot binding/permission issues.
+    await logQuotePoWorkflowRun(env, {
+      workflow_id: workflowId,
+      quote_id: quoteId,
+      person_id: personId,
+      status: 'error',
+      error_message: `workflow_create_failed: ${createErr.message}`,
+      duration_ms: Date.now() - t0,
+      caller_source: callerSource
+    });
+    return await handleQuoteToPoAndEsign(toolInput, env, personId);
+  }
+
+  // Poll KV for status until the workflow terminates or we hit the wait deadline.
+  const deadline = Date.now() + waitMs;
+  const pollIntervalMs = 2500;
+  let lastStatus = null;
+  while (Date.now() < deadline) {
+    await sleep(pollIntervalMs);
+    lastStatus = await readQuotePoStatus(env, workflowId);
+    if (lastStatus?.state === 'terminal') {
+      const result = lastStatus.result || {
+        success: !!lastStatus.success,
+        error: lastStatus.error
+      };
+      return {
+        ...result,
+        _workflow: {
+          workflow_id: workflowId,
+          mode: 'completed_in_window',
+          wall_ms: Date.now() - t0
+        }
+      };
+    }
+  }
+
+  // Wait window expired; workflow is still running in the background.
+  return {
+    success: false,
+    state: 'in_progress',
+    workflow_id: workflowId,
+    quote_id: quoteId,
+    current_step: lastStatus?.step || 'running',
+    started_at: t0,
+    wall_ms: Date.now() - t0,
+    next_action: `quote_to_po_status with workflow_id="${workflowId}"`,
+    _user_visible_summary: `Quote-to-PO workflow started (id ${workflowId.substring(0, 8)}...). It is still running in the background. I'll check back in 1–2 minutes — or you can ask "status of that workflow" any time.`
+  };
+}
+
+async function handleQuotePoStatus(toolInput, env, personId) {
+  const workflowId = toolInput?.workflow_id;
+  if (!workflowId) {
+    return { success: false, error: 'workflow_id is required' };
+  }
+  const status = await readQuotePoStatus(env, workflowId);
+  if (!status) {
+    return {
+      success: false,
+      workflow_id: workflowId,
+      state: 'not_found',
+      error: 'Workflow id not found. It may have expired (24h KV TTL) or the create() call failed.'
+    };
+  }
+  if (status.state === 'terminal') {
+    const result = status.result || { success: !!status.success, error: status.error };
+    return {
+      success: !!result.success,
+      workflow_id: workflowId,
+      state: 'terminal',
+      completed_at: status.completed_at || null,
+      ...result
+    };
+  }
+  return {
+    success: false,
+    workflow_id: workflowId,
+    state: status.state || 'running',
+    step: status.step || null,
+    started_at: status.started_at || null,
+    updated_at: status.updated_at || null
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // A/B MODEL BENCHMARK INFRASTRUCTURE
 // Compares Claude vs Cloudflare Workers AI models on CRM tool-use tasks.
@@ -14471,7 +14879,8 @@ const BENCHMARK_READ_TOOLS = new Set([
   'gmail_read_thread',
   'parse_quote_url',
   'web_search_domain',
-  'build_quote_url'
+  'build_quote_url',
+  'quote_to_po_status'
 ]);
 
 // Wrapper for executeToolCall that mocks writes in dry-run mode.
@@ -18981,6 +19390,23 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 }
               }
 
+              // ── PHASE 1: Most-recent-quote session header ──
+              // Inject the most-recent-quote session header so the model knows
+              // which quote "the quote" / "that quote" refers to on a follow-up
+              // turn. This closes the parity gap between /api/chat (which has
+              // this header) and /api/chat-waterfall (gateway path, which did
+              // not before 2026-05-12). Module-scoped ChatPanel hint on the
+              // extension side defers Quote-specific deictic phrasing to this
+              // header on Account/Deal pages.
+              try {
+                const _quoteHeader = buildMostRecentQuoteSessionHeader(wHistory);
+                if (_quoteHeader) {
+                  wEnrichedMessage = `${_quoteHeader}\n\n${wEnrichedMessage}`;
+                }
+              } catch (qHdrErr) {
+                console.log(`[WATERFALL] Quote session header skipped: ${qHdrErr.message}`);
+              }
+
               let outcome;
 
               // ── 2026-05-05 council: ambiguous license-term hard gate ──
@@ -19355,31 +19781,19 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
               // Only inject email context parts if present (customer/domain info).
               // The extension systemContext is intentionally ignored here.
 
-              // ── IMPLICIT QUOTE CONTEXT ──
+              // ── IMPLICIT QUOTE CONTEXT (Phase 1 — shared helper) ──
               // Scan recent conversation history for the most recently mentioned Zoho quote.
               // Inject it so Claude knows which quote "the quote" / "that quote" refers to.
-              let lastQuoteRef = null;
-              if (chatHistory && chatHistory.length > 0) {
-                for (let _qi = chatHistory.length - 1; _qi >= 0; _qi--) {
-                  const _qm = chatHistory[_qi];
-                  if (_qm.role === 'assistant' && _qm.content) {
-                    const _urlMatch = _qm.content.match(/crm\.zoho\.com\/crm\/org\d+\/tab\/Quotes\/(\d+)/);
-                    const _numMatch = _qm.content.match(/Quote[:\s#]+(\d{14,})/i);
-                    if (_urlMatch || _numMatch) {
-                      lastQuoteRef = {
-                        recordId: _urlMatch ? _urlMatch[1] : null,
-                        quoteNumber: _numMatch ? _numMatch[1] : null
-                      };
-                      break;
-                    }
-                  }
+              // Refactored 2026-05-12 to use the same buildMostRecentQuoteSessionHeader()
+              // helper that /api/chat-waterfall also uses, so behavior is identical on both
+              // ingress paths.
+              try {
+                const _quoteHeader = buildMostRecentQuoteSessionHeader(chatHistory);
+                if (_quoteHeader) {
+                  enrichedMessage = `${_quoteHeader}\n\n${enrichedMessage}`;
                 }
-              }
-              if (lastQuoteRef) {
-                const _qDesc = [];
-                if (lastQuoteRef.quoteNumber) _qDesc.push(`Quote_Number: ${lastQuoteRef.quoteNumber}`);
-                if (lastQuoteRef.recordId) _qDesc.push(`Record_ID: ${lastQuoteRef.recordId} — URL: https://crm.zoho.com/crm/org647122552/tab/Quotes/${lastQuoteRef.recordId}`);
-                enrichedMessage = `[Session: Most recently worked quote — ${_qDesc.join(', ')}. When user says "the quote", "that quote", or "same quote" without specifying another, use THIS quote. Do NOT ask which quote.]\n\n${enrichedMessage}`;
+              } catch (qHdrErr) {
+                console.log(`[API/chat] Quote session header skipped: ${qHdrErr.message}`);
               }
 
               // ── CRM TOOL-USE DECISION ──
