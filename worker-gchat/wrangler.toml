@@ -14,6 +14,12 @@ compatibility_date = "2024-01-01"
 # reopen only with fresh sealed eval evidence.
 USE_DEEPSEEK_TIER_3 = "false"
 USE_DEEPSEEK_ADVISORY = "false"
+# Phase 3 (2026-05-12) — kill switch for QuotePoWorkflow durable orchestrator.
+# Default off so first deploy after merge does NOT change behavior. Flip via:
+#   wrangler secret put QUOTE_PO_WORKFLOW_ENABLED --name stratus-ai-bot-gchat
+# or set here as "true" and redeploy. When off, quote_to_po_and_esign falls
+# back to inline synchronous execution (identical to pre-Phase-3 behavior).
+QUOTE_PO_WORKFLOW_ENABLED = "false"
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
 #
 # ─── CRM & Email Agent Secrets (POC) ───
@@ -94,6 +100,17 @@ crons = ["0 11 * * *"]
 name = "stratus-gchat-crm-workflow"
 binding = "CRM_WORKFLOW"
 class_name = "CrmWorkflow"
+
+# Phase 3 (2026-05-12) — Quote-to-PO/esign durable orchestrator.
+# QuotePoWorkflow is defined in src/index.js. Wraps the existing synchronous
+# handleQuoteToPoAndEsign in a Workflow step so the request can return early
+# while the chain finishes in the background. Kill-switched by env var
+# QUOTE_PO_WORKFLOW_ENABLED (defaults "false" — falls back to inline exec).
+# Without this binding, the wrapper silently falls back to inline.
+[[workflows]]
+name = "stratus-gchat-quote-po-workflow"
+binding = "QUOTE_PO_WORKFLOW"
+class_name = "QuotePoWorkflow"
 
 # ── Analytics Engine: real-time telemetry ───────────────────────────────────
 # writeMetric() in src/index.js already writes to env.BOT_METRICS with
