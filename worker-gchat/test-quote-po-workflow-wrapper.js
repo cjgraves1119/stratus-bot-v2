@@ -175,9 +175,12 @@ t('wrangler.toml binds QuotePoWorkflow', () => {
     'class_name = QuotePoWorkflow missing in wrangler.toml');
 });
 
-t('wrangler.toml sets QUOTE_PO_WORKFLOW_ENABLED = "false" by default', () => {
-  assert.ok(/QUOTE_PO_WORKFLOW_ENABLED = "false"/.test(wranglerToml),
-    'kill switch should default to "false" so first deploy is no-op');
+t('wrangler.toml has QUOTE_PO_WORKFLOW_ENABLED set (Phase 3 enable status)', () => {
+  // Updated 2026-05-13: PR #63 flipped this to "true" to enable Phase 3 in
+  // production. The kill-switch mechanic still works either way; this test
+  // just verifies the var is present and explicit (not missing).
+  assert.ok(/QUOTE_PO_WORKFLOW_ENABLED\s*=\s*"(true|false)"/.test(wranglerToml),
+    'QUOTE_PO_WORKFLOW_ENABLED must be set in wrangler.toml [vars] (current value can be either true or false depending on rollout state)');
 });
 
 t('CRM_WORKFLOW binding still present (regression check)', () => {

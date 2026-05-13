@@ -6000,6 +6000,38 @@ function validateCrmWrite(module_name, data, isCreate = false) {
   }
 
   if (module_name === 'Quotes') {
+    // ─── 2026-05-13 Vendor field hardening (council Item 1 / gaps 1 + 3) ───
+    // Quote.Vendor is a TEXT field. Quote.Vendor1 is a LOOKUP to the Vendors
+    // module. Writing the TEXT field breaks Cisco CCW DID generation.
+    // Intercept Vendor writes from any path (zoho_create_record /
+    // zoho_update_record / generic) and reroute or reject.
+    const _vendorTextHasValue = data.Vendor !== undefined && data.Vendor !== null && data.Vendor !== '';
+    const _vendorLookupHasValue = data.Vendor1 !== undefined && data.Vendor1 !== null && data.Vendor1 !== '';
+    if (_vendorTextHasValue) {
+      if (_vendorLookupHasValue) {
+        console.warn('[VALIDATE] Quote write had both Vendor (text) and Vendor1 (lookup) — dropping Vendor text');
+        delete data.Vendor;
+      } else if (typeof data.Vendor === 'object' && data.Vendor) {
+        console.warn('[VALIDATE] Quote.Vendor passed as object — rerouting to Vendor1 lookup');
+        data.Vendor1 = data.Vendor;
+        delete data.Vendor;
+      } else {
+        const _textValue = String(data.Vendor || '').trim();
+        if (_textValue === DEFAULT_QUOTE_VENDOR_NAME) {
+          console.warn(`[VALIDATE] Quote.Vendor text "${_textValue}" rewritten to Vendor1 lookup (id ${DEFAULT_QUOTE_VENDOR_ID})`);
+          data.Vendor1 = DEFAULT_QUOTE_VENDOR;
+          delete data.Vendor;
+        } else {
+          errors.push(
+            '❌ Quote.Vendor is a text field that breaks Cisco CCW DID generation when populated. ' +
+            'Use Vendor1 (lookup) instead. Known Vendor record: "' + DEFAULT_QUOTE_VENDOR_NAME + '" ' +
+            '(id ' + DEFAULT_QUOTE_VENDOR_ID + '). To set the default vendor, pass: ' +
+            'Vendor1: { id: "' + DEFAULT_QUOTE_VENDOR_ID + '", name: "' + DEFAULT_QUOTE_VENDOR_NAME + '" }. ' +
+            'If you need a different Vendor, look up its record in the Vendors module first and pass the lookup object.'
+          );
+        }
+      }
+    }
     if ('Stage' in data) {
       errors.push('❌ Quotes do not use the Deal Stage field. Do not set Stage on Quotes. For quote-to-PO workflows, trigger Admin_Action only.');
     }
@@ -7162,6 +7194,43 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
   };
   let netTermsNotice = null;
   const withTermsNotice = (message) => netTermsNotice ? `${message} ${netTermsNotice}` : message;
+
+  // ─── 2026-05-13 (council Item 4) — Duplicate-fire short-circuit ─────────
+  // Detect repeated quote_to_po_and_esign calls on the same quote_id within
+  // the last 5 minutes that already produced a Sales Order. The downstream
+  // duplicate-PO guard fires correctly but takes 60-90s to time out, leaving
+  // the user thinking the chain took a long time. This short-circuit returns
+  // the existing Sales Order in <1s with a clear duplicate signal. Only
+  // fires when sales_order_id wasn't explicitly passed (caller-driven resume)
+  // and force_create_po is false (caller didn't intend a 2nd PO).
+  if (quoteId && !requestedSalesOrderId && !forceCreatePo && env?.ANALYTICS_DB) {
+    try {
+      const recentRows = await env.ANALYTICS_DB.prepare(
+        `SELECT workflow_id, sales_order_id, status, created_at FROM quote_po_workflow_runs
+         WHERE quote_id = ? AND status = 'success' AND sales_order_id IS NOT NULL
+           AND created_at > datetime('now', '-5 minutes')
+         ORDER BY id DESC LIMIT 1`
+      ).bind(quoteId).all();
+      const recent = (recentRows?.results || [])[0];
+      if (recent?.sales_order_id) {
+        const existingSo = await fetchRecordFull('Sales_Orders', recent.sales_order_id, env).catch(() => null);
+        if (existingSo?.id) {
+          return finish({
+            success: true,
+            state: 'duplicate_call_recent_success',
+            quote_id: quoteId,
+            sales_order: summarizeSalesOrdersForUser([existingSo])[0],
+            previous_workflow_id: recent.workflow_id,
+            previous_completed_at: recent.created_at,
+            _user_visible_summary: `That quote was already converted to PO ${existingSo.SO_Number || recent.sales_order_id} a moment ago. Returning the existing record instead of creating a duplicate.`,
+            note: 'Short-circuited a duplicate quote_to_po_and_esign call (last success was less than 5 minutes ago).'
+          }, 'success');
+        }
+      }
+    } catch (dupErr) {
+      console.warn(`[QUOTE-PO] Duplicate-detection probe failed (proceeding with full flow): ${dupErr.message}`);
+    }
+  }
 
   if (!quoteId) {
     return finish({ success: false, error: 'quote_id is required', _no_partial_success: true });
@@ -10100,15 +10169,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.records.quote.verification = quoteVerification;
 
           // STEP 8: Create follow-up task
+          // 2026-05-13 (council Item 2): Subject derivation falls through
+          // 4 sources (accountData → account_name → existingDealData → dealId)
+          // so create_quote_on_deal (often omits account_name) doesn't end up
+          // with "Follow up - undefined". Also: distinguish Zoho-rejected from
+          // success-without-id from thrown so silent skips become visible.
           const taskDueDate = new Date();
-          // Add 3 business days
           let daysAdded = 0;
           while (daysAdded < 3) {
             taskDueDate.setDate(taskDueDate.getDate() + 1);
             if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
           }
+          const _taskAccountLabel = accountData?.Account_Name
+            || account_name
+            || existingDealData?.Deal_Name
+            || (results.records.deal?.name)
+            || `Deal ${dealId}`;
           const taskData = {
-            Subject: `Follow up - ${account_name}`,
+            Subject: `Follow up - ${_taskAccountLabel}`,
             Due_Date: taskDueDate.toISOString().split('T')[0],
             Status: 'Not Started',
             Priority: 'Normal',
@@ -10118,13 +10196,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           };
           try {
             const taskResult = await zohoApiCall('POST', 'Tasks', env, { data: [taskData] });
-            const taskId = taskResult?.data?.[0]?.details?.id;
+            const taskRow = taskResult?.data?.[0];
+            const taskId = taskRow?.details?.id;
             if (taskId) {
               results.steps.push(`Created follow-up Task due ${taskData.Due_Date} (${taskId})`);
               results.records.task = { id: taskId, url: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${taskId}` };
+            } else if (taskRow?.status === 'error') {
+              results.steps.push(`Follow-up Task creation rejected by Zoho: code=${taskRow.code || '?'}, message=${taskRow.message || '?'}, details=${JSON.stringify(taskRow.details || {}).substring(0, 200)}`);
+            } else {
+              results.steps.push(`Follow-up Task creation returned no id. Raw response: ${JSON.stringify(taskResult || {}).substring(0, 300)}`);
             }
           } catch (e) {
-            results.steps.push(`Task creation failed: ${e.message}`);
+            results.steps.push(`Follow-up Task creation threw: ${e.message}`);
           }
 
           results.success = true;
