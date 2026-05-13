@@ -6470,7 +6470,34 @@ async function fetchLiveSkuPricing(sku, productId, env) {
   const wooMatch = wooData.find(record =>
     record.WooProduct_Code === suffixed && !String(record.WooProduct_Code || '').includes('+')
   );
-  const ecommPrice = moneyValue(wooMatch?.Stratus_Price);
+  let ecommPrice = moneyValue(wooMatch?.Stratus_Price);
+
+  // 2026-05-13 — Cache fallback for missing-in-WooProducts SKUs.
+  // When the live WooProducts search SUCCEEDS but returns no matching record
+  // (gap case — the SKU exists in our embedded prices.json but hasn't been
+  // backfilled into Zoho's WooProducts module yet), fall back to the cached
+  // ecomm + list pair rather than fail loudly. The parity guarantee is
+  // preserved for the price-mismatch case (where WooProducts returns a
+  // DIFFERENT price than expected — that still surfaces because the cached
+  // value is used as-is). It is also preserved when the live query itself
+  // FAILS (network/auth/rate-limit) — we still fail loud there so a real
+  // outage doesn't quietly fall back to potentially-stale cache.
+  //
+  // Codex B1 cleanup symptom: MS130-24P-HW present in prices.json (list
+  // $3443, ecomm $1999) but absent from WooProducts module. The hard gate at
+  // hydrateResolvedProductsWithLivePricing then refused the entire quote.
+  // The right behavior is: if the daily cache has it and live confirms "no
+  // record" cleanly, use the cache and log so the team can backfill.
+  let _wooFromCache = false;
+  if (!(ecommPrice > 0) && wooResult.status === 'fulfilled') {
+    const cached = (typeof prices !== 'undefined') ? (prices[suffixed] || prices[sku]) : null;
+    const cachedEcomm = moneyValue(cached?.price);
+    if (cachedEcomm > 0) {
+      console.warn(`[LIVE-PRICING] WooProducts has no live record for ${suffixed}; falling back to embedded cache (ecomm $${cachedEcomm}). Backfill WooProducts.`);
+      ecommPrice = cachedEcomm;
+      _wooFromCache = true;
+    }
+  }
   if (!(ecommPrice > 0)) {
     return {
       success: false,
@@ -6502,13 +6529,27 @@ async function fetchLiveSkuPricing(sku, productId, env) {
   }
   const listPrice = moneyValue(productRecord?.Unit_Price);
 
+  // If the ecomm price came from the embedded cache (WooProducts gap), use
+  // the cached list price too when the live Products module has no record —
+  // otherwise a partial cache (ecomm only, no list) leaves discount math broken.
+  let resolvedListPrice = listPrice > 0 ? roundMoney(listPrice) : null;
+  if (resolvedListPrice == null && _wooFromCache) {
+    const cached = (typeof prices !== 'undefined') ? (prices[suffixed] || prices[sku]) : null;
+    const cachedList = moneyValue(cached?.list);
+    if (cachedList > 0) {
+      resolvedListPrice = roundMoney(cachedList);
+      console.warn(`[LIVE-PRICING] Products module also missing ${suffixed}; falling back to embedded cache list price ($${resolvedListPrice}).`);
+    }
+  }
+
   return {
     success: true,
     sku: suffixed,
     product_id: productRecord?.id || productId || null,
     ecomm_price: roundMoney(ecommPrice),
-    list_price: listPrice > 0 ? roundMoney(listPrice) : null,
-    product_code: productRecord?.Product_Code || null
+    list_price: resolvedListPrice,
+    product_code: productRecord?.Product_Code || null,
+    _woo_from_cache: _wooFromCache || undefined
   };
 }
 
