@@ -208,146 +208,43 @@ t('end-to-end stripTermFromLicSku sample stems', () => {
 
 // ─── Section 4: ordered Quoted_Items output ────────────────────────────────
 
-section('4. create_deal_and_quote emits ordered Quoted_Items');
+section('4. create_deal_and_quote line ordering — STEP 3c is sole authority post-revert');
 
-t('source builds _orderedResolved that respects input order', () => {
-  assert.ok(/_orderedResolved\s*=\s*\[\]/.test(source),
-    '_orderedResolved local accumulator must exist');
-  assert.ok(/_inputSuffixedSkus/.test(source),
-    'input-order mapping array must exist');
+t('PR #62 input-order override is removed (Cisco BOM compatibility)', () => {
+  // 2026-05-13: license-before-hardware ordering hangs Cisco CCW DID
+  // generation. PR #62 introduced an override that ordered lines by
+  // input position, which placed standalone licenses before hardware
+  // when the user supplied them first. Yesterday's working Quote
+  // 2570562000405707101 used STEP 3c ordering (HW first, standalones
+  // last) and successfully generated a DID. Today's stuck Quote
+  // 2570562000405752232 used PR #62 ordering and hangs. Override removed.
+  assert.ok(
+    !/_orderedResolved\s*=\s*\[\]/.test(source),
+    'PR #62 _orderedResolved override array must be removed'
+  );
+  assert.ok(
+    !/_inputSuffixedSkus/.test(source),
+    'PR #62 _inputSuffixedSkus must be removed'
+  );
+  assert.ok(
+    !/_consumedPairIndices/.test(source),
+    'PR #62 _consumedPairIndices must be removed'
+  );
 });
 
-t('source emits HW + paired LIC adjacency via consumed-pair index', () => {
-  // Per Codex review, duplicate HW input must not re-emit the same pair's
-  // license. _consumedPairIndices tracks which orderedPairs entries have
-  // been used.
-  assert.ok(/_consumedPairIndices\s*=\s*new Set\(\)/.test(source),
-    '_consumedPairIndices tracking missing — duplicate HW input would re-emit the same paired license');
-  assert.ok(/orderedPairs\[p\]\.hw === sku/.test(source),
-    'paired-license lookup must scan orderedPairs');
+t('quotedItems built directly from STEP-3c-reordered resolvedProducts', () => {
+  assert.ok(
+    /const quotedItems = resolvedProducts\.map\(p => \{[\s\S]+?Product_Name: \{ id: p\.product_id \}/.test(source),
+    'final quotedItems mapping must consume resolvedProducts directly (STEP 3c output)'
+  );
 });
 
-t('source defensively tail-appends anything not emitted in input-order pass', () => {
-  assert.ok(/Defensive tail-append/.test(source),
-    'defensive tail-append comment + behavior should be present');
-});
-
-t('quotedItems is built from _orderedResolved, not resolvedProducts directly', () => {
-  // Quick assertion: line that builds the final shape must reference
-  // _orderedResolved, not just resolvedProducts.map.
-  assert.ok(/const quotedItems = _orderedResolved\.map\(/.test(source),
-    'final Quoted_Items mapping must use _orderedResolved');
-});
-
-t('per-SKU FIFO queue handles duplicate HW input (Codex review)', () => {
-  // Simulate input with the same HW listed twice. Each occurrence should
-  // pull its own resolved product entry from the queue and its own paired
-  // license from the next unconsumed orderedPairs entry.
-  const inputSuffixedSkus = ['MS130-48P-HW', 'MS130-48P-HW'];
-  const resolvedProducts = [
-    { sku: 'MS130-48P-HW', qty: 5, product_id: 'hw-a' },
-    { sku: 'MS130-48P-HW', qty: 5, product_id: 'hw-b' },
-    { sku: 'LIC-MS130-48-1YR', qty: 5, product_id: 'lic-a' },
-    { sku: 'LIC-MS130-48-1YR', qty: 5, product_id: 'lic-b' }
-  ];
-  const orderedPairs = [
-    { hw: 'MS130-48P-HW', hwQty: 5, licSku: 'LIC-MS130-48-1YR' },
-    { hw: 'MS130-48P-HW', hwQty: 5, licSku: 'LIC-MS130-48-1YR' }
-  ];
-  const queue = new Map();
-  for (const rp of resolvedProducts) {
-    if (!queue.has(rp.sku)) queue.set(rp.sku, []);
-    queue.get(rp.sku).push(rp);
-  }
-  const consumedPairIdx = new Set();
-  const out = [];
-  for (const sku of inputSuffixedSkus) {
-    const q = queue.get(sku);
-    const rp = q && q.length ? q.shift() : null;
-    if (rp) out.push(rp);
-    let pairIdx = -1;
-    for (let p = 0; p < orderedPairs.length; p++) {
-      if (!consumedPairIdx.has(p) && orderedPairs[p].hw === sku) { pairIdx = p; break; }
-    }
-    if (pairIdx >= 0) {
-      consumedPairIdx.add(pairIdx);
-      const lic = orderedPairs[pairIdx].licSku;
-      const lq = queue.get(lic);
-      const licRp = lq && lq.length ? lq.shift() : null;
-      if (licRp) out.push(licRp);
-    }
-  }
-  const ids = out.map(r => r.product_id);
-  assert.deepEqual(ids, ['hw-a', 'lic-a', 'hw-b', 'lic-b'],
-    `duplicate-HW emission must consume queues + pairs independently, got ${JSON.stringify(ids)}`);
-});
-
-t('end-to-end ordering simulation against Chris\'s Par Excellence example', () => {
-  // Simulate the ordering algorithm in isolation against the original
-  // Par Excellence input (LIC-MS130-24-3Y, LIC-MX85-SEC-3Y, MS130-48P-HW,
-  // LIC-MS130-48-3Y, Z4-HW, LIC-Z4-SEC-3Y) and verify the output has the
-  // expected HW-LIC adjacency.
-  const skus = [
-    { sku: 'LIC-MS130-24-3Y', qty: 1 },
-    { sku: 'LIC-MX85-SEC-3Y', qty: 1 },
-    { sku: 'MS130-48P-HW', qty: 5 },
-    { sku: 'LIC-MS130-48-3Y', qty: 5 },
-    { sku: 'Z4-HW', qty: 3 },
-    { sku: 'LIC-Z4-SEC-3Y', qty: 3 }
-  ];
-  // Simulate scrambled resolvedProducts order (as the API completion would produce).
-  // The phantom LIC-MS130-48-1Y is gone because the family-stem fix suppresses
-  // auto-pair when input already has an explicit LIC for that family.
-  const resolvedProducts = [
-    { sku: 'MS130-48P-HW', qty: 5, product_id: 'p1' },
-    { sku: 'Z4-HW', qty: 3, product_id: 'p2' },
-    { sku: 'LIC-MS130-24-3Y', qty: 1, product_id: 'p3' },
-    { sku: 'LIC-MX85-SEC-3Y', qty: 1, product_id: 'p4' },
-    { sku: 'LIC-MS130-48-3Y', qty: 5, product_id: 'p5' },
-    { sku: 'LIC-Z4-SEC-3Y', qty: 3, product_id: 'p6' }
-  ];
-  const orderedPairs = [
-    { hw: 'MS130-48P-HW', hwQty: 5, licSku: null },
-    { hw: 'Z4-HW', hwQty: 3, licSku: null }
-  ];
-  // Apply same algorithm as production code (queue-per-SKU + consumed-pair index)
-  const queue = new Map();
-  for (const rp of resolvedProducts) {
-    if (!queue.has(rp.sku)) queue.set(rp.sku, []);
-    queue.get(rp.sku).push(rp);
-  }
-  const consumedPairIdx = new Set();
-  const inputSuffixedSkus = skus.map(e => e.sku);
-  const out = [];
-  for (const sku of inputSuffixedSkus) {
-    const q = queue.get(sku);
-    const rp = q && q.length ? q.shift() : null;
-    if (rp) out.push(rp);
-    let pairIdx = -1;
-    for (let p = 0; p < orderedPairs.length; p++) {
-      if (!consumedPairIdx.has(p) && orderedPairs[p].hw === sku) { pairIdx = p; break; }
-    }
-    if (pairIdx >= 0) {
-      consumedPairIdx.add(pairIdx);
-      const lic = orderedPairs[pairIdx].licSku;
-      if (lic) {
-        const lq = queue.get(lic);
-        const lp = lq && lq.length ? lq.shift() : null;
-        if (lp) out.push(lp);
-      }
-    }
-  }
-  for (const [_, q] of queue) while (q.length) out.push(q.shift());
-
-  const outSkus = out.map(p => p.sku);
-  assert.deepEqual(outSkus, [
-    'LIC-MS130-24-3Y',
-    'LIC-MX85-SEC-3Y',
-    'MS130-48P-HW',
-    'LIC-MS130-48-3Y',
-    'Z4-HW',
-    'LIC-Z4-SEC-3Y'
-  ], `expected request-order output, got ${JSON.stringify(outSkus)}`);
+t('STEP 3c HW→LIC reorder block still in source (the working order)', () => {
+  // Don\'t accidentally remove the actual working ordering logic.
+  assert.ok(
+    /STEP 3c: Reorder resolved products/.test(source) || /First pass: add hardware → unique license pairs/.test(source),
+    'STEP 3c HW→LIC reorder logic must remain intact'
+  );
 });
 
 _testQueue.then(() => {

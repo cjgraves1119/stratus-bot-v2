@@ -9919,74 +9919,25 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             country: accountData?.Billing_Country || 'United States'
           };
           const validTill = closingDate;
-          // 2026-05-12 fix (line-ordering bug): resolvedProducts.push happens
-          // inside Promise.all callbacks, so the array order was driven by API
-          // completion time — quote lines came out scrambled. Reorder to:
-          //   (1) preserve the input skus array order, and
-          //   (2) emit each hardware SKU immediately followed by its
-          //       auto-paired license (from orderedPairs[].licSku) when both
-          //       are present, so HW and LIC stay together regardless of
-          //       where the LIC appears in the input list.
-          // Standalone licenses keep their input position. Anything resolved
-          // but not represented in the input falls through to a defensive
-          // tail append so no line is silently dropped.
+          // 2026-05-13 — REVERTED: PR #62's "walk input skus in order" pass.
+          // Yesterday's bot-created Quote 2570562000405707101 successfully
+          // generated a Cisco DID (CCW_Deal_Number=84517517,
+          // Cisco_Estimate_Status=Success.VALID). Today's structurally
+          // identical Quote 2570562000405752232 hangs at
+          // LIVE_CiscoQuote_Deal__Processing forever. The ONLY diff between
+          // the two is line order: yesterday's = STEP 3c output (HW→LIC pairs
+          // first, standalones at end). Today's = PR #62 input-order override
+          // (standalones first because they appeared first in the request URL).
+          // Cisco's CCW BOM apparently cannot process license-before-hardware
+          // input. Removing the PR #62 override; STEP 3c upstream already
+          // produces correct HW+LIC adjacent order, and PR #62's phantom-1Y
+          // suppression makes that order match Chris's request semantically
+          // (no random scramble from spurious auto-paired licenses).
           //
-          // Codex review hardening: duplicate hardware SKUs in the input
-          // (same model listed twice for two locations, etc.) get their own
-          // queue per SKU and orderedPairs entries are consumed one at a
-          // time, so the second copy doesn't grab the first copy's paired
-          // license again.
-          const _resolvedQueue = new Map(); // sku → FIFO queue of resolved products
-          for (const rp of resolvedProducts) {
-            if (!_resolvedQueue.has(rp.sku)) _resolvedQueue.set(rp.sku, []);
-            _resolvedQueue.get(rp.sku).push(rp);
-          }
-          const _inputSuffixedSkus = skus.map(entry => {
-            const raw = (typeof entry === 'string' ? entry : entry?.sku || '').trim().toUpperCase();
-            if (raw === 'MR-ENT' || raw === 'MR-AGN') return `LIC-ENT-${defaultTerm}YR`;
-            if (raw === 'MV-AGN') return `LIC-MV-${defaultTerm}YR`;
-            if (raw === 'MT-AGN') return `LIC-MT-${defaultTerm}Y`;
-            return applySuffix(raw);
-          });
-          const _consumedPairIndices = new Set();
-          const _orderedResolved = [];
-          for (let i = 0; i < _inputSuffixedSkus.length; i++) {
-            const sku = _inputSuffixedSkus[i];
-            const q = _resolvedQueue.get(sku);
-            const rp = q && q.length ? q.shift() : null;
-            if (rp) _orderedResolved.push(rp);
-
-            // Find the first unconsumed orderedPairs entry for this hardware,
-            // so duplicate hardware inputs each pick up their own paired
-            // license rather than re-emitting the first pair's license.
-            let pairIdx = -1;
-            for (let p = 0; p < orderedPairs.length; p++) {
-              if (!_consumedPairIndices.has(p) && orderedPairs[p].hw === sku) {
-                pairIdx = p;
-                break;
-              }
-            }
-            if (pairIdx >= 0) {
-              _consumedPairIndices.add(pairIdx);
-              const licSku = orderedPairs[pairIdx].licSku;
-              if (licSku) {
-                const lq = _resolvedQueue.get(licSku);
-                const licRp = lq && lq.length ? lq.shift() : null;
-                if (licRp) _orderedResolved.push(licRp);
-              }
-            }
-          }
-          // Defensive tail-append: anything resolved that wasn't represented
-          // in the input order map (or any leftover queue entries). Should
-          // rarely fire under normal flow; the warn below makes anomalies
-          // visible in the worker logs.
-          for (const [sku, q] of _resolvedQueue) {
-            while (q.length) _orderedResolved.push(q.shift());
-          }
-          if (_orderedResolved.length !== resolvedProducts.length) {
-            console.warn(`[COMPOUND] Ordered output count ${_orderedResolved.length} differs from resolvedProducts ${resolvedProducts.length}`);
-          }
-          const quotedItems = _orderedResolved.map(p => {
+          // resolvedProducts at this point has already been reordered by
+          // STEP 3c into HW → paired-license → HW → paired-license →
+          // shared-licenses → standalone-licenses pattern. Just emit it.
+          const quotedItems = resolvedProducts.map(p => {
             const discountTotal = Math.round((p.discount_per_unit || 0) * p.qty * 100) / 100;
             return {
               Product_Name: { id: p.product_id },
