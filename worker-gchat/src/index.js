@@ -5419,6 +5419,55 @@ async function resolveAccountByDomain(domain, env) {
       if (r?.data?.[0]) return r.data[0];
     } catch (_) { /* keep trying */ }
   }
+
+  // 2026-05-13 — Contact-at-domain hop fallback (Codex C2 fix).
+  // If no Account.Website variant matched, search for ANY Contact whose Email
+  // address ends with @DOMAIN. If one of them is linked to an Account, hop to
+  // that Account. Catches the common case where the Account exists in CRM
+  // (with at least one Contact at that domain) but the Account.Website field
+  // is empty / malformed / typo'd / formatted differently.
+  //
+  // Production trigger: PAR Excellence has Ray Mansell (rmansell@parexcellence.com)
+  // linked to it. Resolving rmansell directly via resolveContactByEmail returns
+  // the right Account. But if the active participant chip is switched to
+  // jjackson@parexcellence.com (Javon, not yet a Contact in CRM), Tier 2
+  // returns null. Tier 1 also returns null if Website isn't set as expected.
+  // With this hop, we find Ray's record via the domain-contains search and
+  // surface PAR Excellence via his Account_Name link.
+  try {
+    // Zoho's search API criteria=(Email:contains:X) is unreliable for the
+    // Email field — different Zoho tenants/layouts handle the @ character
+    // inconsistently. Switch to COQL which is documented to support the
+    // LIKE operator on text fields including Email.
+    const coql = `select id, Email, Account_Name from Contacts where Email like '%@${d}' limit 5`;
+    const r = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+    const rows = Array.isArray(r?.data) ? r.data : [];
+    // Prefer the first contact that (a) actually has an email ending with @DOMAIN
+    // (defensive — Zoho's contains can match substrings unexpectedly) AND
+    // (b) has an Account_Name lookup populated.
+    const linkedContact = rows.find(c => {
+      const email = String(c?.Email || '').toLowerCase();
+      if (!email.endsWith(`@${d}`)) return false;
+      const acct = c?.Account_Name;
+      if (!acct) return false;
+      if (typeof acct === 'object') return !!(acct.id || acct.name);
+      return !!String(acct).trim();
+    });
+    const acctId = linkedContact?.Account_Name?.id;
+    if (acctId) {
+      const acctResp = await zohoApiCall('GET',
+        `Accounts/${acctId}?fields=${fields}`, env
+      );
+      const account = acctResp?.data?.[0];
+      if (account) {
+        console.log(`[ACCT-DOMAIN] Resolved ${d} via Contact-at-domain hop (Contact ${linkedContact.id} → Account ${account.id})`);
+        return account;
+      }
+    }
+  } catch (err) {
+    console.warn(`[ACCT-DOMAIN] Contact-at-domain hop failed for ${d}: ${err?.message || err}`);
+  }
+
   return null;
 }
 
