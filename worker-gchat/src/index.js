@@ -5435,11 +5435,12 @@ async function resolveAccountByDomain(domain, env) {
   // With this hop, we find Ray's record via the domain-contains search and
   // surface PAR Excellence via his Account_Name link.
   try {
-    const contactFields = 'id,Email,Account_Name';
-    const r = await zohoApiCall('GET',
-      `Contacts/search?criteria=(Email:contains:@${encodeURIComponent(d)})&fields=${contactFields}&per_page=5`,
-      env
-    );
+    // Zoho's search API criteria=(Email:contains:X) is unreliable for the
+    // Email field — different Zoho tenants/layouts handle the @ character
+    // inconsistently. Switch to COQL which is documented to support the
+    // LIKE operator on text fields including Email.
+    const coql = `select id, Email, Account_Name from Contacts where Email like '%@${d}' limit 5`;
+    const r = await zohoApiCall('POST', 'coql', env, { select_query: coql });
     const rows = Array.isArray(r?.data) ? r.data : [];
     // Prefer the first contact that (a) actually has an email ending with @DOMAIN
     // (defensive — Zoho's contains can match substrings unexpectedly) AND

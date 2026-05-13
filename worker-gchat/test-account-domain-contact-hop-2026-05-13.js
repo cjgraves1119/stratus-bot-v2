@@ -28,10 +28,10 @@ t('Contact-at-domain fallback block exists', () => {
   );
 });
 
-t('Fallback queries Contacts by Email:contains:@DOMAIN', () => {
+t('Fallback queries Contacts via COQL LIKE %@DOMAIN', () => {
   assert.ok(
-    /Contacts\/search\?criteria=\(Email:contains:@\$\{encodeURIComponent\(d\)\}\)/.test(source),
-    'fallback must query Contacts where Email contains @DOMAIN'
+    /Contacts where Email like '%@\$\{d\}' limit 5/.test(source),
+    'fallback must use COQL LIKE %@DOMAIN'
   );
 });
 
@@ -88,11 +88,8 @@ function buildResolver() {
         } catch (_) {}
       }
       try {
-        const contactFields = 'id,Email,Account_Name';
-        const r = await zohoApiCallStub('GET',
-          `Contacts/search?criteria=(Email:contains:@${encodeURIComponent(d)})&fields=${contactFields}&per_page=5`,
-          env
-        );
+        const coql = `select id, Email, Account_Name from Contacts where Email like '%@${d}' limit 5`;
+        const r = await zohoApiCallStub('POST', 'coql', env, { select_query: coql });
         const rows = Array.isArray(r?.data) ? r.data : [];
         const linkedContact = rows.find(c => {
           const email = String(c?.Email || '').toLowerCase();
@@ -135,7 +132,7 @@ t('SCENARIO 2: Website misses, Contact-at-domain hop fires and resolves (C2 fix)
       websiteCalls++;
       return { data: [] };  // no website match for any variant
     }
-    if (path.includes('Contacts/search') && path.includes('Email:contains:@parexcellence.com')) {
+    if (path.includes('coql')) {
       contactsCalled = true;
       return { data: [
         { id: 'CRay', Email: 'rmansell@parexcellence.com',
@@ -160,7 +157,7 @@ t('SCENARIO 3: Hop predicate rejects substring false positives', async () => {
   // Zoho "contains" might match "ray@foo.parexcellence.com.au" → must reject.
   const stub = async (_method, path) => {
     if (path.includes('Accounts/search')) return { data: [] };
-    if (path.includes('Contacts/search')) {
+    if (path.includes('coql')) {
       return { data: [
         { id: 'CFake', Email: 'ray@parexcellence.com.au', Account_Name: { id: 'AFake' } }
       ] };
@@ -175,7 +172,7 @@ t('SCENARIO 3: Hop predicate rejects substring false positives', async () => {
 t('SCENARIO 4: Hop predicate rejects contacts with no Account_Name', async () => {
   const stub = async (_method, path) => {
     if (path.includes('Accounts/search')) return { data: [] };
-    if (path.includes('Contacts/search')) {
+    if (path.includes('coql')) {
       return { data: [
         { id: 'COrphan', Email: 'orphan@parexcellence.com', Account_Name: null }
       ] };
@@ -190,7 +187,7 @@ t('SCENARIO 4: Hop predicate rejects contacts with no Account_Name', async () =>
 t('SCENARIO 5: Hop prefers first contact with Account_Name when mix exists', async () => {
   const stub = async (_method, path) => {
     if (path.includes('Accounts/search')) return { data: [] };
-    if (path.includes('Contacts/search')) {
+    if (path.includes('coql')) {
       return { data: [
         { id: 'COrphan1', Email: 'a@parexcellence.com', Account_Name: null },
         { id: 'CLinked',  Email: 'b@parexcellence.com', Account_Name: { id: 'A1' } },
