@@ -19,7 +19,7 @@ USE_DEEPSEEK_ADVISORY = "false"
 #   wrangler secret put QUOTE_PO_WORKFLOW_ENABLED --name stratus-ai-bot-gchat
 # or set here as "true" and redeploy. When off, quote_to_po_and_esign falls
 # back to inline synchronous execution (identical to pre-Phase-3 behavior).
-QUOTE_PO_WORKFLOW_ENABLED = "false"
+QUOTE_PO_WORKFLOW_ENABLED = "true"
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
 #
 # ─── CRM & Email Agent Secrets (POC) ───
