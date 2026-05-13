@@ -100,9 +100,10 @@ assert.equal(
   'Sales Order send errors override generic admin-action done status'
 );
 assert.equal(salesOrderEsignErrorMessage({ Client_Send_Status: 'Envelope Sent' }), null, 'sent statuses are not treated as errors');
-assert.match(source, /const DEFAULT_QUOTE_VENDOR = 'TD SYNNEX CORPORATION'/, 'Quote default vendor uses the exact existing Zoho picklist value');
-assert.match(source, /Vendor: DEFAULT_QUOTE_VENDOR/, 'Quote creation writes the default vendor picklist value');
-assert.match(source, /data: \[\{ id: quoteId, Vendor: DEFAULT_QUOTE_VENDOR \}\]/, 'Quote-to-PO repairs missing Vendor using the same default picklist value');
+assert.match(source, /const DEFAULT_QUOTE_VENDOR_NAME = 'TD SYNNEX CORPORATION'/, 'Quote default vendor name constant uses the exact existing Zoho Vendors-module record name');
+assert.match(source, /const DEFAULT_QUOTE_VENDOR = \{ id: DEFAULT_QUOTE_VENDOR_ID, name: DEFAULT_QUOTE_VENDOR_NAME \}/, 'Quote default vendor is the lookup object form (id+name), not a bare string');
+assert.match(source, /Vendor1: DEFAULT_QUOTE_VENDOR/, 'Quote creation writes the default vendor LOOKUP (Vendor1) — not the text field');
+assert.match(source, /data: \[\{ id: quoteId, Vendor1: DEFAULT_QUOTE_VENDOR \}\]/, 'Quote-to-PO repairs missing Vendor via the Vendor1 LOOKUP write — not the text field (text breaks Cisco CCW DID)');
 assert.match(source, /existing Zoho picklist value "TD SYNNEX CORPORATION"/, 'tool descriptions tell the model to use the existing picklist value');
 assert.doesNotMatch(source, /TD Synnex/, 'Quote default vendor never uses the informal display label');
 assert.equal(salesOrderVendorReference({ Vendor: { id: 'v123', name: 'TD SYNNEX CORPORATION' } }), 'v123', 'Sales Order vendor lookup accepts Zoho lookup fields');
