@@ -10362,46 +10362,36 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
           results.records.quote.verification = quoteVerification;
 
-          // STEP 8: Create follow-up task
-          // 2026-05-13 (council Item 2): Subject derivation falls through
-          // 4 sources (accountData → account_name → existingDealData → dealId)
-          // so create_quote_on_deal (often omits account_name) doesn't end up
-          // with "Follow up - undefined". Also: distinguish Zoho-rejected from
-          // success-without-id from thrown so silent skips become visible.
-          const taskDueDate = new Date();
-          let daysAdded = 0;
-          while (daysAdded < 3) {
-            taskDueDate.setDate(taskDueDate.getDate() + 1);
-            if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
-          }
+          // STEP 8: Create follow-up task (2026-05-13 Track 1 hardening)
+          // Now delegates to createFollowUpTaskForDeal so both code paths
+          // (compound tool + zoho_create_record direct) share the same logic,
+          // single retry on transient (5xx / thrown) failures, and centralized
+          // telemetry. Subject derivation falls through 4 sources so
+          // create_quote_on_deal (often omits account_name) doesn't end up
+          // with "Follow up - undefined".
           const _taskAccountLabel = accountData?.Account_Name
             || account_name
             || existingDealData?.Deal_Name
             || (results.records.deal?.name)
             || `Deal ${dealId}`;
-          const taskData = {
-            Subject: `Follow up - ${_taskAccountLabel}`,
-            Due_Date: taskDueDate.toISOString().split('T')[0],
-            Status: 'Not Started',
-            Priority: 'Normal',
-            Owner: { id: '2570562000141711002' },
-            What_Id: { id: dealId },
-            $se_module: 'Deals'
-          };
-          try {
-            const taskResult = await zohoApiCall('POST', 'Tasks', env, { data: [taskData] });
-            const taskRow = taskResult?.data?.[0];
-            const taskId = taskRow?.details?.id;
-            if (taskId) {
-              results.steps.push(`Created follow-up Task due ${taskData.Due_Date} (${taskId})`);
-              results.records.task = { id: taskId, url: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${taskId}` };
-            } else if (taskRow?.status === 'error') {
-              results.steps.push(`Follow-up Task creation rejected by Zoho: code=${taskRow.code || '?'}, message=${taskRow.message || '?'}, details=${JSON.stringify(taskRow.details || {}).substring(0, 200)}`);
-            } else {
-              results.steps.push(`Follow-up Task creation returned no id. Raw response: ${JSON.stringify(taskResult || {}).substring(0, 300)}`);
-            }
-          } catch (e) {
-            results.steps.push(`Follow-up Task creation threw: ${e.message}`);
+          const _taskRes = await createFollowUpTaskForDeal({
+            dealId,
+            subjectLabel: _taskAccountLabel,
+            env,
+            personId,
+            ownerId: null
+          });
+          if (_taskRes.success) {
+            results.steps.push(`Created follow-up Task due ${_taskRes.dueDate} (${_taskRes.taskId})${_taskRes.retried ? ' [after 1 retry]' : ''}`);
+            results.records.task = { id: _taskRes.taskId, url: _taskRes.taskUrl };
+          } else {
+            // Codex council fix: surface failure visibly so the caller LLM
+            // tells the user. Old code logged but returned success:true silently.
+            results.task_create_failed = true;
+            results.task_create_error = _taskRes.error;
+            results.task_create_retried = _taskRes.retried;
+            results.task_create_classification = _taskRes.http_classified;
+            results.steps.push(`Follow-up Task creation FAILED (${_taskRes.http_classified}${_taskRes.retried ? ', after 1 retry' : ''}): ${_taskRes.error}`);
           }
 
           results.success = true;
@@ -10423,6 +10413,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             `[Open in Zoho](${results.records.quote.url})` +
             (results.records.deal?.url ? ` — [View Deal](${results.records.deal.url})` : '') +
             (results.records.task?.url ? ` — [View Task](${results.records.task.url})` : '');
+          if (results.task_create_failed) {
+            // Append a visible failure notice. The LLM will paraphrase this
+            // into "Deal+Quote created, but Task creation failed — please add
+            // one manually." per council protocol.
+            results._user_visible_summary +=
+              `\nNote: follow-up Task creation FAILED (${results.task_create_error}). ` +
+              `Please tell the user the Deal and Quote were created but a Task could not be added — they should add one manually.`;
+          }
           return results;
         } catch (e) {
           results.errors.push(`Unexpected error: ${e.message}`);
