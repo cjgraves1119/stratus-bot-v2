@@ -21084,6 +21084,35 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
           }
 
           // ── CRM Quotes: Get quotes for an account's deals ──
+          // ── Diagnostic: GET a Quote by id with ALL fields (no caching) ──
+          // 2026-05-13: temporary diagnostic for DID stuck issue. Lets the team
+          // pull the live state of a Quote including Admin_Action,
+          // Cisco_Estimate_*, Disti_*, TD_API_*, Subscription_*, etc.
+          // Auth: same X-API-Key as other endpoints.
+          case '/api/_debug-quote': {
+            const { record_id: dbgQuoteId, module: dbgModule } = apiBody;
+            if (!dbgQuoteId) {
+              return new Response(JSON.stringify({ error: 'record_id required' }), { status: 400, headers: jsonHeaders });
+            }
+            const dbgMod = dbgModule || 'Quotes';
+            try {
+              const dbgResp = await zohoApiCall('GET', `${dbgMod}/${dbgQuoteId}`, env);
+              const rec = dbgResp?.data?.[0] || null;
+              if (!rec) {
+                apiResult = { error: `${dbgMod}/${dbgQuoteId} not found`, raw: dbgResp };
+              } else {
+                // Strip Zoho-internal $-prefixed fields for readability
+                const cleaned = Object.fromEntries(
+                  Object.entries(rec).filter(([k]) => !k.startsWith('$'))
+                );
+                apiResult = { record: cleaned, module: dbgMod, record_id: dbgQuoteId };
+              }
+            } catch (err) {
+              apiResult = { error: `${dbgMod} fetch failed: ${err.message}` };
+            }
+            break;
+          }
+
           case '/api/crm-quotes': {
             const { accountId: quotesAcctId, dealId: quotesDealId } = apiBody;
             if (!quotesAcctId && !quotesDealId) {
