@@ -10028,6 +10028,29 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
           results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
 
+          // STEP 6b — Verify Vendor populated post-create.
+          // 2026-05-13: Zoho silently ignores plain-string Vendor lookup writes
+          // on the initial POST. The same string works via PUT/update through
+          // setAndVerifyQuoteDefaultVendor (used by quote_to_po_and_esign).
+          // Without this follow-up, a freshly-created Quote has Vendor blank
+          // until something else (typically the PO/esign workflow) runs.
+          // Call the same verify helper here so any Quote created via
+          // create_deal_and_quote OR create_quote_on_deal lands with Vendor
+          // populated, satisfying the per-quote requirement Chris flagged.
+          try {
+            const vendorVerify = await setAndVerifyQuoteDefaultVendor(quoteId, { Vendor: null }, env);
+            if (vendorVerify?.success) {
+              results.steps.push(`Set Quote Vendor: ${DEFAULT_QUOTE_VENDOR} (state: ${vendorVerify.state})`);
+            } else {
+              results.steps.push(`Vendor verify FAILED (state: ${vendorVerify?.state || 'unknown'}): ${vendorVerify?.error || 'no error message'}`);
+              // Non-blocking: Quote was created, Vendor remains blank until
+              // a downstream tool (e.g. quote_to_po_and_esign) repairs it.
+            }
+          } catch (vendorErr) {
+            console.warn(`[COMPOUND] Vendor verify threw (non-blocking): ${vendorErr.message}`);
+            results.steps.push(`Vendor verify threw: ${vendorErr.message} — Quote was still created`);
+          }
+
           // STEP 7: Fetch the created quote to confirm durability, then reconcile
           // persisted line totals to the ecomm target. Zoho may use a live Product
           // Unit_Price that differs from the Stratus ecomm cache; when that happens
