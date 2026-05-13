@@ -5127,7 +5127,18 @@ async function getGmailAccessToken(env) {
 // ─── Zoho CRM API Client ─────────────────────────────────────────────────────
 const ZOHO_AI_CREATED_TAG = 'Stratus AI Created';
 const ZOHO_AI_CREATED_TAG_COLOR = '#57B1FD';
-const DEFAULT_QUOTE_VENDOR = 'TD SYNNEX CORPORATION';
+// 2026-05-13: DEFAULT_QUOTE_VENDOR is the Vendor1 LOOKUP object (id+name).
+// Writing to Vendor (text field) instead of Vendor1 (lookup) was the root cause
+// of the Cisco CCW DID hang — Tim Orozco's automation eventually resolves text
+// → lookup, but the gap left Quotes in a state Cisco couldn't process. Now we
+// write Vendor1 directly with the resolved lookup id, matching the working
+// post-Tim-automation state immediately on CREATE.
+//
+// Vendor record id 2570562000160732440 = "TD SYNNEX CORPORATION" in Stratus's
+// Vendors module. Verified via live snapshot of working Quote 2570562000405707101.
+const DEFAULT_QUOTE_VENDOR_ID = '2570562000160732440';
+const DEFAULT_QUOTE_VENDOR_NAME = 'TD SYNNEX CORPORATION';
+const DEFAULT_QUOTE_VENDOR = { id: DEFAULT_QUOTE_VENDOR_ID, name: DEFAULT_QUOTE_VENDOR_NAME };
 const ZOHO_AI_CREATED_TAG_MODULES = new Set([
   'Accounts',
   'Contacts',
@@ -7096,8 +7107,10 @@ async function setAndVerifyQuoteDefaultVendor(quoteId, quote, env) {
   if (current) {
     return { success: true, state: 'already_set', vendor: current, quote };
   }
+  // 2026-05-13: Write Vendor1 (lookup) not Vendor (text). Vendor text writes
+  // break Cisco CCW DID generation. Vendor1 is what downstream actually reads.
   const write = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, {
-    data: [{ id: quoteId, Vendor: DEFAULT_QUOTE_VENDOR }]
+    data: [{ id: quoteId, Vendor1: DEFAULT_QUOTE_VENDOR }]
   });
   const parsed = parseZohoResponse(write, 'Quote Vendor update');
   if (parsed?.success === false) {
@@ -7107,7 +7120,7 @@ async function setAndVerifyQuoteDefaultVendor(quoteId, quote, env) {
     await sleep(i === 0 ? 1000 : 2500);
     const refreshed = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => null);
     const vendor = quoteVendorValue(refreshed);
-    if (vendor === DEFAULT_QUOTE_VENDOR) {
+    if (vendor === DEFAULT_QUOTE_VENDOR_NAME || vendor === DEFAULT_QUOTE_VENDOR.name) {
       return { success: true, state: 'verified', vendor, quote: refreshed };
     }
   }
@@ -7115,7 +7128,7 @@ async function setAndVerifyQuoteDefaultVendor(quoteId, quote, env) {
   return {
     success: false,
     state: 'not_persisted',
-    error: `Quote Vendor did not verify as "${DEFAULT_QUOTE_VENDOR}" after update.`,
+    error: `Quote Vendor did not verify as "${DEFAULT_QUOTE_VENDOR_NAME}" after update.`,
     write_result: write,
     quote: refreshed || quote
   };
@@ -7172,9 +7185,9 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
       state: 'quote_default_vendor_not_verified',
       quote_id: quoteId,
       quote_subject: quote.Subject,
-      default_vendor: DEFAULT_QUOTE_VENDOR,
+      default_vendor: DEFAULT_QUOTE_VENDOR_NAME,
       vendor_update: quoteVendor,
-      error: `Quote Vendor could not be verified as ${DEFAULT_QUOTE_VENDOR}; I did not convert it to a PO.`,
+      error: `Quote Vendor could not be verified as ${DEFAULT_QUOTE_VENDOR_NAME}; I did not convert it to a PO.`,
       _no_partial_success: true
     }, 'blocked');
   }
@@ -7993,7 +8006,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
         }
         if (module_name === 'Quotes' && !quoteVendorValue(recordData)) {
-          recordData.Vendor = DEFAULT_QUOTE_VENDOR;
+          // 2026-05-13: auto-fill Vendor1 (lookup) not Vendor (text)
+          recordData.Vendor1 = DEFAULT_QUOTE_VENDOR;
         }
         // Auto-correct Quoted_Items discounts using live Zoho pricing
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
@@ -9963,7 +9977,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Billing_Code: billingAddr.zip,
             Billing_Country: billingAddr.country,
             Shipping_Country: billingAddr.country || 'United States',
-            Vendor: DEFAULT_QUOTE_VENDOR,
+            // 2026-05-13: Write Vendor1 (lookup) directly with the resolved
+            // Vendor record id+name. Do NOT write to the Vendor text field —
+            // that triggered Cisco's CCW DID integration to hang.
+            Vendor1: DEFAULT_QUOTE_VENDOR,
             Cisco_Billing_Term: quoteBillingTerm,
             Owner: { id: '2570562000141711002' },
             Do_Not_Auto_Update_Prices: true,
