@@ -309,22 +309,9 @@ function CcwSection({ emailContext }) {
               </a>
             )}
           </div>
-          {/* Velocity Hub */}
-          <button onClick={handleVelocityHub} disabled={vhLoading} style={{
-            width: '100%', padding: '9px', marginBottom: 6,
-            background: vhLoading ? COLORS.TEXT_SECONDARY : '#00bceb',
-            color: 'white', border: 'none', borderRadius: 6, fontSize: 13,
-            fontWeight: 700, cursor: vhLoading ? 'default' : 'pointer',
-          }}>
-            {vhLoading ? 'Submitting...' : '🚀 Submit to Velocity Hub'}
-          </button>
-          {vhResult && (
-            <div style={{ fontSize: 12, padding: 8, borderRadius: 5, marginBottom: 6,
-              background: vhResult.error ? '#fce8e6' : '#e6f4ea',
-              color: vhResult.error ? COLORS.ERROR : '#137333' }}>
-              {vhResult.error || vhResult.message || 'Submitted successfully'}
-            </div>
-          )}
+          {/* 2026-05-12: Velocity Hub button removed per Chris. Server-side
+              velocity_hub_submit tool stays intact (still called by the
+              deterministic quote_to_po_and_esign workflow). */}
         </div>
       )}
 

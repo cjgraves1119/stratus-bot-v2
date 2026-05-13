@@ -58,12 +58,10 @@ export function setupContextMenus() {
       documentUrlPatterns: ['https://mail.google.com/*'],
     });
 
-    chrome.contextMenus.create({
-      id: 'stratus-velocity-hub',
-      title: 'Send Deal ID to Velocity Hub',
-      contexts: ['selection'],
-      documentUrlPatterns: ['https://mail.google.com/*'],
-    });
+    // 2026-05-12: stratus-velocity-hub context menu removed per Chris. The
+    // right-click "Send Deal ID to Velocity Hub" shortcut on selected text
+    // is gone. Server-side velocity_hub_submit tool stays intact — it's
+    // still used by the deterministic quote_to_po_and_esign workflow.
 
     chrome.contextMenus.create({
       id: 'stratus-separator',
@@ -157,25 +155,7 @@ export async function handleContextMenuClick(info, tab) {
       break;
     }
 
-    case 'stratus-velocity-hub': {
-      if (!selectedText.trim()) return;
-      const dealIdMatch = selectedText.match(/\d{13,19}/);
-      if (dealIdMatch) {
-        try {
-          await chrome.sidePanel.open({ tabId: tab.id });
-          setTimeout(() => {
-            chrome.runtime.sendMessage({
-              type: 'SIDEBAR_NAVIGATE',
-              panel: 'email',
-              data: { velocityHubDealId: dealIdMatch[0] },
-            });
-          }, 500);
-        } catch (err) {
-          console.error('[Stratus] Velocity Hub context menu failed:', err);
-        }
-      }
-      break;
-    }
+    // 2026-05-12: stratus-velocity-hub right-click handler removed.
 
     case 'stratus-copy-sku': {
       if (!selectedText.trim()) return;
