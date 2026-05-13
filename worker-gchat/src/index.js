@@ -6108,6 +6108,12 @@ function quoteVendorValue(record) {
   if (!record) return '';
   return [
     record.Vendor,
+    record.Vendor1,        // 2026-05-13: lookup field set by Zoho when Quote
+                            // create resolves the Vendor string to a lookup.
+                            // Recognized here so handleQuoteToPoAndEsign's
+                            // pre-DID setAndVerifyQuoteDefaultVendor short-
+                            // circuits ('already_set') instead of writing
+                            // Vendor text field, which hangs Cisco CCW.
     record.Vendor_Name,
     record.Vendor_Lookup,
     record.Distributor,
@@ -9979,28 +9985,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.steps.push(`Created Quote with ${resolvedProducts.length} line items at ecomm pricing (${quoteId})`);
           results.records.quote = { id: quoteId, url: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}` };
 
-          // STEP 6b — Verify Vendor populated post-create.
-          // 2026-05-13: Zoho silently ignores plain-string Vendor lookup writes
-          // on the initial POST. The same string works via PUT/update through
-          // setAndVerifyQuoteDefaultVendor (used by quote_to_po_and_esign).
-          // Without this follow-up, a freshly-created Quote has Vendor blank
-          // until something else (typically the PO/esign workflow) runs.
-          // Call the same verify helper here so any Quote created via
-          // create_deal_and_quote OR create_quote_on_deal lands with Vendor
-          // populated, satisfying the per-quote requirement Chris flagged.
-          try {
-            const vendorVerify = await setAndVerifyQuoteDefaultVendor(quoteId, { Vendor: null }, env);
-            if (vendorVerify?.success) {
-              results.steps.push(`Set Quote Vendor: ${DEFAULT_QUOTE_VENDOR} (state: ${vendorVerify.state})`);
-            } else {
-              results.steps.push(`Vendor verify FAILED (state: ${vendorVerify?.state || 'unknown'}): ${vendorVerify?.error || 'no error message'}`);
-              // Non-blocking: Quote was created, Vendor remains blank until
-              // a downstream tool (e.g. quote_to_po_and_esign) repairs it.
-            }
-          } catch (vendorErr) {
-            console.warn(`[COMPOUND] Vendor verify threw (non-blocking): ${vendorErr.message}`);
-            results.steps.push(`Vendor verify threw: ${vendorErr.message} — Quote was still created`);
-          }
+          // 2026-05-13 — PR #68's STEP 6b vendor-verify write was REVERTED here.
+          // Writing to the Quote.Vendor text field via PUT after CREATE causes
+          // Cisco's CCW DID integration to hang at LIVE_CiscoQuote_Deal__Processing
+          // indefinitely. Yesterday's working Quote 2570562000405707101 had
+          // Vendor (text) = null and successfully generated CCW_Deal_Number.
+          // Today's broken Quote 2570562000405752232 had Vendor (text) =
+          // 'TD SYNNEX CORPORATION' from the PR #68 PUT and stays stuck.
+          //
+          // The Quote.Vendor1 LOOKUP is already set correctly by Zoho when
+          // the initial POST payload's `Vendor: 'TD SYNNEX CORPORATION'`
+          // string gets resolved to a lookup record (id 2570562000160732440).
+          // That's all Cisco's integration needs. The standalone Vendor text
+          // field appears to be a separate downstream field that interferes
+          // with the integration when populated prematurely.
 
           // STEP 7: Fetch the created quote to confirm durability, then reconcile
           // persisted line totals to the ecomm target. Zoho may use a live Product
