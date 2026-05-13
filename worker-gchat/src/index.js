@@ -566,6 +566,158 @@ async function logCrmOpToD1(env, {
 }
 
 /**
+ * Create a follow-up Task for a Deal in Zoho CRM.
+ *
+ * 2026-05-13 Track 1 fix: extracted from create_deal_and_quote STEP 8 so the
+ * zoho_create_record(Deals) path can call it too. Audit showed 42% of Deal
+ * creates that go through zoho_create_record directly were leaking the
+ * follow-up Task (telemetry: 31/73 over 30 days). STEP 8's logic is
+ * replicated here, plus a single retry on transient (5xx / thrown) failures
+ * and a structured return so callers can surface `task_create_failed: true`.
+ *
+ * Returns: { success, taskId, taskUrl, dueDate, error, retried, http_classified }
+ *   - success: true if Task POSTed and Zoho returned an id
+ *   - taskId / taskUrl: present on success
+ *   - dueDate: YYYY-MM-DD (skips weekends, 3 business days out) — also stamped on failure for logging
+ *   - error: human-readable failure reason on !success
+ *   - retried: true if we exhausted a single 5xx/network retry
+ *   - http_classified: 'transient' | 'validation' | 'unknown' — drives retry decision and telemetry
+ */
+async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, ownerId }) {
+  const taskDueDate = new Date();
+  let daysAdded = 0;
+  while (daysAdded < 3) {
+    taskDueDate.setDate(taskDueDate.getDate() + 1);
+    if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
+  }
+  const dueDateStr = taskDueDate.toISOString().split('T')[0];
+  const taskData = {
+    Subject: `Follow up - ${subjectLabel || `Deal ${dealId}`}`,
+    Due_Date: dueDateStr,
+    Status: 'Not Started',
+    Priority: 'Normal',
+    Owner: { id: ownerId || '2570562000141711002' },
+    What_Id: { id: dealId },
+    $se_module: 'Deals'
+  };
+
+  // Single-attempt invoker. Returns
+  //   { ok: true, taskId } on success
+  //   { ok: false, classification: 'validation', error } on Zoho 4xx-style row error
+  //   { ok: false, classification: 'transient', error } on thrown exception
+  //   { ok: false, classification: 'unknown',    error } on success-without-id
+  async function attemptOnce() {
+    const started = Date.now();
+    try {
+      const taskResult = await zohoApiCall('POST', 'Tasks', env, { data: [taskData] });
+      const taskRow = taskResult?.data?.[0];
+      const taskId = taskRow?.details?.id;
+      if (taskId) {
+        return { ok: true, taskId, raw: taskResult, ms: Date.now() - started };
+      }
+      // Zoho row-level error (e.g. INVALID_DATA, MANDATORY_NOT_FOUND) — these
+      // are 4xx-equivalent validation errors that will just re-fail on retry.
+      if (taskRow?.status === 'error') {
+        return {
+          ok: false,
+          classification: 'validation',
+          error: `Zoho rejected Task create: code=${taskRow.code || '?'}, message=${taskRow.message || '?'}`,
+          raw: taskResult,
+          ms: Date.now() - started
+        };
+      }
+      // Success status but no id surfaced — unknown bucket, don't retry blindly.
+      return {
+        ok: false,
+        classification: 'unknown',
+        error: `Task create returned no id. Raw: ${JSON.stringify(taskResult || {}).substring(0, 300)}`,
+        raw: taskResult,
+        ms: Date.now() - started
+      };
+    } catch (e) {
+      // Thrown — network error, 5xx that didn't parse, fetch abort — treat as transient.
+      return {
+        ok: false,
+        classification: 'transient',
+        error: `Task POST threw: ${e.message}`,
+        ms: Date.now() - started
+      };
+    }
+  }
+
+  let attempt = await attemptOnce();
+  let retried = false;
+
+  if (!attempt.ok && attempt.classification === 'transient') {
+    retried = true;
+    // Brief backoff before single retry — keeps total wall time bounded.
+    await new Promise(r => setTimeout(r, 250));
+    attempt = await attemptOnce();
+  }
+
+  if (attempt.ok) {
+    // Telemetry: successful task create.
+    await logCrmOpToD1(env, {
+      personId: personId || null,
+      bot: botFromPersonId(personId),
+      operation: 'create',
+      module: 'Tasks',
+      recordId: attempt.taskId,
+      recordName: taskData.Subject,
+      status: 'success',
+      durationMs: attempt.ms || null,
+      errorMessage: null,
+      details: { dealId, dueDate: dueDateStr, retried, source: 'createFollowUpTaskForDeal' },
+      preState: null,
+      postState: { id: attempt.taskId, ...taskData },
+      requestPayload: { module: 'Tasks', data: taskData },
+      responsePayload: attempt.raw || null,
+      undoToken: null,
+      userVisibleSummary: null
+    });
+    return {
+      success: true,
+      taskId: attempt.taskId,
+      taskUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${attempt.taskId}`,
+      dueDate: dueDateStr,
+      retried,
+      http_classified: 'success'
+    };
+  }
+
+  // Telemetry: failed task create. Surface enough detail for triage of the
+  // 42% leak class — the whole point of this work.
+  await logCrmOpToD1(env, {
+    personId: personId || null,
+    bot: botFromPersonId(personId),
+    operation: 'create',
+    module: 'Tasks',
+    recordId: null,
+    recordName: taskData.Subject,
+    status: 'error',
+    durationMs: attempt.ms || null,
+    errorMessage: attempt.error,
+    details: { dealId, dueDate: dueDateStr, retried, classification: attempt.classification, source: 'createFollowUpTaskForDeal' },
+    preState: null,
+    postState: null,
+    requestPayload: { module: 'Tasks', data: taskData },
+    responsePayload: attempt.raw || null,
+    undoToken: null,
+    userVisibleSummary: null
+  });
+  return {
+    success: false,
+    taskId: null,
+    taskUrl: null,
+    dueDate: dueDateStr,
+    error: attempt.error,
+    retried,
+    http_classified: attempt.classification
+  };
+}
+
+
+/**
  * Log a price change to D1 pricing_history table.
  */
 async function logPriceChangeToD1(env, { sku, oldPrice, newPrice, listPrice }) {
@@ -8188,6 +8340,48 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               created_id_unverified: createdId,
               message: `Zoho reported Quote ${createdId} was created but the verification fetch threw: ${verifyErr.message}. Treat this as a FAILED create — do NOT claim the quote was created and do NOT render the quote URL.`,
             };
+          }
+        }
+
+        // ── Post-create follow-up Task for Deals (2026-05-13 Track 1 fix) ──
+        // D1 telemetry showed 42% of Deal creates that bypass create_deal_and_quote
+        // were leaking the follow-up Task (31/73 over 30 days). Replicate STEP 8
+        // here via the shared helper. Failures surface a task_create_failed flag
+        // so the caller LLM can tell the user the Deal was created but the Task
+        // was not — not a silent leak.
+        if (!createIsError && createdId && module_name === 'Deals') {
+          const dealLabel = recordData.Deal_Name
+            || (recordData.Account_Name && (recordData.Account_Name.name || recordData.Account_Name))
+            || `Deal ${createdId}`;
+          const taskRes = await createFollowUpTaskForDeal({
+            dealId: createdId,
+            subjectLabel: typeof dealLabel === 'string' ? dealLabel : String(dealLabel),
+            env,
+            personId,
+            ownerId: (recordData.Owner && (recordData.Owner.id || recordData.Owner)) || null
+          });
+          if (taskRes.success) {
+            parsed._followup_task = {
+              id: taskRes.taskId,
+              url: taskRes.taskUrl,
+              due_date: taskRes.dueDate
+            };
+            // Append to the user-visible summary so the model can echo the task link.
+            if (parsed._user_visible_summary) {
+              parsed._user_visible_summary = `${parsed._user_visible_summary} — [View Task](${taskRes.taskUrl})`;
+              parsed.message = parsed._user_visible_summary;
+            }
+          } else {
+            parsed.task_create_failed = true;
+            parsed.task_create_error = taskRes.error;
+            parsed.task_create_retried = taskRes.retried;
+            const failNotice = `Note: follow-up Task creation FAILED (${taskRes.error}). Please tell the user the Deal was created but a Task could not be added automatically — they should add one manually.`;
+            if (parsed._user_visible_summary) {
+              parsed._user_visible_summary = `${parsed._user_visible_summary}\n${failNotice}`;
+              parsed.message = parsed._user_visible_summary;
+            } else {
+              parsed.message = failNotice;
+            }
           }
         }
 
