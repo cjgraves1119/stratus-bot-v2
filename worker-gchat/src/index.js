@@ -21062,6 +21062,28 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
+          // ── Diagnostic: PUT a single field update on a record (no validation) ──
+          // 2026-05-13: temporary diagnostic for DID-hang investigation. Lets the
+          // team clear stuck text fields like Vendor on a Quote without going
+          // through the agentic chat tool. Auth via X-API-Key. Bypasses all
+          // validateCrmWrite guards — diagnostic ONLY.
+          case '/api/_debug-update': {
+            const { record_id: dbgUpId, module: dbgUpModule, data: dbgUpData } = apiBody;
+            if (!dbgUpId || !dbgUpData) {
+              return new Response(JSON.stringify({ error: 'record_id and data required' }), { status: 400, headers: jsonHeaders });
+            }
+            const dbgUpMod = dbgUpModule || 'Quotes';
+            try {
+              const upResp = await zohoApiCall('PUT', `${dbgUpMod}/${dbgUpId}`, env, {
+                data: [{ id: dbgUpId, ...dbgUpData }]
+              });
+              apiResult = { module: dbgUpMod, record_id: dbgUpId, written: dbgUpData, zoho_response: upResp };
+            } catch (err) {
+              apiResult = { error: `${dbgUpMod} update failed: ${err.message}` };
+            }
+            break;
+          }
+
           case '/api/crm-quotes': {
             const { accountId: quotesAcctId, dealId: quotesDealId } = apiBody;
             if (!quotesAcctId && !quotesDealId) {
