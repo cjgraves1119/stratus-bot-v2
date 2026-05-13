@@ -9328,6 +9328,48 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
           results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
 
+          // ── HARD GATE #3b: Account has existing open Deals — refuse silent new-Deal creation ──
+          // 2026-05-13: prior behavior auto-created a new Deal under the Account whenever
+          // create_deal_and_quote was called without existing_deal_id, even if the Account
+          // already had open Deals. The Chrome-extension prompt "create a quote for X on
+          // PAR Excellence's page" would therefore create a duplicate Deal in addition to
+          // the existing open Deal. Now, if the Account has 1+ open Deals and the caller
+          // did NOT pass existing_deal_id and did NOT set confirm_new_deal:true, refuse
+          // and instruct the model to ask the user which Deal to use (or confirm a
+          // separate new Deal). Codex council fix for B1 failure.
+          const confirmNewDeal = toolInput.confirm_new_deal === true;
+          if (accountId && !existingDealId && !confirmNewDeal) {
+            try {
+              const openDealsResp = await zohoApiCall('POST', 'coql', env, {
+                select_query: `select id, Deal_Name, Stage, Amount, Closing_Date from Deals where Account_Name = '${accountId}' and Stage not in ('Closed (Won)', 'Closed (Lost)') order by Modified_Time desc limit 5`
+              });
+              const openDeals = Array.isArray(openDealsResp?.data) ? openDealsResp.data : [];
+              if (openDeals.length > 0) {
+                const dealsList = openDeals.map(d => `• ${d.Deal_Name} (id ${d.id}, Stage "${d.Stage || '-'}"${d.Amount != null ? `, Amount $${d.Amount}` : ''})`).join('\n');
+                return {
+                  success: false,
+                  error: 'account_has_open_deals',
+                  account_id: accountId,
+                  account_name: accountData.Account_Name || account_name,
+                  existing_open_deals: openDeals.map(d => ({
+                    id: d.id, name: d.Deal_Name, stage: d.Stage, amount: d.Amount
+                  })),
+                  instruction: `STOP. Do NOT create a new Deal silently. The Account "${accountData.Account_Name || account_name}" (id ${accountId}) already has ${openDeals.length} open Deal(s). You must either:\n\n` +
+                    `1. Ask the user which existing Deal to add this Quote to. Once they choose, call create_quote_on_deal with that deal_id (the Quote will be created on the existing Deal — NO new Deal). This is the default expected path.\n\n` +
+                    `2. If the user explicitly confirms they want a SEPARATE new Deal for this quote in addition to the existing one(s), re-call create_deal_and_quote with confirm_new_deal:true. Only after explicit user confirmation.\n\n` +
+                    `Existing open Deals on this Account:\n${dealsList}`,
+                  _user_visible_summary: `This account already has ${openDeals.length} open deal(s). Which one should I add the quote to, or do you want a brand new deal?`,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+            } catch (openDealsErr) {
+              // Non-blocking: if the open-deals check itself errors (rate limit,
+              // permissions), fall through to the existing flow rather than
+              // failing the whole tool. Log loudly so anomalies are visible.
+              console.warn(`[COMPOUND] Open-Deals guard check failed (proceeding anyway): ${openDealsErr.message}`);
+            }
+          }
+
           // STEP 2: Find or create Contact — no placeholder fallback
           let contactId = existingDealData?.Contact_Name?.id || null;
           let contactData = existingDealData?.Contact_Name
@@ -11952,7 +11994,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION". For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION". For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. IMPORTANT (2026-05-13): If the resolved Account already has one or more OPEN Deals, this tool refuses with error:"account_has_open_deals" and returns the list of existing Deals. The expected response is to ask the user which Deal to attach the Quote to, then call create_quote_on_deal with the chosen deal_id. Only if the user explicitly confirms they want a SEPARATE new Deal in addition to the existing ones should you re-call create_deal_and_quote with confirm_new_deal:true. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {
@@ -11977,6 +12019,7 @@ const CRM_EMAIL_TOOLS = [
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
+        confirm_new_deal: { type: 'boolean', description: '(2026-05-13) Default false. Set true ONLY after the user has explicitly confirmed they want a brand-new Deal even though the resolved Account already has open Deals. Bypasses the account_has_open_deals refusal. Never set without explicit user consent on the same turn.' },
         billing_address: {
           type: 'object',
           description: 'Billing address (optional — looked up from Account if omitted)',
