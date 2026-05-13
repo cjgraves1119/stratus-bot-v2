@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-// 2026-05-13 regression: create_deal_and_quote / create_quote_on_deal must
-// invoke setAndVerifyQuoteDefaultVendor after Quote POST so the Vendor
-// lookup gets populated. Zoho silently ignores plain-string Vendor on
-// initial CREATE but accepts it on UPDATE — without this follow-up, a
-// fresh Quote has Vendor blank until quote_to_po_and_esign runs.
+// 2026-05-13 — REVERTED PR #68's STEP 6b Vendor write.
+// Root cause investigation found that writing Quote.Vendor text field
+// (via PUT after create) breaks Cisco CCW DID generation: the
+// LIVE_CiscoQuote_Deal admin action hangs at __Processing forever.
+// Yesterday's working Quote had Vendor (text) = null but Vendor1 (lookup)
+// populated; that's all Cisco needs. quoteVendorValue now also reads
+// Vendor1 so the pre-DID Vendor verify in handleQuoteToPoAndEsign
+// short-circuits ('already_set') instead of writing the text field.
 
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
@@ -17,73 +20,49 @@ function t(name, fn) {
   catch (err) { console.log(`  ✗ ${name}\n     ${err.message}`); failed++; }
 }
 
-console.log('\n=== Vendor follow-up after Quote create ===\n');
+console.log('\n=== PR #68 STEP 6b REVERTED ===\n');
 
-t('STEP 6b vendor-verify block exists after Quote POST', () => {
-  // The new follow-up must be inserted between Quote creation and STEP 7
-  // reconcile in the shared create_deal_and_quote / create_quote_on_deal body.
+t('PR #68 STEP 6b vendor-verify post-create call is REMOVED', () => {
+  // Must not have the setAndVerify call right after Quote POST.
+  const idx = source.indexOf('Created Quote with ${resolvedProducts.length} line items at ecomm pricing');
+  assert.notEqual(idx, -1, 'create-success log line still present');
+  // Search the 1200 chars after for any pre-STEP-7 setAndVerify call.
+  const slice = source.slice(idx, idx + 1500);
   assert.ok(
-    /STEP 6b — Verify Vendor populated post-create/.test(source),
-    'STEP 6b banner missing from source'
+    !/setAndVerifyQuoteDefaultVendor\(quoteId/.test(slice),
+    'no Vendor-verify PUT may fire between Quote POST and STEP 7'
   );
 });
 
-t('vendor-verify calls setAndVerifyQuoteDefaultVendor with the new Quote id', () => {
+t('Cisco CCW DID hang root cause is documented in source', () => {
   assert.ok(
-    /setAndVerifyQuoteDefaultVendor\(quoteId, \{ Vendor: null \}, env\)/.test(source),
-    'setAndVerifyQuoteDefaultVendor must be invoked with the freshly-created quoteId and a placeholder Vendor:null so the helper does not skip on a stale read'
+    /Cisco's CCW DID integration to hang/i.test(source),
+    'source must document the Cisco hang root cause for future reverters'
   );
 });
 
-t('vendor-verify success path logs to results.steps with DEFAULT_QUOTE_VENDOR + state', () => {
+t('quoteVendorValue now also reads Vendor1 lookup', () => {
+  // Find the function body and assert Vendor1 is in the read list.
+  const idx = source.indexOf('function quoteVendorValue(');
+  assert.notEqual(idx, -1, 'quoteVendorValue must still be defined');
+  const block = source.slice(idx, idx + 800);
   assert.ok(
-    /Set Quote Vendor: \$\{DEFAULT_QUOTE_VENDOR\} \(state: \$\{vendorVerify\.state\}\)/.test(source),
-    'success log must show the resolved vendor + verifier state'
+    /record\.Vendor1/.test(block),
+    'quoteVendorValue must read Vendor1 so pre-DID Vendor verify short-circuits'
   );
 });
 
-t('vendor-verify failure does NOT block the create (non-blocking)', () => {
-  // The catch branch must not return success:false from the tool; it must
-  // log and continue. Quote was already created, blocking the response
-  // would lie to the model about whether the create happened.
-  const block = source.slice(
-    source.indexOf('STEP 6b — Verify Vendor populated post-create'),
-    source.indexOf('STEP 7: Fetch the created quote to confirm durability')
-  );
-  assert.ok(block.length > 100, 'STEP 6b block must exist');
-  assert.ok(
-    !/return\s+\{\s*success: false/.test(block),
-    'vendor-verify failure must not early-return success:false'
-  );
-  assert.ok(
-    /Non-blocking: Quote was created/.test(block),
-    'non-blocking intent must be documented in the source'
-  );
-});
-
-t('vendor-verify catch handles thrown errors gracefully', () => {
-  const block = source.slice(
-    source.indexOf('STEP 6b — Verify Vendor populated post-create'),
-    source.indexOf('STEP 7: Fetch the created quote to confirm durability')
-  );
-  assert.ok(
-    /catch \(vendorErr\)/.test(block) && /Vendor verify threw/.test(block),
-    'try/catch around verify must exist with thrown-error logging'
-  );
-});
-
-t('Existing setAndVerifyQuoteDefaultVendor function still in source', () => {
+t('setAndVerifyQuoteDefaultVendor still defined (for post-DID/PO flow)', () => {
   assert.ok(
     /async function setAndVerifyQuoteDefaultVendor\(quoteId, quote, env\)/.test(source),
-    'setAndVerifyQuoteDefaultVendor must remain defined'
+    'helper must remain — handleQuoteToPoAndEsign uses it after DID/before PO conversion'
   );
 });
 
-t('Existing handleQuoteToPoAndEsign still calls setAndVerifyQuoteDefaultVendor', () => {
-  // Don't regress the existing wrapper's vendor handling.
+t('Existing handleQuoteToPoAndEsign vendor check intact (will now short-circuit on Vendor1)', () => {
   assert.ok(
     /const quoteVendor = await setAndVerifyQuoteDefaultVendor\(quoteId, quote, env\)/.test(source),
-    'handleQuoteToPoAndEsign must still invoke the helper before PO conversion'
+    'handleQuoteToPoAndEsign must still call the helper; it just no-ops now thanks to quoteVendorValue fix'
   );
 });
 
