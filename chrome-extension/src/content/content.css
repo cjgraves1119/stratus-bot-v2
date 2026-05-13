@@ -132,16 +132,4 @@
   text-decoration: underline;
 }
 
-/* Deal ID Highlighting */
-.stratus-deal-id-highlight {
-  transition: background 0.15s ease;
-}
-
-.stratus-deal-id-highlight:hover {
-  background: #c8e6c9 !important;
-  border-color: #4caf50 !important;
-}
-
-.stratus-deal-tooltip {
-  animation: stratus-fade-in 0.15s ease-out;
-}
+/* Deal ID green-highlight feature removed 2026-05-12 — see content/index.js */

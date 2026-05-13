@@ -311,8 +311,10 @@ async function onEmailChanged() {
     highlightSkusInEmail();
   }
 
-  // Deal ID highlighting (in approval-related emails)
-  highlightDealIdsInEmail();
+  // 2026-05-12: Removed Deal ID green-highlight feature (decorated 13–19
+  // digit Deal IDs in approval emails, opened Zoho deal on click). Function
+  // definitions for highlightDealIdsInEmail / handleDealIdHover /
+  // handleDealIdClick removed below as well.
 }
 
 // ─────────────────────────────────────────────
@@ -492,101 +494,13 @@ function handleSkuClick(event) {
 }
 
 // ─────────────────────────────────────────────
-// Deal ID Detection & Highlighting
+// Deal ID highlighting was removed on 2026-05-12 per Chris.
+// The previous behavior decorated 13–19 digit Deal IDs in approval emails
+// with a green pill (background #e8f5e9, color #2e7d32, border #4caf50)
+// that opened the Zoho deal on click and showed a Velocity Hub hint on
+// hover. The feature is gone; DEAL_ID_PATTERN import is intentionally kept
+// in case future tooling needs it elsewhere.
 // ─────────────────────────────────────────────
-
-function highlightDealIdsInEmail() {
-  // Only look in approval-related emails
-  const subjectEl = document.querySelector('h2.hP');
-  const subject = subjectEl?.textContent || '';
-  const isDealEmail = /deal|approval|DID|velocity|approved|submitted/i.test(subject);
-  if (!isDealEmail) return;
-
-  const bodyEls = document.querySelectorAll('.a3s.aiL, .ii.gt div');
-  bodyEls.forEach((el) => {
-    if (el.dataset.stratusDealsProcessed) return;
-    el.dataset.stratusDealsProcessed = 'true';
-
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
-    const textNodes = [];
-    while (walker.nextNode()) textNodes.push(walker.currentNode);
-
-    textNodes.forEach((node) => {
-      const text = node.textContent;
-      DEAL_ID_PATTERN.lastIndex = 0;
-      if (!DEAL_ID_PATTERN.test(text)) return;
-      DEAL_ID_PATTERN.lastIndex = 0;
-
-      const fragment = document.createDocumentFragment();
-      let lastIndex = 0;
-      let match;
-
-      while ((match = DEAL_ID_PATTERN.exec(text)) !== null) {
-        if (match.index > lastIndex) {
-          fragment.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
-        }
-
-        const span = document.createElement('span');
-        span.className = 'stratus-deal-id-highlight';
-        span.textContent = match[0];
-        span.dataset.dealId = match[0];
-        span.style.cssText = `
-          background: #e8f5e9; border: 1px solid #4caf5044;
-          border-radius: 3px; padding: 0 3px; cursor: pointer; font-weight: 500;
-          color: #2e7d32;
-        `;
-
-        span.addEventListener('click', handleDealIdClick);
-        span.addEventListener('mouseenter', handleDealIdHover);
-        fragment.appendChild(span);
-        lastIndex = match.index + match[0].length;
-      }
-
-      if (lastIndex < text.length) {
-        fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
-      }
-
-      node.parentNode.replaceChild(fragment, node);
-    });
-  });
-}
-
-async function handleDealIdHover(event) {
-  const span = event.target;
-  const dealId = span.dataset.dealId;
-
-  let tooltip = document.querySelector('.stratus-deal-tooltip');
-  if (!tooltip) {
-    tooltip = document.createElement('div');
-    tooltip.className = 'stratus-deal-tooltip';
-    tooltip.style.cssText = `
-      position: fixed; z-index: 99999; background: white; border: 1px solid ${COLORS.BORDER};
-      border-radius: 8px; padding: 10px 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-      font-size: 12px; font-family: -apple-system, sans-serif; max-width: 280px;
-      pointer-events: none;
-    `;
-    document.body.appendChild(tooltip);
-  }
-
-  const rect = span.getBoundingClientRect();
-  tooltip.style.left = `${rect.left}px`;
-  tooltip.style.top = `${rect.bottom + 6}px`;
-  tooltip.innerHTML = `
-    <div style="font-weight: 600; color: #2e7d32; margin-bottom: 4px;">Deal ID: ${dealId}</div>
-    <div style="color: ${COLORS.TEXT_SECONDARY};">Click to open deal in Zoho</div>
-    <div style="color: ${COLORS.TEXT_SECONDARY}; font-size: 11px; margin-top: 2px;">Right-click for Velocity Hub</div>
-  `;
-  tooltip.style.display = 'block';
-
-  span.addEventListener('mouseleave', () => {
-    tooltip.style.display = 'none';
-  }, { once: true });
-}
-
-function handleDealIdClick(event) {
-  const dealId = event.target.dataset.dealId;
-  window.open(`https://crm.zoho.com/crm/org647122552/tab/Potentials/${dealId}`, '_blank');
-}
 
 // ─────────────────────────────────────────────
 // Contact Chip Hover Popups (Gmail thread headers)

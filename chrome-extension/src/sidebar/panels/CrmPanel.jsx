@@ -1331,24 +1331,9 @@ function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRe
             </div>
           )}
 
-          {/* Velocity Hub */}
-          <button onClick={onVelocityHub} disabled={actions.vhLoading} style={{
-            width: '100%', padding: '6px', marginBottom: 6,
-            background: actions.vhLoading ? COLORS.TEXT_SECONDARY : '#00bceb',
-            color: 'white', border: 'none', borderRadius: 5, fontSize: 11,
-            fontWeight: 700, cursor: actions.vhLoading ? 'default' : 'pointer',
-          }}>
-            {actions.vhLoading ? 'Submitting...' : '🚀 Velocity Hub'}
-          </button>
-          {actions.vhResult && (
-            <div style={{
-              fontSize: 11, padding: '4px 8px', borderRadius: 4, marginBottom: 6,
-              background: actions.vhResult.error ? '#fce8e6' : '#e6f4ea',
-              color: actions.vhResult.error ? COLORS.ERROR : '#137333',
-            }}>
-              {actions.vhResult.error || actions.vhResult.message || 'Submitted ✓'}
-            </div>
-          )}
+          {/* 2026-05-12: Velocity Hub button removed per Chris. Server-side
+              velocity_hub_submit tool stays intact for use by the
+              deterministic quote_to_po_and_esign workflow. */}
 
           {/* Assign Cisco Rep */}
           {ciscoEmails.length > 0 && (

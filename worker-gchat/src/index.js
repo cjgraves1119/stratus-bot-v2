@@ -5432,13 +5432,30 @@ async function resolveContactByEmail(email, env) {
   const e = email.trim().toLowerCase();
   if (!e.includes('@')) return null;
   const fields = 'id,First_Name,Last_Name,Full_Name,Email,Secondary_Email,Account_Name,Title,Phone,Mobile,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip';
-  // Try primary Email first, then Secondary_Email as a fallback.
+  // 2026-05-12 fix (Ray vs Raymond duplicate-contact bug): Chris hit a
+  // production case where rmansell@parexcellence.com matched two Contact
+  // records — one orphan (no Account_Name) and one linked to PAR Excellence.
+  // Original per_page=1 returned the orphan and the waterfall reported "No
+  // existing Account". Now we fetch up to 10 matches per criterion and
+  // prefer the contact with a populated Account_Name lookup. If none have
+  // Account_Name, fall back to the first match so behavior is unchanged for
+  // the common single-match case.
+  const fieldsQS = `fields=${fields}&per_page=10`;
   const criteria = [`(Email:equals:${e})`, `(Secondary_Email:equals:${e})`];
   for (const c of criteria) {
     try {
       const r = await zohoApiCall('GET',
-        `Contacts/search?criteria=${encodeURIComponent(c)}&fields=${fields}&per_page=1`, env);
-      if (r?.data?.[0]) return r.data[0];
+        `Contacts/search?criteria=${encodeURIComponent(c)}&${fieldsQS}`, env);
+      const rows = Array.isArray(r?.data) ? r.data : [];
+      if (rows.length === 0) continue;
+      const withAccount = rows.find(c => {
+        const acct = c?.Account_Name;
+        if (!acct) return false;
+        if (typeof acct === 'object') return !!(acct.id || acct.name);
+        return !!String(acct).trim();
+      });
+      if (withAccount) return withAccount;
+      return rows[0];
     } catch (_) {}
   }
   return null;
@@ -9431,6 +9448,42 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const licenseToHardware = {}; // licenseSku → [hwSku1, hwSku2, ...]
 
           console.log(`[COMPOUND] Input SKUs: ${JSON.stringify(skus)}`);
+
+          // 2026-05-12 fix (phantom 1Y license auto-pair): when the user
+          // explicitly supplies a LIC-* SKU for a given hardware family,
+          // do NOT auto-pair an additional default-term license for that
+          // family. The bug Chris hit: request had MS130-48P-HW x5 + explicit
+          // LIC-MS130-48-3Y x5, but auto-pair injected a phantom
+          // LIC-MS130-48-1Y x5 line on top.
+          //
+          // We compute a Set of license family stems present in the input
+          // (e.g. LIC-MS130-48-3Y → "LIC-MS130-48"), then in the per-hw
+          // license-auto-pair branch we look up the candidate license stem
+          // and skip auto-pair when it matches an explicit input license.
+          const explicitLicenseFamilyStems = new Set();
+          const stripTermFromLicSku = (sku) => {
+            const upper = String(sku || '').toUpperCase();
+            // Strip a trailing -{1-99}Y or -{1-99}YR token. Examples:
+            //   LIC-MS130-48-3Y    → LIC-MS130-48
+            //   LIC-MS130-48-3YR   → LIC-MS130-48
+            //   LIC-MT-1Y          → LIC-MT
+            //   LIC-Z4-SEC-3Y      → LIC-Z4-SEC
+            // Tightened from /-(\d{1,2})Y?R?$/ (Codex review): the previous
+            // regex would match a bare -3 or -3R suffix, which are not valid
+            // Cisco LIC SKUs and could collide with non-LIC tokens.
+            return upper.replace(/-\d{1,2}YR?$/i, '');
+          };
+          for (const entry of skus) {
+            const rawSku = (typeof entry === 'string' ? entry : entry?.sku || '').trim().toUpperCase();
+            if (rawSku.startsWith('LIC-')) {
+              const stem = stripTermFromLicSku(rawSku);
+              if (stem) explicitLicenseFamilyStems.add(stem);
+            }
+          }
+          if (explicitLicenseFamilyStems.size > 0) {
+            console.log(`[COMPOUND] Explicit license families in input: ${[...explicitLicenseFamilyStems].join(', ')} — auto-pair will be suppressed for these`);
+          }
+
           for (const entry of skus) {
             const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
             const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
@@ -9499,26 +9552,37 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               continue;
             }
 
-            // Auto-add matching license using getLicenseSkus
+            // Auto-add matching license using getLicenseSkus.
+            // 2026-05-12 fix: skip auto-pair when the user already supplied
+            // an explicit LIC-* for this hardware family — prevents the
+            // phantom 1Y license that was being added on top of an explicit
+            // 3Y license (LIC-MS130-48-1Y appearing alongside the requested
+            // LIC-MS130-48-3Y).
             const licenseOptions = includeLicenses ? getLicenseSkus(rawSku) : null;
             console.log(`[COMPOUND] getLicenseSkus(${rawSku}): ${licenseOptions ? JSON.stringify(licenseOptions[0]) : 'null'}`);
             let resolvedLicSku = null;
-            if (licenseOptions) {
-              const termMap = { '1': '1Y', '3': '3Y', '5': '5Y' };
-              const targetTerm = termMap[defaultTerm] || '1Y';
-              const licenseSku = licenseOptions.find(l => l.term === targetTerm)?.sku;
-              if (licenseSku) {
-                if (!stageProduct(licenseSku, qty)) {
-                  const altSku = licenseSku.endsWith('Y') && !licenseSku.endsWith('YR')
-                    ? licenseSku + 'R'
-                    : licenseSku.replace(/YR$/, 'Y');
-                  if (!stageProduct(altSku, qty)) {
-                    missingProducts.push(licenseSku);
+            if (licenseOptions && licenseOptions.length > 0) {
+              const candidateStem = stripTermFromLicSku(licenseOptions[0].sku);
+              if (candidateStem && explicitLicenseFamilyStems.has(candidateStem)) {
+                console.log(`[COMPOUND] Suppressed auto-pair for ${rawSku}: input already contains an explicit LIC for family ${candidateStem}`);
+                results.steps.push(`Skipped auto-pair license for ${rawSku} — user already supplied LIC for family ${candidateStem}`);
+              } else {
+                const termMap = { '1': '1Y', '3': '3Y', '5': '5Y' };
+                const targetTerm = termMap[defaultTerm] || '1Y';
+                const licenseSku = licenseOptions.find(l => l.term === targetTerm)?.sku;
+                if (licenseSku) {
+                  if (!stageProduct(licenseSku, qty)) {
+                    const altSku = licenseSku.endsWith('Y') && !licenseSku.endsWith('YR')
+                      ? licenseSku + 'R'
+                      : licenseSku.replace(/YR$/, 'Y');
+                    if (!stageProduct(altSku, qty)) {
+                      missingProducts.push(licenseSku);
+                    } else {
+                      resolvedLicSku = altSku;
+                    }
                   } else {
-                    resolvedLicSku = altSku;
+                    resolvedLicSku = licenseSku;
                   }
-                } else {
-                  resolvedLicSku = licenseSku;
                 }
               }
             }
@@ -9723,7 +9787,74 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             country: accountData?.Billing_Country || 'United States'
           };
           const validTill = closingDate;
-          const quotedItems = resolvedProducts.map(p => {
+          // 2026-05-12 fix (line-ordering bug): resolvedProducts.push happens
+          // inside Promise.all callbacks, so the array order was driven by API
+          // completion time — quote lines came out scrambled. Reorder to:
+          //   (1) preserve the input skus array order, and
+          //   (2) emit each hardware SKU immediately followed by its
+          //       auto-paired license (from orderedPairs[].licSku) when both
+          //       are present, so HW and LIC stay together regardless of
+          //       where the LIC appears in the input list.
+          // Standalone licenses keep their input position. Anything resolved
+          // but not represented in the input falls through to a defensive
+          // tail append so no line is silently dropped.
+          //
+          // Codex review hardening: duplicate hardware SKUs in the input
+          // (same model listed twice for two locations, etc.) get their own
+          // queue per SKU and orderedPairs entries are consumed one at a
+          // time, so the second copy doesn't grab the first copy's paired
+          // license again.
+          const _resolvedQueue = new Map(); // sku → FIFO queue of resolved products
+          for (const rp of resolvedProducts) {
+            if (!_resolvedQueue.has(rp.sku)) _resolvedQueue.set(rp.sku, []);
+            _resolvedQueue.get(rp.sku).push(rp);
+          }
+          const _inputSuffixedSkus = skus.map(entry => {
+            const raw = (typeof entry === 'string' ? entry : entry?.sku || '').trim().toUpperCase();
+            if (raw === 'MR-ENT' || raw === 'MR-AGN') return `LIC-ENT-${defaultTerm}YR`;
+            if (raw === 'MV-AGN') return `LIC-MV-${defaultTerm}YR`;
+            if (raw === 'MT-AGN') return `LIC-MT-${defaultTerm}Y`;
+            return applySuffix(raw);
+          });
+          const _consumedPairIndices = new Set();
+          const _orderedResolved = [];
+          for (let i = 0; i < _inputSuffixedSkus.length; i++) {
+            const sku = _inputSuffixedSkus[i];
+            const q = _resolvedQueue.get(sku);
+            const rp = q && q.length ? q.shift() : null;
+            if (rp) _orderedResolved.push(rp);
+
+            // Find the first unconsumed orderedPairs entry for this hardware,
+            // so duplicate hardware inputs each pick up their own paired
+            // license rather than re-emitting the first pair's license.
+            let pairIdx = -1;
+            for (let p = 0; p < orderedPairs.length; p++) {
+              if (!_consumedPairIndices.has(p) && orderedPairs[p].hw === sku) {
+                pairIdx = p;
+                break;
+              }
+            }
+            if (pairIdx >= 0) {
+              _consumedPairIndices.add(pairIdx);
+              const licSku = orderedPairs[pairIdx].licSku;
+              if (licSku) {
+                const lq = _resolvedQueue.get(licSku);
+                const licRp = lq && lq.length ? lq.shift() : null;
+                if (licRp) _orderedResolved.push(licRp);
+              }
+            }
+          }
+          // Defensive tail-append: anything resolved that wasn't represented
+          // in the input order map (or any leftover queue entries). Should
+          // rarely fire under normal flow; the warn below makes anomalies
+          // visible in the worker logs.
+          for (const [sku, q] of _resolvedQueue) {
+            while (q.length) _orderedResolved.push(q.shift());
+          }
+          if (_orderedResolved.length !== resolvedProducts.length) {
+            console.warn(`[COMPOUND] Ordered output count ${_orderedResolved.length} differs from resolvedProducts ${resolvedProducts.length}`);
+          }
+          const quotedItems = _orderedResolved.map(p => {
             const discountTotal = Math.round((p.discount_per_unit || 0) * p.qty * 100) / 100;
             return {
               Product_Name: { id: p.product_id },
