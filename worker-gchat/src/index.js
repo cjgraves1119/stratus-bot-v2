@@ -209,6 +209,217 @@ const MODEL_PRICING = {
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── PR-B: Anthropic Prompt Caching (2026-05-14) ───────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Sentinel string injected at the boundary between cached (static) and
+// uncached (per-user dynamic) portions of the system prompt. When the
+// request body is built, the systemPrompt string is split on this sentinel
+// to produce an array-of-typed-blocks: [{static, cache_control}, {dynamic}].
+//
+// Code paths that append dynamic content (date, datasheet ctx, pricing ctx,
+// accessories ctx, PREVIOUS CRM CONTEXT) emit this sentinel as the seam.
+// If the sentinel is absent (legacy path or kill-switch off), the prompt is
+// sent as a plain string with no cache markers (uncached fallback).
+const PROMPT_CACHE_BOUNDARY = '\n\n___PR_B_DYNAMIC_APPENDIX_BOUNDARY___\n\n';
+
+/**
+ * Splits a systemPrompt string into an array of typed blocks suitable for
+ * Anthropic's `system` field. When the boundary sentinel is present, the
+ * static prefix gets `cache_control: { type: 'ephemeral' }` and the dynamic
+ * suffix is left uncached.
+ *
+ * Until the kill-switch lands in a later commit, `cachingEnabled` defaults
+ * to true — but the function signature accepts the flag so we can land the
+ * refactor and the kill-switch as separable PRs.
+ */
+function buildAnthropicSystemBlocks(systemPrompt, cachingEnabled) {
+  if (typeof systemPrompt !== 'string' || systemPrompt.length === 0) {
+    return systemPrompt || '';
+  }
+  if (!cachingEnabled) {
+    return systemPrompt.replace(PROMPT_CACHE_BOUNDARY, '\n\n');
+  }
+  const idx = systemPrompt.indexOf(PROMPT_CACHE_BOUNDARY);
+  if (idx === -1) {
+    return [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+  }
+  const staticBase = systemPrompt.slice(0, idx);
+  const dynamicAppendix = systemPrompt.slice(idx + PROMPT_CACHE_BOUNDARY.length);
+  const blocks = [{ type: 'text', text: staticBase, cache_control: { type: 'ephemeral' } }];
+  if (dynamicAppendix.length > 0) {
+    blocks.push({ type: 'text', text: dynamicAppendix });
+  }
+  return blocks;
+}
+
+/**
+ * Attaches cache_control: ephemeral to the LAST tool entry. Anthropic only
+ * honors a single tools cache breakpoint; placing it on the last tool caches
+ * the entire tools array. Returns a NEW array — does not mutate input.
+ * Image content blocks NEVER receive cache markers (only system + tools).
+ */
+function attachToolCacheControl(tools, cachingEnabled) {
+  if (!cachingEnabled) return tools;
+  if (!Array.isArray(tools) || tools.length === 0) return tools;
+  const last = tools[tools.length - 1];
+  const cachedLast = { ...last, cache_control: { type: 'ephemeral' } };
+  return [...tools.slice(0, -1), cachedLast];
+}
+
+/** Safe extraction of Anthropic cache token fields with defaults of 0. */
+function extractCacheUsage(usage) {
+  if (!usage || typeof usage !== 'object') return { creation: 0, read: 0 };
+  return {
+    creation: Number(usage.cache_creation_input_tokens || 0) || 0,
+    read: Number(usage.cache_read_input_tokens || 0) || 0
+  };
+}
+
+// ─── KV-backed kill switch (commit 3/5) ────────────────────────────────────
+// Allows ops to instantly disable Anthropic prompt caching without a
+// redeploy: `wrangler kv:key put prompt_caching_enabled false`. Read with
+// an isolate-memory cache (TTL 30s) to keep hot-path latency negligible.
+let _promptCachingKillSwitchCache = { value: null, ts: 0 };
+const PROMPT_CACHING_KILL_SWITCH_TTL_MS = 30 * 1000;
+const PROMPT_CACHING_KV_KEY = 'prompt_caching_enabled';
+
+/**
+ * Returns true when prompt caching should be applied to the next request.
+ * Reads CONVERSATION_KV[prompt_caching_enabled]; default is enabled (true).
+ * KV unreachable or value "false" → returns false (no cache markers).
+ * Cached in isolate memory for 30s to avoid per-request KV reads.
+ */
+async function isPromptCachingEnabled(env) {
+  try {
+    const now = Date.now();
+    if (_promptCachingKillSwitchCache.value !== null &&
+        (now - _promptCachingKillSwitchCache.ts) < PROMPT_CACHING_KILL_SWITCH_TTL_MS) {
+      return _promptCachingKillSwitchCache.value === true;
+    }
+    if (!env?.CONVERSATION_KV) {
+      _promptCachingKillSwitchCache = { value: true, ts: now };
+      return true;
+    }
+    const raw = await env.CONVERSATION_KV.get(PROMPT_CACHING_KV_KEY);
+    const enabled = (raw === null || raw === undefined) ? true : (String(raw).toLowerCase() !== 'false');
+    _promptCachingKillSwitchCache = { value: enabled, ts: now };
+    return enabled;
+  } catch (err) {
+    console.warn(`[PR-B] KV read failed for ${PROMPT_CACHING_KV_KEY}: ${err.message}; falling back to uncached path`);
+    return false;
+  }
+}
+
+/** Test-only: reset the in-isolate kill-switch cache so the next call hits KV. */
+function _resetPromptCachingKillSwitchCache() {
+  _promptCachingKillSwitchCache = { value: null, ts: 0 };
+}
+
+// ─── Canary verification + auto-kill (commit 5/5) ──────────────────────────
+/**
+ * Tiered hit-rate + cost-delta health check.
+ * Tiers (per Codex+Claude council 2026-05-14):
+ *   - 1h hard floor 5% hit ratio → 'kill' (instant)
+ *   - 6h soft floor 20% hit ratio → 'kill'
+ *   - 24h cost delta > +5% vs pre-PR-B baseline → 'kill'
+ *   - 6h ratio < 35% → 'alert' (informational, no kill)
+ */
+async function verifyCachingActive(env) {
+  if (!env?.ANALYTICS_DB) {
+    return { healthy: false, action: 'no-data', reason: 'ANALYTICS_DB binding missing' };
+  }
+  try {
+    const query = (windowMinutes) => `
+      SELECT
+        COALESCE(SUM(CAST(json_extract(response_text, '$.pr_b.cache_read') AS INTEGER)), 0) AS reads,
+        COALESCE(SUM(CAST(json_extract(response_text, '$.pr_b.cache_creation') AS INTEGER)), 0) AS creations,
+        COALESCE(AVG(cost_usd), 0) AS avg_cost,
+        COUNT(*) AS rows
+      FROM bot_usage
+      WHERE response_path IN ('crm_agent','claude')
+        AND created_at >= datetime('now', '-${windowMinutes} minutes')
+        AND response_text LIKE '%pr_b%'`;
+    const baselineQuery = `
+      SELECT COALESCE(AVG(cost_usd), 0) AS avg_cost, COUNT(*) AS rows
+      FROM bot_usage
+      WHERE response_path IN ('crm_agent','claude')
+        AND created_at >= datetime('now', '-10 days')
+        AND created_at <= datetime('now', '-3 days')`;
+    const [r1h, r6h, r24h, baseline] = await Promise.all([
+      env.ANALYTICS_DB.prepare(query(60)).first(),
+      env.ANALYTICS_DB.prepare(query(360)).first(),
+      env.ANALYTICS_DB.prepare(query(1440)).first(),
+      env.ANALYTICS_DB.prepare(baselineQuery).first()
+    ]);
+    const ratio = (row) => {
+      const r = Number(row?.reads || 0);
+      const c = Number(row?.creations || 0);
+      return (r + c) > 0 ? r / (r + c) : 0;
+    };
+    const hitRate1h = ratio(r1h);
+    const hitRate6h = ratio(r6h);
+    const hitRate24h = ratio(r24h);
+    const baseAvg = Number(baseline?.avg_cost || 0);
+    const cur24hAvg = Number(r24h?.avg_cost || 0);
+    const costDelta = baseAvg > 0 ? ((cur24hAvg - baseAvg) / baseAvg) : 0;
+    const enoughData1h = Number(r1h?.rows || 0) >= 5;
+    const enoughData6h = Number(r6h?.rows || 0) >= 30;
+
+    if (enoughData1h && (Number(r1h?.creations || 0) + Number(r1h?.reads || 0)) > 0 && hitRate1h < 0.05) {
+      return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'kill', reason: '1h hit rate below 5% hard floor' };
+    }
+    if (enoughData6h && hitRate6h < 0.20) {
+      return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'kill', reason: '6h hit rate below 20% soft floor' };
+    }
+    if (baseAvg > 0 && Number(r24h?.rows || 0) >= 50 && costDelta > 0.05) {
+      return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'kill', reason: `24h cost delta +${(costDelta * 100).toFixed(1)}% above pre-PR-B baseline` };
+    }
+    if (enoughData6h && hitRate6h < 0.35) {
+      return { healthy: true, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'alert', reason: `6h hit rate ${(hitRate6h * 100).toFixed(1)}% below ideal 35%` };
+    }
+    if (!enoughData1h && !enoughData6h) {
+      return { healthy: true, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'no-data', reason: 'insufficient PR-B telemetry yet' };
+    }
+    return { healthy: true, hitRate1h, hitRate6h, hitRate24h, costDelta, action: 'continue' };
+  } catch (err) {
+    console.error(`[PR-B] verifyCachingActive error: ${err.message}`);
+    return { healthy: false, action: 'no-data', reason: `query error: ${err.message}` };
+  }
+}
+
+/** Flips PROMPT_CACHING_ENABLED to "false" in KV; also resets isolate cache. */
+async function killPromptCaching(env, reason) {
+  if (!env?.CONVERSATION_KV) return false;
+  try {
+    await env.CONVERSATION_KV.put(PROMPT_CACHING_KV_KEY, 'false');
+    _promptCachingKillSwitchCache = { value: false, ts: Date.now() };
+    console.warn(`[PR-B] AUTO-KILL: prompt caching disabled — ${reason}`);
+    if (env.ANALYTICS_DB) {
+      try {
+        await env.ANALYTICS_DB.prepare(
+          `INSERT INTO bot_usage (bot, response_path, model, input_tokens, output_tokens, cost_usd, error_message, response_text)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind('gchat', 'pr_b_kill_switch', 'pr_b_canary', 0, 0, 0,
+               `PR-B auto-kill: ${reason}`,
+               JSON.stringify({ pr_b: { kill_switch_event: true, reason } })).run();
+      } catch (_) { /* best effort */ }
+    }
+    return true;
+  } catch (err) {
+    console.error(`[PR-B] killPromptCaching failed: ${err.message}`);
+    return false;
+  }
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── END PR-B HELPERS (all 5 commits landed) ───────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
 const SEA_LION_MODEL_ID = '@cf/aisingapore/gemma-sea-lion-v4-27b-it';
 const DEEPSEEK_MODEL_IDS = new Set(['deepseek-v4-pro', 'deepseek-v4-flash']);
 const DEEPSEEK_COST_PER_1M = {
@@ -399,11 +610,26 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
     const evalRunId = evalContext?.runId || null;
 
     if (evalRunId) {
-      const _praEvalMeta = (extras?.intentClass || typeof extras?.toolCount === 'number')
+      // PR-A telemetry: intent_class + tool_count
+      // PR-B telemetry (2026-05-14): cache_creation + cache_read tokens from
+      // Anthropic response.usage. Stored as JSON suffix in response_text
+      // (no schema migration — matches PR-A precedent).
+      const _praEvalMeta = (
+        extras?.intentClass ||
+        typeof extras?.toolCount === 'number' ||
+        typeof extras?.cacheCreationTokens === 'number' ||
+        typeof extras?.cacheReadTokens === 'number'
+      )
         ? JSON.stringify({
             pr_a: true,
             intent_class: extras?.intentClass || null,
-            tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+            tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null,
+            pr_b: (typeof extras?.cacheCreationTokens === 'number' || typeof extras?.cacheReadTokens === 'number')
+              ? {
+                  cache_creation: typeof extras?.cacheCreationTokens === 'number' ? extras.cacheCreationTokens : 0,
+                  cache_read: typeof extras?.cacheReadTokens === 'number' ? extras.cacheReadTokens : 0
+                }
+              : undefined
           })
         : null;
       await logBotUsageToD1(env, {
@@ -470,7 +696,10 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
       costUsd: Math.round(totalCost * 1_000_000) / 1_000_000,
       // PR-A (2026-05-14): intent class + tool count for caching baseline
       intentClass: extras?.intentClass || null,
-      toolCount: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+      toolCount: typeof extras?.toolCount === 'number' ? extras.toolCount : null,
+      // PR-B (2026-05-14): Anthropic prompt-caching token counts
+      cacheCreationTokens: typeof extras?.cacheCreationTokens === 'number' ? extras.cacheCreationTokens : 0,
+      cacheReadTokens: typeof extras?.cacheReadTokens === 'number' ? extras.cacheReadTokens : 0
     });
     if (monthly.recentRequests.length > 50) {
       monthly.recentRequests = monthly.recentRequests.slice(0, 50);
@@ -481,12 +710,21 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
     // ── D1: Write to bot_usage table (fire-and-forget) ──
     if (env.ANALYTICS_DB) {
       try {
-        // PR-A: stash intent_class + tool_count as JSON metadata in
-        // response_text so the dashboard can parse without a schema migration.
-        const _praMeta = (extras?.intentClass || typeof extras?.toolCount === 'number')
+        // PR-A: intent_class + tool_count. PR-B: cache_creation + cache_read.
+        // Both stash JSON metadata in response_text (no schema migration).
+        const _hasPrAExtras = extras?.intentClass || typeof extras?.toolCount === 'number';
+        const _hasPrBExtras = typeof extras?.cacheCreationTokens === 'number' ||
+                              typeof extras?.cacheReadTokens === 'number';
+        const _praMeta = (_hasPrAExtras || _hasPrBExtras)
           ? JSON.stringify({
               intent_class: extras?.intentClass || null,
-              tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+              tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null,
+              pr_b: _hasPrBExtras
+                ? {
+                    cache_creation: typeof extras?.cacheCreationTokens === 'number' ? extras.cacheCreationTokens : 0,
+                    cache_read: typeof extras?.cacheReadTokens === 'number' ? extras.cacheReadTokens : 0
+                  }
+                : undefined
             })
           : null;
         await env.ANALYTICS_DB.prepare(
@@ -13239,6 +13477,12 @@ The advisor should respond in under 100 words and use enumerated steps, not expl
     prompt += CRM_PROMPT_ADMIN_ACTION;
   }
 
+  // PR-B (2026-05-14): mark the seam between cached static prompt and any
+  // dynamic per-user content that the caller may append (e.g. PREVIOUS CRM
+  // CONTEXT, speed directives). Anything appended after this marker will
+  // NOT be cached. buildAnthropicSystemBlocks() splits on this sentinel.
+  prompt += PROMPT_CACHE_BOUNDARY;
+
   return prompt;
 }
 
@@ -13437,14 +13681,22 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
       ];
     }
 
+    // PR-B (2026-05-14): apply prompt caching helpers (same as askClaude).
+    // The systemPrompt may already contain the boundary sentinel from the
+    // initial request build — buildAnthropicSystemBlocks handles both
+    // boundary-present and boundary-absent inputs.
+    const _prB_cachingEnabledCont = await isPromptCachingEnabled(env);
+    const _prB_systemFieldCont = buildAnthropicSystemBlocks(systemPrompt, _prB_cachingEnabledCont);
+    const _prB_toolsFieldCont = attachToolCacheControl(contTools, _prB_cachingEnabledCont);
+
     const requestBody = {
       model: contModel,
       max_tokens: contMaxTok,
-      system: systemPrompt,
+      system: _prB_systemFieldCont,
       messages
     };
-    if (contTools.length > 0) {
-      requestBody.tools = contTools;
+    if (_prB_toolsFieldCont.length > 0) {
+      requestBody.tools = _prB_toolsFieldCont;
     }
 
     const response = await callAnthropicWithRetry(requestBody);
@@ -13461,8 +13713,17 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     }
 
     const data = await response.json();
+    // PR-B (2026-05-14): capture cache token counts from response.usage so
+    // the continuation path contributes to canary verification metrics too.
+    const _prB_cacheUsageCont = extractCacheUsage(data.usage);
+    if (_prB_cacheUsageCont.creation > 0 || _prB_cacheUsageCont.read > 0) {
+      console.log(`[PR-B-CONT] cache tokens: creation=${_prB_cacheUsageCont.creation} read=${_prB_cacheUsageCont.read}`);
+    }
     // trackUsage writes to Analytics Engine, KV, AND D1 bot_usage
-    trackUsage(env, contModel, data.usage, 'crm-agent-continue').catch(() => {});
+    trackUsage(env, contModel, data.usage, 'crm-agent-continue', null, {
+      cacheCreationTokens: _prB_cacheUsageCont.creation,
+      cacheReadTokens: _prB_cacheUsageCont.read
+    }).catch(() => {});
 
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
@@ -13892,10 +14153,16 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     const upper = userMessage.toUpperCase();
     let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|READ\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
 
-    let systemPrompt = SYSTEM_PROMPT;
-    // Inject current date so the LLM knows "today" for date calculations
+    // PR-B (2026-05-14): structure systemPrompt as
+    //   STATIC (SYSTEM_PROMPT)  ── boundary ──  DYNAMIC (date + appendices)
+    // The boundary sentinel splits the prompt at API request build time so
+    // the cacheable static prefix gets cache_control: ephemeral and the
+    // per-call dynamic appendix (date, datasheet ctx, pricing ctx,
+    // accessories ctx) does NOT get cached. Date moved OUT of the cached
+    // region — daily invalidation eliminated.
+    let systemPrompt = SYSTEM_PROMPT + PROMPT_CACHE_BOUNDARY;
     const todayStr = new Date().toISOString().split('T')[0];
-    systemPrompt = `Today's date is ${todayStr}.\n\n` + systemPrompt;
+    systemPrompt += `Today's date is ${todayStr}.`;
     const kv = env.CONVERSATION_KV;
 
     // Context-aware: retry/correction phrases after a datasheet answer must
@@ -14203,14 +14470,23 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         ];
       }
 
+      // PR-B (2026-05-14): prompt caching — split systemPrompt into typed
+      // blocks with cache_control: ephemeral on the static prefix, and
+      // attach cache_control to the LAST tool entry to cache the tools
+      // array. Kill switch via CONVERSATION_KV[prompt_caching_enabled]
+      // (default true). Image content blocks NEVER receive cache markers.
+      const _prB_cachingEnabled = await isPromptCachingEnabled(env);
+      const _prB_systemField = buildAnthropicSystemBlocks(systemPrompt, _prB_cachingEnabled);
+      const _prB_toolsField = attachToolCacheControl(activeTools, _prB_cachingEnabled);
+
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
-        system: systemPrompt,
+        system: _prB_systemField,
         messages
       };
-      if (activeTools.length > 0) {
-        requestBody.tools = activeTools;
+      if (_prB_toolsField.length > 0) {
+        requestBody.tools = _prB_toolsField;
       }
 
       const response = await callAnthropicWithRetry(requestBody);
@@ -14260,18 +14536,41 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       // Track API usage (writes to Analytics Engine, KV, AND D1 bot_usage)
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
-      // PR-A (2026-05-14): include intent_class + tool_count for caching baseline.
-      // _intentClassification_PRA and tools.length live above in this function.
+      // PR-A: include intent_class + tool_count for caching baseline.
+      // PR-B (2026-05-14): include Anthropic cache_creation + cache_read
+      // input token counts so canary verification can compute hit-rate.
+      const _prB_cacheUsage = extractCacheUsage(data.usage);
       const _praExtras = useTools
         ? {
             intentClass: _intentClassification_PRA?.class || 'general',
-            toolCount: Array.isArray(activeTools) ? activeTools.length : (Array.isArray(tools) ? tools.length : 0)
+            toolCount: Array.isArray(activeTools) ? activeTools.length : (Array.isArray(tools) ? tools.length : 0),
+            cacheCreationTokens: _prB_cacheUsage.creation,
+            cacheReadTokens: _prB_cacheUsage.read
           }
         : {
             intentClass: 'quote_url',
-            toolCount: Array.isArray(activeTools) ? activeTools.length : 0
+            toolCount: Array.isArray(activeTools) ? activeTools.length : 0,
+            cacheCreationTokens: _prB_cacheUsage.creation,
+            cacheReadTokens: _prB_cacheUsage.read
           };
+      if (_prB_cacheUsage.creation > 0 || _prB_cacheUsage.read > 0) {
+        console.log(`[PR-B] cache tokens: creation=${_prB_cacheUsage.creation} read=${_prB_cacheUsage.read}`);
+      }
       trackUsage(env, activeModel, data.usage, usageSource, evalContext, _praExtras).catch(() => {});
+      // PR-B canary: 1-in-100 in-band sample so kill-switch fires within
+      // minutes of a degraded run, not next 11am cron tick. Fire-and-forget.
+      if (_prB_cachingEnabled && Math.random() < 0.01) {
+        Promise.resolve().then(async () => {
+          try {
+            const c = await verifyCachingActive(env);
+            if (c.action === 'kill') {
+              await killPromptCaching(env, c.reason || 'in-band canary breach');
+            } else if (c.action === 'alert') {
+              console.warn(`[PR-B-CANARY-IB] alert: ${c.reason}`);
+            }
+          } catch (_) { /* swallow */ }
+        });
+      }
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
@@ -23607,6 +23906,19 @@ Return ONLY a JSON object (no markdown, no explanation):
   async scheduled(event, env, ctx) {
     const startTime = Date.now();
     console.log(`[PRICE-CRON] Starting daily price refresh at ${new Date().toISOString()}`);
+
+    // ── PR-B canary (2026-05-14): tiered hit-rate + cost-delta verification ──
+    // Runs once per daily cron tick (also sampled in-band at 1-in-100 in
+    // askClaude). Auto-kills caching via KV when health thresholds breach.
+    try {
+      const _prB_canary = await verifyCachingActive(env);
+      console.log(`[PR-B-CANARY] action=${_prB_canary.action} hit1h=${(_prB_canary.hitRate1h * 100).toFixed(1)}% hit6h=${(_prB_canary.hitRate6h * 100).toFixed(1)}% hit24h=${(_prB_canary.hitRate24h * 100).toFixed(1)}% costDelta=${((_prB_canary.costDelta || 0) * 100).toFixed(1)}% reason=${_prB_canary.reason || 'n/a'}`);
+      if (_prB_canary.action === 'kill') {
+        await killPromptCaching(env, _prB_canary.reason || 'canary breach');
+      }
+    } catch (canaryErr) {
+      console.error(`[PR-B-CANARY] error: ${canaryErr.message}`);
+    }
 
     // Use PRICES_KV (shared across both workers) with CONVERSATION_KV fallback
     const kv = env.PRICES_KV || env.CONVERSATION_KV;
