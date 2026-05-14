@@ -12636,54 +12636,55 @@ function classifyCrmIntent(text, ctx = {}) {
   const t = text.toLowerCase();
 
   // 1. URL/ecomm quote link
-  if (/(urls+quote|ecomms+link|orders+link|shoppings+carts+link|stratuss+url)/.test(t)) {
+  if (/\b(url\s+quote|ecomm\s+link|order\s+link|shopping\s+cart\s+link|stratus\s+url)\b/.test(t)) {
     return { class: 'quote_url', confidence: 0.9 };
   }
 
   // 2. Subscription / DID / PO / contract / esign / sub mod
-  if (/(generates+did|creates+did|fires+did|gets+(a|the)s+did|submits+(tos+|fors+)?(ccw|did|velocity)|live_ciscoquote|live_converttoso|live_sendtoesign|live_getquotedata|admins+action|admin_action|quote.to.po|converts+tos+po|creates+(as+)?po|sends+po|contract|esign|e-sign|docusign|sends+fors+signature|subs*mod|subscriptions+mod|ccws+renewal|renews+(mys+)?subscription)/.test(t)) {
+  if (/\b(generate\s+(a\s+|the\s+)?did|create\s+(a\s+|the\s+)?did|fire\s+(a\s+|the\s+)?did|get\s+(a|the)\s+did|need\s+(a\s+)?did|submit\s+(to\s+|for\s+)?(ccw|did|velocity)|live_ciscoquote|live_converttoso|live_sendtoesign|live_getquotedata|admin\s+action|admin_action|quote.to.po|convert\s+to\s+po|create\s+(a\s+)?po|send\s+po|contract|esign|e-sign|docusign|send\s+for\s+signature|sub\s*mod|subscription\s+mod|ccw\s+renewal|renew\s+(my\s+)?subscription)\b/.test(t)) {
     return { class: 'subscription', confidence: 0.9 };
   }
 
   // 3. Cisco rep assignment (must precede crm_write because verbs overlap)
-  if (/(assign|set|change|update).{0,40}(ciscos+rep|merakis+isr|isr|rep)/.test(t)
-      || /@cisco.com/.test(t)
-      || /pings+(thes+)?(ciscos+)?rep/.test(t)) {
+  if (/\b(assign|set|change|update)\b.{0,40}\b(cisco\s+rep|meraki\s+isr|isr|rep)\b/.test(t)
+      || /@cisco\.com/.test(t)
+      || /\bping\s+(the\s+)?(cisco\s+)?rep\b/.test(t)) {
     return { class: 'cisco_rep', confidence: 0.85 };
   }
 
   // 4. Email composition / inbox
-  if (/(draft|compose|write|send|reply)s+(an?s+)?(email|message|response|follow[s-]?up|reply)/.test(t)
-      || /(check|read|search|scan|summarize|review)s+.{0,30}(email|inbox|gmail|thread)/.test(t)
-      || /gmail/.test(t)
-      || /inbox/.test(t)
-      || /drafts+as+reply/.test(t)) {
+  if (/\b(draft|compose|write|send|reply)\s+(an?\s+)?(email|message|response|follow[\s-]?up|reply)/.test(t)
+      || /\b(check|read|search|scan|summarize|review)\s+.{0,30}(email|inbox|gmail|thread)/.test(t)
+      || /\bgmail\b/.test(t)
+      || /\binbox\b/.test(t)
+      || /\bdraft\s+a\s+reply\b/.test(t)) {
     return { class: 'email', confidence: 0.85 };
   }
 
   // 5. CRM mutation verbs on Zoho records
-  if (/(create|new|add|build|make|sets*up|builds*out)s+(as+)?(deal|quote|task|contact|account|note)/.test(t)
-      || /(update|edit|change|modify|rename|set|fix|adjust|move|extend)s+.{0,50}(deal|quote|task|contact|account|stage|amount|valid_till|closing_date|dues*date|address|lines*items?|quoteds*items?|discount)/.test(t)
-      || /(close|complete|finish|mark)s+(thes+)?(task|deal)/.test(t)
-      || /(delete|remove)s+.{0,30}(quote|deal|task|note|lines*item)/.test(t)
-      || /(clone|copy|duplicate)s+(as+|thes+)?(quote|deal)/.test(t)
-      || /undo/.test(t)
-      || /billin?gs+(address|street|city|state|zip|code)/.test(t)
-      || /shippings+(address|country)/.test(t)) {
+  if (/\b(create|new|add|build|make|set\s*up|build\s*out)\s+(a\s+)?(deal|quote|task|contact|account|note)\b/.test(t)
+      || /\b(update|edit|change|modify|rename|set|fix|adjust|move|extend)\s+.{0,50}\b(deal|quote|task|contact|account|stage|amount|valid_till|closing_date|due\s*date|address|line\s*items?|quoted\s*items?|discount)\b/.test(t)
+      || /\b(close|complete|finish|mark)\s+(the\s+)?(task|deal)\b/.test(t)
+      || /\b(delete|remove)\s+.{0,30}\b(quote|deal|task|note|line\s*item)/.test(t)
+      || /\b(clone|copy|duplicate)\s+(a\s+|the\s+)?(quote|deal)\b/.test(t)
+      || /\bundo\b/.test(t)
+      || /\bbillin?g\s+(address|street|city|state|zip|code)\b/.test(t)
+      || /\bshipping\s+(address|country)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.85 };
   }
 
   // 6. Pure read operations
-  if (/(search|find|looks*up|pulls*up|get|show|list|what'?s|who'?s|when|hows+many|hows+much).{0,60}(deal|quote|task|contact|account|customer|client|order|invoice|lines*items?|pipeline|forecast|revenue|stage|product|rep)/.test(t)
-      || /(my|the|latest|last|recent|newest|mosts+recent|open|active|overdue)s+(deal|quote|task|email|contact|account)/.test(t)) {
+  if (/\b(search|find|look\s*up|pull\s*up|get|show|list|what'?s|who'?s|when|how\s+many|how\s+much)\b.{0,60}\b(deal|quote|task|contact|account|customer|client|order|invoice|line\s*items?|pipeline|forecast|revenue|stage|product|rep)\b/.test(t)
+      || /\b(my|the|latest|last|recent|newest|most\s+recent|open|active|overdue)\s+(deal|quote|task|email|contact|account)/.test(t)) {
     return { class: 'crm_read', confidence: 0.8 };
   }
 
   // 7. Active page context with mutation verb but no record-type keyword
-  if (ctx.hasActivePageContext && /(change|update|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)/.test(t)) {
+  if (ctx.hasActivePageContext && /\b(change|update|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.75 };
   }
 
+  
   return { class: 'general', confidence: 0.5 };
 }
 
@@ -12753,7 +12754,7 @@ You have full Zoho CRM access. NEVER say "I cannot access Zoho" or "I don't have
 4. If server says "that value is a Quote_Number, not a record_id," re-call with the resolved id.
 5. NEVER claim deletion unless \`success: true\` was returned. Saying "deleted" when nothing happened is a critical accuracy failure.
 6. AMBIGUITY — "the last one", "that quote", or anything without a specific id/Quote_Number → ask "Which one? Specify record id or Quote_Number." Refuse to delete until they specify.
-7. If user prompt includes "confirm:true" / "confirm true" — CONFIRMATION GIVEN. Call zoho_delete_record immediately with `confirm: true`. DO NOT ask again. If server returns "confirm:true required," you forgot it — retry with it added.
+7. If user prompt includes "confirm:true" / "confirm true" — CONFIRMATION GIVEN. Call zoho_delete_record immediately with \`confirm: true\`. DO NOT ask again. If server returns "confirm:true required," you forgot it — retry with it added.
 8. Quoted_Items module cannot be deleted via zoho_delete_record. Refuse or update the parent Quote — never call zoho_delete_record on module_name="Quoted_Items".
 
 ---
@@ -12980,7 +12981,7 @@ RIGHT: \`Quoted_Items: [{"id": "lic_1", "_delete": null}, {"id": "lic_2", "_dele
 
 **LICENSE TERM SWAP (3YR → 5YR) — CRITICAL:**
 1. zoho_get_record on Quote AND batch_product_lookup for new SKUs IN PARALLEL.
-2. SINGLE zoho_update_record where Quoted_Items contains BOTH `{id, _delete:null}` for each old LIC line AND `{Product_Name:{id}, Quantity, Discount}` for each new LIC line — WITH ecomm Discount on every add.
+2. SINGLE zoho_update_record where Quoted_Items contains BOTH \`{id, _delete:null}\` for each old LIC line AND \`{Product_Name:{id}, Quantity, Discount}\` for each new LIC line — WITH ecomm Discount on every add.
 3. NEVER split deletes + adds into separate update calls — adds happen before deletes, creating duplicates.
 4. zoho_get_record to re-fetch and verify. Report ACTUAL items, never claim success on API code alone.
 
@@ -13042,10 +13043,10 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 1. CRM mode — always create Zoho CRM quotes, NEVER URL quotes.
 2. Parse for intent, not literal strings. Do not re-ask for already-provided info.
 3. **CRM-FIRST:** Search Zoho before web. web_search_domain only for NEW accounts not in CRM.
-4. **create_quote_on_deal vs create_deal_and_quote:** Existing Deal context or user-supplied Deal ID → `create_quote_on_deal`. Brand-new Deal → `create_deal_and_quote`. Pass ONLY requested SKUs; hardware auto-adds licenses unless hardware_only/include_licenses=false. If same request mentions contract/PO/signature/DocuSign/"send PO," continue immediately with `quote_to_po_and_esign` on the created Quote ID.
+4. **create_quote_on_deal vs create_deal_and_quote:** Existing Deal context or user-supplied Deal ID → \`create_quote_on_deal\`. Brand-new Deal → \`create_deal_and_quote\`. Pass ONLY requested SKUs; hardware auto-adds licenses unless hardware_only/include_licenses=false. If same request mentions contract/PO/signature/DocuSign/"send PO," continue immediately with \`quote_to_po_and_esign\` on the created Quote ID.
 5. **batch_product_lookup / parse_quote_url** for ALL SKU/URL lookups. Never search Products individually.
 6. **VAR PATTERN:** "this is for [Customer]" / "on behalf of [Customer]" → sender is VAR. Billing Account = sender's company. Deal name: "[Sender] - [End Customer] - [Desc]". Contact = sender.
-7. **End with Zoho links** for every record created: `[Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID)`.
+7. **End with Zoho links** for every record created: \`[Name](https://crm.zoho.com/crm/org647122552/tab/MODULE/ID)\`.
 
 ---
 
@@ -13057,7 +13058,7 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 ---
 
 ## URL / ECOMM QUOTE LINK (rare)
-For "URL quote" / "ecomm link", build `https://stratusinfosystems.com/order/?item={SKUs}&qty={Qs}`. If the quote is term-agnostic, generate 3 links (1/3/5yr) by swapping license term suffix: LIC-ENT-{N}YR (APs), LIC-MX{model}-SEC-{N}YR (MX), LIC-{model}-{N}Y (switches — Y not YR). Hardware SKUs stay the same.
+For "URL quote" / "ecomm link", build \`https://stratusinfosystems.com/order/?item={SKUs}&qty={Qs}\`. If the quote is term-agnostic, generate 3 links (1/3/5yr) by swapping license term suffix: LIC-ENT-{N}YR (APs), LIC-MX{model}-SEC-{N}YR (MX), LIC-{model}-{N}Y (switches — Y not YR). Hardware SKUs stay the same.
 
 ---
 
