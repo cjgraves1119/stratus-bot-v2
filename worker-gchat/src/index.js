@@ -389,7 +389,7 @@ function estimateDeepSeekCostUsd(model, usage = {}) {
  * @param {Object} usage - { input_tokens, output_tokens } from API response
  * @param {string} source - Where the call originated (e.g. 'gchat', 'addon-analyze', 'addon-draft', 'crm-agent')
  */
-async function trackUsage(env, model, usage, source, evalContext = null) {
+async function trackUsage(env, model, usage, source, evalContext = null, extras = null) {
   if (!usage || !env?.CONVERSATION_KV) return;
   try {
     const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
@@ -399,6 +399,13 @@ async function trackUsage(env, model, usage, source, evalContext = null) {
     const evalRunId = evalContext?.runId || null;
 
     if (evalRunId) {
+      const _praEvalMeta = (extras?.intentClass || typeof extras?.toolCount === 'number')
+        ? JSON.stringify({
+            pr_a: true,
+            intent_class: extras?.intentClass || null,
+            tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+          })
+        : null;
       await logBotUsageToD1(env, {
         bot: evalContext?.bot || (source.startsWith('addon') ? 'addon' : 'gchat'),
         personId: evalContext?.personId || null,
@@ -417,7 +424,7 @@ async function trackUsage(env, model, usage, source, evalContext = null) {
         costUsd: Math.round(totalCost * 1_000_000) / 1_000_000,
         durationMs: null,
         errorMessage: null,
-        responseText: null,
+        responseText: _praEvalMeta, // PR-A: intent_class + tool_count metadata
         endpoint: evalContext?.endpoint || null,
         evalContext
       });
@@ -460,7 +467,10 @@ async function trackUsage(env, model, usage, source, evalContext = null) {
       source,
       inputTokens: usage.input_tokens,
       outputTokens: usage.output_tokens,
-      costUsd: Math.round(totalCost * 1_000_000) / 1_000_000
+      costUsd: Math.round(totalCost * 1_000_000) / 1_000_000,
+      // PR-A (2026-05-14): intent class + tool count for caching baseline
+      intentClass: extras?.intentClass || null,
+      toolCount: typeof extras?.toolCount === 'number' ? extras.toolCount : null
     });
     if (monthly.recentRequests.length > 50) {
       monthly.recentRequests = monthly.recentRequests.slice(0, 50);
@@ -471,9 +481,17 @@ async function trackUsage(env, model, usage, source, evalContext = null) {
     // ── D1: Write to bot_usage table (fire-and-forget) ──
     if (env.ANALYTICS_DB) {
       try {
+        // PR-A: stash intent_class + tool_count as JSON metadata in
+        // response_text so the dashboard can parse without a schema migration.
+        const _praMeta = (extras?.intentClass || typeof extras?.toolCount === 'number')
+          ? JSON.stringify({
+              intent_class: extras?.intentClass || null,
+              tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+            })
+          : null;
         await env.ANALYTICS_DB.prepare(
-          `INSERT INTO bot_usage (bot, person_id, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO bot_usage (bot, person_id, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, response_text)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           source.startsWith('addon') ? 'addon' : 'gchat',
           null, // person_id filled by caller if available
@@ -482,7 +500,8 @@ async function trackUsage(env, model, usage, source, evalContext = null) {
           usage.input_tokens || 0,
           usage.output_tokens || 0,
           Math.round(totalCost * 1_000_000) / 1_000_000,
-          null
+          null,
+          _praMeta
         ).run();
       } catch (d1Err) {
         console.error('[D1] bot_usage insert error:', d1Err.message);
@@ -12532,6 +12551,174 @@ function detectCrmEmailIntent(text) {
   return { hasCrm, hasEmail, hasAny: hasCrm || hasEmail };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── PR-A: INTENT-CLASS TOOL SUBSETTING (cost reduction, 2026-05-14) ─────────
+// Send only 3-8 tools per Claude call instead of all 23 CRM_EMAIL_TOOLS.
+// Reduces per-call input tokens by ~3-5K depending on class. Class is derived
+// deterministically from the user message + context. Worker-gchat does NOT
+// run the Llama Tier 0 classifier (that's in worker/), so this regex-based
+// classifier serves the same role here. Confidence < 0.7 → fall back to the
+// "general" superset (8 most-used tools) to keep behavior safe.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const TOOL_SUBSETS = Object.freeze({
+  // Write paths — creation + mutation. Includes broad reads needed mid-flow.
+  crm_write: [
+    'create_deal_and_quote', 'create_quote_on_deal',
+    'zoho_create_record', 'zoho_update_record',
+    'clone_quote', 'undo_crm_action',
+    'batch_product_lookup', 'parse_quote_url',
+    'zoho_search_records', 'zoho_get_record'
+  ],
+  // Pure read / lookup. No mutations possible.
+  crm_read: [
+    'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
+    'zoho_get_field'
+  ],
+  // Email-centric flows. Includes zoho_create_record so tasks can be made
+  // from an email context without re-classifying.
+  email: [
+    'gmail_search_messages', 'gmail_read_message', 'gmail_read_thread',
+    'gmail_create_draft', 'gmail_send_email',
+    'zoho_search_records', 'zoho_create_record'
+  ],
+  // Stratus URL ecomm-link generation only.
+  quote_url: ['parse_quote_url', 'batch_product_lookup'],
+  // Subscription / renewal admin work — DID generation, PO conversion,
+  // e-sign — quote_to_po_and_esign is the workflow wrapper.
+  subscription: [
+    'quote_to_po_and_esign', 'quote_to_po_status',
+    'zoho_get_record', 'zoho_update_record',
+    'velocity_hub_submit'
+  ],
+  // Cisco rep assignment paths. Reads + the dedicated assignment tool.
+  cisco_rep: [
+    'assign_cisco_rep_to_deal', 'zoho_search_records',
+    'zoho_get_record', 'zoho_update_record'
+  ],
+  // Fallback superset — 8 most-used tools across all classes. Covers
+  // any ambiguous request without removing the model's options.
+  general: [
+    'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
+    'zoho_create_record', 'zoho_update_record',
+    'batch_product_lookup', 'create_deal_and_quote', 'clone_quote'
+  ]
+});
+
+const TOOL_SUBSET_CLASSES = Object.freeze([
+  'crm_write', 'crm_read', 'email', 'quote_url', 'subscription', 'cisco_rep', 'general'
+]);
+
+/**
+ * Deterministic intent classifier. Returns { class, confidence } where:
+ *   - class is one of TOOL_SUBSET_CLASSES
+ *   - confidence is 0..1 (higher = more certain)
+ *
+ * Inputs:
+ *   text   — user message
+ *   ctx    — optional context flags { hasCrmIntent, hasEmailIntent,
+ *            hasActivePageContext, hasQuoteSession }
+ *
+ * Logic ranked by specificity (first match wins):
+ *   1. Quote-URL phrases → quote_url (0.9)
+ *   2. Subscription / DID / PO / esign / sub mod → subscription (0.9)
+ *   3. Cisco rep assignment → cisco_rep (0.85)
+ *   4. Email composition / draft / send → email (0.85)
+ *   5. Create / update / delete on CRM record → crm_write (0.85)
+ *   6. Search / find / list / show / pull up → crm_read (0.8)
+ *   7. Active-page mutation verbs → crm_write (0.75)
+ *   8. Otherwise → general (0.5, below the 0.7 confidence floor)
+ */
+function classifyCrmIntent(text, ctx = {}) {
+  if (typeof text !== 'string' || !text.trim()) {
+    return { class: 'general', confidence: 0.5 };
+  }
+  const t = text.toLowerCase();
+
+  // 1. URL/ecomm quote link
+  if (/(urls+quote|ecomms+link|orders+link|shoppings+carts+link|stratuss+url)/.test(t)) {
+    return { class: 'quote_url', confidence: 0.9 };
+  }
+
+  // 2. Subscription / DID / PO / contract / esign / sub mod
+  if (/(generates+did|creates+did|fires+did|gets+(a|the)s+did|submits+(tos+|fors+)?(ccw|did|velocity)|live_ciscoquote|live_converttoso|live_sendtoesign|live_getquotedata|admins+action|admin_action|quote.to.po|converts+tos+po|creates+(as+)?po|sends+po|contract|esign|e-sign|docusign|sends+fors+signature|subs*mod|subscriptions+mod|ccws+renewal|renews+(mys+)?subscription)/.test(t)) {
+    return { class: 'subscription', confidence: 0.9 };
+  }
+
+  // 3. Cisco rep assignment (must precede crm_write because verbs overlap)
+  if (/(assign|set|change|update).{0,40}(ciscos+rep|merakis+isr|isr|rep)/.test(t)
+      || /@cisco.com/.test(t)
+      || /pings+(thes+)?(ciscos+)?rep/.test(t)) {
+    return { class: 'cisco_rep', confidence: 0.85 };
+  }
+
+  // 4. Email composition / inbox
+  if (/(draft|compose|write|send|reply)s+(an?s+)?(email|message|response|follow[s-]?up|reply)/.test(t)
+      || /(check|read|search|scan|summarize|review)s+.{0,30}(email|inbox|gmail|thread)/.test(t)
+      || /gmail/.test(t)
+      || /inbox/.test(t)
+      || /drafts+as+reply/.test(t)) {
+    return { class: 'email', confidence: 0.85 };
+  }
+
+  // 5. CRM mutation verbs on Zoho records
+  if (/(create|new|add|build|make|sets*up|builds*out)s+(as+)?(deal|quote|task|contact|account|note)/.test(t)
+      || /(update|edit|change|modify|rename|set|fix|adjust|move|extend)s+.{0,50}(deal|quote|task|contact|account|stage|amount|valid_till|closing_date|dues*date|address|lines*items?|quoteds*items?|discount)/.test(t)
+      || /(close|complete|finish|mark)s+(thes+)?(task|deal)/.test(t)
+      || /(delete|remove)s+.{0,30}(quote|deal|task|note|lines*item)/.test(t)
+      || /(clone|copy|duplicate)s+(as+|thes+)?(quote|deal)/.test(t)
+      || /undo/.test(t)
+      || /billin?gs+(address|street|city|state|zip|code)/.test(t)
+      || /shippings+(address|country)/.test(t)) {
+    return { class: 'crm_write', confidence: 0.85 };
+  }
+
+  // 6. Pure read operations
+  if (/(search|find|looks*up|pulls*up|get|show|list|what'?s|who'?s|when|hows+many|hows+much).{0,60}(deal|quote|task|contact|account|customer|client|order|invoice|lines*items?|pipeline|forecast|revenue|stage|product|rep)/.test(t)
+      || /(my|the|latest|last|recent|newest|mosts+recent|open|active|overdue)s+(deal|quote|task|email|contact|account)/.test(t)) {
+    return { class: 'crm_read', confidence: 0.8 };
+  }
+
+  // 7. Active page context with mutation verb but no record-type keyword
+  if (ctx.hasActivePageContext && /(change|update|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)/.test(t)) {
+    return { class: 'crm_write', confidence: 0.75 };
+  }
+
+  return { class: 'general', confidence: 0.5 };
+}
+
+/**
+ * Pick the tool subset for a Claude call. Confidence floor at 0.7 — anything
+ * below falls back to the general superset to avoid surprising the model on
+ * ambiguous requests. Always preserves advisor tool injection (handled at
+ * call site).
+ *
+ * @param {Object} intent - classifyCrmIntent() result { class, confidence }
+ * @param {Array<Object>} allTools - full CRM_EMAIL_TOOLS array
+ * @returns {Array<Object>} subset of tools
+ */
+function selectToolSubset(intent, allTools) {
+  if (!Array.isArray(allTools) || allTools.length === 0) return allTools || [];
+  if (!intent || typeof intent !== 'object') {
+    return _filterToolsByNames(allTools, TOOL_SUBSETS.general);
+  }
+  const conf = typeof intent.confidence === 'number' ? intent.confidence : 0;
+  if (conf < 0.7) {
+    return _filterToolsByNames(allTools, TOOL_SUBSETS.general);
+  }
+  const names = TOOL_SUBSETS[intent.class] || TOOL_SUBSETS.general;
+  return _filterToolsByNames(allTools, names);
+}
+
+function _filterToolsByNames(allTools, names) {
+  const wanted = new Set(names);
+  return allTools.filter(t => wanted.has(t.name));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── END PR-A: TOOL SUBSETTING ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
 // ─── CRM System Prompt Extension ─────────────────────────────────────────────
 const CRM_SYSTEM_PROMPT = `
 
@@ -13794,9 +13981,32 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       : history;
     let messages = [...effectiveHistory, { role: 'user', content: userContent }];
 
-    // Determine if we should include CRM/email tools
-    // Always include QUOTE_URL_TOOL for deterministic URL generation (even non-CRM path)
-    const tools = useTools ? CRM_EMAIL_TOOLS : [QUOTE_URL_TOOL];
+    // Determine if we should include CRM/email tools.
+    // ── PR-A (2026-05-14): intent-class tool subsetting ──
+    // Send only the 3-8 tools relevant to the classified intent class instead
+    // of all 23 CRM_EMAIL_TOOLS. Confidence floor 0.7 → fall back to the
+    // general superset (8 most-used tools). Saves ~3-5K input tokens per call.
+    // Advisor tool injection is preserved unchanged at the activeTools site
+    // below (Codex Round 1 finding).
+    // Non-CRM path keeps QUOTE_URL_TOOL only (unchanged).
+    const _crmCtx_PRA = useTools ? {
+      hasActivePageContext: /\[Active Zoho page[:\s]/i.test(userMessage),
+      hasQuoteSession:       /\[Session: Most recently worked quote/i.test(userMessage)
+    } : null;
+    const _intentClassification_PRA = useTools
+      ? classifyCrmIntent(userMessage, _crmCtx_PRA)
+      : { class: 'quote_url', confidence: 1.0 };
+    const _toolSubset_PRA = useTools
+      ? selectToolSubset(_intentClassification_PRA, CRM_EMAIL_TOOLS)
+      : [QUOTE_URL_TOOL];
+    // Defensive: if a class accidentally yields an empty subset, fall back
+    // to the full set so behavior never silently regresses.
+    const tools = _toolSubset_PRA.length > 0
+      ? _toolSubset_PRA
+      : (useTools ? CRM_EMAIL_TOOLS : [QUOTE_URL_TOOL]);
+    if (useTools) {
+      console.log(`[GCHAT-AGENT] PR-A intent class=${_intentClassification_PRA.class} conf=${_intentClassification_PRA.confidence.toFixed(2)} tools=${tools.length}/${CRM_EMAIL_TOOLS.length}`);
+    }
     if (useTools) {
       // Build system prompt dynamically — conditionally loads EMAIL INTAKE and ADMIN ACTION
       // sections only when relevant intent is detected, saving ~2K tokens on standard requests.
@@ -14049,7 +14259,18 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       // Track API usage (writes to Analytics Engine, KV, AND D1 bot_usage)
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
-      trackUsage(env, activeModel, data.usage, usageSource, evalContext).catch(() => {});
+      // PR-A (2026-05-14): include intent_class + tool_count for caching baseline.
+      // _intentClassification_PRA and tools.length live above in this function.
+      const _praExtras = useTools
+        ? {
+            intentClass: _intentClassification_PRA?.class || 'general',
+            toolCount: Array.isArray(activeTools) ? activeTools.length : (Array.isArray(tools) ? tools.length : 0)
+          }
+        : {
+            intentClass: 'quote_url',
+            toolCount: Array.isArray(activeTools) ? activeTools.length : 0
+          };
+      trackUsage(env, activeModel, data.usage, usageSource, evalContext, _praExtras).catch(() => {});
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
