@@ -509,11 +509,26 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
     const evalRunId = evalContext?.runId || null;
 
     if (evalRunId) {
-      const _praEvalMeta = (extras?.intentClass || typeof extras?.toolCount === 'number')
+      // PR-A telemetry: intent_class + tool_count
+      // PR-B telemetry (2026-05-14): cache_creation + cache_read tokens from
+      // Anthropic response.usage. Stored as JSON suffix in response_text
+      // (no schema migration — matches PR-A precedent).
+      const _praEvalMeta = (
+        extras?.intentClass ||
+        typeof extras?.toolCount === 'number' ||
+        typeof extras?.cacheCreationTokens === 'number' ||
+        typeof extras?.cacheReadTokens === 'number'
+      )
         ? JSON.stringify({
             pr_a: true,
             intent_class: extras?.intentClass || null,
-            tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+            tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null,
+            pr_b: (typeof extras?.cacheCreationTokens === 'number' || typeof extras?.cacheReadTokens === 'number')
+              ? {
+                  cache_creation: typeof extras?.cacheCreationTokens === 'number' ? extras.cacheCreationTokens : 0,
+                  cache_read: typeof extras?.cacheReadTokens === 'number' ? extras.cacheReadTokens : 0
+                }
+              : undefined
           })
         : null;
       await logBotUsageToD1(env, {
@@ -580,7 +595,10 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
       costUsd: Math.round(totalCost * 1_000_000) / 1_000_000,
       // PR-A (2026-05-14): intent class + tool count for caching baseline
       intentClass: extras?.intentClass || null,
-      toolCount: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+      toolCount: typeof extras?.toolCount === 'number' ? extras.toolCount : null,
+      // PR-B (2026-05-14): Anthropic prompt-caching token counts
+      cacheCreationTokens: typeof extras?.cacheCreationTokens === 'number' ? extras.cacheCreationTokens : 0,
+      cacheReadTokens: typeof extras?.cacheReadTokens === 'number' ? extras.cacheReadTokens : 0
     });
     if (monthly.recentRequests.length > 50) {
       monthly.recentRequests = monthly.recentRequests.slice(0, 50);
@@ -591,12 +609,21 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
     // ── D1: Write to bot_usage table (fire-and-forget) ──
     if (env.ANALYTICS_DB) {
       try {
-        // PR-A: stash intent_class + tool_count as JSON metadata in
-        // response_text so the dashboard can parse without a schema migration.
-        const _praMeta = (extras?.intentClass || typeof extras?.toolCount === 'number')
+        // PR-A: intent_class + tool_count. PR-B: cache_creation + cache_read.
+        // Both stash JSON metadata in response_text (no schema migration).
+        const _hasPrAExtras = extras?.intentClass || typeof extras?.toolCount === 'number';
+        const _hasPrBExtras = typeof extras?.cacheCreationTokens === 'number' ||
+                              typeof extras?.cacheReadTokens === 'number';
+        const _praMeta = (_hasPrAExtras || _hasPrBExtras)
           ? JSON.stringify({
               intent_class: extras?.intentClass || null,
-              tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null
+              tool_count: typeof extras?.toolCount === 'number' ? extras.toolCount : null,
+              pr_b: _hasPrBExtras
+                ? {
+                    cache_creation: typeof extras?.cacheCreationTokens === 'number' ? extras.cacheCreationTokens : 0,
+                    cache_read: typeof extras?.cacheReadTokens === 'number' ? extras.cacheReadTokens : 0
+                  }
+                : undefined
             })
           : null;
         await env.ANALYTICS_DB.prepare(
@@ -13585,8 +13612,17 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     }
 
     const data = await response.json();
+    // PR-B (2026-05-14): capture cache token counts from response.usage so
+    // the continuation path contributes to canary verification metrics too.
+    const _prB_cacheUsageCont = extractCacheUsage(data.usage);
+    if (_prB_cacheUsageCont.creation > 0 || _prB_cacheUsageCont.read > 0) {
+      console.log(`[PR-B-CONT] cache tokens: creation=${_prB_cacheUsageCont.creation} read=${_prB_cacheUsageCont.read}`);
+    }
     // trackUsage writes to Analytics Engine, KV, AND D1 bot_usage
-    trackUsage(env, contModel, data.usage, 'crm-agent-continue').catch(() => {});
+    trackUsage(env, contModel, data.usage, 'crm-agent-continue', null, {
+      cacheCreationTokens: _prB_cacheUsageCont.creation,
+      cacheReadTokens: _prB_cacheUsageCont.read
+    }).catch(() => {});
 
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
@@ -14399,17 +14435,26 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
       // Track API usage (writes to Analytics Engine, KV, AND D1 bot_usage)
       const usageSource = useTools ? 'crm-agent' : 'gchat-quote';
-      // PR-A (2026-05-14): include intent_class + tool_count for caching baseline.
-      // _intentClassification_PRA and tools.length live above in this function.
+      // PR-A: include intent_class + tool_count for caching baseline.
+      // PR-B (2026-05-14): include Anthropic cache_creation + cache_read
+      // input token counts so canary verification can compute hit-rate.
+      const _prB_cacheUsage = extractCacheUsage(data.usage);
       const _praExtras = useTools
         ? {
             intentClass: _intentClassification_PRA?.class || 'general',
-            toolCount: Array.isArray(activeTools) ? activeTools.length : (Array.isArray(tools) ? tools.length : 0)
+            toolCount: Array.isArray(activeTools) ? activeTools.length : (Array.isArray(tools) ? tools.length : 0),
+            cacheCreationTokens: _prB_cacheUsage.creation,
+            cacheReadTokens: _prB_cacheUsage.read
           }
         : {
             intentClass: 'quote_url',
-            toolCount: Array.isArray(activeTools) ? activeTools.length : 0
+            toolCount: Array.isArray(activeTools) ? activeTools.length : 0,
+            cacheCreationTokens: _prB_cacheUsage.creation,
+            cacheReadTokens: _prB_cacheUsage.read
           };
+      if (_prB_cacheUsage.creation > 0 || _prB_cacheUsage.read > 0) {
+        console.log(`[PR-B] cache tokens: creation=${_prB_cacheUsage.creation} read=${_prB_cacheUsage.read}`);
+      }
       trackUsage(env, activeModel, data.usage, usageSource, evalContext, _praExtras).catch(() => {});
 
       // Check if Claude wants to use tools
