@@ -18886,12 +18886,8 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
-          // ── ONE-SHOT: Zoho OAuth grant→refresh exchange (Codex-reviewed, temp 2026-05-14) ──
-          // Auth: requires X-Zoho-Exchange-Key header == env.TEMP_ZOHO_EXCHANGE_KEY (separate
-          // from GMAIL_ADDON_API_KEY which is in distributed ext bundle).
-          // Returns ONLY refresh_token field, not full Zoho response. No logging.
-          // Endpoint + temp key will be removed within minutes of single use.
-          case '/api/_zoho-exchange': {
+          // ── Zia probe v2 (temp, gated by TEMP_ZOHO_EXCHANGE_KEY) — verify new scope ──
+          case '/api/_zia-probe': {
             const exKey = request.headers.get('X-Zoho-Exchange-Key');
             if (!exKey || !env.TEMP_ZOHO_EXCHANGE_KEY || exKey !== env.TEMP_ZOHO_EXCHANGE_KEY) {
               return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -18899,43 +18895,18 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
                 headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
               });
             }
-            const { code } = apiBody;
-            if (!code) {
-              return new Response(JSON.stringify({ error: 'code required' }), {
-                status: 400,
-                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+            const { domain: probeDomain } = apiBody;
+            if (!probeDomain) {
+              return new Response(JSON.stringify({ error: 'domain required' }), {
+                status: 400, headers: { 'Content-Type': 'application/json' }
               });
             }
-            try {
-              const params = new URLSearchParams({
-                grant_type: 'authorization_code',
-                client_id: env.ZOHO_CLIENT_ID,
-                client_secret: env.ZOHO_CLIENT_SECRET,
-                code
-              });
-              const oauthRes = await fetch('https://accounts.zoho.com/oauth/v2/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: params.toString()
-              });
-              const oauthData = await oauthRes.json();
-              return new Response(JSON.stringify({
-                http: oauthRes.status,
-                ok: oauthRes.ok,
-                has_refresh_token: Boolean(oauthData.refresh_token),
-                refresh_token: oauthData.refresh_token || null,
-                error: oauthData.error || null,
-                error_description: oauthData.error_description || null
-              }), {
-                status: 200,
-                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
-              });
-            } catch (err) {
-              return new Response(JSON.stringify({ error: 'exchange failed' }), {
-                status: 500,
-                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
-              });
-            }
+            const ziaResp = await zohoApiCall('POST', '__zia_org_enrichment?module=Accounts', env, {
+              __zia_org_enrichment: [{ enrich_based_on: { website: probeDomain } }]
+            });
+            return new Response(JSON.stringify({ response: ziaResp }), {
+              status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+            });
           }
 
           // ── Tasks: Fetch open Zoho tasks for account/contact (by ID or domain/email fallback) ──
