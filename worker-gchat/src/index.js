@@ -209,6 +209,76 @@ const MODEL_PRICING = {
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── PR-B: Anthropic Prompt Caching (2026-05-14) ───────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// Sentinel string injected at the boundary between cached (static) and
+// uncached (per-user dynamic) portions of the system prompt. When the
+// request body is built, the systemPrompt string is split on this sentinel
+// to produce an array-of-typed-blocks: [{static, cache_control}, {dynamic}].
+//
+// Code paths that append dynamic content (date, datasheet ctx, pricing ctx,
+// accessories ctx, PREVIOUS CRM CONTEXT) emit this sentinel as the seam.
+// If the sentinel is absent (legacy path or kill-switch off), the prompt is
+// sent as a plain string with no cache markers (uncached fallback).
+const PROMPT_CACHE_BOUNDARY = '\n\n___PR_B_DYNAMIC_APPENDIX_BOUNDARY___\n\n';
+
+/**
+ * Splits a systemPrompt string into an array of typed blocks suitable for
+ * Anthropic's `system` field. When the boundary sentinel is present, the
+ * static prefix gets `cache_control: { type: 'ephemeral' }` and the dynamic
+ * suffix is left uncached.
+ *
+ * Until the kill-switch lands in a later commit, `cachingEnabled` defaults
+ * to true — but the function signature accepts the flag so we can land the
+ * refactor and the kill-switch as separable PRs.
+ */
+function buildAnthropicSystemBlocks(systemPrompt, cachingEnabled) {
+  if (typeof systemPrompt !== 'string' || systemPrompt.length === 0) {
+    return systemPrompt || '';
+  }
+  if (!cachingEnabled) {
+    return systemPrompt.replace(PROMPT_CACHE_BOUNDARY, '\n\n');
+  }
+  const idx = systemPrompt.indexOf(PROMPT_CACHE_BOUNDARY);
+  if (idx === -1) {
+    return [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+  }
+  const staticBase = systemPrompt.slice(0, idx);
+  const dynamicAppendix = systemPrompt.slice(idx + PROMPT_CACHE_BOUNDARY.length);
+  const blocks = [{ type: 'text', text: staticBase, cache_control: { type: 'ephemeral' } }];
+  if (dynamicAppendix.length > 0) {
+    blocks.push({ type: 'text', text: dynamicAppendix });
+  }
+  return blocks;
+}
+
+/**
+ * Attaches cache_control: ephemeral to the LAST tool entry. Anthropic only
+ * honors a single tools cache breakpoint; placing it on the last tool caches
+ * the entire tools array. Returns a NEW array — does not mutate input.
+ * Image content blocks NEVER receive cache markers (only system + tools).
+ */
+function attachToolCacheControl(tools, cachingEnabled) {
+  if (!cachingEnabled) return tools;
+  if (!Array.isArray(tools) || tools.length === 0) return tools;
+  const last = tools[tools.length - 1];
+  const cachedLast = { ...last, cache_control: { type: 'ephemeral' } };
+  return [...tools.slice(0, -1), cachedLast];
+}
+
+/** Safe extraction of Anthropic cache token fields with defaults of 0. */
+function extractCacheUsage(usage) {
+  if (!usage || typeof usage !== 'object') return { creation: 0, read: 0 };
+  return {
+    creation: Number(usage.cache_creation_input_tokens || 0) || 0,
+    read: Number(usage.cache_read_input_tokens || 0) || 0
+  };
+}
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── END PR-B HELPERS (commit 1/5: refactor only) ──────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
 const SEA_LION_MODEL_ID = '@cf/aisingapore/gemma-sea-lion-v4-27b-it';
 const DEEPSEEK_MODEL_IDS = new Set(['deepseek-v4-pro', 'deepseek-v4-flash']);
 const DEEPSEEK_COST_PER_1M = {
@@ -13437,14 +13507,22 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
       ];
     }
 
+    // PR-B (2026-05-14): apply prompt caching helpers (same as askClaude).
+    // The systemPrompt may already contain the boundary sentinel from the
+    // initial request build — buildAnthropicSystemBlocks handles both
+    // boundary-present and boundary-absent inputs.
+    const _prB_cachingEnabledCont = true;
+    const _prB_systemFieldCont = buildAnthropicSystemBlocks(systemPrompt, _prB_cachingEnabledCont);
+    const _prB_toolsFieldCont = attachToolCacheControl(contTools, _prB_cachingEnabledCont);
+
     const requestBody = {
       model: contModel,
       max_tokens: contMaxTok,
-      system: systemPrompt,
+      system: _prB_systemFieldCont,
       messages
     };
-    if (contTools.length > 0) {
-      requestBody.tools = contTools;
+    if (_prB_toolsFieldCont.length > 0) {
+      requestBody.tools = _prB_toolsFieldCont;
     }
 
     const response = await callAnthropicWithRetry(requestBody);
@@ -14203,14 +14281,24 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         ];
       }
 
+      // PR-B (2026-05-14): prompt caching — split systemPrompt into typed
+      // blocks with cache_control: ephemeral on the static prefix, and
+      // attach cache_control to the LAST tool entry to cache the tools
+      // array. Kill switch lands in a subsequent commit; until then we
+      // hard-enable caching by passing `true`. Image content blocks NEVER
+      // receive cache markers.
+      const _prB_cachingEnabled = true;
+      const _prB_systemField = buildAnthropicSystemBlocks(systemPrompt, _prB_cachingEnabled);
+      const _prB_toolsField = attachToolCacheControl(activeTools, _prB_cachingEnabled);
+
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
-        system: systemPrompt,
+        system: _prB_systemField,
         messages
       };
-      if (activeTools.length > 0) {
-        requestBody.tools = activeTools;
+      if (_prB_toolsField.length > 0) {
+        requestBody.tools = _prB_toolsField;
       }
 
       const response = await callAnthropicWithRetry(requestBody);
