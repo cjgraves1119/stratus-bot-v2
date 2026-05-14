@@ -275,8 +275,48 @@ function extractCacheUsage(usage) {
     read: Number(usage.cache_read_input_tokens || 0) || 0
   };
 }
+
+// ─── KV-backed kill switch (commit 3/5) ────────────────────────────────────
+// Allows ops to instantly disable Anthropic prompt caching without a
+// redeploy: `wrangler kv:key put prompt_caching_enabled false`. Read with
+// an isolate-memory cache (TTL 30s) to keep hot-path latency negligible.
+let _promptCachingKillSwitchCache = { value: null, ts: 0 };
+const PROMPT_CACHING_KILL_SWITCH_TTL_MS = 30 * 1000;
+const PROMPT_CACHING_KV_KEY = 'prompt_caching_enabled';
+
+/**
+ * Returns true when prompt caching should be applied to the next request.
+ * Reads CONVERSATION_KV[prompt_caching_enabled]; default is enabled (true).
+ * KV unreachable or value "false" → returns false (no cache markers).
+ * Cached in isolate memory for 30s to avoid per-request KV reads.
+ */
+async function isPromptCachingEnabled(env) {
+  try {
+    const now = Date.now();
+    if (_promptCachingKillSwitchCache.value !== null &&
+        (now - _promptCachingKillSwitchCache.ts) < PROMPT_CACHING_KILL_SWITCH_TTL_MS) {
+      return _promptCachingKillSwitchCache.value === true;
+    }
+    if (!env?.CONVERSATION_KV) {
+      _promptCachingKillSwitchCache = { value: true, ts: now };
+      return true;
+    }
+    const raw = await env.CONVERSATION_KV.get(PROMPT_CACHING_KV_KEY);
+    const enabled = (raw === null || raw === undefined) ? true : (String(raw).toLowerCase() !== 'false');
+    _promptCachingKillSwitchCache = { value: enabled, ts: now };
+    return enabled;
+  } catch (err) {
+    console.warn(`[PR-B] KV read failed for ${PROMPT_CACHING_KV_KEY}: ${err.message}; falling back to uncached path`);
+    return false;
+  }
+}
+
+/** Test-only: reset the in-isolate kill-switch cache so the next call hits KV. */
+function _resetPromptCachingKillSwitchCache() {
+  _promptCachingKillSwitchCache = { value: null, ts: 0 };
+}
 // ═══════════════════════════════════════════════════════════════════════════
-// ─── END PR-B HELPERS (commit 1/5: refactor only) ──────────────────────────
+// ─── END PR-B HELPERS (commits 1+3: refactor + kill switch) ────────────────
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SEA_LION_MODEL_ID = '@cf/aisingapore/gemma-sea-lion-v4-27b-it';
@@ -13517,7 +13557,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     // The systemPrompt may already contain the boundary sentinel from the
     // initial request build — buildAnthropicSystemBlocks handles both
     // boundary-present and boundary-absent inputs.
-    const _prB_cachingEnabledCont = true;
+    const _prB_cachingEnabledCont = await isPromptCachingEnabled(env);
     const _prB_systemFieldCont = buildAnthropicSystemBlocks(systemPrompt, _prB_cachingEnabledCont);
     const _prB_toolsFieldCont = attachToolCacheControl(contTools, _prB_cachingEnabledCont);
 
@@ -14296,10 +14336,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // PR-B (2026-05-14): prompt caching — split systemPrompt into typed
       // blocks with cache_control: ephemeral on the static prefix, and
       // attach cache_control to the LAST tool entry to cache the tools
-      // array. Kill switch lands in a subsequent commit; until then we
-      // hard-enable caching by passing `true`. Image content blocks NEVER
-      // receive cache markers.
-      const _prB_cachingEnabled = true;
+      // array. Kill switch via CONVERSATION_KV[prompt_caching_enabled]
+      // (default true). Image content blocks NEVER receive cache markers.
+      const _prB_cachingEnabled = await isPromptCachingEnabled(env);
       const _prB_systemField = buildAnthropicSystemBlocks(systemPrompt, _prB_cachingEnabled);
       const _prB_toolsField = attachToolCacheControl(activeTools, _prB_cachingEnabled);
 
