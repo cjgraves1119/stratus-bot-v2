@@ -18886,25 +18886,48 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
-          // ── Zia probe v2 (temp, gated by TEMP_ZOHO_EXCHANGE_KEY) — verify new scope ──
+          // ── Zia probe v3 (temp, TEMP_ZOHO_EXCHANGE_KEY gated) — schedule + auto-poll ──
           case '/api/_zia-probe': {
             const exKey = request.headers.get('X-Zoho-Exchange-Key');
             if (!exKey || !env.TEMP_ZOHO_EXCHANGE_KEY || exKey !== env.TEMP_ZOHO_EXCHANGE_KEY) {
               return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-                status: 403,
-                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+                status: 403, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
               });
             }
-            const { domain: probeDomain } = apiBody;
-            if (!probeDomain) {
-              return new Response(JSON.stringify({ error: 'domain required' }), {
-                status: 400, headers: { 'Content-Type': 'application/json' }
-              });
+            const { domain: probeDomain, jobId, accountId } = apiBody;
+            const result = { steps: [] };
+            try {
+              let activeJobId = jobId;
+              // If no jobId provided, schedule a new enrichment
+              if (!activeJobId && probeDomain) {
+                const schedResp = await zohoApiCall('POST', '__zia_org_enrichment?module=Accounts', env, {
+                  __zia_org_enrichment: [{ enrich_based_on: { website: probeDomain } }]
+                });
+                result.steps.push({ phase: 'schedule', response: schedResp });
+                activeJobId = schedResp?.__zia_org_enrichment?.[0]?.details?.id || null;
+              }
+              if (activeJobId) {
+                // Try multiple polling endpoints since v8 docs are ambiguous
+                const pollPaths = [
+                  '__zia_org_enrichment/' + activeJobId,
+                  '__zia_org_enrichment?job_id=' + activeJobId,
+                  'Accounts/actions/get_enriched_data?job_id=' + activeJobId
+                ];
+                for (const p of pollPaths) {
+                  const pr = await zohoApiCall('GET', p, env);
+                  result.steps.push({ phase: 'poll', path: p, response: pr });
+                  if (pr && !pr.code && !pr.error) break;
+                }
+              }
+              // Optionally fetch the enriched Account record if accountId provided
+              if (accountId) {
+                const acct = await zohoApiCall('GET', 'Accounts/' + accountId, env);
+                result.steps.push({ phase: 'fetch-account', response: acct });
+              }
+            } catch (err) {
+              result.steps.push({ phase: 'error', error: err.message });
             }
-            const ziaResp = await zohoApiCall('POST', '__zia_org_enrichment?module=Accounts', env, {
-              __zia_org_enrichment: [{ enrich_based_on: { website: probeDomain } }]
-            });
-            return new Response(JSON.stringify({ response: ziaResp }), {
+            return new Response(JSON.stringify(result), {
               status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
             });
           }
