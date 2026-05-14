@@ -1,4 +1,5 @@
 name = "stratus-ai-bot-gchat"
+account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
@@ -98,6 +99,7 @@ crons = ["0 11 * * *"]
 # silently falls through to the Queue.
 [[workflows]]
 name = "stratus-gchat-crm-workflow"
+account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 binding = "CRM_WORKFLOW"
 class_name = "CrmWorkflow"
 
@@ -109,6 +111,7 @@ class_name = "CrmWorkflow"
 # Without this binding, the wrapper silently falls back to inline.
 [[workflows]]
 name = "stratus-gchat-quote-po-workflow"
+account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 binding = "QUOTE_PO_WORKFLOW"
 class_name = "QuotePoWorkflow"
 
