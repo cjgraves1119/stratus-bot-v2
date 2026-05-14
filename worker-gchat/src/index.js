@@ -17548,6 +17548,311 @@ ${(data.recentRequests || []).map(r => {
       return new Response(JSON.stringify(data, null, 2), { headers: { 'Content-Type': 'application/json' } });
     }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── Enrich Company v2 helpers (waterfall: cache → Zoho → Zia → Haiku+web → Sonnet+web)
+// ── Added 2026-05-14, Codex-reviewed pre-deploy
+// ══════════════════════════════════════════════════════════════════════════════
+const ENRICH_SCHEMA_VERSION = 'v2';
+const ENRICH_POLICY_VERSION = '2026-05-14';
+
+// Cache TTLs (seconds)
+const TTL_HIGH_CONFIDENCE = 30 * 86400;   // 30 days
+const TTL_LOW_CONFIDENCE  = 5 * 86400;    // 5 days
+const TTL_MISS_SENTINEL   = 30 * 86400;   // 30 days
+const TTL_WEB_MISS        = 7 * 86400;    // 7 days
+const TTL_IN_PROGRESS     = 90;            // 90 seconds (stampede protection)
+const TTL_CONSUMER_REJECT = 60 * 86400;   // 60 days
+
+function normalizeEnrichDomain(d) {
+  if (!d || typeof d !== 'string') return null;
+  return d.trim().toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/.*$/, '')
+    .replace(/[^a-z0-9.-]/g, '')
+    .trim() || null;
+}
+
+// Detect when Zia returned a name that's just the domain echoed back (no real lookup)
+function detectZiaEcho(name, domain) {
+  if (!name) return { hard: false, soft: false };
+  const n = String(name).toLowerCase().trim();
+  const d = String(domain).toLowerCase().trim();
+  const stem = d.split('.')[0];
+  // Hard echo: name contains TLD-like fragment or full hostname
+  const hard = (
+    n === d ||
+    n === 'www.' + d ||
+    n === d.replace(/\./g, ' ') ||
+    n.includes('.com') || n.includes('.org') || n.includes('.net') || n.includes('.co') ||
+    /\.\w{2,4}\b/.test(n)
+  );
+  // Soft echo: name normalizes to the domain stem only (e.g. "sparkfund")
+  const soft = (
+    n === stem ||
+    n.replace(/[^a-z0-9]/g, '') === stem.replace(/[^a-z0-9]/g, '')
+  );
+  return { hard, soft };
+}
+
+function scoreConfidence(result, tier) {
+  if (!result || typeof result !== 'object') return 0;
+  const hasName = !!result.name;
+  const hasAddr = !!(result.address && result.city);
+  const hasFullAddr = !!(result.address && result.city && result.state);
+  if (tier === 'cache' || tier === 'zoho-existing') return 0.95;
+  if (tier === 'zia') {
+    if (hasName && hasFullAddr) return 0.95;
+    if (hasName && hasAddr) return 0.85;
+    if (hasName) return 0.65;
+    return 0;
+  }
+  if (tier === 'haiku-web' || tier === 'sonnet-web') {
+    if (!result.source_url) return 0;
+    const matchesDomain = result.source_url.toLowerCase().includes(result.domain || '');
+    if (hasName && hasFullAddr && matchesDomain) return 0.90;
+    if (hasName && hasFullAddr) return 0.80;
+    if (hasName && hasAddr) return 0.70;
+    if (hasName) return 0.50;
+    return 0;
+  }
+  return 0;
+}
+
+const CONSUMER_ENRICH_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com',
+  'icloud.com', 'protonmail.com', 'live.com', 'msn.com', 'me.com', 'mac.com',
+  'comcast.net', 'att.net', 'verizon.net', 'sbcglobal.net', 'cox.net',
+]);
+
+async function getEnrichCache(env, domain) {
+  try {
+    const raw = await env.CONVERSATION_KV.get('enrich:' + ENRICH_SCHEMA_VERSION + ':' + domain);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+async function setEnrichCache(env, ctx, domain, value, ttl) {
+  const payload = JSON.stringify({
+    ...value,
+    schema_version: ENRICH_SCHEMA_VERSION,
+    policy_version: ENRICH_POLICY_VERSION,
+    fetched_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + ttl * 1000).toISOString()
+  });
+  const promise = env.CONVERSATION_KV.put('enrich:' + ENRICH_SCHEMA_VERSION + ':' + domain, payload, { expirationTtl: ttl });
+  if (ctx?.waitUntil) ctx.waitUntil(promise);
+  else await promise;
+}
+
+async function callZiaEnrichment(env, domain, signal) {
+  // Schedule + poll up to 5×1.5s
+  const sched = await zohoApiCall('POST', '__zia_org_enrichment?module=Accounts', env, {
+    __zia_org_enrichment: [{ enrich_based_on: { website: domain } }]
+  });
+  const jobId = sched?.__zia_org_enrichment?.[0]?.details?.id;
+  if (!jobId) {
+    return { status: 'no_job', sched };
+  }
+  for (let i = 0; i < 5; i++) {
+    if (signal?.aborted) throw new Error('aborted');
+    await new Promise(r => setTimeout(r, 1500));
+    const polled = await zohoApiCall('GET', '__zia_org_enrichment/' + jobId, env);
+    const status = polled?.__zia_org_enrichment?.[0]?.status;
+    if (status === 'COMPLETED' || status === 'FAILED') {
+      const ed = polled?.__zia_org_enrichment?.[0]?.enriched_data || {};
+      const addrObj = Array.isArray(ed.address) ? ed.address[0] : null;
+      const indObj = Array.isArray(ed.industries) ? ed.industries[0] : null;
+      return {
+        status,
+        name: ed.name || null,
+        address: addrObj?.fill_address || null,
+        city: addrObj?.city || null,
+        state: addrObj?.state || null,
+        zip: addrObj?.pin_code || null,
+        phone: ed.phone || null,
+        industries: indObj?.name ? [indObj.name] : null,
+        website: ed.website || null
+      };
+    }
+  }
+  return { status: 'timeout' };
+}
+
+async function callWebSearchEnrichment(env, domain, model, signal) {
+  const system = 'You are a company research assistant. Given an email domain, look up the official organization. First verify the submitted domain directly via web_search (homepage, about, contact, locations, or footer). If the submitted domain appears to be an alias, parked, or lacks address data, search for the canonical organization using the domain stem. Do not infer from the domain string alone. Return ONLY a raw JSON object (no markdown). If unverified, use null. Schema: {"name":"","address":"","city":"","state":"","zip":"","phone":"","industries":[],"source_url":""}. source_url MUST be the page that supports name+address. Return null fields if you cannot verify with web evidence.';
+
+  const userMsg = 'Company domain: ' + domain;
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1024,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+      system,
+      messages: [{ role: 'user', content: userMsg }]
+    }),
+    signal
+  });
+  if (!resp.ok) {
+    throw new Error('web-search API error: ' + resp.status);
+  }
+  const data = await resp.json();
+  
+  // Extract final text block + any citations
+  const blocks = data.content || [];
+  let textOut = '';
+  for (const b of blocks) {
+    if (b.type === 'text') textOut += b.text;
+  }
+  let parsed = {};
+  try {
+    parsed = JSON.parse(textOut.replace(/```json\n?|\n?```/g, '').trim());
+  } catch {
+    const m = textOut.match(/\{[\s\S]*\}/);
+    if (m) try { parsed = JSON.parse(m[0]); } catch {}
+  }
+  return {
+    name: parsed.name || null,
+    address: parsed.address || null,
+    city: parsed.city || null,
+    state: parsed.state || null,
+    zip: parsed.zip || null,
+    phone: parsed.phone || null,
+    industries: Array.isArray(parsed.industries) ? parsed.industries : null,
+    source_url: parsed.source_url || null,
+    _usage: data.usage
+  };
+}
+
+async function enrichCompanyV2(rawDomain, opts) {
+  const env = opts.env;
+  const ctx = opts.ctx;
+  const startTier = opts.start_tier;
+  const cacheBust = opts.cache_bust;
+
+  // ── Tier 0: hygiene ──
+  const domain = normalizeEnrichDomain(rawDomain);
+  if (!domain) {
+    return { error: 'invalid_domain', tier: 'reject', confidence: 0, domain: rawDomain };
+  }
+  if (CONSUMER_ENRICH_DOMAINS.has(domain)) {
+    return { error: 'consumer_domain', tier: 'reject', confidence: 0, domain };
+  }
+
+  // ── Cache lookup ──
+  if (!cacheBust) {
+    const cached = await getEnrichCache(env, domain);
+    if (cached) {
+      if (cached.status === 'in_progress') {
+        // Another request is processing — return a soft hint
+        return { tier: 'in_progress', confidence: 0, domain, cached: true };
+      }
+      if (cached.status === 'miss_sentinel') {
+        // Skip Zia, but still try web tiers
+        if (!startTier || startTier === 'zia') opts.start_tier = 'haiku';
+      } else if (cached.status === 'success') {
+        return { ...cached.result, tier: 'cache', confidence: cached.confidence, source_url: cached.source_url, cached: true, domain };
+      }
+    }
+  }
+
+  // ── In-progress sentinel (stampede protection) ──
+  await setEnrichCache(env, ctx, domain, { status: 'in_progress' }, TTL_IN_PROGRESS);
+
+  const trace = { domain, attempts: [] };
+
+  // ── Tier 1: Zia ──
+  if (!opts.start_tier || opts.start_tier === 'zia') {
+    try {
+      const abortZia = new AbortController();
+      const ziaTimeout = setTimeout(() => abortZia.abort(), 10000);
+      const zia = await callZiaEnrichment(env, domain, abortZia.signal);
+      clearTimeout(ziaTimeout);
+      trace.attempts.push({ tier: 'zia', status: zia.status, name: zia.name, has_addr: !!zia.address });
+      if (zia.status === 'COMPLETED') {
+        const echo = detectZiaEcho(zia.name, domain);
+        const hasAddr = !!(zia.address && zia.city);
+        const accept = (zia.name && !echo.hard) && (hasAddr || !echo.soft);
+        if (accept) {
+          const result = { name: zia.name, address: zia.address, city: zia.city, state: zia.state, zip: zia.zip, phone: zia.phone, industries: zia.industries, source_url: null };
+          const confidence = scoreConfidence({ ...result, domain }, 'zia');
+          const ttl = confidence >= 0.85 ? TTL_HIGH_CONFIDENCE : TTL_LOW_CONFIDENCE;
+          await setEnrichCache(env, ctx, domain, { status: 'success', tier: 'zia', result, confidence, source_url: null }, ttl);
+          console.log('[enrich-v2]', JSON.stringify({ domain, tier: 'zia', confidence, cache_status: 'miss', reason: 'zia_completed' }));
+          return { ...result, tier: 'zia', confidence, domain, cached: false };
+        } else {
+          trace.attempts[trace.attempts.length - 1].rejected = echo.hard ? 'hard_echo' : (echo.soft ? 'soft_echo_no_addr' : 'no_data');
+        }
+      }
+      // Zia miss — write sentinel to skip next time
+      await setEnrichCache(env, ctx, domain, { status: 'miss_sentinel', tier_attempted: 'zia', reason: zia.status || 'no_completed' }, TTL_MISS_SENTINEL);
+    } catch (e) {
+      trace.attempts.push({ tier: 'zia', error: e.message });
+    }
+  }
+
+  // ── Tier 2: Haiku + web_search ──
+  if (env.ENRICH_DISABLE_WEB_SEARCH !== 'true') {
+    if (!opts.start_tier || ['zia', 'haiku'].includes(opts.start_tier)) {
+      try {
+        const abortHaiku = new AbortController();
+        const haikuTimeout = setTimeout(() => abortHaiku.abort(), 25000);
+        const haiku = await callWebSearchEnrichment(env, domain, 'claude-haiku-4-5-20251001', abortHaiku.signal);
+        clearTimeout(haikuTimeout);
+        trace.attempts.push({ tier: 'haiku-web', has_source: !!haiku.source_url, has_name: !!haiku.name });
+        if (haiku.source_url && haiku.name) {
+          const confidence = scoreConfidence({ ...haiku, domain }, 'haiku-web');
+          if (confidence >= 0.5) {
+            const ttl = confidence >= 0.85 ? TTL_HIGH_CONFIDENCE : TTL_LOW_CONFIDENCE;
+            await setEnrichCache(env, ctx, domain, { status: 'success', tier: 'haiku-web', result: haiku, confidence, source_url: haiku.source_url }, ttl);
+            console.log('[enrich-v2]', JSON.stringify({ domain, tier: 'haiku-web', confidence, cache_status: 'miss', reason: 'haiku_verified' }));
+            return { ...haiku, tier: 'haiku-web', confidence, domain, cached: false };
+          }
+        }
+      } catch (e) {
+        trace.attempts.push({ tier: 'haiku-web', error: e.message });
+      }
+    }
+
+    // ── Tier 3: Sonnet + web_search (kill-switched) ──
+    if (env.ENRICH_DISABLE_SONNET !== 'true' && (!opts.start_tier || ['zia','haiku','sonnet'].includes(opts.start_tier))) {
+      try {
+        const abortSonnet = new AbortController();
+        const sonnetTimeout = setTimeout(() => abortSonnet.abort(), 40000);
+        const sonnet = await callWebSearchEnrichment(env, domain, 'claude-sonnet-4-6', abortSonnet.signal);
+        clearTimeout(sonnetTimeout);
+        trace.attempts.push({ tier: 'sonnet-web', has_source: !!sonnet.source_url, has_name: !!sonnet.name });
+        if (sonnet.source_url && sonnet.name) {
+          const confidence = scoreConfidence({ ...sonnet, domain }, 'sonnet-web');
+          if (confidence >= 0.3) {
+            const ttl = confidence >= 0.85 ? TTL_HIGH_CONFIDENCE : TTL_LOW_CONFIDENCE;
+            await setEnrichCache(env, ctx, domain, { status: 'success', tier: 'sonnet-web', result: sonnet, confidence, source_url: sonnet.source_url }, ttl);
+            console.log('[enrich-v2]', JSON.stringify({ domain, tier: 'sonnet-web', confidence, cache_status: 'miss', reason: 'sonnet_verified' }));
+            return { ...sonnet, tier: 'sonnet-web', confidence, domain, cached: false };
+          }
+        }
+      } catch (e) {
+        trace.attempts.push({ tier: 'sonnet-web', error: e.message });
+      }
+    }
+  }
+
+  // ── No tier accepted — cache miss sentinel + return null result ──
+  await setEnrichCache(env, ctx, domain, { status: 'miss_sentinel', tier_attempted: 'all', reason: 'no_tier_accepted' }, TTL_WEB_MISS);
+  console.log('[enrich-v2]', JSON.stringify({ domain, tier: 'none', confidence: 0, cache_status: 'miss', reason: 'all_tiers_failed' }));
+  return {
+    name: null, address: null, city: null, state: null, zip: null, phone: null, industries: null,
+    source_url: null, tier: 'none', confidence: 0, domain, cached: false, trace
+  };
+}
+
     // ══════════════════════════════════════════════════════════════
     // ── /api/* endpoints: Gmail Add-on backend ──
     // Authenticated via X-API-Key header. Returns JSON responses.
@@ -18833,55 +19138,32 @@ Hard rules:
             break;
           }
 
-          // ── Enrich Company: Use Claude to derive company info from a domain ──
+          // ══════════════════════════════════════════════════════════════════════════
+          // ── Enrich Company v2: 3-tier waterfall (Zia → Haiku+web → Sonnet+web) ──
+          // ══════════════════════════════════════════════════════════════════════════
+          // Replaces the original single-shot Haiku call (2026-04-09 → 2026-05-14).
+          // Council-reviewed by Codex pre-deploy. See enrichCompanyV2() helper above.
+          // Kill switches: ENRICH_KILL_SWITCH, ENRICH_DISABLE_SONNET, ENRICH_DISABLE_WEB_SEARCH
           case '/api/enrich-company': {
-            const { domain: enrichDomain } = apiBody;
+            const { domain: enrichDomain, force_tier, start_tier, cache_bust } = apiBody;
             if (!enrichDomain) {
               return new Response(JSON.stringify({ error: 'domain required' }), { status: 400, headers: jsonHeaders });
             }
-            try {
-              const enrichResp = await fetch('https://api.anthropic.com/v1/messages', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': env.ANTHROPIC_API_KEY,
-                  'anthropic-version': '2023-06-01',
-                },
-                body: JSON.stringify({
-                  model: 'claude-haiku-4-5-20251001',
-                  max_tokens: 300,
-                  system: `You are a company research assistant. Given an email domain, return the company's official name and headquarters address. Return ONLY a raw JSON object (no markdown, no code fences, no commentary). If you cannot determine a field, use an empty string. Format:
-{"name":"Company Name","street":"123 Main St","city":"City","state":"ST","zip":"12345","website":"domain.com","phone":""}
-Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Global Security Inc."). For state, use the 2-letter abbreviation. Only include information you are confident about.`,
-                  messages: [{ role: 'user', content: `Company domain: ${enrichDomain}` }]
-                })
+            // Master kill switch (returns 503 so client can fall back to legacy behavior cleanly)
+            if (env.ENRICH_KILL_SWITCH === 'true' || env.ENRICH_KILL_SWITCH === '1') {
+              return new Response(JSON.stringify({ error: 'Enrichment disabled', kill_switch: true }), {
+                status: 503, headers: jsonHeaders
               });
-              if (!enrichResp.ok) {
-                apiResult = { error: 'Enrichment API error: ' + enrichResp.status };
-                break;
-              }
-              const enrichData = await enrichResp.json();
-              ctx.waitUntil(trackUsage(env, 'claude-haiku-4-5-20251001', enrichData.usage, 'addon-enrich'));
-              const enrichText = enrichData.content?.[0]?.text || '';
-              var enrichParsed;
-              try {
-                enrichParsed = JSON.parse(enrichText.replace(/```json\n?|\n?```/g, '').trim());
-              } catch (_) {
-                // Try extracting JSON from mixed text
-                var enrichJsonMatch = enrichText.match(/\{[\s\S]*"name"\s*:[\s\S]*\}/);
-                enrichParsed = enrichJsonMatch ? JSON.parse(enrichJsonMatch[0]) : {};
-              }
-              apiResult = {
-                name: enrichParsed.name || '',
-                street: enrichParsed.street || '',
-                city: enrichParsed.city || '',
-                state: enrichParsed.state || '',
-                zip: enrichParsed.zip || '',
-                website: enrichParsed.website || enrichDomain,
-                phone: enrichParsed.phone || '',
-              };
+            }
+            try {
+              const result = await enrichCompanyV2(enrichDomain, {
+                start_tier: start_tier || force_tier || null,
+                cache_bust: cache_bust === true,
+                env, ctx
+              });
+              apiResult = result;
             } catch (err) {
-              apiResult = { error: 'Enrichment failed: ' + err.message };
+              apiResult = { error: 'Enrichment failed: ' + err.message, tier: 'error' };
             }
             break;
           }
