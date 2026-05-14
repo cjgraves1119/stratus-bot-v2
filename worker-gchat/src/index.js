@@ -315,8 +315,109 @@ async function isPromptCachingEnabled(env) {
 function _resetPromptCachingKillSwitchCache() {
   _promptCachingKillSwitchCache = { value: null, ts: 0 };
 }
+
+// ─── Canary verification + auto-kill (commit 5/5) ──────────────────────────
+/**
+ * Tiered hit-rate + cost-delta health check.
+ * Tiers (per Codex+Claude council 2026-05-14):
+ *   - 1h hard floor 5% hit ratio → 'kill' (instant)
+ *   - 6h soft floor 20% hit ratio → 'kill'
+ *   - 24h cost delta > +5% vs pre-PR-B baseline → 'kill'
+ *   - 6h ratio < 35% → 'alert' (informational, no kill)
+ */
+async function verifyCachingActive(env) {
+  if (!env?.ANALYTICS_DB) {
+    return { healthy: false, action: 'no-data', reason: 'ANALYTICS_DB binding missing' };
+  }
+  try {
+    const query = (windowMinutes) => `
+      SELECT
+        COALESCE(SUM(CAST(json_extract(response_text, '$.pr_b.cache_read') AS INTEGER)), 0) AS reads,
+        COALESCE(SUM(CAST(json_extract(response_text, '$.pr_b.cache_creation') AS INTEGER)), 0) AS creations,
+        COALESCE(AVG(cost_usd), 0) AS avg_cost,
+        COUNT(*) AS rows
+      FROM bot_usage
+      WHERE response_path IN ('crm_agent','claude')
+        AND created_at >= datetime('now', '-${windowMinutes} minutes')
+        AND response_text LIKE '%pr_b%'`;
+    const baselineQuery = `
+      SELECT COALESCE(AVG(cost_usd), 0) AS avg_cost, COUNT(*) AS rows
+      FROM bot_usage
+      WHERE response_path IN ('crm_agent','claude')
+        AND created_at >= datetime('now', '-10 days')
+        AND created_at <= datetime('now', '-3 days')`;
+    const [r1h, r6h, r24h, baseline] = await Promise.all([
+      env.ANALYTICS_DB.prepare(query(60)).first(),
+      env.ANALYTICS_DB.prepare(query(360)).first(),
+      env.ANALYTICS_DB.prepare(query(1440)).first(),
+      env.ANALYTICS_DB.prepare(baselineQuery).first()
+    ]);
+    const ratio = (row) => {
+      const r = Number(row?.reads || 0);
+      const c = Number(row?.creations || 0);
+      return (r + c) > 0 ? r / (r + c) : 0;
+    };
+    const hitRate1h = ratio(r1h);
+    const hitRate6h = ratio(r6h);
+    const hitRate24h = ratio(r24h);
+    const baseAvg = Number(baseline?.avg_cost || 0);
+    const cur24hAvg = Number(r24h?.avg_cost || 0);
+    const costDelta = baseAvg > 0 ? ((cur24hAvg - baseAvg) / baseAvg) : 0;
+    const enoughData1h = Number(r1h?.rows || 0) >= 5;
+    const enoughData6h = Number(r6h?.rows || 0) >= 30;
+
+    if (enoughData1h && (Number(r1h?.creations || 0) + Number(r1h?.reads || 0)) > 0 && hitRate1h < 0.05) {
+      return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'kill', reason: '1h hit rate below 5% hard floor' };
+    }
+    if (enoughData6h && hitRate6h < 0.20) {
+      return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'kill', reason: '6h hit rate below 20% soft floor' };
+    }
+    if (baseAvg > 0 && Number(r24h?.rows || 0) >= 50 && costDelta > 0.05) {
+      return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'kill', reason: `24h cost delta +${(costDelta * 100).toFixed(1)}% above pre-PR-B baseline` };
+    }
+    if (enoughData6h && hitRate6h < 0.35) {
+      return { healthy: true, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'alert', reason: `6h hit rate ${(hitRate6h * 100).toFixed(1)}% below ideal 35%` };
+    }
+    if (!enoughData1h && !enoughData6h) {
+      return { healthy: true, hitRate1h, hitRate6h, hitRate24h, costDelta,
+               action: 'no-data', reason: 'insufficient PR-B telemetry yet' };
+    }
+    return { healthy: true, hitRate1h, hitRate6h, hitRate24h, costDelta, action: 'continue' };
+  } catch (err) {
+    console.error(`[PR-B] verifyCachingActive error: ${err.message}`);
+    return { healthy: false, action: 'no-data', reason: `query error: ${err.message}` };
+  }
+}
+
+/** Flips PROMPT_CACHING_ENABLED to "false" in KV; also resets isolate cache. */
+async function killPromptCaching(env, reason) {
+  if (!env?.CONVERSATION_KV) return false;
+  try {
+    await env.CONVERSATION_KV.put(PROMPT_CACHING_KV_KEY, 'false');
+    _promptCachingKillSwitchCache = { value: false, ts: Date.now() };
+    console.warn(`[PR-B] AUTO-KILL: prompt caching disabled — ${reason}`);
+    if (env.ANALYTICS_DB) {
+      try {
+        await env.ANALYTICS_DB.prepare(
+          `INSERT INTO bot_usage (bot, response_path, model, input_tokens, output_tokens, cost_usd, error_message, response_text)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind('gchat', 'pr_b_kill_switch', 'pr_b_canary', 0, 0, 0,
+               `PR-B auto-kill: ${reason}`,
+               JSON.stringify({ pr_b: { kill_switch_event: true, reason } })).run();
+      } catch (_) { /* best effort */ }
+    }
+    return true;
+  } catch (err) {
+    console.error(`[PR-B] killPromptCaching failed: ${err.message}`);
+    return false;
+  }
+}
 // ═══════════════════════════════════════════════════════════════════════════
-// ─── END PR-B HELPERS (commits 1+3: refactor + kill switch) ────────────────
+// ─── END PR-B HELPERS (all 5 commits landed) ───────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SEA_LION_MODEL_ID = '@cf/aisingapore/gemma-sea-lion-v4-27b-it';
@@ -14456,6 +14557,20 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         console.log(`[PR-B] cache tokens: creation=${_prB_cacheUsage.creation} read=${_prB_cacheUsage.read}`);
       }
       trackUsage(env, activeModel, data.usage, usageSource, evalContext, _praExtras).catch(() => {});
+      // PR-B canary: 1-in-100 in-band sample so kill-switch fires within
+      // minutes of a degraded run, not next 11am cron tick. Fire-and-forget.
+      if (_prB_cachingEnabled && Math.random() < 0.01) {
+        Promise.resolve().then(async () => {
+          try {
+            const c = await verifyCachingActive(env);
+            if (c.action === 'kill') {
+              await killPromptCaching(env, c.reason || 'in-band canary breach');
+            } else if (c.action === 'alert') {
+              console.warn(`[PR-B-CANARY-IB] alert: ${c.reason}`);
+            }
+          } catch (_) { /* swallow */ }
+        });
+      }
 
       // Check if Claude wants to use tools
       if (data.stop_reason === 'tool_use') {
@@ -23791,6 +23906,19 @@ Return ONLY a JSON object (no markdown, no explanation):
   async scheduled(event, env, ctx) {
     const startTime = Date.now();
     console.log(`[PRICE-CRON] Starting daily price refresh at ${new Date().toISOString()}`);
+
+    // ── PR-B canary (2026-05-14): tiered hit-rate + cost-delta verification ──
+    // Runs once per daily cron tick (also sampled in-band at 1-in-100 in
+    // askClaude). Auto-kills caching via KV when health thresholds breach.
+    try {
+      const _prB_canary = await verifyCachingActive(env);
+      console.log(`[PR-B-CANARY] action=${_prB_canary.action} hit1h=${(_prB_canary.hitRate1h * 100).toFixed(1)}% hit6h=${(_prB_canary.hitRate6h * 100).toFixed(1)}% hit24h=${(_prB_canary.hitRate24h * 100).toFixed(1)}% costDelta=${((_prB_canary.costDelta || 0) * 100).toFixed(1)}% reason=${_prB_canary.reason || 'n/a'}`);
+      if (_prB_canary.action === 'kill') {
+        await killPromptCaching(env, _prB_canary.reason || 'canary breach');
+      }
+    } catch (canaryErr) {
+      console.error(`[PR-B-CANARY] error: ${canaryErr.message}`);
+    }
 
     // Use PRICES_KV (shared across both workers) with CONVERSATION_KV fallback
     const kv = env.PRICES_KV || env.CONVERSATION_KV;
