@@ -13948,9 +13948,14 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 
     // Dynamic max_tokens: 2048 for most iterations, 1024 for pure exec (Haiku dispatch)
     const contMaxTok = _isPureExec ? 1024 : 2048;
-    // Add advisor tool for Sonnet iterations in continuation path
+    // Advisor tool injection — OPT-IN via env.ENABLE_ADVISOR_TOOL (default off).
+    // 2026-05-14: disabled by default after API 400 traced to invalid
+    // server_tool_use.name in conversation history. The advisor tool type
+    // (advisor_20260301) is not in Anthropic's published server-side tool
+    // enum, so Claude calls to it produce blocks that fail schema validation
+    // on subsequent iterations. Re-enable only when the beta is verified live.
     let contTools = tools;
-    if (contModel === 'claude-sonnet-4-6' && tools.length > 0) {
+    if (contModel === 'claude-sonnet-4-6' && tools.length > 0 && env.ENABLE_ADVISOR_TOOL === 'true') {
       contTools = [
         ...tools,
         { type: 'advisor_20260301', name: 'advisor', model: 'claude-opus-4-6' }
@@ -14609,6 +14614,36 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     // we return the cached data instantly instead of making another API call.
     const _expandedQuoteCache = {}; // { recordId: expandedDataString }
 
+    // 2026-05-14 hotfix: scrub server_tool_use blocks with names outside the
+    // allowed Anthropic enum. These appear in message history when the worker
+    // sent a custom server-tool definition (like advisor_20260301) that Anthropic
+    // doesn't recognize. The resulting server_tool_use block has a name field
+    // that fails schema validation on subsequent iterations. Strip the block so
+    // history-rebuild requests don't 400.
+    const VALID_SERVER_TOOL_NAMES = new Set([
+      'web_search', 'web_fetch', 'code_execution', 'bash_code_execution',
+      'text_editor_code_execution', 'tool_search_tool_regex', 'tool_search_tool_bm25'
+    ]);
+    function scrubInvalidServerToolBlocks(msgs) {
+      if (!Array.isArray(msgs)) return msgs;
+      return msgs.map(m => {
+        if (!m || !Array.isArray(m.content)) return m;
+        const filtered = m.content.filter(block => {
+          if (!block || block.type !== 'server_tool_use') return true;
+          return VALID_SERVER_TOOL_NAMES.has(block.name);
+        });
+        // If we removed blocks, also remove paired tool_result blocks referencing the removed ids
+        const removedIds = new Set(
+          m.content.filter(b => b?.type === 'server_tool_use' && !VALID_SERVER_TOOL_NAMES.has(b.name)).map(b => b.id)
+        );
+        const finalFiltered = filtered.filter(b => {
+          if (b?.type === 'web_search_tool_result' && removedIds.has(b.tool_use_id)) return false;
+          return true;
+        });
+        return { ...m, content: finalFiltered.length ? finalFiltered : [{ type: 'text', text: '' }] };
+      });
+    }
+
     // Helper: call Anthropic API with retry for 429/529 + model fallback
     // Supports advisor tool beta header when advisor is in the tools array
     async function callAnthropicWithRetry(body, maxRetries = 3) {
@@ -14622,6 +14657,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       if (hasAdvisor) {
         headers['anthropic-beta'] = 'advisor-tool-2026-03-01';
         console.log(`[GCHAT-ADVISOR] Advisor tool active — Opus 4.6 available for strategic guidance`);
+      }
+
+      // Scrub invalid server_tool_use blocks from history before sending
+      if (Array.isArray(body.messages)) {
+        body = { ...body, messages: scrubInvalidServerToolBlocks(body.messages) };
       }
 
       let lastResponse = null;
@@ -14733,9 +14773,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // ── Build tools array with advisor when in CRM mode ──────────
       // The advisor tool lets Sonnet consult Opus for strategic guidance
       // on complex CRM decisions (deal routing, field validation, etc.)
-      // Only include advisor for Sonnet iterations (not Haiku pure-exec steps)
+      // OPT-IN via env.ENABLE_ADVISOR_TOOL (default off as of 2026-05-14 —
+      // see continuation-path comment for rationale).
       let activeTools = tools;
-      if (useTools && activeModel === 'claude-sonnet-4-6') {
+      if (useTools && activeModel === 'claude-sonnet-4-6' && env.ENABLE_ADVISOR_TOOL === 'true') {
         activeTools = [
           ...tools,
           {
