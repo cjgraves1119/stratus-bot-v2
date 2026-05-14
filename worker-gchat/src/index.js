@@ -13309,6 +13309,12 @@ The advisor should respond in under 100 words and use enumerated steps, not expl
     prompt += CRM_PROMPT_ADMIN_ACTION;
   }
 
+  // PR-B (2026-05-14): mark the seam between cached static prompt and any
+  // dynamic per-user content that the caller may append (e.g. PREVIOUS CRM
+  // CONTEXT, speed directives). Anything appended after this marker will
+  // NOT be cached. buildAnthropicSystemBlocks() splits on this sentinel.
+  prompt += PROMPT_CACHE_BOUNDARY;
+
   return prompt;
 }
 
@@ -13970,10 +13976,16 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     const upper = userMessage.toUpperCase();
     let wantsLiveDatasheet = /\b(VERIFY|CHECK\s+(THE\s+)?LATEST|LATEST\s+DATASHEET|PULL\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST|WHOLE|UP-TO-DATE)\s+)?DATASHEET|SCAN\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|FETCH\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|GET\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|READ\s+(THE\s+)?(?:(LIVE|FULL|COMPLETE|LATEST)\s+)?DATASHEET|CHECK\s+FOR\s+UPDATES|YES.*DATASHEET|YEAH.*DATASHEET|SURE.*DATASHEET|PLEASE.*DATASHEET)\b/i.test(userMessage);
 
-    let systemPrompt = SYSTEM_PROMPT;
-    // Inject current date so the LLM knows "today" for date calculations
+    // PR-B (2026-05-14): structure systemPrompt as
+    //   STATIC (SYSTEM_PROMPT)  ── boundary ──  DYNAMIC (date + appendices)
+    // The boundary sentinel splits the prompt at API request build time so
+    // the cacheable static prefix gets cache_control: ephemeral and the
+    // per-call dynamic appendix (date, datasheet ctx, pricing ctx,
+    // accessories ctx) does NOT get cached. Date moved OUT of the cached
+    // region — daily invalidation eliminated.
+    let systemPrompt = SYSTEM_PROMPT + PROMPT_CACHE_BOUNDARY;
     const todayStr = new Date().toISOString().split('T')[0];
-    systemPrompt = `Today's date is ${todayStr}.\n\n` + systemPrompt;
+    systemPrompt += `Today's date is ${todayStr}.`;
     const kv = env.CONVERSATION_KV;
 
     // Context-aware: retry/correction phrases after a datasheet answer must
