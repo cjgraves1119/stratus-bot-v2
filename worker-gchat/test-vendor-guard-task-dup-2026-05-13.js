@@ -117,31 +117,40 @@ t('Task Subject derivation falls through 4 sources', () => {
   );
 });
 
-t('Task Subject uses the resolved label', () => {
+t('Task Subject uses the resolved label (passed to helper)', () => {
+  // STEP 8 now passes _taskAccountLabel as subjectLabel to the shared helper.
+  // The helper builds `Follow up - ${subjectLabel || \`Deal ${dealId}\`}`.
   assert.ok(
-    /Subject: `Follow up - \$\{_taskAccountLabel\}`/.test(source),
-    'Subject must use _taskAccountLabel not raw account_name'
+    /createFollowUpTaskForDeal\(\{\s*dealId,\s*subjectLabel: _taskAccountLabel/.test(source),
+    'STEP 8 must pass _taskAccountLabel as subjectLabel to createFollowUpTaskForDeal'
+  );
+  assert.ok(
+    /Subject: `Follow up - \$\{subjectLabel \|\| `Deal \$\{dealId\}`\}`/.test(source),
+    'helper Subject template must use subjectLabel with Deal-id fallback'
   );
 });
 
-t('Zoho error response gets logged with code+message+details', () => {
+t('Zoho error response gets classified + logged with code+message (in helper)', () => {
+  // Helper now distinguishes Zoho row-error (validation) from thrown (transient).
   assert.ok(
-    /Follow-up Task creation rejected by Zoho: code=\$\{taskRow\.code/.test(source),
-    'rejected-by-Zoho path must log code/message/details'
+    /if \(taskRow\?\.status === 'error'\)[\s\S]{0,400}classification: 'validation'[\s\S]{0,400}error: `Zoho rejected Task create: code=\$\{taskRow\.code/.test(source),
+    'Zoho row-error path must classify as validation and log code/message'
   );
 });
 
-t('Success-without-id path gets logged with raw response', () => {
+t('Success-without-id path gets classified as unknown with raw response (in helper)', () => {
+  // No-id-returned is the "unknown" bucket — no retry, but still telemetry-logged.
   assert.ok(
-    /Follow-up Task creation returned no id\. Raw response:/.test(source),
-    'no-id-returned path must log raw response so anomalies are visible'
+    /classification: 'unknown'[\s\S]{0,400}Task create returned no id\. Raw:/.test(source),
+    'no-id-returned path must classify as unknown and log raw response'
   );
 });
 
-t('Thrown error path still caught with explicit "threw" label', () => {
+t('Thrown error path classified as transient (the only retryable bucket)', () => {
+  // Thrown (network / 5xx that didn't parse) is the transient bucket — retried once.
   assert.ok(
-    /Follow-up Task creation threw: \$\{e\.message\}/.test(source),
-    'thrown error path must distinguish itself from Zoho-rejected'
+    /catch \(e\)[\s\S]{0,300}classification: 'transient'[\s\S]{0,200}error: `Task POST threw: \$\{e\.message\}`/.test(source),
+    'thrown error path must classify as transient and preserve threw label'
   );
 });
 
