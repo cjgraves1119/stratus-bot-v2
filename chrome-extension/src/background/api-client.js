@@ -539,7 +539,8 @@ function hashString(str) {
  *   { sendMode, killSwitch, ooo, watchInbox, cursors }
  */
 export async function emailResponderState() {
-  return apiCall('/api/email-responder/state', {}, { method: 'GET' });
+  // POST to satisfy gchat's outer routing gate; the proxy internally hits GET /api/state.
+  return apiCall('/api/email-responder/state', {});
 }
 
 /**
