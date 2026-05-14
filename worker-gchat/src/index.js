@@ -8498,6 +8498,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'zoho_create_record': {
         const { module_name, data } = toolInput;
         const recordData = Array.isArray(data) ? data[0] : data;
+        // Default Owner injection for Accounts/Deals — bot acts on behalf of human user
+        if ((module_name === 'Accounts' || module_name === 'Deals') && !recordData.Owner) {
+          recordData.Owner = { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' };
+        }
+        // Normalize state/country to 2-letter codes if caller passed full names
+        if (recordData.Billing_State) recordData.Billing_State = normalizeStateCode(recordData.Billing_State);
+        if (recordData.Billing_Country) recordData.Billing_Country = normalizeCountryCode(recordData.Billing_Country);
+        if (recordData.Mailing_State) recordData.Mailing_State = normalizeStateCode(recordData.Mailing_State);
+        if (recordData.Mailing_Country) recordData.Mailing_Country = normalizeCountryCode(recordData.Mailing_Country);
 
         // ── AUTO-ENRICH for Deal creation ────────────────────────────────────
         // If Account_Name is a string or {name: ...} without id, look up / create
@@ -18273,6 +18282,33 @@ ${(data.recentRequests || []).map(r => {
       return new Response(JSON.stringify(data, null, 2), { headers: { 'Content-Type': 'application/json' } });
     }
 
+// ─── Geographic normalization (state + country to ISO codes) ────────────────
+// Zoho records require 2-letter state/province codes and 2-letter country codes.
+// Zia Enrichment returns full names ("Wisconsin", "United States") so we must
+// normalize before storing or surfacing in the chrome ext form.
+const US_STATE_MAP = { 'alabama':'AL', 'alaska':'AK', 'arizona':'AZ', 'arkansas':'AR', 'california':'CA', 'colorado':'CO', 'connecticut':'CT', 'delaware':'DE', 'florida':'FL', 'georgia':'GA', 'hawaii':'HI', 'idaho':'ID', 'illinois':'IL', 'indiana':'IN', 'iowa':'IA', 'kansas':'KS', 'kentucky':'KY', 'louisiana':'LA', 'maine':'ME', 'maryland':'MD', 'massachusetts':'MA', 'michigan':'MI', 'minnesota':'MN', 'mississippi':'MS', 'missouri':'MO', 'montana':'MT', 'nebraska':'NE', 'nevada':'NV', 'new hampshire':'NH', 'new jersey':'NJ', 'new mexico':'NM', 'new york':'NY', 'north carolina':'NC', 'north dakota':'ND', 'ohio':'OH', 'oklahoma':'OK', 'oregon':'OR', 'pennsylvania':'PA', 'rhode island':'RI', 'south carolina':'SC', 'south dakota':'SD', 'tennessee':'TN', 'texas':'TX', 'utah':'UT', 'vermont':'VT', 'virginia':'VA', 'washington':'WA', 'west virginia':'WV', 'wisconsin':'WI', 'wyoming':'WY', 'district of columbia':'DC', 'puerto rico':'PR', 'virgin islands':'VI', 'guam':'GU', 'american samoa':'AS', 'northern mariana islands':'MP' };
+const CA_PROVINCE_MAP = { 'alberta':'AB', 'british columbia':'BC', 'manitoba':'MB', 'new brunswick':'NB', 'newfoundland and labrador':'NL', 'nova scotia':'NS', 'ontario':'ON', 'prince edward island':'PE', 'quebec':'QC', 'québec':'QC', 'saskatchewan':'SK', 'northwest territories':'NT', 'nunavut':'NU', 'yukon':'YT' };
+const COUNTRY_MAP = { 'united states':'US', 'united states of america':'US', 'usa':'US', 'u.s.':'US', 'u.s.a.':'US', 'america':'US', 'canada':'CA', 'united kingdom':'GB', 'great britain':'GB', 'britain':'GB', 'uk':'GB', 'u.k.':'GB', 'england':'GB', 'mexico':'MX', 'germany':'DE', 'france':'FR', 'spain':'ES', 'italy':'IT', 'netherlands':'NL', 'belgium':'BE', 'sweden':'SE', 'norway':'NO', 'finland':'FI', 'denmark':'DK', 'ireland':'IE', 'switzerland':'CH', 'austria':'AT', 'poland':'PL', 'portugal':'PT', 'greece':'GR', 'australia':'AU', 'new zealand':'NZ', 'japan':'JP', 'china':'CN', 'india':'IN', 'singapore':'SG', 'south korea':'KR', 'korea':'KR', 'taiwan':'TW', 'hong kong':'HK', 'philippines':'PH', 'thailand':'TH', 'vietnam':'VN', 'indonesia':'ID', 'malaysia':'MY', 'brazil':'BR', 'argentina':'AR', 'chile':'CL', 'colombia':'CO', 'peru':'PE', 'south africa':'ZA', 'israel':'IL', 'united arab emirates':'AE', 'uae':'AE', 'saudi arabia':'SA' };
+
+function normalizeStateCode(state) {
+  if (!state) return state;
+  const s = String(state).trim();
+  if (s.length === 2 && /^[A-Z]{2}$/.test(s.toUpperCase())) return s.toUpperCase(); // already 2-letter
+  const lower = s.toLowerCase();
+  if (US_STATE_MAP[lower]) return US_STATE_MAP[lower];
+  if (CA_PROVINCE_MAP[lower]) return CA_PROVINCE_MAP[lower];
+  return s; // unknown — return as-is, don't fabricate
+}
+
+function normalizeCountryCode(country) {
+  if (!country) return country;
+  const c = String(country).trim();
+  if (c.length === 2 && /^[A-Z]{2}$/.test(c.toUpperCase())) return c.toUpperCase();
+  const lower = c.toLowerCase();
+  if (COUNTRY_MAP[lower]) return COUNTRY_MAP[lower];
+  return c;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ── Enrich Company v2 helpers (waterfall: cache → Zoho → Zia → Haiku+web → Sonnet+web)
 // ── Added 2026-05-14, Codex-reviewed pre-deploy
@@ -18394,8 +18430,9 @@ async function callZiaEnrichment(env, domain, signal) {
         name: ed.name || null,
         address: addrObj?.fill_address || null,
         city: addrObj?.city || null,
-        state: addrObj?.state || null,
+        state: normalizeStateCode(addrObj?.state || null),
         zip: addrObj?.pin_code || null,
+        country: normalizeCountryCode(addrObj?.country || null),
         phone: ed.phone || null,
         industries: indObj?.name ? [indObj.name] : null,
         website: ed.website || null
@@ -19828,20 +19865,22 @@ Hard rules:
 
           // ── CRM Create Account ──
           case '/api/crm-create-account': {
-            const { name: newAcctName, street: newAcctStreet, city: newAcctCity, state: newAcctState, zip: newAcctZip, website: newAcctWebsite } = apiBody;
+            const { name: newAcctName, street: newAcctStreet, city: newAcctCity, state: newAcctState, zip: newAcctZip, website: newAcctWebsite, country: newAcctCountry } = apiBody;
             if (!newAcctName) {
               return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: jsonHeaders });
             }
             try {
+              // Defensive normalization: ensure 2-letter state + country codes regardless of caller
               const accountPayload = {
                 data: [{
                   Account_Name: newAcctName,
                   Billing_Street: newAcctStreet || '',
                   Billing_City: newAcctCity || '',
-                  Billing_State: newAcctState || '',
+                  Billing_State: normalizeStateCode(newAcctState) || '',
                   Billing_Code: newAcctZip || '',
+                  Billing_Country: normalizeCountryCode(newAcctCountry) || 'US',
                   Website: newAcctWebsite || '',
-                  Owner: { id: '2570562000141711002' }, // Chris Graves
+                  Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' }, // Chris Graves (overridable)
                 }]
               };
               const createResp = await zohoApiCall('POST', 'Accounts', env, accountPayload);
