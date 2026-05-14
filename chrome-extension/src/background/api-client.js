@@ -296,8 +296,9 @@ export async function crmAccountSearch(query, domain) {
 /**
  * Enrich company info from domain (Claude-powered lookup).
  */
-export async function enrichCompany(domain) {
-  return apiCall('/api/enrich-company', { domain: domain || '' });
+export async function enrichCompany(domain, opts = {}) {
+  // opts: { cache_bust?: boolean, start_tier?: 'zia'|'haiku'|'sonnet' }
+  return apiCall('/api/enrich-company', { domain: domain || '', ...opts });
 }
 
 /**

@@ -295,9 +295,9 @@ registerMessageHandlers({
     return api.crmCreateAccount(name, street, city, state, zip, website);
   },
 
-  // ── Enrich Company (domain → company info) ──
-  [MSG.ENRICH_COMPANY]: async ({ domain }) => {
-    return api.enrichCompany(domain);
+  // ── Enrich Company (domain → company info, optional retry/start_tier) ──
+  [MSG.ENRICH_COMPANY]: async ({ domain, cache_bust, start_tier }) => {
+    return api.enrichCompany(domain, { cache_bust, start_tier });
   },
 
   // ── CRM Create Task ──

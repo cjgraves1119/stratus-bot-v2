@@ -59,6 +59,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   const [createAccountLoading, setCreateAccountLoading] = useState(false);
   const [createAccountError, setCreateAccountError] = useState(null);
   const [enrichLoading, setEnrichLoading] = useState(false);
+  const [enrichResult, setEnrichResult] = useState(null); // {tier, confidence, source_url, ...}
 
   // Task action state
   const [taskActionLoading, setTaskActionLoading] = useState(null);
@@ -468,9 +469,10 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
             sendToBackground(MSG.ENRICH_COMPANY, { domain })
               .then(enriched => {
                 if (enriched && !enriched.error) {
+                  setEnrichResult(enriched);
                   setNewAccountData(prev => ({
                     name: enriched.name || prev.name,
-                    street: enriched.street || prev.street,
+                    street: enriched.address || enriched.street || prev.street,
                     city: enriched.city || prev.city,
                     state: enriched.state || prev.state,
                     zip: enriched.zip || prev.zip,
@@ -500,6 +502,37 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       } catch (_) {}
       setAccountSearchLoading(false);
     }, 300);
+  }
+
+  async function handleRetryEnrich() {
+    const domain = (newAccountData.website || '').trim().toLowerCase()
+      .replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
+    if (!domain) return;
+    // Advance to the next tier on retry. zia → haiku → sonnet → reset.
+    const currentTier = enrichResult?.tier;
+    const nextTier = (currentTier === 'zia' || currentTier === 'cache' || currentTier === 'zoho-existing')
+      ? 'haiku'
+      : (currentTier === 'haiku-web' ? 'sonnet' : 'haiku');
+    setEnrichLoading(true);
+    try {
+      const enriched = await sendToBackground(MSG.ENRICH_COMPANY, {
+        domain,
+        cache_bust: true,
+        start_tier: nextTier
+      });
+      if (enriched && !enriched.error) {
+        setEnrichResult(enriched);
+        setNewAccountData(prev => ({
+          name: enriched.name || prev.name,
+          street: enriched.address || enriched.street || prev.street,
+          city: enriched.city || prev.city,
+          state: enriched.state || prev.state,
+          zip: enriched.zip || prev.zip,
+          website: enriched.website || domain,
+        }));
+      }
+    } catch (_) {}
+    finally { setEnrichLoading(false); }
   }
 
   async function handleCreateAccount() {
@@ -738,6 +771,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 createAccountLoading={createAccountLoading}
                 createAccountError={createAccountError}
                 enrichLoading={enrichLoading}
+                enrichResult={enrichResult}
+                onRetryEnrich={handleRetryEnrich}
                 onSubmit={handleAddContact}
                 onCancel={() => { setShowAddForm(false); setShowCreateAccount(false); }}
                 loading={addFormLoading}
@@ -1502,7 +1537,7 @@ function AddContactForm({
   domainSuggestions, domainSuggestionsLoading,
   showCreateAccount, setShowCreateAccount,
   newAccountData, setNewAccountData, onCreateAccount, createAccountLoading, createAccountError,
-  enrichLoading,
+  enrichLoading, enrichResult, onRetryEnrich,
   onSubmit, onCancel, loading, error,
 }) {
   function selectAccount(acct) {
@@ -1647,6 +1682,27 @@ function AddContactForm({
                 <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.STRATUS_BLUE, textTransform: 'uppercase' }}>
                   New Account
                 </div>
+                {enrichResult && !enrichLoading && enrichResult.tier && enrichResult.tier !== 'reject' && (
+                  (() => {
+                    const conf = enrichResult.confidence || 0;
+                    const tier = enrichResult.tier;
+                    const sourceUrl = enrichResult.source_url;
+                    const badge = conf >= 0.85 ? { icon: '✓', color: '#1a7a32', label: 'Verified' }
+                                : conf >= 0.5  ? { icon: '⚠', color: '#a87900', label: 'Uncertain' }
+                                :                { icon: '?', color: '#999',    label: 'Low confidence' };
+                    const tierLabel = tier === 'cache' ? 'cached' : tier === 'zoho-existing' ? 'CRM' : tier === 'zia' ? 'Zia' : tier === 'haiku-web' ? 'web search (Haiku)' : tier === 'sonnet-web' ? 'web search (Sonnet)' : tier;
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, marginBottom: 6, padding: '4px 8px', background: '#f5f7fa', borderRadius: 4 }}>
+                        <span style={{ color: badge.color, fontWeight: 'bold' }} title={badge.label}>{badge.icon}</span>
+                        <span style={{ color: '#555' }}>via {tierLabel}</span>
+                        {sourceUrl && (
+                          <a href={sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#1a73a7', fontSize: 11, marginLeft: 'auto', textDecoration: 'none' }} title={sourceUrl}>source ↗</a>
+                        )}
+                        <button onClick={onRetryEnrich} style={{ background: 'none', border: '1px solid #ccc', borderRadius: 3, padding: '2px 6px', fontSize: 11, cursor: 'pointer', color: '#444' }} title="Re-run with a different tier">↻ retry</button>
+                      </div>
+                    );
+                  })()
+                )}
                 {enrichLoading && (
                   <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
                     Looking up company info…
@@ -1680,10 +1736,19 @@ function AddContactForm({
                 <div style={{ fontSize: 11, color: COLORS.ERROR, marginBottom: 6 }}>{createAccountError}</div>
               )}
               <div style={{ display: 'flex', gap: 6 }}>
-                <button type="button" onClick={onCreateAccount} disabled={createAccountLoading}
-                  style={{ flex: 1, padding: '7px', background: COLORS.STRATUS_BLUE, color: 'white', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: createAccountLoading ? 'not-allowed' : 'pointer', opacity: createAccountLoading ? 0.6 : 1 }}>
-                  {createAccountLoading ? 'Creating...' : 'Create Account'}
-                </button>
+                {(() => {
+                  // Codex-spec gate: disable if creating, OR no name, OR (auto-enriched with confidence < 0.3)
+                  const lowConf = enrichResult && enrichResult.confidence !== undefined && enrichResult.confidence < 0.3;
+                  const missingName = !newAccountData.name || !newAccountData.name.trim();
+                  const isDisabled = createAccountLoading || missingName || lowConf;
+                  const reason = createAccountLoading ? 'Creating...' : missingName ? 'Add a company name to enable' : lowConf ? 'Low confidence — please review before creating' : '';
+                  return (
+                    <button type="button" onClick={onCreateAccount} disabled={isDisabled} title={reason}
+                      style={{ flex: 1, padding: '7px', background: isDisabled ? '#999' : COLORS.STRATUS_BLUE, color: 'white', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: isDisabled ? 'not-allowed' : 'pointer', opacity: isDisabled ? 0.6 : 1 }}>
+                      {createAccountLoading ? 'Creating...' : 'Create Account'}
+                    </button>
+                  );
+                })()}
                 <button type="button" onClick={() => setShowCreateAccount(false)}
                   style={{ padding: '7px 12px', background: 'white', color: COLORS.TEXT_SECONDARY, border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>
                   Cancel
