@@ -18886,30 +18886,6 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
-          // ── Zia Org Enrichment probe (temp, 2026-05-14): test existing OAuth scope ──
-          // Hits POST /crm/v8/__zia_org_enrichment?module=Accounts to see whether the
-          // worker's current refresh_token scope (modules.ALL + settings.fields.ALL +
-          // coql.READ) can reach Zia Enrichment, or if we need settings.intelligence.ALL.
-          // If this returns SCHEDULED, scope works and we build Zia as Tier 1 of the
-          // company-lookup waterfall. If 401 OAUTH_SCOPE_MISMATCH, we know to expand.
-          case '/api/_zia-probe': {
-            const { domain: probeDomain } = apiBody;
-            if (!probeDomain) {
-              return new Response(JSON.stringify({ error: 'domain required' }), { status: 400, headers: jsonHeaders });
-            }
-            try {
-              const ziaResp = await zohoApiCall('POST', '__zia_org_enrichment?module=Accounts', env, {
-                __zia_org_enrichment: [{
-                  enrich_based_on: { website: probeDomain }
-                }]
-              });
-              apiResult = { ok: true, response: ziaResp };
-            } catch (err) {
-              apiResult = { ok: false, error: err.message };
-            }
-            break;
-          }
-
           // ── Tasks: Fetch open Zoho tasks for account/contact (by ID or domain/email fallback) ──
           case '/api/tasks': {
             const { domains, emails, accountId: directAccountId, contactId: directContactId } = apiBody;
