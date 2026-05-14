@@ -18886,58 +18886,6 @@ Use the most commonly known company name (e.g. "AFIMAC Global" not "AFIMAC Globa
             break;
           }
 
-          // ── Zia batch probe (temp, TEMP_ZOHO_EXCHANGE_KEY gated) — schedule + wait + poll ──
-          case '/api/_zia-probe': {
-            const exKey = request.headers.get('X-Zoho-Exchange-Key');
-            if (!exKey || !env.TEMP_ZOHO_EXCHANGE_KEY || exKey !== env.TEMP_ZOHO_EXCHANGE_KEY) {
-              return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-                status: 403, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
-              });
-            }
-            const { domain: probeDomain } = apiBody;
-            if (!probeDomain) {
-              return new Response(JSON.stringify({ error: 'domain required' }), {
-                status: 400, headers: { 'Content-Type': 'application/json' }
-              });
-            }
-            try {
-              // Schedule
-              const sched = await zohoApiCall('POST', '__zia_org_enrichment?module=Accounts', env, {
-                __zia_org_enrichment: [{ enrich_based_on: { website: probeDomain } }]
-              });
-              const jobId = sched?.__zia_org_enrichment?.[0]?.details?.id;
-              if (!jobId) {
-                return new Response(JSON.stringify({ domain: probeDomain, schedule: sched }), {
-                  status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
-                });
-              }
-              // Poll up to 5 times with 1.5s spacing
-              let polled = null;
-              for (let i = 0; i < 5; i++) {
-                await new Promise(r => setTimeout(r, 1500));
-                polled = await zohoApiCall('GET', '__zia_org_enrichment/' + jobId, env);
-                const status = polled?.__zia_org_enrichment?.[0]?.status;
-                if (status === 'COMPLETED' || status === 'FAILED') break;
-              }
-              const ed = polled?.__zia_org_enrichment?.[0]?.enriched_data || {};
-              return new Response(JSON.stringify({
-                domain: probeDomain,
-                jobId,
-                status: polled?.__zia_org_enrichment?.[0]?.status || 'UNKNOWN',
-                enriched: {
-                  name: ed.name || null,
-                  website: ed.website || null,
-                  address: ed.address || null,
-                  industries: ed.industries || null
-                }
-              }), { status: 200, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-            } catch (err) {
-              return new Response(JSON.stringify({ domain: probeDomain, error: err.message }), {
-                status: 500, headers: { 'Content-Type': 'application/json' }
-              });
-            }
-          }
-
           // ── Tasks: Fetch open Zoho tasks for account/contact (by ID or domain/email fallback) ──
           case '/api/tasks': {
             const { domains, emails, accountId: directAccountId, contactId: directContactId } = apiBody;
