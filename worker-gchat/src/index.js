@@ -6600,32 +6600,105 @@ async function logQuoteToPoTerminal(env, personId, quoteId, status, details = {}
   });
 }
 
-async function submitVelocityHubDid(dealId, country = 'United States') {
-  if (!isCiscoDid(dealId)) {
-    return { success: false, error: `Invalid DID format: "${dealId}". Must be exactly 8 digits.`, deal_id: dealId };
+// ─── Task #29 (2026-05-14) — Hardened single-source Velocity Hub submitter ───
+// All three legacy VH call sites (this helper, velocity_hub_submit tool, and
+// /api/velocity-hub proxy) now route through submitVelocityHubDid so the
+// outbound payload contract is guaranteed identical, and every submission is
+// telemetered to D1 crm_operations. This makes "VH bot got raw 'deal approval'
+// without DID" diagnosable end-to-end: if our log shows deal_id+200 then the
+// loss happened downstream of Pipedream, not in our worker.
+async function submitVelocityHubDid(dealId, country = 'United States', context = {}) {
+  const env = context.env || null;
+  const personId = context.personId || null;
+  const callSite = context.callSite || 'unknown';
+  const quoteId = context.quoteId || null;
+  const submitStart = Date.now();
+  const normalizedDid = String(dealId || '').trim();
+
+  // HARD GUARD: never POST a missing/blank/malformed DID. The downstream VH
+  // webhook accepts any body, so a blank JSON would silently propagate to the
+  // VH bot as the button's literal label ("deal approval") with no DID.
+  if (!isCiscoDid(normalizedDid)) {
+    const errMsg = `Invalid DID format: "${dealId}". Must be exactly 8 digits.`;
+    if (env) {
+      await logCrmOpToD1(env, {
+        personId,
+        bot: botFromPersonId(personId),
+        operation: 'velocity_hub_submit',
+        module: 'Quotes',
+        recordId: quoteId,
+        recordName: null,
+        status: 'error',
+        durationMs: Date.now() - submitStart,
+        errorMessage: errMsg,
+        details: { call_site: callSite, attempted_deal_id: dealId, country },
+        requestPayload: { deal_id: dealId, country },
+        responsePayload: null,
+        userVisibleSummary: `Velocity Hub submission blocked: DID format invalid (${dealId}).`
+      }).catch(() => {});
+    }
+    return { success: false, error: errMsg, deal_id: dealId, call_site: callSite };
   }
+
+  const requestBody = { deal_id: normalizedDid, country };
+  let vhStatus = 0;
+  let vhBody = '';
+  let vhError = null;
   try {
     const vhResponse = await fetch('https://eo44ez435h7vzp2.m.pipedream.net', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deal_id: dealId, country })
+      body: JSON.stringify(requestBody)
     });
-    const body = await vhResponse.text().catch(() => '');
-    return {
-      success: vhResponse.status >= 200 && vhResponse.status < 300,
-      status: vhResponse.status,
-      deal_id: dealId,
-      response_preview: body.slice(0, 300),
-      message: `Deal ${dealId} submitted to Velocity Hub for approval.`
-    };
+    vhStatus = vhResponse.status;
+    vhBody = await vhResponse.text().catch(() => '');
   } catch (err) {
+    vhError = err.message;
+  }
+
+  const ok = !vhError && vhStatus >= 200 && vhStatus < 300;
+  const responsePreview = vhBody.slice(0, 300);
+
+  if (env) {
+    await logCrmOpToD1(env, {
+      personId,
+      bot: botFromPersonId(personId),
+      operation: 'velocity_hub_submit',
+      module: 'Quotes',
+      recordId: quoteId,
+      recordName: null,
+      status: ok ? 'success' : 'error',
+      durationMs: Date.now() - submitStart,
+      errorMessage: ok ? null : (vhError || `HTTP ${vhStatus}`),
+      details: { call_site: callSite, response_status: vhStatus, response_preview: responsePreview },
+      requestPayload: requestBody,
+      responsePayload: { status: vhStatus, body_preview: responsePreview, error: vhError },
+      userVisibleSummary: ok
+        ? `Submitted DID ${normalizedDid} to Velocity Hub (HTTP ${vhStatus}).`
+        : `Velocity Hub submission FAILED for DID ${normalizedDid} (${vhError || `HTTP ${vhStatus}`}).`
+    }).catch(() => {});
+  }
+
+  if (vhError) {
     return {
       success: false,
-      error: err.message,
-      deal_id: dealId,
-      message: `Velocity Hub submission failed; DID ${dealId} was generated successfully.`
+      error: vhError,
+      deal_id: normalizedDid,
+      call_site: callSite,
+      message: `Velocity Hub submission failed; DID ${normalizedDid} was generated successfully.`
     };
   }
+
+  return {
+    success: ok,
+    status: vhStatus,
+    deal_id: normalizedDid,
+    response_preview: responsePreview,
+    call_site: callSite,
+    message: ok
+      ? `Deal ${normalizedDid} submitted to Velocity Hub for approval.`
+      : `Velocity Hub returned HTTP ${vhStatus} for DID ${normalizedDid}; submission did not confirm.`
+  };
 }
 
 function salesOrderLooksEsignSent(record) {
@@ -7424,7 +7497,7 @@ async function triggerAndPollAdminAction({ moduleName, recordId, actionName, env
   return { success: true, state: 'processing', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
 }
 
-async function ensureQuoteDidAndVelocity(quote, env) {
+async function ensureQuoteDidAndVelocity(quote, env, personId = null) {
   const quoteId = quote?.id;
   if (isCiscoDid(quote?.CCW_Deal_Number)) {
     return {
@@ -7444,6 +7517,12 @@ async function ensureQuoteDidAndVelocity(quote, env) {
     maxPollMs: 70000,
     pollEveryMs: 5000
   });
+  // 2026-05-14 (task #29): always re-fetch the Quote from Zoho after the poll
+  // returns. The poll's final_state can lag the post-write Zoho state by 1-2s,
+  // and ensureQuoteDidAndVelocity is the gate for VH submission — if we trust
+  // a stale final_state, we could end up calling submitVelocityHubDid with an
+  // empty DID. fetchQuoteForPoWorkflow goes through the regular CRM read API
+  // so it always reflects the freshly-written CCW_Deal_Number.
   const refreshedQuote = await fetchQuoteForPoWorkflow(quoteId, env).catch(() => action.final_state || quote);
   if (!isCiscoDid(refreshedQuote?.CCW_Deal_Number)) {
     return {
@@ -7455,14 +7534,25 @@ async function ensureQuoteDidAndVelocity(quote, env) {
     };
   }
   const did = String(refreshedQuote.CCW_Deal_Number).trim();
-  const velocity = await submitVelocityHubDid(did);
+  const velocity = await submitVelocityHubDid(did, 'United States', {
+    env,
+    personId,
+    quoteId,
+    callSite: 'quote_to_po_and_esign:ensureQuoteDidAndVelocity'
+  });
+  // 2026-05-14 (task #29): propagate VH submission failure into the parent
+  // state so the user-visible summary cannot falsely claim "submitted ✅"
+  // when Pipedream actually returned non-2xx or threw.
   return {
-    success: true,
-    state: 'did_ready',
+    success: !!velocity.success,
+    state: velocity.success === false ? 'did_ready_velocity_failed' : 'did_ready',
     quote: refreshedQuote,
     ccw_deal_number: did,
     admin_action: action,
-    velocity_hub_submission: velocity
+    velocity_hub_submission: velocity,
+    message: velocity.success === false
+      ? `DID ${did} generated but Velocity Hub submission failed (${velocity.error || `HTTP ${velocity.status || 'unknown'}`}). Resubmit via velocity_hub_submit.`
+      : undefined
   };
 }
 
@@ -7775,7 +7865,7 @@ async function handleQuoteToPoAndEsign(toolInput, env, personId) {
   }
 
   progress('Checking Cisco DID and submitting to Velocity Hub...');
-  const did = await ensureQuoteDidAndVelocity(quote, env);
+  const did = await ensureQuoteDidAndVelocity(quote, env, personId);
   quote = did.quote || quote;
   if (!did.success) {
     return finish({
@@ -12267,25 +12357,19 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       // ── Velocity Hub ──
+      // 2026-05-14 (task #29): consolidated to submitVelocityHubDid so the
+      // outbound payload contract is identical to the workflow chain path.
       case 'velocity_hub_submit': {
         const { deal_id, country } = toolInput;
-        if (!/^\d{8}$/.test(deal_id)) {
-          return { error: `Invalid DID format: "${deal_id}". Must be exactly 8 digits.` };
+        const result = await submitVelocityHubDid(deal_id, country || 'United States', {
+          env,
+          personId,
+          callSite: 'tool:velocity_hub_submit'
+        });
+        if (result.success === false && !result.deal_id) {
+          return { error: result.error || 'Velocity Hub submission failed.' };
         }
-        try {
-          const vhResponse = await fetch('https://eo44ez435h7vzp2.m.pipedream.net', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deal_id, country: country || 'United States' })
-          });
-          const vhStatus = vhResponse.status;
-          const vhBody = await vhResponse.text().catch(() => '');
-          console.log(`[GCHAT-AGENT] Velocity Hub submit: DID=${deal_id}, status=${vhStatus}`);
-          return { success: vhStatus >= 200 && vhStatus < 300, status: vhStatus, deal_id, message: `Deal ${deal_id} submitted to Velocity Hub for approval.` };
-        } catch (vhErr) {
-          console.error(`[GCHAT-AGENT] Velocity Hub error:`, vhErr.message);
-          return { success: false, error: vhErr.message, deal_id, message: `Velocity Hub submission failed but DID ${deal_id} was generated successfully. Chris can submit manually later.` };
-        }
+        return result;
       }
 
       // ── Gmail Tools ──
@@ -22192,24 +22276,54 @@ Hard rules:
           }
 
           // ── Velocity Hub: Proxy deal approval submission to Pipedream webhook ──
+          // 2026-05-14 (task #29): consolidated to submitVelocityHubDid. Adds
+          // strict inbound DID validation and fingerprint logging so any rogue
+          // caller (Chrome ext bug, Pipedream loop-back, manual curl) that
+          // hits this proxy with a missing/blank DID is rejected AND traced
+          // back to its source via request_payload in D1 crm_operations.
           case '/api/velocity-hub': {
             const { deal_id, country } = apiBody;
-            if (!deal_id) {
-              return new Response(JSON.stringify({ error: 'deal_id required' }), { status: 400, headers: jsonHeaders });
+            const inboundUa = request.headers.get('user-agent') || '';
+            const inboundOrigin = request.headers.get('origin') || '';
+            const inboundReferer = request.headers.get('referer') || '';
+            // Inbound validation: reject malformed bodies so we never relay
+            // them to Pipedream. Log the rejection so we can fingerprint
+            // who's calling us with junk payloads.
+            if (!deal_id || !/^\d{8}$/.test(String(deal_id).trim())) {
+              try {
+                await logCrmOpToD1(env, {
+                  personId: null,
+                  bot: 'api',
+                  operation: 'velocity_hub_submit',
+                  module: 'Quotes',
+                  recordId: null,
+                  recordName: null,
+                  status: 'error',
+                  durationMs: 0,
+                  errorMessage: `Inbound /api/velocity-hub rejected: invalid deal_id "${deal_id}".`,
+                  details: {
+                    call_site: 'api:/api/velocity-hub:rejected',
+                    user_agent: inboundUa,
+                    origin: inboundOrigin,
+                    referer: inboundReferer
+                  },
+                  requestPayload: apiBody || null,
+                  responsePayload: null,
+                  userVisibleSummary: null
+                });
+              } catch (_) {}
+              return new Response(JSON.stringify({
+                success: false,
+                error: 'deal_id required and must be exactly 8 digits',
+                received_deal_id: deal_id || null
+              }), { status: 400, headers: jsonHeaders });
             }
-            try {
-              const vhResp = await fetch('https://eo44ez435h7vzp2.m.pipedream.net', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ deal_id, country: country || 'United States' }),
-              });
-              const vhText = await vhResp.text();
-              let vhData;
-              try { vhData = JSON.parse(vhText); } catch (_) { vhData = { success: true, rawResponse: vhText.substring(0, 100) }; }
-              apiResult = vhData;
-            } catch (err) {
-              apiResult = { success: false, error: 'Velocity Hub submission failed: ' + err.message };
-            }
+            const vhResult = await submitVelocityHubDid(
+              String(deal_id).trim(),
+              country || 'United States',
+              { env, personId: null, callSite: 'api:/api/velocity-hub' }
+            );
+            apiResult = vhResult;
             break;
           }
 
