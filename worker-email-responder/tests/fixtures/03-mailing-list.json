@@ -1,0 +1,23 @@
+{
+  "label": "loop guard: mailing list newsletter",
+  "expected_outcome": "skipped",
+  "expected_reasons": ["precedence=bulk", "list-id present"],
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-003",
+    "gmailThreadId": "thread-003",
+    "rfcMessageId": "<test-003@newsletter.example>",
+    "fromEmail": "news@vendor.example",
+    "fromName": "Vendor News",
+    "senderDomain": "vendor.example",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Q4 Roadmap Updates",
+    "precedence": "bulk",
+    "listId": "<news.vendor.example>",
+    "listUnsubscribe": "<https://vendor.example/unsub>",
+    "bodyText": "Click here for our latest roadmap.",
+    "internalDateMs": 1746729600000
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "label": "loop guard: NDR / bounce",
+  "expected_outcome": "skipped",
+  "expected_reasons": ["ndr sender"],
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-004",
+    "gmailThreadId": "thread-004",
+    "rfcMessageId": "<bounce-xyz@google.com>",
+    "fromEmail": "mailer-daemon@googlemail.com",
+    "fromName": "Mail Delivery Subsystem",
+    "senderDomain": "googlemail.com",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Delivery Status Notification (Failure)",
+    "returnPath": "<>",
+    "bodyText": "Your message could not be delivered to recipient@unknown.example.",
+    "internalDateMs": 1746729600000
+  }
+}

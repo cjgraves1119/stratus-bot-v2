@@ -1,0 +1,20 @@
+{
+  "label": "loop guard: our own AI sender comes back into ai@ inbox",
+  "expected_outcome": "skipped",
+  "expected_reasons": ["sender is our own automation"],
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-006",
+    "gmailThreadId": "thread-006",
+    "rfcMessageId": "<msg006@stratus.example>",
+    "fromEmail": "ai@stratusinfosystems.com",
+    "fromName": "Stratus AI Assistant",
+    "senderDomain": "stratusinfosystems.com",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Re: Pricing question",
+    "bodyText": "Echo / forwarded.",
+    "internalDateMs": 1746729600000
+  }
+}

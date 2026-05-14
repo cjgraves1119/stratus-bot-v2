@@ -1,0 +1,20 @@
+{
+  "label": "risk gate: hardware recommendation -> draft for review (never auto-send)",
+  "expected_outcome": "draft_for_review",
+  "expected_intent": "hardware_recommend",
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-008",
+    "gmailThreadId": "thread-008",
+    "rfcMessageId": "<msg008@customer.example>",
+    "fromEmail": "ops@newcompany.example",
+    "fromName": "Ops Lead",
+    "senderDomain": "newcompany.example",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Need help speccing out a wireless solution",
+    "bodyText": "We're opening a new 30,000 sqft office and need wireless. Probably 15-20 APs? Mix of conference rooms and open desks. What would you recommend?",
+    "internalDateMs": 1746729600000
+  }
+}

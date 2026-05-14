@@ -1,0 +1,19 @@
+{
+  "name": "stratus-ai-email-responder",
+  "version": "0.1.0",
+  "description": "AI sales assistant that responds to inbound email when Chris is OOO. POC for Stratus dev handoff.",
+  "private": true,
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "deploy:dry-run": "SEND_MODE=dry_run wrangler deploy",
+    "test": "node --test tests/",
+    "smoke": "bash tests/smoke.sh",
+    "tail": "wrangler tail",
+    "migrate": "wrangler d1 execute stratus-bot-analytics --file=migrations/0001_email_ai_audit.sql --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

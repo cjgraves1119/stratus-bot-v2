@@ -1,0 +1,59 @@
+name = "stratus-ai-email-responder"
+main = "src/index.js"
+compatibility_date = "2024-11-12"
+compatibility_flags = ["nodejs_compat"]
+
+# Workers Paid plan required for ctx.waitUntil() beyond 30s.
+# This worker calls gchat /api/chat-waterfall which can take 30+s on Claude tier.
+
+[vars]
+SEND_MODE = "dry_run"                      # dry_run | draft_only | auto_send
+POLL_INTERVAL_SEC = "60"                   # gmail history poll interval
+GCHAT_BASE_URL = "https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev"
+BOT_SIGNATURE_TOKEN = "x-stratus-ai-msg-v1"  # marker in outbound headers + body for self-detection
+RATE_LIMIT_PER_THREAD_24H = "1"
+RATE_LIMIT_PER_SENDER_DAY = "3"
+CLASSIFIER_CONFIDENCE_FLOOR = "0.75"
+STRATUS_DOMAINS = "stratusinfosystems.com,stratusbots.com"
+JAY_FLORENDO_EMAIL = "jayf@stratusinfosystems.com"
+CHRIS_EMAIL = "chrisg@stratusinfosystems.com"
+AI_ALIAS_EMAIL = "ai@stratusinfosystems.com"
+AI_DISPLAY_NAME = "Stratus AI Assistant"
+
+# ─── Secrets (set via `wrangler secret put`) ──────────────────────
+# GOOGLE_CLIENT_ID         Workspace OAuth client (can reuse gchat's)
+# GOOGLE_CLIENT_SECRET     Workspace OAuth secret
+# GOOGLE_REFRESH_TOKEN_AI  refresh token for `ai@stratusinfosystems.com` mailbox
+# GOOGLE_REFRESH_TOKEN_CHRIS refresh token for `chrisg@` (OOO mode)
+# GCHAT_INTERNAL_TOKEN     API_KEY to call gchat /api/chat-waterfall
+# ADMIN_KEY                gates /api/ooo-toggle, /api/kill-switch, /api/poll
+# ANTHROPIC_API_KEY        only used for classifier when CF AI is rate-limited
+
+# ─── KV: state, dedupe, history cursor, OOO toggle, kill switch ────
+[[kv_namespaces]]
+binding = "STATE_KV"
+id = "45d01f4b96104f8a8e1184a37864119d"            
+
+# Shared analytics DB with rest of Stratus bots
+[[d1_databases]]
+binding = "ANALYTICS_DB"
+database_name = "stratus-bot-analytics"
+database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
+
+# Workers AI for classifier (Llama 4 Scout primary, Gemma 4 fallback)
+[ai]
+binding = "AI"
+
+# Cron: gmail polling (every minute). Real-time enough for OOO.
+[triggers]
+crons = ["* * * * *"]
+
+# Service binding to gchat worker for CRM + quote URL + Anthropic via gateway
+[[services]]
+binding = "GCHAT"
+service = "stratus-ai-bot-gchat"
+
+# Optional: queue for high-risk drafts that need human review notification
+# [[queues.producers]]
+# queue = "stratus-ai-email-review-queue"
+# binding = "REVIEW_QUEUE"

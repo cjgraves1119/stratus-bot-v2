@@ -1,0 +1,38 @@
+[
+  {
+    "id": "meraki-claim-license",
+    "question": "How do I claim or apply a Meraki license on my dashboard?",
+    "answer": "To claim a Meraki license, log into your Meraki dashboard, then go to Organization > Configure > License info. Click 'Add another license', enter the license key (sent in your fulfillment email or visible in your CCW order), and click 'Add license'. The license attaches automatically if you've already added the matching device serials. If you have a co-termination model, the new license's expiration will be blended with the existing pool's end date.",
+    "followup": "If you can't find the license key or the dashboard rejects it, send me the order number and I'll look it up."
+  },
+  {
+    "id": "co-term-vs-per-device",
+    "question": "What's the difference between co-termination and per-device licensing on Meraki?",
+    "answer": "Co-termination (the default for most Meraki orgs) means all licenses in an organization share a single expiration date. When you add a new license, the dashboard recalculates a blended expiration so everything renews together. Per-device licensing assigns each license to a specific device — useful for larger orgs where you want individual control, but you have to renew each device separately. You set this when you create the organization, and switching modes later requires a Meraki support ticket.",
+    "followup": "If you'd like a co-term snapshot for your org, send me your dashboard org name and I'll have the team pull it."
+  },
+  {
+    "id": "license-expiration-check",
+    "question": "How do I check when my Meraki licenses expire?",
+    "answer": "In the Meraki dashboard, go to Organization > Configure > License info. The top of the page shows your overall organization expiration date (for co-term orgs) and a list of every license with its key, device tier, and either contribution-to-pool or individual expiration (per-device orgs). You can also click 'License history' for a full audit trail of additions, upgrades, and renewals.",
+    "followup": "If anything looks off or you'd like a renewal proposal, just let me know your org name."
+  },
+  {
+    "id": "device-license-mismatch",
+    "question": "My dashboard says license-device mismatch / I'm seeing a warning about my license tier.",
+    "answer": "A license-device mismatch usually means one of three things: (1) you have more devices than your licensed count — you need to add another license to cover the extra device(s), (2) you have a device type with no matching license (e.g. an MX added with only MR licenses in the pool), or (3) your license tier (Enterprise vs Advanced Security) is lower than what the device is configured for. The dashboard tells you exactly which devices are short — Organization > Configure > License info has the breakdown.",
+    "followup": "Send me a screenshot of the warning or the device serial and I'll figure out exactly what's needed."
+  },
+  {
+    "id": "renewal-process",
+    "question": "How do I renew my Meraki licenses?",
+    "answer": "Renewals are handled through Stratus. Tell us your dashboard org name (or just CC us on the renewal reminder from Cisco) and we'll pull a renewal quote that matches your current license footprint, including any term changes (1/3/5 year) and any new SKUs you may have added during the term. Renewals typically go in 60-120 days before expiration to give time for processing and PO/budget cycles.",
+    "followup": "Want me to start the renewal quote? If so, just send your org name or the existing license key and I'll get it queued."
+  },
+  {
+    "id": "license-transfer",
+    "question": "Can I transfer a Meraki license to a different organization or device?",
+    "answer": "Yes, with limits. Licenses can be moved between organizations under the same Meraki account using the 'Move licenses' option under Organization > License info. Moving a license to a different account requires a Cisco support ticket and is generally only granted in cases like company restructuring or acquisition. Per-device licenses can be unassigned and reassigned within the same org without a support ticket; co-term licenses are pooled and don't transfer individually.",
+    "followup": "If you need a Cisco support ticket opened for a cross-account move, send the details and we can help facilitate."
+  }
+]

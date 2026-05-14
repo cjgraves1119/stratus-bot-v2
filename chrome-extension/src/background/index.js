@@ -187,6 +187,20 @@ registerMessageHandlers({
     return saveSettings(payload);
   },
 
+  // ── Email Responder OOO Toggle (POC) ──
+  [MSG.EMAIL_RESPONDER_STATE]: async () => {
+    return api.emailResponderState();
+  },
+  [MSG.EMAIL_RESPONDER_TOGGLE]: async ({ ooo, watchInbox }) => {
+    return api.emailResponderToggle(ooo, watchInbox);
+  },
+  [MSG.EMAIL_RESPONDER_KILL]: async ({ state }) => {
+    return api.emailResponderKill(state);
+  },
+  [MSG.EMAIL_RESPONDER_POLL]: async () => {
+    return api.emailResponderPollNow();
+  },
+
   // ── Sidebar Navigation ──
   [MSG.SIDEBAR_NAVIGATE]: async (payload, sender) => {
     // If openPanel flag is set (e.g. from contact chip click), open the side panel first

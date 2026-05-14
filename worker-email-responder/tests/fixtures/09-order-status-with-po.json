@@ -1,0 +1,21 @@
+{
+  "label": "happy path: order status with PO reference + exact contact match",
+  "expected_outcome": "auto_send",
+  "expected_intent": "order_status",
+  "requires_exact_contact_match": true,
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-009",
+    "gmailThreadId": "thread-009",
+    "rfcMessageId": "<msg009@customer.example>",
+    "fromEmail": "buyer@acme-it.com",
+    "fromName": "Sam Buyer",
+    "senderDomain": "acme-it.com",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Status on PO 12345?",
+    "bodyText": "Hi! Can you give me an update on our PO 12345? Trying to figure out when to expect it.",
+    "internalDateMs": 1746729600000
+  }
+}

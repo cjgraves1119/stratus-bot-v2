@@ -1,0 +1,20 @@
+{
+  "label": "loop guard: internal stratus sender",
+  "expected_outcome": "skipped",
+  "expected_reasons": ["internal stratus sender"],
+  "envelope": {
+    "path": "chris_ooo",
+    "recipient": "chrisg@stratusinfosystems.com",
+    "gmailMessageId": "test-005",
+    "gmailThreadId": "thread-005",
+    "rfcMessageId": "<msg005@stratus.example>",
+    "fromEmail": "jayf@stratusinfosystems.com",
+    "fromName": "Jay Florendo",
+    "senderDomain": "stratusinfosystems.com",
+    "to": ["chrisg@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Heads up on Acme",
+    "bodyText": "Wanted to flag that Acme is calling tomorrow about the renewal.",
+    "internalDateMs": 1746729600000
+  }
+}
