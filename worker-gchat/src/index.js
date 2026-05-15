@@ -732,9 +732,13 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
                 : undefined
             })
           : null;
+        // OPT-B (2026-05-15): per-iteration tool names into tool_calls_json
+        const _praToolCallsJson = Array.isArray(extras?.toolNames) && extras.toolNames.length > 0
+          ? JSON.stringify(extras.toolNames)
+          : null;
         await env.ANALYTICS_DB.prepare(
-          `INSERT INTO bot_usage (bot, person_id, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, response_text)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO bot_usage (bot, person_id, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, response_text, tool_calls_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
           source.startsWith('addon') ? 'addon' : 'gchat',
           null, // person_id filled by caller if available
@@ -744,7 +748,8 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
           usage.output_tokens || 0,
           Math.round(totalCost * 1_000_000) / 1_000_000,
           null,
-          _praMeta
+          _praMeta,
+          _praToolCallsJson
         ).run();
       } catch (d1Err) {
         console.error('[D1] bot_usage insert error:', d1Err.message);
