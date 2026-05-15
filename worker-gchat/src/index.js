@@ -632,6 +632,10 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
               : undefined
           })
         : null;
+      // OPT-B (2026-05-15): thread per-iteration tool names into tool_calls_json
+      const _praToolCallsJson = Array.isArray(extras?.toolNames) && extras.toolNames.length > 0
+        ? JSON.stringify(extras.toolNames)
+        : null;
       await logBotUsageToD1(env, {
         bot: evalContext?.bot || (source.startsWith('addon') ? 'addon' : 'gchat'),
         personId: evalContext?.personId || null,
@@ -651,6 +655,7 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
         durationMs: null,
         errorMessage: null,
         responseText: _praEvalMeta, // PR-A: intent_class + tool_count metadata
+        toolCallsJson: _praToolCallsJson,
         endpoint: evalContext?.endpoint || null,
         evalContext
       });
@@ -13954,14 +13959,18 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
 
     // Dynamic model: Haiku only for dispatch-only steps (zoho_update_record, send_email)
     // at iteration 4+. Sonnet for all planning/interpretation steps.
-    // .every() ensures Haiku only fires if ALL last tools were dispatch-only.
+    // 2026-05-15 (OPT-A): when prompt caching is enabled, Sonnet+Haiku maintain
+    // SEPARATE caches, so each swap forces a fresh cache_creation (~$0.03/swap).
+    // Skip the swap unless explicitly re-enabled via env.ENABLE_HAIKU_DISPATCH.
     const _lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
     const _contLastToolNames = _lastMsg && Array.isArray(_lastMsg.content)
       ? _lastMsg.content.filter(b => b.type === 'tool_use').map(b => b.name)
       : [];
     const _contExecTools = new Set(['zoho_update_record', 'send_email']);
     const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.every(n => _contExecTools.has(n));
-    const contModel = (iteration > 3 && _isPureExec)
+    const _contCachingActive = await isPromptCachingEnabled(env);
+    const _contHaikuDispatchOK = !_contCachingActive || env.ENABLE_HAIKU_DISPATCH === 'true';
+    const contModel = (iteration > 3 && _isPureExec && _contHaikuDispatchOK)
       ? 'claude-haiku-4-5-20251001'
       : 'claude-sonnet-4-6';
     console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
@@ -14020,10 +14029,15 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     if (_prB_cacheUsageCont.creation > 0 || _prB_cacheUsageCont.read > 0) {
       console.log(`[PR-B-CONT] cache tokens: creation=${_prB_cacheUsageCont.creation} read=${_prB_cacheUsageCont.read}`);
     }
+    // OPT-B (2026-05-15): capture tool names per iteration for observability
+    const _contIterToolNames = Array.isArray(data.content)
+      ? data.content.filter(b => b.type === 'tool_use').map(b => b.name)
+      : [];
     // trackUsage writes to Analytics Engine, KV, AND D1 bot_usage
     trackUsage(env, contModel, data.usage, 'crm-agent-continue', null, {
       cacheCreationTokens: _prB_cacheUsageCont.creation,
-      cacheReadTokens: _prB_cacheUsageCont.read
+      cacheReadTokens: _prB_cacheUsageCont.read,
+      toolNames: _contIterToolNames
     }).catch(() => {});
 
     if (data.stop_reason === 'tool_use') {
@@ -14776,7 +14790,12 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // for strategic guidance on complex decisions. Haiku for pure
       // execution steps (updates/sends) where the plan is already set.
       // Non-CRM path: Sonnet 4.6 for general product questions.
-      const activeModel = (useTools && iteration > 2 && _inPureExecMode)
+      // 2026-05-15 (OPT-A): when prompt caching is enabled, model swaps force
+      // fresh cache_creation per model (Sonnet/Haiku have separate caches).
+      // Skip the Haiku swap unless explicitly re-enabled via env.ENABLE_HAIKU_DISPATCH.
+      const _askCachingActive = await isPromptCachingEnabled(env);
+      const _askHaikuDispatchOK = !_askCachingActive || env.ENABLE_HAIKU_DISPATCH === 'true';
+      const activeModel = (useTools && iteration > 2 && _inPureExecMode && _askHaikuDispatchOK)
         ? 'claude-haiku-4-5-20251001'
         : 'claude-sonnet-4-6';
       if (useTools) {
@@ -14877,18 +14896,24 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // PR-B (2026-05-14): include Anthropic cache_creation + cache_read
       // input token counts so canary verification can compute hit-rate.
       const _prB_cacheUsage = extractCacheUsage(data.usage);
+      // OPT-B (2026-05-15): capture tool names per iteration for observability
+      const _askIterToolNames = Array.isArray(data.content)
+        ? data.content.filter(b => b.type === 'tool_use').map(b => b.name)
+        : [];
       const _praExtras = useTools
         ? {
             intentClass: _intentClassification_PRA?.class || 'general',
             toolCount: Array.isArray(activeTools) ? activeTools.length : (Array.isArray(tools) ? tools.length : 0),
             cacheCreationTokens: _prB_cacheUsage.creation,
-            cacheReadTokens: _prB_cacheUsage.read
+            cacheReadTokens: _prB_cacheUsage.read,
+            toolNames: _askIterToolNames
           }
         : {
             intentClass: 'quote_url',
             toolCount: Array.isArray(activeTools) ? activeTools.length : 0,
             cacheCreationTokens: _prB_cacheUsage.creation,
-            cacheReadTokens: _prB_cacheUsage.read
+            cacheReadTokens: _prB_cacheUsage.read,
+            toolNames: _askIterToolNames
           };
       if (_prB_cacheUsage.creation > 0 || _prB_cacheUsage.read > 0) {
         console.log(`[PR-B] cache tokens: creation=${_prB_cacheUsage.creation} read=${_prB_cacheUsage.read}`);
