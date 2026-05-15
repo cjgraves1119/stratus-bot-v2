@@ -13158,6 +13158,15 @@ function classifyCrmIntent(text, ctx = {}) {
   }
   const t = text.toLowerCase();
 
+  // 0. Quote/Deal creation guard (2026-05-15 Codex defense-in-depth):
+  // If user is creating/building/making a quote/deal/PO/order, route to crm_write
+  // even if Cisco rep keywords appear elsewhere (e.g. in CRM context preamble).
+  // This prevents the prior misclassification where create_deal_and_quote got
+  // stripped because @cisco.com was in context.
+  if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote|deal|po|order|sales\s*order)\b/.test(t)) {
+    return { class: 'crm_write', confidence: 0.95 };
+  }
+
   // 1. URL/ecomm quote link
   if (/\b(url\s+quote|ecomm\s+link|order\s+link|shopping\s+cart\s+link|stratus\s+url)\b/.test(t)) {
     return { class: 'quote_url', confidence: 0.9 };
@@ -13169,8 +13178,10 @@ function classifyCrmIntent(text, ctx = {}) {
   }
 
   // 3. Cisco rep assignment (must precede crm_write because verbs overlap)
-  if (/\b(assign|set|change|update)\b.{0,40}\b(cisco\s+rep|meraki\s+isr|isr|rep)\b/.test(t)
-      || /@cisco\.com/.test(t)
+  // 2026-05-15: removed bare @cisco.com clause that mis-routed quote creates when
+  // chat context included a Cisco rep email. Now requires assign/set/change/update/
+  // reassign verb + cisco rep keyword, OR an explicit "ping rep" phrase.
+  if (/\b(assign|set|change|update|reassign)\b.{0,40}\b(cisco\s+rep|meraki\s+isr|isr|rep)\b/.test(t)
       || /\bping\s+(the\s+)?(cisco\s+)?rep\b/.test(t)) {
     return { class: 'cisco_rep', confidence: 0.85 };
   }
