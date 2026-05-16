@@ -863,7 +863,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     Due_Date: dueDateStr,
     Status: 'Not Started',
     Priority: 'Normal',
-    Owner: { id: ownerId || '2570562000141711002' },
+    Owner: { id: ownerId || env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' },
     What_Id: { id: dealId },
     $se_module: 'Deals'
   };
@@ -6415,7 +6415,7 @@ function validateCrmWrite(module_name, data, isCreate = false) {
     }
     // Auto-fill defaults for commonly skipped fields
     if (!data.Meraki_ISR && isCreate) data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
-    if (!data.Owner) data.Owner = { id: '2570562000141711002' }; // Chris Graves
+    if (!data.Owner) data.Owner = { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' };
   }
 
   if (module_name === 'Quotes') {
@@ -6495,7 +6495,7 @@ function validateCrmWrite(module_name, data, isCreate = false) {
     // Auto-fill commonly skipped fields with safe defaults
     if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
     if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
-    if (!data.Owner) data.Owner = { id: '2570562000141711002' };
+    if (!data.Owner) data.Owner = { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' };
     // Contact_Name enforcement: every quote must have a contact
     if (!data.Contact_Name) {
       console.log('[VALIDATE] Quote missing Contact_Name — applying Stratus Sales placeholder');
@@ -8538,7 +8538,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               let accountId = acctSearch?.data?.[0]?.id;
               if (!accountId) {
                 const newAcct = await zohoApiCall('POST', 'Accounts', env, {
-                  data: [{ Account_Name: acctName, Owner: { id: '2570562000141711002' } }]
+                  data: [{ Account_Name: acctName, Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' } }]
                 });
                 accountId = newAcct?.data?.[0]?.details?.id;
                 console.log(`[DEAL-ENRICH] Created Account ${acctName} → ${accountId}`);
@@ -10013,7 +10013,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // All fields present — create the Account with full billing info
             const newAcctPayload = {
               Account_Name: account_name,
-              Owner: { id: '2570562000141711002' },
+              Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' },
               Billing_Street: b.street,
               Billing_City: b.city,
               Billing_State: b.state,
@@ -10146,7 +10146,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 Last_Name: last,
                 Email: contact_email,
                 Account_Name: { id: accountId },
-                Owner: { id: '2570562000141711002' }
+                Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' }
               }]
             });
             if (newContact?.data?.[0]?.details?.id) {
@@ -10540,7 +10540,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
             Meraki_ISR: { id: '2570562000027286729' },
-            Owner: { id: '2570562000141711002' },
+            Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' },
             Closing_Date: closingDate
           };
           if (contactId) dealData.Contact_Name = { id: contactId };
@@ -10611,7 +10611,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // that triggered Cisco's CCW DID integration to hang.
             Vendor1: DEFAULT_QUOTE_VENDOR,
             Cisco_Billing_Term: quoteBillingTerm,
-            Owner: { id: '2570562000141711002' },
+            Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' },
             Do_Not_Auto_Update_Prices: true,
             Quoted_Items: quotedItems
           };
@@ -12561,7 +12561,7 @@ const CRM_EMAIL_TOOLS = [
       type: 'object',
       properties: {
         module_name: { type: 'string', description: 'CRM module API name: Deals, Quotes, Contacts, Accounts, Tasks, Products, Sales_Orders, Invoices' },
-        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:2570562000141711002) and (Stage:not_equals:Closed (Won))' },
+        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:<DEFAULT_OWNER_ID>) and (Stage:not_equals:Closed (Won))' },
         fields: { type: 'string', description: 'Comma-separated field API names to return. Example: id,Deal_Name,Stage,Amount,Account_Name' },
         page: { type: 'number', description: 'Page number (default 1)' },
         per_page: { type: 'number', description: 'Records per page (max 200, default 20)' }
@@ -12963,7 +12963,7 @@ async function fastPathQuoteLookup(userMessage, envObj) {
 
   try {
     // Step 1: Search Quotes by account name (most recent first)
-    const OWNER = '2570562000141711002';
+    const OWNER = envObj.BOT_DEFAULT_OWNER_ID || '2570562000141711002';
     const searchPath = `Quotes/search?criteria=(Account_Name:contains:${encodeURIComponent(company)})and(Owner:equals:${OWNER})&sort_by=Created_Time&sort_order=desc&per_page=3&fields=id,Subject,Quote_Number,Account_Name,Grand_Total,Quote_Stage`;
     const searchResult = await zohoApiCall('GET', searchPath, envObj);
     const quotes = searchResult?.data;
@@ -13332,7 +13332,7 @@ New deal+quote → use **create_deal_and_quote** (handles Account, Contact, Deal
 
 ## CRM CONTEXT
 - Org ID: org647122552. URL format: \`https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}\`.
-- Default owner: Chris Graves (id 2570562000141711002). Filter queries by Owner=that id unless told otherwise.
+- Default owner: set per deployment via env.BOT_DEFAULT_OWNER_ID (see currentUser context if provided). Filter queries by that owner unless context indicates a different user.
 
 ---
 
@@ -13370,7 +13370,7 @@ Every Deal Create MUST include:
   "Closing_Date": "{today + 30 days, YYYY-MM-DD}",
   "Amount": 0,
   "Meraki_ISR": {"id": "2570562000027286729"},
-  "Owner": {"id": "2570562000141711002"}
+  "Owner": {"id": "<DEFAULT_OWNER_ID>"}
 }
 \`\`\`
 
@@ -13407,7 +13407,7 @@ Every Quote Create MUST include:
   "Billing_Code": "{zip}",
   "Billing_Country": "US",
   "Shipping_Country": "US",
-  "Owner": {"id": "2570562000141711002"},
+  "Owner": {"id": "<DEFAULT_OWNER_ID>"},
   "Quoted_Items": [
     {
       "Product_Name": {"id": "{zoho_product_id}"},
@@ -13567,7 +13567,7 @@ ONLY use values from the VALID DEAL STAGES list above. Do NOT invent stages ("Wa
 ## EMAIL RULES
 - Always create a Gmail draft first (gmail_create_draft) — NEVER send without approval.
 - Blank line between every paragraph.
-- Sign as: Chris Graves, Regional Sales Director, Stratus Information Systems.
+- Sign with the current user's name/title from currentUser context (e.g. <First Last>, <Job Title>). If not provided, sign generically as 'The Stratus team' or use env.BOT_USER_NAME / env.BOT_USER_TITLE if configured.
 - Voice: friendly, consultative, concise. End every customer email with a question or CTA.
 
 ---
@@ -20159,7 +20159,7 @@ Hard rules:
                       Subject: successorSubject,
                       Status: 'Not Started',
                       Due_Date: newDueDate || followUpDate,
-                      Owner: '2570562000141711002', // Chris Graves
+                      Owner: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002', // env-overridable default
                     }]
                   };
                   // Attach to deal if available
@@ -20497,7 +20497,7 @@ Hard rules:
                       Last_Name: lastName,
                       Email: senderEmail,
                       Account_Name: { id: resultAccountId },
-                      Owner: '2570562000141711002'
+                      Owner: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002'
                     }]
                   };
                   const createContactResp = await zohoApiCall('POST', 'Contacts', env, contactPayload);
@@ -20519,7 +20519,7 @@ Hard rules:
                     Email: senderEmail,
                     Company: company,
                     Lead_Source: 'Website',
-                    Owner: '2570562000141711002'
+                    Owner: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002'
                   }]
                 };
                 const createLeadResp = await zohoApiCall('POST', 'Leads', env, leadPayload);
@@ -20540,7 +20540,7 @@ Hard rules:
                   Subject: 'Follow up: ' + (taskSubject || senderName || senderEmail),
                   Status: 'Not Started',
                   Due_Date: followUpDate,
-                  Owner: '2570562000141711002',
+                  Owner: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002',
                   Description: 'Auto-created from Gmail add-on.\nSender: ' + senderName + ' <' + senderEmail + '>\nOriginal subject: ' + (taskSubject || 'N/A')
                 }]
               };
@@ -22597,7 +22597,7 @@ Hard rules:
                   Phone: newCtPhone || '',
                   Mobile: newCtMobile || '',
                   Title: newCtTitle || '',
-                  Owner: { id: '2570562000141711002' }, // Chris Graves
+                  Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' }, // Chris Graves
                 }]
               };
               if (newCtAcctId) {
@@ -22835,7 +22835,7 @@ Return ONLY a JSON object (no markdown, no explanation):
                   Status: 'Not Started',
                   Due_Date: newTaskDue || createTaskBizDays(new Date(), 3),
                   Priority: newTaskPriority || 'Normal',
-                  Owner: '2570562000141711002', // Chris Graves
+                  Owner: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002', // env-overridable default
                 }]
               };
               if (newTaskDeal) {
