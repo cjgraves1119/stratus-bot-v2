@@ -1730,7 +1730,7 @@ function AddContactForm({
                 onChange={e => setNewAccountData(p => ({ ...p, website: e.target.value }))}
                 style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />
               <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>
-                Owner: <strong>Chris Graves</strong> (default)
+                Owner: <strong>Default user</strong>
               </div>
               {createAccountError && (
                 <div style={{ fontSize: 11, color: COLORS.ERROR, marginBottom: 6 }}>{createAccountError}</div>
