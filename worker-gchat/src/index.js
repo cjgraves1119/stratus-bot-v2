@@ -5499,8 +5499,8 @@ async function ensureUsersTable(db) {
       zoho_user_id TEXT NOT NULL,
       display_name TEXT,
       active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`).run();
     globalThis.__usersTableReady = true;
   } catch (_) { globalThis.__usersTableReady = true; }
