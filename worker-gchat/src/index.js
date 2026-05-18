@@ -5627,6 +5627,99 @@ async function getZohoAccessToken(env) {
   return data.access_token;
 }
 
+// ─── Zoho User Status Helpers (2026-05-18) ─────────────────────────────────
+// Added to surface the FILTER_CRITERIA_NOT_SATISFIED error when a Meraki_ISR
+// (or any other Users-module lookup) is rejected because the user is marked
+// inactive in Zoho. Without these, the agent loops and burns tokens.
+const _zohoUserStatusCache = new Map();
+
+async function getZohoUserStatus(env, userId) {
+  if (!userId) return 'unknown';
+  if (_zohoUserStatusCache.has(userId)) return _zohoUserStatusCache.get(userId);
+  try {
+    const resp = await zohoApiCall('GET', `users?type=AllUsers`, env);
+    const parsed = typeof resp === 'string' ? JSON.parse(resp) : resp;
+    const users = parsed?.users || [];
+    for (const u of users) {
+      const s = String(u.status || '').toLowerCase();
+      const normalized = s === 'active'
+        ? 'active'
+        : (s === 'inactive' || s === 'deleted' ? 'inactive' : 'unknown');
+      _zohoUserStatusCache.set(u.id, normalized);
+    }
+    return _zohoUserStatusCache.get(userId) || 'unknown';
+  } catch (e) {
+    console.error('[getZohoUserStatus] lookup failed:', e?.message);
+    return 'unknown';
+  }
+}
+
+async function getZohoUserName(env, userId) {
+  if (!userId) return null;
+  try {
+    const resp = await zohoApiCall('GET', `users?type=AllUsers`, env);
+    const parsed = typeof resp === 'string' ? JSON.parse(resp) : resp;
+    const u = (parsed?.users || []).find(u => u.id === userId);
+    if (!u) return null;
+    return u.full_name || `${u.first_name || ''} ${u.last_name || ''}`.trim() || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Inspect a parsed Zoho write response for the FILTER_CRITERIA_NOT_SATISFIED
+ * error specifically targeting Meraki_ISR.id. If hit, returns a structured
+ * error object the executor must propagate verbatim to the agent — DO NOT
+ * silently retry with Stratus Sales. Returns null when this guard does not
+ * apply, so the caller can continue with its normal success/failure handling.
+ */
+async function detectInactiveMerakiIsrError(parsedResponse, payloadData, env) {
+  if (!parsedResponse || typeof parsedResponse !== 'object') return null;
+  if (!payloadData || typeof payloadData !== 'object') return null;
+  const isrId = payloadData?.Meraki_ISR?.id
+    || (typeof payloadData?.Meraki_ISR === 'string' ? payloadData.Meraki_ISR : null);
+  if (!isrId) return null;
+  // Zoho v8 returns errors at parsedResponse.data[0].{code,details,message}
+  const row = Array.isArray(parsedResponse?.data) ? parsedResponse.data[0] : null;
+  const code = String(row?.code || parsedResponse?.code || '').toUpperCase();
+  if (code !== 'FILTER_CRITERIA_NOT_SATISFIED') return null;
+  const details = row?.details || parsedResponse?.details || {};
+  const jsonPath = String(details?.json_path || '');
+  const apiName = String(details?.api_name || '');
+  // Only match Meraki_ISR.id failures — leave other filter-criteria errors alone
+  const targetsMerakiIsr = jsonPath.includes('Meraki_ISR.id')
+    || (apiName === 'id' && jsonPath.includes('Meraki_ISR'));
+  if (!targetsMerakiIsr) return null;
+  const status = await getZohoUserStatus(env, isrId);
+  const name = (await getZohoUserName(env, isrId)) || isrId;
+  if (status === 'inactive') {
+    return {
+      validation_error: true,
+      action: 'meraki_isr_inactive',
+      meraki_isr_inactive: true,
+      isr_id: isrId,
+      isr_name: name,
+      message: `❌ Meraki ISR "${name}" is currently marked INACTIVE in Zoho — Zoho's lookup filter rejected the write. ` +
+               `Please activate ${name} in Zoho (Settings → Users → uncheck Inactive) and try the request again. ` +
+               `Do NOT retry with a different ISR or with no ISR — surface this to the user so they can fix Zoho.`
+    };
+  }
+  // Active or unknown but filter still rejected — flag separately so the model
+  // does NOT swap to Stratus Sales blindly. Different remediation path.
+  return {
+    validation_error: true,
+    action: 'meraki_isr_filter_rejected',
+    meraki_isr_filter_rejected: true,
+    isr_id: isrId,
+    isr_name: name,
+    message: `❌ Zoho rejected Meraki_ISR id "${isrId}" (${name}) via the lookup-field filter, and that user appears Active. ` +
+             `Don't retry the same id and don't fall back to Stratus Sales — surface this to the user. There may be a ` +
+             `Zoho profile / department / role / sharing-rule constraint on the Meraki_ISR lookup that needs review.`
+  };
+}
+
+
 // ─── Gmail OAuth Token Manager ────────────────────────────────────────────────
 async function getGmailAccessToken(env) {
   const kv = env.CONVERSATION_KV;
@@ -8734,6 +8827,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         const createStart = Date.now();
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
+        // ── 2026-05-18 Meraki_ISR inactive guardrail ──
+        // If Zoho rejected the write because Meraki_ISR points at an inactive
+        // user, surface a structured error so the agent stops looping and
+        // tells the user to fix Zoho. Triggered by deal 2570562000406442433
+        // incident (Lauren Fogal inactive). Do NOT silently retry.
+        {
+          const _isrErr = await detectInactiveMerakiIsrError(createResult, recordData, env);
+          if (_isrErr) return _isrErr;
+        }
         const parsed = parseZohoResponse(createResult, `${module_name} record creation`);
         // parseZohoResponse returns { success, message, record_id, data: <single record> }
         // — not an array. Pull from parsed.record_id (success path) or parsed.data.details.id.
@@ -9127,6 +9229,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
         const updateStart = Date.now();
         const updateResult = await zohoApiCall('PUT', `${module_name}/${record_id}`, env, { data: [data] });
+        // ── 2026-05-18 Meraki_ISR inactive guardrail (matches CREATE site) ──
+        {
+          const _isrErr = await detectInactiveMerakiIsrError(updateResult, data, env);
+          if (_isrErr) return _isrErr;
+        }
         if (module_name === 'Quotes') {
           console.log(`[GCHAT] Quote update response:`, JSON.stringify(updateResult)?.substring(0, 500));
         }
@@ -17300,6 +17407,8 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - DRY RUN / CONFIRM:FALSE (HARD RULE): When the user writes "confirm false", "confirm:false", "dry run", "dry-run", or "what would be deleted", you MUST pass {"confirm": false} to zoho_delete_record (NOT true). The server returns a preview. Echo the preview with "confirm:false — this was a dry run, nothing was deleted". NEVER claim the record was "deleted successfully" when confirm:false is requested.
 - CONFIRM:TRUE PASSTHROUGH: When the user writes "confirm true" or "confirm:true", pass {"confirm": true} to zoho_delete_record in the SAME tool call. If the server says "confirm:true is required", retry with confirm:true — the user already confirmed.
 - ISR ACCEPT ANYWAY REFUSAL: If lead_source="Meraki ISR Referal" and the named rep is NOT in Meraki_ISRs, REFUSE. Never create the deal "anyway" or fall back to Stratus Sales in the same response that says "rep not found".
+- ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains `meraki_isr_inactive: true`, the named ISR is currently inactive in Zoho. Tell the user EXACTLY: "The Meraki ISR `<isr_name>` is currently marked inactive in Zoho. Please uncheck the Inactive flag in Zoho (Settings → Users → find <isr_name>), then tell me to try again. I won't retry with a different ISR — that would attribute the deal to the wrong rep." DO NOT silently swap to a different ISR or to Stratus Sales. DO NOT retry the write. DO NOT hallucinate a "tool missing" or "session needs zoho_create_record" message — the tool worked correctly and returned an actionable error you must surface verbatim.
+- ZOHO ERROR — MERAKI_ISR FILTER REJECTED (active but blocked): When a CRM tool result contains `meraki_isr_filter_rejected: true`, the user IS active but Zoho's lookup filter still rejected them. Tell the user: "Zoho rejected the Meraki ISR `<isr_name>` even though they're active — there may be a profile, department, role, or sharing-rule constraint on the Meraki_ISR lookup field. Please review the Zoho field config or pick a different valid ISR." DO NOT retry with the same id and DO NOT swap to Stratus Sales blindly.
 
 REFUSAL ON BAD INPUT (do NOT call tools):
 - Lead_Source must be EXACTLY one of: "Stratus Referal", "Meraki ISR Referal", "Meraki ADR Referal", "VDC", "Website", "-None-". If the user provides "Referral" (two Rs), refuse with "Stratus uses 'Referal' (one R) — did you mean 'Stratus Referal' or 'Meraki ISR Referal'?" and do NOT create the deal.
@@ -17430,6 +17539,8 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - CONFIRM:TRUE PASSTHROUGH: If the user explicitly says "confirm true", "confirm:true", "confirm=true", "with confirm true", or "force delete", pass {"confirm": true} to zoho_delete_record in the SAME tool call. Do NOT call zoho_delete_record once without confirm and then ask the user to confirm — the user has already confirmed. If the server returns "confirm:true is required", it means you forgot to pass confirm:true; retry the tool call with confirm:true added.
 - CHAIN TASK DELETE: When the user says "create a task X then delete it with confirm true", the second tool call MUST be zoho_delete_record({module_name:"Tasks", record_id:"<new_id>", confirm:true}). Passing confirm:true is non-negotiable — the user gave it in the prompt.
 - ISR ACCEPT ANYWAY REFUSAL: When creating a deal with lead_source="Meraki ISR Referal" and the named Cisco rep does NOT exist in Meraki_ISRs, REFUSE — do NOT create the deal "anyway" or "with Stratus Sales as fallback". Reply "No Cisco rep named <X> found — please confirm the exact name or email" and STOP. NEVER say "deal created" in the same response as "rep not found".
+- ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains `meraki_isr_inactive: true`, the named ISR is currently inactive in Zoho. Tell the user EXACTLY: "The Meraki ISR `<isr_name>` is currently marked inactive in Zoho. Please uncheck the Inactive flag in Zoho (Settings → Users → find <isr_name>), then tell me to try again. I won't retry with a different ISR — that would attribute the deal to the wrong rep." DO NOT silently swap to a different ISR or to Stratus Sales. DO NOT retry the write. DO NOT hallucinate a "tool missing" or "session needs zoho_create_record" message — the tool worked correctly and returned an actionable error you must surface verbatim.
+- ZOHO ERROR — MERAKI_ISR FILTER REJECTED (active but blocked): When a CRM tool result contains `meraki_isr_filter_rejected: true`, the user IS active but Zoho's lookup filter still rejected them. Tell the user: "Zoho rejected the Meraki ISR `<isr_name>` even though they're active — there may be a profile, department, role, or sharing-rule constraint on the Meraki_ISR lookup field. Please review the Zoho field config or pick a different valid ISR." DO NOT retry with the same id and DO NOT swap to Stratus Sales blindly.
 
 REFUSAL ON BAD INPUT (NO TOOL CALL):
 - Lead_Source valid values ONLY: "Stratus Referal", "Meraki ISR Referal", "Meraki ADR Referal", "VDC", "Website", "-None-". If the user writes "Referral" (two Rs), REFUSE with "Stratus uses 'Referal' (one R) — did you mean 'Stratus Referal' or 'Meraki ISR Referal'?" and do NOT call zoho_create_record.
