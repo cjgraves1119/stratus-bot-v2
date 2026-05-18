@@ -21,6 +21,13 @@ USE_DEEPSEEK_ADVISORY = "false"
 # or set here as "true" and redeploy. When off, quote_to_po_and_esign falls
 # back to inline synchronous execution (identical to pre-Phase-3 behavior).
 QUOTE_PO_WORKFLOW_ENABLED = "true"
+# Caller-derived owner mapping (PII refactor, 2026-05-18). SYSTEM_OWNER_ID is
+# the fallback Zoho user id used for cron jobs, system tasks, and unknown
+# callers; PRICE_CRON_NOTIFY_EMAIL is the operator who receives the daily
+# price-cron Google Chat DM. Both default to Chris on personal so behavior is
+# identical; corp will override with corp-side IDs.
+SYSTEM_OWNER_ID = "2570562000141711002"
+PRICE_CRON_NOTIFY_EMAIL = "chrisg@stratusinfosystems.com"
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
 #
 # ─── CRM & Email Agent Secrets (POC) ───

@@ -863,7 +863,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     Due_Date: dueDateStr,
     Status: 'Not Started',
     Priority: 'Normal',
-    Owner: { id: ownerId || '2570562000141711002' },
+    Owner: { id: ownerId || (env && env.SYSTEM_OWNER_ID) || '2570562000141711002' },
     What_Id: { id: dealId },
     $se_module: 'Deals'
   };
@@ -5469,6 +5469,125 @@ async function extractImageFromEvent(event, env) {
   return null;
 }
 
+// ─── Caller Owner Mapping ────────────────────────────────────────────────────────────────────
+// Maps an incoming caller email (from X-User-Email header) to a Zoho user/owner
+// context, so all Zoho writes attribute records to the actual human user instead
+// of a single hardcoded owner id. Backed by a small `users` table in
+// stratus-bot-analytics D1 (auto-DDL on first call, seeded with Chris so a fresh
+// install is functional). Falls back to env.SYSTEM_OWNER_ID for cron/system
+// jobs and for unknown callers (do NOT silently drop Owner — that attributes to
+// the API-token user).
+//
+// Internal-only deployment with <10 trusted users; X-User-Email is technically
+// spoofable, accepted risk (Chris signed off).
+
+const _ownerCache = new Map();
+const OWNER_CACHE_TTL_MS = 60_000;
+
+// Hardcoded seed: bootstrap Chris on first call so the migration is safe even
+// if the users table is empty. Tim, Jay, etc. get added via a one-time admin
+// endpoint or manual INSERT once their Zoho user IDs are known.
+const SEED_USERS = [
+  { email: 'chrisg@stratusinfosystems.com', zoho_user_id: '2570562000141711002', display_name: 'Chris Graves' },
+];
+
+async function ensureUsersTable(db) {
+  if (!db || globalThis.__usersTableReady) return;
+  try {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS users (
+      email TEXT PRIMARY KEY,
+      zoho_user_id TEXT NOT NULL,
+      display_name TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`).run();
+    globalThis.__usersTableReady = true;
+  } catch (_) { globalThis.__usersTableReady = true; }
+}
+
+/**
+ * Resolve the Zoho owner context for the caller.
+ *   { zoho_user_id, display_name, email, _source }
+ * Lookup order: in-memory cache → D1 users table → SEED_USERS (lazy auto-seed)
+ *               → SYSTEM_OWNER_ID fallback.
+ * Never returns null — unknown callers still get a usable owner id so we never
+ * silently attribute Zoho records to the API-token user.
+ */
+async function getOwnerContext(env, callerEmail) {
+  const sysOwner = (env && env.SYSTEM_OWNER_ID) || '2570562000141711002';
+  if (!callerEmail) {
+    return { zoho_user_id: sysOwner, display_name: 'Stratus AI', email: null, _source: 'system' };
+  }
+  const lower = String(callerEmail).toLowerCase();
+  const cached = _ownerCache.get(lower);
+  if (cached && cached.expires_at > Date.now()) return cached;
+
+  // Try D1 lookup
+  try {
+    if (env && env.ANALYTICS_DB) {
+      await ensureUsersTable(env.ANALYTICS_DB);
+      const r = await env.ANALYTICS_DB
+        .prepare('SELECT zoho_user_id, display_name FROM users WHERE lower(email) = ? AND active = 1')
+        .bind(lower).first();
+      if (r && r.zoho_user_id) {
+        const ctx = {
+          zoho_user_id: r.zoho_user_id,
+          display_name: r.display_name || lower,
+          email: lower,
+          _source: 'd1',
+          expires_at: Date.now() + OWNER_CACHE_TTL_MS,
+        };
+        _ownerCache.set(lower, ctx);
+        return ctx;
+      }
+    }
+  } catch (e) {
+    console.error('[getOwnerContext] D1 lookup failed:', e && e.message);
+  }
+
+  // Seed fallback (lazy auto-seed: insert known user if not yet in DB)
+  const seed = SEED_USERS.find(u => u.email.toLowerCase() === lower);
+  if (seed) {
+    try {
+      if (env && env.ANALYTICS_DB) {
+        await ensureUsersTable(env.ANALYTICS_DB);
+        await env.ANALYTICS_DB
+          .prepare('INSERT OR IGNORE INTO users(email, zoho_user_id, display_name) VALUES(?, ?, ?)')
+          .bind(seed.email.toLowerCase(), seed.zoho_user_id, seed.display_name).run();
+      }
+    } catch (e) { console.error('[getOwnerContext] seed insert failed:', e && e.message); }
+    const ctx = {
+      zoho_user_id: seed.zoho_user_id,
+      display_name: seed.display_name,
+      email: lower,
+      _source: 'seed',
+      expires_at: Date.now() + OWNER_CACHE_TTL_MS,
+    };
+    _ownerCache.set(lower, ctx);
+    return ctx;
+  }
+
+  // Unknown caller — fallback to SYSTEM_OWNER_ID (never silently drop Owner)
+  return {
+    zoho_user_id: sysOwner,
+    display_name: 'Stratus AI',
+    email: lower,
+    _source: 'unknown_caller_fallback',
+  };
+}
+
+/**
+ * Convenience wrapper: returns just the Zoho user id string for Owner: { id }
+ * payloads. Reads caller email from explicit arg or env.__CALLER_EMAIL (set at
+ * request entry points so deep call sites don’t need plumbing).
+ */
+async function getOwnerForCaller(env, callerEmail) {
+  const email = callerEmail || (env && env.__CALLER_EMAIL) || null;
+  const ctx = await getOwnerContext(env, email);
+  return ctx.zoho_user_id;
+}
+
 // ─── Zoho OAuth Token Manager ─────────────────────────────────────────────────
 // Caches access tokens in KV with TTL. Refreshes from client credentials.
 async function getZohoAccessToken(env) {
@@ -6324,7 +6443,7 @@ async function correctQuotedItemDiscounts(quotedItems, env) {
   return { success: failures.length === 0, corrected, failures };
 }
 
-function validateCrmWrite(module_name, data, isCreate = false) {
+async function validateCrmWrite(module_name, data, isCreate = false, env = null) {
   const errors = [];
 
   // Universal garbage strip — runs before all module-specific validation
@@ -6415,7 +6534,7 @@ function validateCrmWrite(module_name, data, isCreate = false) {
     }
     // Auto-fill defaults for commonly skipped fields
     if (!data.Meraki_ISR && isCreate) data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
-    if (!data.Owner) data.Owner = { id: '2570562000141711002' }; // Chris Graves
+    if (!data.Owner) data.Owner = { id: await getOwnerForCaller(env) };
   }
 
   if (module_name === 'Quotes') {
@@ -6495,7 +6614,7 @@ function validateCrmWrite(module_name, data, isCreate = false) {
     // Auto-fill commonly skipped fields with safe defaults
     if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
     if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
-    if (!data.Owner) data.Owner = { id: '2570562000141711002' };
+    if (!data.Owner) data.Owner = { id: await getOwnerForCaller(env) };
     // Contact_Name enforcement: every quote must have a contact
     if (!data.Contact_Name) {
       console.log('[VALIDATE] Quote missing Contact_Name — applying Stratus Sales placeholder');
@@ -8510,7 +8629,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const recordData = Array.isArray(data) ? data[0] : data;
         // Default Owner injection for Accounts/Deals — bot acts on behalf of human user
         if ((module_name === 'Accounts' || module_name === 'Deals') && !recordData.Owner) {
-          recordData.Owner = { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' };
+          recordData.Owner = { id: env.BOT_DEFAULT_OWNER_ID || await getOwnerForCaller(env, callerEmail) };
         }
         // Normalize state/country to 2-letter codes if caller passed full names
         if (recordData.Billing_State) recordData.Billing_State = normalizeStateCode(recordData.Billing_State);
@@ -8538,7 +8657,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               let accountId = acctSearch?.data?.[0]?.id;
               if (!accountId) {
                 const newAcct = await zohoApiCall('POST', 'Accounts', env, {
-                  data: [{ Account_Name: acctName, Owner: { id: '2570562000141711002' } }]
+                  data: [{ Account_Name: acctName, Owner: { id: await getOwnerForCaller(env, callerEmail) } }]
                 });
                 accountId = newAcct?.data?.[0]?.details?.id;
                 console.log(`[DEAL-ENRICH] Created Account ${acctName} → ${accountId}`);
@@ -8565,7 +8684,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
 
         // Pre-flight validation
-        const createCheck = validateCrmWrite(module_name, recordData, true);
+        const createCheck = await validateCrmWrite(module_name, recordData, true, env);
         if (!createCheck.valid) {
           // Strip our internal auto-resolve signals — they were just advisory
           const realErrors = createCheck.error
@@ -8757,7 +8876,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'zoho_update_record': {
         const { module_name, record_id, data } = toolInput;
         // Pre-flight validation
-        const updateCheck = validateCrmWrite(module_name, data, false);
+        const updateCheck = await validateCrmWrite(module_name, data, false, env);
         if (!updateCheck.valid) {
           return { validation_error: true, message: updateCheck.error, action: 'update_blocked' };
         }
@@ -10013,7 +10132,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // All fields present — create the Account with full billing info
             const newAcctPayload = {
               Account_Name: account_name,
-              Owner: { id: '2570562000141711002' },
+              Owner: { id: await getOwnerForCaller(env, callerEmail) },
               Billing_Street: b.street,
               Billing_City: b.city,
               Billing_State: b.state,
@@ -10146,7 +10265,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 Last_Name: last,
                 Email: contact_email,
                 Account_Name: { id: accountId },
-                Owner: { id: '2570562000141711002' }
+                Owner: { id: await getOwnerForCaller(env, callerEmail) }
               }]
             });
             if (newContact?.data?.[0]?.details?.id) {
@@ -10540,7 +10659,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
             Meraki_ISR: { id: '2570562000027286729' },
-            Owner: { id: '2570562000141711002' },
+            Owner: { id: await getOwnerForCaller(env, callerEmail) },
             Closing_Date: closingDate
           };
           if (contactId) dealData.Contact_Name = { id: contactId };
@@ -10611,7 +10730,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // that triggered Cisco's CCW DID integration to hang.
             Vendor1: DEFAULT_QUOTE_VENDOR,
             Cisco_Billing_Term: quoteBillingTerm,
-            Owner: { id: '2570562000141711002' },
+            Owner: { id: await getOwnerForCaller(env, callerEmail) },
             Do_Not_Auto_Update_Prices: true,
             Quoted_Items: quotedItems
           };
@@ -12561,7 +12680,7 @@ const CRM_EMAIL_TOOLS = [
       type: 'object',
       properties: {
         module_name: { type: 'string', description: 'CRM module API name: Deals, Quotes, Contacts, Accounts, Tasks, Products, Sales_Orders, Invoices' },
-        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:2570562000141711002) and (Stage:not_equals:Closed (Won))' },
+        criteria: { type: 'string', description: 'COQL criteria string. Example: (Owner:equals:<the caller\'s owner id>) and (Stage:not_equals:Closed (Won))' },
         fields: { type: 'string', description: 'Comma-separated field API names to return. Example: id,Deal_Name,Stage,Amount,Account_Name' },
         page: { type: 'number', description: 'Page number (default 1)' },
         per_page: { type: 'number', description: 'Records per page (max 200, default 20)' }
@@ -12963,7 +13082,7 @@ async function fastPathQuoteLookup(userMessage, envObj) {
 
   try {
     // Step 1: Search Quotes by account name (most recent first)
-    const OWNER = '2570562000141711002';
+    const OWNER = await getOwnerForCaller(envObj);
     const searchPath = `Quotes/search?criteria=(Account_Name:contains:${encodeURIComponent(company)})and(Owner:equals:${OWNER})&sort_by=Created_Time&sort_order=desc&per_page=3&fields=id,Subject,Quote_Number,Account_Name,Grand_Total,Quote_Stage`;
     const searchResult = await zohoApiCall('GET', searchPath, envObj);
     const quotes = searchResult?.data;
@@ -13332,7 +13451,7 @@ New deal+quote → use **create_deal_and_quote** (handles Account, Contact, Deal
 
 ## CRM CONTEXT
 - Org ID: org647122552. URL format: \`https://crm.zoho.com/crm/org647122552/tab/{MODULE}/{RECORD_ID}\`.
-- Default owner: Chris Graves (id 2570562000141711002). Filter queries by Owner=that id unless told otherwise.
+- Default owner: {{OWNER_DISPLAY_NAME}} (id {{OWNER_ZOHO_ID}}). Filter queries by Owner=that id unless told otherwise.
 
 ---
 
@@ -13370,7 +13489,7 @@ Every Deal Create MUST include:
   "Closing_Date": "{today + 30 days, YYYY-MM-DD}",
   "Amount": 0,
   "Meraki_ISR": {"id": "2570562000027286729"},
-  "Owner": {"id": "2570562000141711002"}
+  "Owner": {"id": "{{OWNER_ZOHO_ID}}"}
 }
 \`\`\`
 
@@ -13407,7 +13526,7 @@ Every Quote Create MUST include:
   "Billing_Code": "{zip}",
   "Billing_Country": "US",
   "Shipping_Country": "US",
-  "Owner": {"id": "2570562000141711002"},
+  "Owner": {"id": "{{OWNER_ZOHO_ID}}"},
   "Quoted_Items": [
     {
       "Product_Name": {"id": "{zoho_product_id}"},
@@ -13740,8 +13859,20 @@ Never pass a bare domain (e.g. "sktydev.com", "acmecorp.io") as account_name —
 When [CRM context: ...] shows "Existing Account: X (id: Y)", reuse Y directly; don't search by name.
 `;
 
+// Substitute owner placeholders ({{OWNER_DISPLAY_NAME}} / {{OWNER_ZOHO_ID}}) in
+// system prompt strings. Falls back to hardcoded Chris defaults if no context
+// supplied (covers eval/benchmark code paths that haven't been threaded).
+function applyOwnerPlaceholders(promptStr, ownerCtx) {
+  if (!promptStr || promptStr.indexOf('{{OWNER_') === -1) return promptStr;
+  const name = (ownerCtx && ownerCtx.display_name) || 'Chris Graves';
+  const id = (ownerCtx && ownerCtx.zoho_user_id) || '2570562000141711002';
+  return promptStr
+    .replace(/\{\{OWNER_DISPLAY_NAME\}\}/g, name)
+    .replace(/\{\{OWNER_ZOHO_ID\}\}/g, id);
+}
+
 // Build CRM system prompt dynamically based on detected intent
-function buildCrmSystemPrompt(text) {
+function buildCrmSystemPrompt(text, ownerCtx) {
   let prompt = CRM_AGENT_SYSTEM_PROMPT_BASE;
   const lower = (text || '').toLowerCase();
 
@@ -13789,7 +13920,7 @@ The advisor should respond in under 100 words and use enumerated steps, not expl
   // NOT be cached. buildAnthropicSystemBlocks() splits on this sentinel.
   prompt += PROMPT_CACHE_BOUNDARY;
 
-  return prompt;
+  return applyOwnerPlaceholders(prompt, ownerCtx);
 }
 
 // Keep backward-compatible reference for non-dynamic usage
@@ -14598,7 +14729,8 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     if (useTools) {
       // Build system prompt dynamically — conditionally loads EMAIL INTAKE and ADMIN ACTION
       // sections only when relevant intent is detected, saving ~2K tokens on standard requests.
-      systemPrompt = buildCrmSystemPrompt(userMessage);
+      const _ownerCtx_crm = await getOwnerContext(env, env && env.__CALLER_EMAIL);
+      systemPrompt = buildCrmSystemPrompt(userMessage, _ownerCtx_crm);
 
       // CRM context injection: if a previous CRM turn saved context (quote ID, account,
       // line items), inject it so the agent can skip re-searching on follow-up messages.
@@ -17113,7 +17245,7 @@ CRITICAL RULES:
 3. When the search returns 0 records, respond "No records found" and STOP — do NOT create anything.
 4. NEVER call the same search repeatedly. If a search returns results, summarize them and stop calling tools.
 5. For product/technical questions with no tool match, answer from your knowledge directly — do NOT search Zoho.
-6. Owner ID for Chris Graves is 2570562000141711002.
+6. Owner ID for the caller is {{OWNER_ZOHO_ID}}.
 7. PRICING QUESTIONS: If the user asks for an approximate, rough, ballpark, or "list price of X", answer from memory — do NOT call batch_product_lookup. batch_product_lookup is ONLY for resolving product IDs and pricing when building a Zoho quote payload.
 8. REFUSAL TASKS: If the user asks for an operation you cannot do (e.g. "set Stage to Closed (Won)"), refuse with a short explanation and DO NOT call any tool. Only "Closed (Won)" is blocked on Stage; other stage values are OK.
 
@@ -17262,7 +17394,7 @@ ACTIVE ZOHO PAGE:
 DEAL DEFAULTS:
 - Lead_Source: "Stratus Referal"
 - Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
-- Chris Graves owner ID: 2570562000141711002
+- Caller owner ID: {{OWNER_ZOHO_ID}}
 
 TOOL RESULT TRUTH (HARD RULE — violating this is the worst failure mode):
 - NEVER claim a record was created, updated, or deleted unless the tool result in THIS conversation includes success:true AND a real record_id pulled directly from that result.
@@ -17351,20 +17483,23 @@ GPT-OSS TOOL-USE GUARDRAILS:
 - For dry-run write-shaped planning responses, use plain ASCII refusal words such as "cannot" or "will not"; avoid ambiguous "I can..." phrasing when the action is blocked.`;
 
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
-function pickOptimizedPrompt(modelId) {
-  if (/llama-4/i.test(modelId)) return LLAMA4_OPTIMIZED_PROMPT;
-  if (/gpt-oss|openai/i.test(modelId)) return `${GEMMA_OPTIMIZED_PROMPT}${GPT_OSS_TOOL_USE_GUARDRAILS}`;
-  return GEMMA_OPTIMIZED_PROMPT;
+function pickOptimizedPrompt(modelId, ownerCtx) {
+  let base;
+  if (/llama-4/i.test(modelId)) base = LLAMA4_OPTIMIZED_PROMPT;
+  else if (/gpt-oss|openai/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GPT_OSS_TOOL_USE_GUARDRAILS}`;
+  else base = GEMMA_OPTIMIZED_PROMPT;
+  return applyOwnerPlaceholders(base, ownerCtx);
 }
 
 // Run a single benchmark task against a single model.
 async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full', evalContext = null, reasoningPolicy = REASONING_POLICY_DISABLED) {
   let systemPrompt;
+  const _ownerCtx_bench = await getOwnerContext(env, env && env.__CALLER_EMAIL);
   if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
-    systemPrompt = pickOptimizedPrompt(modelConfig.id);
+    systemPrompt = pickOptimizedPrompt(modelConfig.id, _ownerCtx_bench);
   } else {
     systemPrompt = typeof buildCrmSystemPrompt === 'function'
-      ? buildCrmSystemPrompt(task.prompt)
+      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench)
       : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
   }
 
@@ -17623,9 +17758,10 @@ function isAdvisoryQuery(userMessage) {
   return /\b(compare|comparison|versus|vs\.?|which\s+(?:is|one|model)|recommend|recommendation|size|sizing|design|license|licensing|tier|enterprise|advanced\s+security|secure\s+sd-?wan|mr\s+advanced|mx\s+advanced|proposal|scope|bom|bill\s+of\s+materials)\b/i.test(userMessage);
 }
 
-function buildDeepSeekGuardedSystemPrompt(userMessage) {
+async function buildDeepSeekGuardedSystemPrompt(userMessage, env) {
+  const _ownerCtx_ds = await getOwnerContext(env, env && env.__CALLER_EMAIL);
   const basePrompt = typeof buildCrmSystemPrompt === 'function'
-    ? buildCrmSystemPrompt(userMessage)
+    ? buildCrmSystemPrompt(userMessage, _ownerCtx_ds)
     : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
 
   return `${basePrompt}
@@ -17658,10 +17794,11 @@ async function tryCfTier(modelId, userMessage, env, personId, dryRun) {
   let result = null;
   let callError = null;
   try {
+    const _ownerCtx_cf = await getOwnerContext(env, env && env.__CALLER_EMAIL);
     result = await askCfModel(
       modelId,
       userMessage,
-      pickOptimizedPrompt(modelId),
+      pickOptimizedPrompt(modelId, _ownerCtx_cf),
       CRM_EMAIL_TOOLS,
       env,
       personId,
@@ -17683,7 +17820,7 @@ async function tryDeepSeekTier(userMessage, env, personId, dryRun, reasoningPoli
     result = await askDeepSeekModel(
       'deepseek-v4-pro',
       userMessage,
-      buildDeepSeekGuardedSystemPrompt(userMessage),
+      await buildDeepSeekGuardedSystemPrompt(userMessage, env),
       CRM_EMAIL_TOOLS,
       env,
       personId,
@@ -17777,7 +17914,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // Force DeepSeek for eval harness runs. This is intentionally outside the
   // production waterfall so B3 can measure DeepSeek itself, not a fallback path.
   if (forceDeepSeekModelId) {
-    const systemPrompt = buildDeepSeekGuardedSystemPrompt(userMessage);
+    const systemPrompt = await buildDeepSeekGuardedSystemPrompt(userMessage, env);
     const r = await askDeepSeekModel(forceDeepSeekModelId, userMessage, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 15, reasoningPolicy);
     return {
       ...r,
@@ -17984,6 +18121,16 @@ export default {
     if (env.CONVERSATION_KV) {
       await loadLivePrices(env);
     }
+
+    // Stash caller email globally on env so deep call sites (e.g. payload
+    // builders) can resolve the Zoho owner via getOwnerForCaller(env) without
+    // every signature being plumbed. X-User-Email is the canonical header
+    // (gateway + chrome ext + Gmail add-on all forward it). Endpoint-specific
+    // handlers may overwrite this later with a more specific value.
+    try {
+      const _hdrCaller = request.headers.get('x-user-email');
+      if (_hdrCaller && _hdrCaller.includes('@')) env.__CALLER_EMAIL = _hdrCaller;
+    } catch (_) {}
 
     const url = new URL(request.url);
     // ── Dashboard Manifest: auto-written to KV on first request after deploy ──
@@ -19921,7 +20068,7 @@ Hard rules:
                   Billing_Code: newAcctZip || '',
                   Billing_Country: normalizeCountryCode(newAcctCountry) || 'US',
                   Website: newAcctWebsite || '',
-                  Owner: { id: env.BOT_DEFAULT_OWNER_ID || '2570562000141711002' }, // Chris Graves (overridable)
+                  Owner: { id: env.BOT_DEFAULT_OWNER_ID || await getOwnerForCaller(env) },
                 }]
               };
               const createResp = await zohoApiCall('POST', 'Accounts', env, accountPayload);
@@ -20159,7 +20306,7 @@ Hard rules:
                       Subject: successorSubject,
                       Status: 'Not Started',
                       Due_Date: newDueDate || followUpDate,
-                      Owner: '2570562000141711002', // Chris Graves
+                      Owner: await getOwnerForCaller(env),
                     }]
                   };
                   // Attach to deal if available
@@ -20497,7 +20644,7 @@ Hard rules:
                       Last_Name: lastName,
                       Email: senderEmail,
                       Account_Name: { id: resultAccountId },
-                      Owner: '2570562000141711002'
+                      Owner: await getOwnerForCaller(env)
                     }]
                   };
                   const createContactResp = await zohoApiCall('POST', 'Contacts', env, contactPayload);
@@ -20519,7 +20666,7 @@ Hard rules:
                     Email: senderEmail,
                     Company: company,
                     Lead_Source: 'Website',
-                    Owner: '2570562000141711002'
+                    Owner: await getOwnerForCaller(env)
                   }]
                 };
                 const createLeadResp = await zohoApiCall('POST', 'Leads', env, leadPayload);
@@ -20540,7 +20687,7 @@ Hard rules:
                   Subject: 'Follow up: ' + (taskSubject || senderName || senderEmail),
                   Status: 'Not Started',
                   Due_Date: followUpDate,
-                  Owner: '2570562000141711002',
+                  Owner: await getOwnerForCaller(env),
                   Description: 'Auto-created from Gmail add-on.\nSender: ' + senderName + ' <' + senderEmail + '>\nOriginal subject: ' + (taskSubject || 'N/A')
                 }]
               };
@@ -20705,6 +20852,7 @@ Hard rules:
             try {
               const wUserEmail = request.headers.get('x-user-email') || 'gateway-user';
               const wPersonId = `gw:${wUserEmail}`;
+              env.__CALLER_EMAIL = wUserEmail.includes('@') ? wUserEmail : null;
 
               // Seed KV history — always overwrite when caller passes history
               // (including []), so a fresh session truly starts empty. Previous
@@ -21087,6 +21235,7 @@ Hard rules:
             try {
               const chatUserEmail = request.headers.get('x-user-email') || 'chrome-extension-user';
               const chatPersonId = `ext:${chatUserEmail}`;
+              env.__CALLER_EMAIL = chatUserEmail.includes('@') ? chatUserEmail : null;
 
               // Seed conversation history from prior chat messages.
               // Always overwrite — passing [] explicitly means "start fresh",
@@ -22597,7 +22746,7 @@ Hard rules:
                   Phone: newCtPhone || '',
                   Mobile: newCtMobile || '',
                   Title: newCtTitle || '',
-                  Owner: { id: '2570562000141711002' }, // Chris Graves
+                  Owner: { id: await getOwnerForCaller(env) },
                 }]
               };
               if (newCtAcctId) {
@@ -22835,7 +22984,7 @@ Return ONLY a JSON object (no markdown, no explanation):
                   Status: 'Not Started',
                   Due_Date: newTaskDue || createTaskBizDays(new Date(), 3),
                   Priority: newTaskPriority || 'Normal',
-                  Owner: '2570562000141711002', // Chris Graves
+                  Owner: await getOwnerForCaller(env),
                 }]
               };
               if (newTaskDeal) {
@@ -24800,13 +24949,16 @@ Return ONLY a JSON object (no markdown, no explanation):
 
           const text = parts.join('\n');
 
-          // Look up Chris's DM space from KV (auto-registered on first DM)
-          const chrisDmSpace = await kv.get('gchat_dm_space:chrisg@stratusinfosystems.com');
-          if (chrisDmSpace) {
-            await sendAsyncGChatMessage(chrisDmSpace, text, null, env);
-            console.log(`[PRICE-CRON] Phase 6: Google Chat notification sent — ${newSkus.length} new SKUs, ${significantChanges.length} price changes`);
+          // Look up the configured operator's DM space from KV (auto-registered
+          // on first DM). PRICE_CRON_NOTIFY_EMAIL is set in wrangler.toml [vars]
+          // so corp can override without code changes.
+          const notifyEmail = (env.PRICE_CRON_NOTIFY_EMAIL || 'chrisg@stratusinfosystems.com').toLowerCase();
+          const notifyDmSpace = await kv.get(`gchat_dm_space:${notifyEmail}`);
+          if (notifyDmSpace) {
+            await sendAsyncGChatMessage(notifyDmSpace, text, null, env);
+            console.log(`[PRICE-CRON] Phase 6: Google Chat notification sent to ${notifyEmail} — ${newSkus.length} new SKUs, ${significantChanges.length} price changes`);
           } else {
-            console.log(`[PRICE-CRON] Phase 6: No DM space cached for Chris — skipping notification. DM the bot once to register.`);
+            console.log(`[PRICE-CRON] Phase 6: No DM space cached for ${notifyEmail} — skipping notification. DM the bot once to register.`);
           }
         } catch (err) {
           console.error(`[PRICE-CRON] Phase 6 GChat notification error: ${err.message}`);
