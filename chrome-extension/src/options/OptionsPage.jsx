@@ -94,8 +94,8 @@ export default function OptionsPage() {
 
       {/* User Info */}
       <Section title="Your Information">
-        <Field label="Full Name" value={settings.userName} onChange={(v) => updateSetting('userName', v)} placeholder="Chris Graves" />
-        <Field label="Email" value={settings.userEmail} onChange={(v) => updateSetting('userEmail', v)} placeholder="chrisg@stratusinfosystems.com" />
+        <Field label="Full Name" value={settings.userName} onChange={(v) => updateSetting('userName', v)} placeholder="Your Full Name" />
+        <Field label="Email" value={settings.userEmail} onChange={(v) => updateSetting('userEmail', v)} placeholder="you@stratusinfosystems.com" />
       </Section>
 
       {/* API Key */}
