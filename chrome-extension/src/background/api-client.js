@@ -255,7 +255,7 @@ export async function crmAddNote(parentModule, parentId, title, content) {
 /**
  * Create a CRM contact.
  */
-export async function crmAddContact(firstName, lastName, email, phone, title, accountId, mobile) {
+export async function crmAddContact(firstName, lastName, email, phone, title, accountId, mobile, nameHint) {
   return apiCall('/api/crm-add-contact', {
     firstName: firstName || '',
     lastName: lastName || '',
@@ -264,6 +264,7 @@ export async function crmAddContact(firstName, lastName, email, phone, title, ac
     title: title || '',
     accountId: accountId || '',
     mobile: mobile || '',
+    nameHint: nameHint || '',
   });
 }
 

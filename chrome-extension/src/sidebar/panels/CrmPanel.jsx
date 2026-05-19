@@ -415,14 +415,37 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
 
   // ── Add Contact ──
   function openAddForm() {
-    const contact = externalContacts.find(c => c.email?.toLowerCase() === selectedContact?.toLowerCase());
-    const nameParts = (contact?.name || '').split(' ');
     const emailForForm = selectedContact || '';
     const domain = emailForForm.split('@')[1] || '';
+    // 2026-05-19 Contact name derivation (Chris request). Two methods:
+    //   1. Display name from the email thread (externalContacts or threadContacts).
+    //   2. Best-guess parse of the email local-part (kevin.goosic -> Kevin Goosic).
+    const _threadContacts = emailContext?.threadContacts || [];
+    const _matchContact = externalContacts.find(c => c.email?.toLowerCase() === emailForForm.toLowerCase())
+      || _threadContacts.find(c => c.email?.toLowerCase() === emailForForm.toLowerCase());
+    const _localPart = emailForForm.split('@')[0] || '';
+    const _stripAlpha = (x) => String(x || '').toLowerCase().replace(/[^a-z]/g, '');
+    const _titleCase = (s) => s ? s.split('-').map(p => p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : p).join('-') : '';
+    let _pfFirst = '', _pfLast = '';
+    const _dispName = (_matchContact?.name || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    const _hintIsLocalPart = _dispName && _localPart && _stripAlpha(_dispName) === _stripAlpha(_localPart);
+    if (_dispName && !_hintIsLocalPart && /[a-zA-Z]/.test(_dispName)) {
+      // Method 1: thread display name
+      const _parts = _dispName.split(' ').filter(Boolean);
+      _pfFirst = _titleCase(_parts[0] || '');
+      _pfLast = _parts.slice(1).map(_titleCase).join(' ');
+    } else if (_localPart) {
+      // Method 2: email local-part best guess
+      const _base = _localPart.replace(/[0-9]+$/, '');
+      const _sep = /[._+]/.test(_base) ? /[._+]+/ : /[._+\-]+/;
+      const _toks = _base.split(_sep).map(t => t.replace(/[0-9]+/g, '')).filter(Boolean);
+      if (_toks.length >= 2) { _pfFirst = _titleCase(_toks[0]); _pfLast = _toks.slice(1).map(_titleCase).join(' '); }
+      else if (_toks.length === 1) { _pfLast = _titleCase(_toks[0]); }
+    }
 
     setAddFormData({
-      firstName: nameParts[0] || '',
-      lastName: nameParts.slice(1).join(' ') || '',
+      firstName: _pfFirst,
+      lastName: _pfLast,
       email: emailForForm,
       phone: '',
       title: '',
@@ -574,13 +597,17 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setAddFormError(null);
     setAddFormSuccess(null);
     try {
+      const _emailForSend = addFormData.email || selectedContact;
+      const _hintContact = (externalContacts.find(c => c.email?.toLowerCase() === (_emailForSend || '').toLowerCase())
+        || (emailContext?.threadContacts || []).find(c => c.email?.toLowerCase() === (_emailForSend || '').toLowerCase()));
       const result = await sendToBackground(MSG.CRM_ADD_CONTACT, {
         firstName: addFormData.firstName,
         lastName: addFormData.lastName,
-        email: addFormData.email || selectedContact,
+        email: _emailForSend,
         phone: addFormData.phone,
         title: addFormData.title,
         accountId: addFormAccountId || data?.account?.id || '',
+        nameHint: _hintContact?.name || '',
       });
       // 2026-05-19 OPTK contact-false-positive fix: tighten to strict success check.
       if (result && result.success === true && result.contactId) {

@@ -8736,6 +8736,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         applyFieldAliases(recordData, `zoho_create_record(${module_name})`);
         // 2026-05-19 Meraki_ISRs Name auto-build (OPTK)
         normalizeMerakiIsrPayload(module_name, recordData);
+        // 2026-05-19 Contact name derivation: if creating a Contact with an email
+        // but no First/Last name, derive from email local-part (LLM tool path).
+        if (module_name === 'Contacts' && !recordData.First_Name && !recordData.Last_Name && recordData.Email) {
+          const _dn = deriveContactNameFields(recordData.Email, null);
+          if (_dn.firstName) recordData.First_Name = _dn.firstName;
+          if (_dn.lastName) recordData.Last_Name = _dn.lastName;
+          if (_dn.firstName || _dn.lastName) console.log(`[CONTACT-NAME] zoho_create_record derived First="${_dn.firstName}" Last="${_dn.lastName}" from ${recordData.Email}`);
+        }
+        // Codex review hardening (2026-05-19): Last_Name is Zoho-required. If a
+        // Contact create still has no Last_Name (e.g. malformed/unparseable email),
+        // fall back to the email local-part — mirrors /api/crm-add-contact and keeps
+        // the write Zoho-valid rather than failing on MANDATORY_NOT_FOUND.
+        if (module_name === 'Contacts' && !recordData.Last_Name) {
+          const _lp = recordData.Email && String(recordData.Email).includes('@') ? String(recordData.Email).split('@')[0] : '';
+          if (_lp) { recordData.Last_Name = _lp; console.log(`[CONTACT-NAME] zoho_create_record Last_Name fallback to local-part "${_lp}"`); }
+        }
         // 2026-05-19 Fix D: placeholder address detection (warn + log only)
         if (module_name === 'Quotes' || module_name === 'Accounts' || module_name === 'Contacts') {
           detectPlaceholderAddress(recordData, `zoho_create_record(${module_name})`);
@@ -18822,6 +18838,41 @@ function detectPlaceholderAddress(data, context = 'unknown') {
   return flags.length > 0 ? flags : null;
 }
 
+// 2026-05-19 Contact name derivation (Chris request): when a contact is created
+// with an email but no First/Last name, derive the name two ways:
+//   Method 1 (preferred): a display-name hint from the email thread / signature
+//     (e.g. Gmail "From" header "Kevin Goosic <kevin.goosic@optk.com>").
+//   Method 2 (fallback): best-guess parse of the email local-part
+//     (kevin.goosic@optk.com -> First "Kevin" Last "Goosic").
+// Single-token local-parts (e.g. "kgoosic") are NOT split into a speculative
+// first initial — they become Last_Name only (Zoho-valid, no fabrication).
+function _titleCaseNameToken(s) {
+  if (!s) return '';
+  // Capitalize each hyphen subpart so "mary-jane" -> "Mary-Jane", "o'brien" -> "O'brien".
+  return String(s).split('-').map(p => p ? (p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()) : p).join('-');
+}
+function deriveContactNameFields(email, nameHint) {
+  const localPart = (email && String(email).includes('@')) ? String(email).split('@')[0] : (email ? String(email) : '');
+  // ── Method 1: explicit display-name hint ──
+  const cleanHint = (nameHint || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  const stripAlpha = (x) => String(x || '').toLowerCase().replace(/[^a-z]/g, '');
+  const hintIsJustLocalPart = cleanHint && localPart && stripAlpha(cleanHint) === stripAlpha(localPart);
+  if (cleanHint && !hintIsJustLocalPart && /[a-zA-Z]/.test(cleanHint)) {
+    const parts = cleanHint.split(' ').filter(Boolean);
+    if (parts.length >= 2) return { firstName: _titleCaseNameToken(parts[0]), lastName: parts.slice(1).map(_titleCaseNameToken).join(' ') };
+    if (parts.length === 1) return { firstName: '', lastName: _titleCaseNameToken(parts[0]) };
+  }
+  // ── Method 2: best-guess from email local-part ──
+  if (localPart) {
+    const _base = localPart.replace(/[0-9]+$/, '');
+    const _sep = /[._+]/.test(_base) ? /[._+]+/ : /[._+\-]+/;
+    const tokens = _base.split(_sep).map(t => t.replace(/[0-9]+/g, '')).filter(Boolean);
+    if (tokens.length >= 2) return { firstName: _titleCaseNameToken(tokens[0]), lastName: tokens.slice(1).map(_titleCaseNameToken).join(' ') };
+    if (tokens.length === 1) return { firstName: '', lastName: _titleCaseNameToken(tokens[0]) };
+  }
+  return { firstName: '', lastName: '' };
+}
+
 // 2026-05-19 Meraki_ISRs Name auto-build (OPTK postmortem).
 function normalizeMerakiIsrPayload(module_name, data) {
   if (module_name !== 'Meraki_ISRs' || !data || typeof data !== 'object') return data;
@@ -23072,13 +23123,25 @@ Hard rules:
 
           // ── CRM Add Contact: Create a new contact, optionally linked to an account ──
           case '/api/crm-add-contact': {
+            let {
+              firstName: newCtFirst, lastName: newCtLast
+            } = apiBody;
             const {
-              firstName: newCtFirst, lastName: newCtLast, email: newCtEmail,
+              email: newCtEmail,
               phone: newCtPhone, title: newCtTitle, accountId: newCtAcctId,
-              mobile: newCtMobile
+              mobile: newCtMobile, nameHint: newCtNameHint
             } = apiBody;
             if (!newCtLast && !newCtEmail) {
               return new Response(JSON.stringify({ error: 'lastName or email required' }), { status: 400, headers: jsonHeaders });
+            }
+            // 2026-05-19 Contact name derivation (Chris request): if no first/last
+            // name supplied, derive from the email-thread display-name hint, then
+            // fall back to parsing the email local-part.
+            if (!newCtFirst && !newCtLast && newCtEmail) {
+              const _dn = deriveContactNameFields(newCtEmail, newCtNameHint);
+              newCtFirst = _dn.firstName || newCtFirst;
+              newCtLast = _dn.lastName || newCtLast;
+              if (newCtFirst || newCtLast) console.log(`[CONTACT-NAME] /api/crm-add-contact derived First="${newCtFirst}" Last="${newCtLast}" via ${newCtNameHint ? 'thread-hint+' : ''}localpart`);
             }
             // 2026-05-19 F1 fix (OPTK postmortem): instrument with crm_operations logging.
             const _ctcCreateStart = Date.now();
