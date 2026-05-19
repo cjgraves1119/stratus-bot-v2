@@ -241,8 +241,8 @@ registerMessageHandlers({
   },
 
   // ── CRM Write Operations ──
-  [MSG.CRM_ADD_CONTACT]: async ({ firstName, lastName, email, phone, title, accountId, mobile }) => {
-    return api.crmAddContact(firstName, lastName, email, phone, title, accountId, mobile);
+  [MSG.CRM_ADD_CONTACT]: async ({ firstName, lastName, email, phone, title, accountId, mobile, nameHint }) => {
+    return api.crmAddContact(firstName, lastName, email, phone, title, accountId, mobile, nameHint);
   },
 
   // ── Image Analysis (screenshot/dashboard parsing) ──
