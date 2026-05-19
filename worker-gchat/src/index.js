@@ -8729,6 +8729,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (recordData.Billing_Country) recordData.Billing_Country = normalizeCountryCode(recordData.Billing_Country);
         if (recordData.Mailing_State) recordData.Mailing_State = normalizeStateCode(recordData.Mailing_State);
         if (recordData.Mailing_Country) recordData.Mailing_Country = normalizeCountryCode(recordData.Mailing_Country);
+        // 2026-05-19 Fix E + Shipping_State/Country normalization (Kenwood + OPTK):
+        if (recordData.Shipping_State) recordData.Shipping_State = normalizeStateCode(recordData.Shipping_State);
+        if (recordData.Shipping_Country) recordData.Shipping_Country = normalizeCountryCode(recordData.Shipping_Country);
+        // 2026-05-19 Fix E: field-name aliases (Billing_Zip -> Billing_Code, etc.)
+        applyFieldAliases(recordData, `zoho_create_record(${module_name})`);
+        // 2026-05-19 Meraki_ISRs Name auto-build (OPTK)
+        normalizeMerakiIsrPayload(module_name, recordData);
+        // 2026-05-19 Fix D: placeholder address detection (warn + log only)
+        if (module_name === 'Quotes' || module_name === 'Accounts' || module_name === 'Contacts') {
+          detectPlaceholderAddress(recordData, `zoho_create_record(${module_name})`);
+        }
 
         // ── AUTO-ENRICH for Deal creation ────────────────────────────────────
         // If Account_Name is a string or {name: ...} without id, look up / create
@@ -8825,6 +8836,44 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (module_name === 'Quotes' && recordData.Quoted_Items && !('Do_Not_Auto_Update_Prices' in recordData)) {
           recordData.Do_Not_Auto_Update_Prices = true;
         }
+
+        // ── 2026-05-19 Fix A (Kenwood + OPTK postmortems): mirror create_deal_and_quote macro's
+        //    Account-billing re-fetch into the direct zoho_create_record(Quotes) path.
+        //    Scoped to missing-only so model-supplied Billing_* win. Non-blocking.
+        const _FIX_A_ADDR_KEYS = ['Billing_Street','Billing_City','Billing_State','Billing_Code','Billing_Country','Shipping_Street','Shipping_City','Shipping_State','Shipping_Code','Shipping_Country'];
+        const _fixAHasAnyAddr = _FIX_A_ADDR_KEYS.some(k => recordData[k] != null && String(recordData[k]).trim() !== '');
+        // Codex BLOCK fix (2026-05-19): gate on NO address fields at all, not just
+        // !Billing_Street. A partial model-supplied address (e.g. City but no Street)
+        // must NOT be mixed with Account data — leave it untouched and let the
+        // update-path guard (Fix C) handle any later divergence.
+        if (module_name === 'Quotes'
+            && recordData.Account_Name && recordData.Account_Name.id
+            && !_fixAHasAnyAddr) {
+          try {
+            const _acctBillFetch = await zohoApiCall(
+              'GET',
+              `Accounts/${recordData.Account_Name.id}?fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Shipping_Street,Shipping_City,Shipping_State,Shipping_Code,Shipping_Country`,
+              env
+            );
+            const _acct = _acctBillFetch?.data?.[0];
+            if (_acct) {
+              if (!recordData.Billing_Street && _acct.Billing_Street) recordData.Billing_Street = _acct.Billing_Street;
+              if (!recordData.Billing_City && _acct.Billing_City) recordData.Billing_City = _acct.Billing_City;
+              if (!recordData.Billing_State && _acct.Billing_State) recordData.Billing_State = normalizeStateCode(_acct.Billing_State);
+              if (!recordData.Billing_Code && _acct.Billing_Code) recordData.Billing_Code = _acct.Billing_Code;
+              if (!recordData.Billing_Country && _acct.Billing_Country) recordData.Billing_Country = normalizeCountryCode(_acct.Billing_Country);
+              if (!recordData.Shipping_Street && _acct.Shipping_Street) recordData.Shipping_Street = _acct.Shipping_Street;
+              if (!recordData.Shipping_City && _acct.Shipping_City) recordData.Shipping_City = _acct.Shipping_City;
+              if (!recordData.Shipping_State && _acct.Shipping_State) recordData.Shipping_State = normalizeStateCode(_acct.Shipping_State);
+              if (!recordData.Shipping_Code && _acct.Shipping_Code) recordData.Shipping_Code = _acct.Shipping_Code;
+              if (!recordData.Shipping_Country && _acct.Shipping_Country) recordData.Shipping_Country = normalizeCountryCode(_acct.Shipping_Country);
+              console.log(`[FIX-A] Direct Quote create — copied Account ${recordData.Account_Name.id} billing fields onto Quote payload`);
+            }
+          } catch (_acctErr) {
+            console.warn(`[FIX-A] Account billing re-fetch failed (non-blocking): ${_acctErr.message}`);
+          }
+        }
+
         const createStart = Date.now();
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
         // ── 2026-05-18 Meraki_ISR inactive guardrail ──
@@ -8977,6 +9026,80 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       case 'zoho_update_record': {
         const { module_name, record_id, data } = toolInput;
+        // 2026-05-19 Fix E: field-name aliases at top of update path (Billing_Zip -> Billing_Code, etc.)
+        applyFieldAliases(data, `zoho_update_record(${module_name})`);
+        // 2026-05-19 Fix E: normalize State/Country to 2-letter codes on update path
+        if (data.Billing_State) data.Billing_State = normalizeStateCode(data.Billing_State);
+        if (data.Billing_Country) data.Billing_Country = normalizeCountryCode(data.Billing_Country);
+        if (data.Shipping_State) data.Shipping_State = normalizeStateCode(data.Shipping_State);
+        if (data.Shipping_Country) data.Shipping_Country = normalizeCountryCode(data.Shipping_Country);
+        if (data.Mailing_State) data.Mailing_State = normalizeStateCode(data.Mailing_State);
+        if (data.Mailing_Country) data.Mailing_Country = normalizeCountryCode(data.Mailing_Country);
+        // 2026-05-19 Fix D: placeholder detection on updates too
+        if (module_name === 'Quotes' || module_name === 'Accounts' || module_name === 'Contacts') {
+          detectPlaceholderAddress(data, `zoho_update_record(${module_name})`);
+        }
+
+        // ── 2026-05-19 Fix C (Kenwood + OPTK postmortems): cross-account billing guard ──
+        //    Behind env.BOT_ADDRESS_GUARD_ENABLED. On Quote update with billing/shipping:
+        //    match -> allow; all-blank clear -> allow; diverge -> REFUSE.
+        if (module_name === 'Quotes'
+            && (env && (env.BOT_ADDRESS_GUARD_ENABLED === 'true' || env.BOT_ADDRESS_GUARD_ENABLED === '1'))) {
+          const _ADDR_FIELDS = ['Billing_Street','Billing_City','Billing_State','Billing_Code','Billing_Country',
+                                'Shipping_Street','Shipping_City','Shipping_State','Shipping_Code','Shipping_Country'];
+          const _writingAddr = _ADDR_FIELDS.filter(f => f in data);
+          if (_writingAddr.length > 0) {
+            const _allBlank = _writingAddr.every(f => {
+              const v = data[f];
+              return v == null || (typeof v === 'string' && v.trim() === '');
+            });
+            if (!_allBlank) {
+              try {
+                const _quoteRes = await zohoApiCall('GET',
+                  `Quotes/${record_id}?fields=id,Account_Name`, env);
+                const _linkedAccountId = _quoteRes?.data?.[0]?.Account_Name?.id || null;
+                if (_linkedAccountId) {
+                  const _acctRes = await zohoApiCall('GET',
+                    `Accounts/${_linkedAccountId}?fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Shipping_Street,Shipping_City,Shipping_State,Shipping_Code,Shipping_Country`,
+                    env);
+                  const _acct = _acctRes?.data?.[0];
+                  if (_acct) {
+                    const _norm = (s) => (s == null ? '' : String(s).trim().toUpperCase().replace(/\s+/g, ' '));
+                    const _normForField = (field, v) => {
+                      if (v == null) return '';
+                      if (/_State$/.test(field)) return _norm(normalizeStateCode(v));
+                      if (/_Country$/.test(field)) return _norm(normalizeCountryCode(v));
+                      return _norm(v);
+                    };
+                    const _mismatches = [];
+                    for (const f of _writingAddr) {
+                      const wantVal = data[f];
+                      const acctVal = _acct[f];
+                      if (acctVal == null) continue;
+                      if (_normForField(f, wantVal) !== _normForField(f, acctVal)) {
+                        _mismatches.push({ field: f, requested: wantVal, account_value: acctVal });
+                      }
+                    }
+                    if (_mismatches.length > 0) {
+                      console.warn(`[FIX-C] address_mismatch_account on Quote ${record_id} acct ${_linkedAccountId}:`, JSON.stringify(_mismatches));
+                      return {
+                        validation_error: true,
+                        action: 'update_blocked',
+                        error: 'address_mismatch_account',
+                        message: `ADDRESS_MISMATCH_ACCOUNT: Cannot update Quote ${record_id} with address values that don't match the linked Account ${_linkedAccountId}. Mismatches: ${_mismatches.map(m => `${m.field}: requested="${m.requested}" account="${m.account_value}"`).join('; ')}. To resolve: (1) fetch the Account via zoho_get_record on Accounts/${_linkedAccountId} and copy the billing fields verbatim, OR (2) if the customer truly relocated, update the Account first via zoho_update_record on Accounts/${_linkedAccountId}, then retry this Quote update. Do NOT chain placeholder or fabricated addresses.`,
+                        linked_account_id: _linkedAccountId,
+                        mismatches: _mismatches,
+                      };
+                    }
+                  }
+                }
+              } catch (_guardErr) {
+                console.warn(`[FIX-C] Cross-account guard fetch failed (non-blocking, allowing write): ${_guardErr.message}`);
+              }
+            }
+          }
+        }
+
         // Pre-flight validation
         const updateCheck = await validateCrmWrite(module_name, data, false, env);
         if (!updateCheck.valid) {
@@ -10311,6 +10434,37 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const openDeals = Array.isArray(openDealsResp?.data) ? openDealsResp.data : [];
               if (openDeals.length > 0) {
                 const dealsList = openDeals.map(d => `• ${d.Deal_Name} (id ${d.id}, Stage "${d.Stage || '-'}"${d.Amount != null ? `, Amount $${d.Amount}` : ''})`).join('\n');
+                // 2026-05-19 Fix B (Kenwood postmortem): emit next-tool-call hints + KV
+                // refusal cache so retries don't tempt the model to chain zoho_create_record.
+                const _skuListForCache = Array.isArray(toolInput.skus) ? toolInput.skus.map(s => String(s).toUpperCase()).sort().join(',') : '';
+                const _termForCache = toolInput.license_term || toolInput.term || '';
+                const _cacheKey = `cdq:open_deals:${accountId}:${_skuListForCache}:${_termForCache}`;
+                const _nextToolHints = openDeals.map(d => ({
+                  description: `Attach quote to existing Deal: ${d.Deal_Name} (Stage ${d.Stage || '-'})`,
+                  tool: 'create_quote_on_deal',
+                  args: {
+                    deal_id: d.id,
+                    skus: toolInput.skus || [],
+                    license_term: toolInput.license_term || toolInput.term || undefined,
+                    hardware_only: toolInput.hardware_only === true || undefined,
+                    include_licenses: toolInput.include_licenses === false ? false : undefined,
+                  },
+                }));
+                const _bypassHint = {
+                  description: 'Create a SEPARATE new Deal (only after explicit user confirmation)',
+                  tool: 'create_deal_and_quote',
+                  args: { ...toolInput, confirm_new_deal: true },
+                };
+                try {
+                  if (env && env.CONVERSATION_KV && env.CONVERSATION_KV.put) {
+                    await env.CONVERSATION_KV.put(_cacheKey, JSON.stringify({
+                      ts: Date.now(),
+                      account_id: accountId,
+                      account_name: accountData.Account_Name || account_name,
+                      open_deals: openDeals.map(d => ({ id: d.id, name: d.Deal_Name, stage: d.Stage, amount: d.Amount })),
+                    }), { expirationTtl: 600 });
+                  }
+                } catch (_cacheErr) { /* swallow */ }
                 return {
                   success: false,
                   error: 'account_has_open_deals',
@@ -10319,9 +10473,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   existing_open_deals: openDeals.map(d => ({
                     id: d.id, name: d.Deal_Name, stage: d.Stage, amount: d.Amount
                   })),
-                  instruction: `STOP. Do NOT create a new Deal silently. The Account "${accountData.Account_Name || account_name}" (id ${accountId}) already has ${openDeals.length} open Deal(s). You must either:\n\n` +
-                    `1. Ask the user which existing Deal to add this Quote to. Once they choose, call create_quote_on_deal with that deal_id (the Quote will be created on the existing Deal — NO new Deal). This is the default expected path.\n\n` +
-                    `2. If the user explicitly confirms they want a SEPARATE new Deal for this quote in addition to the existing one(s), re-call create_deal_and_quote with confirm_new_deal:true. Only after explicit user confirmation.\n\n` +
+                  next_tool_calls: _nextToolHints,
+                  bypass_tool_call: _bypassHint,
+                  refusal_cached_ttl_seconds: 600,
+                  instruction: `STOP. Do NOT chain zoho_create_record(Deals)+zoho_create_record(Quotes) — that bypass produces blank Billing_* and other guardrail leaks. The Account "${accountData.Account_Name || account_name}" (id ${accountId}) already has ${openDeals.length} open Deal(s). Pick ONE of:\n\n` +
+                    `1. (Default) Ask the user which existing Deal to attach to, then call create_quote_on_deal with that deal_id (use the pre-filled "next_tool_calls" above). Do NOT manually create a Deal.\n\n` +
+                    `2. Only if the user explicitly confirms a SEPARATE new Deal is wanted: re-call create_deal_and_quote with confirm_new_deal:true (see "bypass_tool_call" above).\n\n` +
                     `Existing open Deals on this Account:\n${dealsList}`,
                   _user_visible_summary: `This account already has ${openDeals.length} open deal(s). Which one should I add the quote to, or do you want a brand new deal?`,
                   wall_ms: Date.now() - _startMs
@@ -18608,6 +18765,79 @@ function normalizeCountryCode(country) {
   return c;
 }
 
+// 2026-05-19 Fix E (Kenwood + OPTK postmortems): Zoho field-name synonyms.
+const FIELD_NAME_ALIASES = {
+  Billing_Zip: 'Billing_Code',
+  Shipping_Zip: 'Shipping_Code',
+  Mailing_Zip: 'Mailing_Zip', // Contacts module uses Mailing_Zip natively — pass through
+};
+function applyFieldAliases(data, context = 'unknown') {
+  if (!data || typeof data !== 'object') return data;
+  for (const [alias, canonical] of Object.entries(FIELD_NAME_ALIASES)) {
+    if (alias === canonical) continue;
+    if (alias in data && !(canonical in data)) {
+      console.log(`[FIELD-ALIAS] ${context}: rewriting ${alias} -> ${canonical} (value preserved)`);
+      data[canonical] = data[alias];
+      delete data[alias];
+    }
+  }
+  return data;
+}
+
+// 2026-05-19 Fix D: placeholder address heuristic (warn + audit log, no hard block).
+const PLACEHOLDER_STREET_PATTERNS = [
+  /^\s*123\s+main\s+st/i,
+  /^\s*456\s+(elm|oak|pine|maple)\s+st/i,
+  /^\s*1234?\s+(test|sample|example|fake|placeholder)/i,
+  /\bplaceholder\b/i,
+  /\blorem\s+ipsum\b/i,
+];
+const PLACEHOLDER_CITY_PATTERNS = [
+  /^any\s*town$/i,
+  /^other\s*town$/i,
+  /^example\s*city$/i,
+  /^test\s*city$/i,
+  /^placeholder$/i,
+];
+function detectPlaceholderAddress(data, context = 'unknown') {
+  if (!data || typeof data !== 'object') return null;
+  const flags = [];
+  for (const prefix of ['Billing_', 'Shipping_', 'Mailing_']) {
+    const street = data[prefix + 'Street'];
+    const city = data[prefix + 'City'];
+    if (street && typeof street === 'string') {
+      for (const re of PLACEHOLDER_STREET_PATTERNS) {
+        if (re.test(street)) { flags.push({ field: prefix + 'Street', value: street, reason: 'placeholder_pattern' }); break; }
+      }
+    }
+    if (city && typeof city === 'string') {
+      for (const re of PLACEHOLDER_CITY_PATTERNS) {
+        if (re.test(city)) { flags.push({ field: prefix + 'City', value: city, reason: 'placeholder_pattern' }); break; }
+      }
+    }
+  }
+  if (flags.length > 0) {
+    console.warn(`[PLACEHOLDER-ADDR] ${context}: detected ${flags.length} placeholder field(s):`, JSON.stringify(flags));
+  }
+  return flags.length > 0 ? flags : null;
+}
+
+// 2026-05-19 Meraki_ISRs Name auto-build (OPTK postmortem).
+function normalizeMerakiIsrPayload(module_name, data) {
+  if (module_name !== 'Meraki_ISRs' || !data || typeof data !== 'object') return data;
+  if (!data.Name && (data.First_Name || data.Last_Name)) {
+    const built = [data.First_Name, data.Last_Name].filter(Boolean).join(' ').trim();
+    if (built) {
+      console.log(`[MERAKI-ISR-NORM] Auto-built Name="${built}" from First_Name+Last_Name`);
+      data.Name = built;
+      delete data.First_Name;
+      delete data.Last_Name;
+    }
+  }
+  return data;
+}
+
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ── Enrich Company v2 helpers (waterfall: cache → Zoho → Zia → Haiku+web → Sonnet+web)
 // ── Added 2026-05-14, Codex-reviewed pre-deploy
@@ -20168,6 +20398,10 @@ Hard rules:
             if (!newAcctName) {
               return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: jsonHeaders });
             }
+            // 2026-05-19 F1 fix (OPTK postmortem): instrument with crm_operations logging.
+            const _acctCreateStart = Date.now();
+            const _acctCallerEmail = (env && env.__CALLER_EMAIL) || null;
+            let _acctCreateParsed = null;
             try {
               // Defensive normalization: ensure 2-letter state + country codes regardless of caller
               const accountPayload = {
@@ -20184,6 +20418,7 @@ Hard rules:
               };
               const createResp = await zohoApiCall('POST', 'Accounts', env, accountPayload);
               const parsed = parseZohoResponse(createResp, 'Account creation');
+              _acctCreateParsed = parsed;
               if (parsed.success) {
                 apiResult = {
                   success: true,
@@ -20198,6 +20433,26 @@ Hard rules:
             } catch (err) {
               apiResult = { error: 'Account creation failed: ' + err.message, success: false };
             }
+            try {
+              await logCrmOpToD1(env, {
+                personId: _acctCallerEmail,
+                bot: 'chrome_ext',
+                operation: 'create',
+                module: 'Accounts',
+                recordId: apiResult?.accountId || null,
+                recordName: newAcctName || null,
+                status: apiResult?.success ? 'success' : 'error',
+                durationMs: Date.now() - _acctCreateStart,
+                errorMessage: apiResult?.success ? null : (apiResult?.error || _acctCreateParsed?.message || 'unknown'),
+                details: { source: 'api/crm-create-account', caller_email: _acctCallerEmail },
+                preState: null,
+                postState: apiResult?.accountId ? { id: apiResult.accountId, name: newAcctName } : null,
+                requestPayload: { endpoint: '/api/crm-create-account', body: { name: newAcctName, street: newAcctStreet, city: newAcctCity, state: newAcctState, zip: newAcctZip, website: newAcctWebsite, country: newAcctCountry } },
+                responsePayload: apiResult || null,
+                undoToken: null,
+                userVisibleSummary: apiResult?.success ? `Created Account "${newAcctName}" via Chrome ext` : null
+              });
+            } catch (_logErr) { /* swallow — logging must never break the create */ }
             break;
           }
 
@@ -22825,6 +23080,11 @@ Hard rules:
             if (!newCtLast && !newCtEmail) {
               return new Response(JSON.stringify({ error: 'lastName or email required' }), { status: 400, headers: jsonHeaders });
             }
+            // 2026-05-19 F1 fix (OPTK postmortem): instrument with crm_operations logging.
+            const _ctcCreateStart = Date.now();
+            const _ctcCallerEmail = (env && env.__CALLER_EMAIL) || null;
+            let _ctcStatus = 'error';
+            let _ctcDuplicate = null;
 
             try {
               // Check for duplicate by email first
@@ -22845,6 +23105,8 @@ Hard rules:
                     },
                     message: `Contact already exists: ${existing.Full_Name || existing.Email}`
                   };
+                  _ctcStatus = 'skipped';
+                  _ctcDuplicate = existing.id;
                   break;
                 }
               }
@@ -22873,12 +23135,33 @@ Hard rules:
                   zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${parsed.record_id}`,
                   message: `Contact created: ${newCtFirst || ''} ${newCtLast || ''}`.trim()
                 };
+                _ctcStatus = 'success';
               } else {
                 apiResult = { success: false, error: parsed.message || 'Contact creation failed' };
               }
             } catch (err) {
               apiResult = { error: 'Contact creation failed: ' + err.message, success: false };
             }
+            try {
+              await logCrmOpToD1(env, {
+                personId: _ctcCallerEmail,
+                bot: 'chrome_ext',
+                operation: 'create',
+                module: 'Contacts',
+                recordId: apiResult?.contactId || _ctcDuplicate || null,
+                recordName: [newCtFirst, newCtLast].filter(Boolean).join(' ') || newCtEmail || null,
+                status: _ctcStatus,
+                durationMs: Date.now() - _ctcCreateStart,
+                errorMessage: _ctcStatus === 'error' ? (apiResult?.error || 'unknown') : null,
+                details: { source: 'api/crm-add-contact', caller_email: _ctcCallerEmail, duplicate: !!_ctcDuplicate, account_id: newCtAcctId || null },
+                preState: null,
+                postState: apiResult?.contactId ? { id: apiResult.contactId, email: newCtEmail, accountId: newCtAcctId || null } : null,
+                requestPayload: { endpoint: '/api/crm-add-contact', body: { firstName: newCtFirst, lastName: newCtLast, email: newCtEmail, phone: newCtPhone, title: newCtTitle, accountId: newCtAcctId, mobile: newCtMobile } },
+                responsePayload: apiResult || null,
+                undoToken: null,
+                userVisibleSummary: apiResult?.success ? ('Created Contact "' + [newCtFirst, newCtLast].filter(Boolean).join(' ') + '" via Chrome ext') : null
+              });
+            } catch (_logErr) { /* swallow */ }
             break;
           }
 
