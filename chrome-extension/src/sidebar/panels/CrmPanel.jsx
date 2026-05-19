@@ -582,7 +582,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
         title: addFormData.title,
         accountId: addFormAccountId || data?.account?.id || '',
       });
-      if (result && (result.success || result.id || result.contactId)) {
+      // 2026-05-19 OPTK contact-false-positive fix: tighten to strict success check.
+      if (result && result.success === true && result.contactId) {
         setAddFormSuccess('Contact created!');
         setShowAddForm(false);
         const email = addFormData.email || selectedContact;
