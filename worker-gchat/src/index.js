@@ -1707,6 +1707,58 @@ function detectAmbiguousLicenseTerm(text) {
   };
 }
 
+// ── Model-agnostic renewal collapse (2026-05-20) ───────────────────────────
+// Meraki MV cameras, MR/CW access points, and MT sensors use a MODEL-AGNOSTIC
+// co-term license — the hardware model is irrelevant to licensing. For a
+// renewal / license-only quote, collapse every hardware model of such a family
+// into a single agnostic license alias (MV-AGN / MR-AGN / MT-AGN), summing the
+// quantities, so we (a) never fail on EOL hardware with no stockable -HW SKU
+// (e.g. MV22-HW) and (b) emit one totaled license line. Mirrors the Webex
+// cf-deterministic path. Per-model-license families (MS, MX, Z, MG, Catalyst)
+// and explicit LIC-* tokens pass through untouched, so mixed-family requests
+// stay family-scoped. EOL units are captured for an optional refresh offer.
+function agnosticRenewalFamily(model) {
+  const u = String(model || '').toUpperCase();
+  if (/^MV\d/.test(u)) return 'MV';
+  if (/^MR\d/.test(u) || /^CW\d/.test(u)) return 'MR';
+  if (/^MT\d/.test(u)) return 'MT';
+  return null;
+}
+function collapseAgnosticRenewalSkus(skus, opts) {
+  const o = opts || {};
+  const out = { collapsed: false, skus, eolUnits: [], note: '' };
+  if (!o.renewal && !o.licenseOnly) return out;
+  if (!Array.isArray(skus) || skus.length === 0) return out;
+  const ALIAS = { MV: 'MV-AGN', MR: 'MR-AGN', MT: 'MT-AGN' };
+  const famQty = {};
+  const passthrough = [];
+  const eolUnits = [];
+  let touched = false;
+  for (const entry of skus) {
+    const sku = (typeof entry === 'string' ? entry : (entry && entry.sku) || '').trim().toUpperCase();
+    const qty = (typeof entry === 'object' && entry && Number(entry.qty) > 0) ? Math.floor(Number(entry.qty)) : 1;
+    if (!sku || sku.startsWith('LIC-')) { passthrough.push(entry); continue; }
+    const fam = agnosticRenewalFamily(sku);
+    if (!fam) { passthrough.push(entry); continue; }
+    famQty[fam] = (famQty[fam] || 0) + qty;
+    touched = true;
+    try {
+      if (typeof isEol === 'function' && isEol(sku)) {
+        const repl = (typeof EOL_REPLACEMENTS === 'object' && EOL_REPLACEMENTS) ? (EOL_REPLACEMENTS[sku] || null) : null;
+        eolUnits.push({ eol: sku, replacement: repl, qty });
+      }
+    } catch (_) {}
+  }
+  if (!touched) return out;
+  const collapsedSkus = passthrough.slice();
+  const noteParts = [];
+  for (const fam of Object.keys(famQty)) {
+    collapsedSkus.push({ sku: ALIAS[fam], qty: famQty[fam] });
+    noteParts.push(`${famQty[fam]}x ${ALIAS[fam]}`);
+  }
+  return { collapsed: true, skus: collapsedSkus, eolUnits, note: noteParts.join(', ') };
+}
+
 function applySuffix(sku) {
   const upper = sku.toUpperCase();
   // ── 2026-05-05 council: MR Enterprise license SKU canonicalization ─────
@@ -10273,6 +10325,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id } = toolInput;
         let { lead_source } = toolInput;
         const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
+        let _eolRefreshUnits = [];
         const results = { steps: [], errors: [], records: {} };
         const _startMs = Date.now();
 
@@ -10286,6 +10339,25 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               instruction: 'STOP. Ask the user which SKU(s) and quantities to quote before creating a Deal or Quote.',
               wall_ms: Date.now() - _startMs
             };
+          }
+
+          // ── Layer 1: deterministic model-agnostic renewal collapse (2026-05-20) ──
+          // When the caller flags renewal/license-only, collapse MV/MR/CW/MT hardware
+          // models into a single totaled agnostic license alias BEFORE product staging.
+          // Prevents EOL hardware (e.g. MV22-HW) from hard-blocking a license renewal
+          // and guarantees the same interpretation the Webex cf-deterministic path emits.
+          {
+            const _collapse = collapseAgnosticRenewalSkus(skus, {
+              renewal: toolInput.renewal === true,
+              licenseOnly: toolInput.license_only === true
+            });
+            if (_collapse.collapsed) {
+              skus.length = 0;
+              for (const _e of _collapse.skus) skus.push(_e);
+              _eolRefreshUnits = _collapse.eolUnits || [];
+              results.steps.push(`Model-agnostic renewal collapse → ${_collapse.note}` +
+                (_eolRefreshUnits.length ? ` (EOL units flagged for optional refresh: ${_eolRefreshUnits.map(u => u.eol).join(', ')})` : ''));
+            }
           }
           if (existingDealId) {
             const dealResp = await zohoApiCall('GET',
@@ -11193,6 +11265,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             `${p.sku} x${p.qty}: list $${p.list_price}, ecomm $${p.ecomm_price} (${p.discount_pct}% off, $${p.discount_per_unit}/unit discount)`
           );
           results.license_policy = includeLicenses ? 'auto_add_matching_licenses' : 'hardware_only_no_licenses';
+          if (_eolRefreshUnits.length > 0) {
+            results.eol_refresh_available = _eolRefreshUnits;
+            results._eol_refresh_note = 'After reporting the renewal quote, OFFER to build a SEPARATE hardware-refresh quote for these EOL units: ' +
+              _eolRefreshUnits.map(u => `${u.qty}x ${u.eol}${u.replacement ? ` → ${u.replacement}` : ''}`).join(', ') + '.';
+          }
           if (missingProducts.length > 0) {
             results.missing_products = missingProducts;
             results.note = 'Some products were not found. Mention this to the user but do NOT attempt to fix it with additional tool calls.';
@@ -13158,6 +13235,8 @@ const CRM_EMAIL_TOOLS = [
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
+        renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
+        license_only: { type: 'boolean', description: '(2026-05-20) Set true for a license-only quote (no hardware). Triggers the same model-agnostic family collapse as renewal. Leave unset/false for hardware purchases.' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
         confirm_new_deal: { type: 'boolean', description: '(2026-05-13) Default false. Set true ONLY after the user has explicitly confirmed they want a brand-new Deal even though the resolved Account already has open Deals. Bypasses the account_has_open_deals refusal. Never set without explicit user consent on the same turn.' },
@@ -14089,6 +14168,8 @@ When the user says "new customer", "process this email", "intake this lead", or 
 
 ### PHASE 2 — PRODUCT DETERMINATION
 Map needs to Cisco/Meraki SKUs. If vague: MR57/CW9166I for Wi-Fi, MS150 for switches, MX75/85/95 by user count for security. Include licenses (LIC-ENT for APs, LIC-SEC for MX, LIC-MS for switches). Flag placeholders.
+
+**Meraki license renewals (model-agnostic families):** MV cameras, MR/CW access points, and MT sensors use a MODEL-AGNOSTIC co-term license — the specific model does NOT matter for licensing. For a renewal or license-only quote that lists camera/AP/sensor models (even a mix like "14x MV63, 1x MV93, 2x MV52"), do NOT look up or validate per-model hardware in Zoho and do NOT quote -HW SKUs. Instead pass ONE alias per family with the SUMMED quantity (MV → MV-AGN, MR/CW → MR-AGN, MT → MT-AGN), set renewal:true, and include license_term once the user picks 1/3/5 year. create_deal_and_quote totals the license deterministically. MS switches and MX firewalls use PER-MODEL licenses (LIC-MS*, LIC-MX*-SEC) — never collapse those. If any listed models are EOL, still create the renewal FIRST, then proactively offer a SEPARATE hardware-refresh quote for the EOL units (the tool returns eol_refresh_available with replacements).
 
 ### PHASE 3 — CONTACT IDENTIFICATION
 Extract from email: First/Last Name, Email, Phone, Title. Identify decision-maker if multiple people.
