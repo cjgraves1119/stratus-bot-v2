@@ -9087,24 +9087,52 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                       if (/_Country$/.test(field)) return _norm(normalizeCountryCode(v));
                       return _norm(v);
                     };
+                    // 2026-05-19 Codex hardening: classify each written address field into
+                    // matches (both sides equal), mismatches (both populated, differ), and
+                    // additions (Quote writes a non-empty value the Account lacks). Block on:
+                    //   - any mismatch (divergent address — wrong-account/edited), OR
+                    //   - additions present with ZERO matches (an unanchored address write to
+                    //     an Account that has no comparable address — the NuMat-style fabrication
+                    //     risk; can't be validated).
+                    // ALLOW gap-fills: additions alongside >=1 verified match (model correctly
+                    // copied the address and filled a field the Account left blank).
                     const _mismatches = [];
+                    const _matches = [];
+                    const _additions = [];
+                    const _isBlank = (v) => v == null || (typeof v === 'string' && String(v).trim() === '');
                     for (const f of _writingAddr) {
                       const wantVal = data[f];
                       const acctVal = _acct[f];
-                      if (acctVal == null) continue;
+                      const wantBlank = _isBlank(wantVal);
+                      const acctBlank = _isBlank(acctVal);
+                      if (acctBlank) {
+                        if (!wantBlank) _additions.push({ field: f, requested: wantVal });
+                        continue; // Account lacks this field — handled by additions logic below.
+                      }
+                      if (wantBlank) continue; // clearing a single field is not a divergence
                       if (_normForField(f, wantVal) !== _normForField(f, acctVal)) {
                         _mismatches.push({ field: f, requested: wantVal, account_value: acctVal });
+                      } else {
+                        _matches.push(f);
                       }
                     }
-                    if (_mismatches.length > 0) {
-                      console.warn(`[FIX-C] address_mismatch_account on Quote ${record_id} acct ${_linkedAccountId}:`, JSON.stringify(_mismatches));
+                    const _blockReason = _mismatches.length > 0
+                      ? 'divergent'
+                      : ((_additions.length > 0 && _matches.length === 0) ? 'unanchored' : null);
+                    if (_blockReason) {
+                      const _detail = _blockReason === 'divergent'
+                        ? `Mismatches: ${_mismatches.map(m => `${m.field}: requested="${m.requested}" account="${m.account_value}"`).join('; ')}`
+                        : `The linked Account has no address fields to validate against, so writing ${_additions.map(a => a.field).join(', ')} cannot be verified.`;
+                      console.warn(`[FIX-C] address guard block (${_blockReason}) on Quote ${record_id} acct ${_linkedAccountId}:`, JSON.stringify({ mismatches: _mismatches, additions: _additions, matches: _matches }));
                       return {
                         validation_error: true,
                         action: 'update_blocked',
                         error: 'address_mismatch_account',
-                        message: `ADDRESS_MISMATCH_ACCOUNT: Cannot update Quote ${record_id} with address values that don't match the linked Account ${_linkedAccountId}. Mismatches: ${_mismatches.map(m => `${m.field}: requested="${m.requested}" account="${m.account_value}"`).join('; ')}. To resolve: (1) fetch the Account via zoho_get_record on Accounts/${_linkedAccountId} and copy the billing fields verbatim, OR (2) if the customer truly relocated, update the Account first via zoho_update_record on Accounts/${_linkedAccountId}, then retry this Quote update. Do NOT chain placeholder or fabricated addresses.`,
+                        message: `ADDRESS_MISMATCH_ACCOUNT: Cannot update Quote ${record_id} with address values that don't match the linked Account ${_linkedAccountId}. ${_detail}. To resolve: (1) fetch the Account via zoho_get_record on Accounts/${_linkedAccountId} and copy the billing fields verbatim, OR (2) if the customer truly relocated or the Account address is missing, update the Account first via zoho_update_record on Accounts/${_linkedAccountId}, then retry this Quote update. Do NOT chain placeholder or fabricated addresses.`,
                         linked_account_id: _linkedAccountId,
                         mismatches: _mismatches,
+                        unverifiable_additions: _additions,
+                        block_reason: _blockReason,
                       };
                     }
                   }
