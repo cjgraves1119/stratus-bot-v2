@@ -247,6 +247,15 @@ t('classifyCrmIntent — "update me on the latest deals" stays crm_read', () => 
   assert.strictEqual(r.class, 'crm_read');
 });
 
+// Exercises the reordered Rule 6 directly: a noun-free mutation verb in a
+// quote session. Rule 5 misses (no record-type noun); the context-bound
+// rule catches it. Pre-fix this returned `general` — the reorder is what
+// makes it crm_write.
+t('classifyCrmIntent — noun-free mutation in a quote session → crm_write', () => {
+  const r = classifyCrmIntent('update this', { hasQuoteSession: true });
+  assert.strictEqual(r.class, 'crm_write');
+});
+
 t('selectToolSubset — crm_write returns mutation + lookup tools', () => {
   const intent = { class: 'crm_write', confidence: 0.85 };
   const subset = selectToolSubset(intent, CRM_EMAIL_TOOLS);
