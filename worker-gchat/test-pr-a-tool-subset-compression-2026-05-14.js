@@ -229,6 +229,24 @@ t('classifyCrmIntent — empty input returns general', () => {
   assert.ok(r.confidence < 0.7);
 });
 
+// 2026-05-21 regression: "update the licenses to be 5 years" misrouted to
+// crm_read, so the agent got a read-only tool subset (no zoho_update_record)
+// and looped on zoho_search_records until the iteration cap.
+t('classifyCrmIntent — "update licenses" with quote session → crm_write', () => {
+  const r = classifyCrmIntent('[Session: Most recently worked quote — Record_ID: 1. When user says "the quote" use it.]\n\nupdate the licenses to be 5 years', { hasQuoteSession: true });
+  assert.strictEqual(r.class, 'crm_write');
+});
+
+t('classifyCrmIntent — "update licenses" on active quote page → crm_write', () => {
+  const r = classifyCrmIntent('[Active Zoho page: Quotes 2570562000399909180]\nupdate the licenses to be 5 years', { hasActivePageContext: true });
+  assert.strictEqual(r.class, 'crm_write');
+});
+
+t('classifyCrmIntent — "update me on the latest deals" stays crm_read', () => {
+  const r = classifyCrmIntent('update me on the latest deals');
+  assert.strictEqual(r.class, 'crm_read');
+});
+
 t('selectToolSubset — crm_write returns mutation + lookup tools', () => {
   const intent = { class: 'crm_write', confidence: 0.85 };
   const subset = selectToolSubset(intent, CRM_EMAIL_TOOLS);
