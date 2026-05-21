@@ -8774,7 +8774,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const recordData = Array.isArray(data) ? data[0] : data;
         // Default Owner injection for Accounts/Deals — bot acts on behalf of human user
         if ((module_name === 'Accounts' || module_name === 'Deals') && !recordData.Owner) {
-          recordData.Owner = { id: env.BOT_DEFAULT_OWNER_ID || await getOwnerForCaller(env, callerEmail) };
+          recordData.Owner = { id: env.BOT_DEFAULT_OWNER_ID || await getOwnerForCaller(env) };
         }
         // Normalize state/country to 2-letter codes if caller passed full names
         if (recordData.Billing_State) recordData.Billing_State = normalizeStateCode(recordData.Billing_State);
@@ -8829,7 +8829,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               let accountId = acctSearch?.data?.[0]?.id;
               if (!accountId) {
                 const newAcct = await zohoApiCall('POST', 'Accounts', env, {
-                  data: [{ Account_Name: acctName, Owner: { id: await getOwnerForCaller(env, callerEmail) } }]
+                  data: [{ Account_Name: acctName, Owner: { id: await getOwnerForCaller(env) } }]
                 });
                 accountId = newAcct?.data?.[0]?.details?.id;
                 console.log(`[DEAL-ENRICH] Created Account ${acctName} → ${accountId}`);
@@ -10478,7 +10478,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // All fields present — create the Account with full billing info
             const newAcctPayload = {
               Account_Name: account_name,
-              Owner: { id: await getOwnerForCaller(env, callerEmail) },
+              Owner: { id: await getOwnerForCaller(env) },
               Billing_Street: b.street,
               Billing_City: b.city,
               Billing_State: b.state,
@@ -10645,7 +10645,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 Last_Name: last,
                 Email: contact_email,
                 Account_Name: { id: accountId },
-                Owner: { id: await getOwnerForCaller(env, callerEmail) }
+                Owner: { id: await getOwnerForCaller(env) }
               }]
             });
             if (newContact?.data?.[0]?.details?.id) {
@@ -11039,7 +11039,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
             Meraki_ISR: { id: '2570562000027286729' },
-            Owner: { id: await getOwnerForCaller(env, callerEmail) },
+            Owner: { id: await getOwnerForCaller(env) },
             Closing_Date: closingDate
           };
           if (contactId) dealData.Contact_Name = { id: contactId };
@@ -11110,7 +11110,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // that triggered Cisco's CCW DID integration to hang.
             Vendor1: DEFAULT_QUOTE_VENDOR,
             Cisco_Billing_Term: quoteBillingTerm,
-            Owner: { id: await getOwnerForCaller(env, callerEmail) },
+            Owner: { id: await getOwnerForCaller(env) },
             Do_Not_Auto_Update_Prices: true,
             Quoted_Items: quotedItems
           };
