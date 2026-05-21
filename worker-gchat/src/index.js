@@ -14431,7 +14431,7 @@ async function markProgressComplete(env, progressId) {
 
 // Continuation variant of askClaude: resumes a tool loop from saved state.
 // Used by the /_continue self-invocation endpoint.
-async function askClaudeContinue(messages, tools, systemPrompt, startIteration, env, progressCallback, maxWallMs) {
+async function askClaudeContinue(messages, tools, systemPrompt, startIteration, env, progressCallback, maxWallMs, personId = null) {
   const MAX_TOOL_ITERATIONS = 30;
   let iteration = startIteration;
   const _loopStartMs = Date.now();
@@ -14476,7 +14476,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
   while (iteration < MAX_TOOL_ITERATIONS) {
     if (maxWallMs && (Date.now() - _loopStartMs) > maxWallMs) {
       console.log(`[GCHAT-CONTINUE] Deadline hit at iteration ${iteration}, chaining`);
-      return { __continuation: true, messages, tools, systemPrompt, iteration };
+      return { __continuation: true, messages, tools, systemPrompt, iteration, personId };
     }
 
     iteration++;
@@ -21934,7 +21934,7 @@ Hard rules:
               while (reply && reply.__continuation) {
                 reply = await askClaudeContinue(
                   reply.messages, reply.tools, reply.systemPrompt,
-                  reply.iteration, env, null, 120000
+                  reply.iteration, env, null, 120000, chatPersonId
                 );
               }
 
@@ -22133,7 +22133,7 @@ Hard rules:
                   console.log(`[HANDOFF] Continuation at iteration ${result.iteration}`);
                   result = await askClaudeContinue(
                     result.messages, result.tools, result.systemPrompt,
-                    result.iteration, env, progressCallback, 300000
+                    result.iteration, env, progressCallback, 300000, handoffPersonId
                   );
                 }
 
@@ -23867,7 +23867,7 @@ Return ONLY a JSON object (no markdown, no explanation):
           // 5-minute deadline as safety net (unlimited wall time available)
           const result = await askClaudeContinue(
             state.messages, state.tools, state.systemPrompt,
-            state.iteration, env, progressCallback, 300000
+            state.iteration, env, progressCallback, 300000, state.personId
           );
 
           if (result && result.__continuation) {

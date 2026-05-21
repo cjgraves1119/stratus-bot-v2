@@ -1,11 +1,16 @@
-// Regression: ReferenceError 'callerEmail is not defined' — a worker-side bug,
-// NOT a Zoho 500. Commit 172cad3 (#87 "depersonalize owner mapping") added
-// references to `callerEmail` at 6 deep call sites where it is not in lexical
-// scope; `callerEmail` is only ever a parameter of getOwnerContext /
-// getOwnerForCaller. Every record-creating quote path (create_deal_and_quote,
-// create_quote_on_deal, zoho_create_record) threw before the Zoho POST.
-// `node --check` does NOT catch ReferenceErrors, so this guards the regression
-// at the source level.
+// Regression guard for the two undefined-variable ReferenceErrors fixed in
+// PR #98 — both worker-side bugs, NOT Zoho errors. `node --check` does NOT
+// catch ReferenceErrors, so this guards them at the source level.
+//
+//  (1) callerEmail — commit 172cad3 (#87) referenced `callerEmail` at 6 deep
+//      call sites where it is not in scope; it is only ever a parameter of
+//      getOwnerContext / getOwnerForCaller. Broke create_deal_and_quote,
+//      create_quote_on_deal, and zoho_create_record.
+//  (2) personId — askClaudeContinue (the agentic-loop continuation path, which
+//      runs when a CRM request spills past the 30s sync cutoff) referenced
+//      `personId` without declaring it as a parameter. Broke every spilled-over
+//      run that executes a tool.
+//
 // Run: node test-caller-email-scope-2026-05-21.js
 
 const fs = require('fs');
@@ -33,7 +38,7 @@ function grab(name) {
   return src.slice(i, j);
 }
 
-console.log('── callerEmail scope regression ──');
+console.log('── undefined-variable scope regressions (PR #98) ──');
 
 // 1. No call site may pass `callerEmail` into getOwnerForCaller. The helper
 //    reads env.__CALLER_EMAIL itself; deep call sites must call it with env only.
@@ -48,7 +53,15 @@ const restAfterStrip = src
 check('callerEmail does not leak outside getOwnerContext/getOwnerForCaller',
   !/\bcallerEmail\b/.test(restAfterStrip));
 
-// 3. Runtime: the fixed call form getOwnerForCaller(env) must resolve an owner
+// 3. askClaudeContinue (continuation path) must declare a `personId` parameter.
+//    It calls executeToolCall(block.name, block.input, env, personId); without
+//    the parameter that throws 'personId is not defined' on any continuation
+//    that runs a tool.
+const askContinueSrc = grab('askClaudeContinue');
+check('askClaudeContinue declares a personId parameter',
+  /\bpersonId\b/.test(askContinueSrc.slice(0, askContinueSrc.indexOf('{'))));
+
+// 4. Runtime: the fixed call form getOwnerForCaller(env) must resolve an owner
 //    id without throwing — no email, an explicit email, and env.__CALLER_EMAIL.
 const _ownerCache = new Map();
 const SEED_USERS = [];
