@@ -15273,6 +15273,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           tools,
           systemPrompt,
           iteration,
+          personId,
           segment: 1
         };
       }
