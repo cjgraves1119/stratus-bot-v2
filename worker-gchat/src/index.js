@@ -6609,11 +6609,51 @@ async function correctQuotedItemDiscounts(quotedItems, env) {
   return { success: failures.length === 0, corrected, failures };
 }
 
+// Customer-facing quote line Descriptions must never expose Stratus margin
+// (permanent rule, 2026-05-22). Strip ONLY margin wording — keep discount
+// labels ("15% Discount"), subscription add-on / change descriptions, and any
+// other legitimate customer text. The Description is split on separators and
+// only the segment(s) naming margin are dropped; if nothing legitimate
+// remains, the Description field is removed entirely.
+function scrubMarginFromQuotedItems(quotedItems, context = 'Quoted_Items') {
+  if (!Array.isArray(quotedItems)) return { scrubbed: 0 };
+  let scrubbed = 0;
+  for (const item of quotedItems) {
+    if (!item || typeof item.Description !== 'string') continue;
+    if (!/\bmargin\b/i.test(item.Description)) continue;
+    const original = item.Description;
+    // First strip any (...), [...] or {...} group that names margin, so
+    // "5-Year Add-on (20% Margin)" → "5-Year Add-on" rather than being lost.
+    const deParen = original.replace(/\s*[([{][^)\]}]*\bmargin\b[^)\]}]*[)\]}]/gi, '');
+    // Then split on , ; | / and SPACED dashes only — never the hyphens inside
+    // words like "5-Year" or "Add-on" — and drop any margin-bearing segment.
+    const kept = deParen
+      .split(/\s*[,;|/]\s*|\s+[-–—]\s+/)
+      .map(s => s.trim())
+      .filter(s => s && !/\bmargin\b/i.test(s));
+    const cleaned = kept.join(', ');
+    if (cleaned !== original) {
+      if (cleaned) item.Description = cleaned;
+      else delete item.Description;
+      scrubbed++;
+    }
+  }
+  if (scrubbed > 0) {
+    console.log(`[MARGIN-SCRUB] Stripped margin wording from ${scrubbed} ${context} line Description(s)`);
+  }
+  return { scrubbed };
+}
+
 async function validateCrmWrite(module_name, data, isCreate = false, env = null) {
   const errors = [];
 
   // Universal garbage strip — runs before all module-specific validation
   stripUndefinedLiterals(data);
+
+  // Margin must never reach a customer-facing Quote line Description.
+  if (module_name === 'Quotes' && Array.isArray(data.Quoted_Items)) {
+    scrubMarginFromQuotedItems(data.Quoted_Items, isCreate ? 'quote-create' : 'quote-update');
+  }
 
   if (module_name === 'Deals') {
     // Validate Reason / Reason_For_Loss against picklist — strip if not valid
@@ -11513,6 +11553,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                       });
                       return itemPayload;
                     }).filter(it => it.Product_Name?.id);
+                    scrubMarginFromQuotedItems(cleanPayload.Quoted_Items, 'quote-clone-fallback');
                     continue;
                   }
                   cleanPayload[k] = v;
@@ -11611,6 +11652,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let cloneFacts = null;
           let cloneVerifyFailed = false;
           let cloneVerifyError = null;
+          let marginScrubFailed = false;
+          let marginScrubError = null;
           try {
             const verifyFields = 'id,Subject,Quote_Number,Grand_Total,Sub_Total,Deal_Name,Account_Name,Quoted_Items';
             const verifyResult = await zohoApiCall('GET', `Quotes/${clonedId}?fields=${verifyFields}`, env);
@@ -11632,6 +11675,46 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   total: i.Total
                 }))
               };
+              // Native clone copies line Descriptions verbatim — if the source
+              // quote predates the no-margin rule, scrub margin wording off the
+              // CLONED quote and write the cleaned Descriptions back before
+              // returning success (validateCrmWrite never sees this path).
+              try {
+                const scrubPatch = [];
+                for (const ln of (verifyRec.Quoted_Items || [])) {
+                  if (!ln?.id || typeof ln.Description !== 'string') continue;
+                  const probe = [{ id: ln.id, Description: ln.Description }];
+                  scrubMarginFromQuotedItems(probe, 'quote-clone-native');
+                  if (!('Description' in probe[0]) || probe[0].Description !== ln.Description) {
+                    scrubPatch.push({ id: ln.id, Description: ('Description' in probe[0]) ? probe[0].Description : '' });
+                  }
+                }
+                if (scrubPatch.length > 0) {
+                  // Fail CLOSED — the no-margin rule is permanent. If the
+                  // scrub write is rejected, or margin survives on re-check,
+                  // the clone is reported as failed (id surfaced for cleanup).
+                  const scrubPut = await zohoApiCall('PUT', `Quotes/${clonedId}`, env, {
+                    data: [{ id: clonedId, Quoted_Items: scrubPatch, Do_Not_Auto_Update_Prices: true }],
+                  });
+                  if (parseZohoResponse(scrubPut, 'clone margin-scrub')?.success === false) {
+                    marginScrubFailed = true;
+                    marginScrubError = 'Zoho rejected the margin-scrub write on the cloned quote';
+                  } else {
+                    const recheck = await zohoApiCall('GET', `Quotes/${clonedId}?fields=id,Quoted_Items`, env);
+                    const stillMargin = (recheck?.data?.[0]?.Quoted_Items || [])
+                      .some(li => typeof li.Description === 'string' && /\bmargin\b/i.test(li.Description));
+                    if (stillMargin) {
+                      marginScrubFailed = true;
+                      marginScrubError = 'margin wording still present on the cloned quote after the scrub write';
+                    } else {
+                      console.log(`[MARGIN-SCRUB] Cleaned margin wording from ${scrubPatch.length} cloned-quote line(s) on ${clonedId}`);
+                    }
+                  }
+                }
+              } catch (scrubErr) {
+                marginScrubFailed = true;
+                marginScrubError = scrubErr.message;
+              }
             } else {
               cloneVerifyFailed = true;
               cloneVerifyError = 'GET returned no record';
@@ -11648,6 +11731,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               source_quote_id: quote_id,
               cloned_id_unverified: clonedId,
               message: `Zoho reported a clone produced id ${clonedId} but the verification fetch ${cloneVerifyError}. Treat this as a FAILED clone — do NOT claim the quote was cloned and do NOT render any quote URL.`,
+            };
+          }
+
+          if (marginScrubFailed) {
+            console.warn(`[MARGIN-SCRUB] Native-clone scrub FAILED for ${clonedId}: ${marginScrubError}`);
+            return {
+              success: false,
+              error: 'clone_margin_scrub_failed',
+              source_quote_id: quote_id,
+              cloned_id_unverified: clonedId,
+              message: `Quote ${quote_id} was cloned (id ${clonedId}) but margin wording could NOT be removed from the cloned line descriptions (${marginScrubError}). Margin must never be customer-visible — do NOT claim the clone succeeded. Surface the partial record id ${clonedId} for cleanup and tell the user to retry.`,
             };
           }
 
@@ -12027,6 +12121,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   Description: it.Description,
                   Sequence_Number: it.Sequence_Number
                 })).filter(it => it.Product_Name?.id);
+                scrubMarginFromQuotedItems(restoreData.Quoted_Items, 'undo-restore-create');
                 continue;
               }
               restoreData[k] = v;
@@ -12114,6 +12209,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const currentRec = currentRes?.data?.[0] || {};
               const currentItems = currentRec.Quoted_Items || [];
               const preStateItems = Array.isArray(preState.Quoted_Items) ? preState.Quoted_Items : [];
+              // Scrub margin wording from the undo snapshot ONCE, up front, so
+              // the smart-diff, the restore payload, and the post-restore
+              // verification all key off the same sanitized line items.
+              scrubMarginFromQuotedItems(preStateItems, 'undo-prestate');
 
               // 2026-04-24 Codex round-11 finding #3: widen the smart-diff key
               // to include all meaningful mutable Quote line fields. Previous
@@ -14109,7 +14208,7 @@ RIGHT: \`Quoted_Items: [{"id": "lic_1", "_delete": null}, {"id": "lic_2", "_dele
 - **ALWAYS include Discount when adding new line items** — including license term swaps. Missing Discount = list price charged.
 
 **LICENSE TERM SWAP (3YR → 5YR) — CRITICAL:**
-1. zoho_get_record on Quote AND batch_product_lookup for new SKUs IN PARALLEL.
+1. zoho_get_record on Quote AND batch_product_lookup for new SKUs IN PARALLEL. If the quote was just cloned earlier in THIS request, you MUST fetch the cloned quote first and use the cloned quote's fresh Quoted_Items ids — never reuse source-quote line ids.
 2. SINGLE zoho_update_record where Quoted_Items contains BOTH \`{id, _delete:null}\` for each old LIC line AND \`{Product_Name:{id}, Quantity, Discount}\` for each new LIC line — WITH ecomm Discount on every add.
 3. NEVER split deletes + adds into separate update calls — adds happen before deletes, creating duplicates.
 4. zoho_get_record to re-fetch and verify. Report ACTUAL items, never claim success on API code alone.
@@ -14125,6 +14224,10 @@ To clone/copy/duplicate a Quote, **always use \`clone_quote\`**. Pass quote_id a
 
 Example: "clone quote 2570562000401257768 and call it Copy of Acme Q3"
 → \`clone_quote({quote_id: "2570562000401257768", new_subject: "Copy of Acme Q3"})\`
+
+If the user asks for a clone/copy/duplicate AND a modification in the SAME message, run this sequence: (1) \`clone_quote\`; (2) \`zoho_get_record\` on the returned \`cloned_quote_id\` to get the cloned quote's fresh line ids; (3) \`batch_product_lookup\` for every SKU you will add — never guess a product_id; (4) ONE \`zoho_update_record\` against the \`cloned_quote_id\`. Never use source-quote line ids on the clone.
+
+**Customer-facing Description safety:** NEVER put Stratus margin or a margin percentage in a Quote line Description — margin is internal-only. Discount labels ("15% Discount") and subscription add-on / change descriptions are fine.
 
 ### DISCOUNTS — DOLLARS ON THE FIELD, PERCENTAGES IN YOUR HEAD
 Zoho's Discount field is dollars per line. Always THINK in percentages. "10% off" → \`Discount = List_Price * Quantity * 0.10\`. On Quantity change to an existing line, do NOT keep the old Discount dollar — the server auto-scales to preserve the percentage. When in doubt, omit Discount on a qty change.
@@ -15813,6 +15916,26 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
                           product_id: i.product_id || i.Product_Name?.id
                         }));
                       }
+                    }
+                  } catch (_) {}
+                }
+                // Extract Quote context from clone_quote responses. clone_quote
+                // returns cloned_quote_id + facts.line_items (the FRESH cloned
+                // subform ids) rather than a raw Quoted_Items array, so the
+                // block above misses it. Capturing it here lets an immediate
+                // follow-up modification target the clone with correct ids.
+                if (raw.includes('"cloned_quote_id"')) {
+                  try {
+                    const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
+                    if (parsed?.success && parsed?.cloned_quote_id) {
+                      crmCtx.quote_id = parsed.cloned_quote_id;
+                      crmCtx.quote_number = parsed.cloned_quote_number || parsed.facts?.quote_number || crmCtx.quote_number || null;
+                      crmCtx.line_items = (parsed.facts?.line_items || []).map(i => ({
+                        id: i.id,
+                        sku: i.product_code || i.Product_Code || i.Product_Name?.Product_Code || null,
+                        qty: i.quantity ?? i.Quantity,
+                        product_id: i.product_id || i.Product_Name?.id || null,
+                      }));
                     }
                   } catch (_) {}
                 }
@@ -18579,7 +18702,10 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   };
 }
 
-// Log waterfall outcome to D1 analytics for hit-rate tracking.
+// Log waterfall outcome to D1 analytics for hit-rate tracking. The waterfall_log
+// table has no migration — telemetry is best-effort; when the table is absent,
+// warn once per isolate instead of on every request.
+let _waterfallMissingTableLogged = false;
 async function logWaterfallTelemetry(env, outcome) {
   if (!env.ANALYTICS_DB) return;
   try {
@@ -18595,7 +18721,15 @@ async function logWaterfallTelemetry(env, outcome) {
       outcome.iterations || 0
     ).run();
   } catch (err) {
-    // Table may not exist yet — that's fine, graceful degrade
+    // Table may not exist — graceful degrade. waterfall_log has no migration,
+    // so suppress the repeat "no such table" spam after the first warning.
+    if (/no such table:\s*waterfall_log/i.test(err.message || '')) {
+      if (!_waterfallMissingTableLogged) {
+        console.log('[WATERFALL] Telemetry skipped: waterfall_log table is missing (no migration) — suppressing further warnings.');
+        _waterfallMissingTableLogged = true;
+      }
+      return;
+    }
     console.log('[WATERFALL] Telemetry logging skipped:', err.message);
   }
 }
