@@ -832,6 +832,27 @@ async function logCrmOpToD1(env, {
   }
 }
 
+// 2026-05-22: the crm_operations row for a Quote update is inserted BEFORE the
+// post-update verification runs, so it would otherwise always read status
+// 'success' even when verification detected a silent failure. After
+// verification completes the verify block calls this to overwrite the row's
+// status / error_message / details with the true verified verdict.
+async function updateCrmOpVerdict(env, opId, { status, errorMessage, details }) {
+  if (!env?.ANALYTICS_DB || !opId) return;
+  try {
+    await env.ANALYTICS_DB.prepare(
+      `UPDATE crm_operations SET status = ?, error_message = ?, details = ? WHERE id = ?`
+    ).bind(
+      status,
+      errorMessage || null,
+      details ? JSON.stringify(details) : null,
+      opId
+    ).run();
+  } catch (err) {
+    console.error('[D1] crm_operations verdict update error:', err.message);
+  }
+}
+
 /**
  * Create a follow-up Task for a Deal in Zoho CRM.
  *
@@ -9989,6 +10010,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               // Appended last: the bulky line-item array goes after the status
               // block so any truncation eats line items, never the verdict.
               verification.verification.actual_line_items = actualItems;
+              // Fix C (2026-05-22): overwrite the crm_operations row (logged
+              // pre-verification) with the true verified verdict so D1 no
+              // longer shows API-success rows for verified failures.
+              if (updateOpId) {
+                const _v = verification.verification || {};
+                await updateCrmOpVerdict(env, updateOpId, {
+                  status: _v.success === false ? 'error' : 'success',
+                  errorMessage: _v.success === false ? String(_v.WARNING || 'verification failed').slice(0, 500) : null,
+                  details: { fields: Object.keys(data), verification: {
+                    verified: _v.verified !== false,
+                    success: _v.success !== false,
+                    requested_operations: _v.requested_operations || null,
+                  } },
+                });
+              }
               return verification;
             }
             // Verify GET succeeded but returned no record — record may have
@@ -9998,6 +10034,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // verification.success=false, verification.WARNING. The model
             // must NOT claim success when verification can't confirm change.
             console.warn(`[GCHAT] Quote verification GET returned no record for ${record_id}. Treating update as unverified — refusing to confirm success.`);
+            if (updateOpId) {
+              await updateCrmOpVerdict(env, updateOpId, {
+                status: 'error',
+                errorMessage: 'verify_get_returned_no_record',
+                details: { fields: Object.keys(data), verification: { verified: false, success: false, reason: 'verify_get_returned_no_record' } },
+              });
+            }
             return {
               ...updateParsed,
               success: false,
@@ -10016,6 +10059,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // only set verification.verified=false, which let the model narrate
             // success on a write whose effects were never confirmed.
             console.warn(`[GCHAT] Quote verification fetch failed:`, verifyErr.message);
+            if (updateOpId) {
+              await updateCrmOpVerdict(env, updateOpId, {
+                status: 'error',
+                errorMessage: `verify_get_threw: ${verifyErr.message}`.slice(0, 500),
+                details: { fields: Object.keys(data), verification: { verified: false, success: false, reason: 'verify_get_threw' } },
+              });
+            }
             return {
               ...updateParsed,
               success: false,
@@ -13690,6 +13740,19 @@ function classifyCrmIntent(text, ctx = {}) {
   // stripped because @cisco.com was in context.
   if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote|deal|po|order|sales\s*order)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.95 };
+  }
+
+  // 0b. Clone-intent guard (2026-05-22): runs before the subscription rule so a
+  // clone request carrying negated admin-action text — e.g. "clone this quote
+  // ... do NOT submit to CCW" — is not misrouted to the subscription subset,
+  // which has no clone_quote tool. `clone`/`duplicate` match broadly; `copy` is
+  // kept tight (must be bound to "quote") so phrasings like "copy me on the
+  // email" or "copy the quote URL email" don't strip the email/URL tools.
+  if (/\b(clone|duplicate)\b.{0,40}\bquote\b/.test(t)
+      || /\bcopy\s+(a\s+|the\s+|this\s+|current\s+|same\s+)?quote\b/.test(t)
+      || /\b(make|create)\s+(a\s+)?copy\s+of\b.{0,30}\bquote\b/.test(t)
+      || (/\b(clone|duplicate)\b/.test(t) && (ctx.hasActivePageContext || ctx.hasQuoteSession))) {
+    return { class: 'crm_write', confidence: 0.9 };
   }
 
   // 1. URL/ecomm quote link
