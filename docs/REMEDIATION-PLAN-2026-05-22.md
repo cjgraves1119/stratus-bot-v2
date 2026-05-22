@@ -1,84 +1,78 @@
 # Stratus Bot v2 — Audit Remediation Plan
 **Date:** 2026-05-22
 **Companion to:** `docs/AUDIT-2026-05-22.md`
-**Status:** v2 — revised after Round 1 adversarial review. NOT approved. NO code changed.
+**Status:** v3 — revised after Round 1 + Round 2 adversarial review. NOT approved. NO code changed.
 
 ---
 
 ## 0. CRITICAL CONTEXT — The Audit Is Unreliable
 
-Round 1 adversarial review verified the audit's claims against the actual source
-and found **multiple audit findings are factually wrong**:
+The audit was produced by parallel sub-agents. Two rounds of independent
+adversarial review verified its findings against the actual source and found
+**many are wrong**. Verified-wrong findings:
 
 | Audit finding | Reality (verified against code) |
 |---------------|--------------------------------|
-| CRIT-10 `enrichCompanyV2` inside `fetch()` | FALSE — it is at module scope (line 19505/19681, column 0). Not a bug. |
-| CRIT-12 vision `slice(2)` off-by-one | FALSE — `slice(2)` correctly extracts the tail of a 3-part split. The audit's `slice(1)` IS the regression. |
-| CRIT-2 undo regex causes a crash | FALSE — real tokens come from `crypto.randomUUID()` (8 hex chars); the existing `[a-f0-9]` regex already matches them. |
-| CRIT-4 "5 sites" need the lookup fix | FALSE — only line 6094 is broken. Sites 9112/9128/10752/10952 are correct today; the "fix" breaks them. |
-| CRIT-5 "5 double-write sites" | MOSTLY FALSE — most listed sites are the *sole* history writer on continuation paths. |
-| CRIT-13 add-pricing "produces no pricing" | FALSE — the live branch at line 3279 already prices every term. The dead branch is redundant. |
-| CRIT-11 fix `env.ctx?.waitUntil(...)` | The proposed fix is a silent no-op — `env.ctx` is never assigned. |
+| CRIT-10 `enrichCompanyV2` inside `fetch()` | FALSE — module scope already (lines 19505/19681). |
+| CRIT-12 vision `slice(2)` off-by-one | FALSE — `slice(2)` is correct; `slice(1)` would be the regression. |
+| CRIT-2 undo regex crash | FALSE — real tokens are `crypto.randomUUID()` hex; existing regex matches. |
+| CRIT-4 "5 sites" | FALSE — only line 6094 is broken; the other 4 are correct today. |
+| CRIT-5 "5 double-write sites" | WRONG LIST — most are sole writers on continuation paths. |
+| CRIT-13 "produces no pricing" | FALSE — live branch already prices; dead block is redundant. |
+| CRIT-11 fix `env.ctx?.waitUntil` | The proposed fix is a silent no-op. |
+| CRIT-6 `lastUserMsg.content` deref | FALSE — already guarded at line 24948 (`lastUserMsg && ...`). |
 
-**Governing rule for this entire plan:** the audit is a list of **LEADS, not
-facts**. Every fix has a mandatory per-fix verification step that confirms the
-bug exists against the current code before any edit is made. No fix is applied
-on the audit's word alone. The audit doc itself now carries a corrections banner.
+**Governing rule:** the audit is a list of **LEADS, not facts**. Every fix has a
+mandatory per-fix verification step against current code before any edit. The
+audit doc carries a corrections banner.
 
 ---
 
 ## 1. Objective & Hard Constraints
 
 The bot is in production and working well. Fix real bugs **without regressing any
-working behavior**. Constraints:
+working behavior**.
 
 1. Every change is individually revertable.
-2. The highest-risk behavioral changes are toggleable **without a redeploy**.
-3. Nothing reaches production without: per-fix verification + `wrangler deploy
-   --dry-run` + relevant test-suite pass + a manual smoke test on the live bot.
-4. Workers deploy **one at a time**, with an observation window between each.
+2. Highest-risk behavioral changes are toggleable or trivially revertable.
+3. Nothing ships without: per-fix verification + `wrangler deploy --dry-run` +
+   test-suite pass + manual smoke test on the live bot.
+4. Workers deploy one at a time, with an observation window between each.
 5. At any sign of regression: revert first, diagnose second.
 
 ---
 
-## 2. Rollback Architecture — 4 Layers (CORRECTED)
+## 2. Rollback Architecture — 4 Layers
 
 ### Layer 1 — Cloudflare deployment rollback
-`wrangler rollback <id>` (or dashboard → Deployments → Rollback) restores a
-previous Worker **script** version in seconds.
-**CORRECTED LIMITATION — this does NOT revert:**
-- **D1 migrations** — D1 has no automatic down-migrations. A migration applied
-  by `wrangler deploy` stays applied after a script rollback.
-- **KV data** already corrupted by a bug before the rollback (e.g. doubled
-  conversation history written before we noticed).
-- **In-flight Queue messages** or **running Workflow instances** created against
-  the buggy script.
-So Layer 1 is the fast path for *code* regressions, not a universal undo.
+`wrangler rollback <id>` restores a previous Worker **script** version in seconds.
+**Does NOT revert:** D1 migrations (no auto down-migration), KV data already
+corrupted before rollback, in-flight Queue messages, running Workflow instances.
+Layer 1 is the fast path for *code* regressions, not a universal undo.
 
 ### Layer 2 — Git atomic revert
-One logical fix = one commit. `git revert <sha>` undoes any single fix.
+One logical fix = one commit. `git revert <sha>` undoes any single fix. For
+pervasive multi-site changes (Phase 6), per-commit `git revert` + redeploy is the
+primary revert path.
 
-### Layer 3 — Feature flags (CORRECTED — they are STRINGS)
-Cloudflare `[vars]` values are **strings, not booleans**. The repo already proves
-this: every existing flag uses `env.X === 'true' || env.X === '1'` (see
-`worker-gchat/src/index.js:9399, 14946, 21127`, and the helper at line 16658).
-A naive `if (env.FLAG)` treats the string `"false"` as **truthy** — the flag
-would be stuck ON and un-revertable.
-**Mandate:** every new flag (`HISTORY_SINGLE_WRITE`, `FIX_CONTACT_LOOKUP`) MUST
-branch on `env.FLAG === 'true'` (or reuse the line-16658 helper). Phase 0 must
-verify the **committed string value** is `"false"` — note `wrangler.toml`
-already has flags (`QUOTE_PO_WORKFLOW_ENABLED`) whose committed value contradicts
-their "Default off" comment, so trust the value, not the comment.
+### Layer 3 — Feature flags (CF `[vars]` are STRINGS)
+CF `[vars]` are strings. The repo proves it: every flag uses
+`env.X === 'true' || env.X === '1'` (gchat lines 9399, 14946, 21127; helper at
+16658). A naive `if (env.FLAG)` treats `"false"` as truthy. **Mandate:** every
+new flag branches on `env.FLAG === 'true'` (or reuses the line-16658 helper).
+Phase 0 verifies the committed string value (existing flags in `wrangler.toml`
+already contradict their "Default off" comments — trust the value, not the
+comment). Flags are used for `FIX_CONTACT_LOOKUP` (Phase 5). For Phase 6, see the
+note in that phase — a flag may be more trouble than git-revert.
 
-### Layer 4 — Known-good tag (nuclear restore)
+### Layer 4 — Known-good tag
 `pre-audit-fixes-2026-05-22` tags current `main`. Reset + redeploy = full source
-restore (subject to the Layer-1 D1/KV caveats above).
+restore (subject to Layer-1 D1/KV caveats).
 
-### KV-repair contingency (for the history fix specifically)
-Because Layer 1 cannot un-corrupt KV, the history fix (Phase 6) needs its own
-safety net: a small read-only script that detects doubled consecutive identical
-turns in a conversation history blob, runnable to trim corruption if the fix
-misbehaves. This is authored **before** Phase 6 ships, not after.
+### KV-repair contingency (Phase 6 only)
+Because Layer 1 cannot un-corrupt KV, before Phase 6 ships we author a read-only
+script that detects doubled consecutive identical turns in a history blob and can
+trim them. Authored *before* Phase 6, not after.
 
 ---
 
@@ -88,148 +82,191 @@ misbehaves. This is authored **before** Phase 6 ships, not after.
 |------|--------|
 | 0.1 | Create + push tag `pre-audit-fixes-2026-05-22` on current `main` |
 | 0.2 | Record active deployment IDs for all 3 workers → Appendix A |
-| 0.3 | Run ALL existing test suites; establish a green baseline (document any pre-existing failures) |
+| 0.3 | Run all existing test suites; establish a green baseline (document pre-existing failures) |
 | 0.4 | Add `.dev.vars` + `*.dev.vars` to `.gitignore` |
-| 0.5 | Verify the committed string value of every existing `[vars]` flag in all 3 wrangler.toml files |
-| 0.6 | Determine whether ANY planned phase introduces a D1 migration; if so, that phase must ship a forward-fix migration too (no auto down-migration) |
+| 0.5 | Verify the committed string value of every `[vars]` flag in all 3 wrangler.toml files |
+| 0.6 | `wrangler queues list` — confirm whether `stratus-gchat-crm-dlq` exists as a resource (see DLQ item) |
+| 0.7 | Confirm whether any planned phase needs a D1 migration; if so author its forward-fix migration |
 
-**GATE:** baseline green, tag pushed, deployment IDs recorded.
+**GATE:** baseline green, tag pushed, deployment IDs + queue list recorded.
 
 ---
 
 ## 4. Corrected Finding Triage
 
-### 4A. VERIFIED REAL BUGS — safe to fix
+### 4A. VERIFIED REAL BUGS — safe to fix (re-verified in Round 1/2)
 | ID | Location | Bug | Class |
 |----|----------|-----|-------|
-| CRIT-3 | gchat:2552, webex:2992 | `eosLabel` ternary — both branches `'End of Sale'` | A |
-| CRIT-13 | webex:3284-3288 | `if (isAddPricing && !showPricing)` always false — redundant dead block (live branch at 3279 already prices) → **delete** | A |
-| CRIT-8 | gchat `zoho_delete_record` ~13203 | `DELETE` call outside try/catch — a throw aborts the whole agentic turn | A |
-| CRIT-6 | gchat:24940 | `lastUserMsg.content` deref when history empty — needs null guard | A |
-| CRIT-4 | gchat:6094 **ONLY** | `fetchPrimaryContactForAccount` searches `Account_Name:equals:<recordId>` — wrong; needs COQL | C |
-| CRIT-7 | gchat:25482 | Queue consumer has no `__continuation` loop | B/C |
+| CRIT-3 | gchat:2552, webex:2993 | `eosLabel` ternary — both branches `'End of Sale'` (verified byte-identical) | A |
+| CRIT-13 | webex:3284-3288 | `if (isAddPricing && !showPricing)` always false; live branch at 3279 already prices → **delete the block** | A |
+| CRIT-8 | gchat:13203 | `zoho_delete_record` DELETE outside try/catch; a fetch-throw escapes the agentic loop | A |
+| CRIT-7 | gchat:25482 | Queue consumer has no `__continuation` loop | B |
+| CRIT-14 | webex:1674-1754 | `logShadowClassification` runs 11 DDL statements per request, no guard | B |
 | CRIT-9 | gchat:19634, 23934 | Two `api.anthropic.com` literals bypass the gateway constant | B |
-| CRIT-1 | gchat:1170 | `substring(-8)` in the `generateUndoToken` **fallback** path | A (cosmetic) |
-| DLQ | gchat wrangler.toml:92 | `stratus-gchat-crm-dlq` referenced, never declared | B |
+| CRIT-1 | gchat:1170 | `substring(-8)` in the `generateUndoToken` **fallback** path (dead in prod) | A (cosmetic) |
+| CRIT-11 | webex:7773 (root cause = L-15) | `logBotUsageToD1` telemetry lost; `env.ctx` never assigned | C |
+| CRIT-4 | gchat:6094 **ONLY** | `fetchPrimaryContactForAccount` searches a lookup field by record ID | C |
+| EXT-CRIT-1 | zoho-content.js:168 | `{...ctx}` clobbers `message.type` with `'zoho'` | B |
+| EXT-CRIT-2 | OptionsPage.jsx:145 | `ZOHO_DISCONNECT` string has no handler | B |
+| EXT-CRIT-3 | background/index.js:201 | `EMAIL_SENT` handler destructures flat, payload is `{data:{...}}` | B |
+| EXT-CRIT-4 | notifications.js:49 | `NAVIGATE_TO_TASKS` has no case in the content-script switch | B |
 
-### 4B. VERIFIED NON-BUGS — DROPPED from the plan
+### 4B. VERIFIED NON-BUGS — DROPPED
 | ID | Why it is not a bug |
 |----|---------------------|
-| CRIT-10 | `enrichCompanyV2` + TTL constants are already at module scope. Nothing to hoist. |
-| CRIT-12 | Vision `slice(2)` correctly extracts the tail of the 3-part split. The audit's "fix" is the regression. |
-| CRIT-2 | The undo regex matches all real (hex) tokens. No crash occurs. (Widening to `[0-9a-z]` is optional cleanup, not a fix.) |
-| CRIT-4 sites 9112, 9128, 10752, 10952 | Correct today — Accounts-module primary field or legacy name-based lookup. The "fix" breaks them. |
+| CRIT-10 | `enrichCompanyV2` + TTL constants already at module scope. |
+| CRIT-12 | Vision `slice(2)` correctly extracts the 3-part-split tail. |
+| CRIT-2 | Undo regex matches all real (hex) tokens. (Widening is optional cleanup.) |
+| CRIT-4 sites 9112, 9128, 10752, 10952 | Correct today — Accounts primary field or legacy name lookup. |
+| CRIT-6 | `lastUserMsg.content` is already guarded by `lastUserMsg &&` at gchat:24948. |
+| CRIT-5 (as scoped by the audit) | The audit's site list is wrong. The *real* narrow double-write is addressed in Phase 6 with a corrected design. |
 
-### 4C. LEADS NEEDING VERIFICATION before any fix
-| ID | What must be verified |
-|----|----------------------|
-| CRIT-5 | Real double-writes occur ONLY where `askClaude` completes without a `__continuation` AND the caller also writes. The audit's site list is wrong — must be re-derived (Discovery D1). |
-| CRIT-11 | Real issue, but the audit's fix is a no-op. Root cause is L-15 (`env.ctx` never assigned). Needs real `ctx` plumbing (Discovery D4). |
-| CRIT-14 | `logShadowClassification` per-request DDL — confirm no existing guard, confirm `globalThis` guard pattern is safe here. |
-| EXT-CRIT-1..4 | Chrome extension findings — not yet verified against code (Discovery D5). |
+### 4C. RECLASSIFIED
+| ID | Reclassification |
+|----|------------------|
+| DLQ | **NOT a code bug.** A DLQ does not need `[[queues.producers]]`; CF auto-routes. It needs the queue *resource* to exist. Phase 0.6 checks via `wrangler queues list`. Action depends on the result. |
 
 ---
 
-## 5. Phased Rollout (revised)
+## 5. Phased Rollout — Two Waves
 
-Each phase = one PR. A phase does not start until the previous one is deployed
-and observed clean. **Every phase begins with re-verifying its findings.**
+### WAVE 1 — Verified, low-risk fixes (do these first)
 
-### Phase 1 — Verified Class-A only (one PR: worker + worker-gchat)
-**Changes:** CRIT-3 eosLabel — use `eosDate <= now ? 'End of Sale (passed)' :
-'End of Sale'` (mirrors the adjacent `eostLabel` convention); CRIT-6 null guard
-before `lastUserMsg.content`; CRIT-8 try/catch around `zoho_delete_record`'s
-DELETE — the catch MUST return the **same error shape** as the existing
-returned-error branch (`{success:false, error, _no_partial_success:true,
-message:'...did NOT succeed...'}`) so the model never falsely claims success;
-CRIT-13 **delete** the dead block at webex:3284-3288.
-**Removed from Phase 1 vs v1:** CRIT-11 (audit fix is a no-op — moved to Phase 4),
-CRIT-12 (not a bug — dropped).
-**Verification:** dry-run; full test suites; smoke-test an EOL date query on
-both bots; smoke-test a brand-new GChat session (empty history); smoke-test an
-"add pricing" follow-up (confirm no duplicate pricing block).
+#### Phase 1 — Class-A (one PR: worker + worker-gchat)
+**Changes:**
+- **CRIT-3** — `eosDate <= now ? 'End of Sale (passed)' : 'End of Sale'` (mirrors the adjacent `eostLabel` convention). Both workers.
+- **CRIT-8** — try/catch around the `zoho_delete_record` DELETE (gchat:13203). The catch MUST return the same shape as the existing error branch (13222-13228): `{ success:false, error:'Delete failed: '+e.message, _no_partial_success:true, message:'Delete did NOT succeed. Do not claim '+module_name+'/'+record_id+' was deleted.' }`.
+- **CRIT-13** — delete the dead block webex:3284-3288.
+**Verification:** dry-run; test suites; smoke-test EOL query on both bots;
+smoke-test an "add pricing" follow-up (confirm no duplicate pricing block).
 
-### Phase 2 — Undo token + API URL (one PR: worker-gchat)
-**Changes:** CRIT-1 `substring(-8)`→`slice(-8)` in the `generateUndoToken`
-fallback. **Severity downgraded:** the fallback is dead code in production
-(`crypto.randomUUID` is always available in CF Workers) — this is correctness
-hygiene, not a live bug. CRIT-9: route the two `api.anthropic.com` literals
-through the gateway **while preserving a direct-API fallback** — `api.anthropic.com`
-(`ANTHROPIC_API_DIRECT`, line 22) is an *intentional* documented fallback;
-`askClaudeContinue` (line 14890) deliberately fails over to it. The fix must
-replicate that gateway→direct pattern, not just swap to gateway-only.
-**Verification:** dry-run; undo-token test files; smoke-test a create→undo cycle;
-smoke-test `/api/detect-account` (one of the CRIT-9 call sites).
+#### Phase 2 — Undo token + API URL (one PR: worker-gchat)
+**Changes:**
+- **CRIT-1** — `substring(-8)`→`slice(-8)` in the `generateUndoToken` fallback. Cosmetic; the fallback is dead in production.
+- **CRIT-9** — route the two `api.anthropic.com` literals (19634, 23934) through the gateway **while preserving a direct-API fallback**. `ANTHROPIC_API_DIRECT` (line 22) is an intentional fallback; `askClaudeContinue` (14890) deliberately fails over to it. The fix replicates that gateway→direct pattern.
+**Verification:** dry-run; undo-token tests; create→undo smoke test; smoke-test `/api/detect-account`.
 
-### Phase 3 — Queue consumer + DDL guard + DLQ (one PR: worker-gchat)
-**Changes:** CRIT-7 add a `__continuation` loop to the queue consumer (line
-25482) mirroring `/_work`; **note** the consumer also writes history at line
-25505 — after Phase 3 that becomes the sole writer for continued queue jobs, a
-fact Phase 6 must respect. CRIT-14 add a `globalThis` guard to
-`logShadowClassification`. Resolve Q1: declare `stratus-gchat-crm-dlq` or remove
-the reference.
+#### Phase 3 — Queue consumer + DDL guard + DLQ (one PR: worker-gchat)
+**Changes:**
+- **CRIT-7** — after gchat:25483 add: `while (result && result.__continuation) { result = await askClaudeContinue(result.messages, result.tools, result.systemPrompt, result.iteration, env, progressCallback, 300000, personId); }` (mirrors the handoff loop at 22628-22634).
+- **CRIT-14** — guard the DDL only: `if (!globalThis.__shadowTableReady) { <run CREATE + 10 ALTER>; globalThis.__shadowTableReady = true; }`. The INSERT still runs every call.
+- **DLQ** — per Phase 0.6: if `stratus-gchat-crm-dlq` exists, add a wrangler.toml comment only; if absent, `wrangler queues create stratus-gchat-crm-dlq`.
+**Note for Phase 6:** the queue consumer also writes history at 25505. Today
+non-continuation queue jobs **double-write** (askClaude internal + 25505);
+continuation jobs single-write via 25505. Both branches are mapped in D1.
 **Verification:** dry-run; enqueue a long CRM job in a test space if possible.
 
-### Phase 4 — CRIT-11 done correctly (one PR: worker)
+#### Phase 4 — CRIT-11 telemetry (one PR: worker)
 **Blocked by Discovery D4.**
-**Changes:** fix `logBotUsageToD1` telemetry loss properly. The audit's
-`env.ctx?.waitUntil` is a no-op because `env.ctx` is never assigned. The real fix
-(per D4): either assign `env.ctx = ctx` at the top of `fetch()`, or thread the
-real `ctx` parameter down to the `askClaude` call site (line 7773). This is the
-same root cause as audit finding L-15.
-**Verification:** dry-run; confirm a D1 row with `cost_usd` is written for a
-fast-completing request.
+**The bug line is webex:7773 — INSIDE `askClaude`**, not a call site.
+**Fix:** add a `ctx` parameter to `askClaude` (signature at webex:7286) and pass
+the real `ctx` from all 8 call sites (8159, 8570, 8677, 8723, 8932, 8947, 8977,
+8997); use it as `ctx.waitUntil(logBotUsageToD1(...))` at 7773. **Threading is
+preferred over `env.ctx = ctx`** — assigning onto `env` is observable by
+concurrent requests and can attach a `waitUntil` to the wrong request's
+lifetime. Also migrate the existing dead `env.ctx` readers at webex:7321-7322 to
+the threaded `ctx`, or they remain broken.
+**Verification:** dry-run; confirm a D1 row with `cost_usd` for a fast request.
 
-### Phase 5 — Account_Name lookup, line 6094 ONLY (one PR, FLAG-GATED: worker-gchat)
+**WAVE 1 GATE:** all four phases deployed and observed clean in production before
+Wave 2 is even scheduled.
+
+---
+
+### WAVE 2 — Behavioral changes (higher risk; RECOMMEND deferring until Wave 1 is proven)
+
+These two fixes change paths the bot currently relies on. Recommendation: do not
+attempt them in the same sitting as Wave 1. Land Wave 1, watch it for a real
+period, then decide on Wave 2 separately. Both are blocked on discovery tasks.
+
+#### Phase 5 — Account_Name lookup, line 6094 ONLY (one PR, FLAG-GATED: worker-gchat)
 **Blocked by Discovery D2.**
-**Changes:** behind `FIX_CONTACT_LOOKUP` (`=== 'true'`), fix **only line 6094**
-(`fetchPrimaryContactForAccount`) using **COQL** — matching the proven pattern at
-line 6157 (`select ... from Contacts where ...`), NOT legacy-criteria
-`.id:equals`. **Sites 9112/9128/10752/10952 are explicitly OUT of scope** — they
-are correct today.
-**Why flag-gated:** this query currently always returns 0 results, so the bot has
-only ever run the "no contact found" branch. The fix activates the less-tested
-"contact found" branch. The flag allows instant revert.
-**Verification:** D2 confirms COQL syntax against live Zoho via the ZohoCRM MCP
-tools; smoke-test primary-contact resolution against a known account.
+**Concrete fix:** rewrite `fetchPrimaryContactForAccount` (gchat:6089-6098) as a
+COQL POST, behind `FIX_CONTACT_LOOKUP === 'true'`:
+```
+zohoApiCall('POST', 'coql', env, { select_query:
+  "select id,First_Name,Last_Name,Full_Name,Email,Secondary_Email,Phone,Mobile,Title,"
+  + "Account_Name,Mailing_Street,Mailing_City,Mailing_State,Mailing_Zip "
+  + "from Contacts where Account_Name = '" + accountId + "' "
+  + "order by Modified_Time desc limit 1" })
+```
+This mirrors the **proven lookup-by-ID COQL** at gchat:10870 and 23188 — NOT the
+email-LIKE COQL at 6157 (the v2 plan cited the wrong exemplar). Notes:
+- The search-API params `sort_by=Modified_Time&sort_order=desc&per_page=1` must be
+  translated to COQL `order by Modified_Time desc limit 1` (done above).
+- **D2 must validate the entire select field list against the live org** — COQL
+  rejects some fields the search API tolerates. Drop any field D2 flags.
+- COQL response shape: `r.data` is the rows array (same as search) — the existing
+  `r?.data?.[0]` access is unchanged.
+**Why flag-gated:** the query currently always returns 0 results, so only the "no
+contact found" branch has ever run. The fix activates the less-tested "contact
+found" branch. Flag = instant revert.
+**Out of scope:** sites 9112/9128/10752/10952 — correct today, do not touch.
+**Verification:** D2 confirms COQL syntax + field list against live Zoho via the
+ZohoCRM MCP tools; smoke-test primary-contact resolution for a known account.
 
-### Phase 6 — History single-writer (one PR, FLAG-GATED: worker-gchat)
-**Blocked by Discovery D1.**
-**Approach (corrected from v1):** the v1 plan — "remove the redundant second
-call" — was wrong. `askClaude` writes history (lines 16114-16115) ONLY when it
-completes without a `__continuation`. On continuation paths it returns early at
-line 15724 and never writes; `askClaudeContinue` never writes at all. So the
-endpoint-level / workflow-level writes are the **sole** writer on every
-continuation path. **The fix must make exactly one writer per path** — the safe
-direction is to keep the endpoint/workflow writes (which fire after the
-`while(__continuation)` loop) and instead gate `askClaude`'s internal write
-(16114-16115) so it only fires when the caller will NOT also write. D1 produces
-the authoritative per-path writer map first.
-**Flag-gated** (`HISTORY_SINGLE_WRITE === 'true'`); KV-repair script ready first.
-**Verification:** D1 map; multi-turn conversation smoke test on both bots
-including a long (continuation-triggering) CRM job; confirm KV history length is
-correct and not zero on continuation paths.
+#### Phase 6 — History single-writer (one PR: worker-gchat)
+**Blocked by Discovery D1. Approach is PROVISIONAL until D1's writer map lands.**
 
-### Phase 7 — Mechanical refactors (one PR: worker-gchat)
-**Changes:** org-ID → `ZOHO_ORG_ID` constant (verify the literal count first —
-audit says 62; confirm by grep); `addBusinessDays` → one shared util; Velocity
-Hub URL → `env.VELOCITY_HUB_URL` with the current URL as the fallback default.
-**Verification:** grep shows zero remaining literals; the constant `===` the old
-literal; spot-check 5 generated URLs byte-for-byte.
+**The problem (verified):** `askClaude` writes history (16114-16115) only on
+non-continuation completion; on continuation it returns early (15723) without
+writing, and `askClaudeContinue` never writes. Callers split into 3 classes:
+- **Class 1 — caller also writes** (double-write on non-continuation): CrmWorkflow
+  16614, `/_work` 24291, `/api/chat` 22440, handoff 22652, queue consumer 25505.
+- **Class 2 — `askClaude`'s internal write is the SOLE writer** (no caller write):
+  sync GChat fallback 25226/25236/25245, gmail-addon dashboard 20765.
+- **Class 3 — via `askWithWaterfall`:** `/api/chat-waterfall` always writes at
+  22161; `askWithWaterfall` calls `askClaude` only on the Claude tiers → double
+  on Claude tiers, single on llama/gemma/deepseek/cf/deterministic tiers.
 
-### Phase 8 — Chrome extension (one PR — separate pipeline)
-**Blocked by Discovery D5.**
-**Changes:** EXT-CRIT-1..4 — only those D5 confirms are real.
-**Rollback (corrected):** the extension auto-updates via `update_url` and Chrome
-will NOT auto-downgrade. Rollback = rebuild from the tag, **bump the version
-up**, AND republish `update-manifest.xml`. Propagation is not instant (Chrome
-polls every few hours).
-**Verification:** load unpacked, manually exercise each fixed path in a browser.
+**Corrected design (inverted single-writer):**
+- Add a `skipHistory` param to `askClaude` (default `false`). `askClaude` writes
+  internally iff `!skipHistory && !continuation`.
+- **Class 2:** unchanged — `askClaude` default writes for them. (This is why the
+  v2 "gate off the internal write" idea was wrong — it would have erased history
+  on the most common bot path.)
+- **Class 1:** keep the post-loop `addToHistory`, but make it conditional on a
+  local `didContinue` boolean — write only when a continuation actually occurred
+  (non-continuation is already covered by `askClaude`'s internal write).
+- **Class 3:** `askWithWaterfall` calls `askClaude` with `skipHistory=true`;
+  `/api/chat-waterfall`'s write at 22161 becomes the single writer for ALL tiers.
+- `/_continue`: keep its write (continuation path, `askClaudeContinue` never writes).
+**Revert:** because this is pervasive and multi-site, a feature flag would inject
+conditional branches at ~10 sites — messy. Primary revert here is per-commit
+`git revert` + redeploy, plus the KV-repair script. (Flag optional, decided after D1.)
+**Verification:** D1 writer map reviewed first; multi-turn smoke test on both
+bots including a continuation-triggering long CRM job; confirm KV history length
+is correct and never zero on any path.
 
-### Phase 9 — Org/infra cleanup (Class E — per-item explicit approval)
+**Honest recommendation:** Phase 6 is the riskiest item in this plan and the
+double-write bug is bounded (history 2x, the bot works well despite it).
+Consider deferring Phase 6 indefinitely unless the doubled history is causing an
+observed problem (e.g. premature context truncation).
+
+---
+
+### WAVE 3 — Cleanup (low urgency)
+
+#### Phase 7 — Mechanical refactors (one PR: worker-gchat)
+org-ID → `ZOHO_ORG_ID` constant (grep-confirm the count first); `addBusinessDays`
+→ one shared util; Velocity Hub URL → `env.VELOCITY_HUB_URL` with the current URL
+as fallback default. Verification: grep shows zero remaining literals; constant
+`===` old literal; spot-check 5 URLs byte-for-byte.
+
+#### Phase 8 — Chrome extension (one PR — separate pipeline)
+**Changes (all 4 verified real in Round 2):**
+- EXT-CRIT-1 — `chrome.runtime.sendMessage({ ...ctx, type: 'ZOHO_CONTEXT_CHANGED' })` (spread first, type last).
+- EXT-CRIT-2 — add `ZOHO_DISCONNECT` to `MSG` in constants.js; register `[MSG.ZOHO_DISCONNECT]: async () => disconnectZoho()` in background/index.js (`disconnectZoho` is already imported, unused); update OptionsPage.jsx:145 to `sendToBackground(MSG.ZOHO_DISCONNECT)`.
+- EXT-CRIT-3 — handler-side fix in background/index.js:201: `async ({ data }) => { const { recipients, subject, sentAt } = data || {}; ... }`.
+- EXT-CRIT-4 — add `case 'NAVIGATE_TO_TASKS':` to the content/index.js switch (1777-1794) forwarding to the sidebar; add the constant. Depends on EXT-CRIT-3 (else the notification is never shown).
+**Rollback:** Chrome will NOT auto-downgrade. Revert = rebuild from the tag, bump
+the version UP, AND republish `update-manifest.xml`; propagation is not instant.
+**Verification:** load unpacked, exercise each fixed path in a browser.
+
+#### Phase 9 — Org/infra cleanup (Class E — per-item explicit approval)
 Branch deletion, root `index.js`/`data/` removal, stale `stratus-bot-v2` worker
-deletion, test-file reorg, open-PR resolution. **Each destructive item needs a
-separate explicit go-ahead.** Nothing bundled.
+deletion, test-file reorg, open-PR resolution. Each destructive item needs a
+separate explicit go-ahead. Nothing bundled.
 
 ---
 
@@ -237,25 +274,25 @@ separate explicit go-ahead.** Nothing bundled.
 
 | ID | Task | Blocks | Method |
 |----|------|--------|--------|
-| **D1** | Build the authoritative history-writer map: for EVERY ingress path (`/_work`, `/_continue`, `/api/chat`, `/api/chat-waterfall`, `CrmWorkflow`, queue consumer, handoff, EOL/gmailShare), trace whether it calls `askClaude` / `askClaudeContinue` / `askWithWaterfall`, whether that path can return `__continuation`, and which `addToHistory` call is the sole vs. duplicate writer **on each branch**. | Phase 6 | Code read — no changes |
-| **D2** | Verify the exact COQL syntax to fetch Contacts by parent Account ID, against the live org. | Phase 5 | `ZohoCRM_searchRecords` / COQL MCP tool on a real account |
-| **D4** | Decide the `env.ctx` remediation: `env.ctx = ctx` assignment at `fetch()` top vs. threading `ctx` to line 7773. Check every other `env.ctx` reader won't be affected. | Phase 4 | Code read of the Webex `fetch` entrypoint |
-| **D5** | Verify each Chrome-extension finding EXT-CRIT-1..4 against the actual extension source before any edit. | Phase 8 | Code read of `chrome-extension/src/**` |
-| **D6** | Confirm whether any phase requires a D1 migration; if so author the forward-fix migration. | Phase 0 gate | wrangler.toml + migrations dir review |
+| **D1** | Authoritative history-writer map. For EVERY ingress path — `/_work`, `/_continue`, `/api/chat`, `/api/chat-waterfall` (enumerate EACH waterfall tier), CrmWorkflow, queue consumer, handoff, sync GChat fallback (25226/25236/25245), gmail-addon dashboard (20765), EOL/gmailShare — trace `askClaude`/`askClaudeContinue`/`askWithWaterfall` usage, whether the path can return `__continuation`, and the sole-vs-duplicate writer on each branch. | Phase 6 | Code read |
+| **D2** | Verify the exact COQL `select` field list AND the lookup-by-ID WHERE clause for Contacts-by-Account-ID, against the live org. | Phase 5 | ZohoCRM / COQL MCP tool on a real account |
+| **D4** | Confirm the `askClaude` `ctx`-threading plan: 8 call sites, signature change, and that webex:7321-7322 migrate cleanly. | Phase 4 | Code read |
+| **D6** | `wrangler queues list`; confirm D1-migration needs per phase. | Phase 0 / Phase 3 | wrangler CLI |
 
 ---
 
 ## 7. Open Questions for Chris
 
-- **Q1 — Dead-letter queue:** declare `stratus-gchat-crm-dlq` as a real queue, or
-  remove the reference (accepting that exhausted-retry messages are dropped)?
-- **Q3 — Flag defaults:** ship `HISTORY_SINGLE_WRITE` / `FIX_CONTACT_LOOKUP`
-  **OFF** (deploy dark, flip on after observation) — recommended — or ON?
-- **Q4 — Email responder (PR #80):** worker is live but its source is not in
-  `main`. Fold into this effort or keep separate?
-- **Q5 — Scope:** given the audit's unreliability, recommend we fix only the
-  **4A verified bugs** now and treat 4C as a second wave after verification —
-  rather than attempting "all findings" in one effort. Confirm?
+- **Q1 — DLQ:** if `wrangler queues list` shows `stratus-gchat-crm-dlq` is missing,
+  create it (recommended) or remove the `dead_letter_queue` line?
+- **Q3 — Flag default:** ship `FIX_CONTACT_LOOKUP` **OFF** (deploy dark, flip on
+  after observation) — recommended.
+- **Q4 — Email responder (PR #80):** live worker, source not in `main`. Fold in or
+  keep separate?
+- **Q5 — Scope (IMPORTANT):** recommend executing **Wave 1 only** for now (all
+  verified, low-risk), proving it in production, then deciding on Wave 2
+  separately — rather than attempting everything at once. Phase 6 in particular
+  may be best deferred indefinitely. Confirm this staged approach?
 
 ---
 
@@ -265,25 +302,21 @@ separate explicit go-ahead.** Nothing bundled.
 2. `wrangler deploy --dry-run` — must pass.
 3. Run that worker's test suite — must pass.
 4. Merge the phase PR to `main`.
-5. Deploy **one worker**; record the new deployment ID.
+5. Deploy one worker; record the new deployment ID.
 6. Observe (smoke tests + real traffic) for an agreed window.
-7. Only then proceed. At any regression: `wrangler rollback` + diagnose.
+7. At any regression: `wrangler rollback` + diagnose.
 
 ---
 
 ## 9. Consciously Deferred / Out of Scope (decision, not omission)
 
-- Audit Part-2 logic errors L-1..L-14 — **except L-9** (`TOOL_SUBSETS.subscription`
-  missing `create_quote_on_deal`, a real functional gap) which is promoted to a
-  candidate for a future phase pending verification.
-- Cron-corruption findings (gchat `unescape` at line 25911; silent GitHub PATCH
-  failure at line 25968) — real, can corrupt `prices.json` commits; promoted to
-  a candidate future phase pending verification.
-- Config mismatches in audit Part 3 not in Phase 7 (dead gateway bindings,
-  `DEEPSEEK_API_KEY` undocumented, `WORKER_MANIFEST` wrong binding name) —
-  deferred; low operational risk.
+- Audit Part-2 logic errors L-1..L-14 — except **L-9** (`TOOL_SUBSETS.subscription`
+  missing `create_quote_on_deal`) and the **cron-corruption** findings (gchat
+  `unescape` 25911, silent GitHub PATCH failure 25968), which are real and
+  promoted to candidate future phases pending verification.
+- Audit Part-3 config mismatches not in Phase 7 — deferred, low risk.
 - Email responder bugs (audit Part 10) — deferred via Q4.
-- All Part 5/6 dead-code and duplicate-logic cleanup — deferred; cosmetic.
+- Part 5/6 dead-code and duplicate-logic cleanup — deferred, cosmetic.
 
 ---
 
@@ -296,19 +329,23 @@ separate explicit go-ahead.** Nothing bundled.
 | stratus-ai-bot-gateway | _TBD_ | ☐ |
 
 Known-good git tag: `pre-audit-fixes-2026-05-22` — ☐ created ☐ pushed
+`wrangler queues list` output — ☐ recorded
 
 ---
 
-## Appendix B — Round 1 Review Outcome
+## Appendix B — Review History
 
-Round 1 (independent adversarial review) verified plan v1's claims against
-source. Result: 3 Blockers, 5 High, 5 Medium, 5 Low. Key corrections folded into
-v2: audit findings CRIT-10/CRIT-12 dropped as non-bugs; CRIT-2 severity removed;
-CRIT-4 scoped to one site; CRIT-5 approach inverted; CRIT-11 reclassified;
-feature-flag string semantics mandated; `wrangler rollback` limitations
-documented. v2 is pending Round 2 review.
+- **Round 1** — verified plan v1 against source. 3 Blockers, 5 High, 5 Medium, 5
+  Low. Dropped audit CRIT-10/12 as non-bugs; scoped CRIT-4 to one site; inverted
+  the CRIT-5 approach; mandated feature-flag string semantics; documented
+  `wrangler rollback` limits.
+- **Round 2** — verified plan v2. 2 Blockers (Phase 5 COQL exemplar wrong; Phase
+  6 gating approach not implementable) + plan errors in Phase 3/4 wording and a
+  false CRIT-6 "verified" label. Verified CRIT-3/7/8/14 and EXT-CRIT-1..4 as real;
+  CRIT-6 confirmed non-bug; DLQ reclassified.
+- **Round 3** — pending (this is v3).
 
 ---
 
-*v2 DRAFT. Under continued adversarial review. Not executed until reviewed,
-revised, and explicitly approved by Chris.*
+*v3 DRAFT. Pending Round 3 review. Not executed until reviewed, revised, and
+explicitly approved by Chris.*
