@@ -1,7 +1,7 @@
 # Stratus Bot v2 — Audit Remediation Plan
 **Date:** 2026-05-22
 **Companion to:** `docs/AUDIT-2026-05-22.md`
-**Status:** v3 — revised after Round 1 + Round 2 adversarial review. NOT approved. NO code changed.
+**Status:** v4 — revised after Rounds 1-3 adversarial review. Wave 1 converged. NOT approved. NO code changed.
 
 ---
 
@@ -135,7 +135,7 @@ trim them. Authored *before* Phase 6, not after.
 #### Phase 1 — Class-A (one PR: worker + worker-gchat)
 **Changes:**
 - **CRIT-3** — `eosDate <= now ? 'End of Sale (passed)' : 'End of Sale'` (mirrors the adjacent `eostLabel` convention). Both workers.
-- **CRIT-8** — try/catch around the `zoho_delete_record` DELETE (gchat:13203). The catch MUST return the same shape as the existing error branch (13222-13228): `{ success:false, error:'Delete failed: '+e.message, _no_partial_success:true, message:'Delete did NOT succeed. Do not claim '+module_name+'/'+record_id+' was deleted.' }`.
+- **CRIT-8** — try/catch around the `zoho_delete_record` DELETE (gchat:13203). The catch MUST return the same shape as the existing error branch (13222-13228): `{ success:false, error:'Delete failed: '+e.message, _no_partial_success:true, message:'Delete did NOT succeed. Do not claim '+module_name+'/'+record_id+' was deleted.' }`. The catch should also call `logCrmOpToD1` (best-effort), matching the existing error branch (13207-13221), so a thrown DELETE still produces a CRM-op telemetry row.
 - **CRIT-13** — delete the dead block webex:3284-3288.
 **Verification:** dry-run; test suites; smoke-test EOL query on both bots;
 smoke-test an "add pricing" follow-up (confirm no duplicate pricing block).
@@ -190,8 +190,11 @@ zohoApiCall('POST', 'coql', env, { select_query:
   + "from Contacts where Account_Name = '" + accountId + "' "
   + "order by Modified_Time desc limit 1" })
 ```
-This mirrors the **proven lookup-by-ID COQL** at gchat:10870 and 23188 — NOT the
-email-LIKE COQL at 6157 (the v2 plan cited the wrong exemplar). Notes:
+This mirrors the **proven lookup-by-ID COQL** at gchat:10870 (`where Account_Name
+= '<id>'`, the exact bare form used above) — NOT the email-LIKE COQL at 6157.
+(gchat:23188 does the same lookup with the equivalent dotted form
+`Account_Name.id = '<id>'`; both forms work in Zoho COQL — use the bare form to
+match 10870.) Notes:
 - The search-API params `sort_by=Modified_Time&sort_order=desc&per_page=1` must be
   translated to COQL `order by Modified_Time desc limit 1` (done above).
 - **D2 must validate the entire select field list against the live org** — COQL
@@ -205,43 +208,39 @@ found" branch. Flag = instant revert.
 **Verification:** D2 confirms COQL syntax + field list against live Zoho via the
 ZohoCRM MCP tools; smoke-test primary-contact resolution for a known account.
 
-#### Phase 6 — History single-writer (one PR: worker-gchat)
-**Blocked by Discovery D1. Approach is PROVISIONAL until D1's writer map lands.**
+#### Phase 6 — History double-write (DEFERRED — recommended)
+**Status: NOT designed. Do not schedule until Discovery D1 is complete and reviewed.**
 
-**The problem (verified):** `askClaude` writes history (16114-16115) only on
-non-continuation completion; on continuation it returns early (15723) without
-writing, and `askClaudeContinue` never writes. Callers split into 3 classes:
-- **Class 1 — caller also writes** (double-write on non-continuation): CrmWorkflow
-  16614, `/_work` 24291, `/api/chat` 22440, handoff 22652, queue consumer 25505.
-- **Class 2 — `askClaude`'s internal write is the SOLE writer** (no caller write):
-  sync GChat fallback 25226/25236/25245, gmail-addon dashboard 20765.
-- **Class 3 — via `askWithWaterfall`:** `/api/chat-waterfall` always writes at
-  22161; `askWithWaterfall` calls `askClaude` only on the Claude tiers → double
-  on Claude tiers, single on llama/gemma/deepseek/cf/deterministic tiers.
+The history double-write is real but **bounded** — on non-continuation paths
+where both `askClaude` and the caller write, a turn is recorded twice (history
+grows ~2x). The bot works well despite it; it is NOT a crash or data-loss bug.
 
-**Corrected design (inverted single-writer):**
-- Add a `skipHistory` param to `askClaude` (default `false`). `askClaude` writes
-  internally iff `!skipHistory && !continuation`.
-- **Class 2:** unchanged — `askClaude` default writes for them. (This is why the
-  v2 "gate off the internal write" idea was wrong — it would have erased history
-  on the most common bot path.)
-- **Class 1:** keep the post-loop `addToHistory`, but make it conditional on a
-  local `didContinue` boolean — write only when a continuation actually occurred
-  (non-continuation is already covered by `askClaude`'s internal write).
-- **Class 3:** `askWithWaterfall` calls `askClaude` with `skipHistory=true`;
-  `/api/chat-waterfall`'s write at 22161 becomes the single writer for ALL tiers.
-- `/_continue`: keep its write (continuation path, `askClaudeContinue` never writes).
-**Revert:** because this is pervasive and multi-site, a feature flag would inject
-conditional branches at ~10 sites — messy. Primary revert here is per-commit
-`git revert` + redeploy, plus the KV-repair script. (Flag optional, decided after D1.)
-**Verification:** D1 writer map reviewed first; multi-turn smoke test on both
-bots including a continuation-triggering long CRM job; confirm KV history length
-is correct and never zero on any path.
+**Why this phase is deferred, not specified:** all three review rounds each
+uncovered new landmines in every concrete fix design attempted:
+- `askClaude` writes history only on non-continuation; `askClaudeContinue` never
+  writes — so "redundant" caller writes are the *sole* writer on continuation
+  paths (Round 1).
+- The sync GChat fallback relies on `askClaude`'s internal write as the SOLE
+  writer — gating it off erases history on the most common bot path (Round 2).
+- The waterfall reaches `askClaude` via `askClaudeForBenchmark` (which is ALSO
+  the eval-harness entry point — non-trivial blast radius); the Gmail-share path
+  and the handoff's 2nd `askClaude` call site are additional unlisted
+  double-writers; a `didContinue` flag does NOT survive Cloudflare Workflow
+  hibernation in `CrmWorkflow` (must be returned from the `step.do` result); and
+  `/_work`'s write is a non-continuation write that should simply be deleted, not
+  made conditional (Round 3).
 
-**Honest recommendation:** Phase 6 is the riskiest item in this plan and the
-double-write bug is bounded (history 2x, the bot works well despite it).
-Consider deferring Phase 6 indefinitely unless the doubled history is causing an
-observed problem (e.g. premature context truncation).
+A fix is achievable, but only AFTER an expanded **D1** produces a complete,
+verified writer map. **D1 is the deliverable for this phase — not a fix.** Once
+D1 exists, a corrected design (likely direction: `askClaude` and
+`askClaudeForBenchmark` gain a `skipHistory` parameter; exactly one writer per
+fully-enumerated path) can be drafted and put through its own review round.
+
+**Recommendation:** defer Phase 6 indefinitely unless the doubled history is
+causing an *observed* problem (e.g. premature context truncation in long
+conversations). The regression risk outweighs the benefit of halving history
+size. If later pursued: its own PR, per-commit `git revert` is the revert path,
+and the KV-repair script must exist first.
 
 ---
 
@@ -274,7 +273,7 @@ separate explicit go-ahead. Nothing bundled.
 
 | ID | Task | Blocks | Method |
 |----|------|--------|--------|
-| **D1** | Authoritative history-writer map. For EVERY ingress path — `/_work`, `/_continue`, `/api/chat`, `/api/chat-waterfall` (enumerate EACH waterfall tier), CrmWorkflow, queue consumer, handoff, sync GChat fallback (25226/25236/25245), gmail-addon dashboard (20765), EOL/gmailShare — trace `askClaude`/`askClaudeContinue`/`askWithWaterfall` usage, whether the path can return `__continuation`, and the sole-vs-duplicate writer on each branch. | Phase 6 | Code read |
+| **D1** | Complete, verified history-writer map — the prerequisite *deliverable* for Phase 6. Trace the full call chain for every path that can write conversation history and identify the sole-vs-duplicate writer on each branch (continuation AND non-continuation). MUST cover: top-level `askClaude`, `askClaudeContinue`, `askWithWaterfall`; the wrapper `askClaudeForBenchmark` (the real waterfall→Claude hop — and the eval-harness entry point, so note its blast radius); the wrapper handlers `processGmailShareToChat` and `processEmailThread`; and every ingress path — `/_work`, `/_continue`, `/api/chat`, `/api/chat-waterfall` (each waterfall tier), `/api/quote`, CrmWorkflow, queue consumer, handoff (BOTH `askClaude` call sites — 22652 and 22671), sync GChat fallback (25226/25236/25245), gmail-addon dashboard (20765), EOL/gmailShare (24817). Output: a table of every `addToHistory` call with sole/duplicate status per branch. | Phase 6 | Code read |
 | **D2** | Verify the exact COQL `select` field list AND the lookup-by-ID WHERE clause for Contacts-by-Account-ID, against the live org. | Phase 5 | ZohoCRM / COQL MCP tool on a real account |
 | **D4** | Confirm the `askClaude` `ctx`-threading plan: 8 call sites, signature change, and that webex:7321-7322 migrate cleanly. | Phase 4 | Code read |
 | **D6** | `wrangler queues list`; confirm D1-migration needs per phase. | Phase 0 / Phase 3 | wrangler CLI |
@@ -343,9 +342,19 @@ Known-good git tag: `pre-audit-fixes-2026-05-22` — ☐ created ☐ pushed
   6 gating approach not implementable) + plan errors in Phase 3/4 wording and a
   false CRIT-6 "verified" label. Verified CRIT-3/7/8/14 and EXT-CRIT-1..4 as real;
   CRIT-6 confirmed non-bug; DLQ reclassified.
-- **Round 3** — pending (this is v3).
+- **Round 3** — convergence review of v3. **Verdict: Wave 1 (Phases 1-4) has
+  converged — verified safe to execute after D4/D6.** Wave 2 needs more work:
+  Phase 6's class taxonomy was still incomplete (missed the `askClaudeForBenchmark`
+  hop, the Gmail-share double-write at 24817, the handoff 2nd call site at 22671,
+  Workflow hibernation of `didContinue`, and `/_work`'s structure); Phase 5's
+  exemplar citation was imprecise; CRIT-8 catch omitted a telemetry call.
+- **Round 4 (folded into v4)** — Phase 6 no longer presents an authoritative
+  design: it is explicitly DEFERRED, with an expanded D1 as its sole prerequisite
+  deliverable. Phase 5 citation corrected; CRIT-8 telemetry note added; D1 scope
+  expanded to trace `askClaudeForBenchmark` and the wrapper handlers.
 
 ---
 
-*v3 DRAFT. Pending Round 3 review. Not executed until reviewed, revised, and
-explicitly approved by Chris.*
+*v4. Wave 1 (Phases 1-4) has passed three review rounds and is ready for Chris's
+approval. Wave 2: Phase 5 is gated and blocked on D2; Phase 6 is deferred pending
+the expanded D1. Nothing is executed until explicitly approved by Chris.*
