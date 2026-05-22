@@ -7792,6 +7792,229 @@ async function triggerAndPollAdminAction({ moduleName, recordId, actionName, env
   return { success: true, state: 'processing', final_state: finalState, write_result: writeResult, poll_snapshots: snapshots };
 }
 
+// 2026-05-22 (Fix B): deterministic margin-target pricing. The bot must never
+// compute margin discounts itself — in QA it improvised "List*Qty*0.20", a flat
+// discount off list, which is NOT a Stratus margin. This helper runs the
+// LIVE_GetQuoteData admin action to pull CCW-approved distributor cost
+// (Vendor_Lines), computes each line's discount so Stratus lands at the target
+// margin, writes the discounts ({id, Discount} only — never Product_Name, so
+// the ecomm discount-corrector skips them), and verifies. The agent tool
+// apply_margin_to_quote(quote_id, target_margin) just calls this — zero model
+// arithmetic. Formula (per the zoho-crm-v35 margin-update workflow):
+//   Target_Sell = Disti_Price_Total / (1 - margin)
+//   Discount    = (List_Price * Quantity) - Target_Sell
+async function applyMarginToQuote(quoteId, targetMargin, env, personId = null) {
+  const startedMs = Date.now();
+  const fail = (error, message, extra = {}) => ({ success: false, error, message, ...extra });
+
+  // ── 1. Normalize + validate the margin (accept 20 or 0.20) ──
+  let margin = Number(targetMargin);
+  if (!Number.isFinite(margin)) return fail('invalid_margin', `target_margin "${targetMargin}" is not a number.`);
+  if (margin > 1) margin = margin / 100;
+  if (!(margin > 0) || margin >= 0.95) {
+    return fail('invalid_margin', `target_margin must be between 0 and 0.95 — got ${margin}. A 20% margin is 0.20.`);
+  }
+
+  // ── 2. Fetch the quote + its line items ──
+  let quote;
+  try { quote = await fetchRecordFull('Quotes', quoteId, env); }
+  catch (err) { return fail('quote_fetch_failed', `Could not fetch Quote ${quoteId}: ${err.message}`); }
+  if (!quote) return fail('quote_not_found', `Quote ${quoteId} was not found.`);
+  const quotedItems = Array.isArray(quote.Quoted_Items) ? quote.Quoted_Items : [];
+  if (quotedItems.length === 0) return fail('no_line_items', `Quote ${quoteId} has no line items to price.`);
+
+  // ── 3. CCW approval prerequisite — a margin needs approved distributor cost ──
+  if (!isCiscoDid(quote.CCW_Deal_Number)) {
+    return fail('no_ccw_deal_number',
+      `Quote ${quoteId} has no CCW_Deal_Number — it needs Cisco approval (a DID) before a margin target can be priced from approved distributor cost. Submit it for Cisco approval first, then retry. Do NOT estimate the discounts.`);
+  }
+
+  // ── 4. Run LIVE_GetQuoteData to refresh approved distributor cost ──
+  const adminAction = await triggerAndPollAdminAction({
+    moduleName: 'Quotes', recordId: quoteId, actionName: 'LIVE_GetQuoteData',
+    env, maxPollMs: 60000, pollEveryMs: 5000,
+  }).catch(err => ({ success: false, state: 'exception', error: err.message }));
+
+  // ── 5. Fetch Vendor_Lines — authoritative for "is cost data ready". The
+  //       admin-action state ('processing' on timeout, 'already_done' when
+  //       stale) is NOT trusted; populated Vendor_Lines is the only signal. ──
+  let vendorLines = [];
+  try {
+    const vlCriteria = encodeURIComponent(`(Quote.id:equals:${quoteId})`);
+    const vlResult = await zohoApiCall('GET',
+      `Vendor_Lines/search?criteria=${vlCriteria}&fields=id,Name,Product_Code,Quantity,List_Price,Disti_Price,Disti_Price_Total&per_page=200`, env);
+    vendorLines = Array.isArray(vlResult?.data) ? vlResult.data : [];
+  } catch (err) {
+    vendorLines = [];
+  }
+  if (vendorLines.length === 0) {
+    return fail('cost_data_unavailable',
+      `LIVE_GetQuoteData ran (admin-action state: ${adminAction?.state || 'unknown'}) but no Vendor_Lines distributor-cost rows are available for Quote ${quoteId}. Cost data is not ready — wait a moment and retry, or the quote may need to be re-approved in CCW. Do NOT guess the discounts.`,
+      { admin_action_state: adminAction?.state || null });
+  }
+
+  // ── 6. Match each line to a cost row + compute the discount. Conservative:
+  //       match on Product_Code + Quantity, consume on match, fail closed on
+  //       any missing or ambiguous cost row (do not mis-price). ──
+  const vlPool = vendorLines.map(v => ({
+    product_code: String(v.Product_Code || '').trim().toUpperCase(),
+    quantity: Number(v.Quantity) || 0,
+    disti_total: moneyValue(v.Disti_Price_Total) || (moneyValue(v.Disti_Price) * (Number(v.Quantity) || 0)),
+    used: false,
+  }));
+  const lines = [];
+  const problems = [];
+  for (const item of quotedItems) {
+    const sku = String(item.Product_Name?.Product_Code || item.Product_Name?.name || '').trim().toUpperCase();
+    const qty = Number(item.Quantity) || 0;
+    const listTotal = roundMoney(moneyValue(item.List_Price) * qty);
+    const candidates = vlPool.filter(v => !v.used && v.product_code && v.product_code === sku && v.quantity === qty);
+    if (candidates.length === 0) { problems.push(`${sku || item.id}: no matching distributor-cost row`); continue; }
+    if (candidates.length > 1) { problems.push(`${sku || item.id}: ambiguous — ${candidates.length} distributor-cost rows match`); continue; }
+    const vl = candidates[0];
+    vl.used = true;
+    if (!(vl.disti_total > 0)) { problems.push(`${sku || item.id}: distributor cost is zero/unknown`); continue; }
+    if (!(listTotal > 0)) { problems.push(`${sku || item.id}: list price is zero/unknown`); continue; }
+    const targetSell = vl.disti_total / (1 - margin);
+    if (targetSell > listTotal + 0.01) {
+      problems.push(`${sku || item.id}: distributor cost $${vl.disti_total.toFixed(2)} is too high to hit a ${(margin * 100).toFixed(1)}% margin without pricing above list ($${listTotal.toFixed(2)})`);
+      continue;
+    }
+    lines.push({
+      id: item.id,
+      sku,
+      product_id: item.Product_Name?.id || null,
+      quantity: qty,
+      list_total: listTotal,
+      disti_total: roundMoney(vl.disti_total),
+      target_sell: roundMoney(targetSell),
+      discount: roundMoney(listTotal - targetSell),
+      achieved_margin: Number((((targetSell - vl.disti_total) / targetSell) * 100).toFixed(2)),
+    });
+  }
+  if (problems.length > 0) {
+    return fail('cost_match_failed',
+      `Could not price ${problems.length} of ${quotedItems.length} line item(s) to a ${(margin * 100).toFixed(1)}% margin: ${problems.join('; ')}. No changes were written — the whole margin update is aborted so the quote is not left half-priced.`,
+      { problems });
+  }
+
+  // ── 7. Snapshot pre-state for undo, then write the computed discounts.
+  //       The PUT sends {id, Discount} only — never Product_Name — so
+  //       correctQuotedItemDiscounts (the ecomm corrector) skips these rows.
+  //       The undo SNAPSHOT, however, must carry the full line shape:
+  //       undo_crm_action's Quote smart-diff keys on Product_Name.id /
+  //       Quantity / List_Price / Description, and a thin {id,Discount}
+  //       snapshot makes itemKey() return null — which would let undo delete
+  //       every line. Snapshot full rows so undo restores faithfully. ──
+  const preState = {
+    id: quoteId, Quote_Number: quote.Quote_Number,
+    Grand_Total: quote.Grand_Total, Sub_Total: quote.Sub_Total,
+    Quoted_Items: quotedItems.map(i => ({
+      id: i.id,
+      Product_Name: i.Product_Name?.id ? { id: i.Product_Name.id } : undefined,
+      Quantity: i.Quantity,
+      List_Price: i.List_Price,
+      Discount: i.Discount,
+      Description: i.Description,
+      Sequence_Number: i.Sequence_Number,
+    })),
+  };
+  let putResult;
+  try {
+    putResult = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, {
+      data: [{ id: quoteId, Quoted_Items: lines.map(l => ({ id: l.id, Discount: l.discount })), Do_Not_Auto_Update_Prices: true }],
+    });
+  } catch (err) { return fail('write_failed', `The discount write to Quote ${quoteId} threw: ${err.message}`); }
+  const putParsed = parseZohoResponse(putResult, 'Quote margin update');
+  if (putParsed?.success === false) {
+    return fail('write_rejected', `Zoho rejected the margin discount write: ${putParsed.message || 'unknown error'}`);
+  }
+
+  // ── 8. Focused verification — re-fetch, confirm line count + multiset
+  //       unchanged and every targeted discount landed (Codex-specified). ──
+  let verifyQuote = null;
+  try { verifyQuote = await fetchRecordFull('Quotes', quoteId, env); } catch (_) { verifyQuote = null; }
+  const verification = { verified: false, success: false };
+  if (!verifyQuote || !Array.isArray(verifyQuote.Quoted_Items)) {
+    verification.WARNING = `Margin discounts were written but the verification re-fetch of Quote ${quoteId} failed — the update is UNVERIFIED. Do NOT claim success; re-check the quote.`;
+  } else {
+    const after = verifyQuote.Quoted_Items;
+    const countOk = after.length === quotedItems.length;
+    const byId = new Map(after.map(i => [i.id, i]));
+    const mismatches = [];
+    if (!countOk) mismatches.push(`line count changed: ${quotedItems.length} → ${after.length} (possible duplicate rows)`);
+    for (const l of lines) {
+      const got = byId.get(l.id);
+      if (!got) { mismatches.push(`${l.sku}: line missing after update`); continue; }
+      if (Math.abs(moneyValue(got.Discount) - l.discount) > 0.5) {
+        mismatches.push(`${l.sku}: discount did not land (wanted $${l.discount}, got $${moneyValue(got.Discount)})`);
+      }
+      // A margin update only touches Discount — product + quantity must be
+      // unchanged. If either moved, the row was replaced, not modified.
+      if (l.product_id && String(got.Product_Name?.id || '') !== String(l.product_id)) {
+        mismatches.push(`${l.sku}: product changed on the line after update`);
+      }
+      if (Number(got.Quantity) !== l.quantity) {
+        mismatches.push(`${l.sku}: quantity changed (${l.quantity} → ${got.Quantity}) after update`);
+      }
+    }
+    verification.verified = true;
+    verification.line_count_unchanged = countOk;
+    verification.success = countOk && mismatches.length === 0;
+    verification.grand_total_before = moneyValue(quote.Grand_Total);
+    verification.grand_total_after = moneyValue(verifyQuote.Grand_Total);
+    if (mismatches.length > 0) {
+      verification.WARNING = `Margin update verification FAILED: ${mismatches.join('; ')}. Do NOT claim success.`;
+    }
+  }
+
+  // ── 9. Undo token + D1 log ──
+  const undoToken = generateUndoToken();
+  const recordUrl = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}`;
+  const summaryLine = verification.success
+    ? `Applied ${(margin * 100).toFixed(1)}% margin to Quote ${quote.Quote_Number || quoteId} — ${lines.length} line(s) repriced from approved distributor cost — [Open in Zoho](${recordUrl}) — Undo token: \`${undoToken}\` (say "undo" to reverse).`
+    : `⚠️ Margin update on Quote ${quoteId} did NOT fully verify. ${verification.WARNING || ''}`;
+  let opId = null;
+  try {
+    opId = await logCrmOpToD1(env, {
+      personId: personId || null, bot: botFromPersonId(personId),
+      operation: 'update', module: 'Quotes', recordId: quoteId,
+      recordName: quote.Subject || quote.Quote_Number || null,
+      status: verification.success ? 'success' : 'error',
+      durationMs: Date.now() - startedMs,
+      errorMessage: verification.success ? null : (verification.WARNING || 'margin verification failed'),
+      details: { margin_target: margin, lines, admin_action_state: adminAction?.state || null, verification },
+      preState,
+      postState: { id: quoteId, Quoted_Items: lines.map(l => ({ id: l.id, Discount: l.discount })) },
+      requestPayload: { tool: 'apply_margin_to_quote', quote_id: quoteId, target_margin: margin },
+      responsePayload: putParsed,
+      undoToken: verification.success ? undoToken : null,
+      userVisibleSummary: summaryLine,
+    });
+  } catch (_) { opId = null; }
+
+  // ── 10. Result for the model ──
+  const result = {
+    success: verification.success,
+    quote_id: quoteId,
+    quote_number: quote.Quote_Number || null,
+    target_margin: margin,
+    lines,
+    grand_total_before: moneyValue(quote.Grand_Total),
+    grand_total_after: verifyQuote ? moneyValue(verifyQuote.Grand_Total) : null,
+    verification,
+    admin_action_state: adminAction?.state || null,
+    message: summaryLine,
+  };
+  if (verification.success) {
+    result._undo_token = undoToken;
+    result._record_url = recordUrl;
+    result._operation_id = opId;
+    result._user_visible_summary = summaryLine;
+  }
+  return result;
+}
+
 async function ensureQuoteDidAndVelocity(quote, env, personId = null) {
   const quoteId = quote?.id;
   if (isCiscoDid(quote?.CCW_Deal_Number)) {
@@ -11433,6 +11656,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
       }
 
+      // ── Margin-target pricing (deterministic — server pulls approved disti
+      //    cost via LIVE_GetQuoteData and computes discounts; no model math) ──
+      case 'apply_margin_to_quote': {
+        const { quote_id, target_margin } = toolInput;
+        if (!quote_id) return { success: false, error: 'quote_id is required' };
+        if (target_margin === undefined || target_margin === null) {
+          return { success: false, error: 'target_margin is required (e.g. 0.20 or 20 for a 20% margin)' };
+        }
+        return await applyMarginToQuote(quote_id, target_margin, env, personId);
+      }
+
       // ── Clone Quote (native Zoho clone endpoint — preserves per-line Discount verbatim) ──
       case 'clone_quote': {
         const { quote_id, new_subject } = toolInput;
@@ -13183,6 +13417,18 @@ const CRM_EMAIL_TOOLS = [
     }
   },
   {
+    name: 'apply_margin_to_quote',
+    description: 'Set every line-item discount on a Quote so Stratus lands at a target margin, computed from the CCW-approved distributor cost. Use this for ANY margin-target request — "apply 20% margin", "update margin to X%", "price this quote at X% margin", "discounts to reflect a 20% margin". NEVER compute margin discounts yourself: a flat percentage off list is NOT a margin. The server runs the LIVE_GetQuoteData admin action to pull approved distributor cost (Vendor_Lines), computes per line Discount = (List_Price * Quantity) - (Disti_Price_Total / (1 - margin)), writes the discounts, and verifies. The Quote MUST already have a CCW_Deal_Number (Cisco-approved); if it does not, this returns a blocker telling the user to get Cisco approval first. Pass target_margin as a decimal or percent (0.20 or 20 both mean 20%). Trust the returned verification — do not claim success unless verification.success is true.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string', description: 'Zoho Quote record ID to reprice' },
+        target_margin: { type: 'number', description: 'Target Stratus margin — 0.20 or 20 both mean 20%' }
+      },
+      required: ['quote_id', 'target_margin']
+    }
+  },
+  {
     name: 'undo_crm_action',
     description: 'REVERT a previous CRM mutation to its exact prior state. Use this ONLY when the user asks to undo, revert, roll back, or "change it back". Pass the _undo_token that was returned by the earlier tool call (looks like "u_a3f9b2c1"). For updates, this restores the exact field values as they were before the change. For creates, this deletes the record. For clones, this deletes the cloned quote. For deletes, this re-creates the record from its pre-delete snapshot. The original (source) record of a clone is never touched. If the user says "undo" or "undo last" without a specific token, you MAY omit undo_token and the server will resolve to the most recent un-reversed mutation in this session. Always confirm the restoration with a fresh GET and report back the actual restored state.',
     input_schema: {
@@ -13664,7 +13910,7 @@ const TOOL_SUBSETS = Object.freeze({
   crm_write: [
     'create_deal_and_quote', 'create_quote_on_deal',
     'zoho_create_record', 'zoho_update_record',
-    'clone_quote', 'undo_crm_action',
+    'clone_quote', 'apply_margin_to_quote', 'undo_crm_action',
     'batch_product_lookup', 'parse_quote_url',
     'zoho_search_records', 'zoho_get_record'
   ],
@@ -13694,12 +13940,13 @@ const TOOL_SUBSETS = Object.freeze({
     'assign_cisco_rep_to_deal', 'zoho_search_records',
     'zoho_get_record', 'zoho_update_record'
   ],
-  // Fallback superset — 8 most-used tools across all classes. Covers
+  // Fallback superset — most-used tools across all classes. Covers
   // any ambiguous request without removing the model's options.
   general: [
     'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
     'zoho_create_record', 'zoho_update_record',
-    'batch_product_lookup', 'create_deal_and_quote', 'clone_quote'
+    'batch_product_lookup', 'create_deal_and_quote', 'clone_quote',
+    'apply_margin_to_quote'
   ]
 });
 
@@ -13752,6 +13999,18 @@ function classifyCrmIntent(text, ctx = {}) {
       || /\bcopy\s+(a\s+|the\s+|this\s+|current\s+|same\s+)?quote\b/.test(t)
       || /\b(make|create)\s+(a\s+)?copy\s+of\b.{0,30}\bquote\b/.test(t)
       || (/\b(clone|duplicate)\b/.test(t) && (ctx.hasActivePageContext || ctx.hasQuoteSession))) {
+    return { class: 'crm_write', confidence: 0.9 };
+  }
+
+  // 0c. Margin-pricing guard (2026-05-22): "X% margin / apply margin / update
+  // margin to X% / discounts to reflect a 20% margin" → crm_write, before the
+  // subscription rule. Margin pricing is deterministic via apply_margin_to_quote.
+  // A bare "what's the margin" question has no number/verb and is left to the
+  // read rules below.
+  if (/\bmargin\b/.test(t)
+      && (/\d\s*%?\s*margin\b/.test(t)
+          || /\bmargin\b[^.!?]{0,25}\d/.test(t)
+          || /\b(apply|set|update|adjust|change|reflect)\b[^.!?]{0,40}\bmargin\b/.test(t))) {
     return { class: 'crm_write', confidence: 0.9 };
   }
 
@@ -14081,6 +14340,14 @@ Use **batch_product_lookup** for ALL product lookups; **parse_quote_url** for St
    - \`verification.success: false\` → same as above.
    - \`verification.any_item_changed: false\` → no-op (wrong numbers). Recompute and retry.
 6. Only claim success when \`verification.success === true\` AND \`verification.any_item_changed === true\` AND \`actual_line_items\` show correct new Discount values. Never say "Done" based on Zoho's top-level "code: SUCCESS" alone — that fires even on no-ops.
+
+### Margin-Target Pricing (apply_margin_to_quote)
+When the user asks to price a quote to a MARGIN — "apply 20% margin", "update margin to X%", "price at X% margin", "set discounts to reflect a 20% margin" — call \`apply_margin_to_quote({quote_id, target_margin})\`. Do NOT compute the discounts yourself and do NOT use zoho_update_record for this.
+- A flat percentage off list is NOT a margin. Margin is measured against Stratus's distributor cost, which only \`apply_margin_to_quote\` can pull (it runs the LIVE_GetQuoteData admin action for the CCW-approved cost).
+- \`target_margin\` accepts 0.20 or 20 — both mean 20%.
+- If the tool returns \`error: "no_ccw_deal_number"\`, tell the user the quote must be Cisco-approved (have a DID) first — do not estimate discounts.
+- If it returns \`error: "cost_data_unavailable"\` or \`"cost_match_failed"\`, relay the message verbatim — the quote was NOT changed; do not guess.
+- On success, trust \`verification.success\`; report the per-line evidence and the undo token from \`message\`. Never claim a margin was applied unless \`verification.success === true\`.
 
 ### Quote Update Workflow (minimize tool calls)
 1. URL provided → parse_quote_url. Else → batch_product_lookup for all SKUs in ONE call.
