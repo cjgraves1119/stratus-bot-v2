@@ -13664,8 +13664,8 @@ const TOOL_SUBSET_CLASSES = Object.freeze([
  *   3. Cisco rep assignment → cisco_rep (0.85)
  *   4. Email composition / draft / send → email (0.85)
  *   5. Create / update / delete on CRM record → crm_write (0.85)
- *   6. Search / find / list / show / pull up → crm_read (0.8)
- *   7. Active-page mutation verbs → crm_write (0.75)
+ *   6. Mutation verb + active-page / quote-session context → crm_write (0.8)
+ *   7. Search / find / list / show / pull up → crm_read (0.8)
  *   8. Otherwise → general (0.5, below the 0.7 confidence floor)
  */
 function classifyCrmIntent(text, ctx = {}) {
@@ -13711,9 +13711,11 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'email', confidence: 0.85 };
   }
 
-  // 5. CRM mutation verbs on Zoho records
+  // 5. CRM mutation verbs on Zoho records. `update` excludes the read idiom
+  // "update me on ..." (a status request). license/term/product/sku added
+  // 2026-05-21 — "update the licenses" was misrouting to crm_read and looping.
   if (/\b(create|new|add|build|make|set\s*up|build\s*out)\s+(a\s+)?(deal|quote|task|contact|account|note)\b/.test(t)
-      || /\b(update|edit|change|modify|rename|set|fix|adjust|move|extend)\s+.{0,50}\b(deal|quote|task|contact|account|stage|amount|valid_till|closing_date|due\s*date|address|line\s*items?|quoted\s*items?|discount)\b/.test(t)
+      || /\b(update(?!\s+me\s+(?:on|about))|edit|change|modify|rename|set|fix|adjust|move|extend)\s+.{0,50}\b(deals?|quotes?|tasks?|contacts?|accounts?|stage|amount|valid_till|closing_date|due\s*date|address|line\s*items?|quoted\s*items?|discount|licenses?|terms?|products?|skus?)\b/.test(t)
       || /\b(close|complete|finish|mark)\s+(the\s+)?(task|deal)\b/.test(t)
       || /\b(delete|remove)\s+.{0,30}\b(quote|deal|task|note|line\s*item)/.test(t)
       || /\b(clone|copy|duplicate)\s+(a\s+|the\s+)?(quote|deal)\b/.test(t)
@@ -13723,15 +13725,20 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'crm_write', confidence: 0.85 };
   }
 
-  // 6. Pure read operations
+  // 6. Context-bound mutation — runs BEFORE pure reads because injected context
+  // headers ([Active Zoho page...], [Session: ...quote...]) contain read-looking
+  // phrases. On an active page / quote session, a mutation verb is a write
+  // regardless of the object noun. Erring toward crm_write is safe — that subset
+  // still includes the read tools.
+  if ((ctx.hasActivePageContext || ctx.hasQuoteSession)
+      && /\b(update(?!\s+me\s+(?:on|about))|change|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)\b/.test(t)) {
+    return { class: 'crm_write', confidence: 0.8 };
+  }
+
+  // 7. Pure read operations
   if (/\b(search|find|look\s*up|pull\s*up|get|show|list|what'?s|who'?s|when|how\s+many|how\s+much)\b.{0,60}\b(deal|quote|task|contact|account|customer|client|order|invoice|line\s*items?|pipeline|forecast|revenue|stage|product|rep)\b/.test(t)
       || /\b(my|the|latest|last|recent|newest|most\s+recent|open|active|overdue)\s+(deal|quote|task|email|contact|account)/.test(t)) {
     return { class: 'crm_read', confidence: 0.8 };
-  }
-
-  // 7. Active page context with mutation verb but no record-type keyword
-  if (ctx.hasActivePageContext && /\b(change|update|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)\b/.test(t)) {
-    return { class: 'crm_write', confidence: 0.75 };
   }
 
   
