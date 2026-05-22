@@ -256,6 +256,45 @@ t('classifyCrmIntent — noun-free mutation in a quote session → crm_write', (
   assert.strictEqual(r.class, 'crm_write');
 });
 
+// 2026-05-22 regression: "Clone this current quote ... do not submit to CCW"
+// matched the subscription rule's "submit to ccw" substring INSIDE the
+// negation, routing to the `subscription` subset — which has no clone_quote
+// tool. The clone-intent guard now runs before the subscription rule.
+t('classifyCrmIntent — "clone this quote" → crm_write', () => {
+  assert.strictEqual(classifyCrmIntent('clone this quote').class, 'crm_write');
+});
+
+t('classifyCrmIntent — "clone this current quote" → crm_write', () => {
+  assert.strictEqual(classifyCrmIntent('clone this current quote').class, 'crm_write');
+});
+
+t('classifyCrmIntent — "make a copy of this quote" → crm_write', () => {
+  assert.strictEqual(classifyCrmIntent('make a copy of this quote').class, 'crm_write');
+});
+
+t('classifyCrmIntent — clone request with negated "do not submit to CCW" → crm_write', () => {
+  const r = classifyCrmIntent('Clone this current quote under the same Hummel deal. Do not submit to CCW and do not create a CCW deal.');
+  assert.strictEqual(r.class, 'crm_write');
+});
+
+t('selectToolSubset — a clone request yields a subset containing clone_quote', () => {
+  const subset = selectToolSubset(classifyCrmIntent('clone this quote'), CRM_EMAIL_TOOLS);
+  assert.ok(subset.map(x => x.name).includes('clone_quote'),
+    'clone request must yield a subset that includes clone_quote');
+});
+
+t('classifyCrmIntent — DID generation still routes to subscription (guard is clone-only)', () => {
+  assert.strictEqual(classifyCrmIntent('Generate a DID for quote 2570562000401257768').class, 'subscription');
+});
+
+// Clone guard must NOT false-positive on bare "copy" — "copy me on the email"
+// with active-page context must not get routed to crm_write (which would strip
+// the email tools). `copy` is only a clone signal when bound to "quote".
+t('classifyCrmIntent — "copy me on the email" with page context does NOT route to crm_write', () => {
+  const r = classifyCrmIntent('copy me on the email to the customer', { hasActivePageContext: true });
+  assert.notStrictEqual(r.class, 'crm_write');
+});
+
 t('selectToolSubset — crm_write returns mutation + lookup tools', () => {
   const intent = { class: 'crm_write', confidence: 0.85 };
   const subset = selectToolSubset(intent, CRM_EMAIL_TOOLS);
