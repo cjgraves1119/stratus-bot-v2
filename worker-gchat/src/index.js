@@ -9556,9 +9556,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 id: item.id,
                 product_name: item.Product_Name?.name || item.Product_Name,
                 product_code: item.Product_Name?.Product_Code || null,
+                product_id: item.Product_Name?.id || null,
                 quantity: item.Quantity,
                 list_price: item.List_Price,
                 discount: item.Discount,
+                description: item.Description ?? null,
                 total: item.Total,
               }));
 
@@ -9790,13 +9792,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const verification = {
                 ...updateParsed,
                 verification: {
+                  // Status block first so the verdict survives tool-result
+                  // truncation; `success` flips to false in the warnings block.
+                  success: true,
+                  verified: true,
                   verified_at: new Date().toISOString(),
                   quote_number: verifyRecord.Quote_Number,
                   grand_total: verifyRecord.Grand_Total,
                   sub_total: verifyRecord.Sub_Total,
-                  actual_line_items: actualItems,
                   actual_item_count: actualItems.length,
                   data_keys_tried: Object.keys(data).filter(k => k !== 'Do_Not_Auto_Update_Prices'),
+                  // actual_line_items appended last (bulkiest field) — see end of block.
                 },
               };
               // Codex round-9: surface the keep-list normalization so the model
@@ -9840,9 +9846,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 }).join('; ');
                 const qtyFailures = modificationsFailed.filter(m => m.checks?.quantity && !m.checks.quantity.match);
                 if (qtyFailures.length > 0) {
-                  warnings.push(`QUANTITY UPDATE REJECTED: ${qtyFailures.length} line item(s) quantity did NOT change. ${details}. To fix: resubmit the FULL Quoted_Items array (all items, not just the changed one) with the correct Quantity value inside each item object. Partial Quoted_Items payloads are silently ignored by Zoho.`);
+                  warnings.push(`QUANTITY UPDATE REJECTED: ${qtyFailures.length} line item(s) quantity did NOT change. ${details}. To fix: resubmit ONLY the affected row(s) as {id: "<row_id>", Quantity: <correct value>}. Quoted_Items is additive — do NOT send the full array. Quantity on the root object is silently ignored by Zoho.`);
                 } else {
-                  warnings.push(`MODIFICATION FAILED: ${modificationsFailed.length} line item change(s) did NOT apply. ${details}. Zoho accepted the payload but the values did not change. Resubmit with the full Quoted_Items array.`);
+                  warnings.push(`MODIFICATION FAILED: ${modificationsFailed.length} line item change(s) did NOT apply. ${details}. Zoho accepted the payload but the values did not change. Resubmit ONLY the affected row(s) as {id: "<row_id>", ...changed fields}. Quoted_Items is additive — do NOT send the full array.`);
                 }
               }
               // Codex round-11 finding #4: add-failure warning.
@@ -9980,6 +9986,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               }
 
               console.log(`[GCHAT] Quote update verification: items=${actualItems.length}, triedQuotedItems=${triedQuotedItems}, deletes_applied=${deletesApplied.length}, deletes_failed=${deletesFailed.length}, mods_applied=${modificationsApplied.length}, mods_failed=${modificationsFailed.length}, warnings=${warnings.length}`);
+              // Appended last: the bulky line-item array goes after the status
+              // block so any truncation eats line items, never the verdict.
+              verification.verification.actual_line_items = actualItems;
               return verification;
             }
             // Verify GET succeeded but returned no record — record may have
@@ -13100,7 +13109,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_update_record',
-    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use these 5 valid picklist values: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost). "Closed (Won)" is blocked — deals auto-close when a PO is attached. NEVER use any other stage value. Server-side validation auto-corrects known wrong values and rejects invalid ones. IMPORTANT for Quote line item updates: always send the FULL Quoted_Items array with ALL items (not just the changed one). Each item needs: id (existing line item ID), Quantity (integer), Discount (dollar amount). Partial payloads or Quantity on the root object are silently ignored by Zoho. Server auto-verifies after update and returns actual values — trust verification, not the API status code.',
+    description: 'Update an existing Zoho CRM record. Stage changes ARE supported but ONLY use these 5 valid picklist values: Qualification, Proposal/Negotiation, Verbal Commit/Invoicing, Closed (Lost). "Closed (Won)" is blocked — deals auto-close when a PO is attached. NEVER use any other stage value. Server-side validation auto-corrects known wrong values and rejects invalid ones. IMPORTANT for Quote line item updates: Quoted_Items is ADDITIVE — send ONLY the rows you are changing, never the full array. KEEP a row by omitting it. MODIFY: {id, ...changed fields}. DELETE: {id, "_delete": null}. ADD: {Product_Name: {id}, Quantity, Discount} with NO id. To swap a line (e.g. a license-term change), delete the old row and add the new row in the SAME call. Quantity on the root object is silently ignored by Zoho. Server auto-verifies after update and returns actual values — trust verification, not the API status code.',
     input_schema: {
       type: 'object',
       properties: {
@@ -14592,8 +14601,12 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
         console.log(`[GCHAT-CONTINUE] Tool: ${block.name}`);
         const result = await executeToolCall(block.name, block.input, env, personId);
         const resultStr = JSON.stringify(result);
-        // zoho_get_record returns large payloads for Quotes (Quoted_Items); use higher limit
-        const truncLimit = block.name === 'zoho_get_record' ? 8000 : 2000;
+        // Quote get/search/update return large payloads (Quoted_Items +
+        // verification object) — give them the higher limit so the verdict
+        // isn't truncated away. Mirrors the askClaude path.
+        const isQuoteData = block.input?.module_name === 'Quotes' &&
+                            ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(block.name);
+        const truncLimit = (block.name === 'zoho_get_record' || isQuoteData) ? 8000 : 2000;
         return {
           type: 'tool_result',
           tool_use_id: block.id,
@@ -16102,7 +16115,16 @@ export class CrmWorkflow extends WorkflowEntrypoint {
             }
           : async () => {};
 
-        const reply = await askClaude(text, personId, env, imageData, true, progressCallback, 300000);
+        let reply = await askClaude(text, personId, env, imageData, true, progressCallback, 300000);
+        // Handle continuation objects — a CRM op that exceeds askClaude's wall
+        // budget returns {__continuation}; resume it instead of silently
+        // dropping the unfinished work and replying "Done."
+        while (reply && reply.__continuation) {
+          reply = await askClaudeContinue(
+            reply.messages, reply.tools, reply.systemPrompt,
+            reply.iteration, env, progressCallback, 300000, personId
+          );
+        }
         let finalReply = typeof reply === 'string' ? reply : (reply?.reply || 'Done.');
         finalReply = adaptMarkdownForGChat(finalReply);
         finalReply = truncateGChatReply(finalReply);
@@ -16801,7 +16823,7 @@ function extractCfResponse(cfResponse) {
                 calls.push({
                   id: null,
                   name: 'zoho_update_record',
-                  arguments: { module_name: obj.module_name, record_id: obj.record_id, record_data: recordData }
+                  arguments: { module_name: obj.module_name, record_id: obj.record_id, data: recordData }
                 });
               } else if (hasModule && hasCriteria) {
                 calls.push({
@@ -16813,7 +16835,7 @@ function extractCfResponse(cfResponse) {
                 calls.push({
                   id: null,
                   name: 'zoho_create_record',
-                  arguments: { module_name: obj.module_name, record_data: obj.record_data }
+                  arguments: { module_name: obj.module_name, data: obj.record_data }
                 });
               }
             }
@@ -17590,7 +17612,7 @@ const BENCHMARK_TASKS = [
   { id: 'task_49', tier: 'complex', name: 'Create deal+quote with Cisco rep referral', prompt: 'Create a deal and quote for Acme Corp: 10x MR46 access points and 2x MX75 firewalls with 3-year licenses. The Cisco rep who referred this is jacporti@cisco.com. Use Lead_Source "Meraki ISR Referal".', expected: ['create_deal_and_quote'] },
   { id: 'task_50', tier: 'complex', name: 'Clone quote, swap hardware SKU', prompt: 'Find the most recent quote for Chris Graves, clone it, and swap the MR44 line items for MR46 while keeping the same quantities', expected: ['zoho_search_records'] },
   { id: 'task_51', tier: 'complex', name: 'Add line items to existing quote', prompt: 'Find the most recent open quote for Chris Graves and add 5x MS225-24P with matching MS225-24P 3-year licenses to it. Remember Quoted_Items: Quantity must be inside each line item, not on the root quote object.' },
-  { id: 'task_52', tier: 'complex', name: 'Remove a line item from existing quote', prompt: '[Active Zoho page: Quotes 2570562000399909180]\nRemove the LIC-ENT-1YR line item from this quote. Keep all other line items unchanged. Remember you must send the FULL Quoted_Items array, not a partial one.', expected: ['zoho_update_record'] },
+  { id: 'task_52', tier: 'complex', name: 'Remove a line item from existing quote', prompt: '[Active Zoho page: Quotes 2570562000399909180]\nRemove the LIC-ENT-1YR line item from this quote. Keep all other line items unchanged.', expected: ['zoho_update_record'] },
   { id: 'task_53', tier: 'complex', name: 'Change line-item quantity', prompt: '[Active Zoho page: Quotes 2570562000399909180]\nChange the quantity on the first line item (the MR46 hardware) to 25. The MR46 license quantity should match. Other line items unchanged.', expected: ['zoho_update_record'] },
   { id: 'task_54', tier: 'complex', name: 'Create deal with inline billing address', prompt: 'Create a deal + quote for Hillcrest Medical Group: 3x MX105 firewalls with 5-year licenses. Billing address: 250 Peachtree St NE, Atlanta, GA 30303. Lead_Source "Stratus Referal".', expected: ['create_deal_and_quote'] },
   { id: 'task_55', tier: 'complex', name: 'Find matching sales order for PO', prompt: 'A weborder came in with PO number "PO-2026-04-ACME-001". Find the Sales_Order in Zoho that matches this PO and tell me which deal it belongs to.', expected: ['zoho_search_records'] },
