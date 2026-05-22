@@ -295,6 +295,32 @@ t('classifyCrmIntent — "copy me on the email" with page context does NOT route
   assert.notStrictEqual(r.class, 'crm_write');
 });
 
+// 2026-05-22 (Fix B): margin-target requests must route to crm_write (which
+// carries apply_margin_to_quote), not crm_read or subscription. The bug was
+// the bot improvising flat-%-off-list math instead of pulling approved cost.
+t('classifyCrmIntent — "apply 20% margin" → crm_write', () => {
+  assert.strictEqual(classifyCrmIntent('apply a 20% margin to this quote').class, 'crm_write');
+});
+
+t('classifyCrmIntent — "update discounts to reflect 20% margin" → crm_write', () => {
+  assert.strictEqual(classifyCrmIntent('update discounts to reflect 20% margin from approved discounts').class, 'crm_write');
+});
+
+t('classifyCrmIntent — "update the margin to 18%" → crm_write', () => {
+  assert.strictEqual(classifyCrmIntent('update the margin to 18%').class, 'crm_write');
+});
+
+t('CRM_EMAIL_TOOLS defines apply_margin_to_quote', () => {
+  assert.ok(CRM_EMAIL_TOOLS.some(x => x.name === 'apply_margin_to_quote'),
+    'apply_margin_to_quote tool must be registered');
+});
+
+t('selectToolSubset — a margin request yields a subset containing apply_margin_to_quote', () => {
+  const subset = selectToolSubset(classifyCrmIntent('apply 20% margin to this quote'), CRM_EMAIL_TOOLS);
+  assert.ok(subset.map(x => x.name).includes('apply_margin_to_quote'),
+    'margin request must yield a subset that includes apply_margin_to_quote');
+});
+
 t('selectToolSubset — crm_write returns mutation + lookup tools', () => {
   const intent = { class: 'crm_write', confidence: 0.85 };
   const subset = selectToolSubset(intent, CRM_EMAIL_TOOLS);
