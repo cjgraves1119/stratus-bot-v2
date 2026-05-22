@@ -18515,6 +18515,141 @@ async function logWaterfallTelemetry(env, outcome) {
   }
 }
 
+// --- Module-scope helpers (relocated 2026-05-22) --- previously nested inside fetch(), invisible to executeToolCall, which caused ReferenceError on zoho_update_record / zoho_create_record.
+// ─── Geographic normalization (state + country to ISO codes) ────────────────
+// Zoho records require 2-letter state/province codes and 2-letter country codes.
+// Zia Enrichment returns full names ("Wisconsin", "United States") so we must
+// normalize before storing or surfacing in the chrome ext form.
+const US_STATE_MAP = { 'alabama':'AL', 'alaska':'AK', 'arizona':'AZ', 'arkansas':'AR', 'california':'CA', 'colorado':'CO', 'connecticut':'CT', 'delaware':'DE', 'florida':'FL', 'georgia':'GA', 'hawaii':'HI', 'idaho':'ID', 'illinois':'IL', 'indiana':'IN', 'iowa':'IA', 'kansas':'KS', 'kentucky':'KY', 'louisiana':'LA', 'maine':'ME', 'maryland':'MD', 'massachusetts':'MA', 'michigan':'MI', 'minnesota':'MN', 'mississippi':'MS', 'missouri':'MO', 'montana':'MT', 'nebraska':'NE', 'nevada':'NV', 'new hampshire':'NH', 'new jersey':'NJ', 'new mexico':'NM', 'new york':'NY', 'north carolina':'NC', 'north dakota':'ND', 'ohio':'OH', 'oklahoma':'OK', 'oregon':'OR', 'pennsylvania':'PA', 'rhode island':'RI', 'south carolina':'SC', 'south dakota':'SD', 'tennessee':'TN', 'texas':'TX', 'utah':'UT', 'vermont':'VT', 'virginia':'VA', 'washington':'WA', 'west virginia':'WV', 'wisconsin':'WI', 'wyoming':'WY', 'district of columbia':'DC', 'puerto rico':'PR', 'virgin islands':'VI', 'guam':'GU', 'american samoa':'AS', 'northern mariana islands':'MP' };
+const CA_PROVINCE_MAP = { 'alberta':'AB', 'british columbia':'BC', 'manitoba':'MB', 'new brunswick':'NB', 'newfoundland and labrador':'NL', 'nova scotia':'NS', 'ontario':'ON', 'prince edward island':'PE', 'quebec':'QC', 'québec':'QC', 'saskatchewan':'SK', 'northwest territories':'NT', 'nunavut':'NU', 'yukon':'YT' };
+const COUNTRY_MAP = { 'united states':'US', 'united states of america':'US', 'usa':'US', 'u.s.':'US', 'u.s.a.':'US', 'america':'US', 'canada':'CA', 'united kingdom':'GB', 'great britain':'GB', 'britain':'GB', 'uk':'GB', 'u.k.':'GB', 'england':'GB', 'mexico':'MX', 'germany':'DE', 'france':'FR', 'spain':'ES', 'italy':'IT', 'netherlands':'NL', 'belgium':'BE', 'sweden':'SE', 'norway':'NO', 'finland':'FI', 'denmark':'DK', 'ireland':'IE', 'switzerland':'CH', 'austria':'AT', 'poland':'PL', 'portugal':'PT', 'greece':'GR', 'australia':'AU', 'new zealand':'NZ', 'japan':'JP', 'china':'CN', 'india':'IN', 'singapore':'SG', 'south korea':'KR', 'korea':'KR', 'taiwan':'TW', 'hong kong':'HK', 'philippines':'PH', 'thailand':'TH', 'vietnam':'VN', 'indonesia':'ID', 'malaysia':'MY', 'brazil':'BR', 'argentina':'AR', 'chile':'CL', 'colombia':'CO', 'peru':'PE', 'south africa':'ZA', 'israel':'IL', 'united arab emirates':'AE', 'uae':'AE', 'saudi arabia':'SA' };
+
+function normalizeStateCode(state) {
+  if (!state) return state;
+  const s = String(state).trim();
+  if (s.length === 2 && /^[A-Z]{2}$/.test(s.toUpperCase())) return s.toUpperCase(); // already 2-letter
+  const lower = s.toLowerCase();
+  if (US_STATE_MAP[lower]) return US_STATE_MAP[lower];
+  if (CA_PROVINCE_MAP[lower]) return CA_PROVINCE_MAP[lower];
+  return s; // unknown — return as-is, don't fabricate
+}
+
+function normalizeCountryCode(country) {
+  if (!country) return country;
+  const c = String(country).trim();
+  if (c.length === 2 && /^[A-Z]{2}$/.test(c.toUpperCase())) return c.toUpperCase();
+  const lower = c.toLowerCase();
+  if (COUNTRY_MAP[lower]) return COUNTRY_MAP[lower];
+  return c;
+}
+
+// 2026-05-19 Fix E (Kenwood + OPTK postmortems): Zoho field-name synonyms.
+const FIELD_NAME_ALIASES = {
+  Billing_Zip: 'Billing_Code',
+  Shipping_Zip: 'Shipping_Code',
+  Mailing_Zip: 'Mailing_Zip', // Contacts module uses Mailing_Zip natively — pass through
+};
+function applyFieldAliases(data, context = 'unknown') {
+  if (!data || typeof data !== 'object') return data;
+  for (const [alias, canonical] of Object.entries(FIELD_NAME_ALIASES)) {
+    if (alias === canonical) continue;
+    if (alias in data && !(canonical in data)) {
+      console.log(`[FIELD-ALIAS] ${context}: rewriting ${alias} -> ${canonical} (value preserved)`);
+      data[canonical] = data[alias];
+      delete data[alias];
+    }
+  }
+  return data;
+}
+
+// 2026-05-19 Fix D: placeholder address heuristic (warn + audit log, no hard block).
+const PLACEHOLDER_STREET_PATTERNS = [
+  /^\s*123\s+main\s+st/i,
+  /^\s*456\s+(elm|oak|pine|maple)\s+st/i,
+  /^\s*1234?\s+(test|sample|example|fake|placeholder)/i,
+  /\bplaceholder\b/i,
+  /\blorem\s+ipsum\b/i,
+];
+const PLACEHOLDER_CITY_PATTERNS = [
+  /^any\s*town$/i,
+  /^other\s*town$/i,
+  /^example\s*city$/i,
+  /^test\s*city$/i,
+  /^placeholder$/i,
+];
+function detectPlaceholderAddress(data, context = 'unknown') {
+  if (!data || typeof data !== 'object') return null;
+  const flags = [];
+  for (const prefix of ['Billing_', 'Shipping_', 'Mailing_']) {
+    const street = data[prefix + 'Street'];
+    const city = data[prefix + 'City'];
+    if (street && typeof street === 'string') {
+      for (const re of PLACEHOLDER_STREET_PATTERNS) {
+        if (re.test(street)) { flags.push({ field: prefix + 'Street', value: street, reason: 'placeholder_pattern' }); break; }
+      }
+    }
+    if (city && typeof city === 'string') {
+      for (const re of PLACEHOLDER_CITY_PATTERNS) {
+        if (re.test(city)) { flags.push({ field: prefix + 'City', value: city, reason: 'placeholder_pattern' }); break; }
+      }
+    }
+  }
+  if (flags.length > 0) {
+    console.warn(`[PLACEHOLDER-ADDR] ${context}: detected ${flags.length} placeholder field(s):`, JSON.stringify(flags));
+  }
+  return flags.length > 0 ? flags : null;
+}
+
+// 2026-05-19 Contact name derivation (Chris request): when a contact is created
+// with an email but no First/Last name, derive the name two ways:
+//   Method 1 (preferred): a display-name hint from the email thread / signature
+//     (e.g. Gmail "From" header "Kevin Goosic <kevin.goosic@optk.com>").
+//   Method 2 (fallback): best-guess parse of the email local-part
+//     (kevin.goosic@optk.com -> First "Kevin" Last "Goosic").
+// Single-token local-parts (e.g. "kgoosic") are NOT split into a speculative
+// first initial — they become Last_Name only (Zoho-valid, no fabrication).
+function _titleCaseNameToken(s) {
+  if (!s) return '';
+  // Capitalize each hyphen subpart so "mary-jane" -> "Mary-Jane", "o'brien" -> "O'brien".
+  return String(s).split('-').map(p => p ? (p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()) : p).join('-');
+}
+function deriveContactNameFields(email, nameHint) {
+  const localPart = (email && String(email).includes('@')) ? String(email).split('@')[0] : (email ? String(email) : '');
+  // ── Method 1: explicit display-name hint ──
+  const cleanHint = (nameHint || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  const stripAlpha = (x) => String(x || '').toLowerCase().replace(/[^a-z]/g, '');
+  const hintIsJustLocalPart = cleanHint && localPart && stripAlpha(cleanHint) === stripAlpha(localPart);
+  if (cleanHint && !hintIsJustLocalPart && /[a-zA-Z]/.test(cleanHint)) {
+    const parts = cleanHint.split(' ').filter(Boolean);
+    if (parts.length >= 2) return { firstName: _titleCaseNameToken(parts[0]), lastName: parts.slice(1).map(_titleCaseNameToken).join(' ') };
+    if (parts.length === 1) return { firstName: '', lastName: _titleCaseNameToken(parts[0]) };
+  }
+  // ── Method 2: best-guess from email local-part ──
+  if (localPart) {
+    const _base = localPart.replace(/[0-9]+$/, '');
+    const _sep = /[._+]/.test(_base) ? /[._+]+/ : /[._+\-]+/;
+    const tokens = _base.split(_sep).map(t => t.replace(/[0-9]+/g, '')).filter(Boolean);
+    if (tokens.length >= 2) return { firstName: _titleCaseNameToken(tokens[0]), lastName: tokens.slice(1).map(_titleCaseNameToken).join(' ') };
+    if (tokens.length === 1) return { firstName: '', lastName: _titleCaseNameToken(tokens[0]) };
+  }
+  return { firstName: '', lastName: '' };
+}
+
+// 2026-05-19 Meraki_ISRs Name auto-build (OPTK postmortem).
+function normalizeMerakiIsrPayload(module_name, data) {
+  if (module_name !== 'Meraki_ISRs' || !data || typeof data !== 'object') return data;
+  if (!data.Name && (data.First_Name || data.Last_Name)) {
+    const built = [data.First_Name, data.Last_Name].filter(Boolean).join(' ').trim();
+    if (built) {
+      console.log(`[MERAKI-ISR-NORM] Auto-built Name="${built}" from First_Name+Last_Name`);
+      data.Name = built;
+      delete data.First_Name;
+      delete data.Last_Name;
+    }
+  }
+  return data;
+}
+
 export default {
   async fetch(request, env, ctx) {
     // Load KV-cached live prices (if available from daily cron refresh)
@@ -18871,139 +19006,6 @@ ${(data.recentRequests || []).map(r => {
       return new Response(JSON.stringify(data, null, 2), { headers: { 'Content-Type': 'application/json' } });
     }
 
-// ─── Geographic normalization (state + country to ISO codes) ────────────────
-// Zoho records require 2-letter state/province codes and 2-letter country codes.
-// Zia Enrichment returns full names ("Wisconsin", "United States") so we must
-// normalize before storing or surfacing in the chrome ext form.
-const US_STATE_MAP = { 'alabama':'AL', 'alaska':'AK', 'arizona':'AZ', 'arkansas':'AR', 'california':'CA', 'colorado':'CO', 'connecticut':'CT', 'delaware':'DE', 'florida':'FL', 'georgia':'GA', 'hawaii':'HI', 'idaho':'ID', 'illinois':'IL', 'indiana':'IN', 'iowa':'IA', 'kansas':'KS', 'kentucky':'KY', 'louisiana':'LA', 'maine':'ME', 'maryland':'MD', 'massachusetts':'MA', 'michigan':'MI', 'minnesota':'MN', 'mississippi':'MS', 'missouri':'MO', 'montana':'MT', 'nebraska':'NE', 'nevada':'NV', 'new hampshire':'NH', 'new jersey':'NJ', 'new mexico':'NM', 'new york':'NY', 'north carolina':'NC', 'north dakota':'ND', 'ohio':'OH', 'oklahoma':'OK', 'oregon':'OR', 'pennsylvania':'PA', 'rhode island':'RI', 'south carolina':'SC', 'south dakota':'SD', 'tennessee':'TN', 'texas':'TX', 'utah':'UT', 'vermont':'VT', 'virginia':'VA', 'washington':'WA', 'west virginia':'WV', 'wisconsin':'WI', 'wyoming':'WY', 'district of columbia':'DC', 'puerto rico':'PR', 'virgin islands':'VI', 'guam':'GU', 'american samoa':'AS', 'northern mariana islands':'MP' };
-const CA_PROVINCE_MAP = { 'alberta':'AB', 'british columbia':'BC', 'manitoba':'MB', 'new brunswick':'NB', 'newfoundland and labrador':'NL', 'nova scotia':'NS', 'ontario':'ON', 'prince edward island':'PE', 'quebec':'QC', 'québec':'QC', 'saskatchewan':'SK', 'northwest territories':'NT', 'nunavut':'NU', 'yukon':'YT' };
-const COUNTRY_MAP = { 'united states':'US', 'united states of america':'US', 'usa':'US', 'u.s.':'US', 'u.s.a.':'US', 'america':'US', 'canada':'CA', 'united kingdom':'GB', 'great britain':'GB', 'britain':'GB', 'uk':'GB', 'u.k.':'GB', 'england':'GB', 'mexico':'MX', 'germany':'DE', 'france':'FR', 'spain':'ES', 'italy':'IT', 'netherlands':'NL', 'belgium':'BE', 'sweden':'SE', 'norway':'NO', 'finland':'FI', 'denmark':'DK', 'ireland':'IE', 'switzerland':'CH', 'austria':'AT', 'poland':'PL', 'portugal':'PT', 'greece':'GR', 'australia':'AU', 'new zealand':'NZ', 'japan':'JP', 'china':'CN', 'india':'IN', 'singapore':'SG', 'south korea':'KR', 'korea':'KR', 'taiwan':'TW', 'hong kong':'HK', 'philippines':'PH', 'thailand':'TH', 'vietnam':'VN', 'indonesia':'ID', 'malaysia':'MY', 'brazil':'BR', 'argentina':'AR', 'chile':'CL', 'colombia':'CO', 'peru':'PE', 'south africa':'ZA', 'israel':'IL', 'united arab emirates':'AE', 'uae':'AE', 'saudi arabia':'SA' };
-
-function normalizeStateCode(state) {
-  if (!state) return state;
-  const s = String(state).trim();
-  if (s.length === 2 && /^[A-Z]{2}$/.test(s.toUpperCase())) return s.toUpperCase(); // already 2-letter
-  const lower = s.toLowerCase();
-  if (US_STATE_MAP[lower]) return US_STATE_MAP[lower];
-  if (CA_PROVINCE_MAP[lower]) return CA_PROVINCE_MAP[lower];
-  return s; // unknown — return as-is, don't fabricate
-}
-
-function normalizeCountryCode(country) {
-  if (!country) return country;
-  const c = String(country).trim();
-  if (c.length === 2 && /^[A-Z]{2}$/.test(c.toUpperCase())) return c.toUpperCase();
-  const lower = c.toLowerCase();
-  if (COUNTRY_MAP[lower]) return COUNTRY_MAP[lower];
-  return c;
-}
-
-// 2026-05-19 Fix E (Kenwood + OPTK postmortems): Zoho field-name synonyms.
-const FIELD_NAME_ALIASES = {
-  Billing_Zip: 'Billing_Code',
-  Shipping_Zip: 'Shipping_Code',
-  Mailing_Zip: 'Mailing_Zip', // Contacts module uses Mailing_Zip natively — pass through
-};
-function applyFieldAliases(data, context = 'unknown') {
-  if (!data || typeof data !== 'object') return data;
-  for (const [alias, canonical] of Object.entries(FIELD_NAME_ALIASES)) {
-    if (alias === canonical) continue;
-    if (alias in data && !(canonical in data)) {
-      console.log(`[FIELD-ALIAS] ${context}: rewriting ${alias} -> ${canonical} (value preserved)`);
-      data[canonical] = data[alias];
-      delete data[alias];
-    }
-  }
-  return data;
-}
-
-// 2026-05-19 Fix D: placeholder address heuristic (warn + audit log, no hard block).
-const PLACEHOLDER_STREET_PATTERNS = [
-  /^\s*123\s+main\s+st/i,
-  /^\s*456\s+(elm|oak|pine|maple)\s+st/i,
-  /^\s*1234?\s+(test|sample|example|fake|placeholder)/i,
-  /\bplaceholder\b/i,
-  /\blorem\s+ipsum\b/i,
-];
-const PLACEHOLDER_CITY_PATTERNS = [
-  /^any\s*town$/i,
-  /^other\s*town$/i,
-  /^example\s*city$/i,
-  /^test\s*city$/i,
-  /^placeholder$/i,
-];
-function detectPlaceholderAddress(data, context = 'unknown') {
-  if (!data || typeof data !== 'object') return null;
-  const flags = [];
-  for (const prefix of ['Billing_', 'Shipping_', 'Mailing_']) {
-    const street = data[prefix + 'Street'];
-    const city = data[prefix + 'City'];
-    if (street && typeof street === 'string') {
-      for (const re of PLACEHOLDER_STREET_PATTERNS) {
-        if (re.test(street)) { flags.push({ field: prefix + 'Street', value: street, reason: 'placeholder_pattern' }); break; }
-      }
-    }
-    if (city && typeof city === 'string') {
-      for (const re of PLACEHOLDER_CITY_PATTERNS) {
-        if (re.test(city)) { flags.push({ field: prefix + 'City', value: city, reason: 'placeholder_pattern' }); break; }
-      }
-    }
-  }
-  if (flags.length > 0) {
-    console.warn(`[PLACEHOLDER-ADDR] ${context}: detected ${flags.length} placeholder field(s):`, JSON.stringify(flags));
-  }
-  return flags.length > 0 ? flags : null;
-}
-
-// 2026-05-19 Contact name derivation (Chris request): when a contact is created
-// with an email but no First/Last name, derive the name two ways:
-//   Method 1 (preferred): a display-name hint from the email thread / signature
-//     (e.g. Gmail "From" header "Kevin Goosic <kevin.goosic@optk.com>").
-//   Method 2 (fallback): best-guess parse of the email local-part
-//     (kevin.goosic@optk.com -> First "Kevin" Last "Goosic").
-// Single-token local-parts (e.g. "kgoosic") are NOT split into a speculative
-// first initial — they become Last_Name only (Zoho-valid, no fabrication).
-function _titleCaseNameToken(s) {
-  if (!s) return '';
-  // Capitalize each hyphen subpart so "mary-jane" -> "Mary-Jane", "o'brien" -> "O'brien".
-  return String(s).split('-').map(p => p ? (p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()) : p).join('-');
-}
-function deriveContactNameFields(email, nameHint) {
-  const localPart = (email && String(email).includes('@')) ? String(email).split('@')[0] : (email ? String(email) : '');
-  // ── Method 1: explicit display-name hint ──
-  const cleanHint = (nameHint || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-  const stripAlpha = (x) => String(x || '').toLowerCase().replace(/[^a-z]/g, '');
-  const hintIsJustLocalPart = cleanHint && localPart && stripAlpha(cleanHint) === stripAlpha(localPart);
-  if (cleanHint && !hintIsJustLocalPart && /[a-zA-Z]/.test(cleanHint)) {
-    const parts = cleanHint.split(' ').filter(Boolean);
-    if (parts.length >= 2) return { firstName: _titleCaseNameToken(parts[0]), lastName: parts.slice(1).map(_titleCaseNameToken).join(' ') };
-    if (parts.length === 1) return { firstName: '', lastName: _titleCaseNameToken(parts[0]) };
-  }
-  // ── Method 2: best-guess from email local-part ──
-  if (localPart) {
-    const _base = localPart.replace(/[0-9]+$/, '');
-    const _sep = /[._+]/.test(_base) ? /[._+]+/ : /[._+\-]+/;
-    const tokens = _base.split(_sep).map(t => t.replace(/[0-9]+/g, '')).filter(Boolean);
-    if (tokens.length >= 2) return { firstName: _titleCaseNameToken(tokens[0]), lastName: tokens.slice(1).map(_titleCaseNameToken).join(' ') };
-    if (tokens.length === 1) return { firstName: '', lastName: _titleCaseNameToken(tokens[0]) };
-  }
-  return { firstName: '', lastName: '' };
-}
-
-// 2026-05-19 Meraki_ISRs Name auto-build (OPTK postmortem).
-function normalizeMerakiIsrPayload(module_name, data) {
-  if (module_name !== 'Meraki_ISRs' || !data || typeof data !== 'object') return data;
-  if (!data.Name && (data.First_Name || data.Last_Name)) {
-    const built = [data.First_Name, data.Last_Name].filter(Boolean).join(' ').trim();
-    if (built) {
-      console.log(`[MERAKI-ISR-NORM] Auto-built Name="${built}" from First_Name+Last_Name`);
-      data.Name = built;
-      delete data.First_Name;
-      delete data.Last_Name;
-    }
-  }
-  return data;
-}
 
 
 // ══════════════════════════════════════════════════════════════════════════════
