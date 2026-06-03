@@ -7,6 +7,10 @@ node_modules/
 .dev.vars
 *.dev.vars
 
+# Wrangler local-state cache (created by `wrangler whoami` / dev / kv local) — never commit
+.wrangler/
+**/.wrangler/
+
 # Claude Code local scratch (agent worktrees, session files) — never commit
 .claude/
 
