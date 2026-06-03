@@ -61,43 +61,139 @@ chrome.runtime.onStartup.addListener(() => {
 // Message Handlers (content ↔ background ↔ sidebar)
 // ─────────────────────────────────────────────
 
-// In-memory email context (set by content script, read by sidebar)
-let currentEmailContext = null;
+// In-memory caches. Note: page contexts are now keyed PER TAB to prevent
+// cross-tab bleed. The legacy `currentZohoPageContext` / `currentEmailContext`
+// globals were a primary cause of the context-bleed bug (Wave B, 2026-06-03):
+// a Gmail tab's email context would ride into a request issued while the
+// active tab was a Zoho record, and vice versa. We still keep the in-memory
+// maps because chrome.storage.session reads are async and the message
+// handlers want a sync answer where possible.
 let currentCrmContext = null;
 let currentTaskRescheduleContext = null;
-let currentZohoPageContext = null; // Set by Zoho content script
 let currentPageType = 'other';     // 'gmail' | 'zoho' | 'other'
+
+// tabId → email context (Gmail) / Zoho page context, mirrored to
+// chrome.storage.session under the keys emailCtx_<tabId> / zohoCtx_<tabId>.
+const tabEmailContexts = new Map();
+const tabZohoContexts = new Map();
+
+// Storage key prefixes — per-tab keying eliminates cross-tab bleed without
+// requiring a global "active tab" lock everywhere readers run.
+const EMAIL_CTX_KEY_PREFIX = 'emailCtx_';
+const ZOHO_CTX_KEY_PREFIX = 'zohoCtx_';
+const emailCtxKey = (tabId) => `${EMAIL_CTX_KEY_PREFIX}${tabId}`;
+const zohoCtxKey = (tabId) => `${ZOHO_CTX_KEY_PREFIX}${tabId}`;
+
+/**
+ * Resolve the currently active tab. Returns null on failure so callers can
+ * fall back gracefully.
+ */
+async function getActiveTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the Zoho page context for a given tab. Prefers the in-memory cache
+ * but falls back to chrome.storage.session (which survives a slightly longer
+ * window than the worker's memory does in MV3).
+ */
+async function getZohoContextForTab(tabId) {
+  if (tabId == null) return null;
+  if (tabZohoContexts.has(tabId)) return tabZohoContexts.get(tabId);
+  try {
+    const key = zohoCtxKey(tabId);
+    const stored = await chrome.storage.session.get(key);
+    const ctx = stored && stored[key] ? stored[key] : null;
+    if (ctx) tabZohoContexts.set(tabId, ctx);
+    return ctx;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the Gmail email context for a given tab. Same pattern as
+ * getZohoContextForTab.
+ */
+async function getEmailContextForTab(tabId) {
+  if (tabId == null) return null;
+  if (tabEmailContexts.has(tabId)) return tabEmailContexts.get(tabId);
+  try {
+    const key = emailCtxKey(tabId);
+    const stored = await chrome.storage.session.get(key);
+    const ctx = stored && stored[key] ? stored[key] : null;
+    if (ctx) tabEmailContexts.set(tabId, ctx);
+    return ctx;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write the Zoho page context for a given tab.
+ */
+async function setZohoContextForTab(tabId, ctx) {
+  if (tabId == null) return;
+  if (ctx) {
+    tabZohoContexts.set(tabId, ctx);
+    try { await chrome.storage.session.set({ [zohoCtxKey(tabId)]: ctx }); } catch {}
+  } else {
+    tabZohoContexts.delete(tabId);
+    try { await chrome.storage.session.remove(zohoCtxKey(tabId)); } catch {}
+  }
+}
+
+/**
+ * Write the Gmail email context for a given tab.
+ */
+async function setEmailContextForTab(tabId, ctx) {
+  if (tabId == null) return;
+  if (ctx) {
+    tabEmailContexts.set(tabId, ctx);
+    try { await chrome.storage.session.set({ [emailCtxKey(tabId)]: ctx }); } catch {}
+  } else {
+    tabEmailContexts.delete(tabId);
+    try { await chrome.storage.session.remove(emailCtxKey(tabId)); } catch {}
+  }
+}
 
 registerMessageHandlers({
   // ── Email Context ──
-  [MSG.EMAIL_CHANGED]: async (payload) => {
-    currentEmailContext = payload;
-    currentCrmContext = null; // Reset CRM context on new email
-    // Persist to chrome.storage.session for recovery after service worker sleep
-    try {
-      await chrome.storage.session.set({ emailContext: payload });
-    } catch (err) {
-      console.error('[Stratus] Failed to persist email context to session storage:', err);
+  //
+  // Per-tab keying: EMAIL_CHANGED comes from the Gmail content script, so
+  // `sender.tab.id` identifies which tab the user opened the email in.
+  // Storing under emailCtx_<tabId> means a Zoho tab's read path will never
+  // see a Gmail tab's email context (the cross-tab bleed bug).
+  [MSG.EMAIL_CHANGED]: async (payload, sender) => {
+    const tabId = sender?.tab?.id;
+    if (tabId == null) {
+      // No tab id — message likely came from sidebar/popup, drop. Email
+      // context is only ever written by Gmail content scripts.
+      return { success: false, error: 'EMAIL_CHANGED requires a tab id (only Gmail content scripts may set it)' };
     }
+    await setEmailContextForTab(tabId, payload);
+    currentCrmContext = null; // Reset CRM context on new email
     return { success: true };
   },
 
   [MSG.GET_EMAIL_CONTEXT]: async () => {
-    // Return in-memory context if available
-    if (currentEmailContext) {
-      return currentEmailContext;
+    // The sidebar wants the email context for the user's currently active
+    // tab. Resolve that tab, then look up its per-tab email context.
+    const tab = await getActiveTab();
+    if (!tab) return { empty: true };
+    // Email context only makes sense on Gmail tabs — explicitly ignore
+    // anything stored for a non-Gmail tab as a belt-and-suspenders check
+    // against any future regression.
+    if (!tab.url || !tab.url.startsWith('https://mail.google.com/')) {
+      return { empty: true };
     }
-    // Recover from session storage if service worker was asleep
-    try {
-      const stored = await chrome.storage.session.get('emailContext');
-      if (stored && stored.emailContext) {
-        currentEmailContext = stored.emailContext;
-        return currentEmailContext;
-      }
-    } catch (err) {
-      console.error('[Stratus] Failed to retrieve email context from session storage:', err);
-    }
-    return { empty: true };
+    const ctx = await getEmailContextForTab(tab.id);
+    return ctx || { empty: true };
   },
 
   [MSG.GET_CRM_CONTEXT]: async () => {
@@ -306,34 +402,37 @@ registerMessageHandlers({
   },
 
   // ── Zoho Page Context ──
+  //
+  // Per-tab keyed: ZOHO_CONTEXT_CHANGED arrives from the Zoho content script,
+  // so `sender.tab.id` identifies the tab whose record changed. We store
+  // under zohoCtx_<tabId> so other tabs' records cannot show up in the
+  // active-tab read path.
+  //
+  // The content script is the ONLY source for this message; it cannot know
+  // its own tab id, which is why the background is the single writer.
   [MSG.ZOHO_CONTEXT_CHANGED]: async (payload, sender) => {
-    // Stamp url/detectedAt if the sender omitted them, so downstream
-    // readers can always make staleness decisions.
+    const tabId = sender?.tab?.id;
+    if (tabId == null) {
+      return { success: false, error: 'ZOHO_CONTEXT_CHANGED requires a tab id (only Zoho content scripts may set it)' };
+    }
+    // Strip the inbound dispatch fields that registerMessageHandlers already
+    // peeled off (`type`), and stamp url/detectedAt if the sender omitted
+    // them so downstream readers can make staleness decisions.
     const stamped = {
       ...payload,
       url: payload?.url || sender?.tab?.url || null,
       detectedAt: payload?.detectedAt || Date.now(),
     };
-    currentZohoPageContext = stamped;
-    // Persist to LOCAL storage (not session) so it survives service worker restarts.
-    // Manifest V3 service workers die after ~30s idle; session storage clears with them.
-    try {
-      await chrome.storage.local.set({ zohoPageContext: stamped });
-    } catch (err) {
-      console.error('[Stratus] Failed to persist Zoho context:', err);
-    }
+    await setZohoContextForTab(tabId, stamped);
     return { success: true };
   },
 
   [MSG.GET_PAGE_CONTEXT]: async () => {
-    // Determine current page type from the active tab URL.
-    let activeUrl = '';
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      activeUrl = tab?.url || '';
-    } catch {
-      // Fallback if tabs query fails
-    }
+    // Resolve the active tab. Both the page-type decision and the per-tab
+    // context lookup key off this single tab id.
+    const tab = await getActiveTab();
+    const activeUrl = tab?.url || '';
+    const activeTabId = tab?.id;
 
     // Derive page type from the URL we just observed (not from a cached
     // currentPageType that may have drifted since the last onUpdated event).
@@ -357,31 +456,22 @@ registerMessageHandlers({
     let zohoContext = null;
 
     if (urlInfo && urlInfo.isZoho) {
-      // Recover stored context if in-memory cache is empty.
-      if (!currentZohoPageContext) {
-        try {
-          const stored = await chrome.storage.local.get('zohoPageContext');
-          if (stored?.zohoPageContext) {
-            currentZohoPageContext = stored.zohoPageContext;
-          }
-        } catch {}
-      }
+      const tabZoho = await getZohoContextForTab(activeTabId);
 
       if (urlInfo.isRecord) {
-        if (contextMatchesUrl(currentZohoPageContext, urlInfo)) {
+        if (contextMatchesUrl(tabZoho, urlInfo)) {
           // Cached context is for the record the user is actually viewing —
           // trust it (it may have enriched recordName/email/accountName).
-          zohoContext = currentZohoPageContext;
+          zohoContext = tabZoho;
         } else {
           // Cached context is either missing or for a DIFFERENT record
-          // (previous Zoho tab, previous page in SPA). Never leak it.
-          // Fall back to a URL-only context so the sidebar at least has
-          // the correct record id to target.
-          if (currentZohoPageContext && !contextMatchesUrl(currentZohoPageContext, urlInfo)) {
-            // Drop the stale in-memory cache too so subsequent calls don't
-            // keep resurrecting it.
-            currentZohoPageContext = null;
-            chrome.storage.local.remove('zohoPageContext').catch(() => {});
+          // (previous page in SPA inside this tab). Never leak it. Fall
+          // back to a URL-only context so the sidebar at least has the
+          // correct record id to target.
+          if (tabZoho && !contextMatchesUrl(tabZoho, urlInfo)) {
+            // Drop the stale per-tab cache so subsequent calls don't keep
+            // resurrecting it.
+            await setZohoContextForTab(activeTabId, null);
           }
           zohoContext = minimalContextFromUrl(urlInfo);
         }
@@ -393,11 +483,19 @@ registerMessageHandlers({
       }
     }
 
+    // Email context: only attach if the active tab is Gmail. This prevents
+    // a stale email from riding into a Zoho-tab request (the cross-tab
+    // bleed bug Fix A is designed to close).
+    let emailContext = null;
+    if (currentPageType === 'gmail' && activeTabId != null) {
+      emailContext = await getEmailContextForTab(activeTabId);
+    }
+
     return {
       pageType: currentPageType,
       zohoContext,
       activeUrl,
-      emailContext: currentEmailContext,
+      emailContext,
     };
   },
 
@@ -445,16 +543,27 @@ chrome.notifications.onClicked.addListener(handleNotificationClick);
 // Side Panel
 // ─────────────────────────────────────────────
 
-// Helper: clear Zoho context from both in-memory cache AND chrome.storage.local.
-// Previously the in-memory variable was nulled but storage was left stale, so
-// the sidebar's path-2 fallback (direct storage read) kept serving the old
-// record as "the page the user is currently viewing" on Gmail/other tabs.
-function clearZohoContext() {
-  currentZohoPageContext = null;
-  chrome.storage.local.remove('zohoPageContext').catch(() => {});
+// Helpers: clear a single tab's stored context. Context storage is now
+// keyed per-tab, so we always know exactly which tab we're clearing rather
+// than nuking a shared global key.
+function clearZohoContextForTab(tabId) {
+  if (tabId == null) return;
+  setZohoContextForTab(tabId, null).catch(() => {});
+}
+function clearEmailContextForTab(tabId) {
+  if (tabId == null) return;
+  setEmailContextForTab(tabId, null).catch(() => {});
 }
 
 // Enable side panel for all tabs (Gmail, Zoho CRM, and everything else for search)
+//
+// On a load-complete transition we update currentPageType for sync readers
+// (it's a coarse global; the per-tab maps are the authoritative source).
+// We also SYMMETRICALLY clear the OPPOSITE-type context for THIS tab so a
+// single tab navigating between Zoho and Gmail can't accumulate both
+// contexts. (Fix A, Wave B 2026-06-03.) Prior behaviour deliberately left
+// the email context alive on Zoho transitions; that allowed a stale Gmail
+// email to ride into a Zoho-tab request.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (tab.url) {
     chrome.sidePanel.setOptions({
@@ -463,50 +572,47 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       enabled: true,
     }).catch(() => {});
 
-    // Track page type transitions and clear stale context
+    // Track page type transitions and clear stale context for THIS tab.
     if (changeInfo.status === 'complete') {
       if (tab.url.startsWith('https://mail.google.com/')) {
         currentPageType = 'gmail';
-        clearZohoContext();
+        clearZohoContextForTab(tabId);
       } else if (tab.url.startsWith('https://crm.zoho.com/')) {
         currentPageType = 'zoho';
-        currentEmailContext = null;
+        // Symmetric clear: a tab that just navigated to Zoho must NOT
+        // carry an email context. (Fix A.)
+        clearEmailContextForTab(tabId);
       } else {
         currentPageType = 'other';
-        currentEmailContext = null;
-        clearZohoContext();
+        clearEmailContextForTab(tabId);
+        clearZohoContextForTab(tabId);
       }
     }
   }
 });
 
 // Tab switch — user flips between already-loaded tabs (no onUpdated fires).
-// If the new active tab is not Zoho, clear the in-memory Zoho context AND
-// storage so the sidebar stops resolving "this quote" to the old record.
+// Update currentPageType so sync readers see the right value. We do NOT
+// touch the per-tab stored contexts here (the user may switch back); they
+// only get cleared when the tab itself navigates or closes.
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
     const url = tab?.url || '';
     if (url.startsWith('https://mail.google.com/')) {
       currentPageType = 'gmail';
-      clearZohoContext();
     } else if (url.startsWith('https://crm.zoho.com/')) {
       currentPageType = 'zoho';
-      // Don't clear anything — the Zoho content script will re-populate
     } else {
       currentPageType = 'other';
-      clearZohoContext();
     }
   } catch {}
 });
 
-// Tab closed — if it was a Zoho tab, no other Zoho tab may be open, so clear.
-// The next Zoho tab that opens will re-populate via the content script.
-chrome.tabs.onRemoved.addListener(async () => {
-  try {
-    const zohoTabs = await chrome.tabs.query({ url: 'https://crm.zoho.com/*' });
-    if (!zohoTabs || zohoTabs.length === 0) {
-      clearZohoContext();
-    }
-  } catch {}
+// Tab closed — sweep this tab's per-tab context entries so storage doesn't
+// grow unbounded over time. Both Zoho and Gmail keys for the closed tab are
+// removed; any other open tab retains its own.
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  clearZohoContextForTab(tabId);
+  clearEmailContextForTab(tabId);
 });
