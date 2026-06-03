@@ -107,6 +107,18 @@ Systems Manager also enabled
     `got: ${JSON.stringify(smRows)}`);
 }
 
+// ─── 2d. Literal-label fallback is scoped to the SKU block (no caption capture) ─
+{
+  const text = `LICENSE_DASHBOARD_PARSE_V1
+---
+SKU: MR-ENT | LIMIT: 5 | ACTIVE: 5
+---
+Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
+  const skus = extractSkusFromVisionText(text);
+  check('SM mention OUTSIDE the --- block is not captured', !skus.some(s => s.sku === 'SM-ENT'),
+    `got: ${JSON.stringify(skus)}`);
+}
+
 // ─── 3. Full Naf Naf dashboard → renewal quote ───────────────────────────────
 // MR-ENT×5, MS350-24P×1, MS350-48FP×2, MX68CW×36, MX68W×3, MX84×1, SM-ENT×84.
 {

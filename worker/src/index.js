@@ -1869,7 +1869,11 @@ function extractSkusFromVisionText(text) {
     // breaks the token match). Recover it here, guarded so we never
     // double-count a row already captured as SM / SME / SM-ENT.
     if (!skus.some(s => /^(SM|SME|SM-ENT)$/.test(s.sku))) {
-      const smM = cleanedText.match(/Systems\s+Manager[^\n]*?LIMIT:\s*(\d+)[^\n]*?ACTIVE:\s*(\d+)/i);
+      // Scope the search to the SKU block (between the --- markers) so a caption
+      // or License History sentence mentioning "Systems Manager" can't be
+      // misread as a license row.
+      const smBlock = (cleanedText.match(/---\s*([\s\S]*?)\s*---/) || [, cleanedText])[1];
+      const smM = smBlock.match(/Systems\s+Manager[^\n]*?LIMIT:\s*(\d+)[^\n]*?ACTIVE:\s*(\d+)/i);
       if (smM) {
         const smLimit = parseInt(smM[1], 10);
         const smActive = parseInt(smM[2], 10);
@@ -8814,6 +8818,32 @@ export default {
                       await kv.delete(`vision_skus_${personId}`);
                       ctx.waitUntil(T.flush());
                       return;
+                    }
+                    // Fallback: stored SKUs that DON'T resolve to a license
+                    // renewal (dashQuote null — e.g. a non-dashboard image whose
+                    // tokens have no license family) keep the prior parseMessage +
+                    // buildQuoteResponse behavior so the user still gets a
+                    // deterministic quote instead of falling through to clarify.
+                    // A real dashboard always resolves above, so this branch never
+                    // re-emits hardware on a renewal.
+                    const visionSkuText = storedSkus.map(s => `${s.qty} ${s.sku}`).join(', ');
+                    const visionParsed = parseMessage(visionSkuText);
+                    if (visionParsed && visionParsed.items.length > 0) {
+                      const visionResult = buildQuoteResponse(visionParsed);
+                      if (visionResult.message && !visionResult.needsLlm) {
+                        await addToHistory(kv, personId, 'user', text);
+                        await addToHistory(kv, personId, 'assistant', visionResult.message);
+                        T.step('wx-send', 'enter');
+                        await sendMessage(roomId, `${visionResult.message}\n\n_⚡ Vision follow-up + Deterministic Quote (${activeClassification.elapsed}ms classify, free)_`, token);
+                        T.step('wx-send', 'exit');
+                        T.step('wx-d1', 'enter');
+                        logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, responseText: visionResult.message }).catch(() => {});
+                        writeMetric(env, { path: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, personId });
+                        T.step('wx-d1', 'exit');
+                        await kv.delete(`vision_skus_${personId}`);
+                        ctx.waitUntil(T.flush());
+                        return;
+                      }
                     }
                   }
                 } catch (_visionErr) {
