@@ -1674,48 +1674,54 @@ async function callClaudeClassifierJsonFallback(env, { systemPrompt, userText })
 async function logShadowClassification(env, { personId, requestText, priorContext, legacy, v2, gemma4 }) {
   if (!env.ANALYTICS_DB) return;
   try {
-    // Migrate table: add Gemma 4 columns if they don't exist yet
-    await env.ANALYTICS_DB.prepare(`CREATE TABLE IF NOT EXISTS classifier_shadow (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      created_at TEXT DEFAULT (datetime('now')),
-      person_id TEXT,
-      request_text TEXT,
-      prior_context TEXT,
-      legacy_intent TEXT,
-      legacy_elapsed_ms INTEGER,
-      legacy_raw TEXT,
-      v2_intent TEXT,
-      v2_confidence REAL,
-      v2_elapsed_ms INTEGER,
-      v2_items TEXT,
-      v2_modifiers TEXT,
-      v2_revision TEXT,
-      v2_reference TEXT,
-      v2_raw TEXT,
-      v2_parse_error TEXT,
-      intent_agree INTEGER,
-      gemma4_intent TEXT,
-      gemma4_confidence REAL,
-      gemma4_elapsed_ms INTEGER,
-      gemma4_items TEXT,
-      gemma4_modifiers TEXT,
-      gemma4_revision TEXT,
-      gemma4_reference TEXT,
-      gemma4_raw TEXT,
-      gemma4_parse_error TEXT,
-      gemma4_agree INTEGER
-    )`).run();
-    // Safe migration for existing tables: add columns if missing (SQLite ignores duplicate ADD COLUMN errors)
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_intent TEXT`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_confidence REAL`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_elapsed_ms INTEGER`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_items TEXT`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_modifiers TEXT`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_revision TEXT`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_reference TEXT`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_raw TEXT`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_parse_error TEXT`).run(); } catch {}
-    try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_agree INTEGER`).run(); } catch {}
+    // One-time DDL per isolate: matches the ensureTraceTable pattern above.
+    // Without this guard we ran 1× CREATE TABLE + 10× ALTER TABLE on every
+    // classification call, even when the table and columns already existed.
+    if (!globalThis.__shadowTableReady) {
+      // Migrate table: add Gemma 4 columns if they don't exist yet
+      await env.ANALYTICS_DB.prepare(`CREATE TABLE IF NOT EXISTS classifier_shadow (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT DEFAULT (datetime('now')),
+        person_id TEXT,
+        request_text TEXT,
+        prior_context TEXT,
+        legacy_intent TEXT,
+        legacy_elapsed_ms INTEGER,
+        legacy_raw TEXT,
+        v2_intent TEXT,
+        v2_confidence REAL,
+        v2_elapsed_ms INTEGER,
+        v2_items TEXT,
+        v2_modifiers TEXT,
+        v2_revision TEXT,
+        v2_reference TEXT,
+        v2_raw TEXT,
+        v2_parse_error TEXT,
+        intent_agree INTEGER,
+        gemma4_intent TEXT,
+        gemma4_confidence REAL,
+        gemma4_elapsed_ms INTEGER,
+        gemma4_items TEXT,
+        gemma4_modifiers TEXT,
+        gemma4_revision TEXT,
+        gemma4_reference TEXT,
+        gemma4_raw TEXT,
+        gemma4_parse_error TEXT,
+        gemma4_agree INTEGER
+      )`).run();
+      // Safe migration for existing tables: add columns if missing (SQLite ignores duplicate ADD COLUMN errors)
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_intent TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_confidence REAL`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_elapsed_ms INTEGER`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_items TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_modifiers TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_revision TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_reference TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_raw TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_parse_error TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_agree INTEGER`).run(); } catch {}
+      globalThis.__shadowTableReady = true;
+    }
     const intentAgree = legacy?.intent && v2?.intent ? (String(legacy.intent).toLowerCase() === String(v2.intent).toLowerCase() ? 1 : 0) : null;
     const gemma4Agree = legacy?.intent && gemma4?.intent ? (String(legacy.intent).toLowerCase() === String(gemma4.intent).toLowerCase() ? 1 : 0) : null;
     await env.ANALYTICS_DB.prepare(`INSERT INTO classifier_shadow
@@ -2990,7 +2996,7 @@ function handleEolDateRequest(text) {
       const eosDate = new Date(dates.eos);
       const eostDate = new Date(dates.eost);
       const now = new Date();
-      const eosLabel = eosDate <= now ? 'End of Sale' : 'End of Sale';
+      const eosLabel = eosDate <= now ? 'End of Sale (passed)' : 'End of Sale';
       const eostLabel = eostDate <= now ? 'End of Support (passed)' : 'End of Support';
       line += `\n  📅 ${eosLabel}: **${dates.eos}**`;
       line += `\n  🛡️ ${eostLabel}: **${dates.eost}**`;
@@ -3280,11 +3286,6 @@ async function handleFollowUpModifier(text, personId, kv) {
       lines.push(buildPricingBlock(items, false));
     }
     lines.push('');
-  }
-  if (isAddPricing && !showPricing) {
-    // simple pricing-only: price the hardware+licenses for first term
-    const first = mutated[0];
-    lines.push(buildPricingBlock(first.items, false));
   }
   return lines.join('\n').trim();
 }
@@ -7283,7 +7284,7 @@ function sanitizeLiveFetchRetryWording(reply) {
   return out;
 }
 
-async function askClaude(userMessage, personId, env, imageData = null, classification = null) {
+async function askClaude(userMessage, personId, env, imageData = null, classification = null, ctx = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
 
   // ═══ PRODUCT_INFO WATERFALL GATE ═══
@@ -7317,9 +7318,12 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
             await addToHistory(kv, personId, 'assistant', llamaOut.reply);
           } catch (_) {}
         }
-        // Log decision to D1
-        if (env.ctx && env.ctx.waitUntil) {
-          env.ctx.waitUntil(logBotUsageToD1(env, {
+        // Log decision to D1 — prefer ctx.waitUntil so the Worker keeps the
+        // promise alive past the response. Pre-fix this read env.ctx, which
+        // was never assigned (env is shared and aliasing it is unsafe), so
+        // the branch was permanently false and telemetry was fire-and-forget.
+        if (ctx && ctx.waitUntil) {
+          ctx.waitUntil(logBotUsageToD1(env, {
             personId,
             requestText: userMessage,
             responsePath: 'waterfall-llama-product-info',
@@ -7765,12 +7769,15 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       await addToHistory(kv, personId, 'assistant', finalReply);
     }
 
-    // Log token usage + cost to D1 (previously missed — cost was always $0)
+    // Log token usage + cost to D1 (previously missed — cost was always $0).
+    // Use ctx.waitUntil so the Worker keeps the D1 write alive past the
+    // response; fire-and-forget microtasks were being dropped on isolate
+    // termination, silently losing cost/token telemetry.
     if (data?.usage) {
       const MODEL_COST = { input: 3.0, output: 15.0 }; // sonnet-4-6 per 1M tokens
       const costUsd = ((data.usage.input_tokens || 0) / 1e6) * MODEL_COST.input +
                       ((data.usage.output_tokens || 0) / 1e6) * MODEL_COST.output;
-      logBotUsageToD1(env, {
+      const logPromise = logBotUsageToD1(env, {
         personId, requestText: userMessage, responsePath: 'claude',
         model: 'claude-sonnet-4-6',
         inputTokens: data.usage.input_tokens || 0,
@@ -7779,6 +7786,9 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
         durationMs: null,
         responseText: finalReply
       }).catch(() => {});
+      if (ctx && ctx.waitUntil) {
+        ctx.waitUntil(logPromise);
+      }
     }
 
     return finalReply;
@@ -8156,7 +8166,7 @@ export default {
               // Tier 2: Fall back to Claude vision (paid)
               console.log('[Routing] CF vision failed, falling back to Claude');
               T.step('wx-imgclaude', 'enter');
-              const claudeReply = await askClaude(prompt, personId, env, imageData);
+              const claudeReply = await askClaude(prompt, personId, env, imageData, null, ctx);
               T.step('wx-imgclaude', 'exit');
               T.step('wx-send', 'enter');
               await sendMessage(roomId, claudeReply, token);
@@ -8567,7 +8577,7 @@ export default {
                 if (priorWasClaude) {
                   console.log('[CF-First] Retry phrase + prior Claude/datasheet context → reroute to Claude with history');
                   T.step('wx-claude', 'enter');
-                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model(s) they asked about. Treat this same turn as the retry: if '## LIVE DATASHEET CONTENT' is in your prompt, answer from it directly. If it is missing but recent history already contains a successful live datasheet answer, summarize that existing live-sourced answer. Do NOT claim you cannot browse, do NOT ask the user to 'send another message to trigger the fetch', and do NOT ask them to try one model at a time.)`, personId, env, null, activeClassification);
+                  const retryReply = await askClaude(`${text}\n\n(Note: The user is retrying a prior datasheet or product-info turn. Use the conversation history to identify the model(s) they asked about. Treat this same turn as the retry: if '## LIVE DATASHEET CONTENT' is in your prompt, answer from it directly. If it is missing but recent history already contains a successful live datasheet answer, summarize that existing live-sourced answer. Do NOT claim you cannot browse, do NOT ask the user to 'send another message to trigger the fetch', and do NOT ask them to try one model at a time.)`, personId, env, null, activeClassification, ctx);
                   T.step('wx-claude', 'exit');
                   await addToHistory(kv, personId, 'user', text);
                   await addToHistory(kv, personId, 'assistant', retryReply);
@@ -8674,7 +8684,7 @@ export default {
                   if (history.length > 0) {
                     T.step('wx-revision', 'exit', { result: 'has_history' });
                     T.step('wx-claude', 'enter');
-                    const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                    const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env, null, null, ctx);
                     T.step('wx-claude', 'exit');
                     T.step('wx-send', 'enter');
                     await sendMessage(roomId, claudeReply, token);
@@ -8720,7 +8730,7 @@ export default {
                   const errorContext = quoteResult.errors.join('\n');
                   console.log(`[CF-First] Deterministic errors, escalating to Claude: ${errorContext}`);
                   T.step('wx-claude', 'enter');
-                  const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env);
+                  const claudeReply = await askClaude(`${text}\n\n(Note: these SKU issues were detected: ${errorContext})`, personId, env, null, null, ctx);
                   T.step('wx-claude', 'exit');
                   T.step('wx-send', 'enter');
                   await sendMessage(roomId, claudeReply, token);
@@ -8929,7 +8939,7 @@ export default {
                   console.log('[CF-First] Revise: no parseable prior quote in history, falling to Claude');
                   // Let Claude handle it with full history context
                   T.step('wx-claude', 'enter');
-                  const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                  const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env, null, null, ctx);
                   T.step('wx-claude', 'exit');
                   T.step('wx-send', 'enter');
                   await sendMessage(roomId, claudeReply, token);
@@ -8944,7 +8954,7 @@ export default {
                   T.step('wx-revise-v2', 'exit', { result: 'unhandled_action' });
                   console.log('[CF-First] Revise: applyV2Revision returned null (unhandled action), falling to Claude');
                   T.step('wx-claude', 'enter');
-                  const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                  const claudeReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env, null, null, ctx);
                   T.step('wx-claude', 'exit');
                   T.step('wx-send', 'enter');
                   await sendMessage(roomId, claudeReply, token);
@@ -8974,7 +8984,7 @@ export default {
                 T.step('wx-revise-v2', 'exit', { result: 'build_failed' });
                 console.log('[CF-First] Revise: buildQuoteResponse failed on revised state, falling to Claude');
                 T.step('wx-claude', 'enter');
-                const fallbackReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env);
+                const fallbackReply = await askClaude(`${text}\n\n(Note: The user is modifying their previous quote request. Use the conversation history to understand what they originally asked for, apply the requested change, and generate updated URLs.)`, personId, env, null, null, ctx);
                 T.step('wx-claude', 'exit');
                 T.step('wx-send', 'enter');
                 await sendMessage(roomId, fallbackReply, token);
@@ -8994,7 +9004,7 @@ export default {
           // even when the narrow wantsLiveDatasheet regex doesn't match (e.g., followups like
           // "get specifics from datasheet" or "what does the datasheet say about ports").
           T.step('wx-claude', 'enter');
-          const claudeReply = await askClaude(text, personId, env, null, activeClassification);
+          const claudeReply = await askClaude(text, personId, env, null, activeClassification, ctx);
           T.step('wx-claude', 'exit');
           T.step('wx-send', 'enter');
           await sendMessage(roomId, claudeReply, token);

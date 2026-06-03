@@ -3,6 +3,17 @@ node_modules/
 *.log
 .DS_Store
 
+# Wrangler local secret files — never commit
+.dev.vars
+*.dev.vars
+
+# Wrangler local-state cache (created by `wrangler whoami` / dev / kv local) — never commit
+.wrangler/
+**/.wrangler/
+
+# Claude Code local scratch (agent worktrees, session files) — never commit
+.claude/
+
 # Secrets file — lives in parent Bots/ directory, but add here as
 # belt-and-suspenders in case someone ever copies it into the repo tree.
 .stratus-secrets

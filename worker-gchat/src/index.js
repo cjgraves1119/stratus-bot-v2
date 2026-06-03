@@ -1177,7 +1177,7 @@ function generateUndoToken() {
     const hex = uuid.replace(/-/g, '').substring(0, 8);
     if (hex) return 'u_' + hex;
   } catch (_) {}
-  return 'u_' + Date.now().toString(36).substring(-8);
+  return 'u_' + Date.now().toString(36).slice(-8);
 }
 
 // ── Workflow Trace Helper (live flow visualization) ─────────────────────────
@@ -2559,7 +2559,7 @@ function handleEolDateRequest(text) {
       const eosDate = new Date(dates.eos);
       const eostDate = new Date(dates.eost);
       const now = new Date();
-      const eosLabel = eosDate <= now ? 'End of Sale' : 'End of Sale';
+      const eosLabel = eosDate <= now ? 'End of Sale (passed)' : 'End of Sale';
       const eostLabel = eostDate <= now ? 'End of Support (passed)' : 'End of Support';
       line += `\n  📅 ${eosLabel}: **${dates.eos}**`;
       line += `\n  🛡️ ${eostLabel}: **${dates.eost}**`;
@@ -6497,6 +6497,39 @@ function getProductIdToSkuMap() {
   return _productIdToSku;
 }
 
+// ── Wave A leftover Fix 2b (2026-06-03): SKU-name an inactive-product error ──
+// When parseZohoResponse returns _no_retry:true on an inactive product, parse
+// the json_path (e.g. "$.data[0].Quoted_Items[6].Product_Name.id") to extract
+// the line-item index, reverse-map its Product_Name.id to a SKU, and prepend
+// the SKU to the message so the agent can tell the user WHICH product is
+// inactive instead of the generic terminal message.
+function enrichInactiveProductMessage(parsed, recordData) {
+  try {
+    if (!parsed || parsed._no_retry !== true) return parsed;
+    const rec = parsed.data || {};
+    if (!/inactive product/i.test(rec.message || '')) return parsed;
+    const jsonPath = rec.details?.json_path || '';
+    const m = jsonPath.match(/Quoted_Items\[(\d+)\]/);
+    if (!m) return parsed;
+    const idx = parseInt(m[1], 10);
+    const items = Array.isArray(recordData?.Quoted_Items) ? recordData.Quoted_Items : [];
+    const item = items[idx];
+    const productId = item?.Product_Name?.id || item?.Product_Name;
+    if (!productId) return parsed;
+    const idMap = getProductIdToSkuMap();
+    const sku = idMap[productId];
+    if (!sku) return parsed;
+    if (parsed.message && !parsed.message.includes(sku)) {
+      parsed.message = `❌ ${sku} is INACTIVE in Zoho — ${parsed.message.replace(/^[❌⛔]\s*/, '')}`;
+      console.log(`[INACTIVE-SKU] Enriched terminal message with SKU="${sku}" (idx=${idx}, productId=${productId})`);
+    }
+    return parsed;
+  } catch (e) {
+    console.warn(`[INACTIVE-SKU] enrichInactiveProductMessage threw (non-fatal): ${e.message}`);
+    return parsed;
+  }
+}
+
 // ── Product_Active preflight for Quoted_Items ──
 // Blocks NEW line items that reference EOL / inactive products OR fabricated
 // product_ids BEFORE hitting Zoho.
@@ -9187,6 +9220,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
         }
 
+        // ── Wave A leftover P5 (2026-06-03): Tasks $se_module auto-inject ──
+        // Zoho rejects Task create+What_Id without $se_module ("required field
+        // not found"). Mirror the patterns at lines ~21385 and ~21770: if
+        // What_Id is set but $se_module is missing, default to 'Deals' (most
+        // common case). If the caller has signaled an Accounts hint (e.g.
+        // Account_Name on the payload), use 'Accounts' instead.
+        if (module_name === 'Tasks' && recordData.What_Id && !recordData.$se_module) {
+          // Heuristic: an Account-only hint on the payload signals "Accounts".
+          // Otherwise default to Deals (the production-most-common case).
+          const _whatIdVal = typeof recordData.What_Id === 'object' ? recordData.What_Id.id : recordData.What_Id;
+          const _looksLikeAccount = recordData.Account_Name && !recordData.Deal_Name;
+          recordData.$se_module = _looksLikeAccount ? 'Accounts' : 'Deals';
+          console.warn(`[TASK-SE-MODULE] Auto-injected $se_module="${recordData.$se_module}" for What_Id=${_whatIdVal} (caller omitted it)`);
+        }
+
         // Pre-flight validation
         const createCheck = await validateCrmWrite(module_name, recordData, true, env);
         if (!createCheck.valid) {
@@ -9286,6 +9334,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           if (_isrErr) return _isrErr;
         }
         const parsed = parseZohoResponse(createResult, `${module_name} record creation`);
+        // Wave A leftover Fix 2b: name the SKU on inactive-product terminal errors.
+        if (module_name === 'Quotes') enrichInactiveProductMessage(parsed, recordData);
         // parseZohoResponse returns { success, message, record_id, data: <single record> }
         // — not an array. Pull from parsed.record_id (success path) or parsed.data.details.id.
         const createdId = parsed?.record_id
@@ -9789,6 +9839,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.log(`[GCHAT] Quote update response:`, JSON.stringify(updateResult)?.substring(0, 500));
         }
         const updateParsed = parseZohoResponse(updateResult, `${module_name} record update`);
+        // Wave A leftover Fix 2b: name the SKU on inactive-product terminal errors.
+        if (module_name === 'Quotes') enrichInactiveProductMessage(updateParsed, data);
         // parseZohoResponse normalizes .data to a single record (not array).
         const updateIsError = updateParsed?.success === false || updateParsed?.data?.status === 'error';
         let updateUndoToken = null;
@@ -19679,22 +19731,37 @@ async function callWebSearchEnrichment(env, domain, model, signal) {
   const system = 'You are a company research assistant. Given an email domain, look up the official organization. First verify the submitted domain directly via web_search (homepage, about, contact, locations, or footer). If the submitted domain appears to be an alias, parked, or lacks address data, search for the canonical organization using the domain stem. Do not infer from the domain string alone. Return ONLY a raw JSON object (no markdown). If unverified, use null. Schema: {"name":"","address":"","city":"","state":"","zip":"","phone":"","industries":[],"source_url":""}. source_url MUST be the page that supports name+address. Return null fields if you cannot verify with web evidence.';
 
   const userMsg = 'Company domain: ' + domain;
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 1024,
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
-      system,
-      messages: [{ role: 'user', content: userMsg }]
-    }),
-    signal
+  // CRIT-9 (2026-06-03): route through CF AI Gateway first, fall back to direct
+  // Anthropic on 5xx / fetch errors. Mirrors askClaudeContinue (~line 14936).
+  const _wseBody = JSON.stringify({
+    model,
+    max_tokens: 1024,
+    tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
+    system,
+    messages: [{ role: 'user', content: userMsg }]
   });
+  const _wseHeaders = {
+    'Content-Type': 'application/json',
+    'x-api-key': env.ANTHROPIC_API_KEY,
+    'anthropic-version': '2023-06-01'
+  };
+  async function _wseFetch(url) {
+    const headers = url === ANTHROPIC_API_URL
+      ? { ..._wseHeaders, 'cf-aig-cache-ttl': '3600' }
+      : _wseHeaders;
+    return await fetch(url, { method: 'POST', headers, body: _wseBody, signal });
+  }
+  let resp;
+  try {
+    resp = await _wseFetch(ANTHROPIC_API_URL);
+    if (resp.status >= 500) {
+      console.warn('[CRIT-9] web-search gateway ' + resp.status + ', retrying direct');
+      resp = await _wseFetch(ANTHROPIC_API_DIRECT);
+    }
+  } catch (gwErr) {
+    console.warn('[CRIT-9] web-search gateway fetch threw, retrying direct: ' + gwErr.message);
+    resp = await _wseFetch(ANTHROPIC_API_DIRECT);
+  }
   if (!resp.ok) {
     throw new Error('web-search API error: ' + resp.status);
   }
@@ -23853,7 +23920,31 @@ Hard rules:
                 };
                 _ctcStatus = 'success';
               } else {
-                apiResult = { success: false, error: parsed.message || 'Contact creation failed' };
+                // ── Wave A leftover P6 (2026-06-03): duplicate-contact linking ──
+                // Zoho returns DUPLICATE_DATA with the existing record id in
+                // details.id (or details.duplicate_record.id on some endpoints).
+                // Return a SUCCESS result that links to the existing contact
+                // rather than surfacing a generic "creation failed" message.
+                const _rawRec = createResp?.data?.[0] || parsed?.data || {};
+                const _rawCode = _rawRec.code || createResp?.code;
+                const _existingId = _rawRec.details?.duplicate_record?.id
+                  || _rawRec.details?.id
+                  || null;
+                if (_rawCode === 'DUPLICATE_DATA' && _existingId) {
+                  apiResult = {
+                    success: true,
+                    contactId: _existingId,
+                    record_id: _existingId,
+                    zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Contacts/${_existingId}`,
+                    message: 'Contact already exists in Zoho — linked existing record instead of creating a duplicate.',
+                    _existing: true
+                  };
+                  _ctcStatus = 'success';
+                  _ctcDuplicate = _existingId;
+                  console.log(`[CONTACT-DUP] Linked existing Contact ${_existingId} for ${newCtEmail || newCtLast}`);
+                } else {
+                  apiResult = { success: false, error: parsed.message || 'Contact creation failed' };
+                }
               }
             } catch (err) {
               apiResult = { error: 'Contact creation failed: ' + err.message, success: false };
@@ -23979,15 +24070,32 @@ Return ONLY a JSON object (no markdown, no explanation):
               };
               if (claudeTools) claudeBody.tools = claudeTools;
 
-              const claudeResp = await fetch('https://api.anthropic.com/v1/messages', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': env.ANTHROPIC_API_KEY,
-                  'anthropic-version': '2023-06-01',
-                },
-                body: JSON.stringify(claudeBody),
-              });
+              // CRIT-9 (2026-06-03): route through CF AI Gateway first, fall
+              // back to direct Anthropic on 5xx / fetch errors. Mirrors
+              // askClaudeContinue (~line 14936).
+              const _daBody = JSON.stringify(claudeBody);
+              const _daHeaders = {
+                'Content-Type': 'application/json',
+                'x-api-key': env.ANTHROPIC_API_KEY,
+                'anthropic-version': '2023-06-01',
+              };
+              async function _daFetch(url) {
+                const headers = url === ANTHROPIC_API_URL
+                  ? { ..._daHeaders, 'cf-aig-cache-ttl': '3600' }
+                  : _daHeaders;
+                return await fetch(url, { method: 'POST', headers, body: _daBody });
+              }
+              let claudeResp;
+              try {
+                claudeResp = await _daFetch(ANTHROPIC_API_URL);
+                if (claudeResp.status >= 500) {
+                  console.warn('[CRIT-9] detect-account gateway ' + claudeResp.status + ', retrying direct');
+                  claudeResp = await _daFetch(ANTHROPIC_API_DIRECT);
+                }
+              } catch (gwErr) {
+                console.warn('[CRIT-9] detect-account gateway fetch threw, retrying direct: ' + gwErr.message);
+                claudeResp = await _daFetch(ANTHROPIC_API_DIRECT);
+              }
 
               if (claudeResp.ok) {
                 const claudeData = await claudeResp.json();
@@ -25529,6 +25637,19 @@ Return ONLY a JSON object (no markdown, no explanation):
         // 5-minute safety-net deadline
         let result = await askClaude(text, personId, env, imageData || null, true, progressCallback, 300000);
         console.log(`[GCHAT-QUEUE] askClaude completed in ${Date.now() - queueStart}ms`);
+
+        // CRIT-7 (2026-06-03): if the wall-budget elapsed, askClaude returns a
+        // __continuation handoff (state snapshot) instead of a reply. Without
+        // this loop the queue consumer rendered "Done." to GChat and wrote
+        // "Done." to conversation history — silently dropping the unfinished
+        // agent run. Mirror the chat-handler exemplar (~line 22676).
+        while (result && result.__continuation) {
+          console.log(`[GCHAT-QUEUE] Continuation at iteration ${result.iteration}`);
+          result = await askClaudeContinue(
+            result.messages, result.tools, result.systemPrompt,
+            result.iteration, env, progressCallback, 300000, personId
+          );
+        }
 
         let finalReply = typeof result === 'string' ? result : (result?.reply || 'Done.');
         finalReply = adaptMarkdownForGChat(finalReply);

@@ -81,6 +81,29 @@ const TABS = [
   { id: 'search', label: 'Search', icon: '🔍' },
 ];
 
+// Per-tab storage key prefix — must match the background service worker.
+// The Zoho content script's context is keyed by the tab it lives in so that
+// reading "the Zoho context for the active tab" never picks up a different
+// tab's record.
+const ZOHO_CTX_KEY_PREFIX = 'zohoCtx_';
+const zohoCtxKey = (tabId) => `${ZOHO_CTX_KEY_PREFIX}${tabId}`;
+
+/**
+ * Read the per-tab Zoho context for the active tab directly from
+ * chrome.storage.session. Returns the raw stored value (or null) — caller
+ * is responsible for validating it against the active URL via
+ * `contextMatchesUrl` before trusting it.
+ */
+async function readActiveTabZohoCtx(activeTabId) {
+  if (activeTabId == null) return null;
+  try {
+    const key = zohoCtxKey(activeTabId);
+    const stored = await chrome.storage.session.get(key);
+    if (stored && stored[key]) return stored[key];
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('crm');
   const [emailContext, setEmailContext] = useState(null);
@@ -97,9 +120,12 @@ export default function App() {
   //
   // Two-path strategy (MV3-safe):
   //   1. sendToBackground(GET_PAGE_CONTEXT) — fast if service worker is alive.
-  //   2. If that fails or returns no zohoContext, read chrome.storage.local directly.
-  //      Content scripts write zohoPageContext straight to storage now, so it's
-  //      always available even when the background worker has gone idle.
+  //   2. If that fails or returns no zohoContext, read chrome.storage.session
+  //      directly under the per-tab key zohoCtx_<activeTabId>.
+  //
+  // The background is now the single writer to storage and uses per-tab keys
+  // so that the sidebar's active-tab read path can never see a different
+  // tab's record (cross-tab bleed fix, Wave B 2026-06-03).
   useEffect(() => {
     sendToBackground(MSG.GET_AUTH_STATUS).then(setAuthStatus).catch(() => {});
 
@@ -107,9 +133,11 @@ export default function App() {
       // Single source of truth: the currently active tab URL.
       // Parse it first so every downstream decision uses the same anchor.
       let activeUrl = '';
+      let activeTabId = null;
       try {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         activeUrl = activeTab?.url || '';
+        activeTabId = activeTab?.id ?? null;
       } catch (err) {
         console.warn('[Stratus App] chrome.tabs.query failed:', err?.message);
       }
@@ -137,14 +165,10 @@ export default function App() {
         // response came back null). Same validation — we only trust the
         // stored value if module + recordId match the active tab URL.
         if (!zohoCtx) {
-          try {
-            const stored = await chrome.storage.local.get('zohoPageContext');
-            if (contextMatchesUrl(stored?.zohoPageContext, urlInfo)) {
-              zohoCtx = stored.zohoPageContext;
-              console.log('[Stratus App] Zoho context recovered from storage:', zohoCtx);
-            }
-          } catch (err) {
-            console.warn('[Stratus App] chrome.storage.local read failed:', err?.message);
+          const stored = await readActiveTabZohoCtx(activeTabId);
+          if (contextMatchesUrl(stored, urlInfo)) {
+            zohoCtx = stored;
+            console.log('[Stratus App] Zoho context recovered from per-tab storage:', zohoCtx);
           }
         }
 
@@ -311,15 +335,21 @@ export default function App() {
   // sleeps after ~30s idle and the ZOHO_CONTEXT_CHANGED message won't wake
   // the sidebar if the user has it pinned open. This loop re-derives the
   // active-page context every 2s directly from the active tab URL and
-  // chrome.storage.local, discarding any stale value whose module/recordId
-  // don't match the current URL. This is the single source of truth fed
-  // into both the header pill and the ChatPanel via props.
+  // the per-tab session storage entry (zohoCtx_<activeTabId>), discarding
+  // any stale value whose module/recordId don't match the current URL.
+  // This is the single source of truth fed into both the header pill and
+  // the ChatPanel via props.
+  //
+  // Now that ZOHO_CONTEXT_CHANGED actually fires (EXT-CRIT-1 fix), this
+  // polling is more of a belt-and-suspenders safety net than the primary
+  // update path it used to be.
   useEffect(() => {
     let cancelled = false;
     async function refresh() {
       try {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         const activeUrl = activeTab?.url || '';
+        const activeTabId = activeTab?.id ?? null;
         const urlInfo = parseZohoRecordUrl(activeUrl);
 
         if (!urlInfo?.isZoho) {
@@ -333,14 +363,14 @@ export default function App() {
           return;
         }
 
-        // Prefer stored context iff it matches active URL; else synthesize.
+        // Prefer per-tab stored context iff it matches active URL; else
+        // synthesize from the URL. Per-tab keying guarantees we cannot
+        // accidentally pick up a different tab's record here.
         let next = null;
-        try {
-          const stored = await chrome.storage.local.get('zohoPageContext');
-          if (contextMatchesUrl(stored?.zohoPageContext, urlInfo)) {
-            next = stored.zohoPageContext;
-          }
-        } catch (_) { /* ignore */ }
+        const stored = await readActiveTabZohoCtx(activeTabId);
+        if (contextMatchesUrl(stored, urlInfo)) {
+          next = stored;
+        }
         if (!next) next = minimalContextFromUrl(urlInfo);
 
         if (cancelled) return;

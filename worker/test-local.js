@@ -504,7 +504,7 @@ function handleEolDateRequest(text) {
       const eosDate = new Date(dates.eos);
       const eostDate = new Date(dates.eost);
       const now = new Date();
-      const eosLabel = eosDate <= now ? 'End of Sale' : 'End of Sale';
+      const eosLabel = eosDate <= now ? 'End of Sale (passed)' : 'End of Sale';
       const eostLabel = eostDate <= now ? 'End of Support (passed)' : 'End of Support';
       line += `\n  📅 ${eosLabel}: **${dates.eos}**`;
       line += `\n  🛡️ ${eostLabel}: **${dates.eost}**`;
