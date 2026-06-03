@@ -63,7 +63,17 @@ async function loadLivePrices(env) {
 const prices = new Proxy(staticPrices, {
   get(target, prop) {
     // For live prices, check the KV cache first
-    if (livePrices && livePrices[prop]) return livePrices[prop];
+    if (livePrices && livePrices[prop]) {
+      const live = livePrices[prop];
+      // Preserve the static catalog's zoho_active=false flag: it marks SKUs whose Zoho
+      // product record is deactivated (can't be written to a quote). The live KV price
+      // feed doesn't carry this flag, so without this merge a live-priced SKU would be
+      // reported active and slip past the inactive-product guard (LIC-SME-5YR, 2026-06-02).
+      if (target[prop] && target[prop].zoho_active === false && live.zoho_active === undefined) {
+        return { ...live, zoho_active: false };
+      }
+      return live;
+    }
     return target[prop];
   },
   has(target, prop) {
@@ -6529,6 +6539,16 @@ function preflightQuotedItemsProductActive(quotedItems) {
       hallucinated.push({ product_id: productId });
       continue;
     }
+    // Inactive-in-Zoho guard: the SKU is in our catalog but its Zoho product record is
+    // deactivated (Product_Active=false), so Zoho rejects the write with "NOT_ALLOWED —
+    // can't add inactive product." Block pre-flight with actionable guidance instead of
+    // letting the agent loop on the dead id (LIC-SME-5YR / MX67W-HW, 2026-06-02).
+    const priceEntry = (typeof prices !== 'undefined' && prices) ? prices[sku] : null;
+    if (priceEntry && priceEntry.zoho_active === false) {
+      blocked.push({ sku, product_id: productId, inactive_in_zoho: true });
+      errors.push(`❌ ${sku} is INACTIVE in Zoho's inventory and cannot be added to a quote (it is discontinued). Remove it and ask the user for an active alternative — e.g. a different license term.`);
+      continue;
+    }
     if (typeof isEol === 'function' && isEol(sku)) {
       const replacement = (typeof checkEol === 'function') ? checkEol(sku) : null;
       blocked.push({ sku, product_id: productId, replacement: replacement || null });
@@ -6856,17 +6876,45 @@ function parseZohoResponse(result, action = 'operation') {
       const detail = record.details
         ? Object.entries(record.details).map(([k,v]) => `${k}: ${JSON.stringify(v)}`).join(', ')
         : '';
+      const baseMsg = `❌ ${action} failed: ${record.code} — ${record.message || ''}${detail ? ` (${detail})` : ''}`;
+      // Inactive-product writes are TERMINAL. Historically the agent looped on the same
+      // dead product_id (reordering line items) until the Anthropic API 400'd after 1-2
+      // minutes (e.g. LIC-SME-5YR on 2026-06-02). Signal the model to stop, not retry.
+      const isInactiveProduct = record.code === 'NOT_ALLOWED'
+        && /inactive product/i.test(record.message || '');
+      if (isInactiveProduct) {
+        return {
+          success: false,
+          _no_retry: true,
+          message: baseMsg + ` ⛔ TERMINAL — do NOT retry this write and do NOT reorder line items; the result will be identical. A line item references a product that is INACTIVE in Zoho's inventory and can never be added. Identify and remove that line item, then tell the user the product is unavailable (for example, the 5-year SME license is discontinued — offer the 1-year or 3-year term instead).`,
+          data: record
+        };
+      }
       return {
         success: false,
-        message: `❌ ${action} failed: ${record.code} — ${record.message || ''}${detail ? ` (${detail})` : ''}`,
+        message: baseMsg,
         data: record
       };
     }
   }
 
-  // Fallback — return as-is but flag if it looks like an error
+  // Fallback — flag recognizable error shapes as FAILURE. Historically a top-level Zoho
+  // error with no data[] array (e.g. INVALID_URL_PATTERN) fell through to the success
+  // default below and was reported to users as "✅ completed" while the write failed
+  // (Deals/update mislabel, observed 2026-05-14). Default to failure when an error code
+  // or status is present; only treat truly unmarked responses as success.
   if (result.status && result.status >= 400) {
     return { success: false, message: `Zoho API returned status ${result.status}`, data: result };
+  }
+  if ((result.code && result.code !== 'SUCCESS') || result.status === 'error') {
+    const detail = result.details
+      ? Object.entries(result.details).map(([k,v]) => `${k}: ${JSON.stringify(v)}`).join(', ')
+      : '';
+    return {
+      success: false,
+      message: `❌ ${action} failed: ${result.code || 'error'} — ${result.message || ''}${detail ? ` (${detail})` : ''}`,
+      data: result
+    };
   }
 
   return { success: true, message: `✅ ${action} completed.`, data: result };
@@ -8770,7 +8818,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   Product_Code: suffixed,
                   Product_Name: suffixed,
                   Unit_Price: cached.list || null,
-                  Product_Active: true,
+                  Product_Active: cached.zoho_active === false ? false : true,
                   _from_cache: true,
                   ecomm_price: cached.price || null,
                   discount_per_unit: cached.discount_per_unit || 0,
@@ -8794,7 +8842,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 Product_Code: k,
                 Product_Name: k,
                 Unit_Price: v.list || null,
-                Product_Active: true,
+                Product_Active: v.zoho_active === false ? false : true,
                 _from_cache: true,
                 ecomm_price: v.price || null,
                 discount_per_unit: v.discount_per_unit || 0,
@@ -10391,7 +10439,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               ecomm_price: cachedPrice.price || null,
               discount_per_unit: cachedPrice.discount_per_unit || 0,
               discount_pct: cachedPrice.discount_pct || 0,
-              product_active: true,
+              product_active: cachedPrice.zoho_active === false ? false : true,
               found: true
             };
             if (resolved !== suffixed) {

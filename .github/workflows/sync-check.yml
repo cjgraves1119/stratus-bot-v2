@@ -9,6 +9,7 @@ on:
       - 'worker-gchat/src/data/**'
       - 'worker/src/index.js'
       - 'worker-gchat/src/index.js'
+      - 'chrome-extension/src/lib/auto-catalog.json'
   push:
     branches:
       - main
@@ -41,6 +42,15 @@ jobs:
             exit 1
           fi
           echo "✓ auto-catalog.json synchronized"
+
+      - name: Check chrome-extension auto-catalog.json
+        run: |
+          if ! diff -q worker/src/data/auto-catalog.json chrome-extension/src/lib/auto-catalog.json > /dev/null 2>&1; then
+            echo "❌ chrome-extension/src/lib/auto-catalog.json is out of sync with worker/src/data/auto-catalog.json"
+            echo "The extension bundles this catalog at build time — update it to match canonical (worker/src/data)."
+            exit 1
+          fi
+          echo "✓ chrome-extension auto-catalog.json synchronized"
 
       - name: Check specs.json
         run: |
