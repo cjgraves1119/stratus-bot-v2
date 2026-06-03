@@ -2,13 +2,21 @@
  * Stratus AI Chrome Extension — Zoho CRM Content Script
  *
  * 1. Detects the current Zoho CRM record (Account, Contact, Deal, Quote, etc.)
- *    from the URL and page content, then sends context to the sidebar via
- *    background + chrome.storage.local.
+ *    from the URL and page content, then sends context to the background
+ *    service worker, which persists it under a per-tab key
+ *    (`zohoCtx_<tabId>` in chrome.storage.session) so other tabs' contexts
+ *    never leak into the active-tab read path.
  * 2. Injects "View in Gmail" quick links next to email fields.
  *
  * URL is authoritative: on every SPA navigation we publish a minimal
  * URL-derived context immediately (before DOM enrichment finishes) so the
  * sidebar/background never serve a stale record in the gap.
+ *
+ * The content script NEVER writes to chrome.storage directly — it cannot
+ * know its own tab id, and a global storage key (the prior approach) is the
+ * root cause of the cross-tab context-bleed bug. All persistence is routed
+ * through chrome.runtime.sendMessage so the background can stamp
+ * `sender.tab.id` and key storage correctly.
  *
  * Runs only on crm.zoho.com pages.
  */
@@ -136,38 +144,31 @@ function extractWebsite() {
 let lastSentContext = null;
 
 /**
- * Persist context directly to chrome.storage.local so the sidebar can always
- * read it, even when the MV3 service worker is sleeping (sendMessage would
- * silently fail if the background is inactive).
+ * Publish a Zoho page context (list or record) to the background service
+ * worker. The background is now the SINGLE WRITER to chrome.storage.session
+ * for the per-tab keyed entries (zohoCtx_<tabId>) — content scripts cannot
+ * know their own tab id, so writing storage directly here would either need
+ * a global key (the prior cross-tab bleed bug) or be unsafe.
  *
- * We still fire sendMessage() so the background's in-memory cache
- * (currentZohoPageContext) stays warm while the worker is alive.
- */
-function persistContext(ctx) {
-  chrome.storage.local.set({ zohoPageContext: ctx }, () => {
-    if (chrome.runtime.lastError) {
-      console.warn('[Stratus AI] Failed to persist Zoho context to storage:',
-        chrome.runtime.lastError.message);
-    }
-  });
-}
-
-/**
- * Publish a Zoho page context (list or record) to both chrome.storage.local
- * and the background service worker. Dedupes on JSON equality so we don't
- * spam storage during repeated observer ticks.
+ * Dedupes on JSON equality so we don't spam the worker during repeated
+ * observer ticks.
+ *
+ * NOTE on message shape: we MUST spread `ctx` FIRST and then set `type` so
+ * the outer dispatch `type` is not clobbered by `ctx.type` (which is the
+ * literal string 'zoho' from minimalContextFromUrl, NOT a discriminator).
+ * The previous shape `{ type: 'ZOHO_CONTEXT_CHANGED', ...ctx }` silently
+ * overwrote the message type back to 'zoho', so registerMessageHandlers
+ * never dispatched to MSG.ZOHO_CONTEXT_CHANGED. (EXT-CRIT-1)
  */
 function publishContext(ctx) {
   if (!ctx) return;
   const key = JSON.stringify(ctx);
   if (key === lastSentContext) return;
   lastSentContext = key;
-  // Write directly to storage — the service worker may be sleeping.
-  persistContext(ctx);
-  // Also best-effort update the in-memory cache in the worker.
+  // Background handles BOTH the in-memory cache AND the per-tab storage write.
   chrome.runtime.sendMessage({
-    type: 'ZOHO_CONTEXT_CHANGED',
     ...ctx,
+    type: 'ZOHO_CONTEXT_CHANGED',
   }).catch(() => {});
 }
 
@@ -334,6 +335,8 @@ const retryInterval = setInterval(() => {
 // Fix: publish a MINIMAL URL-derived context synchronously on nav
 // (module + recordId + url + detectedAt, with recordName/email/etc. blank).
 // DOM enrichment then upgrades that context in place via the retry cycle.
+// The background re-stamps storage under the per-tab key `zohoCtx_<tabId>`
+// on every push, so storage is always in sync with the most recent push.
 let lastUrl = window.location.href;
 const urlObserver = new MutationObserver(() => {
   if (window.location.href !== lastUrl) {

@@ -15,6 +15,27 @@ import {
 } from '../../lib/zoho-url.js';
 // Quote generation routed through worker API (same engine as Webex/GChat bots)
 
+// Per-tab storage key prefix — must match the background service worker.
+// Reading by tab id ensures the chat panel never picks up a different
+// tab's Zoho record from the storage fallback.
+const ZOHO_CTX_KEY_PREFIX = 'zohoCtx_';
+const zohoCtxKey = (tabId) => `${ZOHO_CTX_KEY_PREFIX}${tabId}`;
+
+/**
+ * Read the per-tab Zoho context for a specific tab id directly from
+ * chrome.storage.session. Caller is responsible for validating against the
+ * active URL via `contextMatchesUrl`.
+ */
+async function readTabZohoCtx(tabId) {
+  if (tabId == null) return null;
+  try {
+    const key = zohoCtxKey(tabId);
+    const stored = await chrome.storage.session.get(key);
+    if (stored && stored[key]) return stored[key];
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
 // ─────────────────────────────────────────────
 // Markdown renderer
 // Handles: [text](url) links, bare URLs, **bold**, *bold*, _italic_, --- hr
@@ -205,15 +226,19 @@ export default function ChatPanel({
   // IS wired (default path), this effect is a no-op.
   //
   // URL is authoritative: we only trust cached/stored context when its
-  // recordId + module match the active tab URL.
+  // recordId + module match the active tab URL. Storage reads use the
+  // per-tab key zohoCtx_<activeTabId> so a different tab's record can
+  // never bleed in.
   useEffect(() => {
     if (zohoPageContextProp !== undefined && zohoPageContextProp !== null) return;
     let cancelled = false;
     async function refreshPageCtx() {
       let activeUrl = '';
+      let activeTabId = null;
       try {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
         activeUrl = activeTab?.url || '';
+        activeTabId = activeTab?.id ?? null;
       } catch (_) { /* ignore */ }
 
       const urlInfo = parseZohoRecordUrl(activeUrl);
@@ -233,14 +258,12 @@ export default function ChatPanel({
         console.warn('[Stratus Chat] GET_PAGE_CONTEXT via background failed:', err?.message);
       }
 
-      // Path 2: direct storage read with matching validation.
+      // Path 2: per-tab storage read with matching validation.
       if (!zohoCtx) {
-        try {
-          const stored = await chrome.storage.local.get('zohoPageContext');
-          if (contextMatchesUrl(stored?.zohoPageContext, urlInfo)) {
-            zohoCtx = stored.zohoPageContext;
-          }
-        } catch (_) { /* ignore */ }
+        const stored = await readTabZohoCtx(activeTabId);
+        if (contextMatchesUrl(stored, urlInfo)) {
+          zohoCtx = stored;
+        }
       }
 
       // Path 3: URL-derived minimal context (always beats null when on a
@@ -347,37 +370,34 @@ export default function ChatPanel({
         content: m.content,
       }));
 
-      // Build effective context: if user selected a specific email, override customerEmail
-      let effectiveContext = selectedContextEmail === '__none__'
-        ? null
-        : selectedContextEmail && emailContext
-          ? { ...emailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
-          : emailContext || null;
-
       // ── Resolve the ACTIVE Zoho record from the active tab URL ─────────
       //
       // The URL is authoritative for "what record is the user currently
       // viewing". We re-read it synchronously here so a message sent
       // immediately after SPA navigation targets the NEW record, not
       // whatever is cached in state from 2 seconds ago.
+      //
+      // Storage reads are keyed by tab id (zohoCtx_<activeTabId>) so a
+      // different tab's record can never satisfy this lookup.
       let activeZohoRecord = null;
       let activeUrlInfo = null;
+      let activeUrl = '';
       try {
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const activeUrl = activeTab?.url || '';
+        activeUrl = activeTab?.url || '';
+        const activeTabId = activeTab?.id ?? null;
         activeUrlInfo = parseZohoRecordUrl(activeUrl);
         if (activeUrlInfo?.isRecord) {
           // Prefer the enriched state if it matches the URL; else fall
-          // back to storage (matching only); else the URL-only minimal.
+          // back to per-tab storage (matching only); else the URL-only
+          // minimal.
           if (contextMatchesUrl(zohoPageContext, activeUrlInfo)) {
             activeZohoRecord = zohoPageContext;
           } else {
-            try {
-              const stored = await chrome.storage.local.get('zohoPageContext');
-              if (contextMatchesUrl(stored?.zohoPageContext, activeUrlInfo)) {
-                activeZohoRecord = stored.zohoPageContext;
-              }
-            } catch (_) { /* ignore */ }
+            const stored = await readTabZohoCtx(activeTabId);
+            if (contextMatchesUrl(stored, activeUrlInfo)) {
+              activeZohoRecord = stored;
+            }
             if (!activeZohoRecord) {
               activeZohoRecord = minimalContextFromUrl(activeUrlInfo);
             }
@@ -386,6 +406,31 @@ export default function ChatPanel({
       } catch (err) {
         console.warn('[Stratus Chat] Pre-send page context refresh failed:', err?.message);
       }
+
+      // ── Page-type gating for email context injection ──────────────────
+      //
+      // (Fix A, Wave B 2026-06-03.) Only attach email context to the
+      // outgoing request when the user is ACTUALLY on Gmail right now.
+      // Without this gate, a stale email from a Gmail tab the user opened
+      // earlier would ride into a request issued while they're on a Zoho
+      // record — the bot then conflates the two and answers the wrong
+      // question. React's `emailContext` state is allowed to keep holding
+      // the value (so the Email panel still works when the user switches
+      // back to Gmail), but it must not leak across into a Zoho-tab send.
+      const activeIsGmail =
+        typeof activeUrl === 'string'
+        && activeUrl.startsWith('https://mail.google.com/');
+      const gatedEmailContext = activeIsGmail ? emailContext : null;
+
+      // Build effective context: if user selected a specific email, override
+      // customerEmail. Source the email pieces from the gated value so a
+      // Zoho-tab send never gets an email block, regardless of dropdown
+      // state.
+      let effectiveContext = selectedContextEmail === '__none__'
+        ? null
+        : selectedContextEmail && gatedEmailContext
+          ? { ...gatedEmailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
+          : gatedEmailContext || null;
 
       // ── Priority rules for which record the LLM targets ───────────────
       //
@@ -587,7 +632,10 @@ export default function ChatPanel({
         text: textToSend,
         emailContext: effectiveContext,
         history: historyForApi,
-        systemContext: buildSystemContext(emailContext, selectedContextEmail === '__none__' ? null : selectedContextEmail),
+        // Page-type-gated: buildSystemContext stays empty when the user
+        // isn't on Gmail, so a stale email never gets baked into the
+        // system prompt for a Zoho-tab request.
+        systemContext: buildSystemContext(gatedEmailContext, selectedContextEmail === '__none__' ? null : selectedContextEmail),
         progressId,
       });
 
