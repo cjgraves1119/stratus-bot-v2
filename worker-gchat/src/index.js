@@ -215,9 +215,37 @@ const MODEL_PRICING = {
   'claude-sonnet-4-20250514': { input: 3.00, output: 15.00 },
   'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
   'claude-opus-4-6': { input: 15.00, output: 75.00 },
+  // Opus 4.8 (2026): $5 / $25 per 1M tokens — ~1.67x Sonnet 4.6, NOT the
+  // legacy $15/$75 Opus rate. Used when CRM_AGENT_FORCE_MODEL routes here.
+  'claude-opus-4-8': { input: 5.00, output: 25.00 },
   'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00 },
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
 };
+
+// ─── CRM agent model override (§7 latency/model strategy, 2026-06-03) ────────
+// Force the CRM/agent path onto ONE model and bypass the per-iteration tier
+// swap (Sonnet executor + Haiku dispatch). Set via env — either a wrangler
+// [vars] entry or `wrangler secret put CRM_AGENT_FORCE_MODEL` (secret = flip
+// with no redeploy):
+//   off | '' | false → default behavior (Sonnet executor + Haiku dispatch)
+//   sonnet           → claude-sonnet-4-6
+//   opus             → claude-opus-4-8
+//   haiku            → claude-haiku-4-5-20251001
+//   <full model id>  → used verbatim (must start with 'claude-')
+// Default OFF: the deploy that ships this is a no-op until the flag is set,
+// so it is fully reversible. When a model is forced, callers also skip the
+// Haiku dispatch downshift and the (disabled) advisor injection.
+const CRM_FORCE_MODEL_ALIASES = {
+  opus: 'claude-opus-4-8',
+  sonnet: 'claude-sonnet-4-6',
+  haiku: 'claude-haiku-4-5-20251001',
+};
+function resolveForcedCrmModel(env) {
+  const raw = String(env?.CRM_AGENT_FORCE_MODEL || '').trim().toLowerCase();
+  if (!raw || raw === 'off' || raw === 'false') return null;
+  if (CRM_FORCE_MODEL_ALIASES[raw]) return CRM_FORCE_MODEL_ALIASES[raw];
+  return raw.startsWith('claude-') ? raw : null;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ─── PR-B: Anthropic Prompt Caching (2026-05-14) ───────────────────────────
@@ -15044,10 +15072,12 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     const _isPureExec = _contLastToolNames.length > 0 && _contLastToolNames.every(n => _contExecTools.has(n));
     const _contCachingActive = await isPromptCachingEnabled(env);
     const _contHaikuDispatchOK = !_contCachingActive || env.ENABLE_HAIKU_DISPATCH === 'true';
-    const contModel = (iteration > 3 && _isPureExec && _contHaikuDispatchOK)
-      ? 'claude-haiku-4-5-20251001'
-      : 'claude-sonnet-4-6';
-    console.log(`[GCHAT-CONTINUE] Model: ${contModel} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
+    const _forcedCrmModelCont = resolveForcedCrmModel(env);
+    const contModel = _forcedCrmModelCont
+      || ((iteration > 3 && _isPureExec && _contHaikuDispatchOK)
+        ? 'claude-haiku-4-5-20251001'
+        : 'claude-sonnet-4-6');
+    console.log(`[GCHAT-CONTINUE] Model: ${contModel}${_forcedCrmModelCont ? ' (FORCED)' : ''} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
     // Dynamic max_tokens: 2048 for most iterations, 1024 for pure exec (Haiku dispatch)
     const contMaxTok = _isPureExec ? 1024 : 2048;
@@ -15875,11 +15905,13 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // Skip the Haiku swap unless explicitly re-enabled via env.ENABLE_HAIKU_DISPATCH.
       const _askCachingActive = await isPromptCachingEnabled(env);
       const _askHaikuDispatchOK = !_askCachingActive || env.ENABLE_HAIKU_DISPATCH === 'true';
-      const activeModel = (useTools && iteration > 2 && _inPureExecMode && _askHaikuDispatchOK)
-        ? 'claude-haiku-4-5-20251001'
-        : 'claude-sonnet-4-6';
+      const _forcedCrmModel = resolveForcedCrmModel(env);
+      const activeModel = _forcedCrmModel
+        || ((useTools && iteration > 2 && _inPureExecMode && _askHaikuDispatchOK)
+          ? 'claude-haiku-4-5-20251001'
+          : 'claude-sonnet-4-6');
       if (useTools) {
-        console.log(`[GCHAT-AGENT] Model: ${activeModel} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
+        console.log(`[GCHAT-AGENT] Model: ${activeModel}${_forcedCrmModel ? ' (FORCED)' : ''} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
 
       // Dynamic max_tokens for speed:
