@@ -2322,6 +2322,7 @@
       "price": 82,
       "discount": 0.3167,
       "zoho_product_id": "2570562000001277655",
+      "zoho_active": false,
       "discount_per_unit": 38,
       "discount_pct": 32
     },
@@ -5652,6 +5653,7 @@
       "price": 715,
       "discount": 0.4766,
       "zoho_product_id": "2570562000009567283",
+      "zoho_active": false,
       "discount_per_unit": 651,
       "discount_pct": 48
     },
