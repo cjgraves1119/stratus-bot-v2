@@ -1863,6 +1863,20 @@ function extractSkusFromVisionText(text) {
       if (!isValidSkuToken(sku)) continue;
       skus.push({ sku, qty });
     }
+    // Defensive net: if the model labeled the Systems Manager row with its
+    // literal name ("SKU: Systems Manager | LIMIT: 85 | ACTIVE: 84") instead of
+    // the SM-ENT token, the single-token lineRe above skips it (the space
+    // breaks the token match). Recover it here, guarded so we never
+    // double-count a row already captured as SM / SME / SM-ENT.
+    if (!skus.some(s => /^(SM|SME|SM-ENT)$/.test(s.sku))) {
+      const smM = cleanedText.match(/Systems\s+Manager[^\n]*?LIMIT:\s*(\d+)[^\n]*?ACTIVE:\s*(\d+)/i);
+      if (smM) {
+        const smLimit = parseInt(smM[1], 10);
+        const smActive = parseInt(smM[2], 10);
+        const smQty = Math.min(smLimit || smActive, smActive || smLimit);
+        if (smActive > 0 && smQty > 0 && smQty <= 500) skus.push({ sku: 'SM-ENT', qty: smQty });
+      }
+    }
     if (skus.length > 0) return dedupeSkus(skus);
   }
 
@@ -1923,8 +1937,9 @@ MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
 MR_EDITION: <Enterprise | Advanced | none>
 
 Hard rules:
-1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, MX models, MS models, MT, MV, MG, Z-series).
+1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, Systems Manager, MX models, MS models, MT, MV, MG, Z-series).
 2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
+2b. Systems Manager rows (the row labeled "Systems Manager", often shown as "Enabled (paid)") MUST be emitted as: SKU: SM-ENT | LIMIT: <license limit number> | ACTIVE: <current device count number>. Use the exact integers from the License limit and Current device count columns. (Skip only if ACTIVE is 0, per rule 3.)
 3. Skip a row ONLY when ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip. Otherwise emit.
 4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table.
 5. NEVER drop a visible row whose ACTIVE >= 1. If a row is partially obscured by a colored annotation, read what is visible and emit it. Annotations (red/yellow/blue underlines, circles, crosses, highlighter strokes) are user markup — they are NOT table boundaries and they do NOT terminate the table.
@@ -1951,7 +1966,7 @@ ${safeFirst}
 Now re-scan the SAME image. Your job is to catch rows the first pass may have missed — especially rows whose ACTIVE >= 1 that sit just below or above a colored annotation (red/yellow/blue underline, cross, circle, highlighter stroke). Annotations are user markup, NOT table boundaries; the License information table continues below them.
 
 Focus checks:
-- For every MX, MR Enterprise, MS, MT, MV, MG, Z, CW, or C9 row visible in the License information table with ACTIVE >= 1, confirm it is present in the first pass.
+- For every MX, MR Enterprise, Systems Manager, MS, MT, MV, MG, Z, CW, or C9 row visible in the License information table with ACTIVE >= 1, confirm it is present in the first pass. (Systems Manager → SM-ENT.)
 - If you see an MX65 row, also look immediately above and below it for an MX85, MX67, MX68, MX75, MX95, MX105, MX250, or MX450 row that the first pass may have skipped.
 - Do not invent SKUs. Only confirm or add rows that are literally visible in the top License information table.
 
@@ -2038,12 +2053,20 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   const nonEolDevices = [];
   const eolDevices = [];
   let mrEntQty = 0;
+  let smEntQty = 0;
   for (const s of (visionSkus || [])) {
     if (!s || !s.sku || !(Number(s.qty) > 0)) continue;
     const upper = String(s.sku).toUpperCase();
     const qty = Math.floor(Number(s.qty));
     if (upper === 'MR-ENT' || upper === 'MR_ENT') {
       mrEntQty += qty;
+      continue;
+    }
+    // Systems Manager (Enterprise) rolls into LIC-SME-{term}YR at the active
+    // device count, mirroring the MR-ENT → LIC-ENT mapping. The vision prompt
+    // emits the "Systems Manager" dashboard row as the SM-ENT token.
+    if (upper === 'SM-ENT' || upper === 'SM_ENT' || upper === 'SME' || upper === 'SM') {
+      smEntQty += qty;
       continue;
     }
     if (isEol(upper)) {
@@ -2080,6 +2103,11 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
     carryForward['1Y'].push({ sku: 'LIC-ENT-1YR', qty: mrEntQty });
     carryForward['3Y'].push({ sku: 'LIC-ENT-3YR', qty: mrEntQty });
     carryForward['5Y'].push({ sku: 'LIC-ENT-5YR', qty: mrEntQty });
+  }
+  if (smEntQty > 0) {
+    carryForward['1Y'].push({ sku: 'LIC-SME-1YR', qty: smEntQty });
+    carryForward['3Y'].push({ sku: 'LIC-SME-3YR', qty: smEntQty });
+    carryForward['5Y'].push({ sku: 'LIC-SME-5YR', qty: smEntQty });
   }
 
   // Option 1 — Renew As-Is. Carry-forward + each EOL device's CURRENT
@@ -8072,8 +8100,11 @@ export default {
               if (cfVision) {
                 // CF vision succeeded — extract SKUs and store for follow-up requests
                 const visionSkus = extractSkusFromVisionText(cfVision.response);
+                // Extract MX/MR edition + expiration once so both the immediate quote
+                // and the "quote this" follow-up (read from KV) use the same metadata.
+                const _dashMeta = extractDashboardMetadata(cfVision.response || '');
                 if (visionSkus.length > 0) {
-                  await kv.put(`vision_skus_${personId}`, JSON.stringify(visionSkus), { expirationTtl: 300 });
+                  await kv.put(`vision_skus_${personId}`, JSON.stringify({ skus: visionSkus, mxEdition: _dashMeta.mxEdition, mrEdition: _dashMeta.mrEdition }), { expirationTtl: 300 });
                   console.log(`[CF-Vision] Extracted ${visionSkus.length} SKUs from vision, stored in KV for 5min`);
                 }
 
@@ -8094,7 +8125,6 @@ export default {
                   // Hardware SKUs are NEVER added here — that was the prior bug shape:
                   // routing through parseMessage emitted MX85-HW alongside the license,
                   // turning a renewal quote into a hardware-purchase quote.
-                  const _dashMeta = extractDashboardMetadata(cfVision.response || '');
                   const dashQuote = buildDashboardRenewalQuote(visionSkus, {
                     mxEdition: _dashMeta.mxEdition,
                     mrEdition: _dashMeta.mrEdition
@@ -8110,6 +8140,8 @@ export default {
                       let seen = false;
                       if (upper === 'MR-ENT' || upper === 'MR_ENT') {
                         seen = /\bLIC-ENT-[135]YR?\b/.test(qmsg);
+                      } else if (upper === 'SM-ENT' || upper === 'SM_ENT' || upper === 'SME' || upper === 'SM') {
+                        seen = /\bLIC-SME-[135]YR?\b/.test(qmsg);
                       } else {
                         const escaped = upper.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                         const directRe = new RegExp(`\\b${escaped}\\b`);
@@ -8751,28 +8783,37 @@ export default {
                 // recently sent a dashboard screenshot. "quote this" / "quote both" after a
                 // vision parse should use the stored SKUs rather than asking for clarification.
                 try {
-                  const storedVisionSkus = await kv.get(`vision_skus_${personId}`, 'json');
-                  if (storedVisionSkus && storedVisionSkus.length > 0) {
-                    const visionSkuText = storedVisionSkus.map(s => `${s.qty} ${s.sku}`).join(', ');
-                    console.log(`[CF-First] Found ${storedVisionSkus.length} vision SKUs in KV, re-parsing: ${visionSkuText}`);
-                    const visionParsed = parseMessage(visionSkuText);
-                    if (visionParsed && visionParsed.items.length > 0) {
-                      const visionResult = buildQuoteResponse(visionParsed);
-                      if (visionResult.message && !visionResult.needsLlm) {
-                        await addToHistory(kv, personId, 'user', text);
-                        await addToHistory(kv, personId, 'assistant', visionResult.message);
-                        T.step('wx-send', 'enter');
-                        await sendMessage(roomId, `${visionResult.message}\n\n_⚡ Vision follow-up + Deterministic Quote (${activeClassification.elapsed}ms classify, free)_`, token);
-                        T.step('wx-send', 'exit');
-                        T.step('wx-d1', 'enter');
-                        logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, responseText: visionResult.message }).catch(() => {});
-                        writeMetric(env, { path: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, personId });
-                        T.step('wx-d1', 'exit');
-                        // Clear vision SKUs after successful use
-                        await kv.delete(`vision_skus_${personId}`);
-                        ctx.waitUntil(T.flush());
-                        return;
-                      }
+                  const storedVision = await kv.get(`vision_skus_${personId}`, 'json');
+                  // KV may hold the legacy array shape OR the {skus, mxEdition,
+                  // mrEdition} object shape — normalize both so a value written by
+                  // an older deploy during the 5-min TTL window still works.
+                  const storedSkus = Array.isArray(storedVision) ? storedVision : (storedVision && storedVision.skus);
+                  if (storedSkus && storedSkus.length > 0) {
+                    const storedMeta = Array.isArray(storedVision) ? {} : (storedVision || {});
+                    console.log(`[CF-First] Found ${storedSkus.length} vision SKUs in KV, building license renewal`);
+                    // Route through the SAME license-only renewal builder as the direct
+                    // screenshot path — NOT parseMessage + buildQuoteResponse, which would
+                    // re-emit hardware SKUs and turn a renewal into a hardware purchase.
+                    const dashQuote = buildDashboardRenewalQuote(storedSkus, {
+                      mxEdition: storedMeta.mxEdition,
+                      mrEdition: storedMeta.mrEdition
+                    });
+                    if (dashQuote && dashQuote.message) {
+                      const skuSummary = storedSkus.map(s => `**${s.sku}** × ${s.qty}`).join('\n');
+                      const combined = `**Detected SKUs:**\n${skuSummary}\n\n---\n\n${dashQuote.message}`;
+                      await addToHistory(kv, personId, 'user', text);
+                      await addToHistory(kv, personId, 'assistant', combined);
+                      T.step('wx-send', 'enter');
+                      await sendMessage(roomId, `${combined}\n\n_⚡ Vision follow-up + License Renewal (${activeClassification.elapsed}ms classify, free)_`, token);
+                      T.step('wx-send', 'exit');
+                      T.step('wx-d1', 'enter');
+                      logBotUsageToD1(env, { personId, requestText: text, responsePath: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, responseText: combined }).catch(() => {});
+                      writeMetric(env, { path: 'cf-vision-followup-quote', durationMs: Date.now() - _wxStartMs, personId });
+                      T.step('wx-d1', 'exit');
+                      // Clear vision SKUs after successful use
+                      await kv.delete(`vision_skus_${personId}`);
+                      ctx.waitUntil(T.flush());
+                      return;
                     }
                   }
                 } catch (_visionErr) {
