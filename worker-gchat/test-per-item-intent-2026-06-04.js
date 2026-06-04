@@ -12,14 +12,11 @@
 // intent word → normal AP quote (hardware + license). An explicit per-clause
 // "hardware only" / "license"/"renewal" overrides for THAT item only.
 //
-// KNOWN LIMITATION (documented, not yet fixed): per-clause intent keys off the
-// connectors "and/plus/,/;/newline" and the explicit phrase "hardware only". An
-// input that mixes intent via "then" (not a clause separator) AND bare "hardware"
-// (not a hardware-only phrase) — e.g. "renew MX67 then add MR44 hardware" — is read
-// as one clause and quoted license-only. origin/main mis-handled it too (both as
-// hardware). The well-formed forms "renew MX67 and add MR44 hardware only" and
-// "license for MX67 and MR44 hardware only" resolve correctly. Fixing the "then"/
-// bare-"hardware" form needs riskier bare-hardware detection; deferred.
+// Connectors: per-clause intent splits on "and/plus/then/,/;/newline", and a clause's
+// hardware intent matches an explicit "hardware only"/"hw only"/"without license" OR a
+// bare "hardware" word (with the same exclusions the global rule uses: hardware
+// specs/info/details/question/issue/problem/support/failure/warranty). So
+// "renew MX67 then add MR44 hardware" → MX67 license + MR44 hardware-only.
 //
 // Gated through the REAL /api/quote handler AND both deterministic engines.
 // Run: node worker-gchat/test-per-item-intent-2026-06-04.js
@@ -169,6 +166,20 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
       assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
     });
   }
+
+  console.log('\n── "then" connector + bare "hardware" → per-item intent (Chris 2026-06-04) ──');
+  await t('"renew MX67 then add MR44 hardware" → MX67 license + MR44-HW (no MX67-HW, no MR44 license)', async () => {
+    const gm = engineSkuQty(G, 'renew MX67 then add MR44 hardware'), wm = engineSkuQty(W, 'renew MX67 then add MR44 hardware');
+    assert.ok(findKey(gm, /^LIC-MX67/), `MX67 should be license (renew): ${keys(gm)}`);
+    assert.ok(!findKey(gm, /^MX67.*-HW$|^MX67-/), `MX67 should NOT be hardware: ${keys(gm)}`);
+    assert.ok(findKey(gm, /^MR44-HW$/), `MR44 should be hardware: ${keys(gm)}`);
+    assert.ok(!findKey(gm, /^LIC-ENT-\dYR$/), `MR44 should NOT carry a license (it's hardware only): ${keys(gm)}`);
+    assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
+  });
+  await t('"renew MX67 then MR44 hardware" (no "add") → same per-item split', async () => {
+    const gm = engineSkuQty(G, 'renew MX67 then MR44 hardware');
+    assert.ok(findKey(gm, /^LIC-MX67/) && findKey(gm, /^MR44-HW$/) && !findKey(gm, /^LIC-ENT-\dYR$/), `wrong split: ${keys(gm)}`);
+  });
 
   console.log('\n── EOL + hardware-only must NOT leave an empty "Option" section (review finding) ──');
   const noEmptyOption = (msg) => {
