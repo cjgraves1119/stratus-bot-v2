@@ -135,13 +135,15 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   check('buildDashboardRenewalQuote returns a message', !!(q && q.message));
   const msg = (q && q.message) || '';
 
-  // BUG 1 — Systems Manager is now in the renewal cart for all three terms.
+  // BUG 1 — Systems Manager is now in the renewal cart, but 5-year SME is deprecated.
   check('quote includes LIC-SME-1YR', /\bLIC-SME-1YR\b/.test(msg));
   check('quote includes LIC-SME-3YR', /\bLIC-SME-3YR\b/.test(msg));
-  check('quote includes LIC-SME-5YR', /\bLIC-SME-5YR\b/.test(msg));
+  check('quote does NOT include deprecated LIC-SME-5YR', !/\bLIC-SME-5YR\b/.test(msg));
+  check('quote flags the SME term cap', /Systems Manager is offered only in 1-year and 3-year terms/.test(msg));
 
   // MR-ENT regression — still maps to LIC-ENT.
   check('quote still includes LIC-ENT-1YR (MR-ENT)', /\bLIC-ENT-1YR\b/.test(msg));
+  check('quote still includes LIC-ENT-5YR for non-SME 5-year terms', /\bLIC-ENT-5YR\b/.test(msg));
 
   const opt1 = optionBlock(msg, 1);
   check('Option 1 (Renew As-Is) block present', opt1.length > 0);
@@ -157,6 +159,10 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   const smLine = opt1Items && opt1Items.find(i => i.sku === 'LIC-SME-1YR');
   check('Option 1 1-Year URL carries LIC-SME-1YR × 84', !!smLine && smLine.qty === 84,
     `decoded SME line: ${JSON.stringify(smLine)}`);
+  const opt1Items5 = decodeUrl(opt1, '5-Year');
+  const sm5Line = opt1Items5 && opt1Items5.find(i => i.sku === 'LIC-SME-3YR');
+  check('Option 1 5-Year URL carries capped LIC-SME-3YR × 84', !!sm5Line && sm5Line.qty === 84,
+    `decoded SME 5-year line: ${JSON.stringify(sm5Line)}`);
 
   // Dashboard top-to-bottom order: MR Enterprise is row 1 (→ LIC-ENT first),
   // Systems Manager is the last row (→ LIC-SME last).
@@ -181,6 +187,7 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   const q = buildDashboardRenewalQuote([{ sku: 'SM-ENT', qty: 84 }], { mxEdition: 'Advanced Security' });
   const msg = (q && q.message) || '';
   check('SM-only renewal includes LIC-SME', /\bLIC-SME-1YR\b/.test(msg));
+  check('SM-only renewal does NOT include LIC-SME-5YR', !/\bLIC-SME-5YR\b/.test(msg));
   check('SM-only renewal has no "-HW" SKU', !/-HW\b/.test(msg));
 }
 

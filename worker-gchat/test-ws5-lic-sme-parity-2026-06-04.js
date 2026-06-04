@@ -1,9 +1,9 @@
 // WS5 (2026-06-04): worker-gchat quoting parity with worker/ (Webex) for
 // Systems Manager / LIC-SME. Verifies the typed-SKU directLicense path, the
 // deterministic SME natural-language handler, the directLicense URL term label,
-// and over-match guards. The mixed hardware+inline-license case asserts PARITY
-// with worker/ (both keep the hardware and drop the inline license — a shared
-// limitation), and that the SME handler never hijacks/​drops the hardware.
+// and over-match guards. Mixed hardware+bare-SME requests must preserve the
+// hardware and inject SME-AGN; typed inline LIC-SME still must not hijack or
+// drop the hardware.
 //
 // Run: node worker-gchat/test-ws5-lic-sme-parity-2026-06-04.js
 
@@ -40,6 +40,7 @@ function buildShim() {
 
 const { parseMessage, buildQuoteResponse, licenseTermLabel } = buildShim();
 const quote = (text) => buildQuoteResponse(parseMessage(text));
+const SME_CAP_NOTE_RE = /Systems Manager is offered only in 1-year and 3-year terms/;
 
 let pass = 0, fail = 0;
 function t(name, fn) {
@@ -63,18 +64,35 @@ t('quote("LIC-SME-1YR") → URL with LIC-SME-1YR', () => {
   const r = quote('LIC-SME-1YR');
   assert.ok(/LIC-SME-1YR/.test(r.message) && r.needsLlm === false, `got: ${r.message}`);
 });
+t('quote("LIC-SME-5Y") → capped LIC-SME-3YR + flag, no invalid SKU', () => {
+  const r = quote('LIC-SME-5Y');
+  assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
+  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(!/item=LIC-SME-5Y\b/.test(r.message), `invalid SKU emitted: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing cap flag: ${r.message}`);
+});
+t('quote("LIC-SME-4YR") → capped LIC-SME-3YR + flag, no invalid SKU', () => {
+  const r = quote('LIC-SME-4YR');
+  assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
+  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(!/item=LIC-SME-4YR\b/.test(r.message), `invalid SKU emitted: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing cap flag: ${r.message}`);
+});
 
 console.log('── Part 2: SME natural-language handler (context, plurals, qty vs term) ──');
-t('"10 systems manager licenses" → qty 10, all 3 terms, not LLM', () => {
+t('"10 systems manager licenses" → qty 10, 1YR+3YR ONLY (5YR deprecated) + flag, not LLM', () => {
   const r = quote('10 systems manager licenses');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/LIC-SME-1YR/.test(r.message) && /LIC-SME-3YR/.test(r.message) && /LIC-SME-5YR/.test(r.message), `got: ${r.message}`);
+  assert.ok(/LIC-SME-1YR/.test(r.message) && /LIC-SME-3YR/.test(r.message), `1/3yr missing: ${r.message}`);
+  assert.ok(!/LIC-SME-5YR/.test(r.message), `5YR must NOT be quoted (deprecated): ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing SME cap flag: ${r.message}`);
   assert.ok(/qty=10/.test(r.message), `qty missing: ${r.message}`);
 });
-t('"5 SME licenses" (plural, no "quote") → qty 5, all terms (plural-context + qty-before)', () => {
+t('"5 SME licenses" → qty 5, 1YR+3YR only (no 5YR)', () => {
   const p = parseMessage('5 SME licenses');
-  assert.ok(p && p.items && p.items.length === 3, `expected 3 SME items, got: ${JSON.stringify(p)}`);
-  assert.ok(p.items.every(i => i.qty === 5 && /^LIC-SME-/.test(i.baseSku)), `bad items: ${JSON.stringify(p.items)}`);
+  const skus = (p.items || []).map(i => i.baseSku);
+  assert.deepStrictEqual(skus, ['LIC-SME-1YR', 'LIC-SME-3YR'], `expected 1/3yr only, got: ${JSON.stringify(skus)}`);
+  assert.ok(p.items.every(i => i.qty === 5), `qty: ${JSON.stringify(p.items)}`);
 });
 t('"SME 3 year license" → directLicense LIC-SME-3YR qty 1, single URL (term≠qty)', () => {
   const p = parseMessage('SME 3 year license');
@@ -89,6 +107,20 @@ t('"SME 3 year license" → directLicense LIC-SME-3YR qty 1, single URL (term≠
 t('"10 SME 3 year licenses" → directLicense LIC-SME-3YR qty 10', () => {
   const p = parseMessage('10 SME 3 year licenses');
   assert.ok(p.directLicense && p.directLicense.sku === 'LIC-SME-3YR' && p.directLicense.qty === 10, `got: ${JSON.stringify(p).slice(0,160)}`);
+});
+t('"systems manager 4 year" → capped LIC-SME-3YR + flag, no throw', () => {
+  const r = quote('systems manager 4 year');
+  assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
+  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(!/LIC-SME-4YR/.test(r.message), `invalid SKU emitted: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing cap flag: ${r.message}`);
+});
+t('"systems manager 2 year license" → capped LIC-SME-3YR + generalized flag, no throw', () => {
+  const r = quote('systems manager 2 year license');
+  assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
+  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(!/LIC-SME-2YR/.test(r.message), `invalid SKU emitted: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing generalized cap flag: ${r.message}`);
 });
 t('over-match guard: "what is Systems Manager" (no quote context) → NOT a quote', () => {
   const p = parseMessage('what is Systems Manager');
@@ -121,12 +153,7 @@ t('licenseTermLabel("LIC-MV-1YR") === "1-Year"', () => assert.strictEqual(licens
 t('licenseTermLabel("LIC-MT-5Y") === "5-Year" (-Y variant)', () => assert.strictEqual(licenseTermLabel('LIC-MT-5Y'), '5-Year'));
 t('licenseTermLabel(no term) === "Quote"', () => assert.strictEqual(licenseTermLabel('LIC-WEIRD'), 'Quote'));
 
-console.log('── Part 3: mixed hardware + inline SME — must MATCH worker/ (parity, no hijack) ──');
-// PARITY NOTE: running worker/ (Webex, gold standard) on this exact input shows it
-// ALSO drops the inline typed LIC-SME and returns only MR44+MX67. So parity =
-// keep the hardware + drop the inline license (a SHARED limitation; fixing it would
-// make worker-gchat exceed worker/ — out of scope). The critical guard here is that
-// the new SME handler must NOT hijack mixed input and drop the hardware.
+console.log('── Part 3: mixed hardware + inline SME — no hijack, bare SME injected ──');
 t('mixed "mr44 x4, MX67, 3 lic-sme-3yr" RETAINS hardware (SME over-match regression guard)', () => {
   const p = parseMessage('mr44 x4, MX67, and 3 lic-sme-3yr');
   const skus = (p.items || []).map(i => i.baseSku);
@@ -137,6 +164,22 @@ t('mixed "mr44 x4, MX67, 3 lic-sme-3yr" RETAINS hardware (SME over-match regress
 t('mixed output matches worker/: hardware multi-term present', () => {
   const r = quote('mr44 x4, MX67, and 3 lic-sme-3yr');
   assert.ok(/MR44-HW/.test(r.message || '') && /MX67-HW/.test(r.message || ''), `hardware missing: ${(r.message || '').slice(0, 200)}`);
+});
+t('mixed "4 mr44, 2 sme, 5 MS130-12X" injects SME-AGN and keeps hardware', () => {
+  const p = parseMessage('4 mr44, 2 sme, 5 MS130-12X');
+  const bySku = new Map((p.items || []).map(i => [i.baseSku, i.qty]));
+  assert.strictEqual(bySku.get('MR44'), 4, `MR44 missing/wrong qty: ${JSON.stringify(p.items)}`);
+  assert.strictEqual(bySku.get('SME-AGN'), 2, `SME-AGN missing/wrong qty: ${JSON.stringify(p.items)}`);
+  assert.strictEqual(bySku.get('MS130-12X'), 5, `MS130-12X missing/wrong qty: ${JSON.stringify(p.items)}`);
+});
+t('mixed bare SME 5-year output caps only SME and leaves other items at 5-year', () => {
+  const r = quote('4 mr44, 2 sme, 1 mx67');
+  const fiveLine = ((r.message || '').match(/\*\*5-Year Co-Term:\*\*[^\n]+/) || [''])[0];
+  assert.ok(/LIC-SME-3YR/.test(fiveLine), `SME was not capped to 3YR in 5-year line: ${fiveLine}`);
+  assert.ok(!/LIC-SME-5YR/.test(r.message || ''), `deprecated SME 5YR emitted: ${r.message}`);
+  assert.ok(/LIC-ENT-5YR/.test(fiveLine), `MR 5-year license missing from 5-year line: ${fiveLine}`);
+  assert.ok(/LIC-MX67-SEC-5YR/.test(fiveLine), `MX67 5-year license missing from 5-year line: ${fiveLine}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message || ''), `missing SME cap note: ${r.message}`);
 });
 
 console.log('── Regression + over-match guards ──');

@@ -124,6 +124,13 @@ function hasKnownMsLicenseModelInput(modelToken) {
 // quotes.
 function normalizeDirectLicenseSku(sku) {
   const upper = String(sku || '').trim().toUpperCase();
+  const smeDirect = upper.match(/^LIC-SME-(\d+)Y(R)?$/i);
+  if (smeDirect) {
+    const sme = smeCapTerm(smeDirect[1]);
+    return sme.capped
+      ? { sku: 'LIC-SME-3YR', note: SME_5YR_FLAG }
+      : { sku: `LIC-SME-${sme.term}YR` };
+  }
   if (prices[upper]) return { sku: upper };
 
   const msDirect = upper.match(/^LIC-(MS\d{3}-[A-Z0-9-]+)-([135])Y(?:R)?$/);
@@ -2453,7 +2460,10 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   // when the model maps to no license family.
   const renewItem = (row, term) => {
     if (row.kind === 'mr') return { sku: `LIC-ENT-${termYr[term]}`, qty: row.qty };
-    if (row.kind === 'sm') return { sku: `LIC-SME-${termYr[term]}`, qty: row.qty };
+    if (row.kind === 'sm') {
+      const sme = smeCapTerm(parseInt(term, 10));
+      return { sku: `LIC-SME-${sme.term}YR`, qty: row.qty, smeCapped: sme.capped };
+    }
     const lic = licFor(row.model, term);
     return lic ? { sku: lic.sku, qty: row.qty } : null;
   };
@@ -2518,7 +2528,8 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
       if (groups[term].length === 0) continue;
       const url = buildStratusUrl(groups[term]);
       const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
-      lines.push(`${label} Co-Term: ${url}`);
+      const note = term === '5Y' && groups[term].some(i => i.smeCapped) ? `\n_${SME_5YR_FLAG}_` : '';
+      lines.push(`${label} Co-Term: ${url}${note}`);
     }
     // Blank line between each co-term option so the quote pastes into Gmail
     // with paragraph spacing instead of a cramped block.
@@ -3871,6 +3882,29 @@ function licenseTermLabel(sku) {
   return m ? `${m[1]}-Year` : 'Quote';
 }
 
+// Systems Manager (LIC-SME) max term. The 5-year option was deprecated in 2026
+// (Systems Manager itself sunsets in under 5 years), so only 1YR and 3YR are
+// quotable. Any non-1YR/non-3YR SME request is capped to 3YR and flagged.
+// Applies across the typed, NL, model-agnostic, and dashboard paths.
+const SME_MAX_TERM = 3;
+const SME_5YR_FLAG = 'Systems Manager is offered only in 1-year and 3-year terms (5-year is no longer available) — quoted at 3-year.';
+// Cap a requested SME term; only 1YR and 3YR are valid.
+function smeCapTerm(term) {
+  const t = parseInt(term, 10);
+  return (t === 1 || t === SME_MAX_TERM)
+    ? { term: t, capped: false }
+    : { term: SME_MAX_TERM, capped: true };
+}
+function findBareSmeMention(upper) {
+  const smeRe = /(?:(\d+)\s*[X×]?\s*)?(?:LIC-SME\b(?!-\d+YR?\b)|(?<![-A-Za-z0-9])SME\b|SYSTEMS?\s+MANAGER\b)/gi;
+  const m = smeRe.exec(String(upper || ''));
+  if (!m) return null;
+  return { qty: m[1] ? parseInt(m[1], 10) : 1, position: m.index };
+}
+function hasOtherQuoteSkuForSme(upper) {
+  return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   // Pre-process: convert written-out numbers to digits
@@ -4074,9 +4108,18 @@ function parseMessage(text) {
     else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
 
     if (licSku && licSku.startsWith('LIC-')) {
+      // SME is only sold in 1-year and 3-year terms; cap any other typed term.
+      let _smeNote = null;
+      const _smeDirect = licSku.match(/^LIC-SME-(\d+)Y(R)?$/i);
+      if (_smeDirect) {
+        const _sme = smeCapTerm(_smeDirect[1]);
+        licSku = `LIC-SME-${_sme.term}YR`;
+        if (_sme.capped) _smeNote = SME_5YR_FLAG;
+      }
       return {
         items: [],
         directLicense: { sku: licSku, qty },
+        note: _smeNote,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
         requestedTier: null,
@@ -4302,15 +4345,16 @@ function parseMessage(text) {
   //  - require explicit license/quote/pricing/renewal context (incl. plurals) so
   //    product-info prose like "what is Systems Manager" does NOT yield a quote;
   //  - the lookbehind keeps the "sme" inside a typed "LIC-SME-…" token from firing
-  //    here, so mixed requests ("mr44 x4, MX67, 3 lic-sme-3yr") fall to the multi-SKU
-  //    path instead of being hijacked (matching worker/, which also drops that inline
-  //    license — a shared limitation, intentionally not "fixed" here);
+  //    here, so typed license SKUs stay on the direct-license path; mixed requests
+  //    with bare SME fall through and inject SME-AGN alongside the hardware.
   //  - quantity is read ONLY from a number immediately before the SME mention, never
   //    from a term like "3 year"; a single named term yields a single-term quote.
-  // The inactive LIC-SME-5YR is intentionally shown in the all-terms URL options
-  // (read-only); the separate Zoho-WRITE guard blocks adding it to a real quote.
-  const smeMentioned = /\bSYSTEMS?\s+MANAGER\b/i.test(upper) || /(?<![-A-Za-z0-9])SME\b/i.test(upper);
-  const smeQuoteContext = /\b(LICEN[SC]ES?|LISCEN[SC]ES?|RENEWALS?|RENEW|QUOTES?|QUOTING|PRICE|PRICES|PRICING)\b/i.test(upper);
+  // The inactive LIC-SME-5YR is never emitted; invalid SME terms are capped to
+  // LIC-SME-3YR and flagged. The Zoho-WRITE inactive guard remains separate.
+  const smeBareMention = findBareSmeMention(upper);
+  const smeMentioned = Boolean(smeBareMention);
+  const smeNamedTermIntent = /\b\d+\s*-?\s*(?:YRS?|YEARS?|Y)\b/i.test(upper);
+  const smeQuoteContext = smeNamedTermIntent || /\b(LICEN[SC]ES?|LISCEN[SC]ES?|RENEWALS?|RENEW|QUOTES?|QUOTING|PRICE|PRICES|PRICING)\b/i.test(upper);
   // Product-info questions ("what is a Systems Manager license") explain, not quote —
   // unless they also carry an explicit quote/price/cost/buy/renew verb.
   // Detect the info-verb ANYWHERE (not just at the start) so polite/modal prefixes
@@ -4318,17 +4362,17 @@ function parseMessage(text) {
   // verb below overrides it so genuine price/quote requests still go through.
   const smeInfoQuestion = /\b(WHAT\s+IS|WHAT\s+ARE|WHAT'?S|TELL\s+ME\s+ABOUT|EXPLAIN|DESCRIBE|HOW\s+(?:DO|DOES|DO\s+I)|DEFINE)\b/i.test(upper);
   const smeExplicitQuoteVerb = /\b(QUOTE|QUOTES|QUOTING|PRICE|PRICES|PRICING|COST|COSTS|RENEW|RENEWAL|RENEWALS|BUY|PURCHASE|ORDER)\b/i.test(upper);
-  if (smeMentioned && smeQuoteContext && !isAdvisory && (!smeInfoQuestion || smeExplicitQuoteVerb)) {
-    const smeQtyMatch = upper.match(/(\d+)\s*(?:X\s*)?(?:SME|SYSTEMS?\s+MANAGER)/);
-    const smeQty = smeQtyMatch ? parseInt(smeQtyMatch[1]) : 1;
-    const smeTermMatch = upper.match(/\b([135])\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
+  if (smeMentioned && smeQuoteContext && !hasOtherQuoteSkuForSme(upper) && !isAdvisory && (!smeInfoQuestion || smeExplicitQuoteVerb)) {
+    const smeQty = smeBareMention.qty;
+    const smeTermMatch = upper.match(/\b(\d+)\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
     if (smeTermMatch) {
-      // A single named term → ONE specific SKU. Route through directLicense so it
-      // renders as a single correctly-labelled URL (the term-option path would
-      // otherwise repeat the same fixed SKU under all of 1/3/5-Year).
+      // A single named term → ONE specific SKU. Invalid SME terms are capped to
+      // 3-year. Route through directLicense for one correctly-labelled URL.
+      const sme = smeCapTerm(smeTermMatch[1]);
       return {
         items: [],
-        directLicense: { sku: `LIC-SME-${smeTermMatch[1]}YR`, qty: smeQty },
+        directLicense: { sku: `LIC-SME-${sme.term}YR`, qty: smeQty },
+        note: sme.capped ? SME_5YR_FLAG : null,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
         requestedTier: null,
@@ -4337,8 +4381,9 @@ function parseMessage(text) {
         showPricing: false
       };
     }
-    const smeItems = ['1', '3', '5'].map(t => ({ baseSku: `LIC-SME-${t}YR`, qty: smeQty, isLicenseOnly: true }));
-    return { items: smeItems, isQuote: true, isTermOptionQuote: true };
+    // No named term → all quotable SME terms (1YR + 3YR only; 5YR deprecated), w/ note.
+    const smeItems = ['1', '3'].map(t => ({ baseSku: `LIC-SME-${t}YR`, qty: smeQty, isLicenseOnly: true }));
+    return { items: smeItems, isQuote: true, isTermOptionQuote: true, clarificationNote: SME_5YR_FLAG };
   }
 
   // ── Model-agnostic license handler (MR, MV, MT) ──
@@ -4471,7 +4516,7 @@ function parseMessage(text) {
       const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
-      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
+      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*(?:OF\s+)?(?:THE\s+)?$/);
       // Negative lookahead rejects qty followed by term keywords like "3 YEAR",
       // "3YR", "3-YEAR", "5 Y" — these are term specifiers, not quantities.
       const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-|\s*-?Y(?:R|EAR|EARS)?\b)/i);
@@ -4496,6 +4541,16 @@ function parseMessage(text) {
     const alreadyHasFamily = foundItems.some(f => f.baseSku.startsWith(family) && f.baseSku !== `${family}-AGN`);
     if (!alreadyHasFamily) {
       foundItems.push(bare);
+    }
+  }
+
+  // Mixed hardware/SKU quote with a bare SME family mention: preserve the
+  // hardware and add Systems Manager as a model-agnostic license item. Pure
+  // SME requests are handled by the early-return block above.
+  if (smeBareMention && !isAdvisory && (!smeInfoQuestion || smeExplicitQuoteVerb) && foundItems.length > 0) {
+    const alreadyHasSme = foundItems.some(f => f.baseSku === 'SME-AGN');
+    if (!alreadyHasSme) {
+      foundItems.push({ baseSku: 'SME-AGN', qty: smeBareMention.qty, position: smeBareMention.position });
     }
   }
 
@@ -4756,7 +4811,9 @@ function buildQuoteResponse(parsed) {
       }
     }
 
-    return { message: lines.join('\n').trim(), needsLlm: false };
+    let _msg = lines.join('\n').trim();
+    if (parsed.clarificationNote) _msg = `_${parsed.clarificationNote}_\n\n${_msg}`;
+    return { message: _msg, needsLlm: false };
   }
 
   if (parsed.directLicense) {
@@ -4764,6 +4821,8 @@ function buildQuoteResponse(parsed) {
     const url = buildStratusUrl([{ sku, qty }]);
     let message = url;
     if (parsed.showPricing) message += buildPricingBlock([{ sku, qty }], true);
+    const directNote = [parsed.note, parsed.clarificationNote].filter(Boolean).join(' ');
+    if (directNote) message += `\n\n_${directNote}_`;
     return { message, needsLlm: false };
   }
 
@@ -4773,6 +4832,9 @@ function buildQuoteResponse(parsed) {
   const terms = parsed.requestedTerm ? [parsed.requestedTerm] : [1, 3, 5];
   const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
   const requestedTier = parsed.requestedTier || null;
+  const sme5yrNote = (term, urlItems) => (parseInt(term, 10) === 5 && (urlItems || []).some(i => i.smeCapped))
+    ? `\n_${SME_5YR_FLAG}_`
+    : '';
   const eolItems = [];
   const errors = [];
   const resolvedItems = [];
@@ -4782,10 +4844,10 @@ function buildQuoteResponse(parsed) {
   const ordered = [];
 
   for (const { baseSku, qty } of parsed.items) {
-    // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN) ──
+    // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN, SME-AGN) ──
     // These are injected by the bare-family parser for "4 MR", "5 MV's", etc.
     // They bypass normal SKU validation and generate license-only items directly.
-    const agnMatch = baseSku.match(/^(MR|MV|MT)-AGN$/);
+    const agnMatch = baseSku.match(/^(MR|MV|MT|SME)-AGN$/);
     if (agnMatch) {
       const family = agnMatch[1];
       let licSkus;
@@ -4807,8 +4869,14 @@ function buildQuoteResponse(parsed) {
           { term: '3Y', sku: 'LIC-MT-3Y' },
           { term: '5Y', sku: 'LIC-MT-5Y' }
         ];
+      } else if (family === 'SME') {
+        licSkus = [
+          { term: '1Y', sku: 'LIC-SME-1YR' },
+          { term: '3Y', sku: 'LIC-SME-3YR' },
+          { term: '5Y', sku: 'LIC-SME-3YR' }
+        ];
       }
-      const agnItem = { baseSku: `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true };
+      const agnItem = { baseSku: family === 'SME' ? 'Systems Manager' : `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true, smeCapped: family === 'SME' };
       resolvedItems.push(agnItem);
       ordered.push({ kind: 'resolved', ref: agnItem });
       continue;
@@ -4941,18 +5009,18 @@ function buildQuoteResponse(parsed) {
               if (licSku) urlItems.push({ sku: licSku, qty });
             }
           } else {
-            const { hwSku, qty, licenseSkus, isAgnosticLicense } = entry.ref;
+            const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
             if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
             if (licenseSkus && !modifiers.hardwareOnly) {
               const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-              if (licSku) urlItems.push({ sku: licSku, qty });
+              if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
             }
           }
         }
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-          lines.push(`${termLabel}: ${url}`);
+          lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
           lines.push('');
         }
       }
@@ -4978,11 +5046,11 @@ function buildQuoteResponse(parsed) {
             if (licSku) urlItems.push({ sku: licSku, qty });
           }
         } else {
-          const { hwSku, qty, licenseSkus, isAgnosticLicense } = entry.ref;
+          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
           if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !modifiers.hardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
           }
         }
       }
@@ -5081,7 +5149,7 @@ function buildQuoteResponse(parsed) {
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-          lines.push(`${termLabel}: ${url}`);
+          lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
           lines.push('');
         }
       }
@@ -5099,7 +5167,7 @@ function buildQuoteResponse(parsed) {
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-          lines.push(`${termLabel}: ${url}`);
+          lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
           lines.push('');
         }
       }
@@ -5117,7 +5185,7 @@ function buildQuoteResponse(parsed) {
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-          lines.push(`${termLabel}: ${url}`);
+          lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
           lines.push('');
         }
       }
@@ -5168,7 +5236,7 @@ function buildQuoteResponse(parsed) {
       // within each block. Each item carries its own license so each quote is
       // self-contained. Added for family-expansion output (expandFamily).
       for (const item of resolvedItems) {
-        const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense } = item;
+        const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = item;
         const label = baseSku || hwSku || 'Quote';
         lines.push(`**${label} × ${qty}:**`);
         for (const term of terms) {
@@ -5176,12 +5244,12 @@ function buildQuoteResponse(parsed) {
           if (!modifiers.licenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
           }
           if (urlItems.length > 0) {
             const url = buildStratusUrl(urlItems);
             const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-            lines.push(`${termLabel}: ${url}`);
+            lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
             if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
           }
         }
@@ -5190,17 +5258,17 @@ function buildQuoteResponse(parsed) {
     } else {
       for (const term of terms) {
         const urlItems = [];
-        for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
+        for (const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } of resolvedItems) {
           if (!modifiers.licenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
           }
         }
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-          lines.push(`**${termLabel}:** ${url}`);
+          lines.push(`**${termLabel}:** ${url}${sme5yrNote(term, urlItems)}`);
           if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
           lines.push('');
         }
@@ -5291,8 +5359,8 @@ EXACT license SKU mappings by product family:
 - All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
 - CW9800 wireless controllers → NO license association
 
-### Systems Manager (SME) — generic, model-agnostic
-- "Systems Manager", "SME", "SME license" → LIC-SME-1YR, LIC-SME-3YR, LIC-SME-5YR (note: -YR suffix). Model-agnostic like MR/MV/MT — quote all three terms unless one is named.
+### Systems Manager (SME) — generic, model-agnostic, 3-YEAR MAX
+- "Systems Manager", "SME", "SME license" → LIC-SME-1YR, LIC-SME-3YR ONLY (note: -YR suffix). The 5-year option is DEPRECATED/no longer offered. Cap any non-1-year/non-3-year SME request to 3-year (LIC-SME-3YR) and flag the capped term; leave non-SME items at their requested term. Model-agnostic like MR/MV/MT — quote 1-year and 3-year unless a single term is named.
 
 ### MX Security Appliances — term suffix depends on model number
 - MX67, MX67W, MX67C, MX68, MX68W, MX68CW, MX250, MX450 (older) → -YR suffix
