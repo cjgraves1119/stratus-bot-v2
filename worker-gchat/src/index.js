@@ -3863,6 +3863,14 @@ function expandFamily(rawText) {
   };
 }
 
+// Infer a "{N}-Year" label from a license SKU's term suffix ("…-3YR" / "…-3Y" →
+// "3-Year"). Used to label a single directLicense quote URL correctly for the
+// extension UI (extractQuoteUrls' positional fallback would mislabel it "1-Year").
+function licenseTermLabel(sku) {
+  const m = String(sku || '').match(/-(\d)Y/i);
+  return m ? `${m[1]}-Year` : 'Quote';
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   // Pre-process: convert written-out numbers to digits
@@ -4284,6 +4292,53 @@ function parseMessage(text) {
       result.clarificationNote = `AnyConnect has a 25-user minimum — bumped quantity to 25.`;
     }
     return result;
+  }
+
+  // ── Systems Manager (SME) natural-language handler ──
+  // License-only, model-agnostic (like MR/MV/MT). Maps "Systems Manager" or a
+  // STANDALONE "SME" — used as a license/quote request — to LIC-SME-{term}YR (note
+  // -YR suffix). Matches the Webex bot, which treats "SME license" → LIC-SME.
+  // Guards:
+  //  - require explicit license/quote/pricing/renewal context (incl. plurals) so
+  //    product-info prose like "what is Systems Manager" does NOT yield a quote;
+  //  - the lookbehind keeps the "sme" inside a typed "LIC-SME-…" token from firing
+  //    here, so mixed requests ("mr44 x4, MX67, 3 lic-sme-3yr") fall to the multi-SKU
+  //    path instead of being hijacked (matching worker/, which also drops that inline
+  //    license — a shared limitation, intentionally not "fixed" here);
+  //  - quantity is read ONLY from a number immediately before the SME mention, never
+  //    from a term like "3 year"; a single named term yields a single-term quote.
+  // The inactive LIC-SME-5YR is intentionally shown in the all-terms URL options
+  // (read-only); the separate Zoho-WRITE guard blocks adding it to a real quote.
+  const smeMentioned = /\bSYSTEMS?\s+MANAGER\b/i.test(upper) || /(?<![-A-Za-z0-9])SME\b/i.test(upper);
+  const smeQuoteContext = /\b(LICEN[SC]ES?|LISCEN[SC]ES?|RENEWALS?|RENEW|QUOTES?|QUOTING|PRICE|PRICES|PRICING)\b/i.test(upper);
+  // Product-info questions ("what is a Systems Manager license") explain, not quote —
+  // unless they also carry an explicit quote/price/cost/buy/renew verb.
+  // Detect the info-verb ANYWHERE (not just at the start) so polite/modal prefixes
+  // ("can you explain…", "please describe…") are still caught; the explicit-quote
+  // verb below overrides it so genuine price/quote requests still go through.
+  const smeInfoQuestion = /\b(WHAT\s+IS|WHAT\s+ARE|WHAT'?S|TELL\s+ME\s+ABOUT|EXPLAIN|DESCRIBE|HOW\s+(?:DO|DOES|DO\s+I)|DEFINE)\b/i.test(upper);
+  const smeExplicitQuoteVerb = /\b(QUOTE|QUOTES|QUOTING|PRICE|PRICES|PRICING|COST|COSTS|RENEW|RENEWAL|RENEWALS|BUY|PURCHASE|ORDER)\b/i.test(upper);
+  if (smeMentioned && smeQuoteContext && !isAdvisory && (!smeInfoQuestion || smeExplicitQuoteVerb)) {
+    const smeQtyMatch = upper.match(/(\d+)\s*(?:X\s*)?(?:SME|SYSTEMS?\s+MANAGER)/);
+    const smeQty = smeQtyMatch ? parseInt(smeQtyMatch[1]) : 1;
+    const smeTermMatch = upper.match(/\b([135])\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
+    if (smeTermMatch) {
+      // A single named term → ONE specific SKU. Route through directLicense so it
+      // renders as a single correctly-labelled URL (the term-option path would
+      // otherwise repeat the same fixed SKU under all of 1/3/5-Year).
+      return {
+        items: [],
+        directLicense: { sku: `LIC-SME-${smeTermMatch[1]}YR`, qty: smeQty },
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false
+      };
+    }
+    const smeItems = ['1', '3', '5'].map(t => ({ baseSku: `LIC-SME-${t}YR`, qty: smeQty, isLicenseOnly: true }));
+    return { items: smeItems, isQuote: true, isTermOptionQuote: true };
   }
 
   // ── Model-agnostic license handler (MR, MV, MT) ──
@@ -5235,6 +5290,9 @@ EXACT license SKU mappings by product family:
 ### APs (MR + CW) — all use generic ENT license
 - All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
 - CW9800 wireless controllers → NO license association
+
+### Systems Manager (SME) — generic, model-agnostic
+- "Systems Manager", "SME", "SME license" → LIC-SME-1YR, LIC-SME-3YR, LIC-SME-5YR (note: -YR suffix). Model-agnostic like MR/MV/MT — quote all three terms unless one is named.
 
 ### MX Security Appliances — term suffix depends on model number
 - MX67, MX67W, MX67C, MX68, MX68W, MX68CW, MX250, MX450 (older) → -YR suffix
@@ -21041,8 +21099,36 @@ CRITICAL URL RULES:
               }
             }
 
+            // Direct SINGLE license SKU (e.g. "10 lic-sme-3yr", "LIC-MV-1YR") — route
+            // through buildQuoteResponse deterministically. parseMessage sets items=[]
+            // but directLicense={sku,qty} for these. Without this branch the request
+            // fell through to Claude (which, lacking SME docs, model-generated a bogus
+            // "not a valid license tier" rejection). Mirrors the directLicenseList branch
+            // above and matches the Webex bot (worker/) which renders directLicense directly.
+            if (parsed && parsed.directLicense) {
+              const quoteResult = buildQuoteResponse(parsed);
+              if (!quoteResult.needsLlm && quoteResult.message) {
+                const responseText = quoteResult.message;
+                const { sku, qty } = parsed.directLicense;
+                // Label from the SKU's term so the extension shows e.g. "3-Year" for
+                // LIC-SME-3YR (extractQuoteUrls' positional fallback would say "1-Year").
+                const rawUrls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
+                const quoteUrls = rawUrls.length
+                  ? [{ url: rawUrls[0], label: licenseTermLabel(sku) }]
+                  : extractQuoteUrls(responseText);
+                await addToHistory(kv, quotePersonId, 'assistant', responseText);
+                apiResult = {
+                  quoteUrls,
+                  eolWarnings: [],
+                  parsedItems: [{ sku, qty }],
+                  handlerType: 'deterministic',
+                };
+                break;
+              }
+            }
+
             // If no parsed items AND no SKU-like tokens at all → Claude fallback (technical question)
-            if ((!parsed || !parsed.items || parsed.items.length === 0) && rawSkuTokens.length === 0 && (!parsed || !parsed.directLicenseList || parsed.directLicenseList.length === 0)) {
+            if ((!parsed || !parsed.items || parsed.items.length === 0) && rawSkuTokens.length === 0 && (!parsed || !parsed.directLicenseList || parsed.directLicenseList.length === 0) && (!parsed || !parsed.directLicense)) {
               try {
                 const claudeReply = await askClaude(
                   text,
