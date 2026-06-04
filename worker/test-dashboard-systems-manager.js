@@ -166,6 +166,14 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   check('Option 1 is in dashboard order — Systems Manager (LIC-SME-1YR) is last',
     !!opt1Items && opt1Items[opt1Items.length - 1] && opt1Items[opt1Items.length - 1].sku === 'LIC-SME-1YR',
     `last item: ${opt1Items && JSON.stringify(opt1Items[opt1Items.length - 1])}`);
+
+  // Paragraph spacing so it pastes into Gmail without looking cramped.
+  check('blank line between Option 1 header and the first co-term URL',
+    /\*\*Option 1 - Renew As-Is:\*\*\n\n1-Year Co-Term:/.test(msg),
+    `msg head: ${msg.slice(0, 160)}`);
+  check('blank line between each co-term option',
+    /1-Year Co-Term:[^\n]*\n\n3-Year Co-Term:[^\n]*\n\n5-Year Co-Term:/.test(msg),
+    `msg: ${msg}`);
 }
 
 // ─── 4. SM-only renewal stays license-only ───────────────────────────────────
