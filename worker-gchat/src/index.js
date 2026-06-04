@@ -3968,6 +3968,11 @@ function assignClauseIntent(items, upper, modifiers) {
   const leadingListLicense = new RegExp(`^\\s*(QUOTE\\s+)?(ENT(?:ERPRISE)?\\s+)?(?:${LIC}|RENEWAL[S]?|RENEW)\\b`).test(upper);
   const trailingListLicense = new RegExp(`\\b(ENT(?:ERPRISE)?\\s+)?(?:${LIC}|RENEWAL[S]?)\\s*$`).test(upper.trim());
   const inheritGlobalLicense = hasLic && !hasHW && (leadingListLicense || trailingListLicense);
+  // Symmetric list-level HARDWARE: a leading "hardware for …" / "hardware only for …"
+  // covers every item (mirror of leading "license for …"). Trailing "… hardware" stays
+  // item-attached (so "renew MX67 then add MR44 hardware" keeps MR44 local).
+  const leadingListHardware = /^\s*(QUOTE\s+)?(HARDWARE\s+ONLY\s+FOR|HARDWARE\s+FOR|HW\s+FOR)\b/.test(upper);
+  const inheritGlobalHardware = hasHW && !hasLic && leadingListHardware;
 
   const clauseFor = (pos) => {
     if (typeof pos !== 'number') return null;
@@ -3981,9 +3986,10 @@ function assignClauseIntent(items, upper, modifiers) {
       item.hardwareOnly = true; item.licenseOnly = false;
     } else if (c && c.licenseOnly) {
       item.hardwareOnly = false; item.licenseOnly = true;
-    } else if (inheritGlobalLicense) {
-      // Item's clause has no explicit intent, but a list-level license modifier
-      // covers the whole request → inherit it.
+    } else if (inheritGlobalLicense || inheritGlobalHardware) {
+      // Item's clause has no explicit intent, but a list-level modifier (leading
+      // "license/renewal for …" / trailing "… licenses", or leading "hardware for …")
+      // covers the whole request → inherit the global modifier.
       item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly;
     } else {
       // No explicit intent on this item and no list-level modifier (or there is a

@@ -156,6 +156,14 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(!findKey(gm, /-HW$/), `leading "renewal for" should suppress ALL hardware: ${keys(gm)}`);
     assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
   });
+  // Symmetry with "license for …": leading "hardware for …" must also be list-level
+  // (cover every item), not just the first clause.
+  await t('"quote hardware for 1 MX67 and 1 MR44" (leading hardware) → all hardware, NO license', async () => {
+    const gm = engineSkuQty(G, 'quote hardware for 1 MX67 and 1 MR44'), wm = engineSkuQty(W, 'quote hardware for 1 MX67 and 1 MR44');
+    assert.ok(!findKey(gm, /^LIC-/), `leading "hardware for" should suppress ALL licenses: ${keys(gm)}`);
+    assert.ok(findKey(gm, /^MX67-HW$/) && findKey(gm, /^MR44-HW$/), `hardware missing: ${keys(gm)}`);
+    assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
+  });
   // Regression guard (2nd review pass): leading "license renewal for …" must be
   // list-level too — the "license" word before "renewal for" must not narrow it.
   for (const input of ['license renewal for 6 mr44 and 1 mx67', 'enterprise license renewal for 6 mr44 and 1 mx67']) {
