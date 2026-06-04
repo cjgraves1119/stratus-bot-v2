@@ -34,7 +34,7 @@ mapped `0-f → a-p`.
 The stable ID for this extension is:
 
 ```
-idkfeabnpcnpklbgknibidbgjcpbcmkh
+haangicfjfkenoilhdadbnljcacighih
 ```
 
 That ID only comes from the **one original signing key**. As long as CI signs
@@ -116,7 +116,7 @@ Verify after deploy:
 
 ```sh
 curl -s https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml
-# appid should be idkfeabnpcnpklbgknibidbgjcpbcmkh and version should match.
+# appid should be haangicfjfkenoilhdadbnljcacighih and version should match.
 ```
 
 ---

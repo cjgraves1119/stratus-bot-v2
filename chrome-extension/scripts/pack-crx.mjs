@@ -42,7 +42,7 @@ const EXT_DIR = resolve(__dirname, '..');
 const DIST_DIR = join(EXT_DIR, 'dist');
 const RELEASE_DIR = join(EXT_DIR, 'release');
 
-const EXPECTED_ID = 'idkfeabnpcnpklbgknibidbgjcpbcmkh';
+const EXPECTED_ID = 'haangicfjfkenoilhdadbnljcacighih'; // fresh key generated 2026-06-04 (original idkfe… key was unrecoverable)
 const PAGES_BASE = 'https://cjgraves1119.github.io/stratus-bot-v2';
 // Minimum Chrome version that supports CRX3 (Chromium switched in late 2017).
 const PRODVERSION_MIN = '64.0.3242';
