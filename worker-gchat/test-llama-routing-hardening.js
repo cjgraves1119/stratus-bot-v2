@@ -18,7 +18,7 @@ function buildShim() {
     `const specsData = require('${escPath('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m,
     `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
-  src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
+  src = src.replace(/^export\s+(class|function|const|let|var)\s+/gm, '$1 ');
   const edIdx = src.indexOf('export default');
   if (edIdx > -1) {
     let depth = 0, started = false, end = edIdx;

@@ -2229,6 +2229,359 @@ function isEol(baseSku) {
   return false;
 }
 
+// ─── WS2: Dashboard renewal helpers (ported verbatim from worker/src/index.js) ─
+function isValidSkuToken(sku) {
+  if (!sku) return false;
+  const s = sku.toUpperCase();
+  if (s.startsWith('LIC-')) return true;
+  if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
+  if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
+  return true;
+}
+
+function dedupeSkus(skus) {
+  const map = new Map();
+  for (const { sku, qty } of skus) {
+    map.set(sku, (map.get(sku) || 0) + qty);
+  }
+  return Array.from(map.entries()).map(([sku, qty]) => ({ sku, qty }));
+}
+
+function extractSkusFromVisionText(text) {
+  const skus = [];
+  if (!text) return skus;
+
+  // Strip markdown bold/italic so Claude's occasional `**SKU:**` doesn't break the regex.
+  const cleanedText = text.replace(/\*{1,3}/g, '');
+
+  if (/LICENSE_DASHBOARD_PARSE_V1/.test(cleanedText)) {
+    const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
+    let m;
+    while ((m = lineRe.exec(cleanedText)) !== null) {
+      const sku = m[1].toUpperCase().replace(/_/g, '-');
+      const limit = parseInt(m[2], 10);
+      const active = parseInt(m[3], 10);
+      if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
+      if (active === 0 && limit === 0) continue;
+      if (active === 0) continue;
+      const qty = Math.min(limit || active, active || limit);
+      if (qty <= 0 || qty > 500) continue;
+      if (!isValidSkuToken(sku)) continue;
+      skus.push({ sku, qty });
+    }
+    // Defensive net: if the model labeled the Systems Manager row with its
+    // literal name ("SKU: Systems Manager | LIMIT: 85 | ACTIVE: 84") instead of
+    // the SM-ENT token, the single-token lineRe above skips it (the space
+    // breaks the token match). Recover it here, guarded so we never
+    // double-count a row already captured as SM / SME / SM-ENT.
+    if (!skus.some(s => /^(SM|SME|SM-ENT)$/.test(s.sku))) {
+      // Scope the search to the SKU block (between the --- markers) so a caption
+      // or License History sentence mentioning "Systems Manager" can't be
+      // misread as a license row.
+      const smBlock = (cleanedText.match(/---\s*([\s\S]*?)\s*---/) || [, cleanedText])[1];
+      const smM = smBlock.match(/Systems\s+Manager[^\n]*?LIMIT:\s*(\d+)[^\n]*?ACTIVE:\s*(\d+)/i);
+      if (smM) {
+        const smLimit = parseInt(smM[1], 10);
+        const smActive = parseInt(smM[2], 10);
+        const smQty = Math.min(smLimit || smActive, smActive || smLimit);
+        if (smActive > 0 && smQty > 0 && smQty <= 500) skus.push({ sku: 'SM-ENT', qty: smQty });
+      }
+    }
+    if (skus.length > 0) return dedupeSkus(skus);
+  }
+
+  const mrEntRe = /MR\s+Enterprise[^\n\d]{0,40}?(\d+)/gi;
+  let mEnt;
+  while ((mEnt = mrEntRe.exec(cleanedText)) !== null) {
+    const qty = parseInt(mEnt[1], 10);
+    if (qty > 0 && qty <= 500) skus.push({ sku: 'MR-ENT', qty });
+  }
+
+  const skuRegex = /\b((?:LIC-[A-Z0-9-]+|(?:MR|MS|MX|MV|MT|MG|CW|C9|Z)\d[A-Z0-9-]*))\b/gi;
+  const lines = cleanedText.split(/\n|\r/);
+  for (const line of lines) {
+    if (/license\s+history/i.test(line)) continue;
+    if (/\b[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/i.test(line)) continue;
+    let match;
+    skuRegex.lastIndex = 0;
+    while ((match = skuRegex.exec(line)) !== null) {
+      const sku = match[1].toUpperCase();
+      if (!isValidSkuToken(sku)) continue;
+      const beforeSku = line.substring(0, match.index);
+      const afterSku = line.substring(match.index + match[0].length);
+      let qty = 1;
+      const afterQty = afterSku.match(/(?:\s*[\|:×x]\s*|\s+(?:has\s+a\s+)?count\s+of\s+|\s*\(\s*)(\d+)/i);
+      if (afterQty) {
+        qty = parseInt(afterQty[1], 10);
+      } else {
+        const beforeQty = beforeSku.match(/(?:^|[\s,|])(\d+)\s*[x×]?\s+$/i);
+        if (beforeQty) {
+          qty = parseInt(beforeQty[1], 10);
+        }
+      }
+      if (qty > 0 && qty <= 500) {
+        skus.push({ sku, qty });
+      }
+    }
+  }
+  return dedupeSkus(skus);
+}
+
+// ─── Dashboard vision prompt + audit pass ───────────────────────────────────
+// Pulled out of the fetch handler so the prompt is testable and the audit pass
+// (second-shot vision call when the first pass looks suspicious) can re-use
+// the same parsing rules.
+function getDashboardVisionPrompt() {
+  return `You are analyzing a Cisco Meraki license dashboard screenshot.
+
+Only extract rows from the TOP "License information" table — the one with the columns "License limit" and "Current device count". IGNORE the "License History" section at the bottom (those are past renewals with license keys like Z228-BEAC-D2QX and old devices — they must never appear in output).
+
+Respond with ONLY this block. No preamble, no summary, no recommendations, no markdown bold, no explanations:
+
+LICENSE_DASHBOARD_PARSE_V1
+---
+SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
+---
+EXPIRATION: <YYYY-MM-DD or unknown>
+MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
+MR_EDITION: <Enterprise | Advanced | none>
+
+Hard rules:
+1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, Systems Manager, MX models, MS models, MT, MV, MG, Z-series).
+2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
+2b. Systems Manager rows (the row labeled "Systems Manager", often shown as "Enabled (paid)") MUST be emitted as: SKU: SM-ENT | LIMIT: <license limit number> | ACTIVE: <current device count number>. Use the exact integers from the License limit and Current device count columns. (Skip only if ACTIVE is 0, per rule 3.)
+3. Skip a row ONLY when ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip. Otherwise emit.
+4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table.
+5. NEVER drop a visible row whose ACTIVE >= 1. If a row is partially obscured by a colored annotation, read what is visible and emit it. Annotations (red/yellow/blue underlines, circles, crosses, highlighter strokes) are user markup — they are NOT table boundaries and they do NOT terminate the table.
+6. KEEP READING the rows BELOW any colored marker stroke. Underlines and crosses commonly span between adjacent rows (e.g. between MX65 and MX85). Continue scanning all subsequent rows in the License information table until you reach the License History section.
+7. Worked example: a dashboard listing "MX65 | 1 | 0" then "MX85 | 1 | 1" with a red underline crossing both rows must skip MX65 (ACTIVE=0) AND emit MX85 (ACTIVE=1). Never drop MX85 because of the annotation.
+8. Do NOT include SKUs from the "License History" section (e.g. MX84 from a prior renewal).
+9. LIMIT and ACTIVE must be the exact integers from the "License limit" and "Current device count" columns — never derive from model numbers.
+10. Preserve hyphens exactly (MS120-24P, not MS120 24P).
+11. Do not wrap labels in asterisks or other markdown. Output plain ASCII only.
+12. If the table is genuinely empty after applying rules 3-8, emit the LICENSE_DASHBOARD_PARSE_V1 block with no SKU lines between the --- markers — but only after you have scanned every row top-to-bottom.`;
+}
+
+
+// Extract dashboard metadata (MX_EDITION / MR_EDITION / EXPIRATION) from a
+// LICENSE_DASHBOARD_PARSE_V1 vision response. Returns { mxEdition, mrEdition,
+// expiration } with empty strings for missing fields.
+function extractDashboardMetadata(text) {
+  const out = { mxEdition: '', mrEdition: '', expiration: '' };
+  if (!text) return out;
+  const mx = String(text).match(/MX_EDITION:\s*([^\n]+)/i);
+  const mr = String(text).match(/MR_EDITION:\s*([^\n]+)/i);
+  const exp = String(text).match(/EXPIRATION:\s*([^\n]+)/i);
+  if (mx) out.mxEdition = mx[1].trim();
+  if (mr) out.mrEdition = mr[1].trim();
+  if (exp) out.expiration = exp[1].trim();
+  return out;
+}
+
+// Build a license-only renewal quote from a dashboard vision parse.
+// Dashboard rows describe ACTIVE devices that need license renewal — they are
+// NOT a hardware quote intent. Per Chris's product spec:
+//   - Active count > 0  → emit license SKU(s) at qty=ACTIVE for each term.
+//   - MR-ENT             → emit LIC-ENT-{term}YR at the MR-ENT qty.
+//   - EOL devices       → list separately as an OPTIONAL upgrade, not in the
+//                          renewal cart.
+//   - MX_EDITION drives the MX license tier (Advanced Security → SEC,
+//     Secure SD-WAN Plus → SDW). Default SEC when absent.
+//   - Hardware SKUs are never added unless an explicit hardware-replacement
+//     rule fires (out of scope for dashboard parses today).
+//
+// Returns { message, upgradeBlock, termGroups } or null if no renewal items.
+function buildDashboardRenewalQuote(visionSkus, opts = {}) {
+  const mxEditionRaw = String(opts.mxEdition || '').toUpperCase();
+  const mxTier = /SDW|SD[-\s]*WAN/.test(mxEditionRaw) ? 'SDW' : 'SEC';
+
+  // Partition vision SKUs into:
+  //   - non-EOL devices (current/stocked models, license-only renewal)
+  //   - EOL devices (current license still renewable AND a replacement
+  //     hardware upgrade is offered separately)
+  //   - MR-ENT (rolls into LIC-ENT-{term}YR at the active qty)
+  const nonEolDevices = [];
+  const eolDevices = [];
+  // `ordered` preserves the dashboard's top-to-bottom row order (visionSkus is
+  // parsed top-to-bottom). Every quote line is emitted from this list so the
+  // URLs match the screenshot order instead of being grouped by type.
+  const ordered = [];
+  let mrEntQty = 0;
+  let smEntQty = 0;
+  for (const s of (visionSkus || [])) {
+    if (!s || !s.sku || !(Number(s.qty) > 0)) continue;
+    const upper = String(s.sku).toUpperCase();
+    const qty = Math.floor(Number(s.qty));
+    if (upper === 'MR-ENT' || upper === 'MR_ENT') {
+      mrEntQty += qty;
+      ordered.push({ kind: 'mr', qty });
+      continue;
+    }
+    // Systems Manager (Enterprise) rolls into LIC-SME-{term}YR at the active
+    // device count, mirroring the MR-ENT → LIC-ENT mapping. The vision prompt
+    // emits the "Systems Manager" dashboard row as the SM-ENT token.
+    if (upper === 'SM-ENT' || upper === 'SM_ENT' || upper === 'SME' || upper === 'SM') {
+      smEntQty += qty;
+      ordered.push({ kind: 'sm', qty });
+      continue;
+    }
+    if (isEol(upper)) {
+      const row = { model: upper, qty, replacement: checkEol(upper) };
+      eolDevices.push(row);
+      ordered.push({ kind: 'eol', ...row });
+    } else {
+      nonEolDevices.push({ model: upper, qty });
+      ordered.push({ kind: 'device', model: upper, qty });
+    }
+  }
+
+  // Helper: license SKU for `model` at `term` ('1Y' / '3Y' / '5Y'). Returns
+  // null when model has no mapped license family (or all generated SKUs
+  // are absent from prices.json — getLicenseSkus already filters those).
+  const licFor = (model, term) => {
+    const lics = getLicenseSkus(model, mxTier);
+    if (!lics) return null;
+    return lics.find(l => l.term === term) || null;
+  };
+
+  const TERMS = ['1Y', '3Y', '5Y'];
+  const termYr = { '1Y': '1YR', '3Y': '3YR', '5Y': '5YR' };
+  const empty = () => ({ '1Y': [], '3Y': [], '5Y': [] });
+
+  // Renewal (carry-forward) license item for one row at one term. MR-ENT →
+  // LIC-ENT, SM-ENT → LIC-SME, device/EOL → its current license. Returns null
+  // when the model maps to no license family.
+  const renewItem = (row, term) => {
+    if (row.kind === 'mr') return { sku: `LIC-ENT-${termYr[term]}`, qty: row.qty };
+    if (row.kind === 'sm') return { sku: `LIC-SME-${termYr[term]}`, qty: row.qty };
+    const lic = licFor(row.model, term);
+    return lic ? { sku: lic.sku, qty: row.qty } : null;
+  };
+
+  // Option 1 — Renew As-Is. Every row's CURRENT renewal license, emitted in
+  // dashboard top-to-bottom order (the customer still owns any EOL hardware and
+  // the dashboard count covers it). NEVER includes EOL hardware.
+  const option1 = empty();
+  for (const term of TERMS) {
+    for (const row of ordered) {
+      const it = renewItem(row, term);
+      if (it) option1[term].push(it);
+    }
+  }
+
+  // Helper: build a Hardware Refresh option for a given uplink index, also in
+  // dashboard order. Non-EOL rows (and MR/SM) carry their license forward; EOL
+  // rows emit the replacement hardware + its license in place of the current
+  // license, at the EOL row's dashboard position.
+  // 0 = primary (1G when array, scalar when single replacement)
+  // 1 = alt (10G when array length >= 2; falls back to 0 if no alt exists,
+  //   which means Option 2 and Option 3 would be identical — caller guards)
+  const buildRefresh = (uplinkIdx) => {
+    const groups = empty();
+    for (const term of TERMS) {
+      for (const row of ordered) {
+        if (row.kind !== 'eol') {
+          const it = renewItem(row, term);
+          if (it) groups[term].push(it);
+          continue;
+        }
+        if (!row.replacement) continue;
+        const replModel = Array.isArray(row.replacement)
+          ? (row.replacement[uplinkIdx] || row.replacement[0])
+          : row.replacement;
+        groups[term].push({ sku: applySuffix(replModel), qty: row.qty });
+        const replLics = getLicenseSkus(replModel, mxTier);
+        if (replLics) {
+          const lic = replLics.find(l => l.term === term);
+          if (lic) groups[term].push({ sku: lic.sku, qty: row.qty });
+        }
+      }
+    }
+    return groups;
+  };
+
+  const hasEol = eolDevices.length > 0;
+  // "Has alt uplink" = any EOL replacement is an array with a distinct
+  // 10G alternative. Only then do we render Option 3 (10G); otherwise
+  // Option 2 doesn't get a "1G Uplink" qualifier and there's no Option 3.
+  const hasAltUplink = eolDevices.some(e =>
+    Array.isArray(e.replacement) && e.replacement.length >= 2 && e.replacement[1] !== e.replacement[0]
+  );
+
+  const option2 = hasEol ? buildRefresh(0) : null;
+  const option3 = (hasEol && hasAltUplink) ? buildRefresh(1) : null;
+
+  // Render helpers
+  const renderTerms = (groups) => {
+    const lines = [];
+    for (const term of TERMS) {
+      if (groups[term].length === 0) continue;
+      const url = buildStratusUrl(groups[term]);
+      const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
+      lines.push(`${label} Co-Term: ${url}`);
+    }
+    // Blank line between each co-term option so the quote pastes into Gmail
+    // with paragraph spacing instead of a cramped block.
+    return lines.join('\n\n');
+  };
+
+  // EOL prose section. One line per EOL model with its replacement(s).
+  // Single replacement → "Replacement: X". Dual-uplink array → "Replacements:
+  // A (1G) / B (10G)". The hardware-refresh URLs already encode the SKUs,
+  // so this prose is intentionally brief.
+  let eolProse = '';
+  if (eolDevices.length > 0) {
+    const proseLines = ['**Products End of Life:**'];
+    for (const { model, replacement } of eolDevices) {
+      let line = `${model} (EOL) → `;
+      if (Array.isArray(replacement) && replacement.length >= 2 && replacement[1] !== replacement[0]) {
+        const parts = replacement.slice(0, 2).map((r, i) => `${r} (${i === 0 ? '1G' : '10G'})`);
+        line += `Replacements: ${parts.join(' / ')}`;
+      } else {
+        const repl = Array.isArray(replacement) ? replacement[0] : replacement;
+        line += repl ? `Replacement: ${repl}` : 'Replacement: see Cisco for upgrade path';
+      }
+      proseLines.push(line);
+    }
+    eolProse = proseLines.join('\n');
+  }
+
+  // Final assembly
+  const sections = [];
+  if (eolProse) sections.push(eolProse);
+
+  const opt1Body = renderTerms(option1);
+  if (opt1Body) sections.push(`**Option 1 - Renew As-Is:**\n\n${opt1Body}`);
+
+  if (option2) {
+    const headerOpt2 = hasAltUplink
+      ? '**Option 2 - Hardware Refresh, 1G Uplink:**'
+      : '**Option 2 - Hardware Refresh:**';
+    const opt2Body = renderTerms(option2);
+    if (opt2Body) sections.push(`${headerOpt2}\n\n${opt2Body}`);
+  }
+  if (option3) {
+    const opt3Body = renderTerms(option3);
+    if (opt3Body) sections.push(`**Option 3 - Hardware Refresh, 10G Uplink:**\n\n${opt3Body}`);
+  }
+
+  if (sections.length === 0) return null;
+
+  return {
+    message: sections.join('\n\n'),
+    // Back-compat fields kept for the existing callsite drop-detection.
+    // upgradeBlock is no longer separate — it's folded into message — so
+    // the field is null and callers should rely on message alone.
+    upgradeBlock: null,
+    termGroups: option1,
+    option1, option2, option3,
+    eolDevices,
+    nonEolDevices,
+    mrEntQty,
+    mxTier
+  };
+}
+
 // ─── EOL Date Helpers ────────────────────────────────────────────────────────
 function getEolDates(baseSku) {
   const upper = baseSku.toUpperCase();
@@ -4238,7 +4591,8 @@ function buildQuoteResponse(parsed) {
     }
 
     // Option 1 — Renew existing licenses (original SKUs as submitted)
-    lines.push(`**Option 1 — Renew Existing Licenses:**`);
+    lines.push(`**Option 1 - Renew As-Is:**`);
+    lines.push('');
     for (const term of terms) {
       const url = buildStratusUrl(parsed.directLicenseList);
       const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
@@ -4304,7 +4658,8 @@ function buildQuoteResponse(parsed) {
       };
 
       if (hasDualUplink) {
-        lines.push(`**Option 2 — Hardware Refresh, 1G Uplink:**`);
+        lines.push(`**Option 2 - Hardware Refresh, 1G Uplink:**`);
+        lines.push('');
         lines.push(..._buildHardwareBreakdownLic(0));
         lines.push('');
         for (const term of terms) {
@@ -4316,7 +4671,8 @@ function buildQuoteResponse(parsed) {
             lines.push('');
           }
         }
-        lines.push(`**Option 3 — Hardware Refresh, 10G Uplink:**`);
+        lines.push(`**Option 3 - Hardware Refresh, 10G Uplink:**`);
+        lines.push('');
         lines.push(..._buildHardwareBreakdownLic(1));
         lines.push('');
         for (const term of terms) {
@@ -4329,7 +4685,8 @@ function buildQuoteResponse(parsed) {
           }
         }
       } else {
-        lines.push(`**Option 2 — Hardware Refresh:**`);
+        lines.push(`**Option 2 - Hardware Refresh:**`);
+        lines.push('');
         lines.push(..._buildHardwareBreakdownLic(0));
         lines.push('');
         for (const term of terms) {
@@ -4365,6 +4722,9 @@ function buildQuoteResponse(parsed) {
   const errors = [];
   const resolvedItems = [];
   const tierWarnings = [];
+  // Items in REQUEST order (preserves the user's SKU sequence across EOL/non-EOL)
+  // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
+  const ordered = [];
 
   for (const { baseSku, qty } of parsed.items) {
     // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN) ──
@@ -4393,7 +4753,9 @@ function buildQuoteResponse(parsed) {
           { term: '5Y', sku: 'LIC-MT-5Y' }
         ];
       }
-      resolvedItems.push({ baseSku: `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true });
+      const agnItem = { baseSku: `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true };
+      resolvedItems.push(agnItem);
+      ordered.push({ kind: 'resolved', ref: agnItem });
       continue;
     }
 
@@ -4406,7 +4768,9 @@ function buildQuoteResponse(parsed) {
     const eol = isEol(baseSku);
     const replacement = checkEol(baseSku);
     if (eol && replacement) {
-      eolItems.push({ baseSku, qty, replacement, eol: true });
+      const eolItem = { baseSku, qty, replacement, eol: true };
+      eolItems.push(eolItem);
+      ordered.push({ kind: 'eol', ref: eolItem });
       continue;
     }
     const zTest = baseSku.toUpperCase().match(/^Z(\d+)/);
@@ -4421,7 +4785,9 @@ function buildQuoteResponse(parsed) {
     }
     const hwSku = applySuffix(baseSku);
     const licenseSkus = getLicenseSkus(baseSku, requestedTier);
-    resolvedItems.push({ baseSku, hwSku, qty, licenseSkus, eol: false });
+    const resItem = { baseSku, hwSku, qty, licenseSkus, eol: false };
+    resolvedItems.push(resItem);
+    ordered.push({ kind: 'resolved', ref: resItem });
   }
 
   if (errors.length > 0 && resolvedItems.length === 0 && eolItems.length === 0) {
@@ -4503,38 +4869,29 @@ function buildQuoteResponse(parsed) {
     };
     const hasRenewLicenses = eolItems.some(({ baseSku }) => _getEolRenewalLicenses(baseSku));
     if (hasRenewLicenses) {
-      if (modifiers.licenseOnly) {
-        // User explicitly asked for license renewal — simple label, everything is license-only
-        lines.push(`**Option 1 — Renew Existing Licenses:**`);
-      } else {
-        // Regular quote — clarify that EOL items are license-only while current gear includes hardware
-        const eolNames = eolItems.map(e => e.baseSku).join(', ');
-        lines.push(`**Option 1 — As Quoted:**`);
-        for (const { baseSku } of eolItems) {
-          lines.push(`ℹ️ ${baseSku} — license renewal only (no longer orderable)`);
-        }
-        if (resolvedItems.length > 0) {
-          lines.push(`All other hardware included. See Option 2 for replacement hardware.`);
-        }
-        lines.push('');
-      }
+      // licenseOnly → pure renewal ("Renew As-Is", matching the vision builder).
+      // Otherwise the user asked for a regular quote that keeps the EOL gear's
+      // current license alongside any non-EOL hardware → "As Quoted".
+      lines.push(modifiers.licenseOnly ? `**Option 1 - Renew As-Is:**` : `**Option 1 - As Quoted:**`);
+      lines.push('');
       for (const term of terms) {
+        // Emit in REQUEST order (single `ordered` list), not bucketed EOL-then-rest.
         const urlItems = [];
-        for (const { baseSku, qty } of eolItems) {
-          const renewLicenses = _getEolRenewalLicenses(baseSku);
-          if (renewLicenses) {
-            const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
-          }
-        }
-        // Also include non-EOL resolved items
-        // Default: hardware + licenses (user asked for a regular quote, non-EOL gear is current)
-        // licenseOnly: license-only (user explicitly asked for license renewal)
-        for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
-          if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-          if (licenseSkus && !modifiers.hardwareOnly) {
-            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
+        for (const entry of ordered) {
+          if (entry.kind === 'eol') {
+            const { baseSku, qty } = entry.ref;
+            const renewLicenses = _getEolRenewalLicenses(baseSku);
+            if (renewLicenses) {
+              const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
+              if (licSku) urlItems.push({ sku: licSku, qty });
+            }
+          } else {
+            const { hwSku, qty, licenseSkus, isAgnosticLicense } = entry.ref;
+            if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+            if (licenseSkus && !modifiers.hardwareOnly) {
+              const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+              if (licSku) urlItems.push({ sku: licSku, qty });
+            }
           }
         }
         if (urlItems.length > 0) {
@@ -4551,26 +4908,27 @@ function buildQuoteResponse(parsed) {
 
     // Helper: build refresh URL items for a given uplink choice (0 = 4G, 1 = 4X)
     const _buildRefreshItems = (term, uplinkIdx) => {
+      // Emit in REQUEST order: each EOL row becomes replacement HW + replacement
+      // license at its original position; non-EOL rows carry their license forward.
       const urlItems = [];
-      for (const { baseSku, qty, replacement } of eolItems) {
-        const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
-        const replHwSku = applySuffix(repl);
-        const replLicenses = getLicenseSkus(repl, requestedTier);
-        // EOL replacement hardware ALWAYS included in refresh (that's the whole point)
-        urlItems.push({ sku: replHwSku, qty });
-        if (replLicenses && !modifiers.hardwareOnly) {
-          const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
-          if (licSku) urlItems.push({ sku: licSku, qty });
-        }
-      }
-      // Also include non-EOL resolved items
-      // Default: hardware + licenses (refresh option includes all current gear as-is)
-      // licenseOnly: license-only for non-EOL (user asked for license renewal, only EOL gets replacement hw)
-      for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
-        if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-        if (licenseSkus && !modifiers.hardwareOnly) {
-          const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-          if (licSku) urlItems.push({ sku: licSku, qty });
+      for (const entry of ordered) {
+        if (entry.kind === 'eol') {
+          const { qty, replacement } = entry.ref;
+          const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
+          const replHwSku = applySuffix(repl);
+          const replLicenses = getLicenseSkus(repl, requestedTier);
+          urlItems.push({ sku: replHwSku, qty });
+          if (replLicenses && !modifiers.hardwareOnly) {
+            const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
+            if (licSku) urlItems.push({ sku: licSku, qty });
+          }
+        } else {
+          const { hwSku, qty, licenseSkus, isAgnosticLicense } = entry.ref;
+          if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !modifiers.hardwareOnly) {
+            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+            if (licSku) urlItems.push({ sku: licSku, qty });
+          }
         }
       }
       return urlItems;
@@ -4659,7 +5017,8 @@ function buildQuoteResponse(parsed) {
     };
 
     if (hasDualUplink) {
-      lines.push(`**Option 2 — Hardware Refresh, 1G Uplink:**`);
+      lines.push(`**Option 2 - Hardware Refresh, 1G Uplink:**`);
+      lines.push('');
       lines.push(..._buildHardwareBreakdown(0));
       lines.push('');
       for (const term of terms) {
@@ -4676,7 +5035,8 @@ function buildQuoteResponse(parsed) {
       for (const s of opt2Suggestions) { lines.push(s); }
       if (opt2Suggestions.length > 0) lines.push('');
 
-      lines.push(`**Option 3 — Hardware Refresh, 10G Uplink:**`);
+      lines.push(`**Option 3 - Hardware Refresh, 10G Uplink:**`);
+      lines.push('');
       lines.push(..._buildHardwareBreakdown(1));
       lines.push('');
       for (const term of terms) {
@@ -4693,7 +5053,8 @@ function buildQuoteResponse(parsed) {
       for (const s of opt3Suggestions) { lines.push(s); }
       if (opt3Suggestions.length > 0) lines.push('');
     } else {
-      lines.push(`**Option 2 — Hardware Refresh:**`);
+      lines.push(`**Option 2 - Hardware Refresh:**`);
+      lines.push('');
       lines.push(..._buildHardwareBreakdown(0));
       lines.push('');
       for (const term of terms) {
@@ -20882,45 +21243,38 @@ CRITICAL URL RULES:
                 break;
               }
 
-              const dashPrompt = dashInstructions || `You are analyzing a Cisco Meraki license dashboard screenshot.
-
-Only extract rows from the TOP "License information" table — the one with the columns "License limit" and "Current device count". IGNORE the "License History" section at the bottom (those are past renewals with license keys like Z228-BEAC-D2QX and old devices — they must never appear in output).
-
-Respond with ONLY this block. No preamble, no summary, no recommendations, no markdown bold, no explanations:
-
-LICENSE_DASHBOARD_PARSE_V1
----
-SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
----
-EXPIRATION: <YYYY-MM-DD or unknown>
-MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
-MR_EDITION: <Enterprise | Advanced | none>
-
-Hard rules:
-1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, MX models, MS models, MT, MV, MG, Z-series).
-2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
-3. Skip any row where ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip.
-4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table. If unsure, leave it out.
-5. Do NOT include SKUs from the "License History" section (e.g. MX84 from a prior renewal).
-6. LIMIT and ACTIVE must be the exact integers from the "License limit" and "Current device count" columns — never derive from model numbers.
-7. Preserve hyphens exactly (MS120-24P, not MS120 24P).
-8. Do not wrap labels in asterisks or other markdown. Output plain ASCII only.
-9. If nothing extractable, emit the block with no SKU lines between the --- markers.`;
+              // WS2: use the shared, testable dashboard vision prompt (parity with
+              // worker/). A caller-supplied `instructions` override still wins.
+              const dashPrompt = dashInstructions || getDashboardVisionPrompt();
 
               // Call Claude with vision (reuse existing askClaude)
               const imageData = { base64: resolvedBase64, mediaType: resolvedMediaType };
               const claudeResponse = await askClaude(dashPrompt, 'gmail-addon-dashboard', env, imageData);
 
-              // Extract URLs from the response
-              const dashUrlRegex = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
-              const dashUrls = (claudeResponse || '').match(dashUrlRegex) || [];
+              // WS2: parse the LICENSE_DASHBOARD_PARSE_V1 block into structured
+              // SKUs + metadata, then build the deterministic license-renewal quote
+              // (Option 1 Renew As-Is + EOL Hardware Refresh options) exactly like
+              // the Webex/gold-standard path. The rendered quote text becomes the
+              // analysis/message body, and quoteUrls/rawUrls are extracted from it.
+              const visionSkus = extractSkusFromVisionText(claudeResponse);
+              const dashMeta = extractDashboardMetadata(claudeResponse);
+              const dashQuote = buildDashboardRenewalQuote(visionSkus, { mxEdition: dashMeta.mxEdition, mrEdition: dashMeta.mrEdition });
 
-              // Parse option structure from response
+              // analysis/message body: the deterministic quote when we built one,
+              // otherwise fall back to Claude's raw response (e.g. empty table).
+              const dashMessage = (dashQuote && dashQuote.message) ? dashQuote.message : (claudeResponse || 'No analysis generated.');
+
+              // Extract URLs from the rendered quote message
+              const dashUrlRegex = /https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g;
+              const dashUrls = dashMessage.match(dashUrlRegex) || [];
+
+              // Parse option structure from the rendered quote message (EXISTING
+              // quote-URL extraction, now run over dashQuote.message).
               const dashQuoteUrls = [];
               const termLabels = ['1-Year', '3-Year', '5-Year'];
               let currentOpt = '';
               let optIdx = 0;
-              const dashLines = (claudeResponse || '').split('\n');
+              const dashLines = dashMessage.split('\n');
               for (const line of dashLines) {
                 const optMatch = line.match(/\*\*Option \d+[^*]*\*\*/) || line.match(/^Option \d+/);
                 if (optMatch) { currentOpt = (optMatch[0] || '').replace(/\*\*/g, '').replace(/[—–:]/g, '').replace(/-+$/, '').trim(); optIdx = 0; }
@@ -20934,117 +21288,36 @@ Hard rules:
                 }
               }
 
-              // Fallback: if no URLs came back in the response, parse the
-              // LICENSE_DASHBOARD_PARSE_V1 block directly and build 1Y/3Y/5Y URLs here.
-              // Strip markdown bold/italic so `**SKU:**` doesn't break the regex.
-              const cleanedResponse = (claudeResponse || '').replace(/\*{1,3}/g, '');
+              // WS2: drop detection — every renewal-eligible vision SKU must appear
+              // in the rendered quote URLs (Option 1 + Option 2/3 collectively).
+              // Mirrors the gold-standard (worker/) cf-vision drop check. Surfaced
+              // as `dropFlags` (same field name/shape as before).
               const fbDropFlags = [];
-              if (dashQuoteUrls.length === 0 && /LICENSE_DASHBOARD_PARSE_V1/.test(cleanedResponse)) {
-                const isValidSkuTokenFb = (sku) => {
-                  if (!sku) return false;
-                  const s = sku.toUpperCase();
-                  if (s.startsWith('LIC-')) return true;
-                  if (s === 'MR-ENT' || s === 'MR_ENT') return true;
-                  if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
-                  if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
-                  return true;
-                };
-                const fbItems = [];
-                const fbRe = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
-                let fbM;
-                while ((fbM = fbRe.exec(cleanedResponse)) !== null) {
-                  const sku = fbM[1].toUpperCase().replace(/_/g, '-');
-                  const limit = parseInt(fbM[2], 10);
-                  const active = parseInt(fbM[3], 10);
-                  if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
-                  if (active === 0 && limit === 0) continue;
-                  if (active === 0) continue;
-                  const qty = Math.min(limit || active, active || limit);
-                  if (qty <= 0 || qty > 500) continue;
-                  if (!isValidSkuTokenFb(sku)) continue;
-                  fbItems.push({ sku, qty });
-                }
-                // Dedupe (model key preserves MR-ENT as its own bucket)
-                const fbMap = new Map();
-                for (const { sku, qty } of fbItems) {
-                  fbMap.set(sku, (fbMap.get(sku) || 0) + qty);
-                }
-                const fbDeduped = Array.from(fbMap.entries()).map(([sku, qty]) => ({ sku, qty }));
-
-                if (fbDeduped.length > 0 && typeof buildStratusUrl === 'function') {
-                  // Produce 1Y / 3Y / 5Y license-renewal URLs (parity with Webex path).
-                  const fbTerms = [
-                    { term: '1Y', suffix: '1YR', label: '1-Year Co-Term' },
-                    { term: '3Y', suffix: '3YR', label: '3-Year Co-Term' },
-                    { term: '5Y', suffix: '5YR', label: '5-Year Co-Term' }
-                  ];
-                  for (const t of fbTerms) {
-                    const itemsForTerm = [];
-                    for (const { sku, qty } of fbDeduped) {
-                      // MR-ENT → LIC-ENT-{1,3,5}YR (generic AP license)
-                      if (sku === 'MR-ENT' || sku === 'MR_ENT') {
-                        itemsForTerm.push({ sku: `LIC-ENT-${t.suffix}`, qty });
-                        continue;
-                      }
-                      // Try catalog license mapping (EOL-safe, uses the engine's rules)
-                      let mapped = null;
-                      try {
-                        const licSkus = getLicenseSkus(sku, null);
-                        if (licSkus) {
-                          const licEntry = licSkus.find(l => l.term === t.term);
-                          if (licEntry) mapped = licEntry.sku;
-                        }
-                      } catch (_) { /* ignore */ }
-                      if (mapped) {
-                        itemsForTerm.push({ sku: mapped, qty });
-                      } else {
-                        // No license mapping — surface as drop flag (once, on 1Y pass)
-                        if (t.term === '1Y') {
-                          fbDropFlags.push(`⚠️ ${sku} × ${qty} was detected but no license mapping was found.`);
-                        }
-                      }
-                    }
-                    if (itemsForTerm.length > 0) {
-                      dashQuoteUrls.push({ url: buildStratusUrl(itemsForTerm), label: t.label });
-                    }
-                  }
-                }
-              }
-
-              // Re-parse V1 block (cheap, ~10 items max) to give the client
-              // structured parsedItems — used to populate the UI textarea and
-              // detected-SKU banner without the client having to re-parse.
-              const parsedItemsForClient = [];
               {
-                const isValidFb2 = (sku) => {
-                  if (!sku) return false;
-                  const s = sku.toUpperCase();
-                  if (s.startsWith('LIC-')) return true;
-                  if (s === 'MR-ENT' || s === 'MR_ENT') return true;
-                  if (/^Z\d/.test(s) && !/^Z[134][C]?X?$/.test(s)) return false;
-                  if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
-                  return true;
-                };
-                const rx = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
-                const seen = new Map();
-                let mm;
-                while ((mm = rx.exec(cleanedResponse)) !== null) {
-                  const sku = mm[1].toUpperCase().replace(/_/g, '-');
-                  const limit = parseInt(mm[2], 10);
-                  const active = parseInt(mm[3], 10);
-                  if (!Number.isFinite(limit) || !Number.isFinite(active)) continue;
-                  if (active === 0 && limit === 0) continue;
-                  if (active === 0) continue;
-                  const qty = Math.min(limit || active, active || limit);
-                  if (qty <= 0 || qty > 500) continue;
-                  if (!isValidFb2(sku)) continue;
-                  seen.set(sku, (seen.get(sku) || 0) + qty);
+                const qmsg = dashMessage || '';
+                for (const s of visionSkus) {
+                  const upper = String(s.sku).toUpperCase();
+                  let seen = false;
+                  if (upper === 'MR-ENT' || upper === 'MR_ENT') {
+                    seen = /\bLIC-ENT-[135]YR?\b/.test(qmsg);
+                  } else if (upper === 'SM-ENT' || upper === 'SM_ENT' || upper === 'SME' || upper === 'SM') {
+                    seen = /\bLIC-SME-[135]YR?\b/.test(qmsg);
+                  } else {
+                    const escaped = upper.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const directRe = new RegExp(`\\b${escaped}\\b`);
+                    const licRe = new RegExp(`LIC-${escaped}(?:-[A-Z0-9]+)?-[135]Y`);
+                    seen = directRe.test(qmsg) || licRe.test(qmsg);
+                  }
+                  if (!seen) fbDropFlags.push(`⚠️ ${s.sku} × ${s.qty} was detected but did not appear in the quote — manual review needed.`);
                 }
-                for (const [sku, qty] of seen.entries()) parsedItemsForClient.push({ sku, qty });
               }
+
+              // WS2: structured parsedItems sourced from the vision parse so SM-ENT
+              // (and every other detected row) flows through to the client UI.
+              const parsedItemsForClient = visionSkus.map(s => ({ sku: s.sku, qty: s.qty }));
 
               apiResult = {
-                analysis: claudeResponse || 'No analysis generated.',
+                analysis: dashMessage,
                 quoteUrls: dashQuoteUrls,
                 rawUrls: dashUrls,
                 dropFlags: fbDropFlags,
