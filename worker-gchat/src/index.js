@@ -3871,6 +3871,18 @@ function licenseTermLabel(sku) {
   return m ? `${m[1]}-Year` : 'Quote';
 }
 
+// Systems Manager (LIC-SME) max term. The 5-year option was deprecated in 2026
+// (Systems Manager itself sunsets in under 5 years), so only 1YR and 3YR are
+// quotable. Any 5-year SME request is capped to 3YR and the 5-year option is
+// flagged. Applies across the typed, NL, model-agnostic, and dashboard paths.
+const SME_MAX_TERM = 3;
+const SME_5YR_FLAG = 'Systems Manager is available at a maximum of 3-year (the 5-year option is no longer offered) — Systems Manager is quoted at 3-year here.';
+// Cap a requested term (int 1/3/5) for SME; returns {term, capped}.
+function smeCapTerm(term) {
+  const t = parseInt(term, 10);
+  return t > SME_MAX_TERM ? { term: SME_MAX_TERM, capped: true } : { term: (t || SME_MAX_TERM), capped: false };
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   // Pre-process: convert written-out numbers to digits
@@ -4074,9 +4086,13 @@ function parseMessage(text) {
     else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
 
     if (licSku && licSku.startsWith('LIC-')) {
+      // SME 5-year is deprecated → cap a typed LIC-SME-5YR to LIC-SME-3YR + flag.
+      let _smeNote = null;
+      if (/^LIC-SME-5YR$/i.test(licSku)) { licSku = 'LIC-SME-3YR'; _smeNote = SME_5YR_FLAG; }
       return {
         items: [],
         directLicense: { sku: licSku, qty },
+        note: _smeNote,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
         requestedTier: null,
@@ -4323,12 +4339,13 @@ function parseMessage(text) {
     const smeQty = smeQtyMatch ? parseInt(smeQtyMatch[1]) : 1;
     const smeTermMatch = upper.match(/\b([135])\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
     if (smeTermMatch) {
-      // A single named term → ONE specific SKU. Route through directLicense so it
-      // renders as a single correctly-labelled URL (the term-option path would
-      // otherwise repeat the same fixed SKU under all of 1/3/5-Year).
+      // A single named term → ONE specific SKU. SME 5-year is capped to 3-year
+      // (deprecated). Route through directLicense for one correctly-labelled URL.
+      const sme = smeCapTerm(smeTermMatch[1]);
       return {
         items: [],
-        directLicense: { sku: `LIC-SME-${smeTermMatch[1]}YR`, qty: smeQty },
+        directLicense: { sku: `LIC-SME-${sme.term}YR`, qty: smeQty },
+        note: sme.capped ? SME_5YR_FLAG : null,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
         requestedTier: null,
@@ -4337,8 +4354,9 @@ function parseMessage(text) {
         showPricing: false
       };
     }
-    const smeItems = ['1', '3', '5'].map(t => ({ baseSku: `LIC-SME-${t}YR`, qty: smeQty, isLicenseOnly: true }));
-    return { items: smeItems, isQuote: true, isTermOptionQuote: true };
+    // No named term → all quotable SME terms (1YR + 3YR only; 5YR deprecated), w/ note.
+    const smeItems = ['1', '3'].map(t => ({ baseSku: `LIC-SME-${t}YR`, qty: smeQty, isLicenseOnly: true }));
+    return { items: smeItems, isQuote: true, isTermOptionQuote: true, clarificationNote: SME_5YR_FLAG };
   }
 
   // ── Model-agnostic license handler (MR, MV, MT) ──
@@ -4471,7 +4489,7 @@ function parseMessage(text) {
       const before = upper.slice(Math.max(0, pos - 20), pos);
       const after = upper.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
-      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*$/);
+      const beforeQty = before.match(/(?:^|[^A-Z0-9])(\d+)\s*[X×]?\s*(?:OF\s+)?(?:THE\s+)?$/);
       // Negative lookahead rejects qty followed by term keywords like "3 YEAR",
       // "3YR", "3-YEAR", "5 Y" — these are term specifiers, not quantities.
       const afterQty = after.match(/^\s*[X×]?\s*(\d+)(?![A-Z0-9]|[A-Z]*-|\s*-?Y(?:R|EAR|EARS)?\b)/i);
@@ -4764,6 +4782,7 @@ function buildQuoteResponse(parsed) {
     const url = buildStratusUrl([{ sku, qty }]);
     let message = url;
     if (parsed.showPricing) message += buildPricingBlock([{ sku, qty }], true);
+    if (parsed.note) message += `\n\n_${parsed.note}_`;
     return { message, needsLlm: false };
   }
 
@@ -5291,8 +5310,8 @@ EXACT license SKU mappings by product family:
 - All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
 - CW9800 wireless controllers → NO license association
 
-### Systems Manager (SME) — generic, model-agnostic
-- "Systems Manager", "SME", "SME license" → LIC-SME-1YR, LIC-SME-3YR, LIC-SME-5YR (note: -YR suffix). Model-agnostic like MR/MV/MT — quote all three terms unless one is named.
+### Systems Manager (SME) — generic, model-agnostic, 3-YEAR MAX
+- "Systems Manager", "SME", "SME license" → LIC-SME-1YR, LIC-SME-3YR ONLY (note: -YR suffix). The 5-year option is DEPRECATED/no longer offered. Cap any 5-year SME request to 3-year (LIC-SME-3YR) and flag the 5-year term; leave non-SME items at their requested term. Model-agnostic like MR/MV/MT — quote 1-year and 3-year unless a single term is named.
 
 ### MX Security Appliances — term suffix depends on model number
 - MX67, MX67W, MX67C, MX68, MX68W, MX68CW, MX250, MX450 (older) → -YR suffix

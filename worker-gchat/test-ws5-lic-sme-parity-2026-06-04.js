@@ -65,16 +65,19 @@ t('quote("LIC-SME-1YR") → URL with LIC-SME-1YR', () => {
 });
 
 console.log('── Part 2: SME natural-language handler (context, plurals, qty vs term) ──');
-t('"10 systems manager licenses" → qty 10, all 3 terms, not LLM', () => {
+t('"10 systems manager licenses" → qty 10, 1YR+3YR ONLY (5YR deprecated) + flag, not LLM', () => {
   const r = quote('10 systems manager licenses');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/LIC-SME-1YR/.test(r.message) && /LIC-SME-3YR/.test(r.message) && /LIC-SME-5YR/.test(r.message), `got: ${r.message}`);
+  assert.ok(/LIC-SME-1YR/.test(r.message) && /LIC-SME-3YR/.test(r.message), `1/3yr missing: ${r.message}`);
+  assert.ok(!/LIC-SME-5YR/.test(r.message), `5YR must NOT be quoted (deprecated): ${r.message}`);
+  assert.ok(/maximum of 3-year/.test(r.message), `missing 5yr deprecation flag: ${r.message}`);
   assert.ok(/qty=10/.test(r.message), `qty missing: ${r.message}`);
 });
-t('"5 SME licenses" (plural, no "quote") → qty 5, all terms (plural-context + qty-before)', () => {
+t('"5 SME licenses" → qty 5, 1YR+3YR only (no 5YR)', () => {
   const p = parseMessage('5 SME licenses');
-  assert.ok(p && p.items && p.items.length === 3, `expected 3 SME items, got: ${JSON.stringify(p)}`);
-  assert.ok(p.items.every(i => i.qty === 5 && /^LIC-SME-/.test(i.baseSku)), `bad items: ${JSON.stringify(p.items)}`);
+  const skus = (p.items || []).map(i => i.baseSku);
+  assert.deepStrictEqual(skus, ['LIC-SME-1YR', 'LIC-SME-3YR'], `expected 1/3yr only, got: ${JSON.stringify(skus)}`);
+  assert.ok(p.items.every(i => i.qty === 5), `qty: ${JSON.stringify(p.items)}`);
 });
 t('"SME 3 year license" → directLicense LIC-SME-3YR qty 1, single URL (term≠qty)', () => {
   const p = parseMessage('SME 3 year license');
