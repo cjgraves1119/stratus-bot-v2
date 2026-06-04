@@ -2174,7 +2174,9 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
       const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
       lines.push(`${label} Co-Term: ${url}`);
     }
-    return lines.join('\n');
+    // Blank line between each co-term option so the quote pastes into Gmail
+    // with paragraph spacing instead of a cramped block.
+    return lines.join('\n\n');
   };
 
   // EOL prose section. One line per EOL model with its replacement(s).
@@ -2203,18 +2205,18 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   if (eolProse) sections.push(eolProse);
 
   const opt1Body = renderTerms(option1);
-  if (opt1Body) sections.push(`**Option 1 - Renew As-Is:**\n${opt1Body}`);
+  if (opt1Body) sections.push(`**Option 1 - Renew As-Is:**\n\n${opt1Body}`);
 
   if (option2) {
     const headerOpt2 = hasAltUplink
       ? '**Option 2 - Hardware Refresh, 1G Uplink:**'
       : '**Option 2 - Hardware Refresh:**';
     const opt2Body = renderTerms(option2);
-    if (opt2Body) sections.push(`${headerOpt2}\n${opt2Body}`);
+    if (opt2Body) sections.push(`${headerOpt2}\n\n${opt2Body}`);
   }
   if (option3) {
     const opt3Body = renderTerms(option3);
-    if (opt3Body) sections.push(`**Option 3 - Hardware Refresh, 10G Uplink:**\n${opt3Body}`);
+    if (opt3Body) sections.push(`**Option 3 - Hardware Refresh, 10G Uplink:**\n\n${opt3Body}`);
   }
 
   if (sections.length === 0) return null;
