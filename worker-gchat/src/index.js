@@ -4737,6 +4737,9 @@ function buildPricingBlock(urlItems, showPricing) {
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
 function buildQuoteResponse(parsed) {
+  // Defensive: parseMessage returns null for non-quote inputs. Callers guard,
+  // but null-safe here too so no caller can ever throw — route null → LLM.
+  if (!parsed) return { message: null, needsLlm: true };
   const invalidDirectLicenses = normalizeParsedDirectLicenses(parsed);
   if (invalidDirectLicenses.length > 0) {
     return {
