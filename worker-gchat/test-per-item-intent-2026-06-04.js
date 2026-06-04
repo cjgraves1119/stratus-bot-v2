@@ -95,13 +95,13 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(ent, `MR enterprise license (LIC-ENT) dropped: ${keys(m)}`);
     assert.strictEqual(m[ent], 6, `MR LIC-ENT qty should be 6 (CW9172I is hardware-only, adds no license), got ${m[ent]}`);
     assert.ok(findKey(m, /^LIC-MX84/), `MX84 license dropped: ${keys(m)}`);
-    assert.ok(findKey(m, /^CW9172I-HW$/), `CW9172I hardware dropped (it was 'hardware only'): ${keys(m)}`);
+    assert.ok(findKey(m, /^CW9172I-RTG$/), `CW9172I hardware dropped (it was 'hardware only'): ${keys(m)}`);
   });
 
   console.log('\n── MIXED CASE 3: "...mx84 license renewal and 1 CW9172I" (no intent word on CW) (handler) ──');
-  await t('CW9172I (bare, no intent) → normal AP: CW9172I-HW present, not silently folded away', async () => {
+  await t('CW9172I (bare, no intent) → normal AP: CW9172I-RTG present, not silently folded away', async () => {
     const m = handlerSkuQty(await callQuote('6 mr and 1 mx84 enterprise license renewal and 1 CW9172I'));
-    assert.ok(findKey(m, /^CW9172I-HW$/), `CW9172I hardware dropped (bare model should quote as normal AP): ${keys(m)}`);
+    assert.ok(findKey(m, /^CW9172I-RTG$/), `CW9172I hardware dropped (bare model should quote as normal AP): ${keys(m)}`);
     assert.ok(findKey(m, /^LIC-MX84/), `MX84 license dropped: ${keys(m)}`);
     assert.ok(findKey(m, /^LIC-ENT-\dYR$/), `MR enterprise license dropped: ${keys(m)}`);
   });
