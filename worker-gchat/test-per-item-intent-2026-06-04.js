@@ -125,6 +125,46 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: gchat=${keys(gm)} webex=${keys(wm)}`);
   });
 
+  console.log('\n── ORDER-INDEPENDENCE: per-item intent regardless of clause order (review finding) ──');
+  await t('"1 CW9172I hardware only and 6 MR44" → CW9172I-RTG (hw-only) + MR44 NORMAL (MR44-HW + LIC-ENT)', async () => {
+    const gm = engineSkuQty(G, '1 CW9172I hardware only and 6 MR44'), wm = engineSkuQty(W, '1 CW9172I hardware only and 6 MR44');
+    assert.ok(findKey(gm, /^CW9172I-RTG$/), `CW9172I hardware missing: ${keys(gm)}`);
+    assert.ok(findKey(gm, /^MR44-HW$/), `MR44 hardware missing (should be normal AP): ${keys(gm)}`);
+    assert.ok(findKey(gm, /^LIC-ENT-\dYR$/), `MR44 license missing — it wrongly inherited CW9172I's hardware-only intent: ${keys(gm)}`);
+    assert.deepStrictEqual(gm, wm, `parity drift: ${JSON.stringify(gm)} vs ${JSON.stringify(wm)}`);
+  });
+  await t('"1 MR44 license renewal and 1 CW9172I" → CW9172I-RTG present (CW9172I NORMAL, not license-folded)', async () => {
+    const gm = engineSkuQty(G, '1 MR44 license renewal and 1 CW9172I'), wm = engineSkuQty(W, '1 MR44 license renewal and 1 CW9172I');
+    assert.ok(findKey(gm, /^CW9172I-RTG$/), `CW9172I hardware dropped — it wrongly inherited MR44's license-only intent: ${keys(gm)}`);
+    assert.deepStrictEqual(gm, wm, `parity drift: ${JSON.stringify(gm)} vs ${JSON.stringify(wm)}`);
+  });
+
+  console.log('\n── LIST-LEVEL modifiers must STILL apply to all items (must NOT regress) ──');
+  await t('"2 MS130-24P, 4 MR44, 5 MX67 licenses" (trailing) → all license, NO hardware', async () => {
+    const gm = engineSkuQty(G, '2 MS130-24P, 4 MR44, 5 MX67 licenses'), wm = engineSkuQty(W, '2 MS130-24P, 4 MR44, 5 MX67 licenses');
+    assert.ok(!findKey(gm, /-HW$/), `trailing "licenses" should suppress ALL hardware: ${keys(gm)}`);
+    assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
+  });
+  await t('"renewal for 4 MR44 and 5 MX67" (leading) → all license, NO hardware', async () => {
+    const gm = engineSkuQty(G, 'renewal for 4 MR44 and 5 MX67'), wm = engineSkuQty(W, 'renewal for 4 MR44 and 5 MX67');
+    assert.ok(!findKey(gm, /-HW$/), `leading "renewal for" should suppress ALL hardware: ${keys(gm)}`);
+    assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
+  });
+
+  console.log('\n── EOL + hardware-only must NOT leave an empty "Option" section (review finding) ──');
+  const noEmptyOption = (msg) => {
+    for (const p of (msg || '').split(/(?=\*\*Option )/)) {
+      if (/^\*\*Option /.test(p) && !/stratusinfosystems\.com\/order\//.test(p)) return false;
+    }
+    return true;
+  };
+  await t('"MS220-8P hardware only" → MS130-8P-HW present, no empty Option section, gchat≡webex', async () => {
+    const gMsg = (G.buildQuoteResponse(G.parseMessage('MS220-8P hardware only')) || {}).message || '';
+    assert.ok(/MS130-8P-HW/.test(gMsg), `replacement hardware missing: ${gMsg.slice(0, 160)}`);
+    assert.ok(noEmptyOption(gMsg), `empty Option section present:\n${gMsg}`);
+    assert.deepStrictEqual(engineSkuQty(G, 'MS220-8P hardware only'), engineSkuQty(W, 'MS220-8P hardware only'), 'parity drift');
+  });
+
   console.log('\n── PARITY on the mixed cases (both engines identical SKU+qty multiset) ──');
   for (const input of ['6 mr and 1 mx84 enterprise license renewal and 1 CW9172I hardware only', '6 mr and 1 mx84 enterprise license renewal and 1 CW9172I']) {
     await t(`parity "${input.slice(0, 40)}..."`, async () => {

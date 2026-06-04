@@ -5144,9 +5144,17 @@ function assignClauseIntent(items, upper, modifiers) {
 
   const hasHW = clauses.some(c => c.hardwareOnly);
   const hasLic = clauses.some(c => c.licenseOnly);
-  const conflict = hasHW && hasLic;
-  const firstClause = clauses[0];
-  const lastClause = clauses[clauses.length - 1];
+  // Detect a genuinely LIST-LEVEL license modifier (vs an item-attached one): a
+  // leading "renewal / license … for …" phrase, or a trailing bare "… licenses" /
+  // "… renewal" word. Only these legitimately cover items whose own clause has no
+  // intent. Hardware intent is ALWAYS item-attached (there is no list-level hardware
+  // trigger), and an item-attached license like "1 MR44 license renewal and 1 CW9172I"
+  // must NOT leak onto the other item — so intent-less items there quote NORMALLY,
+  // independent of clause order.
+  const LIC = `(?:LICEN[SC]E|LISCEN[SC]E|LICESE)S?`;
+  const leadingListLicense = new RegExp(`^\\s*(QUOTE\\s+)?(RENEWAL|RENEW|${LIC}\\s+FOR)\\b`).test(upper);
+  const trailingListLicense = new RegExp(`\\b(ENT(?:ERPRISE)?\\s+)?(?:${LIC}|RENEWAL[S]?)\\s*$`).test(upper.trim());
+  const inheritGlobalLicense = hasLic && !hasHW && (leadingListLicense || trailingListLicense);
 
   const clauseFor = (pos) => {
     if (typeof pos !== 'number') return null;
@@ -5160,22 +5168,15 @@ function assignClauseIntent(items, upper, modifiers) {
       item.hardwareOnly = true; item.licenseOnly = false;
     } else if (c && c.licenseOnly) {
       item.hardwareOnly = false; item.licenseOnly = true;
+    } else if (inheritGlobalLicense) {
+      // Item's clause has no explicit intent, but a list-level license modifier
+      // covers the whole request → inherit it.
+      item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly;
     } else {
-      // Item's own clause has no explicit intent.
-      if (conflict) {
-        item.hardwareOnly = false; item.licenseOnly = false;
-      } else {
-        // Exactly one intent type is present. Inherit the global modifier only
-        // when that intent appears in the FIRST or LAST clause (list-level), so a
-        // leading "renewal for …" / trailing "… licenses" still covers bare items.
-        const intentInFirstOrLast = (hasLic && (firstClause.licenseOnly || lastClause.licenseOnly)) ||
-                                     (hasHW && (firstClause.hardwareOnly || lastClause.hardwareOnly));
-        if (intentInFirstOrLast) {
-          item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly;
-        } else {
-          item.hardwareOnly = false; item.licenseOnly = false;
-        }
-      }
+      // No explicit intent on this item and no list-level modifier (or there is a
+      // hardware/license conflict, or the intent is attached to another item) →
+      // quote it NORMALLY (hardware + license).
+      item.hardwareOnly = false; item.licenseOnly = false;
     }
   }
 }
@@ -6566,8 +6567,10 @@ function buildQuoteResponse(parsed) {
       // licenseOnly → pure renewal ("Renew As-Is", matching the vision builder).
       // Otherwise the user asked for a regular quote that keeps the EOL gear's
       // current license alongside any non-EOL hardware → "As Quoted".
-      lines.push(modifiers.licenseOnly ? `**Option 1 - Renew As-Is:**` : `**Option 1 - As Quoted:**`);
-      lines.push('');
+      // Buffer per-term renewal URLs; only emit the Option 1 header if ≥1 URL is
+      // produced — a hardware-only EOL request suppresses every renewal license and
+      // would otherwise leave an empty "Option 1" section.
+      const opt1Lines = [];
       for (const term of terms) {
         // Emit in REQUEST order (single `ordered` list), not bucketed EOL-then-rest.
         const urlItems = [];
@@ -6599,9 +6602,14 @@ function buildQuoteResponse(parsed) {
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-          lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
-          lines.push('');
+          opt1Lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
+          opt1Lines.push('');
         }
+      }
+      if (opt1Lines.length > 0) {
+        lines.push(modifiers.licenseOnly ? `**Option 1 - Renew As-Is:**` : `**Option 1 - As Quoted:**`);
+        lines.push('');
+        lines.push(...opt1Lines);
       }
     }
 
