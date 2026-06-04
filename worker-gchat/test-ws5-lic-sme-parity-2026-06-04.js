@@ -1,9 +1,9 @@
 // WS5 (2026-06-04): worker-gchat quoting parity with worker/ (Webex) for
 // Systems Manager / LIC-SME. Verifies the typed-SKU directLicense path, the
 // deterministic SME natural-language handler, the directLicense URL term label,
-// and over-match guards. The mixed hardware+inline-license case asserts PARITY
-// with worker/ (both keep the hardware and drop the inline license — a shared
-// limitation), and that the SME handler never hijacks/​drops the hardware.
+// and over-match guards. Mixed hardware+bare-SME requests must preserve the
+// hardware and inject SME-AGN; typed inline LIC-SME still must not hijack or
+// drop the hardware.
 //
 // Run: node worker-gchat/test-ws5-lic-sme-parity-2026-06-04.js
 
@@ -124,12 +124,7 @@ t('licenseTermLabel("LIC-MV-1YR") === "1-Year"', () => assert.strictEqual(licens
 t('licenseTermLabel("LIC-MT-5Y") === "5-Year" (-Y variant)', () => assert.strictEqual(licenseTermLabel('LIC-MT-5Y'), '5-Year'));
 t('licenseTermLabel(no term) === "Quote"', () => assert.strictEqual(licenseTermLabel('LIC-WEIRD'), 'Quote'));
 
-console.log('── Part 3: mixed hardware + inline SME — must MATCH worker/ (parity, no hijack) ──');
-// PARITY NOTE: running worker/ (Webex, gold standard) on this exact input shows it
-// ALSO drops the inline typed LIC-SME and returns only MR44+MX67. So parity =
-// keep the hardware + drop the inline license (a SHARED limitation; fixing it would
-// make worker-gchat exceed worker/ — out of scope). The critical guard here is that
-// the new SME handler must NOT hijack mixed input and drop the hardware.
+console.log('── Part 3: mixed hardware + inline SME — no hijack, bare SME injected ──');
 t('mixed "mr44 x4, MX67, 3 lic-sme-3yr" RETAINS hardware (SME over-match regression guard)', () => {
   const p = parseMessage('mr44 x4, MX67, and 3 lic-sme-3yr');
   const skus = (p.items || []).map(i => i.baseSku);
@@ -140,6 +135,22 @@ t('mixed "mr44 x4, MX67, 3 lic-sme-3yr" RETAINS hardware (SME over-match regress
 t('mixed output matches worker/: hardware multi-term present', () => {
   const r = quote('mr44 x4, MX67, and 3 lic-sme-3yr');
   assert.ok(/MR44-HW/.test(r.message || '') && /MX67-HW/.test(r.message || ''), `hardware missing: ${(r.message || '').slice(0, 200)}`);
+});
+t('mixed "4 mr44, 2 sme, 5 MS130-12X" injects SME-AGN and keeps hardware', () => {
+  const p = parseMessage('4 mr44, 2 sme, 5 MS130-12X');
+  const bySku = new Map((p.items || []).map(i => [i.baseSku, i.qty]));
+  assert.strictEqual(bySku.get('MR44'), 4, `MR44 missing/wrong qty: ${JSON.stringify(p.items)}`);
+  assert.strictEqual(bySku.get('SME-AGN'), 2, `SME-AGN missing/wrong qty: ${JSON.stringify(p.items)}`);
+  assert.strictEqual(bySku.get('MS130-12X'), 5, `MS130-12X missing/wrong qty: ${JSON.stringify(p.items)}`);
+});
+t('mixed bare SME 5-year output caps only SME and leaves other items at 5-year', () => {
+  const r = quote('4 mr44, 2 sme, 1 mx67');
+  const fiveLine = ((r.message || '').match(/\*\*5-Year Co-Term:\*\*[^\n]+/) || [''])[0];
+  assert.ok(/LIC-SME-3YR/.test(fiveLine), `SME was not capped to 3YR in 5-year line: ${fiveLine}`);
+  assert.ok(!/LIC-SME-5YR/.test(r.message || ''), `deprecated SME 5YR emitted: ${r.message}`);
+  assert.ok(/LIC-ENT-5YR/.test(fiveLine), `MR 5-year license missing from 5-year line: ${fiveLine}`);
+  assert.ok(/LIC-MX67-SEC-5YR/.test(fiveLine), `MX67 5-year license missing from 5-year line: ${fiveLine}`);
+  assert.ok(/maximum of 3-year/.test(r.message || ''), `missing SME cap note: ${r.message}`);
 });
 
 console.log('── Regression + over-match guards ──');
