@@ -50,6 +50,21 @@ const render = (shim, text) => {
   return { parsed, out, message: out.message };
 };
 
+const parse = (shim, text) => {
+  const parsed = shim.parseMessage(text);
+  assert.ok(parsed, `${text}: parseMessage returned null`);
+  return parsed;
+};
+
+const parseShape = parsed => ({
+  items: (parsed.items || []).map(item => ({ baseSku: item.baseSku, qty: item.qty, isLicenseOnly: Boolean(item.isLicenseOnly) })),
+  isClarification: Boolean(parsed.isClarification),
+  clarificationMessage: parsed.clarificationMessage || null,
+  modifiers: parsed.modifiers || null,
+  requestedTerm: parsed.requestedTerm || null,
+  clarificationNote: parsed.clarificationNote || parsed.note || null
+});
+
 const urlCount = msg => (msg.match(/https:\/\/stratusinfosystems\.com\/order\/\?item=/g) || []).length;
 const hasCombinedUrl = (msg, skuA, skuB) => {
   const urls = msg.match(/https:\/\/stratusinfosystems\.com\/order\/\?item=[^\s]+/g) || [];
@@ -75,6 +90,13 @@ function sameAsWebex(input) {
   return g;
 }
 
+function sameParseAsWebex(input) {
+  const g = parseShape(parse(gchat, input));
+  const w = parseShape(parse(webex, input));
+  assert.deepStrictEqual(g, w, `${input}: gchat parse shape differs from worker/`);
+  return g;
+}
+
 console.log('Part 1: named terms narrow Duo/Umbrella/AnyConnect');
 t('Duo named 3-year emits only LIC-DUO-ESSENTIALS-3YR', () => {
   const msg = sameAsWebex('quote 10 duo essentials 3 year');
@@ -95,6 +117,14 @@ t('AnyConnect named 3-year emits only 3Y-S1, split by tier', () => {
   assert.ok(!/LIC-L-AC-(?:APX|PLS)-[15]Y-S1/.test(msg), msg);
   assert.strictEqual(urlCount(msg), 2, msg);
   assert.ok(!hasCombinedUrl(msg, 'LIC-L-AC-APX-3Y-S1', 'LIC-L-AC-PLS-3Y-S1'), msg);
+});
+t('AnyConnect Plus 5-year without qty does not show a false minimum bump note', () => {
+  const msg = sameAsWebex('AnyConnect plus 5 year');
+  const shape = sameParseAsWebex('AnyConnect plus 5 year');
+  assert.ok(/LIC-L-AC-PLS-5Y-S1/.test(msg), msg);
+  assert.ok(/qty=25\b/.test(msg), msg);
+  assert.ok(!/25-user minimum|bumped quantity/i.test(msg), msg);
+  assert.strictEqual(shape.clarificationNote, null, JSON.stringify(shape));
 });
 
 console.log('Part 2: untiered AnyConnect is separate per tier');
@@ -123,25 +153,36 @@ t('Multi-combo Umbrella keeps DNS Essentials, DNS Advantage, and SIG Advantage',
   assert.strictEqual(urlCount(msg), 12, msg);
 });
 t('All Duo 3-year emits all three Duo tiers at 3-year only', () => {
+  const shape = sameParseAsWebex('quote all duo 3 year');
   const msg = sameAsWebex('quote all duo 3 year');
+  assert.strictEqual(shape.isClarification, false, JSON.stringify(shape));
   for (const sku of ['LIC-DUO-ESSENTIALS-3YR', 'LIC-DUO-ADVANTAGE-3YR', 'LIC-DUO-PREMIER-3YR']) {
     assert.ok(msg.includes(sku), msg);
   }
   assert.ok(!/LIC-DUO-[A-Z]+-[15]YR/.test(msg), msg);
   assert.strictEqual(urlCount(msg), 3, msg);
 });
-t('All Umbrella 3-year emits all four type/tier combos at 3-year only', () => {
-  const msg = render(gchat, 'quote all umbrella 3 year').message;
-  for (const sku of [
-    'LIC-UMB-DNS-ESS-K9-3YR',
-    'LIC-UMB-DNS-ADV-K9-3YR',
-    'LIC-UMB-SIG-ESS-K9-3YR',
-    'LIC-UMB-SIG-ADV-K9-3YR'
-  ]) {
-    assert.ok(msg.includes(sku), msg);
-  }
-  assert.ok(!/LIC-UMB-[A-Z]+-[A-Z]+-K9-[15]YR/.test(msg), msg);
-  assert.strictEqual(urlCount(msg), 4, msg);
+t('All Umbrella 3-year parser clarifies exactly like worker/', () => {
+  const shape = sameParseAsWebex('quote all umbrella 3 year');
+  assert.strictEqual(shape.isClarification, true, JSON.stringify(shape));
+  assert.deepStrictEqual(shape.items, []);
+  assert.ok(/Which Umbrella package/.test(shape.clarificationMessage || ''), JSON.stringify(shape));
+});
+
+console.log('Part 3b: known shared limitations stay equal');
+t('Known shared limitation: Duo multi-term phrase still emits only the first term', () => {
+  const msg = sameAsWebex('duo advantage 1yr and 3yr');
+  const shape = sameParseAsWebex('duo advantage 1yr and 3yr');
+  assert.ok(/LIC-DUO-ADVANTAGE-1YR/.test(msg), msg);
+  assert.ok(!/LIC-DUO-ADVANTAGE-3YR/.test(msg), msg);
+  assert.strictEqual(shape.items.length, 1, JSON.stringify(shape));
+});
+t('Known shared limitation: Umbrella cross type/tier phrase still over-produces cartesian combos', () => {
+  const msg = sameAsWebex('umbrella DNS essentials and SIG advantage');
+  const shape = sameParseAsWebex('umbrella DNS essentials and SIG advantage');
+  assert.strictEqual(shape.items.length, 12, JSON.stringify(shape));
+  assert.ok(/LIC-UMB-DNS-ADV-K9-1YR/.test(msg), msg);
+  assert.ok(/LIC-UMB-SIG-ESS-K9-1YR/.test(msg), msg);
 });
 
 console.log('Part 4: CW bare stems promote like worker/');

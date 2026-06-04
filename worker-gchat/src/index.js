@@ -4322,15 +4322,6 @@ function parseMessage(text) {
       if (!umbTiers.includes(canon)) umbTiers.push(canon);
     }
 
-    // "all umbrella" / "all umbrella quotes" / "all umbrella licenses" → all
-    // type×tier combos, auto-treat as separate quotes.
-    const isAllUmb = /\bALL\s+(?:CISCO\s+)?UMBRELLA\b/i.test(upper);
-    if (isAllUmb && umbTypes.length === 0 && umbTiers.length === 0) {
-      umbTypes.push('DNS', 'SIG');
-      umbTiers.push('ESS', 'ADV');
-      __separateQuotes = true;
-    }
-
     const umbQtyMatch = upper.match(/\b(\d+)\b/);
     const umbQty = umbQtyMatch ? parseInt(umbQtyMatch[1]) : 1;
 
@@ -4403,7 +4394,10 @@ function parseMessage(text) {
       __separateQuotes = true;
     }
 
-    const acQtyMatch = upper.match(/\b(\d+)\b/);
+    const acQtyMatch = [...upper.matchAll(/\b(\d+)\b/g)].find(m => {
+      const after = upper.slice(m.index + m[0].length, m.index + m[0].length + 15);
+      return !/^\s*-?\s*(?:Y|YR|YEAR|YEARS)\b/i.test(after);
+    });
     let acQty = acQtyMatch ? parseInt(acQtyMatch[1]) : 25;
     let acQtyClamped = false;
     if (acQty < 25) {

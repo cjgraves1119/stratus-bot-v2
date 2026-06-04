@@ -72,9 +72,18 @@ for (const [tag, m] of [['W', W], ['G', G]]) {
   chk(`[${tag}] "quote 5 MS150" deterministic (not LLM)`, r && r.needsLlm !== true, `needsLlm=${r && r.needsLlm}`);
 }
 
+// #4 fix: AnyConnect "N year" must NOT show the spurious 25-user clamp note (both)
+console.log('── #4: AnyConnect "N year" no false clamp ──');
+for (const [tag, m] of [['W', W], ['G', G]]) {
+  const msg = render(m, 'AnyConnect plus 5 year');
+  chk(`[${tag}] AC "5 year" has 5Y PLS`, /AC-PLS-5Y-S1/.test(msg), msg.slice(0,140));
+  chk(`[${tag}] AC "5 year" no false clamp note`, !/bumped quantity to 25|25-user minimum/i.test(msg), `false clamp: ${msg.slice(0,140)}`);
+}
+
 // PARITY: Webex ≡ extension SKU+qty multiset
 console.log('── Parity (Webex vs extension) ──');
-const P = ['Duo essentials 3 year','umbrella sig advantage 3yr','AnyConnect apex 50 3 year','100 AnyConnect 3 year','duo essentials, premier, and advantage 3 year','CW9172','CW9164','3 of the MX67','quote 1 MX85, 1 MX64','MX84','10 MR44'];
+const P = ['Duo essentials 3 year','umbrella sig advantage 3yr','AnyConnect apex 50 3 year','100 AnyConnect 3 year','duo essentials, premier, and advantage 3 year','CW9172','CW9164','3 of the MX67','quote 1 MX85, 1 MX64','MX84','10 MR44',
+  'all umbrella 3 year','all duo 3 year','AnyConnect plus 5 year','duo advantage 1yr and 3yr','umbrella DNS essentials and SIG advantage 3yr'];
 for (const inp of P) { const a = skuSet(render(W, inp)), b = skuSet(render(G, inp)); chk(`parity "${inp}"`, eq(a, b), `W=${JSON.stringify(a)}\n     G=${JSON.stringify(b)}`); }
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ ' + fail + ' FAILED'} — ${pass} passed, ${fail} failed`);
