@@ -157,6 +157,15 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   const smLine = opt1Items && opt1Items.find(i => i.sku === 'LIC-SME-1YR');
   check('Option 1 1-Year URL carries LIC-SME-1YR × 84', !!smLine && smLine.qty === 84,
     `decoded SME line: ${JSON.stringify(smLine)}`);
+
+  // Dashboard top-to-bottom order: MR Enterprise is row 1 (→ LIC-ENT first),
+  // Systems Manager is the last row (→ LIC-SME last).
+  check('Option 1 is in dashboard order — MR (LIC-ENT-1YR) is first',
+    !!opt1Items && opt1Items[0] && opt1Items[0].sku === 'LIC-ENT-1YR',
+    `first item: ${opt1Items && JSON.stringify(opt1Items[0])}`);
+  check('Option 1 is in dashboard order — Systems Manager (LIC-SME-1YR) is last',
+    !!opt1Items && opt1Items[opt1Items.length - 1] && opt1Items[opt1Items.length - 1].sku === 'LIC-SME-1YR',
+    `last item: ${opt1Items && JSON.stringify(opt1Items[opt1Items.length - 1])}`);
 }
 
 // ─── 4. SM-only renewal stays license-only ───────────────────────────────────

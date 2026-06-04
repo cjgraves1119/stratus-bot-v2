@@ -2056,6 +2056,10 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   //   - MR-ENT (rolls into LIC-ENT-{term}YR at the active qty)
   const nonEolDevices = [];
   const eolDevices = [];
+  // `ordered` preserves the dashboard's top-to-bottom row order (visionSkus is
+  // parsed top-to-bottom). Every quote line is emitted from this list so the
+  // URLs match the screenshot order instead of being grouped by type.
+  const ordered = [];
   let mrEntQty = 0;
   let smEntQty = 0;
   for (const s of (visionSkus || [])) {
@@ -2064,6 +2068,7 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
     const qty = Math.floor(Number(s.qty));
     if (upper === 'MR-ENT' || upper === 'MR_ENT') {
       mrEntQty += qty;
+      ordered.push({ kind: 'mr', qty });
       continue;
     }
     // Systems Manager (Enterprise) rolls into LIC-SME-{term}YR at the active
@@ -2071,12 +2076,16 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
     // emits the "Systems Manager" dashboard row as the SM-ENT token.
     if (upper === 'SM-ENT' || upper === 'SM_ENT' || upper === 'SME' || upper === 'SM') {
       smEntQty += qty;
+      ordered.push({ kind: 'sm', qty });
       continue;
     }
     if (isEol(upper)) {
-      eolDevices.push({ model: upper, qty, replacement: checkEol(upper) });
+      const row = { model: upper, qty, replacement: checkEol(upper) };
+      eolDevices.push(row);
+      ordered.push({ kind: 'eol', ...row });
     } else {
       nonEolDevices.push({ model: upper, qty });
+      ordered.push({ kind: 'device', model: upper, qty });
     }
   }
 
@@ -2090,63 +2099,55 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   };
 
   const TERMS = ['1Y', '3Y', '5Y'];
+  const termYr = { '1Y': '1YR', '3Y': '3YR', '5Y': '5YR' };
   const empty = () => ({ '1Y': [], '3Y': [], '5Y': [] });
 
-  // Carry-forward block: non-EOL device licenses + MR-ENT. Used as the
-  // base for both Option 1 (Renew As-Is — adds EOL device LICENSES on top)
-  // and Option 2/3 (Hardware Refresh — adds replacement HW + replacement
-  // LICENSE for each EOL on top).
-  const carryForward = empty();
-  for (const { model, qty } of nonEolDevices) {
-    for (const term of TERMS) {
-      const lic = licFor(model, term);
-      if (lic) carryForward[term].push({ sku: lic.sku, qty });
-    }
-  }
-  if (mrEntQty > 0) {
-    carryForward['1Y'].push({ sku: 'LIC-ENT-1YR', qty: mrEntQty });
-    carryForward['3Y'].push({ sku: 'LIC-ENT-3YR', qty: mrEntQty });
-    carryForward['5Y'].push({ sku: 'LIC-ENT-5YR', qty: mrEntQty });
-  }
-  if (smEntQty > 0) {
-    carryForward['1Y'].push({ sku: 'LIC-SME-1YR', qty: smEntQty });
-    carryForward['3Y'].push({ sku: 'LIC-SME-3YR', qty: smEntQty });
-    carryForward['5Y'].push({ sku: 'LIC-SME-5YR', qty: smEntQty });
-  }
+  // Renewal (carry-forward) license item for one row at one term. MR-ENT →
+  // LIC-ENT, SM-ENT → LIC-SME, device/EOL → its current license. Returns null
+  // when the model maps to no license family.
+  const renewItem = (row, term) => {
+    if (row.kind === 'mr') return { sku: `LIC-ENT-${termYr[term]}`, qty: row.qty };
+    if (row.kind === 'sm') return { sku: `LIC-SME-${termYr[term]}`, qty: row.qty };
+    const lic = licFor(row.model, term);
+    return lic ? { sku: lic.sku, qty: row.qty } : null;
+  };
 
-  // Option 1 — Renew As-Is. Carry-forward + each EOL device's CURRENT
-  // license (because the customer still owns the EOL hardware and the
-  // dashboard count covers it). NEVER include EOL hardware here.
+  // Option 1 — Renew As-Is. Every row's CURRENT renewal license, emitted in
+  // dashboard top-to-bottom order (the customer still owns any EOL hardware and
+  // the dashboard count covers it). NEVER includes EOL hardware.
   const option1 = empty();
-  for (const term of TERMS) option1[term].push(...carryForward[term]);
-  for (const { model, qty } of eolDevices) {
-    for (const term of TERMS) {
-      const lic = licFor(model, term);
-      if (lic) option1[term].push({ sku: lic.sku, qty });
+  for (const term of TERMS) {
+    for (const row of ordered) {
+      const it = renewItem(row, term);
+      if (it) option1[term].push(it);
     }
   }
 
-  // Helper: build a Hardware Refresh option for a given uplink index.
+  // Helper: build a Hardware Refresh option for a given uplink index, also in
+  // dashboard order. Non-EOL rows (and MR/SM) carry their license forward; EOL
+  // rows emit the replacement hardware + its license in place of the current
+  // license, at the EOL row's dashboard position.
   // 0 = primary (1G when array, scalar when single replacement)
   // 1 = alt (10G when array length >= 2; falls back to 0 if no alt exists,
   //   which means Option 2 and Option 3 would be identical — caller guards)
   const buildRefresh = (uplinkIdx) => {
     const groups = empty();
-    for (const term of TERMS) groups[term].push(...carryForward[term]);
-    for (const { qty, replacement } of eolDevices) {
-      if (!replacement) continue;
-      const replModel = Array.isArray(replacement)
-        ? (replacement[uplinkIdx] || replacement[0])
-        : replacement;
-      const hwSku = applySuffix(replModel);
-      groups['1Y'].push({ sku: hwSku, qty });
-      groups['3Y'].push({ sku: hwSku, qty });
-      groups['5Y'].push({ sku: hwSku, qty });
-      const replLics = getLicenseSkus(replModel, mxTier);
-      if (replLics) {
-        for (const term of TERMS) {
+    for (const term of TERMS) {
+      for (const row of ordered) {
+        if (row.kind !== 'eol') {
+          const it = renewItem(row, term);
+          if (it) groups[term].push(it);
+          continue;
+        }
+        if (!row.replacement) continue;
+        const replModel = Array.isArray(row.replacement)
+          ? (row.replacement[uplinkIdx] || row.replacement[0])
+          : row.replacement;
+        groups[term].push({ sku: applySuffix(replModel), qty: row.qty });
+        const replLics = getLicenseSkus(replModel, mxTier);
+        if (replLics) {
           const lic = replLics.find(l => l.term === term);
-          if (lic) groups[term].push({ sku: lic.sku, qty });
+          if (lic) groups[term].push({ sku: lic.sku, qty: row.qty });
         }
       }
     }
