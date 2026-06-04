@@ -6300,6 +6300,11 @@ function buildQuoteResponse(parsed) {
   const errors = [];
   const resolvedItems = [];
   const tierWarnings = [];
+  // Set true when the resolved quote carries no license on any item (e.g. an
+  // accessory-only request: mounts, injectors, power, cables). With no license
+  // there is no term to differentiate, so we emit a single URL instead of an
+  // identical 1/3/5-Year triple. (Parallels the gchat engine.)
+  let noTermSplit = false;
   // Items in REQUEST order (preserves the user's SKU sequence across EOL/non-EOL)
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
@@ -6717,12 +6722,14 @@ function buildQuoteResponse(parsed) {
     );
 
     if (allAccessories) {
-      // Single URL output — no term differentiation needed
+      // Single URL output — no term differentiation needed. noTermSplit keeps the
+      // return shape identical to the gchat engine (Webex ignores the flag).
       const urlItems = resolvedItems.map(i => ({ sku: i.hwSku, qty: i.qty }));
       const url = buildStratusUrl(urlItems);
       lines.push(url);
       if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
       lines.push('');
+      noTermSplit = true;
     } else if (modifiers.hardwareOnly) {
       // Hardware-only: single URL (no license terms to differentiate)
       // Skip agnostic license items (they have no hardware)
@@ -6816,7 +6823,7 @@ function buildQuoteResponse(parsed) {
     lines.push(`⚠️ **AP model not specified** — the quote above covers the other items. ${_formatUnresolvedCategoryPrompt(parsed.unresolvedCategories, { preamble: false })}`);
   }
 
-  return { message: lines.join('\n').trim(), needsLlm: false };
+  return { message: lines.join('\n').trim(), needsLlm: false, noTermSplit };
 }
 
 // ─── System Prompt (identical to Express version) ────────────────────────────
