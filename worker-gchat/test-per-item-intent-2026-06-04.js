@@ -150,6 +150,16 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(!findKey(gm, /-HW$/), `leading "renewal for" should suppress ALL hardware: ${keys(gm)}`);
     assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
   });
+  // Regression guard (2nd review pass): leading "license renewal for …" must be
+  // list-level too — the "license" word before "renewal for" must not narrow it.
+  for (const input of ['license renewal for 6 mr44 and 1 mx67', 'enterprise license renewal for 6 mr44 and 1 mx67']) {
+    await t(`"${input}" (leading license phrase) → all license, NO hardware`, async () => {
+      const gm = engineSkuQty(G, input), wm = engineSkuQty(W, input);
+      assert.ok(!findKey(gm, /-HW$/), `leading "license renewal for" should suppress ALL hardware: ${keys(gm)}`);
+      assert.ok(findKey(gm, /^LIC-ENT-\dYR$/) && findKey(gm, /^LIC-MX67/), `expected MR + MX67 licenses: ${keys(gm)}`);
+      assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
+    });
+  }
 
   console.log('\n── EOL + hardware-only must NOT leave an empty "Option" section (review finding) ──');
   const noEmptyOption = (msg) => {

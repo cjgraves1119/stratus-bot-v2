@@ -5152,7 +5152,7 @@ function assignClauseIntent(items, upper, modifiers) {
   // must NOT leak onto the other item — so intent-less items there quote NORMALLY,
   // independent of clause order.
   const LIC = `(?:LICEN[SC]E|LISCEN[SC]E|LICESE)S?`;
-  const leadingListLicense = new RegExp(`^\\s*(QUOTE\\s+)?(RENEWAL|RENEW|${LIC}\\s+FOR)\\b`).test(upper);
+  const leadingListLicense = new RegExp(`^\\s*(QUOTE\\s+)?(ENT(?:ERPRISE)?\\s+)?(?:${LIC}|RENEWAL[S]?|RENEW)\\b`).test(upper);
   const trailingListLicense = new RegExp(`\\b(ENT(?:ERPRISE)?\\s+)?(?:${LIC}|RENEWAL[S]?)\\s*$`).test(upper.trim());
   const inheritGlobalLicense = hasLic && !hasHW && (leadingListLicense || trailingListLicense);
 
