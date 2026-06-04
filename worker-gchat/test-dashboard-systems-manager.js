@@ -141,7 +141,7 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   check('quote includes LIC-SME-1YR', /\bLIC-SME-1YR\b/.test(msg));
   check('quote includes LIC-SME-3YR', /\bLIC-SME-3YR\b/.test(msg));
   check('quote does NOT include deprecated LIC-SME-5YR', !/\bLIC-SME-5YR\b/.test(msg));
-  check('quote flags the SME 5-year cap', /Systems Manager is available at a maximum of 3-year/.test(msg));
+  check('quote flags the SME term cap', /Systems Manager is offered only in 1-year and 3-year terms/.test(msg));
 
   // MR-ENT regression — still maps to LIC-ENT.
   check('quote still includes LIC-ENT-1YR (MR-ENT)', /\bLIC-ENT-1YR\b/.test(msg));

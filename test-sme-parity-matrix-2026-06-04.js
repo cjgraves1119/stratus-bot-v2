@@ -57,14 +57,20 @@ const SME = [
   { in: 'systems manager 3 year license',  has: ['LIC-SME-3YR'], no5: true, flag: false },
   { in: 'systems manager 5 year license',  has: ['LIC-SME-3YR'], no5: true, flag: true  },  // capped
   { in: 'quote 2 SME 1 year',              has: ['LIC-SME-1YR'], no5: true, flag: false },
+  { in: 'LIC-SME-5Y',                      has: ['LIC-SME-3YR'], no5: true, flag: true  },  // #4 variant suffix
+  { in: 'LIC-SME-4YR',                     has: ['LIC-SME-3YR'], no5: true, flag: true  },  // #4 invalid term
+  { in: 'systems manager 4 year',          has: ['LIC-SME-3YR'], no5: true, flag: true  },  // #4 (was [ERR])
+  { in: 'systems manager 2 year license',  has: ['LIC-SME-3YR'], no5: true, flag: true  },  // #4 non-1/3
 ];
 console.log('── SME behavior (both workers) ──');
+const smeTermDigits = (msg) => (msg.match(/LIC-SME-(\d+)/g) || []).map(s => s.match(/(\d+)/)[1]);
 for (const c of SME) {
   for (const [tag, mod] of [['W', W], ['G', G]]) {
     const msg = render(mod, c.in);
     chk(`[${tag}] "${c.in}" has ${c.has.join('+')}`, c.has.every(s => msg.includes(s)), `got: ${msg.slice(0,160)}`);
-    if (c.no5) chk(`[${tag}] "${c.in}" no LIC-SME-5YR`, !/LIC-SME-5YR/.test(msg), `LEAKED 5YR: ${msg.slice(0,160)}`);
-    chk(`[${tag}] "${c.in}" flag=${c.flag}`, /maximum of 3-year/i.test(msg) === c.flag, `flag mismatch: ${msg.slice(0,160)}`);
+    // Strong invariant: EVERY emitted LIC-SME term must be 1 or 3 (never 2/4/5/5Y).
+    if (c.no5) { const bad = smeTermDigits(msg).filter(d => d !== '1' && d !== '3'); chk(`[${tag}] "${c.in}" only 1/3yr SME`, bad.length === 0, `INVALID SME terms ${JSON.stringify(bad)}: ${msg.slice(0,160)}`); }
+    chk(`[${tag}] "${c.in}" flag=${c.flag}`, /(maximum of 3-year|only in 1-year and 3-year)/i.test(msg) === c.flag, `flag mismatch: ${msg.slice(0,160)}`);
   }
 }
 

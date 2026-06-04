@@ -355,8 +355,12 @@ function hasKnownMsLicenseModelInput(modelToken) {
 // quotes.
 function normalizeDirectLicenseSku(sku) {
   const upper = String(sku || '').trim().toUpperCase();
-  if (/^LIC-SME-5YR$/i.test(upper)) {
-    return { sku: 'LIC-SME-3YR', note: SME_5YR_FLAG };
+  const smeDirect = upper.match(/^LIC-SME-(\d+)Y(R)?$/i);
+  if (smeDirect) {
+    const sme = smeCapTerm(smeDirect[1]);
+    return sme.capped
+      ? { sku: 'LIC-SME-3YR', note: SME_5YR_FLAG }
+      : { sku: `LIC-SME-${sme.term}YR` };
   }
   if (prices[upper]) return { sku: upper };
 
@@ -4082,17 +4086,19 @@ function convertWordNumbers(text) {
 
 // Systems Manager (LIC-SME) max term. The 5-year option was deprecated in 2026
 // (Systems Manager itself sunsets in under 5 years), so only 1YR and 3YR are
-// quotable. Any 5-year SME request is capped to 3YR and the 5-year option is
-// flagged. Applies across the typed, NL, model-agnostic, and dashboard paths.
+// quotable. Any non-1YR/non-3YR SME request is capped to 3YR and flagged.
+// Applies across the typed, NL, model-agnostic, and dashboard paths.
 const SME_MAX_TERM = 3;
-const SME_5YR_FLAG = 'Systems Manager is available at a maximum of 3-year (the 5-year option is no longer offered) — Systems Manager is quoted at 3-year here.';
-// Cap a requested term (int 1/3/5) for SME; returns {term, capped}.
+const SME_5YR_FLAG = 'Systems Manager is offered only in 1-year and 3-year terms (5-year is no longer available) — quoted at 3-year.';
+// Cap a requested SME term; only 1YR and 3YR are valid.
 function smeCapTerm(term) {
   const t = parseInt(term, 10);
-  return t > SME_MAX_TERM ? { term: SME_MAX_TERM, capped: true } : { term: (t || SME_MAX_TERM), capped: false };
+  return (t === 1 || t === SME_MAX_TERM)
+    ? { term: t, capped: false }
+    : { term: SME_MAX_TERM, capped: true };
 }
 function findBareSmeMention(upper) {
-  const smeRe = /(?:(\d+)\s*[X×]?\s*)?(?:LIC-SME\b(?!-[135]YR?\b)|(?<![-A-Za-z0-9])SME\b|SYSTEMS?\s+MANAGER\b)/gi;
+  const smeRe = /(?:(\d+)\s*[X×]?\s*)?(?:LIC-SME\b(?!-\d+YR?\b)|(?<![-A-Za-z0-9])SME\b|SYSTEMS?\s+MANAGER\b)/gi;
   const m = smeRe.exec(String(upper || ''));
   if (!m) return null;
   return { qty: m[1] ? parseInt(m[1], 10) : 1, position: m.index };
@@ -4155,7 +4161,7 @@ function buildQuoteFromV2(v2, rawText) {
   if (/^(?:QUOTE\s+)?(MR|MV|MT)\s+(LICENSE|LICENCE|LIC|RENEWAL)/i.test(rawStr.trim())) return null;
   // Systems Manager has a deprecated 5-year SKU and mixed-input agnostic
   // handling; parseMessage owns that cap/injection logic.
-  if (findBareSmeMention(rawStr.toUpperCase()) || /\bLIC-SME-[135]YR?\b/i.test(rawStr)) return null;
+  if (findBareSmeMention(rawStr.toUpperCase()) || /\bLIC-SME-\d+YR?\b/i.test(rawStr)) return null;
 
   // 5. Bare family mentions that should trigger variant-choice clarify —
   //    MS150, MS130 (bare, no variant), MS390, MS450, C9300L, C9200L,
@@ -5312,9 +5318,14 @@ function parseMessage(text) {
     else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
 
     if (licSku && licSku.startsWith('LIC-')) {
-      // SME 5-year is deprecated → cap a typed LIC-SME-5YR to LIC-SME-3YR + flag.
+      // SME is only sold in 1-year and 3-year terms; cap any other typed term.
       let _smeNote = null;
-      if (/^LIC-SME-5YR$/i.test(licSku)) { licSku = 'LIC-SME-3YR'; _smeNote = SME_5YR_FLAG; }
+      const _smeDirect = licSku.match(/^LIC-SME-(\d+)Y(R)?$/i);
+      if (_smeDirect) {
+        const _sme = smeCapTerm(_smeDirect[1]);
+        licSku = `LIC-SME-${_sme.term}YR`;
+        if (_sme.capped) _smeNote = SME_5YR_FLAG;
+      }
       return {
         items: [],
         directLicense: { sku: licSku, qty },
@@ -5624,12 +5635,13 @@ function parseMessage(text) {
   // here; mixed hardware/SKU requests fall through and inject SME-AGN later.
   const smeBareMention = findBareSmeMention(upper);
   const smeMentioned = Boolean(smeBareMention);
-  const smeQuoteContext = /\b(LICEN[SC]ES?|LISCEN[SC]ES?|RENEWALS?|RENEW|QUOTES?|QUOTING|PRICE|PRICES|PRICING)\b/i.test(upper);
+  const smeNamedTermIntent = /\b\d+\s*-?\s*(?:YRS?|YEARS?|Y)\b/i.test(upper);
+  const smeQuoteContext = smeNamedTermIntent || /\b(LICEN[SC]ES?|LISCEN[SC]ES?|RENEWALS?|RENEW|QUOTES?|QUOTING|PRICE|PRICES|PRICING)\b/i.test(upper);
   const smeInfoQuestion = /\b(WHAT\s+IS|WHAT\s+ARE|WHAT'?S|TELL\s+ME\s+ABOUT|EXPLAIN|DESCRIBE|HOW\s+(?:DO|DOES|DO\s+I)|DEFINE)\b/i.test(upper);
   const smeExplicitQuoteVerb = /\b(QUOTE|QUOTES|QUOTING|PRICE|PRICES|PRICING|COST|COSTS|RENEW|RENEWAL|RENEWALS|BUY|PURCHASE|ORDER)\b/i.test(upper);
   if (smeMentioned && smeQuoteContext && !hasOtherQuoteSkuForSme(upper) && !isAdvisory && (!smeInfoQuestion || smeExplicitQuoteVerb)) {
     const smeQty = smeBareMention.qty;
-    const smeTermMatch = upper.match(/\b([135])\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
+    const smeTermMatch = upper.match(/\b(\d+)\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
     if (smeTermMatch) {
       const sme = smeCapTerm(smeTermMatch[1]);
       return {
