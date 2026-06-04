@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "webpack --mode development --watch",
     "build": "webpack --mode production",
-    "build:crx": "npm run build && bash scripts/build-crx.sh",
-    "clean": "rm -rf dist/"
+    "build:crx": "bash scripts/build-crx.sh",
+    "pack:crx": "node scripts/pack-crx.mjs",
+    "clean": "rm -rf dist/ release/"
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",
