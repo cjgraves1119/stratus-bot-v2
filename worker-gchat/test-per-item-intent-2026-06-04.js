@@ -12,6 +12,15 @@
 // intent word → normal AP quote (hardware + license). An explicit per-clause
 // "hardware only" / "license"/"renewal" overrides for THAT item only.
 //
+// KNOWN LIMITATION (documented, not yet fixed): per-clause intent keys off the
+// connectors "and/plus/,/;/newline" and the explicit phrase "hardware only". An
+// input that mixes intent via "then" (not a clause separator) AND bare "hardware"
+// (not a hardware-only phrase) — e.g. "renew MX67 then add MR44 hardware" — is read
+// as one clause and quoted license-only. origin/main mis-handled it too (both as
+// hardware). The well-formed forms "renew MX67 and add MR44 hardware only" and
+// "license for MX67 and MR44 hardware only" resolve correctly. Fixing the "then"/
+// bare-"hardware" form needs riskier bare-hardware detection; deferred.
+//
 // Gated through the REAL /api/quote handler AND both deterministic engines.
 // Run: node worker-gchat/test-per-item-intent-2026-06-04.js
 
