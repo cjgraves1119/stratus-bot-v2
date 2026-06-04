@@ -6044,7 +6044,8 @@ function buildQuoteResponse(parsed) {
     }
 
     // Option 1 — Renew existing licenses (original SKUs as submitted)
-    lines.push(`**Option 1 — Renew Existing Licenses:**`);
+    lines.push(`**Option 1 - Renew As-Is:**`);
+    lines.push('');
     for (const term of terms) {
       const url = buildStratusUrl(parsed.directLicenseList);
       const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
@@ -6116,7 +6117,8 @@ function buildQuoteResponse(parsed) {
       };
 
       if (hasDualUplink) {
-        lines.push(`**Option 2 — Hardware Refresh, 1G Uplink:**`);
+        lines.push(`**Option 2 - Hardware Refresh, 1G Uplink:**`);
+        lines.push('');
         lines.push(..._buildHardwareBreakdownLic(0));
         lines.push('');
         for (const term of terms) {
@@ -6128,7 +6130,8 @@ function buildQuoteResponse(parsed) {
             lines.push('');
           }
         }
-        lines.push(`**Option 3 — Hardware Refresh, 10G Uplink:**`);
+        lines.push(`**Option 3 - Hardware Refresh, 10G Uplink:**`);
+        lines.push('');
         lines.push(..._buildHardwareBreakdownLic(1));
         lines.push('');
         for (const term of terms) {
@@ -6141,7 +6144,8 @@ function buildQuoteResponse(parsed) {
           }
         }
       } else {
-        lines.push(`**Option 2 — Hardware Refresh:**`);
+        lines.push(`**Option 2 - Hardware Refresh:**`);
+        lines.push('');
         lines.push(..._buildHardwareBreakdownLic(0));
         lines.push('');
         for (const term of terms) {
@@ -6187,6 +6191,9 @@ function buildQuoteResponse(parsed) {
   const errors = [];
   const resolvedItems = [];
   const tierWarnings = [];
+  // Items in REQUEST order (preserves the user's SKU sequence across EOL/non-EOL)
+  // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
+  const ordered = [];
 
   for (let { baseSku, qty } of parsed.items) {
     // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN) ──
@@ -6215,7 +6222,9 @@ function buildQuoteResponse(parsed) {
           { term: '5Y', sku: 'LIC-MT-5Y' }
         ];
       }
-      resolvedItems.push({ baseSku: `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true });
+      const agnItem = { baseSku: `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true };
+      resolvedItems.push(agnItem);
+      ordered.push({ kind: 'resolved', ref: agnItem });
       continue;
     }
 
@@ -6242,7 +6251,9 @@ function buildQuoteResponse(parsed) {
     const eol = isEol(baseSku);
     const replacement = checkEol(baseSku);
     if (eol && replacement) {
-      eolItems.push({ baseSku, qty, replacement, eol: true });
+      const eolItem = { baseSku, qty, replacement, eol: true };
+      eolItems.push(eolItem);
+      ordered.push({ kind: 'eol', ref: eolItem });
       continue;
     }
     const zTest = baseSku.toUpperCase().match(/^Z(\d+)/);
@@ -6257,7 +6268,9 @@ function buildQuoteResponse(parsed) {
     }
     const hwSku = applySuffix(baseSku);
     const licenseSkus = getLicenseSkus(baseSku, requestedTier);
-    resolvedItems.push({ baseSku, hwSku, qty, licenseSkus, eol: false });
+    const resItem = { baseSku, hwSku, qty, licenseSkus, eol: false };
+    resolvedItems.push(resItem);
+    ordered.push({ kind: 'resolved', ref: resItem });
   }
 
   if (errors.length > 0 && resolvedItems.length === 0 && eolItems.length === 0) {
@@ -6355,31 +6368,29 @@ function buildQuoteResponse(parsed) {
     };
     const hasRenewLicenses = eolItems.some(({ baseSku }) => _getEolRenewalLicenses(baseSku));
     if (hasRenewLicenses) {
-      if (modifiers.licenseOnly) {
-        // User explicitly asked for license renewal — simple label, everything is license-only
-        lines.push(`**Option 1 — Renew Existing Licenses:**`);
-      } else {
-        // Regular quote — EOL items already called out in the "Products End of Life" block above.
-        // Just emit the header; skip the per-item info lines (redundant with the EOL callout).
-        lines.push(`**Option 1 — As Quoted:**`);
-      }
+      // licenseOnly → pure renewal ("Renew As-Is", matching the vision builder).
+      // Otherwise the user asked for a regular quote that keeps the EOL gear's
+      // current license alongside any non-EOL hardware → "As Quoted".
+      lines.push(modifiers.licenseOnly ? `**Option 1 - Renew As-Is:**` : `**Option 1 - As Quoted:**`);
+      lines.push('');
       for (const term of terms) {
+        // Emit in REQUEST order (single `ordered` list), not bucketed EOL-then-rest.
         const urlItems = [];
-        for (const { baseSku, qty } of eolItems) {
-          const renewLicenses = _getEolRenewalLicenses(baseSku);
-          if (renewLicenses) {
-            const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
-          }
-        }
-        // Also include non-EOL resolved items
-        // Default: hardware + licenses (user asked for a regular quote, non-EOL gear is current)
-        // licenseOnly: license-only (user explicitly asked for license renewal)
-        for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
-          if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-          if (licenseSkus && !modifiers.hardwareOnly) {
-            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
+        for (const entry of ordered) {
+          if (entry.kind === 'eol') {
+            const { baseSku, qty } = entry.ref;
+            const renewLicenses = _getEolRenewalLicenses(baseSku);
+            if (renewLicenses) {
+              const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
+              if (licSku) urlItems.push({ sku: licSku, qty });
+            }
+          } else {
+            const { hwSku, qty, licenseSkus, isAgnosticLicense } = entry.ref;
+            if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+            if (licenseSkus && !modifiers.hardwareOnly) {
+              const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+              if (licSku) urlItems.push({ sku: licSku, qty });
+            }
           }
         }
         if (urlItems.length > 0) {
@@ -6396,26 +6407,27 @@ function buildQuoteResponse(parsed) {
 
     // Helper: build refresh URL items for a given uplink choice (0 = 4G, 1 = 4X)
     const _buildRefreshItems = (term, uplinkIdx) => {
+      // Emit in REQUEST order: each EOL row becomes replacement HW + replacement
+      // license at its original position; non-EOL rows carry their license forward.
       const urlItems = [];
-      for (const { baseSku, qty, replacement } of eolItems) {
-        const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
-        const replHwSku = applySuffix(repl);
-        const replLicenses = getLicenseSkus(repl, requestedTier);
-        // EOL replacement hardware ALWAYS included in refresh (that's the whole point)
-        urlItems.push({ sku: replHwSku, qty });
-        if (replLicenses && !modifiers.hardwareOnly) {
-          const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
-          if (licSku) urlItems.push({ sku: licSku, qty });
-        }
-      }
-      // Also include non-EOL resolved items
-      // Default: hardware + licenses (refresh option includes all current gear as-is)
-      // licenseOnly: license-only for non-EOL (user asked for license renewal, only EOL gets replacement hw)
-      for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
-        if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-        if (licenseSkus && !modifiers.hardwareOnly) {
-          const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-          if (licSku) urlItems.push({ sku: licSku, qty });
+      for (const entry of ordered) {
+        if (entry.kind === 'eol') {
+          const { qty, replacement } = entry.ref;
+          const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
+          const replHwSku = applySuffix(repl);
+          const replLicenses = getLicenseSkus(repl, requestedTier);
+          urlItems.push({ sku: replHwSku, qty });
+          if (replLicenses && !modifiers.hardwareOnly) {
+            const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
+            if (licSku) urlItems.push({ sku: licSku, qty });
+          }
+        } else {
+          const { hwSku, qty, licenseSkus, isAgnosticLicense } = entry.ref;
+          if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !modifiers.hardwareOnly) {
+            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+            if (licSku) urlItems.push({ sku: licSku, qty });
+          }
         }
       }
       return urlItems;
@@ -6504,7 +6516,8 @@ function buildQuoteResponse(parsed) {
     };
 
     if (hasDualUplink) {
-      lines.push(`**Option 2 — Hardware Refresh, 1G Uplink:**`);
+      lines.push(`**Option 2 - Hardware Refresh, 1G Uplink:**`);
+      lines.push('');
       lines.push(..._buildHardwareBreakdown(0));
       lines.push('');
       for (const term of terms) {
@@ -6521,7 +6534,8 @@ function buildQuoteResponse(parsed) {
       for (const s of opt2Suggestions) { lines.push(s); }
       if (opt2Suggestions.length > 0) lines.push('');
 
-      lines.push(`**Option 3 — Hardware Refresh, 10G Uplink:**`);
+      lines.push(`**Option 3 - Hardware Refresh, 10G Uplink:**`);
+      lines.push('');
       lines.push(..._buildHardwareBreakdown(1));
       lines.push('');
       for (const term of terms) {
@@ -6538,7 +6552,8 @@ function buildQuoteResponse(parsed) {
       for (const s of opt3Suggestions) { lines.push(s); }
       if (opt3Suggestions.length > 0) lines.push('');
     } else {
-      lines.push(`**Option 2 — Hardware Refresh:**`);
+      lines.push(`**Option 2 - Hardware Refresh:**`);
+      lines.push('');
       lines.push(..._buildHardwareBreakdown(0));
       lines.push('');
       for (const term of terms) {
@@ -6928,15 +6943,23 @@ Quote the licenses EXACTLY as shown in the table. Do NOT ask for device counts. 
 **License Overages (if any):**
 • {device}: licensed {X}, active {Y} — adjusted to {Y}
 
-**Option 1 — Renew Existing Licenses:**
+**Option 1 - Renew As-Is:**
 
-3-Year Co-Term: {URL with all license SKUs at determined quantities}
+1-Year Co-Term: {URL with all license SKUs at determined quantities, 1-Year}
+
+3-Year Co-Term: {same SKUs, 3-Year}
+
+5-Year Co-Term: {same SKUs, 5-Year}
 
 If ANY EOL products were found, ALWAYS include a refresh section without being asked:
 
-**Option 2 — Hardware Refresh ({source}→{replacement} mappings):**
+**Option 2 - Hardware Refresh:**
 
-3-Year Co-Term: {URL with replacement hardware SKUs (-HW suffix) + ALL license SKUs including non-EOL ones}
+1-Year Co-Term: {URL with replacement hardware SKUs (-HW suffix) + ALL license SKUs including non-EOL ones, 1-Year}
+
+3-Year Co-Term: {same SKUs, 3-Year}
+
+5-Year Co-Term: {same SKUs, 5-Year}
 
 CRITICAL AGGREGATION RULES FOR REFRESH URLs — follow ALL three rules:
 
@@ -6956,7 +6979,7 @@ Note: MX67W appears once at MX60W's position (first device mapping to MX67W). MX
 
 MANDATORY: Use the build_quote_url tool for ALL URL generation. NEVER manually type out URLs. Pass your parsed device list to the tool and it will handle suffixes, license mapping, dedup, and URL construction. For generic MR Enterprise licenses (no specific AP model), use model "MR-ENT". Call the tool once per URL you need (e.g., once for Option 1 renewal, once for Option 2 refresh). Use hardware_qty when a replacement model matches an existing device (Rule 2).
 
-The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Only show 3-Year for dashboard screenshot responses unless user specifies otherwise.
+The refresh option replaces EOL hardware with successors and carries over ALL other licenses from the renewal. If any replacement switch has 1G/10G uplink variants (4G/4X suffix), show Option 2 (1G Uplink) and Option 3 (10G Uplink). Show 1-Year, 3-Year, AND 5-Year URLs for every option (one URL per term) unless the user explicitly asks for a single term.
 
 ## REFRESH / UPGRADE / HARDWARE UPGRADE SEMANTICS
 When a user asks for a "refresh option" or "upgrade option" in the context of a renewal quote:
@@ -6984,7 +7007,7 @@ Z4 and Z4C default to SEC (Advanced Security) licensing unless the user explicit
 - NEVER include EOS dates, End-of-Support dates, or lifecycle dates in responses unless the user explicitly asks for EOL dates
 
 ## MANDATORY DASHBOARD SCREENSHOT TEMPLATE
-When analyzing a Meraki license dashboard screenshot, you MUST follow this EXACT template. Do NOT deviate, do NOT add extra sections, do NOT skip sections. Show ONLY 3-Year URLs. Use build_quote_url for EVERY URL.
+When analyzing a Meraki license dashboard screenshot, you MUST follow this EXACT template. Do NOT deviate, do NOT add extra sections, do NOT skip sections. Show 1-Year, 3-Year, AND 5-Year URLs for each option. Use build_quote_url for EVERY URL.
 
 **License Analysis:**
 • [Model]: [qty] licensed = [qty] active ✓ (or note discrepancies)
@@ -6994,17 +7017,25 @@ When analyzing a Meraki license dashboard screenshot, you MUST follow this EXACT
 • [Model] (EOL) → [Replacement]
 • ... (list ALL EOL devices)
 
-**Option 1 — Renew As-Is (License Only):**
-[Call build_quote_url with ALL devices as license_only=true, term="3". Include every device from the screenshot that has active devices. Use the ORIGINAL model names (not replacements). Skip MT with 0 devices.]
+**Option 1 - Renew As-Is:**
+[Call build_quote_url with ALL devices as license_only=true, ONCE PER TERM ("1", "3", "5"). Include every device from the screenshot that has active devices. Use the ORIGINAL model names (not replacements). Skip MT with 0 devices.]
 
-3-Year Co-Term: [URL from tool]
+1-Year Co-Term: [URL from tool, term 1]
 
-**Option 2 — Hardware Refresh:**
-[Call build_quote_url with: EOL devices mapped to their replacements (license_only=false), non-EOL devices as license_only=true, term="3". Apply Rules 1-4 for dedup, carry-forward, tally, and ordering.]
+3-Year Co-Term: [URL from tool, term 3]
 
-3-Year Co-Term: [URL from tool]
+5-Year Co-Term: [URL from tool, term 5]
 
-CRITICAL: You MUST call build_quote_url TWICE — once for Option 1, once for Option 2. NEVER manually construct URLs. Complete BOTH options in a single response. Do NOT stop after the analysis or after Option 1.
+**Option 2 - Hardware Refresh:**
+[Call build_quote_url with: EOL devices mapped to their replacements (license_only=false), non-EOL devices as license_only=true, ONCE PER TERM ("1", "3", "5"). Apply Rules 1-4 for dedup, carry-forward, tally, and ordering.]
+
+1-Year Co-Term: [URL from tool, term 1]
+
+3-Year Co-Term: [URL from tool, term 3]
+
+5-Year Co-Term: [URL from tool, term 5]
+
+CRITICAL: You MUST call build_quote_url for BOTH options across all three terms (Option 1: terms 1/3/5; Option 2: terms 1/3/5). NEVER manually construct URLs. Complete BOTH options in a single response. Do NOT stop after the analysis or after Option 1.
 
 ## ACCESSORY & CONNECTIVITY GUIDANCE
 When asked about SFPs, stacking cables, uplink modules, or how to connect two devices:
