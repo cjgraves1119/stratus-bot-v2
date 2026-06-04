@@ -1,0 +1,104 @@
+name: Release Extension (CRX3 → Pages)
+
+# Builds, signs (CRX3), and publishes the Chrome extension to GitHub Pages so
+# installed copies auto-update with zero local-machine involvement.
+#
+# The published Pages site serves exactly two files:
+#   - update-manifest.xml   (the gupdate feed referenced by manifest.json's update_url)
+#   - stratus-ai-<version>.crx
+#
+# One-time setup (see chrome-extension/RELEASE.md):
+#   1. Add repo secret EXT_SIGNING_KEY = `base64 -i key.pem` of the EXISTING
+#      signing key (the one that yields ID idkfeabnpcnpklbgknibidbgjcpbcmkh).
+#   2. Settings → Pages → Build and deployment → Source = "GitHub Actions".
+#
+# Trigger a release by running this workflow manually, or by pushing a tag
+# matching `ext-v*` (e.g. ext-v1.12.4).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'ext-v*'
+
+# Needed by the GitHub Pages deployment action.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; let an in-progress one finish.
+concurrency:
+  group: pages-extension
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build, sign, and deploy CRX3
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Fail if signing secret is missing
+        env:
+          EXT_SIGNING_KEY: ${{ secrets.EXT_SIGNING_KEY }}
+        run: |
+          if [ -z "$EXT_SIGNING_KEY" ]; then
+            echo "::error::Repo secret EXT_SIGNING_KEY is not set. Add it (base64 of the signing key PEM) before releasing. See chrome-extension/RELEASE.md."
+            exit 1
+          fi
+          echo "✓ EXT_SIGNING_KEY is present"
+
+      - name: Install and build extension
+        run: |
+          cd chrome-extension
+          npm ci
+          npm run build
+
+      - name: Decode signing key to a temp file
+        env:
+          EXT_SIGNING_KEY: ${{ secrets.EXT_SIGNING_KEY }}
+        run: |
+          KEY_FILE="$(mktemp)"
+          printf '%s' "$EXT_SIGNING_KEY" | base64 -d > "$KEY_FILE"
+          # Sanity check: must be a private key PEM.
+          if ! grep -q "PRIVATE KEY" "$KEY_FILE"; then
+            echo "::error::Decoded EXT_SIGNING_KEY is not a PEM private key. Re-create the secret with: base64 -i key.pem"
+            rm -f "$KEY_FILE"
+            exit 1
+          fi
+          echo "EXT_SIGNING_KEY_PEM_PATH=$KEY_FILE" >> "$GITHUB_ENV"
+
+      - name: Pack CRX3 + generate update manifest
+        run: |
+          cd chrome-extension
+          node scripts/pack-crx.mjs
+
+      - name: Remove decoded signing key
+        if: always()
+        run: rm -f "$EXT_SIGNING_KEY_PEM_PATH"
+
+      - name: Stage Pages artifact (only .crx + update-manifest.xml)
+        run: |
+          rm -rf pages-public
+          mkdir -p pages-public
+          cp chrome-extension/release/update-manifest.xml pages-public/
+          cp chrome-extension/release/stratus-ai-*.crx pages-public/
+          echo "Pages site contents:"
+          ls -la pages-public/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
