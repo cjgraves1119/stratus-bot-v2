@@ -144,6 +144,14 @@ export const MSG = {
   // Zoho Page Context Detection
   ZOHO_CONTEXT_CHANGED: 'ZOHO_CONTEXT_CHANGED',
   GET_PAGE_CONTEXT: 'GET_PAGE_CONTEXT',
+
+  // WS4 — Build a URL quote from a Zoho Quotes record page.
+  // GET_ZOHO_QUOTE_ITEMS: background → active Zoho tab content script; scrapes
+  //   the Product_Details grid for { sku, qty } line items.
+  // BUILD_URL_QUOTE: sidebar → background; POSTs "<qty> <sku>" lines to
+  //   /api/quote (same engine as the bots) and returns the order URL(s).
+  GET_ZOHO_QUOTE_ITEMS: 'GET_ZOHO_QUOTE_ITEMS',
+  BUILD_URL_QUOTE: 'BUILD_URL_QUOTE',
 };
 
 // Keyboard shortcut command names (match manifest.json)
