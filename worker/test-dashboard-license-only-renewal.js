@@ -99,15 +99,16 @@ MR_EDITION: Enterprise`;
     !!msg && /LIC-ENT-5YR/.test(msg),
     `msg=${msg}`);
 
-  // Critical: each URL must have qty=1,3 (MX85 license, MR-ENT)
-  check('1Y URL has qty=1,3',
-    !!msg && /LIC-MX85-SEC-1Y,LIC-ENT-1YR&qty=1,3/.test(msg),
+  // Critical: URLs follow DASHBOARD top-to-bottom order. Fixture order is
+  // MR-ENT (row 1) then MX85 (row 2), so LIC-ENT comes first → qty=3,1.
+  check('1Y URL in dashboard order: LIC-ENT-1YR,LIC-MX85-SEC-1Y qty=3,1',
+    !!msg && /LIC-ENT-1YR,LIC-MX85-SEC-1Y&qty=3,1/.test(msg),
     `msg=${msg}`);
-  check('3Y URL has qty=1,3',
-    !!msg && /LIC-MX85-SEC-3Y,LIC-ENT-3YR&qty=1,3/.test(msg),
+  check('3Y URL in dashboard order: LIC-ENT-3YR,LIC-MX85-SEC-3Y qty=3,1',
+    !!msg && /LIC-ENT-3YR,LIC-MX85-SEC-3Y&qty=3,1/.test(msg),
     `msg=${msg}`);
-  check('5Y URL has qty=1,3',
-    !!msg && /LIC-MX85-SEC-5Y,LIC-ENT-5YR&qty=1,3/.test(msg),
+  check('5Y URL in dashboard order: LIC-ENT-5YR,LIC-MX85-SEC-5Y qty=3,1',
+    !!msg && /LIC-ENT-5YR,LIC-MX85-SEC-5Y&qty=3,1/.test(msg),
     `msg=${msg}`);
 
   // No upgrade block in this fixture (MX85 is not EOL).
@@ -178,8 +179,10 @@ MR_EDITION: Enterprise`;
   check('Scalar replacement (no 10G alt) → no Option 3 rendered',
     !!msg && !/Option 3/.test(msg),
     `msg=${msg}`);
-  check('Renewal carry-forward includes LIC-ENT for the MR fleet at qty=4',
-    !!msg && /LIC-ENT-3YR/.test(msg) && /qty=4,/.test(msg),
+  // Dashboard order: MX64 (row 1, EOL) before MR-ENT (row 2). Option 1 3Y →
+  // LIC-MX64-SEC-3YR (qty 2) then LIC-ENT-3YR (qty 4).
+  check('Option 1 in dashboard order: LIC-MX64-SEC-3YR,LIC-ENT-3YR qty=2,4',
+    !!msg && /LIC-MX64-SEC-3YR,LIC-ENT-3YR&qty=2,4/.test(msg),
     `msg=${msg}`);
 }
 
