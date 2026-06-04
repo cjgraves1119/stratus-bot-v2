@@ -7671,7 +7671,10 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       }
     }
 
-    // Tool-use loop: handle build_quote_url calls (max 8 iterations for multi-URL responses)
+    // Tool-use loop: handle build_quote_url calls (max 16 iterations for multi-URL responses).
+    // 16 gives headroom for a dashboard refresh that needs up to 3 options × 1/3/5-Year
+    // terms = 9 URLs (one build_quote_url call per term per option) plus analysis turns,
+    // so the final URL is never dropped if Claude calls the tool once per round.
     // Strategy: accumulate Claude's text across all iterations. Track tool-generated URLs
     // separately and only inject them as a FALLBACK if Claude's combined text omits any.
     // This prevents duplicate URLs when Claude includes them in intermediate or final text.
@@ -7679,7 +7682,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     let toolIterations = 0;
     const toolUrls = []; // URLs from build_quote_url results (label + url for fallback injection)
 
-    while (data.stop_reason === 'tool_use' && toolIterations < 8) {
+    while (data.stop_reason === 'tool_use' && toolIterations < 16) {
       toolIterations++;
 
       // Capture text blocks from this iteration BEFORE processing tools
