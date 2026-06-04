@@ -12,7 +12,7 @@
  */
 
 import { MSG } from '../lib/constants.js';
-import { registerMessageHandlers } from '../lib/messaging.js';
+import { registerMessageHandlers, sendToTab } from '../lib/messaging.js';
 import { getSettings } from '../lib/storage.js';
 import {
   parseZohoRecordUrl,
@@ -497,6 +497,32 @@ registerMessageHandlers({
       activeUrl,
       emailContext,
     };
+  },
+
+  // ── WS4: Read line items from the active Zoho Quote page ──
+  //
+  // The sidebar can't talk to the content script directly, so the background
+  // resolves the active tab and forwards GET_ZOHO_QUOTE_ITEMS to it. Returns
+  // { items, module, recordId } — items: [] means the grid wasn't parseable
+  // (or the active tab isn't a Zoho record page).
+  [MSG.GET_ZOHO_QUOTE_ITEMS]: async () => {
+    const tab = await getActiveTab();
+    if (!tab || !tab.id) return { items: [], error: 'No active tab.' };
+    if (!tab.url || !tab.url.startsWith('https://crm.zoho.com/')) {
+      return { items: [], error: 'Active tab is not a Zoho CRM page.' };
+    }
+    const resp = await sendToTab(tab.id, MSG.GET_ZOHO_QUOTE_ITEMS, {});
+    // sendToTab resolves null if the content script isn't loaded.
+    if (!resp) {
+      return { items: [], error: 'Could not reach the Zoho page. Reload the tab and try again.' };
+    }
+    return resp;
+  },
+
+  // ── WS4: Build a URL quote from scraped { sku, qty } line items ──
+  // Same /api/quote engine as the bots (see api.buildUrlQuoteFromSkus).
+  [MSG.BUILD_URL_QUOTE]: async ({ items, personId }) => {
+    return api.buildUrlQuoteFromSkus(items, personId);
   },
 
   // ── Tab Screenshot Capture ──

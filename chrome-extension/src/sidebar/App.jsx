@@ -530,7 +530,7 @@ export default function App() {
           <Suspense fallback={<PanelLoader />}>
             {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} />}
             {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
-            {activeTab === 'quote' && <QuotePanel navData={navData} emailContext={emailContext} onNavigate={handleNavigate} />}
+            {activeTab === 'quote' && <QuotePanel navData={navData} emailContext={emailContext} onNavigate={handleNavigate} zohoPageContext={zohoPageContext} />}
             {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} zohoPageContext={zohoPageContext} />}
             {activeTab === 'search' && <SearchPanel navData={navData} />}
           </Suspense>

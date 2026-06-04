@@ -138,6 +138,155 @@ function extractWebsite() {
 }
 
 // ─────────────────────────────────────────────
+// WS4 — Quote line-item extraction (Product_Details grid)
+// ─────────────────────────────────────────────
+
+/**
+ * Best-effort scrape of the line items (product code + quantity) from a Zoho
+ * Quotes/SalesOrders/Invoices record's Product_Details grid.
+ *
+ * Zoho renders the line-item grid with no single stable contract across themes
+ * and module variants, so we try several strategies and fail GRACEFULLY:
+ * this function NEVER throws and returns [] when nothing parseable is found.
+ * The caller (WS4 round-trip) treats [] as "couldn't read the grid" and shows
+ * a friendly message rather than a hard error.
+ *
+ * A "SKU" here is the Product Code / part number (e.g. MR44, LIC-ENT-3YR), not
+ * the human product name. We prefer an explicit product-code cell, then fall
+ * back to extracting a Cisco/Meraki-shaped token from the product name cell.
+ *
+ * @returns {Array<{sku: string, qty: number}>}
+ */
+function extractQuoteLineItems() {
+  try {
+    // Cisco/Meraki SKU shape — mirrors lib/constants SKU_PATTERN closely enough
+    // to recover a code from a "MR44 - Meraki AP" style product-name cell.
+    const SKU_RE = /\b(MR\d{2,3}[A-Z]*|MS\d{3}[A-Z0-9-]*|MX\d{2,3}[A-Z]*|CW\d{4}[A-Z]*|MV\d{2,3}[A-Z]*|MT\d{2,3}[A-Z]*|MG\d{2,3}[A-Z]*|GR\d{2,3}[A-Z]*|GS\d{3}[A-Z0-9-]*|GX\d{2,3}[A-Z]*|Z\d[A-Z]*|C9\d{3}[A-Z0-9-]*|LIC-[A-Z0-9-]+|SUB-[A-Z0-9-]+|[A-Z]{2,5}-[A-Z0-9-]{3,})\b/i;
+
+    const cleanCode = (raw) => {
+      if (!raw) return null;
+      let s = String(raw).trim();
+      // Strip common label noise.
+      s = s.replace(/^(product\s*code|sku|part\s*(no|number|#)?)\s*[:\-]?\s*/i, '').trim();
+      if (!s) return null;
+      // If the cell holds a full description, recover the SKU token.
+      if (/\s/.test(s) || s.length > 40) {
+        const m = s.match(SKU_RE);
+        if (m) return m[1].toUpperCase();
+        // No recognizable token — fall back to the first whitespace-delimited
+        // chunk if it looks code-like (has a digit or hyphen).
+        const first = s.split(/\s+/)[0];
+        if (first && /[0-9-]/.test(first) && first.length <= 40) return first.toUpperCase();
+        return null;
+      }
+      return s.toUpperCase();
+    };
+
+    const parseQty = (raw) => {
+      if (raw == null) return null;
+      // Quantities can render as "10", "10.00", "10.000 pcs". Take the leading number.
+      const m = String(raw).replace(/,/g, '').match(/(\d+(?:\.\d+)?)/);
+      if (!m) return null;
+      const n = Math.round(parseFloat(m[1]));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+
+    const items = [];
+    const pushItem = (sku, qty) => {
+      const code = cleanCode(sku);
+      if (!code) return;
+      // Skip obvious non-SKU rows (subtotal/discount/tax/shipping labels).
+      if (/^(SUB ?TOTAL|TOTAL|DISCOUNT|TAX|SHIPPING|ADJUSTMENT|GRAND)/i.test(code)) return;
+      const q = parseQty(qty);
+      items.push({ sku: code, qty: q && q > 0 ? q : 1 });
+    };
+
+    // ── Strategy 1: field-name annotated cells within product rows ──────────
+    // Modern Zoho marks line-item cells with data-field-name on the row's cells.
+    // Product code field is usually "Product_Name" (a lookup) with the code in a
+    // sibling, or an explicit "Product_Code"/"Part_No" cell.
+    const rowSelectors = [
+      '.lineItemRow', '.productGridRow', '[data-line-item]',
+      'tr.crmLineItem', 'div[role="row"]',
+    ];
+    let rows = [];
+    for (const sel of rowSelectors) {
+      const found = document.querySelectorAll(sel);
+      if (found && found.length) { rows = Array.from(found); break; }
+    }
+
+    for (const row of rows) {
+      // Try explicit code + qty cells first.
+      const codeEl =
+        row.querySelector('[data-field-name="Product_Code"]') ||
+        row.querySelector('[data-field-name="Part_No"]') ||
+        row.querySelector('[data-field-name="Product_Name"]') ||
+        row.querySelector('.productCode, .product-code, .partNo');
+      const qtyEl =
+        row.querySelector('[data-field-name="Quantity"]') ||
+        row.querySelector('[data-field-name="Qty"]') ||
+        row.querySelector('.quantity, .qty, .productQty');
+
+      if (codeEl) {
+        // Prefer a nested product-code subnode if the lookup cell carries one.
+        const codeText =
+          codeEl.querySelector('.product-code, .productCode, .subText')?.textContent ||
+          codeEl.textContent;
+        pushItem(codeText, qtyEl ? qtyEl.textContent : null);
+      }
+    }
+
+    if (items.length) return dedupeItems(items);
+
+    // ── Strategy 2: classic <table> grid ───────────────────────────────────
+    // Find a table whose header row mentions a product/SKU column and a qty
+    // column, then read those columns by index.
+    const tables = Array.from(document.querySelectorAll('table'));
+    for (const table of tables) {
+      const headerCells = Array.from(
+        table.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td')
+      ).map(c => (c.textContent || '').trim().toLowerCase());
+      if (!headerCells.length) continue;
+
+      const codeIdx = headerCells.findIndex(h =>
+        /product|item|description|sku|part/.test(h));
+      const qtyIdx = headerCells.findIndex(h => /qty|quantity/.test(h));
+      if (codeIdx === -1) continue;
+
+      const bodyRows = Array.from(table.querySelectorAll('tbody tr'));
+      const dataRows = bodyRows.length ? bodyRows : Array.from(table.querySelectorAll('tr')).slice(1);
+      for (const tr of dataRows) {
+        const cells = Array.from(tr.querySelectorAll('td'));
+        if (!cells.length) continue;
+        const codeCell = cells[codeIdx];
+        const qtyCell = qtyIdx !== -1 ? cells[qtyIdx] : null;
+        if (!codeCell) continue;
+        pushItem(codeCell.textContent, qtyCell ? qtyCell.textContent : null);
+      }
+      if (items.length) break;
+    }
+
+    return dedupeItems(items);
+  } catch (err) {
+    // Never throw — WS4 treats empty as "not parseable".
+    console.warn('[Stratus AI] extractQuoteLineItems failed:', err?.message);
+    return [];
+  }
+}
+
+/**
+ * Merge duplicate SKUs (summing quantities) while preserving first-seen order.
+ */
+function dedupeItems(items) {
+  const map = new Map();
+  for (const { sku, qty } of items) {
+    if (!sku) continue;
+    map.set(sku, (map.get(sku) || 0) + (qty || 0));
+  }
+  return Array.from(map.entries()).map(([sku, qty]) => ({ sku, qty: qty > 0 ? qty : 1 }));
+}
+
+// ─────────────────────────────────────────────
 // Context detection & messaging
 // ─────────────────────────────────────────────
 
@@ -402,6 +551,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       email: extractRecordEmail(),
       accountName: extractAccountName(),
       website: extractWebsite(),
+    });
+    return true;
+  }
+
+  // WS4 — sidebar asks (via background) for this Quote page's line items.
+  // Only meaningful on a record page with a Product_Details grid (Quotes,
+  // Sales_Orders, Invoices, Purchase_Orders). Returns { items, module,
+  // recordId } and never throws — items: [] means "couldn't parse the grid".
+  if (msg.type === 'GET_ZOHO_QUOTE_ITEMS') {
+    const urlInfo = parseZohoRecordUrl(window.location.href);
+    const items = extractQuoteLineItems();
+    sendResponse({
+      items,
+      module: urlInfo?.module || null,
+      recordId: urlInfo?.recordId || null,
+      recordName: extractRecordName(),
     });
     return true;
   }

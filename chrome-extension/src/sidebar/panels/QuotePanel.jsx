@@ -7,16 +7,23 @@
 import { useState, useEffect, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS } from '../../lib/constants';
+import { parseStratusOrderUrl } from '../../lib/zoho-url.js';
 
-export default function QuotePanel({ navData, emailContext, onNavigate }) {
+export default function QuotePanel({ navData, emailContext, onNavigate, zohoPageContext }) {
   const [skuText, setSkuText] = useState('');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [copied, setCopied] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState(null);
+  // Tracks the URL the user most recently copied/opened so "Send to Zoho"
+  // hands off THAT specific order URL (e.g. the 3-year option they picked)
+  // rather than always defaulting to the first.
+  const [selectedUrlIdx, setSelectedUrlIdx] = useState(null);
   const [analyzingImage, setAnalyzingImage] = useState(false);
   const [imageAnalysis, setImageAnalysis] = useState(null);
+  // WS4 — building a URL quote from the active Zoho Quote page.
+  const [buildingFromZoho, setBuildingFromZoho] = useState(false);
   const [showZohoPrompt, setShowZohoPrompt] = useState(false);
   // MR-ENT is detected from license dashboards but is NOT a real catalog SKU. We
   // strip it from the quote engine input (otherwise parseMessage's agnostic-family
@@ -56,6 +63,7 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setAnalyzingImage(true);
     setError(null);
     setResult(null);
+    setSelectedUrlIdx(null);
     setImageAnalysis(null);
     try {
       const res = await sendToBackground(MSG.ANALYZE_IMAGE, { imageUrl, imageBase64 });
@@ -78,8 +86,16 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         if (/^[A-Z0-9]{4,}-[A-Z0-9]{4,}-[A-Z0-9]{4,}/.test(s)) return false;
         return true;
       };
-      const parsedItems = [];
-      if (/LICENSE_DASHBOARD_PARSE_V1/.test(analysisText)) {
+      let parsedItems = [];
+      if (Array.isArray(res?.parsedItems) && res.parsedItems.length > 0) {
+        // Backend (worker-gchat /api/parse-dashboard) now returns parsed dashboard
+        // SKUs directly and is SM-aware. Prefer them over re-parsing the rendered
+        // `analysis` prose, which no longer contains the raw LICENSE_DASHBOARD_PARSE_V1
+        // block (it's the rendered renewal quote now).
+        parsedItems = res.parsedItems
+          .map(p => ({ sku: String(p.sku || p.baseSku || '').toUpperCase().replace(/_/g, '-'), qty: Number(p.qty) || 1 }))
+          .filter(p => p.sku && isValidSkuTokenLocal(p.sku) && p.qty > 0 && p.qty <= 500);
+      } else if (/LICENSE_DASHBOARD_PARSE_V1/.test(analysisText)) {
         const lineRe = /SKU:\s*([A-Z0-9][A-Z0-9_-]*)\s*\|\s*LIMIT:\s*(\d+)\s*\|\s*ACTIVE:\s*(\d+)/gi;
         let m;
         while ((m = lineRe.exec(analysisText)) !== null) {
@@ -111,11 +127,17 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
         // Worker returned full quote URLs — show them directly, BUT also populate
         // the textarea (hardware SKUs) and banner (all detected SKUs) so the user
         // can see what was captured and optionally re-run the quote.
+        //
+        // ALSO populate result.parsed from the parsed V1 hardware items (was []
+        // before). Without this, the "Parsed Items" display was blank AND the
+        // Send-to-Zoho handoff had nothing to summarize for screenshot quotes.
+        // The synthetic MR-ENT token is excluded — it isn't a real catalog SKU.
+        const parsedFromV1 = hardwareItemsTop.map(({ sku, qty }) => ({ baseSku: sku, qty }));
         setResult({
           urls: res.quoteUrls.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
           eolWarnings: [],
           suggestions: null,
-          parsed: [],
+          parsed: parsedFromV1,
           source: 'api',
         });
         if (deduped.length > 0) {
@@ -247,6 +269,7 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setLoading(true);
     setError(null);
     setResult(null);
+    setSelectedUrlIdx(null);
     setShowZohoPrompt(false);
 
     try {
@@ -400,6 +423,7 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     setLoading(true);
     setError(null);
     setResult(null);
+    setSelectedUrlIdx(null);
     setShowZohoPrompt(false);
     try {
       const res = await sendToBackground(MSG.GENERATE_QUOTE, {
@@ -465,6 +489,80 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
     }
   }
 
+  /**
+   * WS4 — Build a Stratus URL quote from the Zoho Quote page the user is
+   * currently viewing. Scrapes the Product_Details grid (via the content
+   * script), then POSTs the "<qty> <sku>" lines through the SAME /api/quote
+   * engine as the bots and renders the result with the existing result UI.
+   */
+  async function handleBuildFromZohoQuote() {
+    setBuildingFromZoho(true);
+    setError(null);
+    setResult(null);
+    setSelectedUrlIdx(null);
+    setShowZohoPrompt(false);
+    setImageAnalysis(null);
+    try {
+      // 1. Ask the active Zoho tab for its line items.
+      const scrape = await sendToBackground(MSG.GET_ZOHO_QUOTE_ITEMS, {});
+      const items = Array.isArray(scrape?.items) ? scrape.items : [];
+      if (!items.length) {
+        setError(
+          scrape?.error
+            ? `Couldn't read the quote line items: ${scrape.error}`
+            : "Couldn't read any line items from this Zoho quote page. Open a Quotes record and try again, or paste the SKUs manually below."
+        );
+        return;
+      }
+
+      // Surface what we captured (also lets the user re-run after editing).
+      setSkuText(items.map((i) => `${i.qty || 1} ${i.sku}`).join('\n'));
+      setImageAnalysis({
+        skus: items.map((i) => i.sku),
+        message: `Read ${items.length} line item${items.length > 1 ? 's' : ''} from ${scrape?.recordName ? `"${scrape.recordName}"` : 'this Zoho quote'}`,
+      });
+
+      // 2. Round-trip through the quote engine.
+      const res = await sendToBackground(MSG.BUILD_URL_QUOTE, {
+        items,
+        personId: personIdRef.current,
+      });
+
+      // 3. Map the response with the same shape handleGenerate uses.
+      if (res) {
+        const rawUrls = res.quoteUrls || res.urls || [];
+        const urlsArr = Array.isArray(rawUrls) ? rawUrls : (rawUrls ? [rawUrls] : []);
+        const eolArr = Array.isArray(res.eolWarnings) ? res.eolWarnings : [];
+        const parsedRaw = Array.isArray(res.parsedItems) ? res.parsedItems : [];
+        const suggestArr = Array.isArray(res.suggestions) ? res.suggestions : null;
+        if (urlsArr.length > 0 || (suggestArr && suggestArr.length > 0) || res.claudeResponse) {
+          setResult({
+            urls: urlsArr.map((u) => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
+            eolWarnings: eolArr,
+            suggestions: suggestArr,
+            parsed: parsedRaw.length
+              ? parsedRaw.map((p) => ({ baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 }))
+              : items.map((i) => ({ baseSku: i.sku, qty: i.qty || 1 })),
+            claudeResponse: res.claudeResponse || null,
+            handlerType: res.handlerType || 'deterministic',
+            source: 'zoho-quote',
+          });
+        } else if (res.error) {
+          setError(res.error);
+        } else {
+          setError('No quote generated from this Zoho quote. Review the SKUs below.');
+        }
+      } else {
+        setError('No response from quote API.');
+      }
+    } catch (err) {
+      console.error('[Stratus] Build-from-Zoho-quote error:', err);
+      setError(err.message || 'Failed to build a URL quote from this Zoho quote.');
+    } finally {
+      setBuildingFromZoho(false);
+    }
+  }
+
   async function handleCopy(text, idx) {
     try {
       await navigator.clipboard.writeText(text);
@@ -477,36 +575,80 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
       document.body.removeChild(textarea);
     }
     setCopiedIdx(idx);
+    // Remember which URL was copied so Send-to-Zoho hands off this exact one.
+    if (typeof idx === 'number') setSelectedUrlIdx(idx);
     setTimeout(() => setCopiedIdx(null), 2000);
   }
 
+  /**
+   * Resolve the order URL + SKU summary for a Zoho/GChat handoff.
+   *
+   * Root cause of the prior lossy handoff: the summary was built ONLY from
+   * `result.parsed`, which is EMPTY for screenshot / Claude-fallback quotes
+   * (the URLs came straight from the worker, no per-item parse). The order URL
+   * itself — which fully encodes the line items — was never sent or re-parsed.
+   *
+   * Fix: pick the URL the user actually selected (last copied/opened), else the
+   * first result URL. Parse that URL back into {sku, qty} pairs with
+   * parseStratusOrderUrl so the summary always reflects the real quote, even
+   * when result.parsed is empty. Only fall back to result.parsed if the URL has
+   * no parseable items.
+   *
+   * @returns {{ orderUrl: string|null, skuSummary: string }}
+   */
+  function resolveHandoffQuote() {
+    const urls = Array.isArray(result?.urls) ? result.urls : [];
+    // Selected/last-copied URL wins; else first result URL.
+    let chosen = null;
+    if (selectedUrlIdx != null && urls[selectedUrlIdx]) chosen = urls[selectedUrlIdx];
+    else if (urls.length > 0) chosen = urls[0];
+    const orderUrl = chosen ? (typeof chosen === 'object' ? chosen.url : String(chosen)) : null;
+
+    // Primary: re-expand the order URL into line items.
+    let items = orderUrl ? parseStratusOrderUrl(orderUrl) : [];
+
+    // Fallback: only if URL parse produced nothing, use the deterministic parse.
+    if (!items.length) {
+      const parsed = result?.parsed?.filter(p => p.validation?.valid !== false) || result?.parsed || [];
+      items = parsed.map(p => ({ sku: p.baseSku || p.sku || '', qty: p.qty || 1 })).filter(p => p.sku);
+    }
+
+    const skuSummary = items.map(i => `${i.qty || 1}x ${i.sku}`).join(', ');
+    return { orderUrl, skuSummary };
+  }
+
   function handleSendToZoho() {
-    // Build a message with the parsed SKUs for the chat panel to create a Zoho quote
-    const items = result?.parsed?.filter(p => p.validation?.valid !== false) || result?.parsed || [];
-    const skuSummary = items.map(i => `${i.qty || 1}x ${i.baseSku}`).join(', ');
+    const { orderUrl, skuSummary } = resolveHandoffQuote();
     const customerName = emailContext?.customerName || emailContext?.senderName || '';
     const customerDomain = emailContext?.customerDomain || '';
 
-    // Build the CRM request text
-    let requestText = `Create a Zoho CRM quote with: ${skuSummary}`;
+    // Build the CRM request text. Include the actual order URL so the chat
+    // agent / worker can re-parse the exact line items (the URL is the source
+    // of truth) — this is what was missing before.
+    let requestText = 'Create a Zoho CRM quote from this Stratus quote';
+    if (orderUrl) requestText += `: ${orderUrl}`;
+    if (skuSummary) requestText += `\n\nLine items: ${skuSummary}`;
     if (customerName || customerDomain) {
-      requestText += ` for ${customerName || customerDomain}`;
+      requestText += `\n\nCustomer: ${customerName || customerDomain}`;
     }
 
-    // Navigate to chat panel with the pre-filled request
+    // Navigate to chat panel with the pre-filled request + current Zoho context
+    // so the handoff can target the active record (mirrors ChatPanel's context).
     if (onNavigate) {
-      onNavigate('chat', { prefillText: requestText });
+      onNavigate('chat', { prefillText: requestText, zohoPageContext: zohoPageContext || null });
     }
   }
 
   function handleSendToGChat() {
-    // Open GChat with a pre-composed message for CRM quote creation
-    const items = result?.parsed?.filter(p => p.validation?.valid !== false) || result?.parsed || [];
-    const skuSummary = items.map(i => `${i.qty || 1}x ${i.baseSku}`).join(', ');
+    // GChat handoff is informational (opens the bot space); compose a message
+    // with the resolved URL + line items so the user can paste it.
+    const { orderUrl, skuSummary } = resolveHandoffQuote();
     const customerName = emailContext?.customerName || emailContext?.senderName || '';
 
-    let msg = `Create a quote with ${skuSummary}`;
+    let msg = 'Create a quote';
+    if (skuSummary) msg += ` with ${skuSummary}`;
     if (customerName) msg += ` for ${customerName}`;
+    if (orderUrl) msg += `\n${orderUrl}`;
 
     // Open GChat in new tab with the Stratus AI bot space
     const gchatUrl = `https://chat.google.com/room/AAAAnp6E_Yw?cls=7`;
@@ -538,9 +680,43 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
           background: imageAnalysis.skus?.length ? '#e8f5e9' : '#fef7e0',
           color: imageAnalysis.skus?.length ? '#2e7d32' : '#e37400',
         }}>
-          {imageAnalysis.skus?.length
-            ? `Detected ${imageAnalysis.skus.length} SKU${imageAnalysis.skus.length > 1 ? 's' : ''} from image`
-            : imageAnalysis.message || 'No SKUs found in image'}
+          {/* Prefer the explicit message when provided (Zoho-quote + dashboard
+              flows set a descriptive one); else the generic image-detect line. */}
+          {imageAnalysis.message
+            ? imageAnalysis.message
+            : imageAnalysis.skus?.length
+              ? `Detected ${imageAnalysis.skus.length} SKU${imageAnalysis.skus.length > 1 ? 's' : ''} from image`
+              : 'No SKUs found in image'}
+        </div>
+      )}
+
+      {/* WS4 — Build a URL quote from the active Zoho Quote page. Only shown
+          when the user is viewing a Zoho record that carries a Product_Details
+          line-item grid (Quotes primarily; Sales Orders / Invoices / POs share
+          the same grid). */}
+      {zohoPageContext?.recordId &&
+        ['Quotes', 'Sales_Orders', 'Invoices', 'Purchase_Orders'].includes(zohoPageContext.module) && (
+        <div style={{
+          marginBottom: 12, padding: 12, background: '#e8f0fe',
+          borderRadius: 8, border: '1px solid #aecbfa',
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.STRATUS_DARK, marginBottom: 8 }}>
+            On a Zoho {({ Quotes: 'Quote', Sales_Orders: 'Sales Order', Invoices: 'Invoice', Purchase_Orders: 'Purchase Order' }[zohoPageContext.module] || zohoPageContext.module)} page
+          </div>
+          <button
+            onClick={handleBuildFromZohoQuote}
+            disabled={buildingFromZoho || loading}
+            title="Read the line items on this Zoho record and build a Stratus order URL"
+            style={{
+              width: '100%', padding: '8px 12px',
+              background: buildingFromZoho ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE,
+              color: 'white', border: 'none', borderRadius: 6, fontSize: 13,
+              fontWeight: 600, cursor: buildingFromZoho || loading ? 'default' : 'pointer',
+              opacity: buildingFromZoho || loading ? 0.7 : 1,
+            }}
+          >
+            {buildingFromZoho ? 'Reading line items...' : '🔗 Build URL quote from this Zoho quote'}
+          </button>
         </div>
       )}
 
@@ -780,11 +956,17 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
           {/* Quote URLs */}
           {result.urls.map((urlObj, i) => (
             <div key={i} style={{
-              background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+              background: COLORS.BG_PRIMARY,
+              border: `1px solid ${selectedUrlIdx === i ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
               borderRadius: 8, padding: 12, marginBottom: 8,
             }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 6 }}>
                 {urlObj.label || `Option ${i + 1}`}
+                {selectedUrlIdx === i && result.urls.length > 1 && (
+                  <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, color: COLORS.STRATUS_BLUE }}>
+                    • selected for Zoho
+                  </span>
+                )}
               </div>
               <div style={{
                 background: COLORS.BG_SECONDARY, borderRadius: 6, padding: '8px 10px',
@@ -807,6 +989,7 @@ export default function QuotePanel({ navData, emailContext, onNavigate }) {
                 </button>
                 <a
                   href={urlObj.url} target="_blank" rel="noopener"
+                  onClick={() => setSelectedUrlIdx(i)}
                   style={{
                     flex: 1, padding: '6px 10px', background: 'transparent',
                     color: COLORS.STRATUS_BLUE, border: `1px solid ${COLORS.STRATUS_BLUE}`,

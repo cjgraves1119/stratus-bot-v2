@@ -116,6 +116,37 @@ export async function generateQuote(skuText, personId) {
   return apiCall('/api/quote', { text: skuText, personId }, { timeout: 60000 });
 }
 
+/**
+ * WS4 — Build a Stratus URL quote from a structured list of { sku, qty } line
+ * items (e.g. scraped from a Zoho Quotes Product_Details grid).
+ *
+ * Routes through the SAME /api/quote engine as the Webex/GChat bots — it does
+ * NOT use the dead local quote-engine.js. We format each item as a
+ * "<qty> <sku>" line (the engine's preferred input form) and let the worker
+ * handle SKU validation, suffix mapping, EOL replacement, and URL building.
+ *
+ * @param {Array<{sku: string, qty: number}>} items
+ * @param {string} personId
+ * @returns {Promise<Object>} Same response shape as generateQuote (quoteUrls,
+ *   parsedItems, eolWarnings, suggestions, ...).
+ */
+export async function buildUrlQuoteFromSkus(items, personId) {
+  const lines = (Array.isArray(items) ? items : [])
+    .map((i) => {
+      const sku = String(i?.sku || i?.baseSku || '').trim();
+      if (!sku) return null;
+      const qty = Number.isFinite(i?.qty) && i.qty > 0 ? i.qty : 1;
+      return `${qty} ${sku}`;
+    })
+    .filter(Boolean);
+
+  if (!lines.length) {
+    return { error: 'No line items to quote.' };
+  }
+
+  return apiCall('/api/quote', { text: lines.join('\n'), personId }, { timeout: 60000 });
+}
+
 // ─────────────────────────────────────────────
 // CRM Operations (zero AI cost endpoints)
 // ─────────────────────────────────────────────
@@ -357,42 +388,19 @@ export async function detectSkus(text) {
 
 /**
  * Analyze an image for SKUs via Claude vision.
- * Uses the /api/parse-dashboard endpoint which handles
- * both imageUrl and imageBase64.
+ * Uses the /api/parse-dashboard endpoint which handles both imageUrl and imageBase64.
  *
- * Prompt discipline: Claude MUST emit ONLY the V1 block — no preamble,
- * no recommendations, no markdown bold. The parser relies on strict format
- * and a loose prose fallback will hallucinate SKUs (e.g. picking up "MS130-24P"
- * from a sentence like "consider upgrading to MS130-24P").
+ * NO `instructions` override: the worker now owns the dashboard vision prompt
+ * (getDashboardVisionPrompt — the SM-aware gold-standard prompt that includes
+ * Systems Manager → SM-ENT and the colored-marker continuation rules). Sending a
+ * prompt from here would override the backend's and silently drop Systems Manager.
+ * The worker returns a fully-rendered renewal quote (analysis + quoteUrls) plus a
+ * structured `parsedItems` array — the panel consumes parsedItems directly.
  */
 export async function analyzeImageForSkus(imageUrl, imageBase64) {
   return apiCall('/api/parse-dashboard', {
     imageUrl: imageUrl || undefined,
     imageBase64: imageBase64 || undefined,
-    instructions: `You are analyzing a Cisco Meraki license dashboard screenshot.
-
-Only extract rows from the TOP "License information" table — the one with the columns "License limit" and "Current device count". IGNORE the "License History" section at the bottom (those are past renewals with license keys like Z228-BEAC-D2QX and old devices — they must never appear in output).
-
-Respond with ONLY this block. No preamble, no summary, no recommendations, no markdown bold, no explanations:
-
-LICENSE_DASHBOARD_PARSE_V1
----
-SKU: <sku> | LIMIT: <license limit number> | ACTIVE: <current device count number>
----
-EXPIRATION: <YYYY-MM-DD or unknown>
-MX_EDITION: <Advanced Security | Secure SD-WAN Plus | none>
-MR_EDITION: <Enterprise | Advanced | none>
-
-Hard rules:
-1. One SKU per line between the --- markers. Emit a row for EVERY visible row in the top License table (including MR Enterprise, MX models, MS models, MT, MV, MG, Z-series).
-2. MR Enterprise rows MUST be emitted as: SKU: MR-ENT | LIMIT: <number> | ACTIVE: <number>
-3. Skip any row where ACTIVE (Current device count) is 0. Example: "MT | 5 free | 0" — skip.
-4. Do NOT invent, recommend, translate, or substitute SKUs. Only emit SKUs literally visible in the top License table. If unsure, leave it out.
-5. Do NOT include SKUs from the "License History" section (e.g. MX84 from a prior renewal).
-6. LIMIT and ACTIVE must be the exact integers from the "License limit" and "Current device count" columns — never derive from model numbers.
-7. Preserve hyphens exactly (MS120-24P, not MS120 24P).
-8. Do not wrap labels in asterisks or other markdown. Output plain ASCII only.
-9. If nothing extractable, emit the block with no SKU lines between the --- markers.`,
   }, { timeout: 60000 });
 }
 

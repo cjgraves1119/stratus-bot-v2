@@ -95,6 +95,73 @@ export function contextMatchesUrl(ctx, urlInfo) {
 }
 
 /**
+ * Parse a Stratus order URL into its line items.
+ *
+ * Stratus quote URLs look like:
+ *   https://stratusinfosystems.com/order/?item=SKU1,SKU2&qty=1,2
+ *
+ * The `item` param is a comma-separated list of SKUs and `qty` is the
+ * positionally-matched comma-separated list of quantities. This helper is the
+ * inverse of the URL builder used throughout the quote panel, so a quote that
+ * was produced as a URL (screenshot / Claude fallback path, where
+ * `result.parsed` is empty) can be re-expanded into `{sku, qty}` pairs for the
+ * "Send to Zoho" handoff.
+ *
+ * Robustness:
+ *   - Accepts a full URL or a bare query string.
+ *   - decodeURIComponent on each token (SKUs are URL-encoded in the link).
+ *   - Tolerates missing/short qty list (defaults qty to 1).
+ *   - Skips empty SKU tokens.
+ *   - Never throws — returns [] on anything unparseable.
+ *
+ * @param {string} url
+ * @returns {Array<{sku: string, qty: number}>}
+ */
+export function parseStratusOrderUrl(url) {
+  if (typeof url !== 'string' || !url) return [];
+
+  let itemParam = null;
+  let qtyParam = null;
+
+  // Primary: parse as a proper URL and read search params.
+  try {
+    const u = new URL(url);
+    itemParam = u.searchParams.get('item');
+    qtyParam = u.searchParams.get('qty');
+  } catch {
+    // Fallback: maybe we were handed a bare query string ("item=...&qty=...")
+    // or a relative URL. Pull the params out by hand.
+    try {
+      const qs = url.includes('?') ? url.slice(url.indexOf('?') + 1) : url;
+      const params = new URLSearchParams(qs);
+      itemParam = params.get('item');
+      qtyParam = params.get('qty');
+    } catch {
+      return [];
+    }
+  }
+
+  if (!itemParam) return [];
+
+  const decode = (s) => {
+    try { return decodeURIComponent(s); } catch { return s; }
+  };
+
+  const skus = decode(itemParam).split(',').map((s) => s.trim());
+  const qtys = (qtyParam ? decode(qtyParam) : '').split(',').map((s) => s.trim());
+
+  const items = [];
+  for (let i = 0; i < skus.length; i++) {
+    const sku = skus[i];
+    if (!sku) continue;
+    const rawQty = parseInt(qtys[i], 10);
+    const qty = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 1;
+    items.push({ sku, qty });
+  }
+  return items;
+}
+
+/**
  * Build a minimal context object from just the URL, so we always
  * have *something* useful to publish immediately on SPA navigation
  * while DOM enrichment (record name, email, account name) is still
