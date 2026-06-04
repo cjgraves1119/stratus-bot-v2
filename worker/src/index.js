@@ -5596,7 +5596,10 @@ function parseMessage(text) {
     }
 
     // Extract quantity (default to 25 — the minimum)
-    const acQtyMatch = upper.match(/\b(\d+)\b/);
+    const acQtyMatch = [...upper.matchAll(/\b(\d+)\b/g)].find(m => {
+      const after = upper.slice(m.index + m[0].length, m.index + m[0].length + 15);
+      return !/^\s*-?\s*(?:Y|YR|YEAR|YEARS)\b/i.test(after);
+    });
     let acQty = acQtyMatch ? parseInt(acQtyMatch[1]) : 25;
     let acQtyClamped = false;
     if (acQty < 25) {
