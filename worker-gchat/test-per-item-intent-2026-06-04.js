@@ -180,6 +180,17 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     const gm = engineSkuQty(G, 'renew MX67 then MR44 hardware');
     assert.ok(findKey(gm, /^LIC-MX67/) && findKey(gm, /^MR44-HW$/) && !findKey(gm, /^LIC-ENT-\dYR$/), `wrong split: ${keys(gm)}`);
   });
+  // Per-clause hardware must match only an item-qualifier "hardware" (trailing or
+  // "hardware for"), NOT "hardware <noun>". Regression guard: when the GLOBAL rule is
+  // suppressed (a "hardware support" phrase present), a clause's "hardware model" must
+  // NOT re-trigger hardware-only and drop the license — both items quote normally.
+  await t('"quote hardware support for 1 MX67 and 1 MR44 hardware model" → both NORMAL (licenses kept)', async () => {
+    const gm = engineSkuQty(G, 'quote hardware support for 1 MX67 and 1 MR44 hardware model'), wm = engineSkuQty(W, 'quote hardware support for 1 MX67 and 1 MR44 hardware model');
+    assert.ok(findKey(gm, /^LIC-ENT-\dYR$/), `MR44 license wrongly dropped ("hardware model" mis-read as hardware-only): ${keys(gm)}`);
+    assert.ok(findKey(gm, /^LIC-MX67/), `MX67 license missing: ${keys(gm)}`);
+    assert.ok(findKey(gm, /^MR44-HW$/) && findKey(gm, /^MX67-HW$/), `hardware missing: ${keys(gm)}`);
+    assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
+  });
 
   console.log('\n── EOL + hardware-only must NOT leave an empty "Option" section (review finding) ──');
   const noEmptyOption = (msg) => {

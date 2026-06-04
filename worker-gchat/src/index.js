@@ -3940,15 +3940,15 @@ function assignClauseIntent(items, upper, modifiers) {
   }
   clauses.push({ start: last, end: upper.length, text: upper.slice(last) });
 
-  // Hardware intent: an explicit "hardware only"/"hw only"/"without license" phrase
-  // OR a bare "hardware" word — but NOT "hardware specs/info/support/…" (mirrors the
-  // global rule's exclusions). So "add MR44 hardware" reads as hardware-only for that
-  // item, while "renew MX67" (its own clause) stays license.
-  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HARDWARE|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE))\b/;
-  const HW_EXCLUDE_RE = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
+  // Hardware intent: an explicit "hardware only"/"hw only"/"without license" phrase,
+  // OR a bare "hardware" used as an ITEM QUALIFIER — trailing the clause ("add MR44
+  // hardware") or "hardware for …". Deliberately NOT matching "hardware <noun>"
+  // (e.g. "hardware support/specs/model"), which is descriptive, not hardware-only
+  // intent — so a license is never dropped on those.
+  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE))\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
   const LIC_RE = /\b(LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|RENEWAL[S]?|RENEW)\b/;
   for (const c of clauses) {
-    c.hardwareOnly = HW_ONLY_RE.test(c.text) && !HW_EXCLUDE_RE.test(c.text);
+    c.hardwareOnly = HW_ONLY_RE.test(c.text);
     c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text);
   }
 
