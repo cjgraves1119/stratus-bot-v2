@@ -21306,12 +21306,28 @@ CRITICAL URL RULES:
             // Skip validation for license SKUs (LIC-*) and passthrough items —
             // parseMessage already validated these when constructing the items.
             // validateSku only knows hardware models, not license SKU patterns.
+            // Display form for the model-agnostic license aliases so the extension's
+            // captured-items banner / Send-to-Zoho show a real token, not the internal
+            // "-AGN" alias. buildQuoteResponse still receives the original alias (in
+            // parsed.items) and resolves it to the per-term LIC SKU for the URLs.
+            const AGN_DISPLAY = { 'MR-AGN': 'MR-ENT', 'MV-AGN': 'LIC-MV', 'MT-AGN': 'LIC-MT', 'SME-AGN': 'LIC-SME' };
             for (const item of (parsed?.items || [])) {
               const base = item.baseSku || item.sku;
               const upper = (base || '').toUpperCase();
-              if (upper.startsWith('LIC-') || PASSTHROUGH.has(upper)) {
-                // License/passthrough SKUs are valid by definition if parseMessage returned them
-                parsedWithValidation.push({ sku: base, qty: item.qty, validation: { valid: true } });
+              // LIC-*, passthrough, AND the model-agnostic license aliases
+              // (MR-AGN/MV-AGN/MT-AGN/SME-AGN) are valid by definition — parseMessage
+              // produced them and buildQuoteResponse resolves them to real LIC SKUs.
+              // Without the -AGN skip, a bare "6 mr"/"2 sme" in a mixed quote made
+              // validateSku('MR-AGN') fail → bogus "not a recognized SKU" → quote blocked
+              // in the extension while Webex (which renders buildQuoteResponse directly)
+              // worked. (2026-06-04)
+              // CW Wi-Fi 6E/7 bare stems (CW916x/CW917x) are also valid-by-definition:
+              // buildQuoteResponse promotes them to the I-variant (e.g. CW9172→CW9172I-RTG)
+              // via its own pre-normalize, which validateSku can't see — so the raw
+              // validateSku here would falsely reject and block the quote (same class as -AGN).
+              if (upper.startsWith('LIC-') || PASSTHROUGH.has(upper) || /^(MR|MV|MT|SME)-AGN$/.test(upper) || /^CW9(16|17)\d/.test(upper)) {
+                // License/passthrough/agnostic-alias/CW-stem SKUs are valid by definition if parseMessage returned them
+                parsedWithValidation.push({ sku: AGN_DISPLAY[upper] || base, qty: item.qty, validation: { valid: true } });
                 validItems.push(item);
               } else {
                 const validation = validateSku(base);
