@@ -5029,6 +5029,11 @@ function buildQuoteResponse(parsed) {
   const errors = [];
   const resolvedItems = [];
   const tierWarnings = [];
+  // Set true when the resolved quote carries no license on any item (e.g. an
+  // accessory-only request: mounts, injectors, power, cables). Signals the
+  // /api/quote handler not to apply the positional 1/3/5-Year label to the
+  // single URL we emit, since there is no term to differentiate.
+  let noTermSplit = false;
   // Items in REQUEST order (preserves the user's SKU sequence across EOL/non-EOL)
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
@@ -5415,7 +5420,24 @@ function buildQuoteResponse(parsed) {
   }
 
   if (resolvedItems.length > 0) {
-    if (modifiers.hardwareOnly) {
+    // Check if ALL resolved items are accessories (no license component) — e.g., MA- prefix.
+    // These don't have term-based licensing, so showing 3 identical URLs (1Y/3Y/5Y) is noise.
+    // (Ported from worker/ to fix the gchat-only accessory term-split bug; keeps engines in parity.)
+    const allAccessories = resolvedItems.every(item =>
+      (!item.licenseSkus || item.licenseSkus.length === 0) &&
+      (item.baseSku?.toUpperCase().startsWith('MA-') || item.hwSku?.toUpperCase().startsWith('MA-'))
+    );
+
+    if (allAccessories) {
+      // Single URL output — no term differentiation needed. noTermSplit tells the
+      // /api/quote handler not to apply the positional 1-Year label to this URL.
+      const urlItems = resolvedItems.map(i => ({ sku: i.hwSku, qty: i.qty }));
+      const url = buildStratusUrl(urlItems);
+      lines.push(url);
+      if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
+      lines.push('');
+      noTermSplit = true;
+    } else if (modifiers.hardwareOnly) {
       // Hardware-only: single URL (no license terms to differentiate)
       // Skip agnostic license items (they have no hardware)
       const urlItems = [];
@@ -5502,7 +5524,7 @@ function buildQuoteResponse(parsed) {
     }
   }
 
-  return { message: lines.join('\n').trim(), needsLlm: false };
+  return { message: lines.join('\n').trim(), needsLlm: false, noTermSplit };
 }
 
 // ─── System Prompt (identical to Express version) ────────────────────────────
@@ -21548,7 +21570,14 @@ CRITICAL URL RULES:
 
             // ── Deterministic quote — extract URLs from buildQuoteResponse output ──
             const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
-            const quoteUrls = extractQuoteUrls(responseText);
+            let quoteUrls = extractQuoteUrls(responseText);
+            // Term-less quotes (accessories — mounts, injectors, power, cables) carry
+            // no license, so buildQuoteResponse emits a single URL with no co-term.
+            // extractQuoteUrls' positional fallback would mislabel it "1-Year" — relabel
+            // it neutrally so the extension doesn't imply a nonexistent license term.
+            if (quoteResult.noTermSplit && quoteUrls.length === 1) {
+              quoteUrls = [{ url: quoteUrls[0].url, label: 'Quote' }];
+            }
 
             // Store the full deterministic response in history so pricing follow-ups work
             await addToHistory(kv, quotePersonId, 'assistant', responseText);
