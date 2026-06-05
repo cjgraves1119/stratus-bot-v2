@@ -49,3 +49,26 @@ BASE_URL=http://127.0.0.1:8787 PROMPT_FILE=CF_CLASSIFIER_PROMPT_V3-draft-2026-06
   CONSUMER=v3prod ENGINE_DIR=/tmp/phase3/worker N=10 node eval-model-intent-2026-06-04.js
 cd /tmp/phase3/worker && node test-local.js   # 498/498 regression
 ```
+
+## Adversarial review round (3 reviewers, empirical) — 3 high-sev defects found & fixed (commit fd7b535)
+The first cut (commit 7e7b88b) passed 36/36 + 498/498, but an adversarial pass caught 3 real defects the
+38-item corpus never exercised — all now fixed:
+1. **SME 5yr cap broken** — `SME@5yr` dropped the line / emptied the quote (no 5Y→3YR fallback), and the
+   cap NOTE was dropped. Violated the documented SME-cap business rule.
+2. **`separate_quotes` + named multi-term license** → dangling empty headers / link-less "quote".
+3. **MS "advanced" (tier="A") downgraded to Essentials** when rawText didn't contain the literal "advanced".
+
+**Fix:** `buildQuoteFromV3` now **collapses** each named license (directLicense/directLicenseList/
+isTermOptionQuote) into ONE multi-term `_v3PreLicense` item (a new `buildQuoteResponse` resolution branch,
+mirrors `MR-AGN`) — so it renders as one clean group under separate_quotes, one-per-term in default, with a
+natural home for the SME 5Y→3YR cap (gated on an explicit 5yr request) + the cap note (now also prepended in
+the default renderer). Tier is taken from the engine's per-item resolution instead of re-derived from rawText.
+Reviewer dims (a) regex and (b) renderer-safety were proven SOUND (no leak; 498/498 holds).
+
+**Post-fix verification:** 498/498; 9/9 grouping probe; native-vs-V3 differential (SME no-term/5yr,
+separate_quotes, MS-advanced all match/beat native); 8/8 named-license families (Duo/Umbrella/AnyConnect/
+agnostic/SME/multi-list — V3 ⊇ native, keeps siblings native drops); 8/8 edge cases (AnyConnect 25-user
+clamp 10→25, empty/0/negative/missing-intent, garbage-among-good survives, all-garbage→fallback, clarify
+passthrough). Full-corpus live N=10 = **35/36** — the one miss (`cov:mr-3yr-normal`) is upstream classifier
+intent variance (intent=license on 2/10 runs); deterministic offline = correct. That's a **Phase-2 prompt**
+item, not a Phase-3 engine defect.
