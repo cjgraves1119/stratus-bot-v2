@@ -4381,6 +4381,94 @@ function buildQuoteFromV2(v2, rawText) {
   };
 }
 
+// ─── V3 model-intent adapter (Phase 3) ──────────────────────────────────────
+// Consumes the V3 classifier contract (per-item product+intent, top-level clarify,
+// NO model SKUs) and returns a `parsed` object in the SAME shape buildQuoteFromV2
+// returns — so the caller's existing `buildQuoteResponse(qp)` seam is unchanged.
+//
+// Design (council-selected "open-robust", 2026-06-05): synthesize one NL string per
+// item (mirrors the eval's proven synthV3, 36/36 live) and run parseMessage PER ITEM
+// IN ISOLATION — this is what prevents the bare-family sibling-drop, since no two
+// items share a parseMessage context. Then FLATTEN the per-item parsed.items into one
+// items[] (stamping per-item hardwareOnly/licenseOnly from the item intent) and let the
+// existing renderer group by term. Shared license SKUs across items SUM automatically:
+// buildStratusUrl dedupes by SKU and sums qtys. No new renderer code.
+//
+// Returns: null → caller falls back (parseMessage/LLM); {isClarification,clarificationMessage}
+// → caller renders the question; else a parsed object for buildQuoteResponse.
+const V3_TIER_WORD = { SEC: 'SEC', SDW: 'SD-WAN', ENT: 'enterprise', A: 'advanced' };
+function synthV3Item(product, intent, qty, tier) {
+  let base = `${qty} ${product}`;
+  if (tier && V3_TIER_WORD[tier]) base += ` ${V3_TIER_WORD[tier]}`; // parseMessage resolves the tier word/suffix
+  if (intent === 'license') return `${base} license`;
+  if (intent === 'hardware') return `${base} hardware only`;
+  return base; // normal → hardware + license
+}
+function buildQuoteFromV3(v3, rawText) {
+  if (!v3 || typeof v3 !== 'object') return null;
+
+  // Clarify wins: the classifier already detected ambiguity → return the question.
+  if (v3.clarify && v3.clarify.needed === true) {
+    return { isClarification: true, clarificationMessage: v3.clarify.question || '', _fromV3: true };
+  }
+
+  const items = Array.isArray(v3.items) ? v3.items : [];
+  if (!items.length) return null;
+  const mods = v3.modifiers || {};
+
+  const combinedItems = [];
+  for (const it of items) {
+    const product = String(it.product || '').trim();
+    if (!product) continue;
+    const intent = it.intent === 'hardware' ? 'hardware' : it.intent === 'license' ? 'license' : 'normal';
+    const qty = Number.isFinite(Number(it.qty)) && Number(it.qty) > 0 ? Math.floor(Number(it.qty)) : 1;
+
+    const synthetic = synthV3Item(product, intent, qty, mods.tier);
+    let p;
+    try { p = parseMessage(synthetic); } catch { return null; } // a single un-parseable item bounces the whole quote to fallback
+    if (!p) continue;
+    p = preserveMsAdvancedTier(p, synthetic);
+
+    // Per-item ambiguity (e.g. incomplete stem "MS130-24") → clarify wins.
+    if (p && p.isClarification && p.clarificationMessage) {
+      return { isClarification: true, clarificationMessage: p.clarificationMessage, _fromV3: true };
+    }
+    if (!p || !Array.isArray(p.items)) continue;
+
+    // Stamp per-item intent so buildQuoteResponse's per-item gates (it.hardwareOnly ??
+    // modifiers.hardwareOnly) route hardware/license correctly, then flatten.
+    for (const pi of p.items) {
+      pi.hardwareOnly = (intent === 'hardware');
+      pi.licenseOnly = (intent === 'license');
+      combinedItems.push(pi);
+    }
+  }
+  if (!combinedItems.length) return null;
+
+  // List-level single term (null → buildQuoteResponse expands 1/3/5YR). all_terms wins.
+  let requestedTerm = null;
+  if (!mods.all_terms) {
+    const t = parseInt(mods.term_years, 10);
+    if ([1, 3, 5].includes(t)) requestedTerm = t;
+  }
+
+  return {
+    items: combinedItems,
+    requestedTerm,
+    modifiers: {
+      hardwareOnly: false, // global default — per-item flags override via the ?? gates
+      licenseOnly: false,
+      separateQuotes: Boolean(mods.separate_quotes)
+    },
+    requestedTier: normalizeRequestedTier(mods.tier, rawText),
+    isAdvisory: false,
+    isRevision: false,
+    showPricing: Boolean(mods.show_pricing),
+    unresolvedCategories: [],
+    _fromV3: true
+  };
+}
+
 // ─── V2 Revision Applicator (PR 2) ─────────────────────────────────────────
 // Applies a V2 revision object to a prior parseMessage-shape quote and returns
 // a new parseMessage-shape result that can feed straight into buildQuoteResponse.
@@ -6440,6 +6528,30 @@ function buildQuoteResponse(parsed) {
     const bUpper = baseSku.toUpperCase();
     if (/^CW9(16|17)\d$/.test(bUpper) && !bUpper.endsWith('I')) {
       baseSku = `${bUpper}I`;
+    }
+
+    // ── Pre-resolved license SKUs (bare LIC-*-{term}) — Phase 3 ──
+    // buildQuoteFromV3 flattens named / term-option licenses (Duo, Umbrella, SME,
+    // AnyConnect, attached MX-ENT, …) into the default branch as already-resolved LIC-
+    // SKUs that carry their own term. validateSku would reject them (they are not hardware
+    // models) and the license would be DROPPED. Instead, place each at its own term as an
+    // agnostic license-only item — exactly the shape the term loop + buildStratusUrl already
+    // group/sum, so a Duo-1YR/3YR/5YR triple lands one-per-term (not all in every URL) and
+    // shared SKUs across items still sum. Mirrors the MR-AGN agnostic path above. This branch
+    // only fires for the V3 flatten path; V2/parseMessage route bare licenses via
+    // directLicense / directLicenseList / isTermOptionQuote and never reach here.
+    const preLic = baseSku.match(/^LIC-.+-([135])Y(?:R)?(?:-S\d+)?$/i);
+    if (preLic) {
+      const preItem = {
+        baseSku, hwSku: null, qty,
+        licenseSkus: [{ term: `${preLic[1]}Y`, sku: baseSku }],
+        eol: false, isAgnosticLicense: true,
+        hardwareOnly: false, licenseOnly: true,
+        smeCapped: /^LIC-SME-/i.test(baseSku)
+      };
+      resolvedItems.push(preItem);
+      ordered.push({ kind: 'resolved', ref: preItem });
+      continue;
     }
 
     const validation = validateSku(baseSku);
