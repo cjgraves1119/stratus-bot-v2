@@ -18,7 +18,10 @@
 //   - Analytics & cost tracking (token usage, latency, error rates)
 //   - Rate limiting (protect against runaway API costs)
 // Dashboard: https://dash.cloudflare.com/ec1888c5a0b51dc3eebf6bae13a3922b/ai/ai-gateway/gateways/stratus-ai-bot
-const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
+// env-overridable for one-to-one portability across deployments: the entry points set this
+// from env.ANTHROPIC_GATEWAY_URL (deterministic per deploy). The literal is a backward-compat
+// default for the personal account only.
+let ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
 const ANTHROPIC_API_DIRECT = 'https://api.anthropic.com/v1/messages'; // Fallback when gateway fails
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 
@@ -929,7 +932,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     Due_Date: dueDateStr,
     Status: 'Not Started',
     Priority: 'Normal',
-    Owner: { id: ownerId || (env && env.SYSTEM_OWNER_ID) || '2570562000141711002' },
+    Owner: { id: ownerId || (env && env.SYSTEM_OWNER_ID) || '' },
     What_Id: { id: dealId },
     $se_module: 'Deals'
   };
@@ -6336,12 +6339,10 @@ async function extractImageFromEvent(event, env) {
 const _ownerCache = new Map();
 const OWNER_CACHE_TTL_MS = 60_000;
 
-// Hardcoded seed: bootstrap Chris on first call so the migration is safe even
-// if the users table is empty. Tim, Jay, etc. get added via a one-time admin
-// endpoint or manual INSERT once their Zoho user IDs are known.
-const SEED_USERS = [
-  { email: 'chrisg@stratusinfosystems.com', zoho_user_id: '2570562000141711002', display_name: 'Chris Graves' },
-];
+// The default owner is seeded from deploy env (SYSTEM_OWNER_EMAIL / SYSTEM_OWNER_ID /
+// SYSTEM_OWNER_NAME) inside getOwnerContext below, so the codebase carries no personal
+// identity — personal and corp each set their own values per deployment. Additional
+// users get added via a one-time admin endpoint or manual INSERT.
 
 async function ensureUsersTable(db) {
   if (!db || globalThis.__usersTableReady) return;
@@ -6367,7 +6368,7 @@ async function ensureUsersTable(db) {
  * silently attribute Zoho records to the API-token user.
  */
 async function getOwnerContext(env, callerEmail) {
-  const sysOwner = (env && env.SYSTEM_OWNER_ID) || '2570562000141711002';
+  const sysOwner = (env && env.SYSTEM_OWNER_ID) || '';
   if (!callerEmail) {
     return { zoho_user_id: sysOwner, display_name: 'Stratus AI', email: null, _source: 'system' };
   }
@@ -6398,8 +6399,13 @@ async function getOwnerContext(env, callerEmail) {
     console.error('[getOwnerContext] D1 lookup failed:', e && e.message);
   }
 
-  // Seed fallback (lazy auto-seed: insert known user if not yet in DB)
-  const seed = SEED_USERS.find(u => u.email.toLowerCase() === lower);
+  // Seed fallback (lazy auto-seed): the default owner comes from deploy env
+  // (SYSTEM_OWNER_EMAIL/ID/NAME) so the codebase carries no personal identity.
+  const seedEmail = env && env.SYSTEM_OWNER_EMAIL;
+  const seedId = env && env.SYSTEM_OWNER_ID;
+  const seed = (seedEmail && seedId && String(seedEmail).toLowerCase() === lower)
+    ? { email: lower, zoho_user_id: seedId, display_name: (env && env.SYSTEM_OWNER_NAME) || seedEmail }
+    : null;
   if (seed) {
     try {
       if (env && env.ANALYTICS_DB) {
@@ -15389,7 +15395,7 @@ ONLY use values from the VALID DEAL STAGES list above. Do NOT invent stages ("Wa
 ## EMAIL RULES
 - Always create a Gmail draft first (gmail_create_draft) — NEVER send without approval.
 - Blank line between every paragraph.
-- Sign as: Chris Graves, Regional Sales Director, Stratus Information Systems.
+- Sign as: {{OWNER_DISPLAY_NAME}}, Stratus Information Systems.
 - Voice: friendly, consultative, concise. End every customer email with a question or CTA.
 
 ---
@@ -15569,8 +15575,8 @@ When [CRM context: ...] shows "Existing Account: X (id: Y)", reuse Y directly; d
 // supplied (covers eval/benchmark code paths that haven't been threaded).
 function applyOwnerPlaceholders(promptStr, ownerCtx) {
   if (!promptStr || promptStr.indexOf('{{OWNER_') === -1) return promptStr;
-  const name = (ownerCtx && ownerCtx.display_name) || 'Chris Graves';
-  const id = (ownerCtx && ownerCtx.zoho_user_id) || '2570562000141711002';
+  const name = (ownerCtx && ownerCtx.display_name) || 'Stratus AI';
+  const id = (ownerCtx && ownerCtx.zoho_user_id) || '';
   return promptStr
     .replace(/\{\{OWNER_DISPLAY_NAME\}\}/g, name)
     .replace(/\{\{OWNER_ZOHO_ID\}\}/g, id);
@@ -17287,7 +17293,7 @@ async function verifyGoogleChatToken(request, env) {
  *    - Slash commands: (optional, for /quote, /price)
  *
  * 3. Connection Settings
- *    - HTTP endpoint URL: https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev
+ *    - HTTP endpoint URL: https://stratus-ai-bot-gchat.<your-subdomain>.workers.dev
  *    - Verification token: (optional, for extra security)
  *
  * 4. Permissions
@@ -18877,22 +18883,22 @@ async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWall
 const BENCHMARK_TASKS = [
   // Simple — single tool call
   { id: 'task_01', tier: 'simple', name: 'Find account by name', prompt: 'Find the Zoho account for "Stratus Information Systems"' },
-  { id: 'task_02', tier: 'simple', name: 'Find contact by email', prompt: 'Find the contact in Zoho with email chrisg@stratusinfosystems.com' },
-  { id: 'task_03', tier: 'simple', name: 'List open deals for owner', prompt: 'List the 5 most recent open deals owned by Chris Graves (owner ID 2570562000141711002)' },
-  { id: 'task_04', tier: 'simple', name: 'Get last 5 closed-won deals', prompt: 'Show me the 5 most recent Closed Won deals owned by Chris Graves' },
-  { id: 'task_05', tier: 'simple', name: 'Get tasks due this week', prompt: 'List tasks for Chris Graves (owner 2570562000141711002) with Due_Date this week' },
+  { id: 'task_02', tier: 'simple', name: 'Find contact by email', prompt: 'Find the contact in Zoho with email owner@example.com' },
+  { id: 'task_03', tier: 'simple', name: 'List open deals for owner', prompt: 'List the 5 most recent open deals owned by {{OWNER_DISPLAY_NAME}} (owner ID {{OWNER_ZOHO_ID}})' },
+  { id: 'task_04', tier: 'simple', name: 'Get last 5 closed-won deals', prompt: 'Show me the 5 most recent Closed Won deals owned by {{OWNER_DISPLAY_NAME}}' },
+  { id: 'task_05', tier: 'simple', name: 'Get tasks due this week', prompt: 'List tasks for {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}}) with Due_Date this week' },
   // Medium — 2-4 tool calls
   { id: 'task_06', tier: 'medium', name: 'Account + contacts', prompt: 'Find the "Stratus Information Systems" account and list its associated contacts' },
-  { id: 'task_07', tier: 'medium', name: 'Quote summary', prompt: 'Find the most recent quote owned by Chris Graves and summarize its line items' },
-  { id: 'task_08', tier: 'medium', name: 'Deal detail lookup', prompt: 'Find the most recent open deal for Chris Graves and report its stage, amount, and any related quote' },
+  { id: 'task_07', tier: 'medium', name: 'Quote summary', prompt: 'Find the most recent quote owned by {{OWNER_DISPLAY_NAME}} and summarize its line items' },
+  { id: 'task_08', tier: 'medium', name: 'Deal detail lookup', prompt: 'Find the most recent open deal for {{OWNER_DISPLAY_NAME}} and report its stage, amount, and any related quote' },
   { id: 'task_09', tier: 'medium', name: 'Add contact to account (dry-run)', prompt: 'Add a new contact named "Test User" with email testuser@example.com to the Stratus Information Systems account' },
-  { id: 'task_10', tier: 'medium', name: 'Update task due date (dry-run)', prompt: 'Find the most overdue open task for Chris Graves and push its due date to next Friday' },
+  { id: 'task_10', tier: 'medium', name: 'Update task due date (dry-run)', prompt: 'Find the most overdue open task for {{OWNER_DISPLAY_NAME}} and push its due date to next Friday' },
   // Complex — 5+ tool calls
   { id: 'task_11', tier: 'complex', name: 'Create full deal+quote (dry-run)', prompt: 'Create a new deal and quote for Stratus Information Systems: 5x MR46 access points with 3-year licenses. Use Lead_Source "Stratus Referal" and default Stratus Sales Meraki ISR.' },
-  { id: 'task_12', tier: 'complex', name: 'Clone and modify quote (dry-run)', prompt: 'Find the most recent quote for Chris Graves, clone it, and change the quantity of the first line item to 10' },
-  { id: 'task_13', tier: 'complex', name: 'Add SKU to existing quote (dry-run)', prompt: 'Find the most recent open quote for Chris Graves and add 2x LIC-ENT-3YR to it' },
+  { id: 'task_12', tier: 'complex', name: 'Clone and modify quote (dry-run)', prompt: 'Find the most recent quote for {{OWNER_DISPLAY_NAME}}, clone it, and change the quantity of the first line item to 10' },
+  { id: 'task_13', tier: 'complex', name: 'Add SKU to existing quote (dry-run)', prompt: 'Find the most recent open quote for {{OWNER_DISPLAY_NAME}} and add 2x LIC-ENT-3YR to it' },
   { id: 'task_14', tier: 'complex', name: 'Handle missing record gracefully', prompt: 'Find the account "Nonexistent Fake Company XYZ 12345" and if not found, respond that no account was found — do NOT create one' },
-  { id: 'task_15', tier: 'complex', name: 'Multi-module reconciliation', prompt: 'Find all open deals for Chris Graves that have an associated quote but no related invoice, and list them' },
+  { id: 'task_15', tier: 'complex', name: 'Multi-module reconciliation', prompt: 'Find all open deals for {{OWNER_DISPLAY_NAME}} that have an associated quote but no related invoice, and list them' },
   // ── Webex-bot-style tasks (technical questions, product info, fallback scenarios) ──
   { id: 'task_16', tier: 'simple', name: 'Product spec question', prompt: 'What are the specifications of the Meraki MR46 access point?' },
   { id: 'task_17', tier: 'simple', name: 'EOL lookup', prompt: 'When does the MR44 go end-of-life?' },
@@ -18914,36 +18920,36 @@ const BENCHMARK_TASKS = [
   { id: 'task_27', tier: 'simple', name: 'Find contact by phone', prompt: 'Find the contact in Zoho CRM whose phone number is 404-555-0199', expected: ['zoho_search_records'] },
   { id: 'task_28', tier: 'simple', name: 'Accounts by state', prompt: 'List the first 10 accounts in Zoho CRM whose Billing_State is "GA"', expected: ['zoho_search_records'] },
   { id: 'task_29', tier: 'simple', name: 'Find quote by Quote_Number (not record id)', prompt: 'Pull up quote number 2570562000399909183 and give me the Zoho URL', expected: ['zoho_search_records'], forbidden: ['zoho_get_record'] },
-  { id: 'task_30', tier: 'simple', name: 'Tasks due today', prompt: 'Show me the tasks owned by Chris Graves (owner 2570562000141711002) due today', expected: ['zoho_search_records'] },
-  { id: 'task_31', tier: 'simple', name: 'Most recently modified deal', prompt: 'What is the most recently modified deal for Chris Graves (owner 2570562000141711002)?', expected: ['zoho_search_records'] },
-  { id: 'task_32', tier: 'simple', name: 'Deals by amount threshold', prompt: 'Show me the open deals for Chris Graves with an Amount greater than 50,000', expected: ['zoho_search_records'] },
-  { id: 'task_33', tier: 'simple', name: 'Accounts created this month', prompt: 'List accounts owned by Chris Graves (owner 2570562000141711002) created this month', expected: ['zoho_search_records'] },
+  { id: 'task_30', tier: 'simple', name: 'Tasks due today', prompt: 'Show me the tasks owned by {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}}) due today', expected: ['zoho_search_records'] },
+  { id: 'task_31', tier: 'simple', name: 'Most recently modified deal', prompt: 'What is the most recently modified deal for {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}})?', expected: ['zoho_search_records'] },
+  { id: 'task_32', tier: 'simple', name: 'Deals by amount threshold', prompt: 'Show me the open deals for {{OWNER_DISPLAY_NAME}} with an Amount greater than 50,000', expected: ['zoho_search_records'] },
+  { id: 'task_33', tier: 'simple', name: 'Accounts created this month', prompt: 'List accounts owned by {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}}) created this month', expected: ['zoho_search_records'] },
   { id: 'task_34', tier: 'simple', name: 'Deals by Cisco rep assignment', prompt: 'Find all deals where the Meraki_ISR is the rep whose email is jacporti@cisco.com. Remember: Cisco reps live in Meraki_ISRs, not Contacts.', forbidden: ['zoho_create_record', 'zoho_update_record'] },
-  { id: 'task_35', tier: 'simple', name: 'Deals by picklist-with-slash stage', prompt: 'List Chris Graves\'s deals (owner 2570562000141711002) currently in Stage "Verbal Commit/Invoicing"', expected: ['zoho_search_records'] },
+  { id: 'task_35', tier: 'simple', name: 'Deals by picklist-with-slash stage', prompt: 'List {{OWNER_DISPLAY_NAME}}\'s deals (owner {{OWNER_ZOHO_ID}}) currently in Stage "Verbal Commit/Invoicing"', expected: ['zoho_search_records'] },
   { id: 'task_36', tier: 'medium', name: 'Quote_Number -> parent deal', prompt: 'For quote number 2570562000399909183, who is the related deal and what is its stage?', expected: ['zoho_search_records'] },
-  { id: 'task_37', tier: 'medium', name: 'Deal -> related quotes summary', prompt: 'Find the most recent open deal for Chris Graves (owner 2570562000141711002), list its related quotes, and give me the Quote_Number and total amount for each', expected: ['zoho_get_related_records'] },
-  { id: 'task_38', tier: 'medium', name: 'Contact email -> their deals', prompt: 'Find the contact with email chrisg@stratusinfosystems.com in Zoho and list the deals associated with their account' },
-  { id: 'task_39', tier: 'medium', name: 'Overdue tasks linked to open deals', prompt: 'Find Chris Graves\'s (owner 2570562000141711002) overdue tasks that are linked to open deals — skip tasks linked to closed deals' },
+  { id: 'task_37', tier: 'medium', name: 'Deal -> related quotes summary', prompt: 'Find the most recent open deal for {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}}), list its related quotes, and give me the Quote_Number and total amount for each', expected: ['zoho_get_related_records'] },
+  { id: 'task_38', tier: 'medium', name: 'Contact email -> their deals', prompt: 'Find the contact with email owner@example.com in Zoho and list the deals associated with their account' },
+  { id: 'task_39', tier: 'medium', name: 'Overdue tasks linked to open deals', prompt: 'Find {{OWNER_DISPLAY_NAME}}\'s (owner {{OWNER_ZOHO_ID}}) overdue tasks that are linked to open deals — skip tasks linked to closed deals' },
   { id: 'task_40', tier: 'medium', name: 'Active-page context update', prompt: '[Active Zoho page: Quotes 2570562000399909180]\nChange the Valid_Till date on this quote to 2026-06-30', expected: ['zoho_update_record'], forbidden: ['zoho_search_records'] },
-  { id: 'task_41', tier: 'medium', name: 'Close a task (dry-run)', prompt: 'Find Chris Graves\'s most recent open task with "follow up" in the subject and mark it completed', expected: ['zoho_update_record'] },
+  { id: 'task_41', tier: 'medium', name: 'Close a task (dry-run)', prompt: 'Find {{OWNER_DISPLAY_NAME}}\'s most recent open task with "follow up" in the subject and mark it completed', expected: ['zoho_update_record'] },
   { id: 'task_42', tier: 'medium', name: 'Set stage with slash picklist', prompt: '[Active Zoho page: Deals 2570562000400000001]\nMove this deal to the Proposal/Negotiation stage', expected: ['zoho_update_record'] },
-  { id: 'task_43', tier: 'medium', name: 'Add a note to existing deal', prompt: 'Add a note to the most recent open deal for Chris Graves (owner 2570562000141711002) saying: "Customer requested pricing on 3-year vs 5-year licensing."' },
+  { id: 'task_43', tier: 'medium', name: 'Add a note to existing deal', prompt: 'Add a note to the most recent open deal for {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}}) saying: "Customer requested pricing on 3-year vs 5-year licensing."' },
   { id: 'task_44', tier: 'medium', name: 'Follow-up task on contact', prompt: 'Find the contact John Smith at Stratus Information Systems and create a follow-up task due next Friday with subject "Pricing follow-up"' },
   { id: 'task_45', tier: 'medium', name: 'Rename a deal', prompt: '[Active Zoho page: Deals 2570562000400000001]\nRename this deal to "Stratus Information Systems - Q2 2026 MR Refresh"', expected: ['zoho_update_record'] },
   { id: 'task_46', tier: 'medium', name: 'Create contact under existing account', prompt: 'Create a new contact under the Stratus Information Systems account: first name Alice, last name Tremblay, email alice@stratusinfosystems.com, phone 404-555-0134', expected: ['zoho_create_record'] },
   { id: 'task_47', tier: 'qa_medium', name: 'Refuse Stage = Closed (Won)', prompt: '[Active Zoho page: Deals 2570562000400000001]\nChange the stage on this deal to "Closed (Won)". Note: "Closed (Won)" is blocked by the CRM — you should refuse this request and explain why, not call any update tool.', forbidden: ['zoho_update_record'] },
-  { id: 'task_48', tier: 'medium', name: 'Expired quotes', prompt: 'List open quotes for Chris Graves (owner 2570562000141711002) where Valid_Till is in the past (before today, 2026-04-20)', expected: ['zoho_search_records'] },
+  { id: 'task_48', tier: 'medium', name: 'Expired quotes', prompt: 'List open quotes for {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}}) where Valid_Till is in the past (before today, 2026-04-20)', expected: ['zoho_search_records'] },
   { id: 'task_49', tier: 'complex', name: 'Create deal+quote with Cisco rep referral', prompt: 'Create a deal and quote for Acme Corp: 10x MR46 access points and 2x MX75 firewalls with 3-year licenses. The Cisco rep who referred this is jacporti@cisco.com. Use Lead_Source "Meraki ISR Referal".', expected: ['create_deal_and_quote'] },
-  { id: 'task_50', tier: 'complex', name: 'Clone quote, swap hardware SKU', prompt: 'Find the most recent quote for Chris Graves, clone it, and swap the MR44 line items for MR46 while keeping the same quantities', expected: ['zoho_search_records'] },
-  { id: 'task_51', tier: 'complex', name: 'Add line items to existing quote', prompt: 'Find the most recent open quote for Chris Graves and add 5x MS225-24P with matching MS225-24P 3-year licenses to it. Remember Quoted_Items: Quantity must be inside each line item, not on the root quote object.' },
+  { id: 'task_50', tier: 'complex', name: 'Clone quote, swap hardware SKU', prompt: 'Find the most recent quote for {{OWNER_DISPLAY_NAME}}, clone it, and swap the MR44 line items for MR46 while keeping the same quantities', expected: ['zoho_search_records'] },
+  { id: 'task_51', tier: 'complex', name: 'Add line items to existing quote', prompt: 'Find the most recent open quote for {{OWNER_DISPLAY_NAME}} and add 5x MS225-24P with matching MS225-24P 3-year licenses to it. Remember Quoted_Items: Quantity must be inside each line item, not on the root quote object.' },
   { id: 'task_52', tier: 'complex', name: 'Remove a line item from existing quote', prompt: '[Active Zoho page: Quotes 2570562000399909180]\nRemove the LIC-ENT-1YR line item from this quote. Keep all other line items unchanged.', expected: ['zoho_update_record'] },
   { id: 'task_53', tier: 'complex', name: 'Change line-item quantity', prompt: '[Active Zoho page: Quotes 2570562000399909180]\nChange the quantity on the first line item (the MR46 hardware) to 25. The MR46 license quantity should match. Other line items unchanged.', expected: ['zoho_update_record'] },
   { id: 'task_54', tier: 'complex', name: 'Create deal with inline billing address', prompt: 'Create a deal + quote for Hillcrest Medical Group: 3x MX105 firewalls with 5-year licenses. Billing address: 250 Peachtree St NE, Atlanta, GA 30303. Lead_Source "Stratus Referal".', expected: ['create_deal_and_quote'] },
   { id: 'task_55', tier: 'complex', name: 'Find matching sales order for PO', prompt: 'A weborder came in with PO number "PO-2026-04-ACME-001". Find the Sales_Order in Zoho that matches this PO and tell me which deal it belongs to.', expected: ['zoho_search_records'] },
   { id: 'task_56', tier: 'complex', name: 'Assign Cisco rep via @cisco.com email', prompt: 'Assign the Cisco rep jacporti@cisco.com as the Meraki ISR on deal 2570562000400000001. Remember: Cisco reps are NOT in Contacts — they live in Meraki_ISRs.', expected: ['assign_cisco_rep_to_deal'], forbidden: ['zoho_search_records'] },
   { id: 'task_57', tier: 'complex', name: 'Submit DID to Velocity Hub', prompt: 'Deal 2570562000400000001 just generated CCW Deal Number 12345678 in Zoho. Submit that DID to Velocity Hub for deal approval.', expected: ['velocity_hub_submit'] },
-  { id: 'task_58', tier: 'complex', name: 'Deals with quote but no sales order', prompt: 'Find Chris Graves\'s (owner 2570562000141711002) open deals that have a related quote but no related Sales_Order, and list them.', expected: ['zoho_search_records'] },
-  { id: 'task_59', tier: 'complex', name: 'Closed-won deals missing FU30 task', prompt: 'Find any Closed (Won) deals for Chris Graves (owner 2570562000141711002) that do not have a follow-up task with "FU30" or "30-day" in the subject', expected: ['zoho_search_records'] },
+  { id: 'task_58', tier: 'complex', name: 'Deals with quote but no sales order', prompt: 'Find {{OWNER_DISPLAY_NAME}}\'s (owner {{OWNER_ZOHO_ID}}) open deals that have a related quote but no related Sales_Order, and list them.', expected: ['zoho_search_records'] },
+  { id: 'task_59', tier: 'complex', name: 'Closed-won deals missing FU30 task', prompt: 'Find any Closed (Won) deals for {{OWNER_DISPLAY_NAME}} (owner {{OWNER_ZOHO_ID}}) that do not have a follow-up task with "FU30" or "30-day" in the subject', expected: ['zoho_search_records'] },
   { id: 'task_60', tier: 'complex', name: 'Active-page update with skip-search', prompt: '[Active Zoho page: Deals 2570562000400000001]\nOn the current deal, update the Amount to 87,500 and the Closing_Date to 2026-05-30', expected: ['zoho_update_record'], forbidden: ['zoho_search_records'] },
   { id: 'task_61', tier: 'qa_simple', name: 'Approximate list price (no tool)', prompt: 'Roughly what is the list price of a Meraki MS125-48FP switch? A ballpark is fine.' },
   { id: 'task_62', tier: 'qa_simple', name: 'Territory ownership (unknown)', prompt: 'Who is the Cisco ISR that owns the "West SLED" territory? Just tell me if you don\'t know — don\'t search Zoho, it wouldn\'t be in there.' },
@@ -20009,6 +20015,7 @@ function normalizeMerakiIsrPayload(module_name, data) {
 
 export default {
   async fetch(request, env, ctx) {
+    if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL;
     // Load KV-cached live prices (if available from daily cron refresh)
     // This is fast: reads KV once, then cached in-memory for 5 minutes per isolate
     if (env.CONVERSATION_KV) {
@@ -20835,7 +20842,7 @@ async function enrichCompanyV2(rawDomain, opts) {
                 body: JSON.stringify({
                   model: 'claude-sonnet-4-6',
                   max_tokens: 500,
-                  system: `You are a concise email analyzer for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
+                  system: `You are a concise email analyzer for a Stratus Information Systems sales rep (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
 {
   "summary": "2-3 sentence summary of the email",
   "urgency": "low|medium|high",
@@ -21082,7 +21089,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
               body: JSON.stringify({
                 model: 'claude-sonnet-4-6',
                 max_tokens: 1500,
-                system: `You are drafting email replies for Chris Graves, Regional Sales Director at Stratus Information Systems (Cisco/Meraki exclusive reseller specializing in Meraki). Write in Chris's voice:
+                system: `You are drafting email replies for a Stratus Information Systems sales rep (Cisco/Meraki exclusive reseller specializing in Meraki). Write in a friendly, consultative voice:
 
 STYLE RULES:
 - Personable, consultative, and concise
@@ -21678,7 +21685,7 @@ CRITICAL URL RULES:
 
               // Call Claude with vision (reuse existing askClaude)
               const imageData = { base64: resolvedBase64, mediaType: resolvedMediaType };
-              const claudeResponse = await askClaude(dashPrompt, 'gmail-addon-dashboard', env, imageData);
+              const claudeResponse = await askClaude(dashPrompt, 'dashboard', env, imageData);
 
               // WS2: parse the LICENSE_DASHBOARD_PARSE_V1 block into structured
               // SKUs + metadata, then build the deterministic license-renewal quote
@@ -23334,21 +23341,6 @@ CRITICAL URL RULES:
             } catch (err) {
               apiResult = { error: 'Usage fetch failed: ' + err.message };
             }
-            break;
-          }
-
-          case '/api/register-space': {
-            const { userEmail: regEmail, spaceName: regSpaceName } = apiBody;
-            if (!regEmail || !regSpaceName) {
-              apiResult = { error: 'userEmail and spaceName are required' };
-              break;
-            }
-            await env.CONVERSATION_KV.put(
-              `gchat_dm_space:${regEmail.toLowerCase().trim()}`,
-              regSpaceName,
-              { expirationTtl: 86400 * 365 }
-            );
-            apiResult = { success: true, registered: { userEmail: regEmail, spaceName: regSpaceName } };
             break;
           }
 
@@ -26445,6 +26437,7 @@ Return ONLY a JSON object (no markdown, no explanation):
   },
 
   async scheduled(event, env, ctx) {
+    if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL;
     const startTime = Date.now();
     console.log(`[PRICE-CRON] Starting daily price refresh at ${new Date().toISOString()}`);
 
@@ -26917,7 +26910,7 @@ Return ONLY a JSON object (no markdown, no explanation):
           // Look up the configured operator's DM space from KV (auto-registered
           // on first DM). PRICE_CRON_NOTIFY_EMAIL is set in wrangler.toml [vars]
           // so corp can override without code changes.
-          const notifyEmail = (env.PRICE_CRON_NOTIFY_EMAIL || 'chrisg@stratusinfosystems.com').toLowerCase();
+          const notifyEmail = (env.PRICE_CRON_NOTIFY_EMAIL || '').toLowerCase();
           const notifyDmSpace = await kv.get(`gchat_dm_space:${notifyEmail}`);
           if (notifyDmSpace) {
             await sendAsyncGChatMessage(notifyDmSpace, text, null, env);
