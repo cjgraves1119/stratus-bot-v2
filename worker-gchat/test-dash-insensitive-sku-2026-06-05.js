@@ -30,7 +30,7 @@ function loadLookups(workerDir, tag, exportNames) {
 }
 
 // Any prices access here is the in-process static catalog — ZERO network/API calls.
-const G = loadLookups('worker-gchat', 'gch', ['resolveCatalogSku', 'getPrice', 'dashInsensitiveCatalogKey', 'prices']);
+const G = loadLookups('worker-gchat', 'gch', ['resolveCatalogSku', 'getPrice', 'dashInsensitiveCatalogKey', 'resolveCachedProduct', 'prices']);
 const W = loadLookups('worker', 'wbx', ['getPrice', 'dashInsensitiveCatalogKey', 'prices']);
 
 const MOUNTS = [
@@ -54,6 +54,13 @@ console.log('── worker-gchat: getPrice dash-insensitive ──');
 for (const [dashless, canonical] of MOUNTS) {
   const p = G.getPrice(dashless);
   ok(p && p.zoho_product_id === G.prices[canonical].zoho_product_id, `getPrice(${dashless}) → ${canonical} entry`);
+}
+
+console.log('── worker-gchat: resolveCachedProduct (the shared intercept resolver — Products/WooProducts search, compound staging, live pricing all route through this) ──');
+for (const [dashless, canonical] of MOUNTS) {
+  const r = G.resolveCachedProduct(dashless);
+  ok(r.key === canonical && r.entry && r.entry.zoho_product_id === G.prices[canonical].zoho_product_id,
+    `resolveCachedProduct(${dashless}) → {key:${canonical}, entry w/ zoho_product_id} (intercepts now resolve dashless → cache hit, no live CRM search)`);
 }
 
 console.log('── worker (webex): getPrice dash-insensitive (parity) ──');
