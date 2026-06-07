@@ -927,12 +927,18 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
   }
   const dueDateStr = taskDueDate.toISOString().split('T')[0];
+  // Fail closed: never POST Owner.id='' — Zoho would silently attribute the task to the API-token
+  // user. Personal/corp both set SYSTEM_OWNER_ID, so this only trips on a misconfigured deploy.
+  const _taskOwnerId = ownerId || (env && env.SYSTEM_OWNER_ID) || '';
+  if (!_taskOwnerId) {
+    return { success: false, taskId: null, taskUrl: null, dueDate: dueDateStr, error: 'No owner id resolved (SYSTEM_OWNER_ID unset) — refused to avoid API-token attribution', retried: false, http_classified: 'validation' };
+  }
   const taskData = {
     Subject: `Follow up - ${subjectLabel || `Deal ${dealId}`}`,
     Due_Date: dueDateStr,
     Status: 'Not Started',
     Priority: 'Normal',
-    Owner: { id: ownerId || (env && env.SYSTEM_OWNER_ID) || '' },
+    Owner: { id: _taskOwnerId },
     What_Id: { id: dealId },
     $se_module: 'Deals'
   };
@@ -6370,7 +6376,10 @@ async function ensureUsersTable(db) {
 async function getOwnerContext(env, callerEmail) {
   const sysOwner = (env && env.SYSTEM_OWNER_ID) || '';
   if (!callerEmail) {
-    return { zoho_user_id: sysOwner, display_name: 'Stratus AI', email: null, _source: 'system' };
+    // No caller resolved → fall back to the deploy's configured owner NAME so customer-facing
+    // text (email sign-offs, quote headers) still reads the rep's name, not a neutral default.
+    // Each deploy sets SYSTEM_OWNER_NAME in wrangler.toml [vars]; unset → "Stratus AI".
+    return { zoho_user_id: sysOwner, display_name: (env && env.SYSTEM_OWNER_NAME) || 'Stratus AI', email: null, _source: 'system' };
   }
   const lower = String(callerEmail).toLowerCase();
   const cached = _ownerCache.get(lower);
@@ -17382,6 +17391,7 @@ export class CrmWorkflow extends WorkflowEntrypoint {
     }
 
     const env = this.env;
+    if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL; // 1:1 corp port: route Claude through the deploy's gateway
     const workflowStart = Date.now();
     console.log(`[WORKFLOW] Starting CRM workflow for: "${(text || '').substring(0, 80)}..."`);
 
@@ -17603,6 +17613,7 @@ async function logQuotePoWorkflowRun(env, {
 export class QuotePoWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     const env = this.env;
+    if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL; // 1:1 corp port
     const payload = event?.payload || {};
     const workflowId = payload.workflow_id;
     const quoteId = payload.quote_id;
@@ -25582,6 +25593,12 @@ Return ONLY a JSON object (no markdown, no explanation):
           });
         }
 
+        // Attribute CRM/email actions + customer-facing sign-offs to the GChat sender. HTTP paths
+        // set __CALLER_EMAIL from the x-user-email header; the webhook path must propagate the
+        // event sender's email the same way, else owner resolution falls back to the system owner.
+        const _gchatSender = event.message?.sender?.email || event.user?.email;
+        if (_gchatSender && String(_gchatSender).includes('@')) env.__CALLER_EMAIL = String(_gchatSender).toLowerCase().trim();
+
         // Save full event structure (without auth tokens to save space)
         const debugEvent = JSON.parse(rawBody);
         delete debugEvent.authorizationEventObject;
@@ -26310,6 +26327,7 @@ Return ONLY a JSON object (no markdown, no explanation):
   // The webhook handler produces a message with the work payload; this
   // consumer picks it up and runs the full agentic CRM loop.
   async queue(batch, env) {
+    if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL; // 1:1 corp port: route Claude through the deploy's gateway
     for (const msg of batch.messages) {
       const queueStart = Date.now();
       const { text, personId, spaceName, threadName, imageData } = msg.body;
