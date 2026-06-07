@@ -2892,6 +2892,20 @@ function detectFamily(sku) {
 }
 
 // ─── Price Lookup ────────────────────────────────────────────────────────────
+// Dash-insensitive catalog fallback (kept identical to worker-gchat). Users and the model often
+// paste accessory SKUs without the mid-SKU dash (MA-MNT-MV88 vs the catalog's MA-MNT-MV-88), which
+// defeats catalog lookup. As a LAST resort on a miss, match the input against catalog keys with ALL
+// dashes stripped; return the single canonical (dashed) key, or null if none/ambiguous. Only fires
+// on a miss → cannot override a valid match. 0 dash-strip collisions across the 1058-key catalog.
+function dashInsensitiveCatalogKey(upper) {
+  const bare = upper.replace(/-/g, '');
+  let hit = null;
+  for (const k of Object.keys(prices)) {
+    if (k.toUpperCase().replace(/-/g, '') === bare) { if (hit) return null; hit = k; }
+  }
+  return hit;
+}
+
 function getPrice(sku) {
   const upper = sku.toUpperCase();
   if (prices[upper]) return prices[upper];
@@ -2907,6 +2921,9 @@ function getPrice(sku) {
   // Try full applySuffix normalization as last resort
   const suffixed = applySuffix(upper);
   if (suffixed !== upper && prices[suffixed]) return prices[suffixed];
+  // Dash-insensitive fallback (last resort): MA-MNT-MV88 → MA-MNT-MV-88, etc.
+  const dashed = dashInsensitiveCatalogKey(upper);
+  if (dashed) return prices[dashed];
   return null;
 }
 

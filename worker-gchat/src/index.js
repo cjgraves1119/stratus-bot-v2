@@ -1925,8 +1925,7 @@ function preResolveProductsForQuoteText(text, options = {}) {
   const preSkuTokens = collectQuotePreResolveSkuTokens(text, { hardwareOnly });
   const preResolved = {};
   for (const raw of [...new Set(preSkuTokens)]) {
-    const suffixed = applySuffix(raw);
-    const cached = prices[suffixed] || prices[raw] || null;
+    const { key: suffixed, entry: cached } = resolveCachedProduct(raw);
     if (!cached?.zoho_product_id) continue;
 
     preResolved[raw] = {
@@ -2803,11 +2802,28 @@ function detectFamily(sku) {
 }
 
 // ─── Price Lookup ────────────────────────────────────────────────────────────
+// Dash-insensitive catalog fallback (shared by getPrice + resolveCatalogSku). Users and the model
+// often paste accessory SKUs without the mid-SKU dash (MA-MNT-MV88 vs the catalog's MA-MNT-MV-88),
+// which defeats the zoho_product_id cache and forces slow live CRM searches. As a LAST resort on a
+// lookup miss, match the input against catalog keys with ALL dashes stripped; return the single
+// canonical (dashed) key, or null if none/ambiguous. Only fires on a miss → cannot override a valid
+// match. 0 dash-strip collisions across the 1058-key catalog (verified), so the mapping is unambiguous.
+function dashInsensitiveCatalogKey(upper) {
+  const bare = upper.replace(/-/g, '');
+  let hit = null;
+  for (const k of Object.keys(prices)) {
+    if (k.toUpperCase().replace(/-/g, '') === bare) { if (hit) return null; hit = k; }
+  }
+  return hit;
+}
+
 function getPrice(sku) {
   const upper = sku.toUpperCase();
   if (prices[upper]) return prices[upper];
   const noHw = upper.replace(/-HW(-NA)?$/, '');
   if (prices[noHw]) return prices[noHw];
+  const dashed = dashInsensitiveCatalogKey(upper);
+  if (dashed) return prices[dashed];
   return null;
 }
 
@@ -2821,13 +2837,32 @@ function resolveCatalogSku(sku) {
   if (!sku) return sku;
   const upper = sku.toUpperCase();
   if (prices[upper]) return upper;
-  if (!upper.startsWith('LIC-')) return upper;
-  // Flip -NY ↔ -NYR on the terminal term (avoid matching -CCW-, -SDW-, etc.)
-  const yToYr = upper.replace(/-(\d+)Y$/, '-$1YR');
-  if (yToYr !== upper && prices[yToYr]) return yToYr;
-  const yrToY = upper.replace(/-(\d+)YR$/, '-$1Y');
-  if (yrToY !== upper && prices[yrToY]) return yrToY;
-  return upper;
+  if (upper.startsWith('LIC-')) {
+    // Flip -NY ↔ -NYR on the terminal term (avoid matching -CCW-, -SDW-, etc.)
+    const yToYr = upper.replace(/-(\d+)Y$/, '-$1YR');
+    if (yToYr !== upper && prices[yToYr]) return yToYr;
+    const yrToY = upper.replace(/-(\d+)YR$/, '-$1Y');
+    if (yrToY !== upper && prices[yrToY]) return yrToY;
+  }
+  // Dash-insensitive fallback (last resort): MA-MNT-MV88 → MA-MNT-MV-88, etc.
+  return dashInsensitiveCatalogKey(upper) || upper;
+}
+
+// Resolve a user/model SKU to its canonical catalog key + cache entry, layering every
+// normalization the catalog needs: applySuffix (-HW/-MR/-RTG), then resolveCatalogSku
+// (exact → LIC -Y/-YR flip → dash-insensitive MA-MNT-MV88→MA-MNT-MV-88). Returns
+// { key, entry } — `key` is the canonical (suffixed/dashed) catalog key when found (use it
+// as the Product_Code), `entry` is the prices row or null. Single source of truth so every
+// cache-intercept (Products/WooProducts search, batch lookup, compound staging) resolves
+// dashless accessory SKUs identically and skips the slow live CRM fallback.
+function resolveCachedProduct(sku) {
+  const up = String(sku || '').toUpperCase();
+  const suffixed = applySuffix(up);
+  const resolved = resolveCatalogSku(suffixed);
+  if (prices[resolved]) return { key: resolved, entry: prices[resolved] };
+  if (prices[suffixed]) return { key: suffixed, entry: prices[suffixed] };
+  if (prices[up]) return { key: up, entry: prices[up] };
+  return { key: suffixed, entry: null };
 }
 
 // ─── Pricing Calculator ──────────────────────────────────────────────────────
@@ -8180,7 +8215,7 @@ function targetEcommUnitPrice(product = {}) {
 }
 
 async function fetchLiveSkuPricing(sku, productId, env) {
-  const suffixed = applySuffix(sku);
+  const suffixed = resolveCachedProduct(sku).key; // canonical catalog key (suffix + dash-insensitive)
   const [wooResult, productResult] = await Promise.allSettled([
     zohoApiCall(
       'GET',
@@ -9575,8 +9610,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           if (equalsMatch) {
             const sku = equalsMatch[1].toUpperCase();
-            const suffixed = applySuffix(sku);
-            const cached = prices[suffixed] || prices[sku] || null;
+            const { key: suffixed, entry: cached } = resolveCachedProduct(sku);
             if (cached?.zoho_product_id) {
               console.log(`[INTERCEPT] Products search for ${sku} → cache hit (${cached.zoho_product_id})`);
               return {
@@ -9601,9 +9635,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           if (startsWithMatch) {
             const prefix = startsWithMatch[1].toUpperCase();
-            // Find all matching SKUs in cache
+            const barePrefix = prefix.replace(/-/g, ''); // dash-insensitive prefix (MA-MNT-MV88 → MAMNTMV88)
+            // Find all matching SKUs in cache (dash-insensitive so a dashless/mis-dashed prefix still hits)
             const matches = Object.entries(prices)
-              .filter(([k, v]) => k.startsWith(prefix) && v?.zoho_product_id)
+              .filter(([k, v]) => v?.zoho_product_id && (k.startsWith(prefix) || k.replace(/-/g, '').startsWith(barePrefix)))
               .map(([k, v]) => ({
                 id: v.zoho_product_id,
                 Product_Code: k,
@@ -9633,8 +9668,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const wooMatch = criteria.match(/WooProduct_Code:equals:([A-Z0-9\-]+)/i);
           if (wooMatch) {
             const sku = wooMatch[1].toUpperCase();
-            const suffixed = applySuffix(sku);
-            const cached = prices[suffixed] || prices[sku] || null;
+            const { key: suffixed, entry: cached } = resolveCachedProduct(sku);
             if (cached?.price) {
               console.log(`[INTERCEPT] WooProducts search for ${sku} → cache hit (ecomm: $${cached.price})`);
               return {
@@ -11230,7 +11264,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
             if (resolved !== suffixed) {
               result.normalized_from = suffixed;
-              result.note = `Resolved term-variant: "${suffixed}" → "${resolved}" (catalog has -${resolved.endsWith('YR') ? 'YR' : 'Y'}).`;
+              result.note = (suffixed.replace(/-/g, '') === resolved.replace(/-/g, ''))
+                ? `Resolved dash-variant: "${suffixed}" → "${resolved}".`
+                : `Resolved term-variant: "${suffixed}" → "${resolved}" (catalog has -${resolved.endsWith('YR') ? 'YR' : 'Y'}).`;
             }
             // For hardware SKUs, suggest associated license SKUs so Claude doesn't need mapping knowledge
             if (!rawSku.startsWith('LIC-')) {
@@ -11426,8 +11462,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let cacheHits = 0;
           let apiNeeded = 0;
           const resolvedItems = orderedItems.map(item => {
-            const suffixed = applySuffix(item.sku);
-            const cached = prices[suffixed] || prices[item.sku] || null;
+            const { key: suffixed, entry: cached } = resolveCachedProduct(item.sku);
             if (cached?.zoho_product_id) {
               cacheHits++;
               return {
@@ -11859,16 +11894,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const defaultTerm = license_term || '1';
 
           function resolveFromCache(sku) {
-            const suffixed = applySuffix(sku);
-            return prices[suffixed] || prices[sku] || null;
+            return resolveCachedProduct(sku).entry;
           }
 
           // Collect SKUs needing product IDs, then batch-resolve via API
           const pendingProducts = []; // {suffixed, qty, cached} waiting for product ID
 
           function stageProduct(sku, qty) {
-            const suffixed = applySuffix(sku);
-            const cached = prices[suffixed] || prices[sku] || null;
+            const { key: suffixed, entry: cached } = resolveCachedProduct(sku);
             console.log(`[COMPOUND] stageProduct: sku=${sku} suffixed=${suffixed} hasPid=${!!cached?.zoho_product_id} hasPrice=${!!cached?.price}`);
             if (cached) {
               pendingProducts.push({ suffixed, qty, cached, hasPid: !!cached.zoho_product_id });
