@@ -9635,9 +9635,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           if (startsWithMatch) {
             const prefix = startsWithMatch[1].toUpperCase();
-            // Find all matching SKUs in cache
+            const barePrefix = prefix.replace(/-/g, ''); // dash-insensitive prefix (MA-MNT-MV88 → MAMNTMV88)
+            // Find all matching SKUs in cache (dash-insensitive so a dashless/mis-dashed prefix still hits)
             const matches = Object.entries(prices)
-              .filter(([k, v]) => k.startsWith(prefix) && v?.zoho_product_id)
+              .filter(([k, v]) => v?.zoho_product_id && (k.startsWith(prefix) || k.replace(/-/g, '').startsWith(barePrefix)))
               .map(([k, v]) => ({
                 id: v.zoho_product_id,
                 Product_Code: k,
