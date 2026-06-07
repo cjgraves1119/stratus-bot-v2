@@ -30,7 +30,11 @@ BOT_ADDRESS_GUARD_ENABLED = "true"
 # price-cron Google Chat DM. Both default to Chris on personal so behavior is
 # identical; corp will override with corp-side IDs.
 SYSTEM_OWNER_ID = "2570562000141711002"
+SYSTEM_OWNER_EMAIL = "chrisg@stratusinfosystems.com"
+SYSTEM_OWNER_NAME = "Chris Graves"
 PRICE_CRON_NOTIFY_EMAIL = "chrisg@stratusinfosystems.com"
+# Anthropic CF AI Gateway URL — env-overridable so the code ports 1:1 to corp (corp sets its own account).
+ANTHROPIC_GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages"
 # GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
 #
 # ─── CRM & Email Agent Secrets (POC) ───

@@ -13,6 +13,9 @@ compatibility_date = "2024-01-01"
 # break strict equality checks. Toggle "true"/"false" here, push to redeploy.
 USE_PRODUCT_INFO_WATERFALL = "true"
 
+# Anthropic CF AI Gateway URL — env-overridable so the code ports 1:1 to corp (corp sets its own account).
+ANTHROPIC_GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages"
+
 # ── D1 Database: Analytics & history ─────────────────────────────────
 # Quote history, bot usage analytics, CRM operation log, pricing history
 [[d1_databases]]

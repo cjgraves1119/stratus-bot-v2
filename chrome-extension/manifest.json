@@ -24,6 +24,8 @@
     "https://mail.google.com/*",
     "https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev/*",
     "https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev/*",
+    "https://stratus-ai-bot-gateway.it-262.workers.dev/*",
+    "https://stratus-ai-bot-gchat.it-262.workers.dev/*",
     "https://accounts.zoho.com/*",
     "https://www.zohoapis.com/*",
     "https://crm.zoho.com/*"

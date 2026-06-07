@@ -15,7 +15,10 @@
 // ─── Cloudflare AI Gateway ──────────────────────────────────────────────────
 // Routes Anthropic API calls through CF AI Gateway for caching, analytics,
 // and rate limiting. Dashboard: dash.cloudflare.com > AI > AI Gateway
-const ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
+// env-overridable for one-to-one portability across deployments: the entry points set this
+// from env.ANTHROPIC_GATEWAY_URL (deterministic per deploy). The literal is a backward-compat
+// default for the personal account only.
+let ANTHROPIC_API_URL = 'https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages';
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions';
 
 // ─── Data Imports (embedded at build time by wrangler) ──────────────────────
@@ -8009,6 +8012,7 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
 // ─── Main Worker Entry Point ─────────────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
+    if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL;
     // Load KV-cached live prices (written by GChat worker's daily cron)
     await loadLivePrices(env);
 

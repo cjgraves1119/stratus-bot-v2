@@ -6,7 +6,12 @@
 // Gateway transparently forwards non-chat /api/* paths to the main worker.
 // ROLLBACK: change to 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev' to
 // revert to the original Claude-only path. No other code changes needed.
-export const API_BASE = 'https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev';
+// API_BASE is overridable at build time via webpack DefinePlugin (STRATUS_API_BASE) or a
+// global, so one bundle works for personal and corporate. Falls back to the personal-account
+// gateway for backward compat.
+export const API_BASE = (typeof STRATUS_API_BASE !== 'undefined' && STRATUS_API_BASE)
+  || (typeof globalThis !== 'undefined' && globalThis.STRATUS_API_BASE)
+  || 'https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev';
 
 export const ZOHO = {
   ORG_URL: 'https://crm.zoho.com/crm/org647122552',
