@@ -25597,7 +25597,8 @@ Return ONLY a JSON object (no markdown, no explanation):
         // set __CALLER_EMAIL from the x-user-email header; the webhook path must propagate the
         // event sender's email the same way, else owner resolution falls back to the system owner.
         const _gchatSender = event.message?.sender?.email || event.user?.email;
-        if (_gchatSender && String(_gchatSender).includes('@')) env.__CALLER_EMAIL = String(_gchatSender).toLowerCase().trim();
+        // Set OR clear (env is reused across requests in an isolate — don't let a prior caller leak in).
+        env.__CALLER_EMAIL = (_gchatSender && String(_gchatSender).includes('@')) ? String(_gchatSender).toLowerCase().trim() : null;
 
         // Save full event structure (without auth tokens to save space)
         const debugEvent = JSON.parse(rawBody);
