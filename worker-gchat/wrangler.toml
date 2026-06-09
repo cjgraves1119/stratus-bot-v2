@@ -9,9 +9,9 @@ compatibility_date = "2024-01-01"
 
 [vars]
 
-# V3 model-intent quoting kill-switch. Default OFF — V3 stays dormant until flipped.
-# Flip via: wrangler secret put CF_QUOTE_V3_ENABLED  (secret overrides this var), or set "true" here + redeploy.
-CF_QUOTE_V3_ENABLED = "false"
+# V3 model-intent quoting kill-switch. NOT a var (would enable corp too) — set per-deploy as a
+# SECRET so personal can be on while corp stays off. Absent secret => undefined => OFF (safe default).
+# Enable:  wrangler secret put CF_QUOTE_V3_ENABLED   (value: true)   Disable: wrangler secret delete CF_QUOTE_V3_ENABLED
 # Non-secret config (secrets set via `wrangler secret put`)
 # ANTHROPIC_API_KEY = set via wrangler secret
 # DEEPSEEK_API_KEY = set via wrangler secret
