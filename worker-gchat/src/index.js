@@ -3960,6 +3960,90 @@ function hasOtherQuoteSkuForSme(upper) {
   return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
 }
 
+// ─── Per-item (per-clause) intent ─────────────────────────────────────────────
+// Bug #2: license/hardware intent is detected globally but users express it
+// per clause ("6 mr AND 1 mx84 license renewal AND 1 CW9172I hardware only").
+// Segment the message into clauses on connectors, map each found item to its
+// clause by character position, and attach a per-item {hardwareOnly,licenseOnly}
+// override. Items in a clause with no explicit intent inherit the global modifier
+// ONLY when a single intent type appears in the first/last clause (a list-level
+// modifier like leading "renewal for …" / trailing "… licenses"); a lone intent
+// in an interior clause stays attached to its own item, and a hardware/license
+// conflict makes intent-less items NORMAL. If NO clause has explicit intent the
+// items are left untouched (undefined) so plain quotes behave exactly as before.
+function assignClauseIntent(items, upper, modifiers) {
+  if (!items || items.length === 0) return;
+  // Build clause char-ranges by splitting on connectors: AND, PLUS, comma,
+  // semicolon, newline. Each range is [start,end) over `upper`.
+  const clauses = [];
+  const sepRe = /(\s+AND\s+|\s+PLUS\s+|\s+THEN\s+|,|;|\n)/g;
+  let last = 0, mm;
+  while ((mm = sepRe.exec(upper)) !== null) {
+    clauses.push({ start: last, end: mm.index, text: upper.slice(last, mm.index) });
+    last = mm.index + mm[0].length;
+  }
+  clauses.push({ start: last, end: upper.length, text: upper.slice(last) });
+
+  // Hardware intent: an explicit "hardware only"/"hw only"/"without license" phrase,
+  // OR a bare "hardware" used as an ITEM QUALIFIER — trailing the clause ("add MR44
+  // hardware") or "hardware for …". Deliberately NOT matching "hardware <noun>"
+  // (e.g. "hardware support/specs/model"), which is descriptive, not hardware-only
+  // intent — so a license is never dropped on those.
+  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE))\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
+  const LIC_RE = /\b(LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|RENEWAL[S]?|RENEW)\b/;
+  for (const c of clauses) {
+    c.hardwareOnly = HW_ONLY_RE.test(c.text);
+    c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text);
+  }
+
+  const anyExplicit = clauses.some(c => c.hardwareOnly || c.licenseOnly);
+  if (!anyExplicit) return; // plain quote → leave items untouched (unchanged behavior)
+
+  const hasHW = clauses.some(c => c.hardwareOnly);
+  const hasLic = clauses.some(c => c.licenseOnly);
+  // Detect a genuinely LIST-LEVEL license modifier (vs an item-attached one): a
+  // leading "renewal / license … for …" phrase, or a trailing bare "… licenses" /
+  // "… renewal" word. Only these legitimately cover items whose own clause has no
+  // intent. Hardware intent is ALWAYS item-attached (there is no list-level hardware
+  // trigger), and an item-attached license like "1 MR44 license renewal and 1 CW9172I"
+  // must NOT leak onto the other item — so intent-less items there quote NORMALLY,
+  // independent of clause order.
+  const LIC = `(?:LICEN[SC]E|LISCEN[SC]E|LICESE)S?`;
+  const leadingListLicense = new RegExp(`^\\s*(QUOTE\\s+)?(ENT(?:ERPRISE)?\\s+)?(?:${LIC}|RENEWAL[S]?|RENEW)\\b`).test(upper);
+  const trailingListLicense = new RegExp(`\\b(ENT(?:ERPRISE)?\\s+)?(?:${LIC}|RENEWAL[S]?)\\s*$`).test(upper.trim());
+  const inheritGlobalLicense = hasLic && !hasHW && (leadingListLicense || trailingListLicense);
+  // Symmetric list-level HARDWARE: a leading "hardware for …" / "hardware only for …"
+  // covers every item (mirror of leading "license for …"). Trailing "… hardware" stays
+  // item-attached (so "renew MX67 then add MR44 hardware" keeps MR44 local).
+  const leadingListHardware = /^\s*(QUOTE\s+)?(HARDWARE\s+ONLY\s+FOR|HARDWARE\s+FOR|HW\s+FOR)\b/.test(upper);
+  const inheritGlobalHardware = hasHW && !hasLic && leadingListHardware;
+
+  const clauseFor = (pos) => {
+    if (typeof pos !== 'number') return null;
+    for (const c of clauses) { if (pos >= c.start && pos < c.end) return c; }
+    return null;
+  };
+
+  for (const item of items) {
+    const c = clauseFor(item.position);
+    if (c && c.hardwareOnly) {
+      item.hardwareOnly = true; item.licenseOnly = false;
+    } else if (c && c.licenseOnly) {
+      item.hardwareOnly = false; item.licenseOnly = true;
+    } else if (inheritGlobalLicense || inheritGlobalHardware) {
+      // Item's clause has no explicit intent, but a list-level modifier (leading
+      // "license/renewal for …" / trailing "… licenses", or leading "hardware for …")
+      // covers the whole request → inherit the global modifier.
+      item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly;
+    } else {
+      // No explicit intent on this item and no list-level modifier (or there is a
+      // hardware/license conflict, or the intent is attached to another item) →
+      // quote it NORMALLY (hardware + license).
+      item.hardwareOnly = false; item.licenseOnly = false;
+    }
+  }
+}
+
 // ─── Message Parser ──────────────────────────────────────────────────────────
 function parseMessage(text) {
   // Pre-process: convert written-out numbers to digits
@@ -4729,7 +4813,10 @@ function parseMessage(text) {
   }
 
   foundItems.sort((a, b) => a.position - b.position);
-  const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
+  const items = foundItems.map(({ baseSku, qty, position }) => ({ baseSku, qty, position }));
+  // Bug #2: attach per-clause license/hardware intent to each item (no-op for
+  // plain quotes; only mutates items when the message has explicit intent words).
+  assignClauseIntent(items, upper, modifiers);
 
   const revisionPatterns = [
     /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(LICENSE|HARDWARE|HW|AP|SWITCH|MX|MR)/,
@@ -5082,7 +5169,7 @@ function buildQuoteResponse(parsed) {
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
 
-  for (let { baseSku, qty } of parsed.items) {
+  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly } of parsed.items) {
     // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN, SME-AGN) ──
     // These are injected by the bare-family parser for "4 MR", "5 MV's", etc.
     // They bypass normal SKU validation and generate license-only items directly.
@@ -5115,7 +5202,7 @@ function buildQuoteResponse(parsed) {
           { term: '5Y', sku: 'LIC-SME-3YR' }
         ];
       }
-      const agnItem = { baseSku: family === 'SME' ? 'Systems Manager' : `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true, smeCapped: family === 'SME' };
+      const agnItem = { baseSku: family === 'SME' ? 'Systems Manager' : `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true, smeCapped: family === 'SME', hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
       resolvedItems.push(agnItem);
       ordered.push({ kind: 'resolved', ref: agnItem });
       continue;
@@ -5137,7 +5224,7 @@ function buildQuoteResponse(parsed) {
     const eol = isEol(baseSku);
     const replacement = checkEol(baseSku);
     if (eol && replacement) {
-      const eolItem = { baseSku, qty, replacement, eol: true };
+      const eolItem = { baseSku, qty, replacement, eol: true, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
       eolItems.push(eolItem);
       ordered.push({ kind: 'eol', ref: eolItem });
       continue;
@@ -5154,7 +5241,7 @@ function buildQuoteResponse(parsed) {
     }
     const hwSku = applySuffix(baseSku);
     const licenseSkus = getLicenseSkus(baseSku, requestedTier);
-    const resItem = { baseSku, hwSku, qty, licenseSkus, eol: false };
+    const resItem = { baseSku, hwSku, qty, licenseSkus, eol: false, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
     resolvedItems.push(resItem);
     ordered.push({ kind: 'resolved', ref: resItem });
   }
@@ -5241,23 +5328,33 @@ function buildQuoteResponse(parsed) {
       // licenseOnly → pure renewal ("Renew As-Is", matching the vision builder).
       // Otherwise the user asked for a regular quote that keeps the EOL gear's
       // current license alongside any non-EOL hardware → "As Quoted".
-      lines.push(modifiers.licenseOnly ? `**Option 1 - Renew As-Is:**` : `**Option 1 - As Quoted:**`);
-      lines.push('');
+      // Buffer per-term renewal URLs; only emit the Option 1 header if ≥1 URL is
+      // produced — a hardware-only EOL request suppresses every renewal license and
+      // would otherwise leave an empty "Option 1" section.
+      const opt1Lines = [];
       for (const term of terms) {
         // Emit in REQUEST order (single `ordered` list), not bucketed EOL-then-rest.
         const urlItems = [];
         for (const entry of ordered) {
+          // Per-item intent with global fallback (Bug #2). `explicitHw` is true only
+          // when THIS item carried an explicit per-clause hardware-only intent (vs
+          // inheriting the global modifier) — used so a hardware-only item still
+          // emits its hardware in the "As Quoted" view, while preserving the prior
+          // global behavior (whole-quote hardwareOnly suppresses hardware here).
+          const itHw = entry.ref.hardwareOnly ?? modifiers.hardwareOnly;
+          const itLic = entry.ref.licenseOnly ?? modifiers.licenseOnly;
+          const explicitHw = entry.ref.hardwareOnly === true;
           if (entry.kind === 'eol') {
             const { baseSku, qty } = entry.ref;
             const renewLicenses = _getEolRenewalLicenses(baseSku);
-            if (renewLicenses) {
+            if (renewLicenses && !itHw) {
               const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
               if (licSku) urlItems.push({ sku: licSku, qty });
             }
           } else {
             const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
-            if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-            if (licenseSkus && !modifiers.hardwareOnly) {
+            if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+            if (licenseSkus && !itHw) {
               const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
               if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
             }
@@ -5266,9 +5363,14 @@ function buildQuoteResponse(parsed) {
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
-          lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
-          lines.push('');
+          opt1Lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
+          opt1Lines.push('');
         }
+      }
+      if (opt1Lines.length > 0) {
+        lines.push(modifiers.licenseOnly ? `**Option 1 - Renew As-Is:**` : `**Option 1 - As Quoted:**`);
+        lines.push('');
+        lines.push(...opt1Lines);
       }
     }
 
@@ -5281,20 +5383,25 @@ function buildQuoteResponse(parsed) {
       // license at its original position; non-EOL rows carry their license forward.
       const urlItems = [];
       for (const entry of ordered) {
+        // Per-item intent with global fallback (Bug #2). See Option-1 loop for the
+        // explicitHw rationale.
+        const itHw = entry.ref.hardwareOnly ?? modifiers.hardwareOnly;
+        const itLic = entry.ref.licenseOnly ?? modifiers.licenseOnly;
+        const explicitHw = entry.ref.hardwareOnly === true;
         if (entry.kind === 'eol') {
           const { qty, replacement } = entry.ref;
           const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
           const replHwSku = applySuffix(repl);
           const replLicenses = getLicenseSkus(repl, requestedTier);
           urlItems.push({ sku: replHwSku, qty });
-          if (replLicenses && !modifiers.hardwareOnly) {
+          if (replLicenses && !itHw) {
             const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty });
           }
         } else {
           const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
-          if (!modifiers.licenseOnly && !modifiers.hardwareOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-          if (licenseSkus && !modifiers.hardwareOnly) {
+          if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !itHw) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
           }
@@ -5315,9 +5422,12 @@ function buildQuoteResponse(parsed) {
         entry.total += qty;
         entry.parts.push({ qty, source: `replacing ${baseSku}` });
       }
-      // Non-EOL hardware (only in regular quote mode, not license renewal)
-      if (!modifiers.licenseOnly) {
-        for (const { hwSku, qty } of resolvedItems) {
+      // Non-EOL hardware breakdown — show each item's HW unless it's license-only
+      // (per-item intent with global fallback, Bug #2).
+      {
+        for (const it of resolvedItems) {
+          const { hwSku, qty } = it;
+          if (it.licenseOnly ?? modifiers.licenseOnly) continue;
           if (!hwMap.has(hwSku)) hwMap.set(hwSku, { total: 0, parts: [] });
           const entry = hwMap.get(hwSku);
           entry.total += qty;
@@ -5446,9 +5556,12 @@ function buildQuoteResponse(parsed) {
     if (resolvedItems.length > 0) {
       if (parsed.showPricing) {
         const allItems = [];
-        for (const { hwSku, qty, licenseSkus, isAgnosticLicense } of resolvedItems) {
-          if (!modifiers.licenseOnly && !isAgnosticLicense) allItems.push({ sku: hwSku, qty });
-          if (licenseSkus && !modifiers.hardwareOnly) {
+        for (const it of resolvedItems) {
+          const { hwSku, qty, licenseSkus, isAgnosticLicense } = it;
+          const itHw = it.hardwareOnly ?? modifiers.hardwareOnly;
+          const itLic = it.licenseOnly ?? modifiers.licenseOnly;
+          if (!itLic && !isAgnosticLicense) allItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !itHw) {
             const licSku = licenseSkus.find(l => l.term === '3Y')?.sku;
             if (licSku) allItems.push({ sku: licSku, qty });
           }
@@ -5481,9 +5594,11 @@ function buildQuoteResponse(parsed) {
       if (parsed.showPricing) lines.push(buildPricingBlock(urlItems, true));
       lines.push('');
       noTermSplit = true;
-    } else if (modifiers.hardwareOnly) {
-      // Hardware-only: single URL (no license terms to differentiate)
-      // Skip agnostic license items (they have no hardware)
+    } else if (resolvedItems.every(it => (it.hardwareOnly ?? modifiers.hardwareOnly))) {
+      // Hardware-only: single URL (no license terms to differentiate).
+      // Only short-circuit here when EVERY item is hardware-only; mixed per-item
+      // intent (Bug #2) falls through to the default branch below, which suppresses
+      // license/hardware per item. Skip agnostic license items (they have no hardware).
       const urlItems = [];
       for (const { hwSku, qty, isAgnosticLicense } of resolvedItems) {
         if (!isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
@@ -5500,12 +5615,15 @@ function buildQuoteResponse(parsed) {
       // self-contained. Added for family-expansion output (expandFamily).
       for (const item of resolvedItems) {
         const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = item;
+        // Per-item intent with global fallback (Bug #2).
+        const itemHardwareOnly = item.hardwareOnly ?? modifiers.hardwareOnly;
+        const itemLicenseOnly = item.licenseOnly ?? modifiers.licenseOnly;
         const label = baseSku || hwSku || 'Quote';
         lines.push(`**${label} × ${qty}:**`);
         for (const term of terms) {
           const urlItems = [];
-          if (!modifiers.licenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-          if (licenseSkus) {
+          if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !itemHardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
           }
@@ -5521,9 +5639,15 @@ function buildQuoteResponse(parsed) {
     } else {
       for (const term of terms) {
         const urlItems = [];
-        for (const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } of resolvedItems) {
-          if (!modifiers.licenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
-          if (licenseSkus) {
+        for (const it of resolvedItems) {
+          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = it;
+          // Per-item intent with global fallback (Bug #2). The license push gains a
+          // !itemHardwareOnly gate so a per-item hardware-only item among licensed
+          // items emits its hardware with no license.
+          const itemHardwareOnly = it.hardwareOnly ?? modifiers.hardwareOnly;
+          const itemLicenseOnly = it.licenseOnly ?? modifiers.licenseOnly;
+          if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
+          if (licenseSkus && !itemHardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
             if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
           }
