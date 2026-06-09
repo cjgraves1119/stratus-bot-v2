@@ -48,3 +48,7 @@ binding = "AI"
 [[kv_namespaces]]
 binding = "PRICES_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
+
+# V3 model-intent quoting kill-switch. Default OFF — deploy changes nothing until flipped.
+# Flip via: wrangler secret put CF_QUOTE_V3_ENABLED  (or set here "true" + redeploy).
+CF_QUOTE_V3_ENABLED = "false"

@@ -145,3 +145,7 @@ dataset = "stratus_bot_metrics"
 [[r2_buckets]]
 binding = "BOT_STORAGE"
 bucket_name = "stratus-bot-storage"
+
+# V3 model-intent quoting kill-switch. Default OFF — deploy changes nothing until flipped.
+# Flip via: wrangler secret put CF_QUOTE_V3_ENABLED  (or set here "true" + redeploy).
+CF_QUOTE_V3_ENABLED = "false"
