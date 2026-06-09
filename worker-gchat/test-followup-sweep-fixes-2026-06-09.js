@@ -104,6 +104,15 @@ const qtys = (r, sku) => { const m = (r || '').match(new RegExp('item=([^&\\s]*)
   r = await W.handleFollowUpModifier('5 year', 'p', kvWith(SMEQ));
   ok(r && /LIC-SME-3YR/.test(r) && !/LIC-SME-5YR/.test(r), '"5 year" after SME quote → LIC-SME-3YR, NEVER LIC-SME-5YR');
   ok(r && /only in 1-year and 3-year/.test(r), '   …with the standard cap note');
+  ok(r && qtys(r, 'LIC-SME-3YR').every(q => q === 100), '   …at qty 100, NOT 200 (codex round-3: collapsed term-alternatives must dedupe, not sum)');
+
+  console.log('── codex round-3: add intent + na-bucket term safety ──');
+  r = await W.handleFollowUpModifier('add 2 MR44 hardware only', 'p', kvWith(MR44Q));
+  ok(r && qtys(r, 'MR44-HW').every(q => q === 7) && qtys(r, 'LIC-ENT-3YR')[0] === 5, '"add 2 MR44 hardware only" → hw 7, license STAYS 5 (intent honored)');
+  r = await W.handleFollowUpModifier('add 2 MR44 license only', 'p', kvWith(MR44Q));
+  ok(r && qtys(r, 'MR44-HW').every(q => q === 5) && qtys(r, 'LIC-ENT-3YR')[0] === 7, '"add 2 MR44 license only" → license 7, hw STAYS 5');
+  r = await W.handleFollowUpModifier('add 100 duo essentials', 'p', kvWith(HWONLYQ));
+  ok(r === null, 'term-bearing add into an UNLABELED (na) bucket → null (would mix terms in one URL)');
 
   console.log('── codex round-2: family prefix + qty validation ──');
   r = await W.handleFollowUpModifier('change to umbrella essentials', 'p', kvWith(DUO200));

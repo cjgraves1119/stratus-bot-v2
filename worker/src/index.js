@@ -3414,16 +3414,27 @@ async function handleFollowUpModifier(text, personId, kv) {
       if (parsed && parsed.items && parsed.items.length > 0 && !parsed.isClarification) {
         const merged = items.map(i => ({ ...i }));
         let changed = false;
+        const pMods = parsed.modifiers || {};
         for (const it of parsed.items) {
           const hwSku = applySuffix(it.baseSku);
           const tm = String(hwSku).match(/-([135])(?:YR|Y-S\d+|Y)$/i);
-          if (tm && bucketTerm != null && String(tm[1]) !== String(bucketTerm)) continue; // wrong term for this bucket
-          const existingIdx = merged.findIndex(e => e.sku.toUpperCase() === hwSku.toUpperCase());
-          if (existingIdx >= 0) merged[existingIdx].qty += it.qty;
-          else merged.push({ sku: hwSku, qty: it.qty });
-          changed = true;
-          // Pair added hardware with its co-term license (fresh-quote convention).
-          if (bucketTerm != null && !/^LIC-/i.test(hwSku)) {
+          // A term-bearing addition into an UNLABELED bucket can't be placed without mixing
+          // terms in one URL — fail closed (codex: bare prior URL + "add 100 duo essentials"
+          // produced one URL with all three Duo terms).
+          if (tm && bucketTerm == null) return null;
+          if (tm && String(tm[1]) !== String(bucketTerm)) continue; // wrong term for this bucket
+          // Honor the addition's own hardware/license intent ("add 2 MR44 hardware only").
+          const itHwOnly = (it.hardwareOnly ?? pMods.hardwareOnly) === true;
+          const itLicOnly = (it.licenseOnly ?? pMods.licenseOnly) === true;
+          if (!itLicOnly) {
+            const existingIdx = merged.findIndex(e => e.sku.toUpperCase() === hwSku.toUpperCase());
+            if (existingIdx >= 0) merged[existingIdx].qty += it.qty;
+            else merged.push({ sku: hwSku, qty: it.qty });
+            changed = true;
+          }
+          // Pair added hardware with its co-term license (fresh-quote convention) — unless the
+          // user said hardware only. license-only additions add ONLY the license.
+          if (!itHwOnly && bucketTerm != null && !/^LIC-/i.test(hwSku)) {
             let lics = null;
             try { lics = getLicenseSkus(it.baseSku); } catch { lics = null; }
             const lic = Array.isArray(lics) ? lics.find(l => l && l.term === `${bucketTerm}Y`) : null;
@@ -3431,6 +3442,9 @@ async function handleFollowUpModifier(text, personId, kv) {
               const li = merged.findIndex(e => e.sku.toUpperCase() === String(lic.sku).toUpperCase());
               if (li >= 0) merged[li].qty += it.qty;
               else merged.push({ sku: lic.sku, qty: it.qty });
+              changed = true;
+            } else if (itLicOnly) {
+              return null; // user asked for license only but none resolves — fail closed
             }
           }
         }
@@ -3495,7 +3509,15 @@ async function handleFollowUpModifier(text, personId, kv) {
       }
       if (anyTermBearing && anyFailed) return null; // fail-closed
       if (anyTermBearing && rewrittenItems.length > 0) {
-        filteredTerms = [[String(wantTerm), rewrittenItems]];
+        // The prior term buckets are ALTERNATIVES of the same line — after rewriting them all to
+        // one term they collapse to duplicates, and buildStratusUrl SUMS duplicates (codex: SME
+        // 1YR×100 + 3YR×100 + "5 year" rendered LIC-SME-3YR×200). Dedupe by SKU keeping max qty.
+        const _seen = new Map();
+        for (const it of rewrittenItems) {
+          const k = String(it.sku).toUpperCase();
+          if (!_seen.has(k) || _seen.get(k).qty < it.qty) _seen.set(k, it);
+        }
+        filteredTerms = [[String(wantTerm), [..._seen.values()]]];
       }
       // else (no term-bearing items at all): leave filteredTerms unchanged.
     }
