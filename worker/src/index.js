@@ -3250,14 +3250,24 @@ async function handleFollowUpModifier(text, personId, kv) {
   // Pure modifier phrases (no SKU tokens needed)
   const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?)\s*\.?\s*$/i.test(upper);
   const isLicOnly = /^(LICENSE[S]?\s+ONLY|LICENCE[S]?\s+ONLY|JUST\s+(THE\s+)?LICENSE[S]?|LICENSE[S]?\s+RENEWAL|RENEWAL\s+ONLY|NO\s+HARDWARE)\s*\.?\s*$/i.test(upper);
-  const isTermOnly = upper.match(/^(?:(?:CHANGE|SWAP|REPLACE)(?:\s+(?:TO|WITH|IT\s+TO))?\s+)?(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(?:A\s+)?(\d)\s*-?\s*YEAR(?:\s+(?:ONLY|PLEASE|LICENSE[S]?|TERM))?\s*\.?\s*$/i);
+  const isTermOnly = upper.match(/^(?:(?:CHANGE|SWAP|REPLACE|SWITCH|MAKE|GO)(?:\s+(?:TO|WITH\s+THE|WITH|IT\s+TO|IT|THAT|TERM\s+TO))?\s+)?(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(?:A\s+)?([135])\s*-?\s*(?:YEAR|YR)S?(?:\s+(?:ONLY|PLEASE|LICENSE[S]?|TERM))?\s*\.?\s*$/i);
   const isAddPricing = /^(ADD\s+PRICING|WITH\s+PRICING|INCLUDE\s+PRICING|SHOW\s+ME\s+PRICING|HOW\s+MUCH(\s+(IS|ARE)\s+(IT|THAT|THOSE|THIS|THESE|THEM))?\s*\??\s*)$/i.test(upper);
+  // Quantity follow-ups ("change qty to 300", "make it 300", "actually 300", "bump to 500",
+  // "double it") — sweep 2026-06-09 found ALL of these fell to the slow/nondeterministic LLM
+  // path. Handled in applyItemMutation; ambiguous numbers (1/3/5 could mean a term) fail closed.
+  const isQtyChange = /^(?:(?:CHANGE|UPDATE|SET)\s+(?:THE\s+)?(?:QTY|QUANTITY)(?:\s+TO)?\s+\d+|MAKE\s+(?:IT|THAT|THEM)\s+\d+|ACTUALLY\s+\d+|\d+\s+(?:INSTEAD|LICENSES\s+INSTEAD|USERS\s+INSTEAD|SEATS\s+INSTEAD)|(?:BUMP|INCREASE|RAISE)(?:\s+IT)?(?:\s+UP)?\s+TO\s+\d+|(?:LOWER|DROP|REDUCE)(?:\s+IT)?(?:\s+DOWN)?\s+TO\s+\d+|QTY\s*:?\s*\d+|DOUBLE\s+(?:IT|THAT)|(?:CHANGE|SWITCH)\s+TO\s+\d+(?:\s+(?:USERS|SEATS|LICENSES))?)\s*\.?\s*$/i.test(upper);
 
-  if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) return null;
+  if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !isQtyChange && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) return null;
 
   const history = await getHistory(kv, personId);
   if (!history || history.length === 0) return null;
   const assistantMsgs = history.filter(h => h.role === 'assistant').reverse();
+
+  // A PENDING tier-clarify question must be answered against the QUESTION's quantity by the
+  // tier-clarify continuation (which runs after this handler) — not by mutating a STALE older
+  // quote found deeper in history (sweep 2026-06-09: "change to essentials" while the Duo
+  // question was pending tier-swapped a previous quote at the old qty).
+  if (assistantMsgs[0] && /Which (?:Cisco Duo tier|Umbrella package) do you need\? \(qty:/i.test(assistantMsgs[0].content)) return null;
 
   // Find the last assistant message with a Stratus URL
   let lastUrl = null, lastTermLabels = [];
@@ -3280,14 +3290,18 @@ async function handleFollowUpModifier(text, personId, kv) {
   }
   if (!lastUrl) return null;
 
-  // Parse each URL into {sku, qty}[]
+  // Parse each URL into {sku, qty}[]. Fail-closed on malformed input (empty SKU, non-positive
+  // or non-numeric qty, bad percent-encoding) — never propagate NaN/garbage into a re-render.
   const urlToItems = (url) => {
-    const m = url.match(/[?&]item=([^&]+)&qty=([^&\s)]+)/);
-    if (!m) return null;
-    const skus = m[1].split(',').map(s => decodeURIComponent(s.trim()));
-    const qtys = m[2].split(',').map(q => parseInt(decodeURIComponent(q.trim()), 10));
-    if (skus.length !== qtys.length) return null;
-    return skus.map((sku, i) => ({ sku, qty: qtys[i] }));
+    try {
+      const m = url.match(/[?&]item=([^&]+)&qty=([^&\s)]+)/);
+      if (!m) return null;
+      const skus = m[1].split(',').map(s => decodeURIComponent(s.trim()));
+      const qtys = m[2].split(',').map(q => parseInt(decodeURIComponent(q.trim()), 10));
+      if (skus.length !== qtys.length) return null;
+      if (skus.some(s => !s) || qtys.some(q => !Number.isFinite(q) || q <= 0)) return null;
+      return skus.map((sku, i) => ({ sku, qty: qtys[i] }));
+    } catch { return null; }
   };
 
   // For mutations, we apply to all terms (hw only, license only, term reduction) OR a specific one.
@@ -3318,21 +3332,24 @@ async function handleFollowUpModifier(text, personId, kv) {
     return generated;
   };
   // Helper: apply add/remove/swap
-  const applyItemMutation = (items, freshText) => {
+  const applyItemMutation = (items, freshText, bucketTerm) => {
     const up = freshText.toUpperCase();
     // ── Duo/Umbrella TIER swap — "change to essentials", "swap to advantage", "switch to premier" ──
     // Live canary 2026-06-09 (D1 row 4738): this phrasing had no deterministic handler, fell to the
     // Claude fallback (Sonnet emitted malformed empty ?item=&qty= URLs). Rewrite the tier segment of
     // term-in-SKU license families, keep each bucket's term suffix, and FAIL-CLOSED (return null →
-    // V2-revise/Claude) when nothing is swappable or any rewrite misses the catalog. Mirrors the
-    // term-rewrite pattern below.
-    const tierSwapM = up.match(/^(?:CHANGE|SWAP|REPLACE|SWITCH)(?:\s+(?:IT|THEM|THAT|THESE|THOSE))?(?:\s+(?:TO|WITH|FOR))?\s+(?:DUO\s+|UMBRELLA\s+)?(ESSENTIALS?|ADVANTAGE|PREMIER)\s*\.?\s*$/i);
+    // V2-revise/Claude) when nothing is swappable or any rewrite misses the catalog. When the user
+    // names a family ("change to umbrella essentials") only that family's items are swapped — and
+    // it must actually be present, or we fail closed (codex finding: the prefix was being ignored).
+    const tierSwapM = up.match(/^(?:CHANGE|SWAP|REPLACE|SWITCH)(?:\s+(?:IT|THEM|THAT|THESE|THOSE))?(?:\s+(?:TO|WITH|FOR))?\s+(?:(DUO|UMBRELLA)\s+)?(ESSENTIALS?|ADVANTAGE|PREMIER)\s*\.?\s*$/i);
     if (tierSwapM) {
-      const want = /^ESSENTIAL/i.test(tierSwapM[1]) ? 'ESSENTIALS' : tierSwapM[1].toUpperCase();
+      const wantFamily = tierSwapM[1] ? tierSwapM[1].toUpperCase() : null;
+      const want = /^ESSENTIAL/i.test(tierSwapM[2]) ? 'ESSENTIALS' : tierSwapM[2].toUpperCase();
       let anySwappable = false, anyFailed = false;
       const swapped = items.map(i => {
         const duoM = String(i.sku).match(/^LIC-DUO-(ESSENTIALS|ADVANTAGE|PREMIER)(-.+)$/i);
         if (duoM) {
+          if (wantFamily === 'UMBRELLA') return i; // user targeted the other family — leave Duo untouched
           anySwappable = true;
           const newSku = ('LIC-DUO-' + want + duoM[2]).toUpperCase();
           if (newSku in prices) return { ...i, sku: newSku };
@@ -3340,6 +3357,7 @@ async function handleFollowUpModifier(text, personId, kv) {
         }
         const umbM = String(i.sku).match(/^LIC-UMB-(DNS|SIG)-(ESS|ADV)(-K9-.+)$/i);
         if (umbM) {
+          if (wantFamily === 'DUO') return i; // user targeted the other family — leave Umbrella untouched
           anySwappable = true;
           const wantUmb = want === 'ESSENTIALS' ? 'ESS' : want === 'ADVANTAGE' ? 'ADV' : null;
           if (!wantUmb) { anyFailed = true; return i; } // Umbrella has no Premier tier
@@ -3352,24 +3370,71 @@ async function handleFollowUpModifier(text, personId, kv) {
       if (!anySwappable || anyFailed) return null; // fail-closed
       return swapped;
     }
-    // Remove
-    const removeMatch = up.match(/^(?:REMOVE|TAKE\s+OUT|WITHOUT)\s+(\d+\s+)?([A-Z0-9][-A-Z0-9]+)/i);
-    if (removeMatch) {
-      const rmSku = removeMatch[2].toUpperCase();
-      return items.filter(i => i.sku.toUpperCase() !== rmSku && i.sku.toUpperCase() !== applySuffix(rmSku).toUpperCase());
+    // ── Quantity change — "change qty to 300", "make it 300", "actually 300", "bump to 500",
+    // "double it" (sweep 2026-06-09: every qty phrasing fell to the LLM). Applies only when the
+    // bucket's quantities are UNIFORM (hw+lic pairs move together); otherwise fail-closed —
+    // "make it 10" on a mixed-qty quote is ambiguous about which line.
+    const qtyDouble = /^DOUBLE\s+(?:IT|THAT)\s*\.?\s*$/i.test(up);
+    const qtyNumM = !qtyDouble && isQtyChange ? up.match(/\b(\d+)\b/) : null;
+    if (qtyDouble || qtyNumM) {
+      const uniform = items.length > 0 && items.every(i => i.qty === items[0].qty);
+      if (!uniform) return null;
+      let n;
+      if (qtyDouble) n = items[0].qty * 2;
+      else {
+        n = parseInt(qtyNumM[1], 10);
+        // 1/3/5 without an explicit qty word could mean a TERM ("change to 5") — fail closed.
+        if ([1, 3, 5].includes(n) && !/\b(QTY|QUANTITY|USERS|SEATS|LICENSES|INSTEAD)\b/i.test(up)) return null;
+      }
+      if (!Number.isFinite(n) || n <= 0 || n > 100000) return null;
+      if (n === items[0].qty) return null; // no-op — don't re-render as a "change"
+      return items.map(i => ({ ...i, qty: n }));
     }
-    // Add
+    // ── Remove — fail-closed on anything we can't do EXACTLY right (sweep: silent no-op
+    // re-renders and orphaned-license removals are worse than falling to the LLM). ──
+    const removeMatch = up.match(/^(?:REMOVE|TAKE\s+OUT|WITHOUT|DROP)\s+(\d+\s+)?(?:THE\s+|THESE\s+|THOSE\s+|MY\s+)?([A-Z0-9][-A-Z0-9]+)/i);
+    if (removeMatch) {
+      if (removeMatch[1]) return null;           // "remove 2 MR44" — partial removal needs license rebalancing; LLM handles it
+      const rmSku = removeMatch[2].toUpperCase();
+      if (/^\d+$/.test(rmSku)) return null;       // "remove 50" — a number is not a SKU
+      const next = items.filter(i => i.sku.toUpperCase() !== rmSku && i.sku.toUpperCase() !== applySuffix(rmSku).toUpperCase());
+      if (next.length === items.length) return null; // nothing matched — never re-render unchanged as success
+      const removedWasHardware = items.some(i => !/^LIC-/i.test(i.sku) && !next.includes(i));
+      if (removedWasHardware && next.some(i => /^LIC-/i.test(i.sku))) return null; // license qtys would be stale — LLM rebalances
+      return next;
+    }
+    // ── Add — strip filler so quantities survive ("add 2 more MR44"); merge term-bearing
+    // additions ONLY into the matching term bucket (never poison other term URLs); pair added
+    // hardware with its co-term license like a fresh quote would. ──
     const addMatch = freshText.match(/^(?:ADD|ALSO\s+(?:ADD|INCLUDE))\s+(.+)$/i);
     if (addMatch) {
-      const parsed = parseMessage(addMatch[1]);
-      if (parsed && parsed.items && parsed.items.length > 0) {
-        const merged = items.slice();
+      const addText = addMatch[1].replace(/\b(more|additional|extra)\b/gi, ' ');
+      let parsed = null;
+      try { parsed = parseMessage(addText); } catch { parsed = null; }
+      if (parsed && parsed.items && parsed.items.length > 0 && !parsed.isClarification) {
+        const merged = items.map(i => ({ ...i }));
+        let changed = false;
         for (const it of parsed.items) {
           const hwSku = applySuffix(it.baseSku);
+          const tm = String(hwSku).match(/-([135])(?:YR|Y-S\d+|Y)$/i);
+          if (tm && bucketTerm != null && String(tm[1]) !== String(bucketTerm)) continue; // wrong term for this bucket
           const existingIdx = merged.findIndex(e => e.sku.toUpperCase() === hwSku.toUpperCase());
           if (existingIdx >= 0) merged[existingIdx].qty += it.qty;
           else merged.push({ sku: hwSku, qty: it.qty });
+          changed = true;
+          // Pair added hardware with its co-term license (fresh-quote convention).
+          if (bucketTerm != null && !/^LIC-/i.test(hwSku)) {
+            let lics = null;
+            try { lics = getLicenseSkus(it.baseSku); } catch { lics = null; }
+            const lic = Array.isArray(lics) ? lics.find(l => l && l.term === `${bucketTerm}Y`) : null;
+            if (lic && lic.sku && (lic.sku in prices)) {
+              const li = merged.findIndex(e => e.sku.toUpperCase() === String(lic.sku).toUpperCase());
+              if (li >= 0) merged[li].qty += it.qty;
+              else merged.push({ sku: lic.sku, qty: it.qty });
+            }
+          }
         }
+        if (!changed) return null; // nothing landed in this bucket — fail-closed, no unchanged re-render
         return merged;
       }
     }
@@ -3377,6 +3442,7 @@ async function handleFollowUpModifier(text, personId, kv) {
   };
 
   let filteredTerms = Object.entries(termItems);
+  let smeCapApplied = false; // set when a 5-year request on SME is capped to 3-year (note appended in render)
 
   // Apply term filter
   if (isTermOnly) {
@@ -3409,7 +3475,17 @@ async function handleFollowUpModifier(text, personId, kv) {
             rewrittenItems.push(it);
             continue;
           }
-          const newSku = rewriteSkuTerm(it.sku, wantTerm);
+          // SME business rule: 5-year is deprecated — LIC-SME-5YR must NEVER be emitted even
+          // though it still exists in the price catalog (sweep 2026-06-09: "5 year" after an SME
+          // quote produced LIC-SME-5YR). Cap to the 3-year SKU and surface the standard note.
+          const _isSme = /^LIC-SME/i.test(String(it.sku));
+          const effectiveTerm = (_isSme && wantTerm === 5) ? 3 : wantTerm;
+          if (_isSme && wantTerm === 5) smeCapApplied = true;
+          if (effectiveTerm === currentTerm) {
+            rewrittenItems.push(it); // already at the capped term (e.g. LIC-SME-3YR asked for 5yr)
+            continue;
+          }
+          const newSku = rewriteSkuTerm(it.sku, effectiveTerm);
           if (newSku && newSku !== it.sku && (newSku in prices)) {
             rewrittenItems.push({ sku: newSku, qty: it.qty });
           } else {
@@ -3431,12 +3507,12 @@ async function handleFollowUpModifier(text, personId, kv) {
     let out = items;
     if (isHwOnly) out = applyHwOnly(out);
     else if (isLicOnly) out = applyLicOnly(out, term === 'na' ? null : parseInt(term, 10));
-    else if ((hasRemovePrefix || hasAddPrefix || hasSwapPrefix) && !isTermOnly) {
+    else if ((hasRemovePrefix || hasAddPrefix || hasSwapPrefix || isQtyChange) && !isTermOnly) {
       // hasSwapPrefix can co-occur with isTermOnly (e.g. "change to 3 year").
       // In that case the term filter / SKU-rewrite above already produced the
       // intended state, so we skip the item mutation pass which would only
       // try to interpret "change ..." as add/remove/swap and fail.
-      const r = applyItemMutation(out, text);
+      const r = applyItemMutation(out, text, term === 'na' ? null : parseInt(term, 10));
       if (r) out = r;
       else return null; // couldn't parse the mutation — pass through
     }
@@ -3452,10 +3528,13 @@ async function handleFollowUpModifier(text, personId, kv) {
     const label = term === 'na' ? '' : `**${term}-Year Co-Term:** `;
     lines.push(`${label}${url}`);
     if (showPricing) {
-      lines.push(buildPricingBlock(items, false));
+      // Second arg must be true or buildPricingBlock returns '' (sweep: "with pricing"
+      // re-rendered the quote with a blank line where the prices should have been).
+      lines.push(buildPricingBlock(items, true));
     }
     lines.push('');
   }
+  if (smeCapApplied) lines.push(`_${SME_5YR_FLAG}_`, '');
   return lines.join('\n').trim();
 }
 
@@ -3692,8 +3771,10 @@ async function handlePricingRequest(text, personId, kv) {
     if (/option\s+(\d|a|b|b1|b2)/i.test(trimmed)) {
       currentLabel = trimmed.replace(/[*:]+/g, '').trim();
     }
-    // Track term labels
-    const termLabel = trimmed.match(/^(\d-Year\s+Co-Term):/i);
+    // Track term labels. Real bot lines are markdown-bold ("**3-Year Co-Term:**") — the old
+    // anchor without the optional asterisks never matched them, so the "how much for the 3
+    // year" term filter silently matched nothing (sweep 2026-06-09).
+    const termLabel = trimmed.match(/^\**(\d-Year\s+Co-Term)\**:/i);
     if (termLabel) {
       const urlMatch = trimmed.match(/(https:\/\/stratusinfosystems\.com\/order\/\?[^\s]+)/);
       if (urlMatch) {
