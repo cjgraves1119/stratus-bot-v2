@@ -56,6 +56,13 @@ const CASES = [
   ['Advantage 3 year', DUO_Q, '200 duo advantage licenses 3 year'],
   ['Essentials 5yr', DUO_Q, '200 duo essentials licenses 5 year'],
   ['Duo Essentials 200 3 year', DUO_Q, '200 duo essentials licenses 3 year'],
+  // codex round-3: negation / hedge / multi-tier replies are never answers
+  ['not advantage', DUO_Q, null],
+  ['no advantage', DUO_Q, null],
+  ['not essentials, advantage', DUO_Q, null],
+  ['advantage or premier', DUO_Q, null],
+  ['maybe advantage', DUO_Q, null],
+  ["don't do premier", DUO_Q, null],
 ];
 for (const [reply, lastAsst, expect] of CASES) {
   const g = G.buildTierClarifyContinuation(reply, lastAsst);

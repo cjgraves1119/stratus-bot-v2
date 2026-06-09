@@ -16306,9 +16306,13 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
   const duoM = lastAssistantContent.match(/Which Cisco Duo tier do you need\? \(qty:\s*(\d+)\)/i);
   const umbM = lastAssistantContent.match(/Which Umbrella package do you need\? \(qty:\s*(\d+)\)/i);
   if (!duoM && !umbM) return null;
-  const tierM = reply.match(/\b(essentials?|advantage|premier)\b/i);
-  if (!tierM) return null;
-  const tierWord = /^essential/i.test(tierM[1]) ? "essentials" : tierM[1].toLowerCase();
+  // Negations/hedges are not answers ("not essentials, advantage", "maybe premier"), and a reply
+  // naming MORE THAN ONE distinct tier is ambiguous — leave both on the normal routing.
+  if (/\b(no|not|never|without|except|neither|nor|maybe|instead)\b|\bdon'?t\b/i.test(reply)) return null;
+  const tierMatches = [...reply.matchAll(/\b(essentials?|advantage|premier)\b/gi)]
+    .map(m => (/^essential/i.test(m[1]) ? 'essentials' : m[1].toLowerCase()));
+  if (new Set(tierMatches).size !== 1) return null;
+  const tierWord = tierMatches[0];
   // "Essentials 3 year" → a TERM choice, not a quantity. Strip the term phrase before
   // reading a qty override so "3 year" never becomes qty 3.
   const termM = reply.match(/\b([135])\s*-?\s*(?:year|yr)s?\b/i);
