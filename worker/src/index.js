@@ -3517,7 +3517,12 @@ async function handleFollowUpModifier(text, personId, kv) {
           const k = String(it.sku).toUpperCase();
           if (!_seen.has(k) || _seen.get(k).qty < it.qty) _seen.set(k, it);
         }
-        filteredTerms = [[String(wantTerm), [..._seen.values()]]];
+        const _deduped = [..._seen.values()];
+        // Label honesty: if EVERYTHING in the bucket is SME capped to 3-year, label it 3-Year —
+        // never present a 3YR SKU under a "5-Year Co-Term" heading. Mixed quotes keep the
+        // requested-term label (non-SME items really are 5-year) and the cap note explains SME.
+        const _allCappedSme = smeCapApplied && _deduped.every(it => /^LIC-SME/i.test(String(it.sku)));
+        filteredTerms = [[String(_allCappedSme ? 3 : wantTerm), _deduped]];
       }
       // else (no term-bearing items at all): leave filteredTerms unchanged.
     }
