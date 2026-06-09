@@ -21694,15 +21694,18 @@ CRITICAL URL RULES:
             }
             if (!parsed) parsed = parseMessage(_tierRequest || text);
 
-            // Clarification prompts (e.g. "which Duo tier?") — return as clarification response
+            // Clarification prompts (e.g. "which Duo tier?") — return as clarification response.
+            // Store the question as an assistant turn so the NEXT message ("Essentials") can be
+            // caught by the tier-clarify continuation — without this, the lookback finds nothing
+            // and the bare tier reply falls to the Claude fallback (slow, nondeterministic).
             if (parsed && parsed.isClarification && parsed.clarificationMessage) {
-              apiResult = {
+              apiResult = await finalizeQuoteResponse({
                 quoteUrls: [],
                 eolWarnings: [],
                 parsedItems: [],
                 clarification: parsed.clarificationMessage,
                 handlerType: 'clarification',
-              };
+              }, parsed.clarificationMessage);
               break;
             }
 
