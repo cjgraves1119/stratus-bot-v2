@@ -218,6 +218,116 @@ function preserveMsAdvancedTier(parsed, rawText) {
   return parsed;
 }
 
+// Kept IDENTICAL to worker/ (webex) so both engines produce the same quote for the same input.
+function normalizeRequestedTier(rawTier, rawText = '') {
+  const raw = String(rawTier || '').toUpperCase().replace(/\s+/g, '').replace(/^SD-WAN$/, 'SDW');
+  if (['SEC', 'ENT', 'SDW'].includes(raw)) return raw;
+  if (['A', 'ADV', 'ADVANCED'].includes(raw)) return hasMsAdvancedTierIntent(rawText) ? 'A' : null;
+  return hasMsAdvancedTierIntent(rawText) ? 'A' : null;
+}
+
+// ─── V3 model-intent adapter (Phase 4 — ported VERBATIM from worker/ for engine parity) ──────
+// Converts the V3 classifier contract (per-item {product,qty,intent}, top-level clarify, NO model
+// SKUs) into a `parsed` object buildQuoteResponse consumes. Each item is synthesized to NL and
+// parsed IN ISOLATION (prevents bare-family sibling-drop), then flattened into one parsed.items[];
+// named/multi-term licenses collapse to one _v3PreLicense item. Identical to worker/src/index.js.
+const V3_TIER_WORD = { SEC: 'SEC', SDW: 'SD-WAN', ENT: 'enterprise', A: 'advanced' };
+function synthV3Item(product, intent, qty, tier) {
+  let base = `${qty} ${product}`;
+  if (tier && V3_TIER_WORD[tier]) base += ` ${V3_TIER_WORD[tier]}`; // parseMessage resolves the tier word/suffix
+  if (intent === 'license') return `${base} license`;
+  if (intent === 'hardware') return `${base} hardware only`;
+  return base; // normal → hardware + license
+}
+function buildQuoteFromV3(v3, rawText) {
+  if (!v3 || typeof v3 !== 'object') return null;
+
+  // Clarify wins: the classifier already detected ambiguity → return the question.
+  if (v3.clarify && v3.clarify.needed === true) {
+    return { isClarification: true, clarificationMessage: v3.clarify.question || '', _fromV3: true };
+  }
+
+  const items = Array.isArray(v3.items) ? v3.items : [];
+  if (!items.length) return null;
+  const mods = v3.modifiers || {};
+
+  // List-level single term (null → buildQuoteResponse expands 1/3/5YR). all_terms wins.
+  let requestedTerm = null;
+  if (!mods.all_terms) {
+    const t = parseInt(mods.term_years, 10);
+    if ([1, 3, 5].includes(t)) requestedTerm = t;
+  }
+
+  const combinedItems = [];
+  let resolvedTier = null;
+  let capNote = null;
+  for (const it of items) {
+    const product = String(it.product || '').trim();
+    if (!product) continue;
+    const intent = it.intent === 'hardware' ? 'hardware' : it.intent === 'license' ? 'license' : 'normal';
+    const qty = Number.isFinite(Number(it.qty)) && Number(it.qty) > 0 ? Math.floor(Number(it.qty)) : 1;
+
+    const synthetic = synthV3Item(product, intent, qty, mods.tier);
+    let p;
+    try { p = parseMessage(synthetic); } catch { return null; }
+    if (!p) continue;
+    p = preserveMsAdvancedTier(p, synthetic);
+
+    if (p.isClarification && p.clarificationMessage) {
+      return { isClarification: true, clarificationMessage: p.clarificationMessage, _fromV3: true };
+    }
+    if (p.requestedTier && !resolvedTier) resolvedTier = p.requestedTier;
+    const note = [p.clarificationNote, p.note].filter(Boolean).join(' ');
+    if (note && !capNote) capNote = note;
+
+    // Named / multi-term licenses → collapse to ONE multi-term item (renders as one group; SME cap).
+    let licEntries = null;
+    if (p.directLicense && p.directLicense.sku) licEntries = [{ sku: p.directLicense.sku, qty: p.directLicense.qty }];
+    else if (Array.isArray(p.directLicenseList) && p.directLicenseList.length) licEntries = p.directLicenseList.map(e => ({ sku: e.sku, qty: e.qty }));
+    else if (p.isTermOptionQuote && Array.isArray(p.items)) licEntries = p.items.map(e => ({ sku: e.baseSku, qty: e.qty }));
+
+    if (licEntries) {
+      const byBase = new Map();
+      for (const e of licEntries) {
+        const m = String(e.sku || '').match(/^(LIC-.+?)-([135])Y(?:R)?(?:-S\d+)?$/i);
+        if (!m) { combinedItems.push({ baseSku: e.sku, qty: e.qty || qty, hardwareOnly: false, licenseOnly: true }); continue; }
+        const base = m[1].toUpperCase();
+        if (!byBase.has(base)) byBase.set(base, { qty: e.qty || qty, licenseSkus: [], sme: /^LIC-SME/i.test(base) });
+        byBase.get(base).licenseSkus.push({ term: `${m[2]}Y`, sku: e.sku });
+      }
+      for (const [base, info] of byBase) {
+        if (info.sme && requestedTerm === 5) {
+          const three = info.licenseSkus.find(l => l.term === '3Y');
+          if (three && !info.licenseSkus.some(l => l.term === '5Y')) info.licenseSkus.push({ term: '5Y', sku: three.sku });
+        }
+        combinedItems.push({ baseSku: base, qty: info.qty, _v3PreLicense: info.licenseSkus, smeCapped: info.sme, hardwareOnly: false, licenseOnly: true });
+      }
+      continue;
+    }
+
+    if (!Array.isArray(p.items)) continue;
+    for (const pi of p.items) {
+      pi.hardwareOnly = (intent === 'hardware');
+      pi.licenseOnly = (intent === 'license');
+      combinedItems.push(pi);
+    }
+  }
+  if (!combinedItems.length) return null;
+
+  return {
+    items: combinedItems,
+    requestedTerm,
+    modifiers: { hardwareOnly: false, licenseOnly: false, separateQuotes: Boolean(mods.separate_quotes) },
+    requestedTier: resolvedTier || normalizeRequestedTier(mods.tier, rawText),
+    isAdvisory: false,
+    isRevision: false,
+    showPricing: Boolean(mods.show_pricing),
+    clarificationNote: capNote || undefined,
+    unresolvedCategories: [],
+    _fromV3: true
+  };
+}
+
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
 // Pricing per 1M tokens (USD) by model
 const MODEL_PRICING = {
@@ -5169,7 +5279,18 @@ function buildQuoteResponse(parsed) {
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
 
-  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly } of parsed.items) {
+  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeCapped: itemSmeCapped } of parsed.items) {
+    // ── V3 collapsed named/multi-term license (Phase 4 — identical to worker/) ──
+    // buildQuoteFromV3 collapses a named license (Duo/Umbrella/SME/AnyConnect/…) into ONE item
+    // carrying its already-resolved per-term SKUs in _v3PreLicense. Emit it as a single agnostic
+    // license-only item so the term loop places one SKU per term, separate_quotes gives it one
+    // group, buildStratusUrl sums shared SKUs, and the SME 5yr-cap note can fire.
+    if (Array.isArray(_v3PreLicense) && _v3PreLicense.length) {
+      const preItem = { baseSku, hwSku: null, qty, licenseSkus: _v3PreLicense, eol: false, isAgnosticLicense: true, hardwareOnly: false, licenseOnly: true, smeCapped: Boolean(itemSmeCapped) };
+      resolvedItems.push(preItem);
+      ordered.push({ kind: 'resolved', ref: preItem });
+      continue;
+    }
     // ── Model-agnostic license families (MR-AGN, MV-AGN, MT-AGN, SME-AGN) ──
     // These are injected by the bare-family parser for "4 MR", "5 MV's", etc.
     // They bypass normal SKU validation and generate license-only items directly.
@@ -5283,6 +5404,9 @@ function buildQuoteResponse(parsed) {
   // and append errors as warnings at the top
 
   let lines = [];
+  // Surface a carried business-rule note (e.g. the SME 5yr→3yr cap flag) at the top — identical to
+  // worker/. A V3 collapsed named license routed through the default branch would otherwise drop it.
+  if (parsed.clarificationNote) lines.push(`_${parsed.clarificationNote}_`, '');
   // Prepend invalid SKU warnings when processing alongside valid items
   if (errors.length > 0) {
     lines.push(...errors, '');
