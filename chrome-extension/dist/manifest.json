@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Stratus AI",
-  "version": "1.12.3",
+  "version": "1.13.0",
   "description": "Cisco/Meraki sales assistant for Gmail — CRM integration, quoting, email analysis, and task management.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -24,6 +24,8 @@
     "https://mail.google.com/*",
     "https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev/*",
     "https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev/*",
+    "https://stratus-ai-bot-gateway.it-262.workers.dev/*",
+    "https://stratus-ai-bot-gchat.it-262.workers.dev/*",
     "https://accounts.zoho.com/*",
     "https://www.zohoapis.com/*",
     "https://crm.zoho.com/*"

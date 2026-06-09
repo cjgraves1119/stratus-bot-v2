@@ -953,6 +953,27 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
             </div>
           )}
 
+          {/* Copy All — one click copies every option as "<label>: <url>" lines,
+              mirroring the Webex bot quote output (plain text, no markdown bold).
+              Labels + URLs only — never include margin/cost data here. */}
+          {result.urls.length > 1 && (
+            <button
+              onClick={() => handleCopy(
+                result.urls
+                  .map((u, j) => `${u.label || `Option ${j + 1}`}: ${u.url}`)
+                  .join('\n'),
+                'all'
+              )}
+              style={{
+                width: '100%', padding: '8px 12px', background: COLORS.STRATUS_BLUE,
+                color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
+                fontWeight: 600, cursor: 'pointer', marginBottom: 8,
+              }}
+            >
+              {copiedIdx === 'all' ? '✓ Copied!' : `Copy All (${result.urls.length} links)`}
+            </button>
+          )}
+
           {/* Quote URLs */}
           {result.urls.map((urlObj, i) => (
             <div key={i} style={{
