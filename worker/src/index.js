@@ -935,6 +935,10 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
   if (!text || !lastAssistantContent) return null;
   const reply = String(text).trim();
   if (reply.length > 48) return null;                                  // bare-ish replies only
+  if (reply.includes("?")) return null;                                // questions are not answers
+  // Info/pricing follow-ups ("cost of Duo Advantage", "what is advantage") belong to the
+  // pricing/product-info handlers — never turn them into quotes.
+  if (/\b(cost|price|pricing|much|what|which|why|how|who|compare|vs|versus|spec|specs|info|difference|datasheet)\b/i.test(reply)) return null;
   if (/\b(?:MR|MX|MS|MV|MT|MG|CW|C9|C8|Z)\d/i.test(reply)) return null; // fresh SKU request — not a tier reply
   const duoM = lastAssistantContent.match(/Which Cisco Duo tier do you need\? \(qty:\s*(\d+)\)/i);
   const umbM = lastAssistantContent.match(/Which Umbrella package do you need\? \(qty:\s*(\d+)\)/i);
@@ -942,16 +946,21 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
   const tierM = reply.match(/\b(essentials?|advantage|premier)\b/i);
   if (!tierM) return null;
   const tierWord = /^essential/i.test(tierM[1]) ? "essentials" : tierM[1].toLowerCase();
-  const qtyOverride = (reply.match(/\b(\d+)\b/) || [])[1]; // "Duo Essentials 200" → qty 200
+  // "Essentials 3 year" → a TERM choice, not a quantity. Strip the term phrase before
+  // reading a qty override so "3 year" never becomes qty 3.
+  const termM = reply.match(/\b([135])\s*-?\s*(?:year|yr)s?\b/i);
+  const replySansTerm = termM ? reply.replace(termM[0], " ") : reply;
+  const termSuffix = termM ? " " + termM[1] + " year" : "";
+  const qtyOverride = (replySansTerm.match(/\b(\d+)\b/) || [])[1]; // "Duo Essentials 200" → qty 200
   if (duoM) {
     const qty = qtyOverride || duoM[1];
-    return qty + " duo " + tierWord + " licenses";
+    return qty + " duo " + tierWord + " licenses" + termSuffix;
   }
   // Umbrella: the package type (DNS vs SIG) matters — never guess it.
   const typeM = reply.match(/\b(dns|sig)\b/i);
   if (!typeM || tierWord === "premier") return null;
   const qty = qtyOverride || umbM[1];
-  return qty + " umbrella " + typeM[1].toLowerCase() + " " + tierWord + " licenses";
+  return qty + " umbrella " + typeM[1].toLowerCase() + " " + tierWord + " licenses" + termSuffix;
 }
 
 const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
@@ -8954,6 +8963,7 @@ export default {
           let v2RoutingClassification = null;  // V2 plus deterministic routing normalizations
           let gemma4Classification = null;     // Gemma result (null unless waterfall escalates)
           let _rollbackShadowPromise = null;   // V2 shadow promise for rollback-mode logging only
+          let _v3Promise = null;               // V3 classifier promise — awaited only on the quote branch (outer scope: the quote branch is outside the USE_V2_CLASSIFIER block)
 
           if (USE_V2_CLASSIFIER) {
             // V2 + legacy in parallel
@@ -8962,7 +8972,7 @@ export default {
             // V3 classifier (flag-gated) runs IN PARALLEL with V2 — awaited only if routing lands
             // on the quote branch. Serial placement added ~2-3s to every quote (canary 2026-06-09:
             // cf-deterministic 3-4s → 6.1-6.3s); parallel kickoff recovers it.
-            const _v3Promise = (String(env.CF_QUOTE_V3_ENABLED) === 'true')
+            _v3Promise = (String(env.CF_QUOTE_V3_ENABLED) === 'true')
               ? classifyV3(text, '', env).catch(() => null)
               : null;
             const _legacyPromise = classifyWithCF(text, env)

@@ -47,6 +47,15 @@ const CASES = [
   ['quote 5 MR44', DUO_Q, null],                     // fresh SKU request — not hijacked
   ['Essentials', 'Here is your quote: https://stratusinfosystems.com/order/?item=MR44-HW&qty=5', null], // no clarify pending
   ['I think we want the advantage tier for all two hundred users plus extras', DUO_Q, null], // too long — not a bare reply
+  // codex round-2 hardening: questions/pricing/info follow-ups never become quotes
+  ['what is advantage?', DUO_Q, null],
+  ['cost of Duo Advantage', DUO_Q, null],
+  ['how much is premier', DUO_Q, null],
+  ['compare essentials vs advantage', DUO_Q, null],
+  // "N year" is a TERM choice, not a quantity
+  ['Advantage 3 year', DUO_Q, '200 duo advantage licenses 3 year'],
+  ['Essentials 5yr', DUO_Q, '200 duo essentials licenses 5 year'],
+  ['Duo Essentials 200 3 year', DUO_Q, '200 duo essentials licenses 3 year'],
 ];
 for (const [reply, lastAsst, expect] of CASES) {
   const g = G.buildTierClarifyContinuation(reply, lastAsst);
@@ -75,6 +84,12 @@ for (const [eng, name] of [[G, 'gchat'], [W, 'webex']]) {
   const um = skuQty(ur && ur.message);
   ok(um['LIC-UMB-DNS-ESS-K9-1YR'] === 6 && um['LIC-UMB-DNS-ESS-K9-3YR'] === 6,
     `${name}: "DNS Essentials" after Umbrella q(6) → LIC-UMB-DNS-ESS-K9 × 6`);
+  // term-qualified reply renders ONLY the chosen term
+  const tq = eng.buildTierClarifyContinuation('Advantage 3 year', DUO_Q);
+  const tr = eng.buildQuoteResponse(eng.parseMessage(tq));
+  const tm = skuQty(tr && tr.message);
+  ok(tm['LIC-DUO-ADVANTAGE-3YR'] === 200 && !tm['LIC-DUO-ADVANTAGE-1YR'] && !tm['LIC-DUO-ADVANTAGE-5YR'],
+    `${name}: "Advantage 3 year" → LIC-DUO-ADVANTAGE-3YR × 200 ONLY (term honored, not qty 3)`);
 }
 
 console.log(`\n${fail === 0 ? '✅' : '❌'} ${pass}/${pass + fail} assertions passed`);

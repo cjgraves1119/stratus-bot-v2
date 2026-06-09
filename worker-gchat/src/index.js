@@ -16298,6 +16298,10 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
   if (!text || !lastAssistantContent) return null;
   const reply = String(text).trim();
   if (reply.length > 48) return null;                                  // bare-ish replies only
+  if (reply.includes("?")) return null;                                // questions are not answers
+  // Info/pricing follow-ups ("cost of Duo Advantage", "what is advantage") belong to the
+  // pricing/product-info handlers — never turn them into quotes.
+  if (/\b(cost|price|pricing|much|what|which|why|how|who|compare|vs|versus|spec|specs|info|difference|datasheet)\b/i.test(reply)) return null;
   if (/\b(?:MR|MX|MS|MV|MT|MG|CW|C9|C8|Z)\d/i.test(reply)) return null; // fresh SKU request — not a tier reply
   const duoM = lastAssistantContent.match(/Which Cisco Duo tier do you need\? \(qty:\s*(\d+)\)/i);
   const umbM = lastAssistantContent.match(/Which Umbrella package do you need\? \(qty:\s*(\d+)\)/i);
@@ -16305,16 +16309,21 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
   const tierM = reply.match(/\b(essentials?|advantage|premier)\b/i);
   if (!tierM) return null;
   const tierWord = /^essential/i.test(tierM[1]) ? "essentials" : tierM[1].toLowerCase();
-  const qtyOverride = (reply.match(/\b(\d+)\b/) || [])[1]; // "Duo Essentials 200" → qty 200
+  // "Essentials 3 year" → a TERM choice, not a quantity. Strip the term phrase before
+  // reading a qty override so "3 year" never becomes qty 3.
+  const termM = reply.match(/\b([135])\s*-?\s*(?:year|yr)s?\b/i);
+  const replySansTerm = termM ? reply.replace(termM[0], " ") : reply;
+  const termSuffix = termM ? " " + termM[1] + " year" : "";
+  const qtyOverride = (replySansTerm.match(/\b(\d+)\b/) || [])[1]; // "Duo Essentials 200" → qty 200
   if (duoM) {
     const qty = qtyOverride || duoM[1];
-    return qty + " duo " + tierWord + " licenses";
+    return qty + " duo " + tierWord + " licenses" + termSuffix;
   }
   // Umbrella: the package type (DNS vs SIG) matters — never guess it.
   const typeM = reply.match(/\b(dns|sig)\b/i);
   if (!typeM || tierWord === "premier") return null;
   const qty = qtyOverride || umbM[1];
-  return qty + " umbrella " + typeM[1].toLowerCase() + " " + tierWord + " licenses";
+  return qty + " umbrella " + typeM[1].toLowerCase() + " " + tierWord + " licenses" + termSuffix;
 }
 
 const CF_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
@@ -26221,6 +26230,26 @@ Return ONLY a JSON object (no markdown, no explanation):
           }
         }
         T.step('gc-pricing', 'exit', { result: reply ? 'match' : 'no_match' });
+
+        // ── Tier-clarify continuation (deterministic) — same helper as webex + /api/quote ──
+        // A bare tier reply ("Essentials") after the Duo/Umbrella tier question re-enters the
+        // deterministic engine instead of falling through to the CRM/Claude routing.
+        if (!reply && !isExplicitCrmRequest) {
+          try {
+            const _histTier = await getHistory(kv, personId);
+            const _lastAsstTier = (_histTier || []).filter(h => h.role === 'assistant').slice(-1)[0];
+            const _tierRequest = _lastAsstTier ? buildTierClarifyContinuation(text, _lastAsstTier.content) : null;
+            if (_tierRequest) {
+              const _tierParsed = parseMessage(_tierRequest);
+              const _tierResult = _tierParsed ? buildQuoteResponse(_tierParsed) : null;
+              if (_tierResult && _tierResult.message && !_tierResult.needsLlm) {
+                await addToHistory(kv, personId, 'user', text);
+                await addToHistory(kv, personId, 'assistant', _tierResult.message);
+                reply = _tierResult.message;
+              }
+            }
+          } catch (_) { /* fall through to the normal routing */ }
+        }
 
         // Pre-check: Deterministic clarifications (Duo/Umbrella tier selection) — always instant
         T.step('gc-parse', 'enter');
