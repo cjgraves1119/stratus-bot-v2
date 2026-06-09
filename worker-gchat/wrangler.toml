@@ -8,6 +8,10 @@ compatibility_date = "2024-01-01"
 # usage_model = "unbound" is deprecated and ignored by modern Wrangler.
 
 [vars]
+
+# V3 model-intent quoting kill-switch. Default OFF — V3 stays dormant until flipped.
+# Flip via: wrangler secret put CF_QUOTE_V3_ENABLED  (secret overrides this var), or set "true" here + redeploy.
+CF_QUOTE_V3_ENABLED = "false"
 # Non-secret config (secrets set via `wrangler secret put`)
 # ANTHROPIC_API_KEY = set via wrangler secret
 # DEEPSEEK_API_KEY = set via wrangler secret
@@ -145,3 +149,4 @@ dataset = "stratus_bot_metrics"
 [[r2_buckets]]
 binding = "BOT_STORAGE"
 bucket_name = "stratus-bot-storage"
+
