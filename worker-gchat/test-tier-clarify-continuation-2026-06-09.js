@@ -63,6 +63,13 @@ const CASES = [
   ['advantage or premier', DUO_Q, null],
   ['maybe advantage', DUO_Q, null],
   ["don't do premier", DUO_Q, null],
+  // codex round-4: curly apostrophe + negative phrases + SIG synonym
+  ['don’t do premier', DUO_Q, null],
+  ['anything but advantage', DUO_Q, null],
+  ['other than advantage', DUO_Q, null],
+  ['all but premier', DUO_Q, null],
+  ['Secure Internet Gateway Advantage', UMB_Q, '6 umbrella sig advantage licenses'],
+  ['Advantage but 3 year', DUO_Q, '200 duo advantage licenses 3 year'], // plain "but" still allowed
 ];
 for (const [reply, lastAsst, expect] of CASES) {
   const g = G.buildTierClarifyContinuation(reply, lastAsst);

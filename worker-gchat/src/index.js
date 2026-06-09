@@ -16308,7 +16308,7 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
   if (!duoM && !umbM) return null;
   // Negations/hedges are not answers ("not essentials, advantage", "maybe premier"), and a reply
   // naming MORE THAN ONE distinct tier is ambiguous — leave both on the normal routing.
-  if (/\b(no|not|never|without|except|neither|nor|maybe|instead)\b|\bdon'?t\b/i.test(reply)) return null;
+  if (/\b(no|not|never|without|except|neither|nor|maybe|instead|anything but|all but|other than|rather than)\b|\bdon[’']?t\b/i.test(reply)) return null;
   const tierMatches = [...reply.matchAll(/\b(essentials?|advantage|premier)\b/gi)]
     .map(m => (/^essential/i.test(m[1]) ? 'essentials' : m[1].toLowerCase()));
   if (new Set(tierMatches).size !== 1) return null;
@@ -16324,7 +16324,7 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
     return qty + " duo " + tierWord + " licenses" + termSuffix;
   }
   // Umbrella: the package type (DNS vs SIG) matters — never guess it.
-  const typeM = reply.match(/\b(dns|sig)\b/i);
+  const typeM = reply.match(/\b(dns|sig)\b/i) || (/\bsecure\s+internet\s+gateway\b/i.test(reply) ? [null, 'sig'] : null);
   if (!typeM || tierWord === "premier") return null;
   const qty = qtyOverride || umbM[1];
   return qty + " umbrella " + typeM[1].toLowerCase() + " " + tierWord + " licenses" + termSuffix;
