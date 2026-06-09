@@ -3245,7 +3245,7 @@ async function handleFollowUpModifier(text, personId, kv) {
   // UNLESS the phrase is "add ..." or "also ..." which we want to apply to the prior quote.
   const hasAddPrefix = /^(ADD|ALSO\s+(?:ADD|INCLUDE))\b/i.test(upper);
   const hasRemovePrefix = /^(REMOVE|TAKE\s+OUT|WITHOUT)\b/i.test(upper);
-  const hasSwapPrefix = /^(CHANGE|SWAP|REPLACE)\b/i.test(upper);
+  const hasSwapPrefix = /^(CHANGE|SWAP|REPLACE|SWITCH)\b/i.test(upper);
 
   // Pure modifier phrases (no SKU tokens needed)
   const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?)\s*\.?\s*$/i.test(upper);
@@ -3320,6 +3320,38 @@ async function handleFollowUpModifier(text, personId, kv) {
   // Helper: apply add/remove/swap
   const applyItemMutation = (items, freshText) => {
     const up = freshText.toUpperCase();
+    // ── Duo/Umbrella TIER swap — "change to essentials", "swap to advantage", "switch to premier" ──
+    // Live canary 2026-06-09 (D1 row 4738): this phrasing had no deterministic handler, fell to the
+    // Claude fallback (Sonnet emitted malformed empty ?item=&qty= URLs). Rewrite the tier segment of
+    // term-in-SKU license families, keep each bucket's term suffix, and FAIL-CLOSED (return null →
+    // V2-revise/Claude) when nothing is swappable or any rewrite misses the catalog. Mirrors the
+    // term-rewrite pattern below.
+    const tierSwapM = up.match(/^(?:CHANGE|SWAP|REPLACE|SWITCH)(?:\s+(?:IT|THEM|THAT|THESE|THOSE))?(?:\s+(?:TO|WITH|FOR))?\s+(?:DUO\s+|UMBRELLA\s+)?(ESSENTIALS?|ADVANTAGE|PREMIER)\s*\.?\s*$/i);
+    if (tierSwapM) {
+      const want = /^ESSENTIAL/i.test(tierSwapM[1]) ? 'ESSENTIALS' : tierSwapM[1].toUpperCase();
+      let anySwappable = false, anyFailed = false;
+      const swapped = items.map(i => {
+        const duoM = String(i.sku).match(/^LIC-DUO-(ESSENTIALS|ADVANTAGE|PREMIER)(-.+)$/i);
+        if (duoM) {
+          anySwappable = true;
+          const newSku = ('LIC-DUO-' + want + duoM[2]).toUpperCase();
+          if (newSku in prices) return { ...i, sku: newSku };
+          anyFailed = true; return i;
+        }
+        const umbM = String(i.sku).match(/^LIC-UMB-(DNS|SIG)-(ESS|ADV)(-K9-.+)$/i);
+        if (umbM) {
+          anySwappable = true;
+          const wantUmb = want === 'ESSENTIALS' ? 'ESS' : want === 'ADVANTAGE' ? 'ADV' : null;
+          if (!wantUmb) { anyFailed = true; return i; } // Umbrella has no Premier tier
+          const newSku = ('LIC-UMB-' + umbM[1] + '-' + wantUmb + umbM[3]).toUpperCase();
+          if (newSku in prices) return { ...i, sku: newSku };
+          anyFailed = true; return i;
+        }
+        return i; // non-Duo/Umbrella items pass through unchanged
+      });
+      if (!anySwappable || anyFailed) return null; // fail-closed
+      return swapped;
+    }
     // Remove
     const removeMatch = up.match(/^(?:REMOVE|TAKE\s+OUT|WITHOUT)\s+(\d+\s+)?([A-Z0-9][-A-Z0-9]+)/i);
     if (removeMatch) {
@@ -8329,7 +8361,15 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
     // injected '## LIVE DATASHEET CONTENT' block contains the URL. The worker
     // ALSO appends its own attribution footer below — without dedupe the user
     // sees the same source line twice. Strip Claude's echo before appending.
-    const sanitizedReply = sanitizeLiveFetchRetryWording(reply);
+    // Strip malformed EMPTY order URLs Claude occasionally composes (live canary 2026-06-09:
+    // Sonnet emitted "**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=&qty=" header
+    // lines above the real quote). A zero-item order link is never valid — drop those lines.
+    const stripEmptyOrderUrls = (s) => String(s || '')
+      .split('\n')
+      .filter(line => !/stratusinfosystems\.com\/order\/\?item=&qty=/.test(line))
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n');
+    const sanitizedReply = sanitizeLiveFetchRetryWording(stripEmptyOrderUrls(reply));
     const dedupedReply = stripEchoedSourceFooter(sanitizedReply);
     const finalReply = sourceFooter
       ? `${dedupedReply}\n\n${sourceFooter}\n\n${modelMarker}`
