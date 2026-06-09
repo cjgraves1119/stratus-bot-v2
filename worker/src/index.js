@@ -9171,7 +9171,17 @@ export default {
               // separate_quotes phrasing at the adapter layer (not the routing
               // layer) so the renderer gets the right flag.
               let quoteParsed = null;
-              if (activeClassification._v2) {
+              // V3 model-intent path (flag-gated via CF_QUOTE_V3_ENABLED, OFF by default). When on,
+              // classify per-item intent and build via buildQuoteFromV3 (same parseMessage-shape
+              // output, incl. clarification). Falls through to the V2-direct adapter / parseMessage
+              // on any miss. Mirrors the gchat /api/quote wiring so both engines behave identically.
+              if (String(env.CF_QUOTE_V3_ENABLED) === 'true') {
+                try {
+                  const _v3 = await classifyV3(text, '', env);
+                  if (_v3 && _v3.intent === 'quote') quoteParsed = buildQuoteFromV3(_v3, text) || null;
+                } catch (_) { quoteParsed = null; }
+              }
+              if (!quoteParsed && activeClassification._v2) {
                 try {
                   quoteParsed = buildQuoteFromV2(activeClassification._v2, text);
                   if (quoteParsed) {

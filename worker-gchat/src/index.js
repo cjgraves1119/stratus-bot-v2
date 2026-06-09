@@ -21623,7 +21623,19 @@ CRITICAL URL RULES:
                 .filter(s => !s.startsWith('LIC-'))
             )];
 
-            const parsed = parseMessage(text);
+            // V3 model-intent path (flag-gated via CF_QUOTE_V3_ENABLED, OFF by default). When on,
+            // the classifier reads per-item intent and buildQuoteFromV3 returns a parsed object in
+            // the SAME shape parseMessage produces (quote OR clarification) — so the entire
+            // downstream flow is unchanged. Any miss (flag off / non-quote intent / null / throw)
+            // falls through to the deterministic parseMessage path. Mirrors the webex wiring.
+            let parsed = null;
+            if (String(env.CF_QUOTE_V3_ENABLED) === 'true') {
+              try {
+                const _v3 = await classifyV3(text, '', env);
+                if (_v3 && _v3.intent === 'quote') parsed = buildQuoteFromV3(_v3, text) || null;
+              } catch (_) { parsed = null; }
+            }
+            if (!parsed) parsed = parseMessage(text);
 
             // Clarification prompts (e.g. "which Duo tier?") — return as clarification response
             if (parsed && parsed.isClarification && parsed.clarificationMessage) {
