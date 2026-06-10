@@ -15271,7 +15271,7 @@ function classifyCrmIntent(text, ctx = {}) {
   }
 
   // 2. Subscription / DID / PO / contract / esign / sub mod
-  if (/\b(generate\s+(a\s+|the\s+)?did|create\s+(a\s+|the\s+)?did|fire\s+(a\s+|the\s+)?did|get\s+(a|the)\s+did|need\s+(a\s+)?did|submit\s+(to\s+|for\s+)?(ccw|did|velocity)|live_ciscoquote|live_converttoso|live_sendtoesign|live_getquotedata|admin\s+action|admin_action|quote.to.po|convert\s+to\s+po|create\s+(a\s+)?po|send\s+po|contract|esign|e-sign|docusign|send\s+for\s+signature|sub\s*mod|subscription\s+mod|ccw\s+renewal|renew\s+(my\s+)?subscription)\b/.test(t)) {
+  if (/\b(generate\s+(a\s+|the\s+)?did|create\s+(a\s+|the\s+)?did|fire\s+(a\s+|the\s+)?did|get\s+(a|the)\s+did|need\s+(a\s+)?did|submit\s+(to\s+|for\s+)?(that\s+|the\s+|this\s+)?(ccw|did|velocity)|live_ciscoquote|live_converttoso|live_sendtoesign|live_getquotedata|admin\s+action|admin_action|quote.to.po|convert\s+to\s+po|create\s+(a\s+)?po|send\s+po|contract|esign|e-sign|docusign|send\s+for\s+signature|sub\s*mod|subscription\s+mod|ccw\s+renewal|renew\s+(my\s+)?subscription)\b/.test(t)) {
     return { class: 'subscription', confidence: 0.9 };
   }
 
