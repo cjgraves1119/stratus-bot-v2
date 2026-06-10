@@ -12641,7 +12641,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   product: item.Product_Name?.name || item.product?.name || 'Unknown',
                   qty: item.Quantity,
                   unit_price: item.unit_price,
-                  total: item.total
+                  total: item.total,
+                  // SEDA postmortem (2026-06-09): carry the subform ids so the
+                  // crm_context extractor can persist line_items {id,sku,qty,
+                  // product_id} — without them a modify-after-create turn starts
+                  // blind and re-asks everything already confirmed.
+                  id: item.id || null,
+                  sku: item.Product_Code || item.Product_Name?.Product_Code || null,
+                  product_id: item.Product_Name?.id || item.product?.id || null
                 }))
               };
               if (fq.Quote_Number) {
@@ -15428,6 +15435,8 @@ Info needed for a Quote (ask in one combined message if missing):
 - Cisco rep involvement? (determines Lead_Source)
 - Billing address (look up in Zoho Account first, then Gmail thread, then ask)
 
+**Pasted multi-line product lists (BOM):** when a message or pasted email lists MULTIPLE products, parse the ENTIRE list into one bill of materials FIRST — every line item with SKU + qty + term. A global quantity phrase ("Qty 2 each") applies to EVERY line unless a line overrides it; a term stated once ("3 YEAR") or embedded in a license SKU (…-3Y) is RESOLVED — do not re-ask it. Echo the full parsed BOM back in ONE confirmation message (SKU and qty per line — no extra lookups needed first), get a single approval, then call create_deal_and_quote ONCE with the complete skus[] array. NEVER build the quote one item per turn, and NEVER call create_deal_and_quote with only a subset of the items the user confirmed.
+
 ---
 
 ## PRE-CREATION VALIDATION TABLE (MANDATORY)
@@ -16179,7 +16188,11 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
         // isn't truncated away. Mirrors the askClaude path.
         const isQuoteData = block.input?.module_name === 'Quotes' &&
                             ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(block.name);
-        const truncLimit = (block.name === 'zoho_get_record' || isQuoteData) ? 8000 : 2000;
+        // Compound create results carry nested records + verification line items the
+        // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
+        // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
+        const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
+        const truncLimit = (block.name === 'zoho_get_record' || isQuoteData || isCompoundCreate) ? 8000 : 2000;
         return {
           type: 'tool_result',
           tool_use_id: block.id,
@@ -17048,6 +17061,152 @@ async function askCFConversation(userMessage, env) {
   }
 }
 
+// CRM context extraction: pull key record IDs (Quote/Deal/Account + line items)
+// out of a turn's tool_result blocks so follow-up messages can skip re-searching.
+// Module-scope so the SEDA-postmortem regression tests can drive it directly.
+// env is only used for the fire-and-forget DID sync write-back.
+function extractCrmContextFromMessages(messages, env) {
+  const crmCtx = {};
+  for (const msg of messages) {
+    if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type !== 'tool_result' || !block.content) continue;
+      const raw = typeof block.content === 'string' ? block.content : '';
+      // Extract Quote context from create_record responses (which lack Quoted_Items)
+      // zoho_create_record returns: {data: [{status: "success", details: {id: "..."}, message: "record added"}]}
+      if (raw.includes('"record added"') && raw.includes('"details"')) {
+        try {
+          const parsed = JSON.parse(raw);
+          const rec = parsed?.data?.[0];
+          if (rec?.status === 'success' && rec?.details?.id) {
+            // Check the tool_use block preceding this result to identify the module
+            const prevIdx = messages.indexOf(msg) - 1;
+            const prevMsg = prevIdx >= 0 ? messages[prevIdx] : null;
+            if (prevMsg?.role === 'assistant' && Array.isArray(prevMsg.content)) {
+              const toolUse = prevMsg.content.find(b => b.type === 'tool_use' && b.id === block.tool_use_id);
+              if (toolUse?.input?.module_name === 'Quotes') {
+                crmCtx.quote_id = rec.details.id;
+              } else if (toolUse?.input?.module_name === 'Deals') {
+                crmCtx.deal_id = rec.details.id;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+      // Extract Quote context (from search, get_record, or update_record responses)
+      if (raw.includes('"Quoted_Items"') || raw.includes('"Quote_Number"') || raw.includes('"CCW_Deal_Number"')) {
+        try {
+          const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
+          const rec = parsed?.data?.[0] || parsed;
+          if (rec?.id) {
+            crmCtx.quote_id = rec.id;
+            crmCtx.quote_number = rec.Quote_Number || crmCtx.quote_number || null;
+            crmCtx.account_name = rec.Account_Name?.name || crmCtx.account_name || null;
+            crmCtx.account_id = rec.Account_Name?.id || crmCtx.account_id || null;
+            crmCtx.deal_id = rec.Deal_Name?.id || crmCtx.deal_id || null;
+            // Capture CCW Deal Number (DID) when present from Admin Action results
+            if (rec.CCW_Deal_Number) {
+              crmCtx.ccw_deal_number = rec.CCW_Deal_Number;
+              // ── DID SYNC: propagate Quote.CCW_Deal_Number → Deal.CCW_Deal_ID ──
+              // The DID lives on the Quote but users often check the Deal record.
+              // Write it back so Deal is self-describing.
+              const syncDealId = rec.Deal_Name?.id || crmCtx.deal_id;
+              if (syncDealId) {
+                zohoApiCall('PUT', `Deals/${syncDealId}`, env, {
+                  data: [{ CCW_Deal_ID: rec.CCW_Deal_Number }]
+                }).then(() => {
+                  console.log(`[DID-SYNC] Wrote CCW_Deal_Number=${rec.CCW_Deal_Number} → Deal.CCW_Deal_ID on deal ${syncDealId}`);
+                }).catch(err => {
+                  console.warn(`[DID-SYNC] Deal write-back failed for deal ${syncDealId}:`, err.message);
+                });
+              }
+            }
+            // Compact line items: product code + qty + line item ID
+            if (rec.Quoted_Items) {
+              crmCtx.line_items = rec.Quoted_Items.map(i => ({
+                id: i.id,
+                sku: i.Product_Code || i.Product_Name?.Product_Code || i.Product_Name,
+                qty: i.Quantity,
+                product_id: i.product_id || i.Product_Name?.id
+              }));
+            }
+          }
+        } catch (_) {}
+      }
+      // Extract Quote context from clone_quote responses. clone_quote
+      // returns cloned_quote_id + facts.line_items (the FRESH cloned
+      // subform ids) rather than a raw Quoted_Items array, so the
+      // block above misses it. Capturing it here lets an immediate
+      // follow-up modification target the clone with correct ids.
+      if (raw.includes('"cloned_quote_id"')) {
+        try {
+          const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
+          if (parsed?.success && parsed?.cloned_quote_id) {
+            crmCtx.quote_id = parsed.cloned_quote_id;
+            crmCtx.quote_number = parsed.cloned_quote_number || parsed.facts?.quote_number || crmCtx.quote_number || null;
+            crmCtx.line_items = (parsed.facts?.line_items || []).map(i => ({
+              id: i.id,
+              sku: i.product_code || i.Product_Code || i.Product_Name?.Product_Code || null,
+              qty: i.quantity ?? i.Quantity,
+              product_id: i.product_id || i.Product_Name?.id || null,
+            }));
+          }
+        } catch (_) {}
+      }
+      // Extract context from the COMPOUND create tools (create_deal_and_quote /
+      // create_quote_on_deal). Their nested result shape {records:{account,deal,
+      // quote:{id,quote_number,verification:{items}}}} matches NONE of the flat
+      // markers above — SEDA postmortem (2026-06-09): the "Quote_Number" branch
+      // fired but read rec.id at the top level (absent here), so crm_context was
+      // silently dropped after every compound create and the next "modify" turn
+      // started blind (re-asked SKUs/qty/term the user had already confirmed).
+      // Keyed on the tool_use name — exact, no marker guessing.
+      {
+        const cIdx = messages.indexOf(msg) - 1;
+        const cPrev = cIdx >= 0 ? messages[cIdx] : null;
+        const cToolUse = (cPrev?.role === 'assistant' && Array.isArray(cPrev.content))
+          ? cPrev.content.find(b => b.type === 'tool_use' && b.id === block.tool_use_id)
+          : null;
+        if (cToolUse && (cToolUse.name === 'create_deal_and_quote' || cToolUse.name === 'create_quote_on_deal')) {
+          try {
+            const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
+            if (parsed?.success && parsed?.records) {
+              if (parsed.records.quote?.id) crmCtx.quote_id = parsed.records.quote.id;
+              if (parsed.records.quote?.quote_number) crmCtx.quote_number = parsed.records.quote.quote_number;
+              if (parsed.records.deal?.id) crmCtx.deal_id = parsed.records.deal.id;
+              if (parsed.records.account?.id) {
+                crmCtx.account_id = parsed.records.account.id;
+                crmCtx.account_name = parsed.records.account.name || crmCtx.account_name || null;
+              }
+              const vItems = parsed.records.quote?.verification?.items;
+              if (Array.isArray(vItems) && vItems.length > 0) {
+                crmCtx.line_items = vItems.map(i => ({
+                  id: i.id || null,
+                  sku: i.sku || i.product || null,
+                  qty: i.qty,
+                  product_id: i.product_id || null
+                }));
+              }
+            }
+          } catch (_) {}
+        }
+      }
+      // Extract Account context
+      if (raw.includes('"Account_Name"') && !crmCtx.account_id) {
+        try {
+          const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
+          const rec = parsed?.data?.[0] || parsed;
+          if (rec?.Account_Name) {
+            crmCtx.account_name = rec.Account_Name?.name || rec.Account_Name;
+            crmCtx.account_id = rec.Account_Name?.id || null;
+          }
+        } catch (_) {}
+      }
+    }
+  }
+  return crmCtx;
+}
+
 async function askClaude(userMessage, personId, env, imageData = null, useTools = false, progressCallback = null, maxWallMs = null, evalContext = null) {
   if (!env.ANTHROPIC_API_KEY) return 'Claude API not configured. Please check ANTHROPIC_API_KEY.';
   try {
@@ -17322,6 +17481,14 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         });
       }
     }
+
+    // Turn-level CRM-context accumulator: filled incrementally right after each
+    // tool_result push, BEFORE message compaction can shrink results below
+    // parseability (codex review: compound create + a later non-quote tool in
+    // the same turn compacted the create result to 300 chars before the final
+    // save, losing the line-item context). Later pushes overwrite earlier keys,
+    // so a fresh zoho_get_record still wins over a stale create.
+    const _turnCrmCtx = {};
 
     while (iteration < MAX_TOOL_ITERATIONS) {
       // Deadline guard: if we've burned past maxWallMs, return a continuation object
@@ -17643,7 +17810,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           // Also include zoho_update_record on Quotes so Admin Action responses (with CCW_Deal_Number etc.) aren't truncated
           const isQuoteData = (block.input?.module_name === 'Quotes') &&
                               ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(block.name);
-          const truncLimit = isQuoteData ? 8000 : 2000;
+          // Compound create results carry nested records + verification line items the
+          // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
+          // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
+          const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
+          const truncLimit = (isQuoteData || isCompoundCreate) ? 8000 : 2000;
           return {
             type: 'tool_result',
             tool_use_id: block.id,
@@ -17655,6 +17826,14 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
 
         // Add tool results to messages
         messages.push({ role: 'user', content: toolResults });
+
+        // Incremental CRM-context capture on the just-pushed pair (assistant
+        // tool_use msg + user tool_results msg) — must run BEFORE compaction.
+        if (useTools) {
+          try {
+            Object.assign(_turnCrmCtx, extractCrmContextFromMessages(messages.slice(-2), env));
+          } catch (_) { /* context capture must never break the loop */ }
+        }
 
         // Message compaction: when conversation grows beyond 4 messages,
         // replace older tool_result contents with a brief summary to keep
@@ -17724,111 +17903,15 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         await addToHistory(kv, personId, 'user', userMessage);
         await addToHistory(kv, personId, 'assistant', reply);
 
-        // CRM context persistence: extract key record IDs from tool results
-        // so follow-up messages can skip re-searching. Scan messages for Zoho
-        // tool results containing Quote, Deal, or Account data.
+        // CRM context persistence: persist the turn's accumulated record IDs so
+        // follow-up messages can skip re-searching. The accumulator was filled
+        // incrementally at each tool_result push (pre-compaction) — a final
+        // full re-scan here would re-parse compacted blocks and silently lose
+        // whatever compaction destroyed, and would double-fire the DID-sync
+        // write-back for results extracted once already.
         if (useTools && kv) {
           try {
-            const crmCtx = {};
-            for (const msg of messages) {
-              if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
-              for (const block of msg.content) {
-                if (block.type !== 'tool_result' || !block.content) continue;
-                const raw = typeof block.content === 'string' ? block.content : '';
-                // Extract Quote context from create_record responses (which lack Quoted_Items)
-                // zoho_create_record returns: {data: [{status: "success", details: {id: "..."}, message: "record added"}]}
-                if (raw.includes('"record added"') && raw.includes('"details"')) {
-                  try {
-                    const parsed = JSON.parse(raw);
-                    const rec = parsed?.data?.[0];
-                    if (rec?.status === 'success' && rec?.details?.id) {
-                      // Check the tool_use block preceding this result to identify the module
-                      const prevIdx = messages.indexOf(msg) - 1;
-                      const prevMsg = prevIdx >= 0 ? messages[prevIdx] : null;
-                      if (prevMsg?.role === 'assistant' && Array.isArray(prevMsg.content)) {
-                        const toolUse = prevMsg.content.find(b => b.type === 'tool_use' && b.id === block.tool_use_id);
-                        if (toolUse?.input?.module_name === 'Quotes') {
-                          crmCtx.quote_id = rec.details.id;
-                        } else if (toolUse?.input?.module_name === 'Deals') {
-                          crmCtx.deal_id = rec.details.id;
-                        }
-                      }
-                    }
-                  } catch (_) {}
-                }
-                // Extract Quote context (from search, get_record, or update_record responses)
-                if (raw.includes('"Quoted_Items"') || raw.includes('"Quote_Number"') || raw.includes('"CCW_Deal_Number"')) {
-                  try {
-                    const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
-                    const rec = parsed?.data?.[0] || parsed;
-                    if (rec?.id) {
-                      crmCtx.quote_id = rec.id;
-                      crmCtx.quote_number = rec.Quote_Number || crmCtx.quote_number || null;
-                      crmCtx.account_name = rec.Account_Name?.name || crmCtx.account_name || null;
-                      crmCtx.account_id = rec.Account_Name?.id || crmCtx.account_id || null;
-                      crmCtx.deal_id = rec.Deal_Name?.id || crmCtx.deal_id || null;
-                      // Capture CCW Deal Number (DID) when present from Admin Action results
-                      if (rec.CCW_Deal_Number) {
-                        crmCtx.ccw_deal_number = rec.CCW_Deal_Number;
-                        // ── DID SYNC: propagate Quote.CCW_Deal_Number → Deal.CCW_Deal_ID ──
-                        // The DID lives on the Quote but users often check the Deal record.
-                        // Write it back so Deal is self-describing.
-                        const syncDealId = rec.Deal_Name?.id || crmCtx.deal_id;
-                        if (syncDealId) {
-                          zohoApiCall('PUT', `Deals/${syncDealId}`, env, {
-                            data: [{ CCW_Deal_ID: rec.CCW_Deal_Number }]
-                          }).then(() => {
-                            console.log(`[DID-SYNC] Wrote CCW_Deal_Number=${rec.CCW_Deal_Number} → Deal.CCW_Deal_ID on deal ${syncDealId}`);
-                          }).catch(err => {
-                            console.warn(`[DID-SYNC] Deal write-back failed for deal ${syncDealId}:`, err.message);
-                          });
-                        }
-                      }
-                      // Compact line items: product code + qty + line item ID
-                      if (rec.Quoted_Items) {
-                        crmCtx.line_items = rec.Quoted_Items.map(i => ({
-                          id: i.id,
-                          sku: i.Product_Code || i.Product_Name?.Product_Code || i.Product_Name,
-                          qty: i.Quantity,
-                          product_id: i.product_id || i.Product_Name?.id
-                        }));
-                      }
-                    }
-                  } catch (_) {}
-                }
-                // Extract Quote context from clone_quote responses. clone_quote
-                // returns cloned_quote_id + facts.line_items (the FRESH cloned
-                // subform ids) rather than a raw Quoted_Items array, so the
-                // block above misses it. Capturing it here lets an immediate
-                // follow-up modification target the clone with correct ids.
-                if (raw.includes('"cloned_quote_id"')) {
-                  try {
-                    const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
-                    if (parsed?.success && parsed?.cloned_quote_id) {
-                      crmCtx.quote_id = parsed.cloned_quote_id;
-                      crmCtx.quote_number = parsed.cloned_quote_number || parsed.facts?.quote_number || crmCtx.quote_number || null;
-                      crmCtx.line_items = (parsed.facts?.line_items || []).map(i => ({
-                        id: i.id,
-                        sku: i.product_code || i.Product_Code || i.Product_Name?.Product_Code || null,
-                        qty: i.quantity ?? i.Quantity,
-                        product_id: i.product_id || i.Product_Name?.id || null,
-                      }));
-                    }
-                  } catch (_) {}
-                }
-                // Extract Account context
-                if (raw.includes('"Account_Name"') && !crmCtx.account_id) {
-                  try {
-                    const parsed = JSON.parse(raw.replace(/\.\.\.\(truncated\)$/, '').replace(/\.\.\.\(compacted\)$/, ''));
-                    const rec = parsed?.data?.[0] || parsed;
-                    if (rec?.Account_Name) {
-                      crmCtx.account_name = rec.Account_Name?.name || rec.Account_Name;
-                      crmCtx.account_id = rec.Account_Name?.id || null;
-                    }
-                  } catch (_) {}
-                }
-              }
-            }
+            const crmCtx = _turnCrmCtx;
             if (Object.keys(crmCtx).length > 0) {
               await kv.put(`crm_context_${personId}`, JSON.stringify(crmCtx), { expirationTtl: 900 });
               console.log(`[GCHAT] Saved CRM context for ${personId}: quote=${crmCtx.quote_id}, acct=${crmCtx.account_name}`);
