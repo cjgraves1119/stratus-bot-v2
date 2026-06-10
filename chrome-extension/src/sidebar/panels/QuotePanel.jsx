@@ -336,14 +336,18 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
 
         // Handle all response types from the full handler chain
         if (res.pricingResponse) {
-          // Deterministic pricing calculator response
+          // Pricing-bearing response. Follow-up modifier results carry BOTH quote
+          // URLs and pricing/SME-note text — keep the structured URL list (copy
+          // buttons / Copy All / Send-to-Zoho) instead of dropping it. Legacy
+          // pricing-calculator responses have no URLs (urlsArr is empty), so they
+          // render exactly as before. Mirrors the other call site below.
           setResult({
-            urls: [],
+            urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
             eolWarnings: [],
             suggestions: null,
             parsed: [],
             pricingResponse: res.pricingResponse,
-            handlerType: 'pricing',
+            handlerType: res.handlerType || 'pricing',
             source: 'pricing',
           });
         } else if (res.eolDateResponse) {
@@ -951,6 +955,27 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
                 </div>
               ))}
             </div>
+          )}
+
+          {/* Copy All — one click copies every option as "<label>: <url>" lines,
+              mirroring the Webex bot quote output (plain text, no markdown bold).
+              Labels + URLs only — never include margin/cost data here. */}
+          {result.urls.length > 1 && (
+            <button
+              onClick={() => handleCopy(
+                result.urls
+                  .map((u, j) => `${u.label || `Option ${j + 1}`}: ${u.url}`)
+                  .join('\n'),
+                'all'
+              )}
+              style={{
+                width: '100%', padding: '8px 12px', background: COLORS.STRATUS_BLUE,
+                color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
+                fontWeight: 600, cursor: 'pointer', marginBottom: 8,
+              }}
+            >
+              {copiedIdx === 'all' ? '✓ Copied!' : `Copy All (${result.urls.length} links)`}
+            </button>
           )}
 
           {/* Quote URLs */}
