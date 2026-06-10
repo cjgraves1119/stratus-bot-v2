@@ -336,14 +336,18 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
 
         // Handle all response types from the full handler chain
         if (res.pricingResponse) {
-          // Deterministic pricing calculator response
+          // Pricing-bearing response. Follow-up modifier results carry BOTH quote
+          // URLs and pricing/SME-note text — keep the structured URL list (copy
+          // buttons / Copy All / Send-to-Zoho) instead of dropping it. Legacy
+          // pricing-calculator responses have no URLs (urlsArr is empty), so they
+          // render exactly as before. Mirrors the other call site below.
           setResult({
-            urls: [],
+            urls: urlsArr.map(u => (u && typeof u === 'object') ? u : { url: String(u), label: 'Quote' }),
             eolWarnings: [],
             suggestions: null,
             parsed: [],
             pricingResponse: res.pricingResponse,
-            handlerType: 'pricing',
+            handlerType: res.handlerType || 'pricing',
             source: 'pricing',
           });
         } else if (res.eolDateResponse) {
