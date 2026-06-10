@@ -3256,8 +3256,13 @@ async function handleFollowUpModifier(text, personId, kv) {
   // "double it") — sweep 2026-06-09 found ALL of these fell to the slow/nondeterministic LLM
   // path. Handled in applyItemMutation; ambiguous numbers (1/3/5 could mean a term) fail closed.
   const isQtyChange = /^(?:(?:CHANGE|UPDATE|SET)\s+(?:THE\s+)?(?:QTY|QUANTITY)(?:\s+TO)?\s+\d+|MAKE\s+(?:IT|THAT|THEM)\s+\d+|ACTUALLY\s+\d+|\d+\s+(?:INSTEAD|LICENSES\s+INSTEAD|USERS\s+INSTEAD|SEATS\s+INSTEAD)|(?:BUMP|INCREASE|RAISE)(?:\s+IT)?(?:\s+UP)?\s+TO\s+\d+|(?:LOWER|DROP|REDUCE)(?:\s+IT)?(?:\s+DOWN)?\s+TO\s+\d+|QTY\s*:?\s*\d+|DOUBLE\s+(?:IT|THAT)|(?:CHANGE|SWITCH)\s+TO\s+\d+(?:\s+(?:USERS|SEATS|LICENSES))?)\s*\.?\s*$/i.test(upper);
+  // Verb-less Umbrella package-type phrase ("SIG instead", "umbrella dns instead") — the
+  // swap-verb forms ("change to SIG …") already enter via hasSwapPrefix. Requires the trailing
+  // INSTEAD so a bare "DNS Essentials" tier-question ANSWER never enters this handler (that
+  // belongs to the tier-clarify continuation). Live repro 2026-06-09 (D1 23:19:29).
+  const isUmbTypeSwap = /^(?:UMBRELLA\s+)?(?:DNS|SIG|SECURE\s+INTERNET\s+GATEWAY)(?:\s+(?:ESSENTIALS?|ADVANTAGE))?\s+INSTEAD\s*\.?\s*$/i.test(upper);
 
-  if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !isQtyChange && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) return null;
+  if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !isQtyChange && !isUmbTypeSwap && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) return null;
 
   const history = await getHistory(kv, personId);
   if (!history || history.length === 0) return null;
@@ -3368,6 +3373,35 @@ async function handleFollowUpModifier(text, personId, kv) {
         return i; // non-Duo/Umbrella items pass through unchanged
       });
       if (!anySwappable || anyFailed) return null; // fail-closed
+      return swapped;
+    }
+    // ── Umbrella PACKAGE-TYPE swap — "change to SIG", "change to SIG Advantage", "switch to
+    // dns advantage", "SIG instead". Live repro 2026-06-09 (D1 23:19:29): fell to Sonnet because
+    // the tier swap above only swaps ESS↔ADV within the same type. Rewrites the (DNS|SIG) type
+    // segment of LIC-UMB-(DNS|SIG)-(ESS|ADV)-K9-{term}, optionally the tier too. Disjoint from
+    // tierSwapM (which requires a bare tier word after an optional DUO/UMBRELLA prefix), from the
+    // qty branch (no digits here), and from term phrasings. FAIL-CLOSED: no Umbrella line in the
+    // bucket, any rewrite missing from the catalog, or a no-op (already that type+tier) → null.
+    const umbTypeSwapM =
+      up.match(/^(?:CHANGE|SWAP|REPLACE|SWITCH)(?:\s+(?:IT|THEM|THAT|THESE|THOSE))?(?:\s+(?:TO|WITH|FOR))?\s+(?:UMBRELLA\s+)?(DNS|SIG|SECURE\s+INTERNET\s+GATEWAY)(?:\s+(ESSENTIALS?|ADVANTAGE))?\s*\.?\s*$/i)
+      || up.match(/^(?:UMBRELLA\s+)?(DNS|SIG|SECURE\s+INTERNET\s+GATEWAY)(?:\s+(ESSENTIALS?|ADVANTAGE))?\s+INSTEAD\s*\.?\s*$/i);
+    if (umbTypeSwapM) {
+      const wantType = /^SECURE/i.test(umbTypeSwapM[1]) ? 'SIG' : umbTypeSwapM[1].toUpperCase();
+      const wantTier = umbTypeSwapM[2]
+        ? (/^ESSENTIAL/i.test(umbTypeSwapM[2]) ? 'ESS' : 'ADV')
+        : null; // no tier named — keep each line's current tier
+      let anyUmbrella = false, anyFailed = false;
+      const swapped = items.map(i => {
+        const umbM = String(i.sku).match(/^LIC-UMB-(DNS|SIG)-(ESS|ADV)(-K9-.+)$/i);
+        if (!umbM) return i; // non-Umbrella items pass through unchanged (DNS/SIG is Umbrella-only)
+        anyUmbrella = true;
+        const newSku = ('LIC-UMB-' + wantType + '-' + (wantTier || umbM[2].toUpperCase()) + umbM[3]).toUpperCase();
+        if (newSku in prices) return { ...i, sku: newSku };
+        anyFailed = true; return i;
+      });
+      if (!anyUmbrella || anyFailed) return null; // fail-closed
+      const changedUmb = swapped.some((s, idx) => s.sku !== items[idx].sku);
+      if (!changedUmb) return null; // no-op ("change to SIG" on an all-SIG quote) — never re-render unchanged as success
       return swapped;
     }
     // ── Quantity change — "change qty to 300", "make it 300", "actually 300", "bump to 500",
@@ -3534,7 +3568,7 @@ async function handleFollowUpModifier(text, personId, kv) {
     let out = items;
     if (isHwOnly) out = applyHwOnly(out);
     else if (isLicOnly) out = applyLicOnly(out, term === 'na' ? null : parseInt(term, 10));
-    else if ((hasRemovePrefix || hasAddPrefix || hasSwapPrefix || isQtyChange) && !isTermOnly) {
+    else if ((hasRemovePrefix || hasAddPrefix || hasSwapPrefix || isQtyChange || isUmbTypeSwap) && !isTermOnly) {
       // hasSwapPrefix can co-occur with isTermOnly (e.g. "change to 3 year").
       // In that case the term filter / SKU-rewrite above already produced the
       // intended state, so we skip the item mutation pass which would only
