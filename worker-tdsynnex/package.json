@@ -1,0 +1,15 @@
+{
+  "name": "stratus-tdsynnex-pricing",
+  "version": "1.0.0",
+  "description": "Daily TD Synnex distributor cost pricing refresh for Cisco/Meraki SKUs",
+  "main": "src/index.js",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "node test-local.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

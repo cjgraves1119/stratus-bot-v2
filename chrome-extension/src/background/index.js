@@ -31,6 +31,23 @@ import { handleCommand } from './shortcuts.js';
 // Extension Lifecycle
 // ─────────────────────────────────────────────
 
+self.addEventListener('error', (event) => {
+  console.error('[Stratus AI] Background service worker error:', {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+    stack: event.error?.stack,
+  });
+});
+
+self.addEventListener('unhandledrejection', (event) => {
+  console.error(
+    '[Stratus AI] Background service worker promise rejection:',
+    event.reason?.stack || event.reason?.message || event.reason
+  );
+});
+
 chrome.runtime.onInstalled.addListener((details) => {
   console.log('[Stratus AI] Extension installed/updated:', details.reason);
 
@@ -194,6 +211,28 @@ registerMessageHandlers({
     }
     const ctx = await getEmailContextForTab(tab.id);
     return ctx || { empty: true };
+  },
+
+  [MSG.GET_FULL_EMAIL_CONTEXT]: async () => {
+    const activeTab = await getActiveTab();
+
+    if (activeTab?.id && activeTab.url?.startsWith('https://mail.google.com/')) {
+      try {
+        const liveContext = await chrome.tabs.sendMessage(activeTab.id, { type: MSG.GET_FULL_EMAIL_CONTEXT });
+        if (liveContext && !liveContext.empty) {
+          await setEmailContextForTab(activeTab.id, liveContext);
+          return liveContext;
+        }
+      } catch (err) {
+        console.warn('[Stratus] Live full-thread email extraction failed:', err?.message);
+      }
+    }
+
+    if (activeTab?.id != null && activeTab.url?.startsWith('https://mail.google.com/')) {
+      const ctx = await getEmailContextForTab(activeTab.id);
+      if (ctx) return ctx;
+    }
+    return { empty: true };
   },
 
   [MSG.GET_CRM_CONTEXT]: async () => {
@@ -391,7 +430,11 @@ registerMessageHandlers({
     return api.crmCreateAccount(name, street, city, state, zip, website);
   },
 
-  // ── Enrich Company (domain → company info, optional retry/start_tier) ──
+  // ── Enrich Company (domain → company info) ──
+  // Narrowed to the deployed worker's 3-tier contract ({cache_bust, start_tier:
+  // zia|haiku|sonnet}). The richer fields his enrich-v5 worker consumed are dropped
+  // here to match the CrmPanel downgrade — forwarding them was dead plumbing against
+  // main's /api/enrich-company and risked polluting the enrich KV cache.
   [MSG.ENRICH_COMPANY]: async ({ domain, cache_bust, start_tier }) => {
     return api.enrichCompany(domain, { cache_bust, start_tier });
   },

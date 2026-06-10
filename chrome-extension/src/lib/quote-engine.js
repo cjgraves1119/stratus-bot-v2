@@ -238,6 +238,9 @@ export function validateSku(baseSku) {
   // License SKUs pass through
   if (/^LIC-/.test(upper)) return { valid: true };
 
+  // Model-agnostic license aliases used for renewal/license-only requests.
+  if (/^(MR|MV|MT|AP)-AGN$/.test(upper)) return { valid: true };
+
   // Try family-based matching
   const family = detectFamily(upper);
   if (family && catalog[family]) {
@@ -324,7 +327,7 @@ export function getLicenseSkus(baseSku, requestedTerm = null, requestedTier = nu
   }
 
   // ── MR Access Points & CW Wi-Fi — LIC-ENT ──
-  if (/^MR\d/.test(upper) || /^CW9\d/.test(upper)) {
+  if (/^MR\d/.test(upper) || /^CW9\d/.test(upper) || upper === 'MR-AGN' || upper === 'AP-AGN') {
     // CW9800 Wireless Controller has no standard license
     if (/^CW9800/.test(upper)) return [];
     return terms.map(t => `LIC-ENT-${t}YR`);
@@ -371,7 +374,7 @@ export function getLicenseSkus(baseSku, requestedTerm = null, requestedTier = nu
   }
 
   // ── MV Cameras — LIC-MV-{term}YR ──
-  if (/^MV\d/.test(upper)) {
+  if (/^MV\d/.test(upper) || upper === 'MV-AGN') {
     return terms.map(t => `LIC-MV-${t}YR`);
   }
 
@@ -553,6 +556,61 @@ function normalizeDirectLicenseItems(items) {
   return { items: normalizedItems, notes, invalidSkus };
 }
 
+function hasLicenseIntent(text) {
+  return /\b(LICENSE|LICENSES|LICENSING|LICENCE|LICENCES|LIC|RENEWAL|RENEWALS|RENEW)\b/i.test(String(text || ''));
+}
+
+function isLicenseOnlyCapableItem(baseSku) {
+  const upper = String(baseSku || '').toUpperCase();
+  return /^(MR|MV|MT|AP)-AGN$/.test(upper)
+    || /^(MR|MV|MT)\d/.test(upper)
+    || /^CW9\d/.test(upper)
+    || /^MX\d/.test(upper);
+}
+
+function extractBareAgnosticLicenseItems(text) {
+  const upper = String(text || '').toUpperCase();
+  const items = [];
+  const occupied = [];
+
+  const addItem = (baseSku, qty, position, length) => {
+    if (!baseSku || !qty || qty < 1) return;
+    if (occupied.some(r => position < r.end && position + length > r.start)) return;
+    occupied.push({ start: position, end: position + length });
+    items.push({ baseSku, qty, position });
+  };
+
+  const patterns = [
+    { re: /\b(\d+)\s*[X×]?\s*(MR|MRS|MR'S)\b/gi, sku: 'MR-AGN' },
+    { re: /\b(\d+)\s*[X×]?\s*(MV|MVS|MV'S)\b/gi, sku: 'MV-AGN' },
+    { re: /\b(\d+)\s*[X×]?\s*(MT|MTS|MT'S)\b/gi, sku: 'MT-AGN' },
+    { re: /\b(\d+)\s*[X×]?\s*(AP|APS|AP'S|ACCESS\s+POINTS?)\b/gi, sku: 'AP-AGN' },
+  ];
+
+  for (const { re, sku } of patterns) {
+    let match;
+    while ((match = re.exec(upper)) !== null) {
+      addItem(sku, parseInt(match[1], 10), match.index, match[0].length);
+    }
+  }
+
+  const noQtyPatterns = [
+    { re: /\b(MR|MRS|MR'S)\b/gi, sku: 'MR-AGN' },
+    { re: /\b(MV|MVS|MV'S)\b/gi, sku: 'MV-AGN' },
+    { re: /\b(MT|MTS|MT'S)\b/gi, sku: 'MT-AGN' },
+    { re: /\b(AP|APS|AP'S|ACCESS\s+POINTS?)\b/gi, sku: 'AP-AGN' },
+  ];
+
+  for (const { re, sku } of noQtyPatterns) {
+    let match;
+    while ((match = re.exec(upper)) !== null) {
+      addItem(sku, 1, match.index, match[0].length);
+    }
+  }
+
+  return items;
+}
+
 // ============================================================================
 // PARSING — Ported from the proven Webex/GChat bot's parseMessage()
 // Uses per-family SKU regex patterns with context-based quantity extraction
@@ -642,6 +700,7 @@ export function parseSkuInput(text) {
 
   // ── Detect modifiers ──
   const modifiers = { hardwareOnly: false, licenseOnly: false };
+  const licenseIntent = hasLicenseIntent(upper);
   if (hasMsAdvancedTierIntent(upper)) modifiers.switchTier = 'A';
   if (/\b(HARDWARE\s+ONLY|HARDWARE|WITHOUT\s+(A\s+)?LICENSE|NO\s+LICENSE|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/.test(upper)
       && !/\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/.test(upper)) {
@@ -712,22 +771,39 @@ export function parseSkuInput(text) {
     });
   });
 
+  if (licenseIntent) {
+    for (const bare of extractBareAgnosticLicenseItems(joinedUpper)) {
+      const alreadyHasExact = foundItems.some(item => item.position === bare.position);
+      const family = bare.baseSku.slice(0, 2);
+      const alreadyHasFamilyModel = foundItems.some(item => {
+        const upperSku = String(item.baseSku || '').toUpperCase();
+        if (family === 'AP') return /^(MR|CW9)\d/.test(upperSku);
+        return family !== 'AP' && upperSku.startsWith(family) && /\d/.test(upperSku);
+      });
+      if (!alreadyHasExact && !alreadyHasFamilyModel) foundItems.push(bare);
+    }
+  }
+
   // Sort by position in original text
   foundItems.sort((a, b) => a.position - b.position);
   const items = foundItems.map(({ baseSku, qty }) => ({ baseSku, qty }));
+
+  if (!modifiers.hardwareOnly && licenseIntent && items.length > 0 && items.every(item => isLicenseOnlyCapableItem(item.baseSku))) {
+    modifiers.licenseOnly = true;
+  }
 
   // ── Model-agnostic family detection ──
   // If no items found but text contains bare family names (MR, MV, MX, etc.),
   // return empty items with suggestions for popular models
   if (items.length === 0) {
     const FAMILY_SUGGESTIONS = {
-      'MR': ['MR44', 'MR46', 'MR57', 'MR28', 'MR36'],
-      'MV': ['MV13', 'MV22X', 'MV32', 'MV52', 'MV72X'],
+      'MR': ['MR28', 'MR36H', 'MR46', 'MR57', 'MR78', 'MR86'],
+      'MV': ['MV13', 'MV33', 'MV53X', 'MV73M', 'MV93'],
       'MX': ['MX67', 'MX67W', 'MX68', 'MX75', 'MX85'],
       'MT': ['MT10', 'MT12', 'MT14', 'MT15', 'MT20'],
       'MG': ['MG41', 'MG41E', 'MG52', 'MG52E'],
       'MS': ['MS130-24P', 'MS130-48P', 'MS150-48FP-4G', 'MS150-24P-4X'],
-      'CW': ['CW9172I', 'CW9166I', 'CW9174I', 'CW9176I', 'CW9178I'],
+      'CW': ['CW9172H', 'CW9164I', 'CW9166I'],
     };
     const familyMatch = upper.match(/\b(MR|MV|MX|MT|MG|MS|CW)\b/);
     if (familyMatch) {
@@ -737,10 +813,11 @@ export function parseSkuInput(text) {
         // Extract quantity if present (e.g., "10 MR" or "quote 5 MV")
         const qtyMatch = upper.match(/(\d+)\s*[X×]?\s*(?:MR|MV|MX|MT|MG|MS|CW)\b/);
         const qty = qtyMatch ? parseInt(qtyMatch[1]) : 1;
+        const isBareFamilyQty = new RegExp(`^(?:QUOTE\\s+)?${qty}\\s*[X×]?\\s*${family}(?:'?S)?\\s*$`, 'i').test(upper.trim());
         return {
           items: [],
           modifiers,
-          familySuggestions: { family, suggestions, qty },
+          familySuggestions: { family, suggestions, qty, ambiguousFamily: isBareFamilyQty },
         };
       }
     }
@@ -816,6 +893,39 @@ export function generateLocalQuote(text) {
       // Check for model-agnostic family suggestions (e.g., "quote MR" → suggest MR44, MR46, etc.)
       if (parsed.familySuggestions) {
         const fs = parsed.familySuggestions;
+        if (fs.ambiguousFamily) {
+          const licenseLabels = {
+            MR: 'MR access point licenses',
+            MV: 'MV camera licenses',
+            MT: 'MT sensor licenses',
+          };
+          const familyLabels = {
+            MX: 'security appliance',
+            MS: 'switch',
+            MG: 'cellular gateway',
+            CW: 'wireless access point',
+          };
+          const reason = licenseLabels[fs.family]
+            ? `Did you mean ${fs.qty} ${licenseLabels[fs.family]} or ${fs.qty} ${fs.family} hardware devices?`
+            : `Which ${fs.family} ${familyLabels[fs.family] || 'model'} do you want to quote?`;
+          const suggest = licenseLabels[fs.family]
+            ? [`${fs.qty} ${fs.family} licenses`, ...fs.suggestions]
+            : fs.suggestions;
+          return {
+            urls: [],
+            needsApi: false,
+            error: null,
+            parsed: [],
+            suggestions: [{
+              input: fs.family,
+              reason,
+              suggest,
+              isCommonMistake: false,
+              qty: fs.qty,
+            }],
+            eolWarnings: [],
+          };
+        }
         return {
           urls: [],
           needsApi: false,
@@ -898,7 +1008,7 @@ export function generateLocalQuote(text) {
 
     // Check if any EOL items have dual uplink replacements
     const hasDualUplink = eolWarnings.some(w => w.isDualUplink);
-    const hasEol = eolWarnings.length > 0;
+    const hasEol = !modifiers.licenseOnly && eolWarnings.length > 0;
     const nonEolItems = validItems.filter(item => !isEol(item.baseSku));
     const eolItems = validItems.filter(item => isEol(item.baseSku));
 

@@ -1,0 +1,92 @@
+1|is the MX75 good enough for 300 users|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-
+2|can the MS225-24P do layer 3 routing|cf-product-info|The MS225-24P is a Layer 2 switch, but it can be upgraded to a Layer 3 switch wi
+3|does the CW9166 support WiFi 7|cf-product-info|The CW9166 is a Wi-Fi 7 access point, supporting the latest wireless standard fo
+4|what's the range on an MR57|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR57-HW,LIC-ENT-1
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR57-HW,LIC-ENT-3
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR57-HW,LIC-ENT-5
+5|is MR46 indoor or outdoor|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR46-HW,LIC-ENT-1
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR46-HW,LIC-ENT-3
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR46-HW,LIC-ENT-5
+6|how many PoE ports does MS390-24UX have|cf-product-info|The MS390-24UX has 24 Gigabit Ethernet ports with PoE+ (30W) and 4 10G SFP+ upli
+7|what's the warranty on MV72|deterministic-quote|**Products End of Life:**
+• MV72 (EOL) → Replacement: MV73M
+
+**Option 1 — As Quoted:**
+ℹ️ MV72 — license renewal only (no longer orderable)
+
+1-Year Co-Term: https://stratusinfosystems.com/order/?item=LIC-MV-1YR&qty=1
+
+3-Year Co-Term: https://stratusinfosystems.com/order/?item=LIC-MV-3YR&qty=1
+
+5-Year Co-Term: https://stratusinfosystems.com/order/?item=LIC-MV-5YR&qty=1
+
+**Option 2 — Hardware Refresh:**
+• MV73M-HW × 1 (replacing MV72)
+
+1-Year Co-Term: https://stratusinfosystems.com/order/?item=MV7
+8|can I stack MS225 switches|cf-product-info|The MS225 switches support stacking. You can stack up to 8 MS225 switches using 
+9|does MX67 support site-to-site VPN|cf-product-info|The MX67 does support site-to-site VPN, making it suitable for connecting multip
+10|what frequency bands does CW9164 use|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=CW9164I-MR,LIC-EN
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=CW9164I-MR,LIC-EN
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=CW9164I-MR,LIC-EN
+11|compare MR46 vs CW9164|cf-product-info|The MR46 is a Wi-Fi 6 access point with a list price of $1,295, suitable for hig
+12|MX85 vs MX95 which is better for us|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-
+13|is the MR44 worth buying or should I get CW9164|cf-product-info|The MR44 is end-of-sale, so I would recommend considering the MR46 instead. The 
+14|what mount does the MR28 use|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR28-HW,LIC-ENT-1
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR28-HW,LIC-ENT-3
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR28-HW,LIC-ENT-5
+15|does MS130-8P have SFP uplinks|cf-product-info|The MS130-8P has 2 SFP uplinks. It supports 1GbE SFP modules.
+16|how much power does MT14 sensor need|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=MT14-HW,LIC-MT-1Y
+
+• 1 × MT14-HW — $118.00 each ($118.00)
+• 1 × LIC-MT-1Y — $68.00 each ($68.00)
+**Cart Total: $186.00**
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MT14-HW,LIC-MT-3Y
+
+• 1 × MT14-HW — $118.00 each ($118.00)
+• 1 × LIC-MT-3Y — $154.00 each ($154.00)
+**Cart Total: $272.00**
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=MT14-HW,LIC-MT-5Y
+
+• 1 × MT14-HW — $118.0
+17|can MX67 do content filtering|cf-product-info|The MX67 does support content filtering as part of its security features. It's a
+18|what's max throughput on MX250|deterministic-quote|**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX250-HW,LIC-MX25
+
+**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX250-HW,LIC-MX25
+
+**5-Year Co-Term:** https://stratusinfosystems.com/order/?item=MX250-HW,LIC-MX25
+19|is MV22 weatherproof|deterministic-quote|**Products End of Life:**
+• MV22 (EOL) → Replacement: MV23M
+
+**Option 1 — As Quoted:**
+ℹ️ MV22 — license renewal only (no longer orderable)
+
+1-Year Co-Term: https://stratusinfosystems.com/order/?item=LIC-MV-1YR&qty=1
+
+3-Year Co-Term: https://stratusinfosystems.com/order/?item=LIC-MV-3YR&qty=1
+
+5-Year Co-Term: https://stratusinfosystems.com/order/?item=LIC-MV-5YR&qty=1
+
+**Option 2 — Hardware Refresh:**
+• MV23M-HW × 1 (replacing MV22)
+
+1-Year Co-Term: https://stratusinfosystems.com/order/?item=MV2
+20|do I need a license for MT sensors|cf-product-info|MT sensors require a license for full functionality. The specific license requir

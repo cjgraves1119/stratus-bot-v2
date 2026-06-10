@@ -21,6 +21,178 @@ const safeStr = (v) => {
   return String(v);
 };
 
+const titleCaseNamePart = (value) => {
+  const s = safeStr(value).trim();
+  if (!s) return '';
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+};
+
+function splitContactName(name, email) {
+  const rawLocal = safeStr(email).split('@')[0] || '';
+  const localParts = rawLocal.split(/[._-]+/).filter(Boolean);
+  if (!safeStr(name).trim() && localParts.length === 1) {
+    const local = localParts[0];
+    const camelInitial = local.match(/^([A-Z])([A-Z][a-z].*)$/);
+    if (camelInitial) {
+      return { firstName: camelInitial[1], lastName: titleCaseNamePart(camelInitial[2]) };
+    }
+    const lowerInitialSurname = local.match(/^([a-z])([a-z]{5,})$/);
+    if (lowerInitialSurname) {
+      return { firstName: lowerInitialSurname[1].toUpperCase(), lastName: titleCaseNamePart(lowerInitialSurname[2]) };
+    }
+  }
+
+  let cleaned = safeStr(name)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(via|on behalf of)\b.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned || cleaned.includes('@')) {
+    cleaned = rawLocal
+      .replace(/[._-]+/g, ' ')
+      .replace(/\b(no.?reply|noreply|notifications?|info|sales|support|admin|contact)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  const parts = cleaned.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: '', lastName: '-' };
+  if (parts.length === 1) return { firstName: titleCaseNamePart(parts[0]), lastName: '-' };
+  return {
+    firstName: titleCaseNamePart(parts[0]),
+    lastName: parts.slice(1).map(titleCaseNamePart).join(' '),
+  };
+}
+
+function extractSignatureTitle(body, email) {
+  const tail = safeStr(body).slice(-2500);
+  if (!tail) return '';
+  const local = safeStr(email).split('@')[0]?.replace(/[._-]+/g, ' ').toLowerCase() || '';
+  const titleWords = /\b(CIO|CTO|CEO|CFO|COO|VP|Vice President|Director|Manager|Administrator|Admin|Engineer|Architect|Analyst|Consultant|Coordinator|Specialist|Supervisor|Lead|Head|Owner|Founder|President|Principal|Partner|Technician|Information Technology|IT|Network|Systems?|Security|Operations|Procurement|Purchasing|Facilities)\b/i;
+  const noise = /\b(email|mobile|cell|phone|tel|fax|office|www\.|https?:|@|street|suite|ste\.?|road|rd\.?|avenue|ave\.?|blvd|zip|confidential|disclaimer|unsubscribe)\b/i;
+
+  for (const rawLine of tail.split(/\r?\n/).slice(-24)) {
+    const line = rawLine.replace(/\s+/g, ' ').trim();
+    if (!line || line.length < 2 || line.length > 80) continue;
+    if (noise.test(line)) continue;
+    if (local && line.toLowerCase() === local) continue;
+
+    const pipeParts = line.split(/\s*[|•-]\s*/).filter(Boolean);
+    for (const part of pipeParts) {
+      const candidate = part.trim();
+      if (candidate.length < 2 || candidate.length > 60) continue;
+      if (noise.test(candidate)) continue;
+      if (titleWords.test(candidate)) return candidate;
+    }
+  }
+  return '';
+}
+
+function normalizeEmail(value) {
+  return safeStr(value).trim().toLowerCase();
+}
+
+function domainFromEmail(value) {
+  const email = normalizeEmail(value);
+  return email.includes('@') ? email.split('@')[1] : '';
+}
+
+function getScopedEmailEvidence(emailContext, selectedEmail) {
+  const selected = normalizeEmail(selectedEmail);
+  const selectedDomain = domainFromEmail(selected);
+  if (!selected || !selectedDomain) {
+    return { emailBody: '', senderEmail: selectedEmail || '', senderName: '', evidenceScope: 'none' };
+  }
+
+  const contexts = Array.isArray(emailContext?.messageContexts) ? emailContext.messageContexts : [];
+  const usableContexts = contexts.filter(ctx => safeStr(ctx?.signatureTail || ctx?.body).trim());
+  const exact = usableContexts.find(ctx => normalizeEmail(ctx.fromEmail) === selected);
+  if (exact) {
+    return {
+      emailBody: exact.signatureTail || exact.body || '',
+      senderEmail: exact.fromEmail || selected,
+      senderName: exact.fromName || '',
+      evidenceScope: 'exact_sender',
+    };
+  }
+
+  const sameDomain = usableContexts.find(ctx => domainFromEmail(ctx.fromEmail) === selectedDomain);
+  if (sameDomain) {
+    return {
+      emailBody: sameDomain.signatureTail || sameDomain.body || '',
+      senderEmail: sameDomain.fromEmail || selected,
+      senderName: sameDomain.fromName || '',
+      evidenceScope: 'same_domain_sender',
+    };
+  }
+
+  if (normalizeEmail(emailContext?.senderEmail) === selected) {
+    return {
+      emailBody: emailContext?.body || '',
+      senderEmail: emailContext.senderEmail,
+      senderName: emailContext.senderName || '',
+      evidenceScope: 'exact_sender',
+    };
+  }
+
+  if (domainFromEmail(emailContext?.senderEmail) === selectedDomain) {
+    return {
+      emailBody: emailContext?.body || '',
+      senderEmail: emailContext.senderEmail,
+      senderName: emailContext.senderName || '',
+      evidenceScope: 'same_domain_sender',
+    };
+  }
+
+  return {
+    emailBody: '',
+    senderEmail: selected,
+    senderName: '',
+    evidenceScope: 'none',
+  };
+}
+
+const ENRICH_TIER_LABELS = {
+  cache: 'cached result',
+  'zoho-existing': 'Zoho CRM',
+  zia: 'Zia enrichment',
+  'official-site': 'official website',
+  'linkedin-about': 'LinkedIn about',
+  signature: 'email signature',
+  'haiku-web': 'web search',
+  'sonnet-web': 'deep web search',
+  none: 'no match',
+  reject: 'not eligible',
+  error: 'error',
+};
+
+// 2026-06-10 reconcile: deployed /api/enrich-company only serves the
+// zia|haiku|sonnet contract, so the source picker is restricted to those
+// tiers (his richer 8-source list required the undeployed enrich-v5 worker).
+const ENRICH_SOURCE_OPTIONS = [
+  { value: 'zia', label: 'Zia enrichment' },
+  { value: 'haiku', label: 'Web search' },
+  { value: 'sonnet', label: 'Deep web search' },
+];
+
+function enrichTierLabel(tier) {
+  return ENRICH_TIER_LABELS[tier] || tier || 'unknown';
+}
+
+function enrichResultStartTier(result, hasEmailBody) {
+  const tier = result?.tier;
+  const sourceNote = safeStr(result?.source_note || result?.source).toLowerCase();
+  if (tier === 'signature') return hasEmailBody ? 'signature' : 'official';
+  if (tier === 'official-site' || sourceNote.includes('official website')) return 'official';
+  if (tier === 'zia' || sourceNote.includes('zia')) return 'zia';
+  if (tier === 'linkedin-about' || sourceNote.includes('linkedin')) return 'linkedin';
+  if (tier === 'haiku-web' || sourceNote.includes('haiku') || sourceNote === 'web search') return 'haiku';
+  if (tier === 'sonnet-web' || sourceNote.includes('sonnet') || sourceNote.includes('deep web')) return 'sonnet';
+  return hasEmailBody ? 'signature' : 'official';
+}
+
 const SUB_TABS = [
   { id: 'info', label: 'Info' },
   { id: 'deals', label: 'Deals' },
@@ -60,6 +232,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   const [createAccountError, setCreateAccountError] = useState(null);
   const [enrichLoading, setEnrichLoading] = useState(false);
   const [enrichResult, setEnrichResult] = useState(null); // {tier, confidence, source_url, ...}
+  const [enrichAlternate, setEnrichAlternate] = useState(null);
 
   // Task action state
   const [taskActionLoading, setTaskActionLoading] = useState(null);
@@ -107,6 +280,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   // only when there is no better external participant on the thread.
   useEffect(() => {
     if (!emailContext) return;
+    const requestedEmail = navData?.preloadEmail || navData?.lookupEmail;
+    if (requestedEmail) return;
     const senderEmail = emailContext.senderEmail || '';
     const senderDomain = (senderEmail.split('@')[1] || '').toLowerCase();
     const senderIsInternal = senderEmail.toLowerCase().includes('@stratusinfosystems.com')
@@ -137,7 +312,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       return;
     }
     lookupCrm(email, domain);
-  }, [emailContext?.senderEmail, emailContext?.customerEmail]);
+  }, [emailContext?.senderEmail, emailContext?.customerEmail, navData?.preloadEmail, navData?.lookupEmail]);
 
   useEffect(() => {
     if (crmContext && crmContext.found) setData(crmContext);
@@ -149,8 +324,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     // "Send + Task" button: jump to tasks sub-tab
     if (navData.activeSubTab) setActiveSubTab(navData.activeSubTab);
     // Contact chip click: pre-load a specific email
-    if (navData.preloadEmail) {
-      const email = navData.preloadEmail;
+    const requestedEmail = navData.preloadEmail || navData.lookupEmail;
+    if (requestedEmail) {
+      const email = requestedEmail;
       const domain = email.split('@')[1] || '';
       setSelectedContact(email);
       setManualEmail('');
@@ -415,40 +591,22 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
 
   // ── Add Contact ──
   function openAddForm() {
+    const contact = externalContacts.find(c => c.email?.toLowerCase() === selectedContact?.toLowerCase());
     const emailForForm = selectedContact || '';
     const domain = emailForForm.split('@')[1] || '';
-    // 2026-05-19 Contact name derivation (Chris request). Two methods:
-    //   1. Display name from the email thread (externalContacts or threadContacts).
-    //   2. Best-guess parse of the email local-part (kevin.goosic -> Kevin Goosic).
-    const _threadContacts = emailContext?.threadContacts || [];
-    const _matchContact = externalContacts.find(c => c.email?.toLowerCase() === emailForForm.toLowerCase())
-      || _threadContacts.find(c => c.email?.toLowerCase() === emailForForm.toLowerCase());
-    const _localPart = emailForForm.split('@')[0] || '';
-    const _stripAlpha = (x) => String(x || '').toLowerCase().replace(/[^a-z]/g, '');
-    const _titleCase = (s) => s ? s.split('-').map(p => p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : p).join('-') : '';
-    let _pfFirst = '', _pfLast = '';
-    const _dispName = (_matchContact?.name || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-    const _hintIsLocalPart = _dispName && _localPart && _stripAlpha(_dispName) === _stripAlpha(_localPart);
-    if (_dispName && !_hintIsLocalPart && /[a-zA-Z]/.test(_dispName)) {
-      // Method 1: thread display name
-      const _parts = _dispName.split(' ').filter(Boolean);
-      _pfFirst = _titleCase(_parts[0] || '');
-      _pfLast = _parts.slice(1).map(_titleCase).join(' ');
-    } else if (_localPart) {
-      // Method 2: email local-part best guess
-      const _base = _localPart.replace(/[0-9]+$/, '');
-      const _sep = /[._+]/.test(_base) ? /[._+]+/ : /[._+\-]+/;
-      const _toks = _base.split(_sep).map(t => t.replace(/[0-9]+/g, '')).filter(Boolean);
-      if (_toks.length >= 2) { _pfFirst = _titleCase(_toks[0]); _pfLast = _toks.slice(1).map(_titleCase).join(' '); }
-      else if (_toks.length === 1) { _pfLast = _titleCase(_toks[0]); }
-    }
+    const scopedEvidence = getScopedEmailEvidence(emailContext, emailForForm);
+    const bestName = contact?.fullName || contact?.name
+      || (emailContext?.customerEmail?.toLowerCase() === emailForForm.toLowerCase() ? emailContext?.customerName : '')
+      || (emailContext?.senderEmail?.toLowerCase() === emailForForm.toLowerCase() ? emailContext?.senderName : '');
+    const nameParts = splitContactName(bestName, emailForForm);
+    const explicitTitle = contact?.title || extractSignatureTitle(scopedEvidence.emailBody, emailForForm);
 
     setAddFormData({
-      firstName: _pfFirst,
-      lastName: _pfLast,
+      firstName: nameParts.firstName || '',
+      lastName: nameParts.lastName || '-',
       email: emailForForm,
       phone: '',
-      title: '',
+      title: explicitTitle || 'IT',
     });
 
     // Pre-select account if CRM already found one
@@ -474,6 +632,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       website: domain || '',
     });
     setCreateAccountError(null);
+    setEnrichResult(null);
+    setEnrichAlternate(null);
     setShowAddForm(true);
     setAddFormError(null);
     setAddFormSuccess(null);
@@ -489,9 +649,13 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
           if (found.length === 0) {
             setEnrichLoading(true);
             setShowCreateAccount(true); // Auto-open create account form
+            // 2026-06-10 reconcile: deployed /api/enrich-company only accepts
+            // start_tier zia|haiku|sonnet. Use the base-style single enrich call
+            // (no only_tier/emailBody/evidenceScope) so we don't send unsupported
+            // start_tier values or pollute the enrich KV cache.
             sendToBackground(MSG.ENRICH_COMPANY, { domain })
               .then(enriched => {
-                if (enriched && !enriched.error) {
+                if (enriched && !enriched.error && enriched.name) {
                   setEnrichResult(enriched);
                   setNewAccountData(prev => ({
                     name: enriched.name || prev.name,
@@ -503,7 +667,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                   }));
                 }
               })
-              .catch(() => {})
+              .catch(err => setEnrichResult({ error: err.message || 'Company lookup failed', tier: 'error', confidence: 0 }))
               .finally(() => setEnrichLoading(false));
           }
         })
@@ -527,35 +691,78 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     }, 300);
   }
 
-  async function handleRetryEnrich() {
-    const domain = (newAccountData.website || '').trim().toLowerCase()
-      .replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
-    if (!domain) return;
-    // Advance to the next tier on retry. zia → haiku → sonnet → reset.
-    const currentTier = enrichResult?.tier;
-    const nextTier = (currentTier === 'zia' || currentTier === 'cache' || currentTier === 'zoho-existing')
-      ? 'haiku'
-      : (currentTier === 'haiku-web' ? 'sonnet' : 'haiku');
+  function applyEnrichmentToAccount(enriched, domain) {
+    if (!enriched || enriched.error) return;
+    setEnrichResult(enriched);
+    setEnrichAlternate(null);
+    setNewAccountData(prev => ({
+      name: enriched.name || prev.name,
+      street: enriched.address || enriched.street || prev.street,
+      city: enriched.city || prev.city,
+      state: enriched.state || prev.state,
+      zip: enriched.zip || prev.zip,
+      website: enriched.website || domain || prev.website,
+    }));
+  }
+
+  function getEnrichmentInputs() {
+    const domain = (newAccountData.website || addFormData.email.split('@')[1] || '').trim().toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/^www\./, '')
+      .replace(/\/.*$/, '');
+    return { domain };
+  }
+
+  // 2026-06-10 reconcile: deployed /api/enrich-company only accepts
+  // start_tier zia|haiku|sonnet. Send the main contract only — no
+  // only_tier/emailBody/evidenceScope — to avoid skipping all tiers or
+  // polluting the enrich KV cache with miss sentinels.
+  async function fetchEnrichment(startTier) {
+    const { domain } = getEnrichmentInputs();
+    if (!domain) return null;
     setEnrichLoading(true);
     try {
-      const enriched = await sendToBackground(MSG.ENRICH_COMPANY, {
+      return await sendToBackground(MSG.ENRICH_COMPANY, {
         domain,
         cache_bust: true,
-        start_tier: nextTier
+        start_tier: startTier,
       });
-      if (enriched && !enriched.error) {
-        setEnrichResult(enriched);
-        setNewAccountData(prev => ({
-          name: enriched.name || prev.name,
-          street: enriched.address || enriched.street || prev.street,
-          city: enriched.city || prev.city,
-          state: enriched.state || prev.state,
-          zip: enriched.zip || prev.zip,
-          website: enriched.website || domain,
-        }));
-      }
-    } catch (_) {}
-    finally { setEnrichLoading(false); }
+    } catch (err) {
+      return { error: err.message || 'Enrichment lookup failed', tier: 'error', confidence: 0 };
+    } finally {
+      setEnrichLoading(false);
+    }
+  }
+
+  async function handleRetryEnrich() {
+    const { domain } = getEnrichmentInputs();
+    if (!domain) return;
+    // Advance to the next tier on retry: zia/cache/zoho-existing → haiku,
+    // haiku-web → sonnet, otherwise → haiku.
+    const t = enrichResult?.tier;
+    const nextTier = (t === 'zia' || t === 'cache' || t === 'zoho-existing')
+      ? 'haiku'
+      : (t === 'haiku-web' ? 'sonnet' : 'haiku');
+    const enriched = await fetchEnrichment(nextTier);
+    if (!enriched) return;
+    if (enriched.error) {
+      setEnrichResult(enriched);
+      return;
+    }
+    applyEnrichmentToAccount(enriched, domain);
+  }
+
+  async function handleSelectEnrichSource(startTier) {
+    const { domain } = getEnrichmentInputs();
+    if (!domain || !startTier) return;
+    const enriched = await fetchEnrichment(startTier);
+    if (!enriched) return;
+    setEnrichAlternate(enriched);
+  }
+
+  function handleUseEnrichAlternate() {
+    const { domain } = getEnrichmentInputs();
+    applyEnrichmentToAccount(enrichAlternate, domain);
   }
 
   async function handleCreateAccount() {
@@ -800,7 +1007,10 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 createAccountError={createAccountError}
                 enrichLoading={enrichLoading}
                 enrichResult={enrichResult}
+                enrichAlternate={enrichAlternate}
                 onRetryEnrich={handleRetryEnrich}
+                onSelectEnrichSource={handleSelectEnrichSource}
+                onUseEnrichAlternate={handleUseEnrichAlternate}
                 onSubmit={handleAddContact}
                 onCancel={() => { setShowAddForm(false); setShowCreateAccount(false); }}
                 loading={addFormLoading}
@@ -1565,7 +1775,7 @@ function AddContactForm({
   domainSuggestions, domainSuggestionsLoading,
   showCreateAccount, setShowCreateAccount,
   newAccountData, setNewAccountData, onCreateAccount, createAccountLoading, createAccountError,
-  enrichLoading, enrichResult, onRetryEnrich,
+  enrichLoading, enrichResult, enrichAlternate, onRetryEnrich, onSelectEnrichSource, onUseEnrichAlternate,
   onSubmit, onCancel, loading, error,
 }) {
   function selectAccount(acct) {
@@ -1579,6 +1789,89 @@ function AddContactForm({
     setAccountName('');
     onAccountSearchChange('', true);
     setShowCreateAccount(false);
+  }
+
+  function renderEnrichBadge(result, options = {}) {
+    if (!result) return null;
+    const conf = Number(result.confidence || 0);
+    const tier = result.tier || 'unknown';
+    const sourceUrl = result.source_url || result.zohoUrl || '';
+    const sourceNote = result.source_note || result.source || (sourceUrl ? 'Verified source' : 'No source link returned');
+    const badge = conf >= 0.85 ? { icon: '✓', color: '#1a7a32', label: 'Verified' }
+      : conf >= 0.5 ? { icon: '!', color: '#a87900', label: 'Uncertain' }
+        : { icon: '?', color: '#777', label: 'Low confidence' };
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11, padding: '4px 8px', background: options.background || '#f5f7fa', borderRadius: 4, border: `1px solid ${options.borderColor || COLORS.BORDER}` }}>
+        <span style={{ color: badge.color, fontWeight: 700 }} title={badge.label}>{badge.icon}</span>
+        <span style={{ color: COLORS.TEXT_SECONDARY }}>{options.prefix || 'via'} {enrichTierLabel(tier)}</span>
+        <span style={{ color: COLORS.TEXT_SECONDARY }}>({Math.round(conf * 100)}%)</span>
+        {sourceUrl ? (
+          <a href={sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: COLORS.STRATUS_BLUE, textDecoration: 'none' }} title={sourceUrl}>source</a>
+        ) : (
+          <span style={{ color: COLORS.TEXT_SECONDARY }} title={sourceNote}>no source link</span>
+        )}
+        {options.children}
+      </div>
+    );
+  }
+
+  function renderEnrichDetails(result) {
+    if (!result) return null;
+    const city = safeStr(result.city).trim();
+    const state = safeStr(result.state).trim();
+    const zip = safeStr(result.zip || result.postalCode).trim();
+    const locality = [city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    const rows = [
+      { label: 'Name', value: safeStr(result.name).trim() },
+      { label: 'Street', value: safeStr(result.street || result.address).trim() },
+      { label: 'City', value: locality },
+      { label: 'Phone', value: safeStr(result.phone).trim() },
+      { label: 'Website', value: safeStr(result.website || result.domain).trim() },
+      { label: 'Cached', value: result.fetched_at ? safeStr(result.fetched_at).trim() : '' },
+      { label: 'Note', value: safeStr(result.error || result.source_note).trim() },
+    ].filter(row => row.value);
+
+    return (
+      <div style={{ marginTop: 6, padding: '6px 8px', background: '#fff8d8', borderRadius: 4, fontSize: 11, color: COLORS.TEXT_PRIMARY, lineHeight: 1.35 }}>
+        {rows.length > 0 ? rows.map(row => (
+          <div key={row.label} style={{ display: 'grid', gridTemplateColumns: '52px minmax(0, 1fr)', gap: 6, marginBottom: 2 }}>
+            <span style={{ color: COLORS.TEXT_SECONDARY, fontWeight: 600 }}>{row.label}</span>
+            <span style={{ overflowWrap: 'anywhere' }}>{row.value}</span>
+          </div>
+        )) : (
+          <div style={{ color: COLORS.TEXT_SECONDARY }}>No address fields returned by this source.</div>
+        )}
+      </div>
+    );
+  }
+
+  function renderSourcePicker(label = 'try source') {
+    return (
+      <select
+        value=""
+        onChange={e => {
+          const source = e.target.value;
+          if (source) onSelectEnrichSource(source);
+        }}
+        disabled={enrichLoading}
+        style={{
+          background: 'white',
+          border: `1px solid ${COLORS.STRATUS_BLUE}55`,
+          borderRadius: 4,
+          padding: '2px 6px',
+          fontSize: 11,
+          cursor: enrichLoading ? 'not-allowed' : 'pointer',
+          color: COLORS.STRATUS_BLUE,
+          maxWidth: 182,
+        }}
+        title="Choose exactly which lookup source to try"
+      >
+        <option value="">{label}</option>
+        {ENRICH_SOURCE_OPTIONS.map(option => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    );
   }
 
   // All candidate accounts for the dropdown: domain suggestions + name search results (deduped)
@@ -1710,26 +2003,19 @@ function AddContactForm({
                 <div style={{ fontSize: 11, fontWeight: 700, color: COLORS.STRATUS_BLUE, textTransform: 'uppercase' }}>
                   New Account
                 </div>
-                {enrichResult && !enrichLoading && enrichResult.tier && enrichResult.tier !== 'reject' && (
-                  (() => {
-                    const conf = enrichResult.confidence || 0;
-                    const tier = enrichResult.tier;
-                    const sourceUrl = enrichResult.source_url;
-                    const badge = conf >= 0.85 ? { icon: '✓', color: '#1a7a32', label: 'Verified' }
-                                : conf >= 0.5  ? { icon: '⚠', color: '#a87900', label: 'Uncertain' }
-                                :                { icon: '?', color: '#999',    label: 'Low confidence' };
-                    const tierLabel = tier === 'cache' ? 'cached' : tier === 'zoho-existing' ? 'CRM' : tier === 'zia' ? 'Zia' : tier === 'haiku-web' ? 'web search (Haiku)' : tier === 'sonnet-web' ? 'web search (Sonnet)' : tier;
-                    return (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, marginBottom: 6, padding: '4px 8px', background: '#f5f7fa', borderRadius: 4 }}>
-                        <span style={{ color: badge.color, fontWeight: 'bold' }} title={badge.label}>{badge.icon}</span>
-                        <span style={{ color: '#555' }}>via {tierLabel}</span>
-                        {sourceUrl && (
-                          <a href={sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#1a73a7', fontSize: 11, marginLeft: 'auto', textDecoration: 'none' }} title={sourceUrl}>source ↗</a>
-                        )}
-                        <button onClick={onRetryEnrich} style={{ background: 'none', border: '1px solid #ccc', borderRadius: 3, padding: '2px 6px', fontSize: 11, cursor: 'pointer', color: '#444' }} title="Re-run with a different tier">↻ retry</button>
-                      </div>
-                    );
-                  })()
+                {enrichResult && !enrichLoading && (
+                  renderEnrichBadge(enrichResult, {
+                    children: (
+                      <>
+                        <button type="button" onClick={onRetryEnrich} disabled={enrichLoading}
+                          style={{ marginLeft: 'auto', background: 'white', border: `1px solid ${COLORS.BORDER}`, borderRadius: 4, padding: '2px 6px', fontSize: 11, cursor: 'pointer', color: COLORS.TEXT_PRIMARY }}
+                          title="Refresh the current source without changing source type">
+                          refresh
+                        </button>
+                        {renderSourcePicker('choose source...')}
+                      </>
+                    ),
+                  })
                 )}
                 {enrichLoading && (
                   <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
@@ -1737,6 +2023,26 @@ function AddContactForm({
                   </div>
                 )}
               </div>
+              {enrichAlternate && !enrichLoading && (
+                <div style={{ marginBottom: 8, padding: 6, background: '#fffdf5', border: '1px solid #e6c86e', borderRadius: 6 }}>
+                  {renderEnrichBadge(enrichAlternate, {
+                    prefix: 'alternate from',
+                    background: 'transparent',
+                    borderColor: 'transparent',
+                    children: (
+                      <>
+                        <button type="button" onClick={onUseEnrichAlternate} disabled={!!enrichAlternate.error}
+                          style={{ marginLeft: 'auto', background: enrichAlternate.error ? '#f1f3f4' : COLORS.STRATUS_BLUE, border: 'none', borderRadius: 4, padding: '2px 6px', fontSize: 11, cursor: enrichAlternate.error ? 'not-allowed' : 'pointer', color: 'white' }}
+                          title="Apply this alternate result to the account fields">
+                          use
+                        </button>
+                        {renderSourcePicker('try another...')}
+                      </>
+                    ),
+                  })}
+                  {renderEnrichDetails(enrichAlternate)}
+                </div>
+              )}
               <input type="text" placeholder="Account Name *" value={newAccountData.name}
                 onChange={e => setNewAccountData(p => ({ ...p, name: e.target.value }))}
                 style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', marginBottom: 6, background: 'white' }} />
@@ -1765,14 +2071,13 @@ function AddContactForm({
               )}
               <div style={{ display: 'flex', gap: 6 }}>
                 {(() => {
-                  // Codex-spec gate: disable if creating, OR no name, OR (auto-enriched with confidence < 0.3)
-                  const lowConf = enrichResult && enrichResult.confidence !== undefined && enrichResult.confidence < 0.3;
+                  const lowConfidence = enrichResult && enrichResult.confidence !== undefined && Number(enrichResult.confidence) < 0.3;
                   const missingName = !newAccountData.name || !newAccountData.name.trim();
-                  const isDisabled = createAccountLoading || missingName || lowConf;
-                  const reason = createAccountLoading ? 'Creating...' : missingName ? 'Add a company name to enable' : lowConf ? 'Low confidence — please review before creating' : '';
+                  const disabled = createAccountLoading || missingName || lowConfidence;
+                  const reason = createAccountLoading ? 'Creating...' : missingName ? 'Add a company name first' : lowConfidence ? 'Low confidence. Retry or correct the account details first.' : '';
                   return (
-                    <button type="button" onClick={onCreateAccount} disabled={isDisabled} title={reason}
-                      style={{ flex: 1, padding: '7px', background: isDisabled ? '#999' : COLORS.STRATUS_BLUE, color: 'white', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: isDisabled ? 'not-allowed' : 'pointer', opacity: isDisabled ? 0.6 : 1 }}>
+                    <button type="button" onClick={onCreateAccount} disabled={disabled} title={reason}
+                      style={{ flex: 1, padding: '7px', background: disabled ? '#9aa0a6' : COLORS.STRATUS_BLUE, color: 'white', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.7 : 1 }}>
                       {createAccountLoading ? 'Creating...' : 'Create Account'}
                     </button>
                   );

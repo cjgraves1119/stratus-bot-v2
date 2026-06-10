@@ -363,7 +363,7 @@ function CcwSection({ emailContext }) {
 // ─────────────────────────────────────────────
 // Main EmailPanel
 // ─────────────────────────────────────────────
-export default function EmailPanel({ emailContext, navData }) {
+export default function EmailPanel({ emailContext, navData, onNavigate }) {
   const [analysis, setAnalysis] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -389,6 +389,35 @@ export default function EmailPanel({ emailContext, navData }) {
     } finally {
       setLoading(false);
     }
+  }
+
+  function getDetectedQuoteText() {
+    const detected = analysis?.detectedSkus || [];
+    return detected
+      .map(item => {
+        if (typeof item === 'string') return item;
+        const sku = item.sku || item.product || item.model || item.name || '';
+        if (!sku) return '';
+        const qty = item.qty || item.quantity || item.count || 1;
+        return qty && Number(qty) > 1 ? `${qty} ${sku}` : sku;
+      })
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  function handleQuoteDetected() {
+    const skuText = getDetectedQuoteText();
+    if (!skuText) return;
+    onNavigate?.('quote', { skuText });
+  }
+
+  function handleSendDetectedToZoho() {
+    const skuText = getDetectedQuoteText();
+    if (!skuText) return;
+    const customer = emailContext?.customerName || emailContext?.senderName || emailContext?.customerEmail || emailContext?.senderEmail || '';
+    let prefillText = `Create a Zoho CRM quote with: ${skuText}`;
+    if (customer) prefillText += ` for ${customer}`;
+    onNavigate?.('chat', { prefillText });
   }
 
   if (!emailContext) {
@@ -502,6 +531,28 @@ export default function EmailPanel({ emailContext, navData }) {
                     {sku.sku || sku}{sku.qty > 1 ? ` (x${sku.qty})` : ''}
                   </span>
                 ))}
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                <button
+                  onClick={handleQuoteDetected}
+                  style={{
+                    flex: 1, padding: '7px 8px', background: COLORS.STRATUS_BLUE,
+                    color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
+                    fontWeight: 600, cursor: 'pointer',
+                  }}
+                >
+                  Generate Quote
+                </button>
+                <button
+                  onClick={handleSendDetectedToZoho}
+                  style={{
+                    flex: 1, padding: '7px 8px', background: 'transparent',
+                    color: COLORS.STRATUS_BLUE, border: `1px solid ${COLORS.STRATUS_BLUE}`,
+                    borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                  }}
+                >
+                  Send to Zoho
+                </button>
               </div>
             </Section>
           )}

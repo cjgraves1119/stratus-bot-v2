@@ -621,6 +621,52 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
     return { orderUrl, skuSummary };
   }
 
+  function escapeHtml(value) {
+    return String(value || '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[ch]));
+  }
+
+  async function writeRichClipboard({ text, html }) {
+    if (navigator.clipboard?.write && window.ClipboardItem && html) {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+          'text/html': new Blob([html], { type: 'text/html' }),
+        }),
+      ]);
+      return;
+    }
+    await navigator.clipboard.writeText(text);
+  }
+
+  async function handleCopyAll(urls) {
+    const rows = (urls || []).filter(u => u?.url);
+    const text = rows
+      .map((u, i) => `${u.label || `Option ${i + 1}`}: ${u.url}`)
+      .join('\n');
+    if (!text) return;
+    const html = rows
+      .map((u, i) => {
+        const label = escapeHtml(u.label || `Option ${i + 1}`);
+        const url = escapeHtml(u.url);
+        return `<div><strong>${label}:</strong> <a href="${url}">${url}</a></div>`;
+      })
+      .join('');
+    try {
+      await writeRichClipboard({ text, html });
+    } catch {
+      await handleCopy(text, 'all');
+      return;
+    }
+    setCopiedIdx('all');
+    setTimeout(() => setCopiedIdx(null), 2000);
+  }
+
   function handleSendToZoho() {
     const { orderUrl, skuSummary } = resolveHandoffQuote();
     const customerName = emailContext?.customerName || emailContext?.senderName || '';
@@ -641,22 +687,6 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
     if (onNavigate) {
       onNavigate('chat', { prefillText: requestText, zohoPageContext: zohoPageContext || null });
     }
-  }
-
-  function handleSendToGChat() {
-    // GChat handoff is informational (opens the bot space); compose a message
-    // with the resolved URL + line items so the user can paste it.
-    const { orderUrl, skuSummary } = resolveHandoffQuote();
-    const customerName = emailContext?.customerName || emailContext?.senderName || '';
-
-    let msg = 'Create a quote';
-    if (skuSummary) msg += ` with ${skuSummary}`;
-    if (customerName) msg += ` for ${customerName}`;
-    if (orderUrl) msg += `\n${orderUrl}`;
-
-    // Open GChat in new tab with the Stratus AI bot space
-    const gchatUrl = `https://chat.google.com/room/AAAAnp6E_Yw?cls=7`;
-    window.open(gchatUrl, '_blank');
   }
 
   function handleKeyDown(e) {
@@ -957,28 +987,22 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
             </div>
           )}
 
-          {/* Copy All — one click copies every option as "<label>: <url>" lines,
-              mirroring the Webex bot quote output (plain text, no markdown bold).
+          {/* Copy All Links — writes both plain text and rich HTML so labeled
+              links paste as clickable rich text into Gmail/Webex, falling back
+              to plain text where the rich clipboard API is unavailable.
               Labels + URLs only — never include margin/cost data here. */}
-          {result.urls.length > 1 && (
-            <button
-              onClick={() => handleCopy(
-                result.urls
-                  .map((u, j) => `${u.label || `Option ${j + 1}`}: ${u.url}`)
-                  .join('\n'),
-                'all'
-              )}
-              style={{
-                width: '100%', padding: '8px 12px', background: COLORS.STRATUS_BLUE,
-                color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
-                fontWeight: 600, cursor: 'pointer', marginBottom: 8,
-              }}
-            >
-              {copiedIdx === 'all' ? '✓ Copied!' : `Copy All (${result.urls.length} links)`}
-            </button>
-          )}
-
           {/* Quote URLs */}
+          <button
+            onClick={() => handleCopyAll(result.urls)}
+            style={{
+              width: '100%', padding: '8px 10px', background: COLORS.STRATUS_BLUE,
+              color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
+              fontWeight: 700, cursor: 'pointer', marginBottom: 8,
+            }}
+          >
+            {copiedIdx === 'all' ? '✓ Copied All Links!' : 'Copy All Links'}
+          </button>
+
           {result.urls.map((urlObj, i) => (
             <div key={i} style={{
               background: COLORS.BG_PRIMARY,
@@ -1028,7 +1052,7 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
             </div>
           ))}
 
-          {/* Send to Zoho CRM / GChat */}
+          {/* Send to Zoho CRM */}
           <div style={{
             marginTop: 8, padding: 12, background: '#f3e5f5', borderRadius: 8,
             border: '1px solid #ce93d8',
@@ -1049,9 +1073,6 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
               </button>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ fontSize: 12, color: '#4a148c', marginBottom: 4 }}>
-                  Route quote creation through:
-                </div>
                 <button
                   onClick={handleSendToZoho}
                   style={{
@@ -1061,16 +1082,6 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
                   }}
                 >
                   Extension Chat (recommended)
-                </button>
-                <button
-                  onClick={handleSendToGChat}
-                  style={{
-                    padding: '8px 12px', background: 'transparent', color: '#7b1fa2',
-                    border: '1px solid #7b1fa2', borderRadius: 6, fontSize: 12,
-                    fontWeight: 600, cursor: 'pointer',
-                  }}
-                >
-                  Open Google Chat
                 </button>
               </div>
             )}

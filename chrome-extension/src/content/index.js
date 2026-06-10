@@ -18,6 +18,23 @@ import './gmail-observer.js';
 // Initialization
 // ─────────────────────────────────────────────
 
+window.addEventListener('error', (event) => {
+  console.error('[Stratus AI] Gmail content script error:', {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+    stack: event.error?.stack,
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  console.error(
+    '[Stratus AI] Gmail content script promise rejection:',
+    event.reason?.stack || event.reason?.message || event.reason
+  );
+});
+
 console.log('[Stratus AI] Content script loaded on Gmail.');
 
 let lastEmailHash = '';
@@ -56,7 +73,97 @@ const BOT_EMAILS = new Set([
  * Extract email data from Gmail's DOM when an email/thread is opened.
  * Gmail's DOM is complex and class names change, so we use multiple strategies.
  */
-function extractEmailData() {
+function extractVisibleThreadBody() {
+  const candidates = Array.from(document.querySelectorAll('.a3s.aiL, .gs .a3s, [data-message-id] .a3s'));
+  const seen = new Set();
+  const parts = [];
+
+  for (const el of candidates) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0) continue;
+
+    const text = (el.innerText || el.textContent || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{4,}/g, '\n\n\n')
+      .trim();
+    if (!text) continue;
+
+    const fingerprint = text.substring(0, 500);
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    parts.push(text);
+  }
+
+  return parts.join('\n\n--- message ---\n\n').substring(0, 20000);
+}
+
+function normalizeVisibleMessageText(el, maxLength = 8000) {
+  const rect = el.getBoundingClientRect();
+  const style = window.getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0) return '';
+  return (el.innerText || el.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim()
+    .substring(0, maxLength);
+}
+
+function extractVisibleMessageContexts() {
+  const bodies = Array.from(document.querySelectorAll('.a3s.aiL, .gs .a3s, [data-message-id] .a3s'));
+  const seen = new Set();
+  const contexts = [];
+
+  bodies.forEach((bodyEl, index) => {
+    const body = normalizeVisibleMessageText(bodyEl, 8000);
+    if (!body) return;
+
+    const fingerprint = body.substring(0, 500);
+    if (seen.has(fingerprint)) return;
+    seen.add(fingerprint);
+
+    const container = bodyEl.closest('[data-message-id], .adn, .gs') || bodyEl.parentElement || bodyEl;
+    const senderEl = container.querySelector('.gD[email], .gD[data-hovercard-id], [email].gD, [data-hovercard-id].gD')
+      || container.querySelector('[email], [data-hovercard-id]');
+    let fromEmail = senderEl?.getAttribute('email') || senderEl?.getAttribute('data-hovercard-id') || '';
+    let fromName = senderEl?.getAttribute('name') || senderEl?.textContent?.trim() || '';
+
+    if (!fromEmail) {
+      const fromMatch = body.match(/(?:^|\n)\s*From:\s*([^<\n]+)?<?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})>?/i);
+      if (fromMatch) {
+        fromName = (fromMatch[1] || '').trim() || fromName;
+        fromEmail = fromMatch[2] || '';
+      }
+    }
+
+    const allMessageEmails = new Set();
+    container.querySelectorAll('[email], [data-hovercard-id]').forEach(el => {
+      const email = el.getAttribute('email') || el.getAttribute('data-hovercard-id') || '';
+      if (email && email.includes('@')) allMessageEmails.add(email.toLowerCase());
+    });
+    const bodyEmailPattern = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    let m;
+    while ((m = bodyEmailPattern.exec(body)) !== null) {
+      allMessageEmails.add(m[0].toLowerCase());
+    }
+
+    contexts.push({
+      index,
+      fromEmail,
+      fromName,
+      fromDomain: fromEmail.includes('@') ? fromEmail.split('@')[1].toLowerCase() : '',
+      emails: [...allMessageEmails],
+      body: body.substring(0, 4000),
+      signatureTail: body.slice(-3000),
+    });
+  });
+
+  return contexts;
+}
+
+function extractEmailData(options = {}) {
   // Strategy 1: URL-based detection
   const hash = window.location.hash;
   // Gmail thread hashes: #inbox/FMfcg..., #sent/FMfcg..., #label/FMfcg..., etc.
@@ -90,7 +197,11 @@ function extractEmailData() {
   const bodyEl = document.querySelector('.a3s.aiL')
     || document.querySelector('.ii.gt div')
     || document.querySelector('[data-message-id] .a3s');
-  const body = bodyEl ? bodyEl.innerText.substring(0, 8000) : '';
+  const fullThreadBody = options.includeFullThread ? extractVisibleThreadBody() : '';
+  const messageContexts = extractVisibleMessageContexts();
+  const body = options.includeFullThread
+    ? (fullThreadBody || bodyEl?.innerText || '').substring(0, 12000)
+    : (bodyEl ? bodyEl.innerText.substring(0, 8000) : '');
 
   // Collect all participants with role information
   const allEmails = new Set();
@@ -255,6 +366,7 @@ function extractEmailData() {
   return {
     subject,
     body,
+    ...(options.includeFullThread ? { fullThreadBody } : {}),
     senderEmail,
     senderName,
     customerEmail,
@@ -264,6 +376,7 @@ function extractEmailData() {
     allEmails: [...allEmails],
     allDomains: [...allDomains],
     threadContacts,
+    messageContexts,
     ciscoEmails,         // Cisco rep emails detected on thread
     ccwDealNumber,       // CCW Deal ID if detected in subject
     isCiscoNotification, // True for notificationsapp@cisco.com
@@ -1789,6 +1902,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         injectCrmBanner(message.data);
       }
       sendResponse({ success: true });
+      break;
+
+    case MSG.GET_FULL_EMAIL_CONTEXT:
+      sendResponse(extractEmailData({ includeFullThread: true }) || { empty: true });
       break;
   }
 });

@@ -88,6 +88,6 @@ module.exports = (env, argv) => {
         new CssMinimizerPlugin(),
       ],
     },
-    devtool: isProd ? false : 'cheap-module-source-map',
+    devtool: isProd ? 'source-map' : 'cheap-module-source-map',
   };
 };

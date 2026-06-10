@@ -330,7 +330,8 @@ export async function crmAccountSearch(query, domain) {
  */
 export async function enrichCompany(domain, opts = {}) {
   // opts: { cache_bust?: boolean, start_tier?: 'zia'|'haiku'|'sonnet' }
-  return apiCall('/api/enrich-company', { domain: domain || '', ...opts });
+  // 75s timeout: the zia→haiku→sonnet enrichment waterfall can exceed the 30s default.
+  return apiCall('/api/enrich-company', { domain: domain || '', ...opts }, { timeout: 75000, skipCache: true });
 }
 
 /**
