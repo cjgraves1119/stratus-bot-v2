@@ -768,8 +768,11 @@ function estimateDeepSeekCostUsd(model, usage = {}) {
  * @param {string} model - Model name used
  * @param {Object} usage - { input_tokens, output_tokens } from API response
  * @param {string} source - Where the call originated (e.g. 'gchat', 'addon-analyze', 'addon-draft', 'crm-agent')
+ * @param {string|null} personId - Caller identity. Only synthetic 'bench:*' ids
+ *   are written to D1 (bot='benchmark') so benchmark A/B runs stop polluting
+ *   production analytics; real-traffic rows keep their existing shape.
  */
-async function trackUsage(env, model, usage, source, evalContext = null, extras = null) {
+async function trackUsage(env, model, usage, source, evalContext = null, extras = null, personId = null) {
   if (!usage || !env?.CONVERSATION_KV) return;
   try {
     const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
@@ -905,12 +908,18 @@ async function trackUsage(env, model, usage, source, evalContext = null, extras 
         const _praToolCallsJson = Array.isArray(extras?.toolNames) && extras.toolNames.length > 0
           ? JSON.stringify(extras.toolNames)
           : null;
+        // Benchmark canary runs (askClaudeForBenchmark → askClaude) thread a
+        // synthetic 'bench:<task_id>:<ts>' personId. Before 2026-06-10 these
+        // rows landed as bot='gchat', person_id=NULL (~415/day) — completely
+        // indistinguishable from real traffic. Tag bench rows only; real
+        // traffic keeps the existing bot mapping and NULL person_id.
+        const _isBenchRun = typeof personId === 'string' && personId.startsWith('bench:');
         await env.ANALYTICS_DB.prepare(
           `INSERT INTO bot_usage (bot, person_id, response_path, model, input_tokens, output_tokens, cost_usd, duration_ms, response_text, tool_calls_json)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).bind(
-          source.startsWith('addon') ? 'addon' : 'gchat',
-          null, // person_id filled by caller if available
+          _isBenchRun ? botFromPersonId(personId) : (source.startsWith('addon') ? 'addon' : 'gchat'),
+          _isBenchRun ? personId : null, // person_id filled by caller if available
           source === 'crm-agent' ? 'crm_agent' : (source.includes('addon') ? 'claude' : 'claude'),
           model,
           usage.input_tokens || 0,
@@ -1324,6 +1333,10 @@ function botFromPersonId(personId) {
   if (!personId) return 'gchat';
   // Gateway wraps user emails as 'gw:<email>', so match on the substring too.
   const p = String(personId).toLowerCase();
+  // Benchmark canary runs (askClaudeForBenchmark) use synthetic
+  // 'bench:<task_id>:<ts>' ids — tag them so A/B traffic is excludable
+  // from production analytics instead of masquerading as 'gchat'.
+  if (p.startsWith('bench:')) return 'benchmark';
   if (p.includes('chrome-ext-chat')) return 'chrome-chat';
   if (p.includes('chrome-ext-quote')) return 'chrome-quote';
   if (p.includes('chrome-ext')) return 'chrome-ext';
@@ -16196,7 +16209,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
       cacheCreationTokens: _prB_cacheUsageCont.creation,
       cacheReadTokens: _prB_cacheUsageCont.read,
       toolNames: _contIterToolNames
-    }).catch(() => {});
+    }, personId).catch(() => {});
 
     if (data.stop_reason === 'tool_use') {
       messages.push({ role: 'assistant', content: data.content });
@@ -17710,7 +17723,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       if (_prB_cacheUsage.creation > 0 || _prB_cacheUsage.read > 0) {
         console.log(`[PR-B] cache tokens: creation=${_prB_cacheUsage.creation} read=${_prB_cacheUsage.read}`);
       }
-      trackUsage(env, activeModel, data.usage, usageSource, evalContext, _praExtras).catch(() => {});
+      trackUsage(env, activeModel, data.usage, usageSource, evalContext, _praExtras, personId).catch(() => {});
       // PR-B canary: 1-in-100 in-band sample so kill-switch fires within
       // minutes of a degraded run, not next 11am cron tick. Fire-and-forget.
       if (_prB_cachingEnabled && Math.random() < 0.01) {

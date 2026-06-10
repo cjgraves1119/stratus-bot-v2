@@ -403,8 +403,8 @@ t('Source contains intent_class + tool_count telemetry stash', () => {
 
 t('trackUsage signature accepts an extras argument', () => {
   const src = fs.readFileSync(path.join(__dirname, 'src/index.js'), 'utf8');
-  assert.ok(src.includes('async function trackUsage(env, model, usage, source, evalContext = null, extras = null)'),
-    'trackUsage signature missing extras parameter');
+  assert.ok(src.includes('async function trackUsage(env, model, usage, source, evalContext = null, extras = null, personId = null)'),
+    'trackUsage signature missing extras/personId parameters');
 });
 
 // ─── 6. detectCrmEmailIntent is preserved (no regressions to existing logic) ─

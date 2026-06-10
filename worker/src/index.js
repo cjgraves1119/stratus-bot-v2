@@ -9481,6 +9481,13 @@ export default {
                   T.step('wx-send', 'enter');
                   await sendMessage(roomId, quoteParsed.clarificationMessage, token);
                   T.step('wx-send', 'exit');
+                  T.step('wx-d1', 'enter');
+                  // Telemetry: clarify turns were the only deterministic branch that
+                  // returned without a bot_usage row — the missing "200 duo licenses"
+                  // turn made the 2026-06-09 tier-continuation root-cause blind.
+                  ctx.waitUntil(logBotUsageToD1(env, { personId, requestText: text, responsePath: 'clarify-question', durationMs: Date.now() - _wxStartMs, responseText: quoteParsed.clarificationMessage }).catch(() => {}));
+                  writeMetric(env, { path: 'clarify-question', durationMs: Date.now() - _wxStartMs, personId });
+                  T.step('wx-d1', 'exit');
                   ctx.waitUntil(T.flush());
                   return;
                 }
