@@ -22,8 +22,16 @@ export function detectSearchModule(text) {
   // Stratus uses 18-19 digit Zoho-style IDs as SO_Number — long pure numeric → POs
   if (/^\d{15,}$/.test(t)) return 'Sales_Orders';
 
-  // Invoice patterns: "INV-12345", "INV12345", "INV 12345"
-  if (/^inv[\s\-_]?\d+$/i.test(t)) return 'Invoices';
+  // Deal ID / DLID / DID / CCW number → related Quotes
+  if (/^(?:deal\s*(?:id|#)?|dlid|did|ccw)[\s#:\-_]*\d{8}$/i.test(t)) return 'Quotes';
+  if (/^\d{8}$/.test(t)) return 'Quotes';
+
+  // Invoice patterns: "Invoice 26236", "INV-12345", "INV12345", "INV 12345"
+  if (/^(?:inv|invoice)[\s#:\-_]*\d+$/i.test(t)) return 'Invoices';
+
+  // Bare short numeric lookups are invoice numbers in the extension search flow.
+  // Keep long Zoho-style ids above routed to Sales_Orders.
+  if (/^\d{4,7}$/.test(t)) return 'Invoices';
 
   // Quote patterns: "QT-12345", "Q-12345", "Quote-12345"
   if (/^(qt|q|quote)[\s\-_]?\d+$/i.test(t)) return 'Quotes';
@@ -143,10 +151,11 @@ export async function handleContextMenuClick(info, tab) {
       try {
         await chrome.sidePanel.open({ tabId: tab.id });
         setTimeout(() => {
+          const emailLookup = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
-            panel: 'search',
-            data: { query: trimmed, module },
+            panel: emailLookup ? 'crm' : 'search',
+            data: emailLookup ? { preloadEmail: trimmed } : { query: trimmed, module },
           });
         }, 500);
       } catch (err) {
@@ -199,8 +208,8 @@ export async function handleContextMenuClick(info, tab) {
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
-            panel: 'zoho',
-            data: { lookupEmail: email },
+            panel: 'crm',
+            data: { preloadEmail: email },
             openPanel: true,
           });
         }, 500);

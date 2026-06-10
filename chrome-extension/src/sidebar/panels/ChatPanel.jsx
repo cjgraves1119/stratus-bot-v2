@@ -115,6 +115,40 @@ const QUICK_ACTIONS = [
   { label: 'Look Up Account', text: 'Look up the account for this email in Zoho CRM' },
 ];
 
+function isQuoteFromEmailRequest(text) {
+  const value = (text || '').toLowerCase();
+  if (!/(quote|quoted|quoting|zoho quote|crm quote)/.test(value)) return false;
+  return /\b(this|the|current)\s+(email|thread|conversation)\b/.test(value)
+    || /\bbased on (this|the|current) (email|thread|conversation)\b/.test(value)
+    || /\bfrom (this|the|current) (email|thread|conversation)\b/.test(value)
+    || /\brequested items?\b/.test(value)
+    || /\bwhat (needs|need) to be quoted\b/.test(value);
+}
+
+function buildRequestedQuoteEmailContext(emailContext) {
+  if (!emailContext) return '';
+  const threadText = (emailContext.fullThreadBody || emailContext.body || '').trim();
+  if (!threadText) return '';
+  const lines = [
+    '[User explicitly requested quote extraction from the current Gmail thread.]',
+    `Subject: ${emailContext.subject || ''}`,
+  ];
+  if (emailContext.senderName || emailContext.senderEmail) {
+    lines.push(`From: ${emailContext.senderName || ''} <${emailContext.senderEmail || ''}>`);
+  }
+  if (emailContext.customerEmail) {
+    lines.push(`Customer: ${emailContext.customerName || ''} <${emailContext.customerEmail}>`);
+  }
+  lines.push(
+    '',
+    'Full visible Gmail thread text for identifying requested quote items:',
+    threadText.substring(0, 18000),
+    '',
+    'Use this thread text only because the user asked for it. Identify the requested items and quantities from the email before creating or preparing a quote. If the thread is ambiguous, ask one concise clarification instead of guessing.'
+  );
+  return lines.join('\n');
+}
+
 // ─────────────────────────────────────────────
 // Zoho intent detection
 // When user asks to modify a quote/deal, inject enforcement
@@ -432,6 +466,26 @@ export default function ChatPanel({
           ? { ...gatedEmailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
           : gatedEmailContext || null;
 
+      const shouldReadFullEmailForQuote = isQuoteFromEmailRequest(messageText);
+      if (shouldReadFullEmailForQuote) {
+        try {
+          const fullEmailContext = await sendToBackground(MSG.GET_FULL_EMAIL_CONTEXT, {});
+          if (fullEmailContext && !fullEmailContext.empty) {
+            effectiveContext = selectedContextEmail === '__none__'
+              ? null
+              : selectedContextEmail
+                ? {
+                    ...fullEmailContext,
+                    customerEmail: selectedContextEmail,
+                    customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || fullEmailContext.customerName || '',
+                  }
+                : fullEmailContext;
+          }
+        } catch (err) {
+          console.warn('[Stratus Chat] Full email context requested but unavailable:', err?.message);
+        }
+      }
+
       // ── Priority rules for which record the LLM targets ───────────────
       //
       // The user can pin an Account (or any record) via the search flow.
@@ -504,6 +558,15 @@ export default function ChatPanel({
         // No primary record, but a pinned account is useful context too.
         const accHint = buildZohoPageContextHint(supplementalAccount);
         if (accHint) textToSend = `${accHint}\n(Source: pinned by user)\n\nUser message: ${messageText}`;
+      }
+
+      if (shouldReadFullEmailForQuote) {
+        const quoteEmailContext = buildRequestedQuoteEmailContext(effectiveContext);
+        if (quoteEmailContext) {
+          textToSend = `${quoteEmailContext}\n\n${textToSend}`;
+        } else {
+          textToSend = `[User explicitly asked to generate a quote from the current email, but the extension could not read visible thread body text. Ask the user to open/expand the Gmail thread or paste the requested items before creating the quote.]\n\n${textToSend}`;
+        }
       }
 
       // ── Fail-closed guard ─────────────────────────────────────────────

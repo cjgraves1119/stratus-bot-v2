@@ -114,7 +114,23 @@ export default function OptionsPage() {
                   headers: { 'Content-Type': 'application/json', 'X-API-Key': settings.apiKey },
                   body: JSON.stringify({ query: 'test', module: 'Accounts' }),
                 });
-                alert(res.ok ? 'Connection successful!' : `Connection failed (HTTP ${res.status})`);
+                const responseText = await res.text();
+                let responseBody = null;
+                try {
+                  responseBody = responseText ? JSON.parse(responseText) : null;
+                } catch {
+                  responseBody = null;
+                }
+                if (res.ok) {
+                  alert('Connection successful!');
+                  return;
+                }
+                const details = responseBody?.error
+                  || responseBody?.message
+                  || responseText.slice(0, 220)
+                  || res.statusText
+                  || 'Unknown error';
+                alert(`Connection failed (HTTP ${res.status}): ${details}`);
               } catch (err) {
                 alert('Connection failed: ' + err.message);
               }

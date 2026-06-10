@@ -18,3 +18,6 @@ node_modules/
 # belt-and-suspenders in case someone ever copies it into the repo tree.
 .stratus-secrets
 *.stratus-secrets
+
+.wrangler/
+**/.wrangler/

@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Stratus AI — Chrome Extension CRM Agent Test Harness</title>
+<style>
+  :root {
+    --stratus-blue: #1a73a7;
+    --bg-primary: #ffffff;
+    --bg-secondary: #f6f8fa;
+    --bg-tertiary: #eef2f6;
+    --border: #d7dee5;
+    --text-primary: #1a1d21;
+    --text-secondary: #4a5159;
+    --shadow: 0 1px 2px rgba(0,0,0,.05);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    background: var(--stratus-blue);
+    color: #fff;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header .status { font-size: 12px; opacity: .9; }
+
+  .layout { display: grid; grid-template-columns: 1fr 440px; height: calc(100vh - 44px); }
+
+  /* Left: chat area */
+  .chat {
+    display: flex; flex-direction: column;
+    background: var(--bg-primary);
+    border-right: 1px solid var(--border);
+  }
+
+  .config {
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 14px;
+    font-size: 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 14px;
+  }
+  .config label { display: flex; flex-direction: column; gap: 2px; }
+  .config input {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 6px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    background: #fff;
+  }
+  .config .full { grid-column: 1 / -1; }
+  .config-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .config-actions button {
+    font-size: 11px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .config-actions button:hover { background: var(--bg-secondary); }
+
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .bubble {
+    max-width: 78%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    word-wrap: break-word;
+    box-shadow: var(--shadow);
+    white-space: pre-wrap;
+  }
+  .bubble[data-role="user"] {
+    align-self: flex-end;
+    background: var(--stratus-blue);
+    color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+  .bubble[data-role="assistant"] {
+    align-self: flex-start;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border-bottom-left-radius: 4px;
+  }
+  .bubble[data-role="system"] {
+    align-self: center;
+    background: #fff4cd;
+    color: #6b4e00;
+    font-size: 12px;
+    max-width: 90%;
+  }
+  .bubble a { color: var(--stratus-blue); text-decoration: underline; }
+  .bubble[data-role="user"] a { color: #fff; }
+  .bubble code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    background: rgba(0,0,0,.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12.5px;
+  }
+  .bubble[data-role="user"] code { background: rgba(255,255,255,.2); color: #fff; }
+  .bubble strong { font-weight: 600; }
+  .bubble em { font-style: italic; }
+  .bubble ul, .bubble ol { margin: 6px 0; padding-left: 22px; }
+  .bubble hr { border: 0; border-top: 1px solid var(--border); margin: 8px 0; }
+
+  .progress {
+    align-self: flex-start;
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    border: 1px dashed var(--border);
+  }
+
+  .composer {
+    border-top: 1px solid var(--border);
+    padding: 10px 12px;
+    display: flex;
+    gap: 8px;
+    background: var(--bg-primary);
+  }
+  #chat-input {
+    flex: 1;
+    resize: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 14px;
+    min-height: 40px;
+    max-height: 160px;
+  }
+  #chat-input:focus { outline: 2px solid var(--stratus-blue); outline-offset: -1px; }
+  #send-btn {
+    padding: 8px 18px;
+    background: var(--stratus-blue);
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  #send-btn:disabled { opacity: .5; cursor: not-allowed; }
+  #send-btn:hover:not(:disabled) { background: #155e89; }
+
+  /* Right: debug panel */
+  .debug {
+    display: flex; flex-direction: column;
+    background: #0f1419;
+    color: #d7dee5;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    overflow: hidden;
+  }
+  .debug h2 {
+    margin: 0;
+    padding: 10px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    background: #1a1f26;
+    color: #a0aec0;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    border-bottom: 1px solid #2d3748;
+  }
+  .debug-section {
+    flex: 1;
+    overflow: auto;
+    padding: 10px 14px;
+    border-bottom: 1px solid #2d3748;
+  }
+  .debug-section pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: #e8ebee;
+  }
+  .debug-section.error pre { color: #fc8181; }
+  .debug-meta {
+    padding: 6px 14px;
+    background: #1a1f26;
+    color: #a0aec0;
+    font-size: 10.5px;
+    border-top: 1px solid #2d3748;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+    background: #2d3748;
+  }
+  .tag.ok { background: #22543d; color: #9ae6b4; }
+  .tag.err { background: #742a2a; color: #fc8181; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Stratus AI — CRM Agent Test Harness</h1>
+  <span class="status" id="session-status">session: <span id="session-id">(new)</span></span>
+</header>
+
+<div class="layout">
+  <section class="chat">
+    <div class="config">
+      <label>Worker URL (gateway)
+        <input id="cfg-worker" value="https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev" />
+      </label>
+      <label>Person ID (user)
+        <input id="cfg-person" value="2570562000141711002" />
+      </label>
+      <label>User Email
+        <input id="cfg-email" value="chrisg@stratusinfosystems.com" />
+      </label>
+      <label>Test Account ID
+        <input id="cfg-account" value="2570562000401231689" />
+      </label>
+      <div class="full config-actions">
+        <button id="reset-session">Reset Session</button>
+        <button id="clear-history">Clear History</button>
+        <button id="health-check">Health Check</button>
+        <span id="health-status" style="font-size:11px;align-self:center;color:var(--text-secondary);"></span>
+      </div>
+    </div>
+
+    <div id="messages" role="log" aria-live="polite"></div>
+
+    <div class="composer">
+      <textarea id="chat-input" placeholder="Ask the CRM agent… (Shift+Enter for newline)" rows="1"></textarea>
+      <button id="send-btn">Send</button>
+    </div>
+  </section>
+
+  <aside class="debug">
+    <h2>Last Request <span id="req-tag" class="tag">—</span></h2>
+    <div class="debug-section">
+      <pre id="debug-last-request">(none)</pre>
+    </div>
+
+    <h2>Last Response <span id="res-tag" class="tag">—</span></h2>
+    <div class="debug-section" id="res-section">
+      <pre id="debug-last-response">(none)</pre>
+    </div>
+
+    <h2>Last Rendered HTML</h2>
+    <div class="debug-section">
+      <pre id="debug-last-html">(none)</pre>
+    </div>
+
+    <div class="debug-meta" id="debug-meta">ready</div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const cfg = {
+    worker: () => document.getElementById('cfg-worker').value.replace(/\/+$/, ''),
+    person: () => document.getElementById('cfg-person').value.trim(),
+    email:  () => document.getElementById('cfg-email').value.trim(),
+    account:() => document.getElementById('cfg-account').value.trim(),
+  };
+
+  const messagesEl   = document.getElementById('messages');
+  const inputEl      = document.getElementById('chat-input');
+  const sendBtn      = document.getElementById('send-btn');
+  const sessionIdEl  = document.getElementById('session-id');
+  const dbgReq       = document.getElementById('debug-last-request');
+  const dbgRes       = document.getElementById('debug-last-response');
+  const dbgHtml      = document.getElementById('debug-last-html');
+  const dbgMeta      = document.getElementById('debug-meta');
+  const reqTag       = document.getElementById('req-tag');
+  const resTag       = document.getElementById('res-tag');
+  const resSection   = document.getElementById('res-section');
+
+  let history = [];  // [{role, content}]
+  let sessionId = localStorage.getItem('harness_session_id') || crypto.randomUUID();
+  sessionIdEl.textContent = sessionId;
+
+  // ---------- Markdown renderer (mirrors ChatPanel.jsx) ----------
+  // Order matters:
+  //  1. markdown links [text](url) + bare URLs
+  //  2. inline code `...`
+  //  3. bold **...** / *...* and italic _..._
+  //  4. line-level: bullet lists, hr, paragraphs
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function renderInline(text) {
+    // 1. inline code first — protect its content from further replacement
+    const codeSlots = [];
+    text = text.replace(/`([^`\n]+)`/g, (_, c) => {
+      codeSlots.push(c);
+      return `\u0001CODE${codeSlots.length - 1}\u0001`;
+    });
+
+    // 2. links: markdown [text](url) OR bare URL
+    const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')]+)/g;
+    const linkSlots = [];
+    text = text.replace(linkRegex, (_, mdText, mdUrl, bareUrl) => {
+      const url = mdUrl || bareUrl;
+      const label = mdText || url;
+      // strip trailing punctuation from bare URLs only
+      let href = url;
+      let trail = '';
+      if (bareUrl) {
+        const m = /[.,;:!?)\]]+$/.exec(href);
+        if (m) { trail = m[0]; href = href.slice(0, -trail.length); }
+      }
+      linkSlots.push(
+        `<a href="${escHtml(href)}" target="_blank" rel="noopener">${escHtml(label)}</a>${escHtml(trail)}`
+      );
+      return `\u0001LINK${linkSlots.length - 1}\u0001`;
+    });
+
+    // 3. escape everything else
+    text = escHtml(text);
+
+    // 4. bold/italic via splitter
+    const emphRe = /(\*\*[^*]+\*\*|\*[^*\n]+\*|_[^_\n]+_)/g;
+    text = text.split(emphRe).map(chunk => {
+      if (/^\*\*[^*]+\*\*$/.test(chunk)) return `<strong>${chunk.slice(2, -2)}</strong>`;
+      if (/^\*[^*\n]+\*$/.test(chunk))   return `<em>${chunk.slice(1, -1)}</em>`;
+      if (/^_[^_\n]+_$/.test(chunk))     return `<em>${chunk.slice(1, -1)}</em>`;
+      return chunk;
+    }).join('');
+
+    // 5. restore link + code slots
+    text = text.replace(/\u0001LINK(\d+)\u0001/g, (_, i) => linkSlots[+i]);
+    text = text.replace(/\u0001CODE(\d+)\u0001/g, (_, i) => `<code>${escHtml(codeSlots[+i])}</code>`);
+
+    return text;
+  }
+
+  function renderMarkdown(raw) {
+    if (!raw) return '';
+    const lines = String(raw).replace(/\r\n?/g, '\n').split('\n');
+    const out = [];
+    let inList = false;
+    let listTag = 'ul';
+    let para = [];
+
+    const flushPara = () => {
+      if (para.length) {
+        out.push('<p>' + renderInline(para.join(' ')) + '</p>');
+        para = [];
+      }
+    };
+    const openList = (tag) => {
+      if (!inList || listTag !== tag) {
+        if (inList) out.push(`</${listTag}>`);
+        out.push(`<${tag}>`);
+        listTag = tag;
+        inList = true;
+      }
+    };
+    const closeList = () => {
+      if (inList) { out.push(`</${listTag}>`); inList = false; }
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine;
+      if (/^\s*$/.test(line)) {
+        flushPara();
+        closeList();
+        continue;
+      }
+      if (/^\s*---\s*$/.test(line) || /^\s*\*\*\*\s*$/.test(line)) {
+        flushPara(); closeList();
+        out.push('<hr/>');
+        continue;
+      }
+      const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
+      const num = /^\s*\d+\.\s+(.*)$/.exec(line);
+      if (bullet) {
+        flushPara();
+        openList('ul');
+        out.push('<li>' + renderInline(bullet[1]) + '</li>');
+        continue;
+      }
+      if (num) {
+        flushPara();
+        openList('ol');
+        out.push('<li>' + renderInline(num[1]) + '</li>');
+        continue;
+      }
+      closeList();
+      para.push(line);
+    }
+    flushPara();
+    closeList();
+    return out.join('');
+  }
+
+  // ---------- UI helpers ----------
+  function addBubble(role, rawText, opts = {}) {
+    const b = document.createElement('div');
+    b.className = 'bubble';
+    b.setAttribute('data-role', role);
+    if (role === 'assistant') {
+      b.innerHTML = renderMarkdown(rawText);
+      b.setAttribute('data-raw', rawText || '');
+      dbgHtml.textContent = b.innerHTML;
+    } else {
+      b.textContent = rawText;
+    }
+    if (opts.id) b.id = opts.id;
+    messagesEl.appendChild(b);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return b;
+  }
+
+  function addProgressBubble(text) {
+    const p = document.createElement('div');
+    p.className = 'progress';
+    p.id = 'progress-line';
+    p.textContent = text;
+    messagesEl.appendChild(p);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return p;
+  }
+  function removeProgressBubble() {
+    const p = document.getElementById('progress-line');
+    if (p) p.remove();
+  }
+
+  function setRequestView(obj) {
+    dbgReq.textContent = JSON.stringify(obj, null, 2);
+  }
+  function setResponseView(obj, ok, meta = '') {
+    dbgRes.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+    resTag.textContent = ok ? 'OK' : 'ERR';
+    resTag.className = 'tag ' + (ok ? 'ok' : 'err');
+    resSection.classList.toggle('error', !ok);
+    dbgMeta.textContent = meta;
+  }
+
+  // ---------- Progress polling ----------
+  async function pollProgress(progressId, signal) {
+    const url = `${cfg.worker()}/api/chat-progress?id=${encodeURIComponent(progressId)}`;
+    try {
+      const r = await fetch(url, { signal });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
+  }
+
+  // ---------- Send flow ----------
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+    inputEl.value = '';
+    sendBtn.disabled = true;
+    reqTag.textContent = 'SENDING';
+    reqTag.className = 'tag';
+    resTag.textContent = '…';
+    resTag.className = 'tag';
+
+    addBubble('user', text);
+    const progressEl = addProgressBubble('thinking…');
+    const progressId = crypto.randomUUID();
+
+    const payload = {
+      text,
+      emailContext: null,
+      history: history.slice(-10), // keep last 10 turns
+      systemContext: {
+        userEmail: cfg.email(),
+        personId: cfg.person(),
+        sessionId,
+        testAccountId: cfg.account(),
+        harness: true,
+      },
+      progressId,
+    };
+
+    setRequestView({
+      url: `${cfg.worker()}/api/chat`,
+      headers: { 'Content-Type': 'application/json', 'X-User-Email': cfg.email() },
+      body: payload,
+    });
+    reqTag.textContent = 'SENT';
+    reqTag.className = 'tag ok';
+
+    // Progress polling loop
+    const pollController = new AbortController();
+    const pollTimer = setInterval(async () => {
+      const p = await pollProgress(progressId, pollController.signal);
+      if (p && p.message) {
+        progressEl.textContent = p.message;
+      }
+    }, 1000);
+
+    const t0 = Date.now();
+    let raw, ok = false, parsed = null;
+
+    try {
+      const r = await fetch(`${cfg.worker()}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Email': cfg.email(),
+        },
+        body: JSON.stringify(payload),
+      });
+      raw = await r.text();
+      ok = r.ok;
+      try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+      const ms = Date.now() - t0;
+      setResponseView(parsed, ok, `HTTP ${r.status} • ${ms} ms`);
+    } catch (e) {
+      parsed = { error: String(e) };
+      setResponseView(parsed, false, 'fetch threw');
+    } finally {
+      clearInterval(pollTimer);
+      pollController.abort();
+      removeProgressBubble();
+    }
+
+    // Extract assistant text from response
+    let assistantText = '';
+    if (parsed && typeof parsed === 'object') {
+      assistantText =
+        parsed.reply ||
+        parsed.message ||
+        parsed.text ||
+        parsed.response ||
+        (parsed.choices && parsed.choices[0] && parsed.choices[0].message && parsed.choices[0].message.content) ||
+        (parsed.error ? `⚠️ ${parsed.error}` : JSON.stringify(parsed, null, 2));
+    } else if (typeof parsed === 'string') {
+      assistantText = parsed;
+    } else {
+      assistantText = '(empty response)';
+    }
+
+    addBubble('assistant', assistantText);
+    history.push({ role: 'user', content: text });
+    history.push({ role: 'assistant', content: assistantText });
+
+    sendBtn.disabled = false;
+    inputEl.focus();
+  }
+
+  // ---------- Event wiring ----------
+  sendBtn.addEventListener('click', sendMessage);
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  });
+
+  document.getElementById('reset-session').addEventListener('click', () => {
+    sessionId = crypto.randomUUID();
+    localStorage.setItem('harness_session_id', sessionId);
+    sessionIdEl.textContent = sessionId;
+    dbgMeta.textContent = 'session reset';
+  });
+
+  document.getElementById('clear-history').addEventListener('click', () => {
+    history = [];
+    messagesEl.innerHTML = '';
+    dbgMeta.textContent = 'history cleared';
+  });
+
+  document.getElementById('health-check').addEventListener('click', async () => {
+    const status = document.getElementById('health-status');
+    status.textContent = 'checking…';
+    try {
+      const r = await fetch(`${cfg.worker()}/health`);
+      status.textContent = r.ok ? `OK (${r.status})` : `ERR ${r.status}`;
+      status.style.color = r.ok ? '#22543d' : '#742a2a';
+    } catch (e) {
+      status.textContent = 'ERR';
+      status.style.color = '#742a2a';
+    }
+  });
+
+  // Seed one system bubble
+  addBubble('system', `Harness ready. Session: ${sessionId.slice(0, 8)}… • Worker: ${cfg.worker()}`);
+
+  // Expose for MCP-driven debugging
+  window.harness = {
+    send: (t) => { inputEl.value = t; return sendMessage(); },
+    history: () => history,
+    lastAssistant: () => {
+      const nodes = messagesEl.querySelectorAll('.bubble[data-role="assistant"]');
+      const n = nodes[nodes.length - 1];
+      return n ? { html: n.innerHTML, raw: n.getAttribute('data-raw') } : null;
+    },
+    reset: () => document.getElementById('reset-session').click(),
+    clear: () => document.getElementById('clear-history').click(),
+  };
+})();
+</script>
+</body>
+</html>

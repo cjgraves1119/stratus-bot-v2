@@ -271,6 +271,7 @@ export default function App() {
     return onMessage(MSG.EMAIL_CHANGED, (data) => {
       setEmailContext(data);
       setCrmContext(null);
+      setNavData(null);
     });
   }, []);
 
@@ -397,7 +398,7 @@ export default function App() {
     return onMessage(MSG.SIDEBAR_NAVIGATE, (data) => {
       if (data.panel) {
         // Map legacy 'tasks'/'draft' routes to new locations
-        const panelMap = { tasks: 'crm', draft: 'email' };
+        const panelMap = { tasks: 'crm', draft: 'email', zoho: 'crm' };
         const targetPanel = panelMap[data.panel] || data.panel;
         setActiveTab(targetPanel);
         if (data.data) setNavData(data.data);
@@ -419,7 +420,7 @@ export default function App() {
   }, []);
 
   const handleNavigate = useCallback((panel, data) => {
-    const panelMap = { tasks: 'crm', draft: 'email' };
+    const panelMap = { tasks: 'crm', draft: 'email', zoho: 'crm' };
     const targetPanel = panelMap[panel] || panel;
     setActiveTab(targetPanel);
     setNavData(data || null);
@@ -528,7 +529,7 @@ export default function App() {
       <div style={{ flex: 1, overflow: 'auto' }}>
         <PanelErrorBoundary activeTab={activeTab}>
           <Suspense fallback={<PanelLoader />}>
-            {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} />}
+            {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} onNavigate={handleNavigate} />}
             {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
             {activeTab === 'quote' && <QuotePanel navData={navData} emailContext={emailContext} onNavigate={handleNavigate} zohoPageContext={zohoPageContext} />}
             {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} zohoPageContext={zohoPageContext} />}

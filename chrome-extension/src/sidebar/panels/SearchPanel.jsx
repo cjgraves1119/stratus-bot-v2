@@ -11,11 +11,38 @@ const ZOHO_ORG = 'org647122552';
 const MODULE_MAP = {
   Accounts: { label: 'Accounts', tab: 'Accounts' },
   Contacts: { label: 'Contacts', tab: 'Contacts' },
-  Deals: { label: 'Deals', tab: 'Potentials' },
   Quotes: { label: 'Quotes', tab: 'Quotes' },
   Sales_Orders: { label: 'POs', tab: 'SalesOrders' },
   Invoices: { label: 'Invoices', tab: 'Invoices' },
 };
+
+function detectSearchModule(text) {
+  const t = (text || '').trim();
+  if (!t) return 'Accounts';
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)) return 'Contacts';
+  if (/^\d{15,}$/.test(t)) return 'Sales_Orders';
+  if (/^(?:deal\s*(?:id|#)?|dlid|did|ccw)[\s#:\-_]*\d{8}$/i.test(t)) return 'Quotes';
+  if (/^\d{8}$/.test(t)) return 'Quotes';
+  if (/^(?:inv|invoice)[\s#:\-_]*\d+$/i.test(t)) return 'Invoices';
+  if (/^\d{4,7}$/.test(t)) return 'Invoices';
+  if (/^(qt|q|quote)[\s\-_]?\d+$/i.test(t)) return 'Quotes';
+  const words = t.split(/\s+/);
+  if (words.length === 2 && words.every(w => /^[A-Za-z][A-Za-z'\-]*\.?$/.test(w))) {
+    return 'Contacts';
+  }
+  return 'Accounts';
+}
+
+function isStrongAutoModuleSearch(text) {
+  const t = (text || '').trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)
+    || /^\d{15,}$/.test(t)
+    || /^(?:deal\s*(?:id|#)?|dlid|did|ccw)[\s#:\-_]*\d{8}$/i.test(t)
+    || /^\d{8}$/.test(t)
+    || /^(?:inv|invoice)[\s#:\-_]*\d+$/i.test(t)
+    || /^\d{4,7}$/.test(t)
+    || /^(qt|q|quote)[\s\-_]?\d+$/i.test(t);
+}
 
 function buildZohoUrl(moduleId, recordId) {
   const tab = MODULE_MAP[moduleId]?.tab || moduleId;
@@ -25,6 +52,7 @@ function buildZohoUrl(moduleId, recordId) {
 export default function SearchPanel({ navData }) {
   const [query, setQuery] = useState('');
   const [module, setModule] = useState('Accounts');
+  const [moduleTouched, setModuleTouched] = useState(false);
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -34,7 +62,10 @@ export default function SearchPanel({ navData }) {
     if (navData?.query) {
       setQuery(navData.query);
       const mod = navData.module || module;
-      if (navData.module) setModule(navData.module);
+      if (navData.module) {
+        setModule(navData.module);
+        setModuleTouched(false);
+      }
       handleSearch(navData.query, mod);
     }
   }, [navData]);
@@ -42,15 +73,21 @@ export default function SearchPanel({ navData }) {
   async function handleSearch(q, mod) {
     const searchQuery = q || query;
     if (!searchQuery.trim()) return;
+    const requestedModule = mod || module;
+    const shouldAutoDetect = !mod && (!moduleTouched || isStrongAutoModuleSearch(searchQuery));
+    const effectiveModule = shouldAutoDetect
+      ? detectSearchModule(searchQuery)
+      : requestedModule;
+    if (effectiveModule !== module) setModule(effectiveModule);
     setLoading(true);
     setError(null);
 
     try {
       const result = await sendToBackground(MSG.CRM_SEARCH, {
         query: searchQuery.trim(),
-        module: mod || module,
+        module: effectiveModule,
       });
-      setResults({ ...result, searchModule: mod || module });
+      setResults({ ...result, searchModule: effectiveModule });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -171,6 +208,7 @@ export default function SearchPanel({ navData }) {
         const quoteNum = getFieldValue(record.Quote_Number);
         const total = getFieldValue(record.Grand_Total);
         const deal = getFieldValue(record.Deal_Name);
+        const ccwDeal = getFieldValue(record.CCW_Deal_Number);
         const stage = getFieldValue(record.Stage);
 
         return (
@@ -178,6 +216,7 @@ export default function SearchPanel({ navData }) {
             <div style={{ fontWeight: 600, fontSize: 13, color: COLORS.STRATUS_BLUE }}>{subject}</div>
             {quoteNum && <div style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY }}>#{quoteNum}</div>}
             {deal && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Deal: {deal}</div>}
+            {ccwDeal && <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>Deal ID: <span style={copyableStyle}>{ccwDeal}</span></div>}
             <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
               {total && (
                 <span style={{ fontSize: 12, fontWeight: 600, color: '#2e7d32' }}>
@@ -339,7 +378,7 @@ export default function SearchPanel({ navData }) {
         {Object.entries(MODULE_MAP).map(([id, { label }]) => (
           <button
             key={id}
-            onClick={() => { setModule(id); if (query) handleSearch(query, id); }}
+            onClick={() => { setModule(id); setModuleTouched(true); if (query) handleSearch(query, id); }}
             style={{
               flex: 1, padding: '6px 8px', borderRadius: 6,
               border: `1px solid ${module === id ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
