@@ -19660,17 +19660,21 @@ async function askDeepSeekModel(modelId, userMessage, systemPrompt, anthropicToo
 // Sets env.__BENCHMARK_DRY_RUN so executeToolCall can intercept writes
 // at the case level without needing globalThis hooks.
 // Tool call counts are inferred by scraping the agent log from KV.
-async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWallMs = 60000, evalContext = null) {
+async function askClaudeForBenchmark(userMessage, env, personId, dryRun, maxWallMs = 60000, evalContext = null, forcedModel = null) {
   const startMs = Date.now();
   const errors = [];
 
   // Create a wrapped env that carries the dry-run flag and a tool tracker.
   // executeToolCall checks env.__BENCHMARK_DRY_RUN and env.__BENCHMARK_TRACKER.
+  // When forcedModel is set (model-pinned benchmark entry), override
+  // CRM_AGENT_FORCE_MODEL so the run uses exactly that model regardless of the
+  // worker's live flag — gives a clean per-request Sonnet-vs-Opus A/B.
   const toolCallsLog = [];
   const wrappedEnv = new Proxy(env, {
     get(target, prop) {
       if (prop === '__BENCHMARK_DRY_RUN') return dryRun;
       if (prop === '__BENCHMARK_TRACKER') return toolCallsLog;
+      if (prop === 'CRM_AGENT_FORCE_MODEL' && forcedModel) return forcedModel;
       return target[prop];
     }
   });
@@ -19788,6 +19792,11 @@ const BENCHMARK_TASKS = [
 
 const BENCHMARK_MODELS = [
   { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
+  // Explicit model-pinned entries for a clean Sonnet-vs-Opus A/B — each forces
+  // its own model per-request via the benchmark env proxy, so the result does
+  // NOT depend on the live CRM_AGENT_FORCE_MODEL flag's current value.
+  { id: 'claude-sonnet', label: 'Claude Sonnet 4.6 (pinned)', type: 'claude', forceModel: 'claude-sonnet-4-6' },
+  { id: 'claude-opus', label: 'Claude Opus 4.8 (pinned)', type: 'claude', forceModel: 'claude-opus-4-8' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', type: 'deepseek' },
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', type: 'deepseek' },
   { id: SEA_LION_MODEL_ID, label: 'SEA-LION V4 27B (CF)', type: 'cf' },
@@ -20075,7 +20084,7 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
   }
 
   if (modelConfig.type === 'claude') {
-    return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext);
+    return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext, modelConfig.forceModel || null);
   }
   if (modelConfig.type === 'deepseek') {
     return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
