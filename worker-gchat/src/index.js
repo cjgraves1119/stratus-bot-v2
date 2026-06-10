@@ -9861,6 +9861,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'create_quote_on_deal': { success: true, deal_id: toolInput.deal_id, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
         'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
+        'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
         'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
         'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
         'webex_send_message': { success: true, message_id: mockId, dry_run: true },
@@ -15271,7 +15272,23 @@ function classifyCrmIntent(text, ctx = {}) {
   }
 
   // 2. Subscription / DID / PO / contract / esign / sub mod
-  if (/\b(generate\s+(a\s+|the\s+)?did|create\s+(a\s+|the\s+)?did|fire\s+(a\s+|the\s+)?did|get\s+(a|the)\s+did|need\s+(a\s+)?did|submit\s+(to\s+|for\s+)?(that\s+|the\s+|this\s+)?(ccw|did|velocity)|live_ciscoquote|live_converttoso|live_sendtoesign|live_getquotedata|admin\s+action|admin_action|quote.to.po|convert\s+to\s+po|create\s+(a\s+)?po|send\s+po|contract|esign|e-sign|docusign|send\s+for\s+signature|sub\s*mod|subscription\s+mod|ccw\s+renewal|renew\s+(my\s+)?subscription)\b/.test(t)) {
+  //    Velocity Hub: the original determiner fix only caught "submit ... to velocity".
+  //    Real rep phrasings still dropped to 'general' (no velocity_hub_submit tool):
+  //    "push/send that DID to velocity hub", "resubmit to velocity", "submit it/the
+  //    deal to velocity hub". Three added branches (codex-hardened over 2 rounds):
+  //    (1) push-verb + ADMIN NOUN (did/deal/quote/po/approval/request/estimate…) +
+  //        connector + velocity — comma excluded from the gaps so a clause boundary
+  //        ("send the team an update, it goes to velocity hub") can't bridge;
+  //    (2) push-verb + PRONOUN with the connector IMMEDIATELY bound ("submit it to
+  //        velocity") — a loose pronoun gap stole "send this email to velocity hub
+  //        support" from the email subset;
+  //    (3) bare "resubmit … to velocity" (unambiguous, object-free).
+  //    Benign sends ("send an email/a message/the invoice to velocity hub support")
+  //    have no admin noun and no verb-bound pronoun → never match.
+  if (/\b(generate\s+(a\s+|the\s+)?did|create\s+(a\s+|the\s+)?did|fire\s+(a\s+|the\s+)?did|get\s+(a|the)\s+did|need\s+(a\s+)?did|submit\s+(to\s+|for\s+)?(that\s+|the\s+|this\s+)?(ccw|did|velocity)|live_ciscoquote|live_converttoso|live_sendtoesign|live_getquotedata|admin\s+action|admin_action|quote.to.po|convert\s+to\s+po|create\s+(a\s+)?po|send\s+po|contract|esign|e-sign|docusign|send\s+for\s+signature|sub\s*mod|subscription\s+mod|ccw\s+renewal|renew\s+(my\s+)?subscription)\b/.test(t)
+      || /\b(submit|resubmit|push|send|fire|shoot)\b[^.!?,]{0,30}\b(did|deal|quote(?!\s+(url|link))|order|po|sub|subscription|approval|request|estimate)\b[^.!?,]{0,25}\b(to|into|through|over\s+to)\s+(the\s+)?velocity(\s+hub)?\b/.test(t)
+      || /\b(submit|resubmit|push|send|fire|shoot)\s+(it|that|this|them)\s+(to|into|through|over\s+to)\s+(the\s+)?velocity(\s+hub)?\b/.test(t)
+      || /\bresubmit\b[^.!?,]{0,15}\b(to|into|through|over\s+to)\s+(the\s+)?velocity(\s+hub)?\b/.test(t)) {
     return { class: 'subscription', confidence: 0.9 };
   }
 
@@ -18685,6 +18702,7 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'create_quote_on_deal',
   'quote_to_po_and_esign',
   'velocity_hub_submit',
+  'apply_margin_to_quote',
   'assign_cisco_rep_to_deal',
   'gmail_create_draft',
   'gmail_send_email',
@@ -18785,6 +18803,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'create_quote_on_deal': { success: true, deal_id: toolInput.deal_id, quote_id: `DRY_QUOTE_${mockId}`, quote_number: `Q-DRY-${mockId}`, dry_run: true },
       'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
+      'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
       'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
       'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
       'webex_send_message': { success: true, message_id: mockId, dry_run: true },
