@@ -367,6 +367,17 @@ function resolveForcedCrmModel(env) {
   return raw.startsWith('claude-') ? raw : null;
 }
 
+// Whether the advisor TOOL will actually be injected for a given run — the
+// single source of truth shared by tool injection AND prompt guidance, so the
+// prompt never instructs calling advisor() unless the tool is present.
+// The tool injects only when ENABLE_ADVISOR_TOOL=true AND the effective
+// Anthropic model is Sonnet 4.6 (the activeModel===sonnet gate at the two
+// injection sites). Non-Anthropic models (DeepSeek/CF) never carry it, so pass
+// effectiveModel='' for those.
+function advisorToolActive(env, effectiveModel) {
+  return env?.ENABLE_ADVISOR_TOOL === 'true' && effectiveModel === 'claude-sonnet-4-6';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ─── PR-B: Anthropic Prompt Caching (2026-05-14) ───────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════
@@ -15857,13 +15868,19 @@ function applyOwnerPlaceholders(promptStr, ownerCtx) {
 }
 
 // Build CRM system prompt dynamically based on detected intent
-function buildCrmSystemPrompt(text, ownerCtx) {
+function buildCrmSystemPrompt(text, ownerCtx, includeAdvisor = false) {
   let prompt = CRM_AGENT_SYSTEM_PROMPT_BASE;
   const lower = (text || '').toLowerCase();
 
   // ── Advisor tool guidance (Anthropic advisor-tool-2026-03-01 beta) ──
   // Sonnet 4.6 executor + Opus 4.6 advisor for strategic CRM decisions.
   // The advisor sees the full transcript and provides plans/corrections.
+  // GATED on includeAdvisor: only emit this guidance when the advisor TOOL is
+  // actually injected (ENABLE_ADVISOR_TOOL=true). Otherwise the prompt tells the
+  // model to call advisor() but no such tool exists — Opus obediently calls the
+  // phantom tool, wasting an iteration and sometimes stalling the whole turn
+  // (live A/B 2026-06-10: Opus hit advisor on 6/6 create runs; Sonnet ignored it).
+  if (includeAdvisor) {
   prompt += `\n\n## ADVISOR TOOL
 You have access to an advisor tool backed by a stronger reviewer model. It takes NO parameters — when you call advisor(), your entire conversation history is automatically forwarded.
 
@@ -15877,6 +15894,7 @@ Also call advisor:
 Give the advice serious weight. If you follow a step and it fails empirically, or you have primary-source evidence that contradicts a specific claim, adapt. If there's a conflict between your data and the advisor's guidance, surface it in one more advisor call.
 
 The advisor should respond in under 100 words and use enumerated steps, not explanations.\n`;
+  }
 
   // Detect email intake intent
   const emailIntakePatterns = [
@@ -17339,7 +17357,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // Build system prompt dynamically — conditionally loads EMAIL INTAKE and ADMIN ACTION
       // sections only when relevant intent is detected, saving ~2K tokens on standard requests.
       const _ownerCtx_crm = await getOwnerContext(env, env && env.__CALLER_EMAIL);
-      systemPrompt = buildCrmSystemPrompt(userMessage, _ownerCtx_crm);
+      systemPrompt = buildCrmSystemPrompt(userMessage, _ownerCtx_crm, advisorToolActive(env, resolveForcedCrmModel(env) || 'claude-sonnet-4-6'));
 
       // CRM context injection: if a previous CRM turn saved context (quote ID, account,
       // line items), inject it so the agent can skip re-searching on follow-up messages.
@@ -20079,7 +20097,7 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
     systemPrompt = pickOptimizedPrompt(modelConfig.id, _ownerCtx_bench);
   } else {
     systemPrompt = typeof buildCrmSystemPrompt === 'function'
-      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench)
+      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench, advisorToolActive(env, modelConfig.type === 'claude' ? (modelConfig.forceModel || 'claude-sonnet-4-6') : ''))
       : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
   }
 
@@ -20341,7 +20359,7 @@ function isAdvisoryQuery(userMessage) {
 async function buildDeepSeekGuardedSystemPrompt(userMessage, env) {
   const _ownerCtx_ds = await getOwnerContext(env, env && env.__CALLER_EMAIL);
   const basePrompt = typeof buildCrmSystemPrompt === 'function'
-    ? buildCrmSystemPrompt(userMessage, _ownerCtx_ds)
+    ? buildCrmSystemPrompt(userMessage, _ownerCtx_ds, false)
     : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
 
   return `${basePrompt}
