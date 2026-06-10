@@ -303,8 +303,12 @@ function t(name, fn) {
   });
 
   // 17. Advisory path compatibility
-  await t('17. Advisory path: buildDeepSeekGuardedSystemPrompt result passes through helpers', () => {
-    const ds = buildDeepSeekGuardedSystemPrompt('what firewall should I use for 100 users');
+  await t('17. Advisory path: buildDeepSeekGuardedSystemPrompt result passes through helpers', async () => {
+    // 2026-06-10: buildDeepSeekGuardedSystemPrompt became async when owner-context
+    // depersonalization landed (it awaits getOwnerContext to fill {{OWNER_*}}
+    // placeholders; both production call sites await it). The helper still
+    // RESOLVES to a plain string — await it like the production paths do.
+    const ds = await buildDeepSeekGuardedSystemPrompt('what firewall should I use for 100 users');
     assert.strictEqual(typeof ds, 'string');
     // Advisory wraps buildCrmSystemPrompt which now includes the cache
     // boundary; the DeepSeek guardrails are appended AFTER it. That means
