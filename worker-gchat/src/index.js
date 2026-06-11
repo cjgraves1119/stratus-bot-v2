@@ -4714,7 +4714,18 @@ function parseMessage(text) {
   // ── Umbrella natural language handler ──
   // License-only product. If type+tier specified, return URLs directly.
   // If missing, prompt user to choose type (DNS/SIG) and tier (Essentials/Advantage).
-  const isUmb = /\b(?:UMBRELLA|UMB)\b/i.test(upper);
+  //
+  // F1 (seam 2026-06-10, D1 rows 5240/5251): Umbrella must also be recognized WITHOUT the
+  // literal "umbrella"/"umb" token. Live failure: "200 dns advantage" — every Umbrella entry
+  // point required the keyword, so the deterministic parser went blind and each surface's
+  // fallback failed differently (webex: bare single-term URL; gchat: Claude apology).
+  // DNS and SIG are Umbrella-only vocabulary in this catalog, but "dns" also appears in
+  // benign tech questions ("what dns servers does meraki use"), so the keywordless patterns
+  // REQUIRE tier-adjacency ("dns advantage", "sig essentials") or qty-adjacency ("200 dns",
+  // "50 sig") and reject infrastructure-noun follows ("dns servers/records/settings/...").
+  const umbTypeTierAdjacent = /\b(?:DNS|SIG|SECURE\s+INTERNET\s+GATEWAY)[\s-]+(?:ESSENTIALS?|ADVANTAGE)\b/i.test(upper);
+  const umbQtyTypeAdjacent = /\b\d+\s*[X×]?\s*(?:DNS|SIG)\b(?!\s+(?:SERVERS?|RECORDS?|SETTINGS?|ENTRIES|ENTRY|QUERIES|QUERY|REQUESTS?|LOOKUPS?|NAMES?|ZONES?|RESOLVERS?|ISSUES?|PROBLEMS?|ERRORS?|TRAFFIC))/i.test(upper);
+  const isUmb = /\b(?:UMBRELLA|UMB)\b/i.test(upper) || umbTypeTierAdjacent || umbQtyTypeAdjacent;
   if (isUmb && !isAdvisory) {
     // Collect ALL types (DNS, SIG) mentioned, in order of appearance
     const umbTypes = [];
@@ -4724,6 +4735,9 @@ function parseMessage(text) {
       const canon = tym[1].toUpperCase();
       if (!umbTypes.includes(canon)) umbTypes.push(canon);
     }
+    // "Secure Internet Gateway" spelled out without the SIG token (F1 sibling gap —
+    // previously fell to the type-clarify question even WITH the umbrella keyword).
+    if (!umbTypes.includes('SIG') && /\bSECURE\s+INTERNET\s+GATEWAY\b/i.test(upper)) umbTypes.push('SIG');
 
     // Collect ALL tiers (ESS, ADV) mentioned, in order of appearance
     // Must match both literal spellings ("advantage", "essentials") and short forms ("adv", "ess").
@@ -4744,14 +4758,20 @@ function parseMessage(text) {
     const umbRequestedTerm = umbTermMatch ? parseInt(umbTermMatch[1]) : null;
 
     if (umbTypes.length === 0 || umbTiers.length === 0) {
-      let prompt = `Which Umbrella package do you need? (qty: ${umbQty})\n\n`;
+      // F1(b): when the TYPE is already known ("200 dns" → DNS, tier missing), carry it in
+      // the question header so buildTierClarifyContinuation can resolve a bare tier reply
+      // ("essentials") without re-asking — it never guesses DNS vs SIG on its own.
+      const umbKnownType = umbTypes.length === 1 ? umbTypes[0] : null;
+      let prompt = `Which Umbrella package do you need? (qty: ${umbQty}${umbKnownType ? `, type: ${umbKnownType}` : ''})\n\n`;
       if (umbTypes.length === 0) {
         prompt += `**Type:**\n• **DNS Security** — DNS-layer protection\n• **SIG** (Secure Internet Gateway) — full web proxy + DNS\n\n`;
       }
       if (umbTiers.length === 0) {
         prompt += `**Tier:**\n• **Essentials** — core protection\n• **Advantage** — Essentials + advanced features\n\n`;
       }
-      prompt += `Reply with the full package, e.g. "Umbrella DNS Essentials ${umbQty}" or "Umbrella SIG Advantage".`;
+      prompt += umbKnownType
+        ? `Reply with the tier, e.g. "Essentials" or "${umbKnownType} Advantage".`
+        : `Reply with the full package, e.g. "Umbrella DNS Essentials ${umbQty}" or "Umbrella SIG Advantage".`;
       return {
         items: [],
         isQuote: false,
@@ -16436,8 +16456,67 @@ async function handleFollowUpModifier(text, personId, kv) {
   // INSTEAD so a bare "DNS Essentials" tier-question ANSWER never enters this handler (that
   // belongs to the tier-clarify continuation). Live repro 2026-06-09 (D1 23:19:29).
   const isUmbTypeSwap = /^(?:UMBRELLA\s+)?(?:DNS|SIG|SECURE\s+INTERNET\s+GATEWAY)(?:\s+(?:ESSENTIALS?|ADVANTAGE))?\s+INSTEAD\s*\.?\s*$/i.test(upper);
+  // ── F4 (seam 2026-06-10): all-terms re-render — "provide 1-5 year options", "show all
+  // terms", "1, 3 and 5 year options", "show me the other terms", "all term options".
+  // Live failure C: after a single-term render there was no deterministic all-terms branch,
+  // so these fell to Sonnet. Anchored like the other single-intent gates; the actual
+  // re-render happens below via rewriteSkuTerm on the prior quote's term-bearing SKUs.
+  const isAllTerms = /^(?:PLEASE\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PROVIDE|SHOW|GIVE|LIST|DISPLAY|SEND|QUOTE|WHAT\s+ARE)?\s*(?:ME\s+)?(?:THE\s+)?(?:(?:ALL\s+)?1\s*(?:-|–|TO|THROUGH)\s*5\s*-?\s*(?:YEAR|YR)S?|1\s*,?\s*3\s*,?\s*(?:AND\s+|&\s*)?5\s*-?\s*(?:YEAR|YR)S?|ALL\s+(?:THE\s+)?(?:TERM|YEAR)S?|(?:THE\s+)?OTHER\s+TERMS?)\s*(?:TERM\s+)?(?:OPTIONS?)?\s*\.?\s*\??\s*$/i.test(upper);
 
-  if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !isQtyChange && !isUmbTypeSwap && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) return null;
+  // ── F2 (seam 2026-06-10): conservative COMPOUND pass — pricing + at most ONE mutation ──
+  // Live failure B: "what are the costs for essentials" after an Advantage quote slipped past
+  // these mutually-exclusive anchored gates; downstream cf-v2-revise applied the PRICING but
+  // ignored the TIER change and confidently rendered Advantage prices as the answer to an
+  // Essentials question. Decompose the message into components and accept ONLY when a pricing
+  // word co-occurs with at most one unambiguous mutation (tier word / dns-sig type / term) and
+  // NOTHING else survives a filler strip. Everything else (two mutations, SKU tokens, free
+  // numbers, unrecognized words) FAILS CLOSED → return null → the existing fallbacks.
+  // Mutations re-use the SAME machinery as the anchored single-intent phrasings
+  // (applyItemMutation / the shared term filter), then render WITH pricing. Also covers the
+  // pricing-only phrasings the isAddPricing anchor missed ("what's the total", "total cost?",
+  // "what are the costs") — those re-render the prior quote with buildPricingBlock.
+  let compound = null;
+  if (!isHwOnly && !isLicOnly && !isTermOnly && !isAddPricing && !isQtyChange && !isUmbTypeSwap && !isAllTerms && !hasAddPrefix && !hasRemovePrefix && !hasSwapPrefix) {
+    compound = (() => {
+      if (!/\b(COSTS?|PRICES?|PRICING|HOW\s+MUCH|TOTALS?)\b/i.test(upper)) return null; // pricing word required
+      // SKU-ish tokens mean a FRESH quote (or an add/swap carrying items) — never compound.
+      if (/LIC-|\b(?:MR|MS|MX|MV|MT|MG|CW|C9|C8|Z)\d/i.test(upper)) return null;
+      let rest = upper.replace(/['’]S\b/g, '').replace(/[?.!,;:]/g, ' ');
+      rest = rest.replace(/\b(COSTS?|PRICES?|PRICING|HOW\s+MUCH|TOTALS?)\b/g, ' ');
+      const mutations = [];
+      // Umbrella package type, optionally with an adjacent tier — ONE component (mirrors the
+      // umbTypeSwapM branch of applyItemMutation, which the synthesized text re-enters).
+      const typeM = rest.match(/\b(DNS|SIG|SECURE\s+INTERNET\s+GATEWAY)(?:\s+(ESSENTIALS?|ADVANTAGE))?\b/);
+      if (typeM) {
+        mutations.push(`CHANGE TO ${/^SECURE/.test(typeM[1]) ? 'SIG' : typeM[1]}${typeM[2] ? ' ' + typeM[2] : ''}`);
+        rest = rest.replace(typeM[0], ' ');
+      }
+      // Duo/Umbrella tier word alone (mirrors the tierSwapM branch).
+      const tierM = rest.match(/\b(ESSENTIALS?|ADVANTAGE|PREMIER)\b/);
+      if (tierM) {
+        mutations.push(`CHANGE TO ${tierM[1]}`);
+        rest = rest.replace(tierM[0], ' ');
+      }
+      // Term — applied via the SAME term filter as "just 3 year" (not via applyItemMutation).
+      let termMutation = null;
+      const termM = rest.match(/(?<![\w-])([135])\s*-?\s*(?:YEAR|YR)S?(?:\s+TERM)?\b/);
+      if (termM) {
+        termMutation = [null, termM[1]];
+        mutations.push(termMutation);
+        rest = rest.replace(termM[0], ' ');
+      }
+      if (mutations.length > 1) return null; // two mutation components → ambiguous → fail closed
+      if (/\d/.test(rest)) return null;      // a free number (qty change?) → ambiguous → fail closed
+      // ANY surviving non-filler word is something this pass does not understand → fail closed.
+      rest = rest.replace(/\b(WHAT|WHATS|ARE|IS|WAS|WILL|WOULD|BE|DO|DOES|THE|THIS|THAT|THOSE|THESE|IT|THEM|A|AN|FOR|OF|ON|AT|TO|IN|WITH|AND|ME|MY|OUR|US|PLEASE|THANKS|THANK|YOU|CAN|COULD|SHOW|GIVE|TELL|JUST|NOW|OPTION|OPTIONS|ONE|ONES|TIER|VERSION|PACKAGE|LICENSE|LICENSES|LICENCE|LICENCES|QUOTE|CART|ORDER|MUCH|HOW|ALL|EVERYTHING|WHOLE)\b/g, ' ');
+      if (rest.trim().length > 0) return null;
+      return {
+        mutationText: (typeof mutations[0] === 'string') ? mutations[0] : null, // tier/type swap → applyItemMutation
+        termM: termMutation                                                     // term → shared term filter
+      };
+    })();
+    if (!compound) return null;
+  }
 
   const history = await getHistory(kv, personId);
   if (!history || history.length === 0) return null;
@@ -16667,9 +16746,11 @@ async function handleFollowUpModifier(text, personId, kv) {
   let filteredTerms = Object.entries(termItems);
   let smeCapApplied = false; // set when a 5-year request on SME is capped to 3-year (note appended in render)
 
-  // Apply term filter
-  if (isTermOnly) {
-    const wantTerm = parseInt(isTermOnly[1], 10);
+  // Apply term filter — single-intent ("just 3 year") or the compound pass's term
+  // component ("price for the 3 year"); identical machinery either way (F2).
+  const termFilterM = isTermOnly || (compound && compound.termM) || null;
+  if (termFilterM) {
+    const wantTerm = parseInt(termFilterM[1], 10);
     const single = filteredTerms.find(([k]) => String(k) === String(wantTerm));
     if (single) {
       filteredTerms = [single];
@@ -16737,12 +16818,54 @@ async function handleFollowUpModifier(text, personId, kv) {
     }
   }
 
+  // ── F4 (seam 2026-06-10): re-render the prior quote across ALL terms [1,3,5] ──
+  // Source bucket: the first prior term bucket (term buckets are ALTERNATIVES of the same
+  // line set, so any one of them seeds the expansion). Term-bearing SKUs are rewritten per
+  // bucket via rewriteSkuTerm (catalog-validated, fail-closed); non-term items (hardware,
+  // accessories) pass through unchanged into every bucket. SME: 5-year is deprecated — a
+  // pure-SME quote expands to [1,3] only, a mixed quote keeps non-SME items at 5-year and
+  // caps the SME line to 3YR with the standard note. NEVER emits LIC-SME-5YR.
+  if (isAllTerms) {
+    const srcItems = filteredTerms.length > 0 ? filteredTerms[0][1] : null;
+    if (!srcItems || srcItems.length === 0) return null;
+    const TERM_SUFFIX_RE = /-([135])(YR|Y-S\d+|Y)$/i;
+    const termBearing = srcItems.filter(it => TERM_SUFFIX_RE.test(String(it.sku)));
+    if (termBearing.length === 0) return null; // nothing to expand across terms — fail closed
+    const allSme = termBearing.every(it => /^LIC-SME/i.test(String(it.sku)));
+    const targetTerms = allSme ? [1, 3] : [1, 3, 5];
+    if (allSme) smeCapApplied = true; // surface the standard note for the omitted 5-year
+    const buckets = [];
+    for (const t of targetTerms) {
+      const bucket = [];
+      for (const it of srcItems) {
+        const tm = String(it.sku).match(TERM_SUFFIX_RE);
+        if (!tm) { bucket.push(it); continue; }
+        const _isSme = /^LIC-SME/i.test(String(it.sku));
+        const effectiveTerm = (_isSme && t === 5) ? 3 : t;
+        if (_isSme && t === 5) smeCapApplied = true;
+        if (parseInt(tm[1], 10) === effectiveTerm) { bucket.push(it); continue; }
+        const newSku = rewriteSkuTerm(it.sku, effectiveTerm);
+        if (newSku && newSku !== it.sku && (newSku in prices)) bucket.push({ sku: newSku, qty: it.qty });
+        else return null; // any unrewritable term-bearing SKU → fail closed
+      }
+      buckets.push([String(t), bucket]);
+    }
+    filteredTerms = buckets;
+  }
+
   // Apply mutation
   const mutated = [];
   for (const [term, items] of filteredTerms) {
     let out = items;
     if (isHwOnly) out = applyHwOnly(out);
     else if (isLicOnly) out = applyLicOnly(out, term === 'na' ? null : parseInt(term, 10));
+    else if (compound && compound.mutationText) {
+      // F2: the compound pass's single tier/type mutation re-enters applyItemMutation via
+      // synthesized "CHANGE TO …" text — the exact branches the anchored phrasings hit.
+      const r = applyItemMutation(out, compound.mutationText, term === 'na' ? null : parseInt(term, 10));
+      if (r) out = r;
+      else return null; // fail closed (e.g. tier not valid for the families in the prior quote)
+    }
     else if ((hasRemovePrefix || hasAddPrefix || hasSwapPrefix || isQtyChange || isUmbTypeSwap) && !isTermOnly) {
       // hasSwapPrefix can co-occur with isTermOnly (e.g. "change to 3 year").
       // In that case the term filter / SKU-rewrite above already produced the
@@ -16758,7 +16881,7 @@ async function handleFollowUpModifier(text, personId, kv) {
 
   // Render response
   const lines = [];
-  const showPricing = isAddPricing;
+  const showPricing = isAddPricing || Boolean(compound); // the compound pass always carries pricing intent (F2)
   for (const { term, items } of mutated) {
     const url = buildStratusUrl(items);
     const label = term === 'na' ? '' : `**${term}-Year Co-Term:** `;
@@ -16784,7 +16907,10 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
   if (/\b(cost|price|pricing|much|what|which|why|how|who|compare|vs|versus|spec|specs|info|difference|datasheet)\b/i.test(reply)) return null;
   if (/\b(?:MR|MX|MS|MV|MT|MG|CW|C9|C8|Z)\d/i.test(reply)) return null; // fresh SKU request — not a tier reply
   const duoM = lastAssistantContent.match(/Which Cisco Duo tier do you need\? \(qty:\s*(\d+)\)/i);
-  const umbM = lastAssistantContent.match(/Which Umbrella package do you need\? \(qty:\s*(\d+)\)/i);
+  // F1(b) seam 2026-06-10: the Umbrella question may carry an already-known package type
+  // ("(qty: 200, type: DNS)" — emitted when the user said "200 dns" with no tier). Capture
+  // it so a bare tier reply resolves without re-asking. Plain "(qty: N)" still matches.
+  const umbM = lastAssistantContent.match(/Which Umbrella package do you need\? \(qty:\s*(\d+)(?:,\s*type:\s*(DNS|SIG))?\)/i);
   if (!duoM && !umbM) return null;
   // Negations/hedges are not answers ("not essentials, advantage", "maybe premier"), and a reply
   // naming MORE THAN ONE distinct tier is ambiguous — leave both on the normal routing.
@@ -16803,8 +16929,11 @@ function buildTierClarifyContinuation(text, lastAssistantContent) {
     const qty = qtyOverride || duoM[1];
     return qty + " duo " + tierWord + " licenses" + termSuffix;
   }
-  // Umbrella: the package type (DNS vs SIG) matters — never guess it.
-  const typeM = reply.match(/\b(dns|sig)\b/i) || (/\bsecure\s+internet\s+gateway\b/i.test(reply) ? [null, 'sig'] : null);
+  // Umbrella: the package type (DNS vs SIG) matters — never guess it. The reply's own type
+  // wins; otherwise fall back to the type the QUESTION already locked in (umbM[2], F1(b)).
+  const typeM = reply.match(/\b(dns|sig)\b/i)
+    || (/\bsecure\s+internet\s+gateway\b/i.test(reply) ? [null, 'sig'] : null)
+    || (umbM[2] ? [null, umbM[2]] : null);
   if (!typeM || tierWord === "premier") return null;
   const qty = qtyOverride || umbM[1];
   return qty + " umbrella " + typeM[1].toLowerCase() + " " + tierWord + " licenses" + termSuffix;
