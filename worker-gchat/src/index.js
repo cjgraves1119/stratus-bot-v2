@@ -3008,6 +3008,158 @@ function resolveCachedProduct(sku) {
   return { key: suffixed, entry: null };
 }
 
+// ── Description→SKU mismatch gate (IMP-3, 2026-06-10 — SEDA postmortem) ─────
+// A customer email asked for a "125W AC CONFIG 5 POWER SUPPLY W/MERAKI"
+// (correct SKU PWR-C5-125WAC-M, ~$1,309). The model mis-mapped that free text
+// to MA-PWR-30W-US — a $30 Meraki AP wall adapter — and create_deal_and_quote
+// committed it silently, because product staging only checks CACHE MEMBERSHIP:
+// any valid catalog SKU passes regardless of what the user actually described.
+// prices.json carries no product names (verified: list/price/discount/
+// zoho_product_id only), so this gate works on FAMILY prefix grammar + intent
+// TOKEN heuristics over the customer's original wording (source_text).
+//
+// CONSERVATIVE by design — flag only confident conflicts, silence on doubt:
+//   - entry without source_text → skipped (exact-SKU flows get ZERO friction)
+//   - source_text contains the SKU verbatim (case/dash-insensitive) → pass
+//   - model-agnostic aliases (MR-AGN/MV-AGN/MT-AGN/MR-ENT/MG-AGN) → skip
+//   - any strong SKU token (or 5-char SKU prefix) found in the text VETOES
+//     a mismatch (e.g. text contains "PWR-C5" or "125WAC" → pass)
+//   - intent keyword matching the resolved family → pass
+//   - mismatch ONLY when every detected intent sits in the hard-conflict
+//     table for the resolved family (psu-text→MA- accessory = SEDA case,
+//     switch-text→PWR-, license-text→hardware, ap-text→MV camera, ...)
+// entries = [{ sku, qty, source_text? }] → { mismatches: [{ sku, source_text, reason }] }
+function checkSkuDescriptionMismatch(entries) {
+  const mismatches = [];
+  if (!Array.isArray(entries) || entries.length === 0) return { mismatches };
+
+  const squash = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+  // Resolved-SKU family — prefix grammar (order matters: LIC- and MA- before
+  // the PWR-/model prefixes; MA-PWR-* is an ACCESSORY, not a Catalyst PSU).
+  const skuFamily = (sku) => {
+    if (/^LIC-/.test(sku)) return 'license';
+    if (/^MA-/.test(sku)) return 'accessory';
+    if (/^PWR-/.test(sku)) return 'psu';
+    if (/^C9\d{3}/.test(sku) || /^MS\d/.test(sku)) return 'switch';
+    if (/^MR\d/.test(sku) || /^CW9/.test(sku)) return 'ap';
+    if (/^MX\d/.test(sku) || /^Z\d/.test(sku)) return 'security';
+    if (/^MV\d/.test(sku)) return 'camera';
+    if (/^MT\d/.test(sku)) return 'sensor';
+    if (/^MG\d/.test(sku)) return 'gateway';
+    return null; // unknown family → conservative skip
+  };
+
+  // Intent keywords in the customer's wording (text is uppercased first).
+  const INTENT_PATTERNS = [
+    { intent: 'psu', re: /\bPOWER[\s-]*SUPPL(?:Y|IES)\b|\bPSU\b|\bPWR[\s-]+SUPPL(?:Y|IES)\b/ }, // bare \bPWR\b over-blocked 'PWR adapter' (codex r2)
+    { intent: 'license', re: /\bLICEN[CS]\w*\b|\bLIC\b|\bSUBSCRIPTIONS?\b|\bESSENTIALS\b|\bADVANTAGE\b/ },
+    { intent: 'switch', re: /\bSWITCH(?:ES)?\b|\bPORTS?\b|\bUPLINKS?\b/ },
+    { intent: 'ap', re: /\bACCESS[\s-]*POINTS?\b|\bAPS?\b|\bWI-?FI\b|\bWIRELESS\b/ },
+    { intent: 'camera', re: /\bCAMERAS?\b/ },
+    { intent: 'security', re: /\bFIREWALLS?\b|\bSECURITY[\s-]*APPLIANCES?\b/ },
+    { intent: 'sensor', re: /\bSENSORS?\b/ },
+    { intent: 'gateway', re: /\bCELLULAR[\s-]*GATEWAYS?\b|\bLTE\b/ },
+    // "adapter" counts only as power/AC/wall adapter (per IMP-3 spec)
+    { intent: 'accessory', re: /\b(?:POWER|AC|WALL)[\s-]*ADAPTERS?\b|\bMOUNT(?:S|ING)?\b|\bBRACKETS?\b|\bSFP\w*\b|\bTRANSCEIVERS?\b/ },
+  ];
+
+  // intent → resolved families that are CONFIDENT conflicts. Pairs absent
+  // here never flag (e.g. camera-text→MA- mount is adjacent, not a conflict).
+  const HARD_CONFLICTS = {
+    psu: ['accessory', 'license', 'ap', 'camera', 'sensor', 'switch'],
+    switch: ['psu', 'camera', 'sensor', 'ap'],
+    license: ['ap', 'switch', 'camera', 'sensor', 'gateway', 'security', 'psu', 'accessory'],
+    ap: ['camera', 'sensor', 'switch'],
+    camera: ['ap', 'switch', 'sensor'],
+    security: ['ap', 'camera', 'sensor', 'switch'],
+    sensor: ['ap', 'camera', 'switch'],
+    gateway: ['camera', 'sensor'],
+    accessory: [], // mounts/adapters/SFPs are adjacent to every hardware family
+  };
+
+  const INTENT_LABEL = {
+    psu: 'a power supply',
+    switch: 'a switch',
+    license: 'a license/subscription',
+    ap: 'an access point',
+    camera: 'a camera',
+    security: 'a firewall/security appliance',
+    sensor: 'a sensor',
+    gateway: 'a cellular gateway',
+    accessory: 'a power adapter/accessory',
+  };
+
+  const familyLabel = (family, sku) => {
+    if (family === 'accessory') {
+      if (sku.startsWith('MA-PWR')) return 'a Meraki AC adapter for access points (an accessory, not a switch power supply)';
+      if (sku.startsWith('MA-SFP')) return 'a Meraki SFP transceiver module (an accessory)';
+      if (sku.startsWith('MA-MNT')) return 'a Meraki mounting accessory';
+      if (sku.startsWith('MA-CBL')) return 'a Meraki cable accessory';
+      if (sku.startsWith('MA-MOD')) return 'a Meraki uplink module (an accessory)';
+      if (sku.startsWith('MA-ANT')) return 'a Meraki antenna (an accessory)';
+      return 'a Meraki accessory';
+    }
+    return {
+      psu: 'a Catalyst switch power supply',
+      switch: 'a network switch',
+      ap: 'a wireless access point',
+      camera: 'a Meraki security camera',
+      sensor: 'a Meraki IoT sensor',
+      gateway: 'a Meraki cellular gateway',
+      security: 'a security appliance',
+      license: 'a license/subscription SKU (not hardware)',
+    }[family] || 'a different product family';
+  };
+
+  // SKU tokens too generic to veto on (family prefixes, suffixes, terms).
+  // 'PWR' is family-AMBIGUOUS (MA-PWR-* AP adapters AND PWR-C* switch PSUs) — codex
+  // round-1 HIGH: letting it veto allowed 'PWR-C5 ... power supply' text to pass
+  // against MA-PWR-30W-US, the exact SEDA failure class this gate exists to stop.
+  const WEAK_TOKENS = new Set(['HW', 'NA', 'US', 'EU', 'UK', 'LIC', 'ENT', 'SEC', 'SDW', 'RTG', 'MR', 'MS', 'MX', 'MV', 'MT', 'MG', 'MA', 'CW', 'PWR']);
+  const isTermToken = (t) => /^\d{1,2}YR?$/.test(t);
+
+  for (const entry of entries) {
+    const sku = String(entry && entry.sku || '').trim().toUpperCase();
+    const text = entry && typeof entry.source_text === 'string' ? entry.source_text.trim() : '';
+    if (!sku || !text) continue; // fail-open: no source_text → zero friction
+    if (/^(MR|MV|MT|MG)-(AGN|ENT)$/.test(sku)) continue; // model-agnostic aliases
+
+    const upperText = text.toUpperCase();
+    const sqText = squash(text);
+    const sqSku = squash(sku);
+    if (!sqSku || sqText.includes(sqSku)) continue; // text IS / contains the SKU
+
+    const family = skuFamily(sku);
+    if (!family) continue; // unknown family → silence
+
+    // Token-overlap VETO: any strong SKU token (or the leading 5 chars of the
+    // squashed SKU, e.g. "PWRC5") appearing in the text means the text plausibly
+    // references this exact product — never flag.
+    if (sqSku.length >= 5 && sqText.includes(sqSku.slice(0, 5))) continue;
+    const tokens = sku.split('-').filter(t => t.length >= 3 && !WEAK_TOKENS.has(t) && !isTermToken(t));
+    if (tokens.some(t => sqText.includes(squash(t)))) continue;
+
+    const intents = INTENT_PATTERNS.filter(p => p.re.test(upperText)).map(p => p.intent);
+    if (intents.length === 0) continue; // no clear intent → silence
+    if (intents.includes(family)) continue; // wording matches resolved family
+
+    // Confident mismatch only when EVERY detected intent hard-conflicts with
+    // the resolved family (multi-intent ambiguity → silence).
+    const allConflict = intents.every(i => (HARD_CONFLICTS[i] || []).includes(family));
+    if (!allConflict) continue;
+
+    const primary = intents[0];
+    mismatches.push({
+      sku,
+      source_text: text,
+      reason: `you asked for ${INTENT_LABEL[primary]} ("${text}") but ${sku} is ${familyLabel(family, sku)}`,
+    });
+  }
+
+  return { mismatches };
+}
+
 // ─── Pricing Calculator ──────────────────────────────────────────────────────
 
 /**
@@ -12203,6 +12355,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const orderedPairs = []; // [{hw: sku, hwQty, licSku, licQty}]
           const licenseQtyMap = {}; // licenseSku → total qty (for grouping shared licenses)
           const licenseToHardware = {}; // licenseSku → [hwSku1, hwSku2, ...]
+          // IMP-3 (SEDA postmortem): user entries that carry the customer's
+          // original free-text wording, checked by HARD GATE #6b below.
+          const _gateEntries = []; // [{sku, qty, source_text}]
 
           console.log(`[COMPOUND] Input SKUs: ${JSON.stringify(skus)}`);
 
@@ -12244,6 +12399,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           for (const entry of skus) {
             const rawSku = (typeof entry === 'string' ? entry : entry.sku).trim().toUpperCase();
             const qty = (typeof entry === 'object' ? entry.qty : 1) || 1;
+            // IMP-3: carry the customer's original wording for this line (if the
+            // model passed it) so HARD GATE #6b can compare it to the resolved SKU.
+            const sourceText = (entry && typeof entry === 'object' && typeof entry.source_text === 'string' && entry.source_text.trim())
+              ? entry.source_text.trim() : null;
             console.log(`[COMPOUND] Processing: rawSku=${rawSku} qty=${qty} isLicense=${rawSku.startsWith('LIC-')}`);
 
             // If it's already a license SKU, just resolve it directly
@@ -12254,6 +12413,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               }
               if (!stageProduct(rawSku, qty)) {
                 missingProducts.push(rawSku);
+              } else if (sourceText) {
+                _gateEntries.push({ sku: rawSku, qty, source_text: sourceText });
               }
               continue;
             }
@@ -12308,6 +12469,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               missingUserHardware.push(rawSku);
               continue;
             }
+            // IMP-3: staged user hardware line with original wording → gate input.
+            if (sourceText) _gateEntries.push({ sku: rawSku, qty, source_text: sourceText });
 
             // Auto-add matching license using getLicenseSkus.
             // 2026-05-12 fix: skip auto-pair when the user already supplied
@@ -12427,6 +12590,38 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               instruction: `STOP. The user requested hardware SKU(s) that do not exist in the catalog: ${missingUserHardware.join(', ')}. Do NOT create any Deal or Quote. Do NOT silently omit the missing SKUs. Report to the user and ask them to clarify or correct them.${disambigHint}`,
               wall_ms: Date.now() - _startMs
             };
+          }
+
+          // ── HARD GATE #6b: description→SKU mismatch needs user confirmation (IMP-3) ──
+          // 2026-06-10 SEDA postmortem: the customer email line "125W AC CONFIG 5
+          // POWER SUPPLY W/MERAKI" (PWR-C5-125WAC-M, ~$1,309) was mis-mapped by the
+          // model to MA-PWR-30W-US — a $30 Meraki AP wall adapter — and committed
+          // silently because staging only checks cache membership. When the caller
+          // passes the customer's original wording per line (skus[].source_text),
+          // compare it against the resolved SKU family and refuse on hard conflicts
+          // until the user confirms. Sits with the other HARD GATEs: after staging
+          // and account/contact resolution (same precedent as account_has_open_deals)
+          // and BEFORE any Deal/Quote/Task write. NOTE: Account/Contact records may
+          // already have been created/patched upstream (same precedent as the
+          // open-deals gate) — this path writes no Deal, Quote, or Task. Bypass: confirm_resolved_items:true after explicit user consent.
+          if (toolInput.confirm_resolved_items !== true) {
+            const _descGate = checkSkuDescriptionMismatch(_gateEntries);
+            if (_descGate.mismatches.length > 0) {
+              return {
+                success: false,
+                error: 'resolved_items_need_confirmation',
+                mismatches: _descGate.mismatches,
+                resolved_items: _gateEntries.map(e => ({ sku: e.sku, qty: e.qty, source_text: e.source_text })),
+                bypass_tool_call: {
+                  tool: toolInput.existing_deal_id ? 'create_quote_on_deal' : 'create_deal_and_quote',
+                  input_patch: { confirm_resolved_items: true },
+                  note: 'Re-call the SAME tool with the corrected skus[] plus confirm_resolved_items:true AFTER the user confirms.'
+                },
+                instruction: `STOP. Do NOT retry as-is. For each mismatch, tell the user what they asked for vs what was resolved, ask them to confirm or correct the SKU, then re-call ${toolInput.existing_deal_id ? 'create_quote_on_deal' : 'create_deal_and_quote'} with the corrected skus[] AND confirm_resolved_items:true (see bypass_tool_call). Do not create any records until the user confirms.`,
+                _user_visible_summary: `Before I create anything, ${_descGate.mismatches.length} line(s) may not match what was asked for: ${_descGate.mismatches.map(m => m.reason).join('; ')}. Please confirm or correct the SKU(s).`,
+                wall_ms: Date.now() - _startMs
+              };
+            }
           }
 
           // STEP 3c: Reorder resolved products — hardware then license underneath
@@ -14778,7 +14973,7 @@ const CRM_EMAIL_TOOLS = [
   // Compound tool: create deal + quote in one shot
   {
     name: 'create_deal_and_quote',
-    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION". For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. IMPORTANT (2026-05-13): If the resolved Account already has one or more OPEN Deals, this tool refuses with error:"account_has_open_deals" and returns the list of existing Deals. The expected response is to ask the user which Deal to attach the Quote to, then call create_quote_on_deal with the chosen deal_id. Only if the user explicitly confirms they want a SEPARATE new Deal in addition to the existing ones should you re-call create_deal_and_quote with confirm_new_deal:true. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
+    description: 'FASTEST way to create a Deal + Quote in Zoho CRM. Created CRM records are automatically tagged "Stratus AI Created" for cleanup/audit. Quotes set Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION". For hardware requests, pass hardware SKUs (e.g., MX68, MS130-12X, MR44) and licenses are auto-added unless the user says hardware only/no license, in which case set hardware_only:true and include_licenses:false. For license-only requests, pass the explicit license SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN) and do NOT invent hardware. Handles ALL steps: Account, Contact, Deal, product resolution from cache, Quote with ecomm pricing, verification, and follow-up Task. ONE call, ~10 seconds. IMPORTANT (2026-05-13): If the resolved Account already has one or more OPEN Deals, this tool refuses with error:"account_has_open_deals" and returns the list of existing Deals. The expected response is to ask the user which Deal to attach the Quote to, then call create_quote_on_deal with the chosen deal_id. Only if the user explicitly confirms they want a SEPARATE new Deal in addition to the existing ones should you re-call create_deal_and_quote with confirm_new_deal:true. IMP-3 (2026-06-10): when a line item came from customer free text or an email (not an exact SKU the user typed), pass that line\'s original wording as source_text on the skus[] entry. If this returns error:"resolved_items_need_confirmation", echo each flagged line (resolved SKU + qty + reason) to the user, get confirmation or a corrected SKU, then re-call with the corrected skus[] AND confirm_resolved_items:true. After this returns, just report the results for quote-only requests; if the same user request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the created Quote ID.',
     input_schema: {
       type: 'object',
       properties: {
@@ -14792,12 +14987,14 @@ const CRM_EMAIL_TOOLS = [
             type: 'object',
             properties: {
               sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes. For "MR licenses" use MR-ENT or LIC-ENT-{term}YR; never substitute MR46/MR44 hardware unless the user asked for AP hardware.' },
-              qty: { type: 'number', description: 'Quantity (default 1)' }
+              qty: { type: 'number', description: 'Quantity (default 1)' },
+              source_text: { type: 'string', description: 'REQUIRED whenever this line came from customer free text / an email rather than an explicit SKU the user typed: pass the customer\'s original wording for THIS line. Omit when the user typed the exact SKU.' }
             },
             required: ['sku']
           },
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses. License-only requests must stay license-only.'
         },
+        confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) the lines flagged by error:"resolved_items_need_confirmation". Never set on the first attempt.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
@@ -14823,7 +15020,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'create_quote_on_deal',
-    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets Quote Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
+    description: 'Create a new Quote on an existing Zoho Deal without creating a duplicate Deal. Use this when the current CRM page/context is a Deal, or the user gives a deal_id and asks to create/send a quote, contract, PO, signature, or e-signature from that Deal. It reuses the Deal Account and Contact, tags the created Quote "Stratus AI Created", sets Quote Vendor to the existing Zoho picklist value "TD SYNNEX CORPORATION", applies ecomm pricing, and verifies persisted pre-tax line totals. For free-text-derived lines pass source_text per skus[] entry; on error:"resolved_items_need_confirmation" confirm with the user, then re-call with confirm_resolved_items:true. If the same request asks for a contract, PO, signature, e-signature, DocuSign, or "send PO", continue with quote_to_po_and_esign using the returned quote_id.',
     input_schema: {
       type: 'object',
       properties: {
@@ -14835,12 +15032,14 @@ const CRM_EMAIL_TOOLS = [
             type: 'object',
             properties: {
               sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes.' },
-              qty: { type: 'number', description: 'Quantity (default 1)' }
+              qty: { type: 'number', description: 'Quantity (default 1)' },
+              source_text: { type: 'string', description: 'REQUIRED for lines derived from customer free text / email: the customer\'s original wording for THIS line. Omit for exact user-typed SKUs.' }
             },
             required: ['sku']
           },
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses unless hardware_only/include_licenses=false.'
         },
+        confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) lines flagged by error:"resolved_items_need_confirmation".' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses.' },
