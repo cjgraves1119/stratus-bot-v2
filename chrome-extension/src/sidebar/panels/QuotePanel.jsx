@@ -526,7 +526,42 @@ export default function QuotePanel({ navData, emailContext, onNavigate, zohoPage
         message: `Read ${items.length} line item${items.length > 1 ? 's' : ''} from ${scrape?.recordName ? `"${scrape.recordName}"` : 'this Zoho quote'}`,
       });
 
-      // 2. Round-trip through the quote engine.
+      // 2. FAITHFUL reproduction: an existing Zoho quote already specifies the
+      //    exact SKUs+terms, so the order URL is just those lines joined — NOT a
+      //    re-resolution. Routing through the /api/quote engine mangled terms and
+      //    silently dropped EOL-flagged lines (MS225 license renewals), producing
+      //    a 1-of-3-item URL. Prefer the endpoint's faithful orderUrl; if absent
+      //    (DOM-scrape fallback path), build the same URL client-side from items.
+      const faithfulUrl =
+        (typeof scrape?.orderUrl === 'string' && scrape.orderUrl) ||
+        (() => {
+          // Client-side fallback (only when the worker didn't supply orderUrl,
+          // e.g. the DOM-scrape path). Build {sku,qty} pairs first so a blank
+          // SKU can't misalign qtys; encode each component (commas stay literal
+          // as the multi-item delimiter).
+          const pairs = items
+            .map((i) => ({ sku: String(i.sku || '').trim(), qty: Number.isFinite(i.qty) && i.qty > 0 ? i.qty : 1 }))
+            .filter((p) => p.sku);
+          if (!pairs.length) return null;
+          const itemPart = pairs.map((p) => encodeURIComponent(p.sku)).join(',');
+          const qtyPart = pairs.map((p) => encodeURIComponent(String(p.qty))).join(',');
+          return `https://stratusinfosystems.com/order/?item=${itemPart}&qty=${qtyPart}`;
+        })();
+
+      if (faithfulUrl) {
+        setResult({
+          urls: [{ url: faithfulUrl, label: 'Order URL' }],
+          eolWarnings: [],
+          suggestions: null,
+          parsed: items.map((i) => ({ baseSku: i.sku, qty: i.qty || 1 })),
+          claudeResponse: null,
+          handlerType: 'zoho-faithful',
+          source: 'zoho-quote',
+        });
+        return;
+      }
+
+      // 2b. Fallback (no SKUs could be derived): round-trip through the engine.
       const res = await sendToBackground(MSG.BUILD_URL_QUOTE, {
         items,
         personId: personIdRef.current,

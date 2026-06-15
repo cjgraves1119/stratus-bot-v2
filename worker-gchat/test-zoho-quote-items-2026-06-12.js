@@ -169,7 +169,17 @@ const hasNoPriceKey = (items) => items.every(it => PRICE_KEYS.every(k => !(k in 
   const mapBlock = src.slice(mapIdx, src.indexOf('\n}', mapIdx) + 2);
   ok(mapIdx > -1 && !forbidden.test(mapBlock), 'mapSubformToItems body references NO price/margin field');
 
-  console.log('');
+    // Faithful order URL: the endpoint builds it via buildStratusUrl(items) — exact
+  // SKUs+qtys joined, NO engine round-trip (which dropped EOL-flagged MS225 lines).
+  {
+    const src = fs.readFileSync(path.join(__dirname, 'src/index.js'), 'utf8');
+    ok(/const orderUrl = items\.length \? buildStratusUrl\(items\) : null;/.test(src),
+      'endpoint builds a faithful orderUrl via buildStratusUrl (no resolving engine)');
+    ok(/JSON\.stringify\(\{ items, orderUrl, module, recordId, recordName/.test(src),
+      'endpoint response includes orderUrl');
+  }
+
+console.log('');
   console.log(fail === 0 ? `✅ ${pass}/${pass + fail} assertions passed` : `❌ ${fail} FAILED, ${pass} passed`);
   process.exit(fail === 0 ? 0 : 1);
 })();
