@@ -12128,6 +12128,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           let accountData = existingDealData?.Account_Name
             ? { id: existingDealData.Account_Name.id, Account_Name: existingDealData.Account_Name.name }
             : null;
+          // Whether a FULL Account GET has SUCCEEDED for this existing Account —
+          // i.e. its address is authoritatively known. Deliberately NOT set by
+          // the name/domain SEARCH below: Zoho search responses can be field-
+          // sparse (that's exactly why the full re-fetch exists, see comment
+          // there), so a search "hit" does not prove we read the billing fields.
+          // The existing_deal path (create_quote_on_deal) seeds accountData with
+          // only {id, name}. zohoApiCall returns an error payload WITHOUT
+          // throwing, so a transient Zoho failure can leave accountData billing-
+          // less. We use this flag to fail CLOSED at HARD GATE #3 (STOP) instead
+          // of patching caller data over — and PUTting it onto — an Account whose
+          // address we merely failed to read. (Codex review 2026-06-15.)
+          let accountBillingConfirmed = false;
 
           // 1a: If we have a contact_email, try the domain first
           if (!accountId && contact_email && contact_email.includes('@')) {
@@ -12136,6 +12148,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (byDomain) {
               accountData = byDomain;
               accountId = byDomain.id;
+              // NOT confirmed here — the full re-fetch below is the authoritative read.
               results.steps.push(`Found Account by domain "${dom}": ${accountData.Account_Name} (${accountId})`);
             }
           }
@@ -12148,6 +12161,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (acctSearch?.data?.[0]) {
               accountData = acctSearch.data[0];
               accountId = accountData.id;
+              // NOT confirmed here — search can be field-sparse; the re-fetch below confirms.
               results.steps.push(`Found Account by name: ${accountData.Account_Name} (${accountId})`);
             }
           }
@@ -12161,6 +12175,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 env);
               if (fullAcct?.data?.[0]) {
                 accountData = { ...(accountData || {}), ...fullAcct.data[0] };
+                accountBillingConfirmed = true; // authoritative read succeeded
                 results.steps.push(`Fetched Account billing fields for Quote address: ${accountId}`);
               }
             } catch (acctFetchErr) {
@@ -12171,14 +12186,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // ── HARD GATE #2: If no Account found, require full billing info + contact before creating ──
           if (!accountId) {
             const b = billing_address || {};
+            // 2026-06-15 — trim before the presence check: whitespace-only fields
+            // (e.g. street:"   ") are NOT a real address. Without trimming they
+            // slipped this gate, created an Account with whitespace, then the
+            // Account-authoritative builder below trimmed them back to blank and
+            // wrote a blank-address Quote (Codex review).
+            const _has = (v) => v != null && String(v).trim() !== '';
             const missingCreateFields = [];
-            if (!b.street) missingCreateFields.push('Billing Street');
-            if (!b.city) missingCreateFields.push('Billing City');
-            if (!b.state) missingCreateFields.push('Billing State');
-            if (!b.zip) missingCreateFields.push('Billing Zip');
-            if (!b.country) missingCreateFields.push('Billing Country');
-            if (!contact_name) missingCreateFields.push('Contact Name');
-            if (!contact_email) missingCreateFields.push('Contact Email');
+            if (!_has(b.street)) missingCreateFields.push('Billing Street');
+            if (!_has(b.city)) missingCreateFields.push('Billing City');
+            if (!_has(b.state)) missingCreateFields.push('Billing State');
+            if (!_has(b.zip)) missingCreateFields.push('Billing Zip');
+            if (!_has(b.country)) missingCreateFields.push('Billing Country');
+            if (!_has(contact_name)) missingCreateFields.push('Contact Name');
+            if (!_has(contact_email)) missingCreateFields.push('Contact Email');
 
             if (missingCreateFields.length > 0) {
               return {
@@ -12214,7 +12235,43 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // ── HARD GATE #3: Existing Account must have complete billing fields ──
             // If any are missing, refuse to proceed so we don't generate a Quote
             // on a blank-address Account.
-            const missing = getMissingAccountFields(accountData);
+            let missing = getMissingAccountFields(accountData);
+            // FAIL CLOSED on an UNREAD Account. If we never confirmed a full
+            // Account GET (the existing_deal path, or a search hit whose later
+            // re-fetch errored), accountData may be billing-incomplete OR simply
+            // missing Shipping_* — and we cannot tell "the Account genuinely
+            // lacks this" from "we failed to read it." Run ONE authoritative GET
+            // here (skipped entirely when the first re-fetch already succeeded,
+            // so no extra call on the happy path). This covers BOTH the billing
+            // gate AND knowing the real Shipping_* (so the Quote's shipping is the
+            // Account's distinct shipping, not a silent fall-back to billing).
+            // BILLING is the hard requirement — if it still can't be confirmed,
+            // STOP rather than patch caller data over (and PUT it onto) an Account
+            // we failed to read. SHIPPING is allowed to default to billing, so an
+            // unread shipping alone never blocks. (Codex review 2026-06-15.)
+            if (accountId && !accountBillingConfirmed) {
+              try {
+                const retryAcct = await zohoApiCall('GET',
+                  `Accounts/${accountId}?fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Shipping_Street,Shipping_City,Shipping_State,Shipping_Code,Shipping_Country,Phone,Website`,
+                  env);
+                if (retryAcct?.data?.[0]) {
+                  accountData = { ...(accountData || {}), ...retryAcct.data[0] };
+                  accountBillingConfirmed = true;
+                  missing = getMissingAccountFields(accountData);
+                  results.steps.push(`Re-read Account ${accountId} (billing+shipping) after unconfirmed first fetch`);
+                }
+              } catch (_) {}
+              if (!accountBillingConfirmed && getMissingAccountFields(accountData).length > 0) {
+                return {
+                  success: false,
+                  needs_account_info: true,
+                  error: `Could not read the billing address for existing Account ${accountId} from Zoho (transient read failure).`,
+                  account_id: accountId,
+                  instruction: `STOP. Do NOT retry immediately and do NOT pass a billing_address to "fill in" the gap — Account ${accountId} already exists and is the source of truth; its address simply could not be read this time. Wait a moment and retry the SAME request unchanged, or ask the user to verify the address on the Account in Zoho.`,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+            }
             if (missing.length > 0) {
               const b = billing_address || {};
               // If caller supplied billing_address, patch the Account first
@@ -12226,9 +12283,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (!accountData.Billing_Country && b.country) patch.Billing_Country = b.country;
               if (Object.keys(patch).length > 0) {
                 try {
-                  await zohoApiCall('PUT', `Accounts/${accountId}`, env, { data: [patch] });
-                  Object.assign(accountData, patch);
-                  results.steps.push(`Patched Account with billing fields: ${Object.keys(patch).join(', ')}`);
+                  const putResp = await zohoApiCall('PUT', `Accounts/${accountId}`, env, { data: [patch] });
+                  // zohoApiCall does NOT throw on a Zoho error payload, so verify
+                  // the PUT actually landed before trusting the patch in memory.
+                  // If it did NOT, leave accountData unpatched — the stillMissing
+                  // check below then fails closed (STOP) rather than quoting an
+                  // address that was never persisted to the Account. (Codex review.)
+                  const row = putResp?.data?.[0];
+                  const putOk = row?.code === 'SUCCESS' || String(row?.status || '').toLowerCase() === 'success' || !!row?.details?.id;
+                  if (putOk) {
+                    Object.assign(accountData, patch);
+                    results.steps.push(`Patched Account with billing fields: ${Object.keys(patch).join(', ')}`);
+                  } else {
+                    results.steps.push(`Account billing patch REJECTED by Zoho, not applied: ${JSON.stringify(row || putResp || {}).slice(0, 200)}`);
+                  }
                 } catch (_) {}
               }
               // Re-check after patching
@@ -12816,13 +12884,58 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           results.records.deal = { id: dealId, name: dealData.Deal_Name, url: `https://crm.zoho.com/crm/org647122552/tab/Deals/${dealId}` };
 
           // STEP 6: Create Quote with line items
-          const billingAddr = billing_address || {
-            street: accountData?.Billing_Street || '',
-            city: accountData?.Billing_City || '',
-            state: accountData?.Billing_State || '',
-            zip: accountData?.Billing_Code || '',
-            country: accountData?.Billing_Country || 'United States'
+          // 2026-06-15 — ACCOUNT-AUTHORITATIVE per-FIELD address build, NOT a
+          // wholesale `billing_address ||` override. The CRM agent sometimes
+          // passes a PARTIAL billing_address (e.g. {country:'US'} with blank
+          // street/city/state/zip, mirroring the prompt's quote-shape example).
+          // A bare `||` treated that truthy-but-empty object as authoritative and
+          // SHADOWED the resolved Account's real address — producing a Quote with
+          // blank Billing_* even though the Account was re-fetched (STEP 1) with
+          // full Billing_*/Shipping_* fields and HARD GATE #3 proved it complete.
+          // Goodwill Industries of Kansas, Quote 2026-06-15: blank street +
+          // Billing_Country "US" (code default is "United States", so "US" could
+          // only have come from a model-supplied partial) confirmed the override.
+          //
+          // The resolved Account is the system of record, so it WINS field-by-
+          // field; a model-supplied billing_address only fills a field the
+          // Account genuinely lacks. This is safe for every path because the
+          // Account is the source of truth by STEP 6: an EXISTING account was
+          // re-fetched + gate-verified complete; a NEW account had the caller's
+          // billing_address copied INTO accountData at creation; an incomplete
+          // existing account was PATCHED from billing_address into accountData.
+          // So "Account-first" never loses caller data that mattered, and it
+          // blocks a hallucinated/wrong billing_address from overriding a correct
+          // Account address (Codex review, 2026-06-15). No "add the address"
+          // round-trip is ever needed.
+          const _coalesceAddr = (...vals) => {
+            for (const v of vals) {
+              if (v != null && String(v).trim() !== '') return String(v).trim();
+            }
+            return '';
           };
+          const _ba = billing_address || {};
+          const billingAddr = {
+            street: _coalesceAddr(accountData?.Billing_Street, _ba.street),
+            city: _coalesceAddr(accountData?.Billing_City, _ba.city),
+            state: _coalesceAddr(accountData?.Billing_State, _ba.state),
+            zip: _coalesceAddr(accountData?.Billing_Code, _ba.zip),
+            country: _coalesceAddr(accountData?.Billing_Country, _ba.country) || 'United States'
+          };
+          // Shipping: prefer the Account's explicit Shipping_* fields, else fall
+          // back to billing — so the Quote carries a FULL shipping address up
+          // front instead of needing a separate "add the shipping address too"
+          // step. (Previously only Shipping_Country was set; street/city/state/
+          // zip were always left blank on bot-created Quotes.)
+          const shippingAddr = {
+            street: _coalesceAddr(accountData?.Shipping_Street, billingAddr.street),
+            city: _coalesceAddr(accountData?.Shipping_City, billingAddr.city),
+            state: _coalesceAddr(accountData?.Shipping_State, billingAddr.state),
+            zip: _coalesceAddr(accountData?.Shipping_Code, billingAddr.zip),
+            country: _coalesceAddr(accountData?.Shipping_Country, billingAddr.country) || 'United States'
+          };
+          results.steps.push(
+            `Quote address (Account-authoritative): billing ${billingAddr.street ? 'populated' : 'BLANK'}, shipping ${shippingAddr.street ? 'populated' : 'BLANK'}`
+          );
           const validTill = closingDate;
           // 2026-05-13 — REVERTED: PR #62's "walk input skus in order" pass.
           // Yesterday's bot-created Quote 2570562000405707101 successfully
@@ -12861,7 +12974,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Billing_State: billingAddr.state,
             Billing_Code: billingAddr.zip,
             Billing_Country: billingAddr.country,
-            Shipping_Country: billingAddr.country || 'United States',
+            Shipping_Street: shippingAddr.street,
+            Shipping_City: shippingAddr.city,
+            Shipping_State: shippingAddr.state,
+            Shipping_Code: shippingAddr.zip,
+            Shipping_Country: shippingAddr.country,
             // 2026-05-13: Write Vendor1 (lookup) directly with the resolved
             // Vendor record id+name. Do NOT write to the Vendor text field —
             // that triggered Cisco's CCW DID integration to hang.
@@ -15090,7 +15207,7 @@ const CRM_EMAIL_TOOLS = [
         confirm_new_deal: { type: 'boolean', description: '(2026-05-13) Default false. Set true ONLY after the user has explicitly confirmed they want a brand-new Deal even though the resolved Account already has open Deals. Bypasses the account_has_open_deals refusal. Never set without explicit user consent on the same turn.' },
         billing_address: {
           type: 'object',
-          description: 'Billing address (optional — looked up from Account if omitted)',
+          description: 'OMIT this for any Account that already exists in Zoho — the tool always auto-fills both billing AND shipping from the Account record, which is the system of record (an existing Account address cannot be overridden here). ONLY pass it when creating a brand-new Account that is not yet in Zoho, and then pass ALL of street/city/state/zip/country together (never a partial like country-only).',
           properties: {
             street: { type: 'string' },
             city: { type: 'string' },
