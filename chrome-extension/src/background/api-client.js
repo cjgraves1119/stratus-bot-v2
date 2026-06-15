@@ -147,6 +147,20 @@ export async function buildUrlQuoteFromSkus(items, personId) {
   return apiCall('/api/quote', { text: lines.join('\n'), personId }, { timeout: 60000 });
 }
 
+/**
+ * Fetch a Zoho record's line items authoritatively via the worker (which holds
+ * the Zoho creds), keyed by the recordId the extension already parsed from the
+ * page URL. Replaces DOM scraping for the "Build URL quote from this Zoho quote"
+ * feature — the Zoho Quotes grid is a lyte web-component the scraper can't read.
+ *
+ * @param {string} recordId  10–25 digit Zoho record id
+ * @param {string} module    one of Quotes | Sales_Orders | Invoices | Purchase_Orders
+ * @returns {Promise<{items: Array<{sku: string, qty: number}>, module: string, recordId: string, recordName: string|null, error?: string}>}
+ */
+export async function getZohoQuoteItems(recordId, module) {
+  return apiCall('/api/zoho-quote-items', { recordId, module }, { timeout: 30000 });
+}
+
 // ─────────────────────────────────────────────
 // CRM Operations (zero AI cost endpoints)
 // ─────────────────────────────────────────────

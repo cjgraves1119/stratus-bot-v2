@@ -7269,6 +7269,67 @@ async function zohoApiCall(method, path, env, body = null, options = {}) {
   }
 }
 
+// ─── Zoho Quote-Items (extension "Build URL quote") helpers ──────────────────
+// Added 2026-06-12 — the Chrome extension's "Build URL quote from this Zoho
+// quote" feature used to scrape the Zoho Quotes DOM (a lyte web-component grid
+// the scraper couldn't read → 0 items). /api/zoho-quote-items now fetches the
+// line items authoritatively from the Zoho v8 API by recordId. These constants
+// + mapper are factored to module scope so they can be unit-tested directly.
+
+// Allowed modules and their v8 subform field (Zoho v8 returns subform rows only
+// when the field is explicitly requested via ?fields=).
+const ZOHO_QUOTE_ITEMS_SUBFORM_FIELD = {
+  Quotes: 'Quoted_Items',
+  Sales_Orders: 'Ordered_Items',
+  Invoices: 'Invoiced_Items',
+  Purchase_Orders: 'Purchase_Items',
+};
+const ZOHO_QUOTE_ITEMS_ALLOWED_MODULES = Object.keys(ZOHO_QUOTE_ITEMS_SUBFORM_FIELD);
+
+// Cisco/Meraki SKU token extractor — used when a subform row has no
+// Product_Code and we must recover a SKU from the free-text product name.
+const ZOHO_QUOTE_ITEMS_SKU_REGEX = /\b(MR\d{2,3}[A-Z0-9-]*|MS\d{3}[A-Z0-9-]*|MX\d{2,3}[A-Z0-9-]*|CW\d{4}[A-Z0-9-]*|MV\d{2,3}[A-Z0-9-]*|MT\d{2,3}[A-Z0-9-]*|MG\d{2,3}[A-Z0-9-]*|C9\d{3}[A-Z0-9-]*|Z\d[A-Z0-9-]*|LIC-[A-Z0-9-]+|SUB-[A-Z0-9-]+|PWR-[A-Z0-9-]+|MA-[A-Z0-9-]+)\b/i;
+
+/**
+ * Map Zoho v8 subform rows → minimal { sku, qty } line items.
+ *
+ * Resolution order for the SKU, per row:
+ *   1. row.Product_Code                         (Quotes/Sales_Orders flat field)
+ *   2. row.Product_Name?.Product_Code           (lookup-object carrying the code)
+ *   3. SKU token extracted from row.Product_Name?.name via ZOHO_QUOTE_ITEMS_SKU_REGEX
+ * Rows where no SKU can be derived are skipped. qty = round(Quantity) || 1.
+ *
+ * NEVER emits any price/margin field — only { sku, qty } (no-margin invariant).
+ *
+ * @param {Array<Object>} rows  raw subform rows from the v8 record
+ * @returns {Array<{sku: string, qty: number}>}
+ */
+function mapSubformToItems(rows) {
+  if (!Array.isArray(rows)) return [];
+  const items = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    let sku = row.Product_Code
+      || row.Product_Name?.Product_Code
+      || null;
+    if (!sku) {
+      const name = row.Product_Name?.name;
+      if (typeof name === 'string') {
+        const m = name.match(ZOHO_QUOTE_ITEMS_SKU_REGEX);
+        if (m) sku = m[1];
+      }
+    }
+    if (!sku || typeof sku !== 'string' || !sku.trim()) continue;
+    // Zoho API qty is numeric, but parse the leading number defensively (handles
+    // "4.00", "4 units") and only fall back to 1 when there's no positive integer.
+    const qtyMatch = String(row.Quantity == null ? '' : row.Quantity).match(/-?\d+(?:\.\d+)?/);
+    const qtyNum = qtyMatch ? Math.round(Number(qtyMatch[0])) : NaN;
+    const qty = Number.isFinite(qtyNum) && qtyNum > 0 ? qtyNum : 1;
+    items.push({ sku: sku.trim().toUpperCase(), qty });
+  }
+  return items;
+}
+
 // ─── Account Resolution Helpers ──────────────────────────────────────────────
 // Added 2026-04-21 — Skty Trading LLC forensic fix.
 // Previously /api/chat-waterfall enriched the message with customerDomain but
@@ -25443,6 +25504,35 @@ CRITICAL URL RULES:
               apiResult = { error: 'Quotes lookup failed: ' + err.message, quotes: [] };
             }
             break;
+          }
+
+          // ── Zoho Quote Items: authoritative line items for the extension's ──
+          // "Build URL quote from this Zoho quote" feature. Fetches the record's
+          // subform from the Zoho v8 API by recordId (no DOM scraping) and maps
+          // each row → { sku, qty }. Read-only; NEVER returns price/margin.
+          case '/api/zoho-quote-items': {
+            const recordId = String(apiBody?.recordId || '').trim();
+            const module = String(apiBody?.module || 'Quotes').trim() || 'Quotes';
+            // Validate recordId is a 10–25 digit Zoho id.
+            if (!/^\d{10,25}$/.test(recordId)) {
+              return new Response(JSON.stringify({ error: 'recordId must be a 10-25 digit string', items: [] }), { status: 400, headers: jsonHeaders });
+            }
+            // Restrict to the modules that have a quotable subform.
+            if (!ZOHO_QUOTE_ITEMS_ALLOWED_MODULES.includes(module)) {
+              return new Response(JSON.stringify({ error: `Unsupported module: ${module}`, items: [] }), { status: 400, headers: jsonHeaders });
+            }
+            const subformField = ZOHO_QUOTE_ITEMS_SUBFORM_FIELD[module];
+            try {
+              const rec = await zohoApiCall('GET', `${module}/${recordId}?fields=id,Subject,${subformField}`, env);
+              const record = rec?.data?.[0];
+              if (!record) {
+                return new Response(JSON.stringify({ items: [], module, recordId, error: rec?.error ? `Zoho error: ${typeof rec.error === 'string' ? rec.error : (rec.error?.message || 'record not found')}` : 'Record not found' }), { headers: jsonHeaders });
+              }
+              const items = mapSubformToItems(record[subformField]);
+              return new Response(JSON.stringify({ items, module, recordId, recordName: record.Subject || null }), { headers: jsonHeaders });
+            } catch (err) {
+              return new Response(JSON.stringify({ items: [], module, recordId, error: 'Zoho fetch failed: ' + err.message }), { headers: jsonHeaders });
+            }
           }
 
           // ── CCW Lookup: Find a Zoho Quote by CCW Deal Number (with Deal Name fallback) ──
