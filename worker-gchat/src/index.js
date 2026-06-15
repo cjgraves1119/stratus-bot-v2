@@ -4243,7 +4243,7 @@ function findBareSmeMention(upper) {
   return { qty: m[1] ? parseInt(m[1], 10) : 1, position: m.index };
 }
 function hasOtherQuoteSkuForSme(upper) {
-  return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
+  return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
 }
 
 // ─── Per-item (per-clause) intent ─────────────────────────────────────────────
@@ -4988,7 +4988,11 @@ function parseMessage(text) {
     /CW9\d{3}[A-Z0-9]*/gi,
     /MS150-[\dA-Z]+-[\dA-Z]+/gi,
     /MS450-\d+/gi,
-    /MS[12345]\d{2}R?-[\dA-Z]+(?:-RF)?/gi,
+    // MS switches: model + 1 dash-segment, + optional -I (internal-PSU variant,
+    // e.g. MS130-8P-I — the only multi-segment non-MS150 MS hardware SKU), + optional
+    // -RF. -I is deliberately NOT a generic 2nd segment: a broad (?:-[\dA-Z]+)? swallowed
+    // -HW / term suffixes and broke validation (MS130-8P-HW → no quote).
+    /MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?/gi,
     /(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])/gi,
     /MX\d+[A-Z]*(?:-NA)?/gi,
     /Z\d+[A-Z]*/gi
