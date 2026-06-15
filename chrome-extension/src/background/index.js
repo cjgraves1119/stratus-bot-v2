@@ -542,18 +542,51 @@ registerMessageHandlers({
     };
   },
 
-  // ── WS4: Read line items from the active Zoho Quote page ──
+  // ── WS4: Read line items from the active Zoho Quote/SO/Invoice/PO record ──
   //
-  // The sidebar can't talk to the content script directly, so the background
-  // resolves the active tab and forwards GET_ZOHO_QUOTE_ITEMS to it. Returns
-  // { items, module, recordId } — items: [] means the grid wasn't parseable
-  // (or the active tab isn't a Zoho record page).
+  // API-FIRST: fetch the line items authoritatively from the Zoho v8 API in the
+  // worker (which holds the Zoho creds), keyed by the recordId parsed from the
+  // page URL. This is the robust path — the old DOM scrape couldn't read Zoho's
+  // lyte web-component grid (returned 0 items → "Couldn't read any line items").
+  //
+  // FALLBACK: if the recordId can't be parsed, or the API call throws/returns no
+  // items, fall through to the legacy content-script DOM scrape so a worker or
+  // network hiccup degrades gracefully instead of breaking the feature.
+  //
+  // Returns { items, module, recordId, recordName, error?, source? } — the shape
+  // QuotePanel expects. items: [] means neither path found line items.
   [MSG.GET_ZOHO_QUOTE_ITEMS]: async () => {
     const tab = await getActiveTab();
     if (!tab || !tab.id) return { items: [], error: 'No active tab.' };
     if (!tab.url || !tab.url.startsWith('https://crm.zoho.com/')) {
       return { items: [], error: 'Active tab is not a Zoho CRM page.' };
     }
+
+    // Modules with a quotable subform — must match the worker's allowed set.
+    const ALLOWED_MODULES = ['Quotes', 'Sales_Orders', 'Invoices', 'Purchase_Orders'];
+
+    // ── API-first ──
+    const info = parseZohoRecordUrl(tab.url);
+    if (info?.recordId && ALLOWED_MODULES.includes(info.module)) {
+      try {
+        const apiResp = await api.getZohoQuoteItems(info.recordId, info.module);
+        if (apiResp?.items?.length) {
+          return {
+            items: apiResp.items,
+            module: info.module,
+            recordId: info.recordId,
+            recordName: apiResp.recordName || null,
+            source: 'api',
+          };
+        }
+        // API reached but found nothing → fall through to the DOM scrape below.
+      } catch (apiErr) {
+        // Worker/network error → degrade to the DOM scrape, never break.
+        console.warn('[Stratus] zoho-quote-items API failed, falling back to DOM scrape:', apiErr?.message || apiErr);
+      }
+    }
+
+    // ── Fallback: legacy content-script DOM scrape ──
     const resp = await sendToTab(tab.id, MSG.GET_ZOHO_QUOTE_ITEMS, {});
     // sendToTab resolves null if the content script isn't loaded.
     if (!resp) {

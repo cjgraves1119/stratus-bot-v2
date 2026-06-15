@@ -26,6 +26,7 @@ export const ZOHO_TAB_TO_MODULE = {
   Quotes: 'Quotes',
   SalesOrders: 'Sales_Orders',
   Invoices: 'Invoices',
+  PurchaseOrders: 'Purchase_Orders',
   Leads: 'Leads',
   Tasks: 'Tasks',
 };
