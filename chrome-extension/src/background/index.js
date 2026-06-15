@@ -573,6 +573,10 @@ registerMessageHandlers({
         if (apiResp?.items?.length) {
           return {
             items: apiResp.items,
+            // Pass the worker-built faithful order URL through to QuotePanel
+            // (it consolidates duplicate SKUs); without this it always fell back
+            // to the client-side builder.
+            orderUrl: apiResp.orderUrl || null,
             module: info.module,
             recordId: info.recordId,
             recordName: apiResp.recordName || null,

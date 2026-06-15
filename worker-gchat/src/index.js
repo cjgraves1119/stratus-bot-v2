@@ -25529,7 +25529,14 @@ CRITICAL URL RULES:
                 return new Response(JSON.stringify({ items: [], module, recordId, error: rec?.error ? `Zoho error: ${typeof rec.error === 'string' ? rec.error : (rec.error?.message || 'record not found')}` : 'Record not found' }), { headers: jsonHeaders });
               }
               const items = mapSubformToItems(record[subformField]);
-              return new Response(JSON.stringify({ items, module, recordId, recordName: record.Subject || null }), { headers: jsonHeaders });
+              // Reproducing an EXISTING quote → the order URL must be a FAITHFUL
+              // concatenation of the exact line SKUs+qtys (terms already baked into
+              // each SKU, e.g. LIC-MS225-24P-3YR). buildStratusUrl does only that —
+              // no EOL drop, no term inference, no validation that could silently
+              // discard lines (the resolving /api/quote engine flagged MS225 license
+              // renewals as EOL and built a 1-of-3-item URL). One combined order URL.
+              const orderUrl = items.length ? buildStratusUrl(items) : null;
+              return new Response(JSON.stringify({ items, orderUrl, module, recordId, recordName: record.Subject || null }), { headers: jsonHeaders });
             } catch (err) {
               return new Response(JSON.stringify({ items: [], module, recordId, error: 'Zoho fetch failed: ' + err.message }), { headers: jsonHeaders });
             }
