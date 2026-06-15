@@ -28168,11 +28168,22 @@ Return ONLY a JSON object (no markdown, no explanation):
       let githubCommitted = false;
       const dayOfWeek = new Date().getUTCDay(); // 0=Sun, 1=Mon, ...
       const shouldCommit = (dayOfWeek === 1) || productIdsAdded > 0; // Mondays or when IDs added
+      // 2026-06-15 — PRICE_CRON_READONLY lets a SECONDARY deployment (e.g. corp)
+      // run this cron to populate its OWN prices_live KV WITHOUT writing to the
+      // SHARED price book. The Phase-5 GitHub commit is the cron's ONLY shared-/
+      // cross-account write: Phase 1 only READS WooProducts (GET), and the KV
+      // puts above are per-account. Exactly ONE deployment should own the
+      // prices.json commit, so a fresh corp deploy sets PRICE_CRON_READONLY=true.
+      // PRICE_CRON_REPO env-drives the target repo (was hardcoded to the personal
+      // repo, so a corp PAT would otherwise push into — or 403 against — it).
+      const priceCronReadOnly = String(env.PRICE_CRON_READONLY) === 'true';
 
-      if (shouldCommit && env.GITHUB_PAT && priceChanges.length > 0) {
+      if (priceCronReadOnly) {
+        console.log('[PRICE-CRON] Phase 5 SKIPPED — PRICE_CRON_READONLY=true (this deploy does not own the shared prices.json commit)');
+      } else if (shouldCommit && env.GITHUB_PAT && priceChanges.length > 0) {
         try {
-          console.log('[PRICE-CRON] Phase 5: Committing updated prices.json to GitHub...');
-          const repo = 'cjgraves1119/stratus-bot-v2';
+          const repo = env.PRICE_CRON_REPO || 'cjgraves1119/stratus-bot-v2';
+          console.log(`[PRICE-CRON] Phase 5: Committing updated prices.json to GitHub (${repo})...`);
           const ghHeaders = {
             'Authorization': `token ${env.GITHUB_PAT}`,
             'Accept': 'application/vnd.github.v3+json',
