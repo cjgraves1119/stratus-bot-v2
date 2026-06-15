@@ -1,4 +1,5 @@
 const path = require('path');
+const webpack = require('webpack');
 const CopyPlugin = require('copy-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
@@ -53,6 +54,16 @@ module.exports = (env, argv) => {
       ],
     },
     plugins: [
+      // Build-time injection of the worker API base so ONE codebase produces
+      // both the personal and the corporate extension build. constants.js reads
+      // the bare identifier STRATUS_API_BASE; without this DefinePlugin that
+      // identifier was never defined, so the documented override was dead code
+      // and every build silently hardcoded the personal gateway. (2026-06-15)
+      //   Personal build:  npm run build            → '' → falls back to personal default
+      //   Corp build:      STRATUS_API_BASE="https://stratus-ai-bot-gateway.<corp>.workers.dev" npm run build
+      new webpack.DefinePlugin({
+        STRATUS_API_BASE: JSON.stringify(process.env.STRATUS_API_BASE || ''),
+      }),
       new MiniCssExtractPlugin({
         filename: '[name].css',
       }),
