@@ -10,6 +10,7 @@ import { useState, useEffect } from 'react';
 import { sendToBackground } from '../lib/messaging';
 import { MSG, COLORS } from '../lib/constants';
 import { getSettings, saveSettings, getLocalStorage, setLocalStorage } from '../lib/storage';
+import EmailResponderToggle from './EmailResponderToggle';
 
 export default function OptionsPage() {
   const [settings, setSettingsState] = useState(null);
@@ -175,6 +176,11 @@ export default function OptionsPage() {
             </button>
           )}
         </div>
+      </Section>
+
+      {/* Email Responder OOO Mode (POC) */}
+      <Section title="AI Email Responder (OOO Mode)">
+        <EmailResponderToggle />
       </Section>
 
       {/* Feature Toggles */}

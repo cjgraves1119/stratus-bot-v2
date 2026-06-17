@@ -21960,6 +21960,50 @@ async function enrichCompanyV2(rawDomain, opts) {
         let apiResult;
         switch (url.pathname) {
 
+          // ── Email Responder Proxy (Chrome ext / Gmail Add-on entry point) ──
+          // Chrome ext authenticates here via X-API-Key (same as every other endpoint).
+          // This worker holds EMAIL_RESPONDER_ADMIN_KEY in its secrets and forwards the
+          // call to the email-responder worker, so the browser never sees the admin key.
+          case '/api/email-responder/state':
+          case '/api/email-responder/toggle':
+          case '/api/email-responder/kill':
+          case '/api/email-responder/poll':
+          case '/api/email-responder/audit': {
+            if (!env.EMAIL_RESPONDER_ADMIN_KEY) {
+              apiResult = { error: 'EMAIL_RESPONDER_ADMIN_KEY not configured on gchat worker' };
+              break;
+            }
+            const erBase = env.EMAIL_RESPONDER_URL || 'https://stratus-ai-email-responder.chrisg-ec1.workers.dev';
+            const subpath = url.pathname.replace('/api/email-responder/', '');
+            const targetMap = {
+              state:  { path: '/api/state',       method: 'GET'  },
+              toggle: { path: '/api/ooo-toggle',  method: 'POST' },
+              kill:   { path: '/api/kill-switch', method: 'POST' },
+              poll:   { path: '/api/poll',        method: 'POST' },
+              audit:  { path: '/api/audit',       method: 'GET'  },
+            };
+            const target = targetMap[subpath];
+            if (!target) { apiResult = { error: 'Unknown email-responder subpath: ' + subpath }; break; }
+            const erUrl = erBase + target.path + (target.method === 'GET' && url.search ? url.search : '');
+            try {
+              const proxied = await fetch(erUrl, {
+                method: target.method,
+                headers: {
+                  'X-Admin-Key': env.EMAIL_RESPONDER_ADMIN_KEY,
+                  'Content-Type': 'application/json',
+                },
+                body: target.method === 'POST' ? JSON.stringify(apiBody || {}) : undefined,
+              });
+              const proxyText = await proxied.text();
+              try { apiResult = JSON.parse(proxyText); }
+              catch { apiResult = { raw: proxyText, status: proxied.status }; }
+              if (!proxied.ok && !apiResult.error) apiResult.error = `email-responder returned ${proxied.status}`;
+            } catch (err) {
+              apiResult = { error: 'email-responder unreachable: ' + err.message };
+            }
+            break;
+          }
+
           // ── Analyze Email: summary + detected SKUs + CRM sender lookup ──
           case '/api/analyze-email': {
             const { subject, body, senderEmail, senderName } = apiBody;

@@ -1,0 +1,20 @@
+{
+  "label": "happy path: licensing FAQ from KB",
+  "expected_outcome": "auto_send",
+  "expected_intent": "licensing_faq",
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-010",
+    "gmailThreadId": "thread-010",
+    "rfcMessageId": "<msg010@customer.example>",
+    "fromEmail": "admin@school.example",
+    "fromName": "School Admin",
+    "senderDomain": "school.example",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "How do I add a Meraki license?",
+    "bodyText": "Just got our license key. Where in the dashboard do I plug it in?",
+    "internalDateMs": 1746729600000
+  }
+}

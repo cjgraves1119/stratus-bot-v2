@@ -1,0 +1,20 @@
+{
+  "label": "risk gate: pricing exception ask -> escalate to Jay",
+  "expected_outcome": "escalate_to_jay",
+  "expected_intent": "financial_legal",
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-007",
+    "gmailThreadId": "thread-007",
+    "rfcMessageId": "<msg007@customer.example>",
+    "fromEmail": "buyer@acme-it.com",
+    "fromName": "Sam Buyer",
+    "senderDomain": "acme-it.com",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Can we do 25% off on the MR46 order?",
+    "bodyText": "Hey, I'm seeing 25% from another VAR. Can Stratus match that? Also we need Net 90 terms instead of Net 30.",
+    "internalDateMs": 1746729600000
+  }
+}

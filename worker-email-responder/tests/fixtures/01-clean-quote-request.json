@@ -1,0 +1,20 @@
+{
+  "label": "happy path: clean URL quote request from known contact",
+  "expected_outcome": "auto_send",
+  "expected_intent": "url_quote",
+  "envelope": {
+    "path": "ai_alias",
+    "recipient": "ai@stratusinfosystems.com",
+    "gmailMessageId": "test-001",
+    "gmailThreadId": "thread-001",
+    "rfcMessageId": "<test-001@customer.example>",
+    "fromEmail": "buyer@acme-it.com",
+    "fromName": "Sam Buyer",
+    "senderDomain": "acme-it.com",
+    "to": ["ai@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Pricing on 10 MR46 with 3yr licenses",
+    "bodyText": "Hi, can you send me a quote for 10x MR46 with 3-year enterprise licenses? Thanks!",
+    "internalDateMs": 1746729600000
+  }
+}

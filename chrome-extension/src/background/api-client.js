@@ -29,16 +29,17 @@ async function apiCall(endpoint, payload, options = {}) {
   const controller = new AbortController();
   const timeout = options.timeout || 30000;
   const timer = setTimeout(() => controller.abort(), timeout);
+  const method = options.method || 'POST';
 
   try {
     const response = await fetch(`${API_BASE}${endpoint}`, {
-      method: 'POST',
+      method,
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': settings.apiKey,
         'X-User-Email': settings.userEmail || '',
       },
-      body: JSON.stringify(payload),
+      body: method === 'GET' ? undefined : JSON.stringify(payload),
       signal: controller.signal,
     });
 
@@ -550,4 +551,39 @@ function hashString(str) {
     hash |= 0;
   }
   return Math.abs(hash).toString(36);
+}
+
+
+// ─────────────────────────────────────────────
+// Email Responder OOO Toggle (POC)
+// ─────────────────────────────────────────────
+
+/**
+ * Get current state of the email responder worker.
+ *   { sendMode, killSwitch, ooo, watchInbox, cursors }
+ */
+export async function emailResponderState() {
+  // POST to satisfy gchat's outer routing gate; the proxy internally hits GET /api/state.
+  return apiCall('/api/email-responder/state', {});
+}
+
+/**
+ * Flip OOO toggle. Body: { ooo: 'on'|'off', watchInbox: 'on'|'off' }
+ */
+export async function emailResponderToggle(ooo, watchInbox) {
+  return apiCall('/api/email-responder/toggle', { ooo, watchInbox });
+}
+
+/**
+ * Emergency kill switch.
+ */
+export async function emailResponderKill(state) {
+  return apiCall('/api/email-responder/kill', { state });
+}
+
+/**
+ * Manually trigger a poll (admin only).
+ */
+export async function emailResponderPollNow() {
+  return apiCall('/api/email-responder/poll', {});
 }

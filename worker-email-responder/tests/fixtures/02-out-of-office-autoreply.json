@@ -1,0 +1,21 @@
+{
+  "label": "loop guard: customer's own OOO autoreply",
+  "expected_outcome": "skipped",
+  "expected_reasons": ["auto-submitted=auto-replied"],
+  "envelope": {
+    "path": "chris_ooo",
+    "recipient": "chrisg@stratusinfosystems.com",
+    "gmailMessageId": "test-002",
+    "gmailThreadId": "thread-002",
+    "rfcMessageId": "<test-002@customer.example>",
+    "fromEmail": "buyer@acme-it.com",
+    "fromName": "Sam Buyer",
+    "senderDomain": "acme-it.com",
+    "to": ["chrisg@stratusinfosystems.com"],
+    "cc": [],
+    "subject": "Out of Office: Re: Following up",
+    "autoSubmitted": "auto-replied",
+    "bodyText": "I'm out of office until Monday. For urgent matters contact my assistant.",
+    "internalDateMs": 1746729600000
+  }
+}
