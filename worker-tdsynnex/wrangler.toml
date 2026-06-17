@@ -1,30 +1,59 @@
-name = "stratus-tdsynnex-pricing"
+# stratus-tdsynnex-pricing (daily TD SYNNEX cost refresh → shared PRICES_KV)
+#
+# ⚠️ DEPLOY WITH AN EXPLICIT ENVIRONMENT — never a bare `wrangler deploy`:
+#     wrangler deploy -e personal     # chrisg-ec1  (dev / test)
+#     wrangler deploy -e corp         # corp it-262 (production)
+# Top-level intentionally has NO name/account_id/bindings, so a flag-less deploy
+# fails loudly. (This worker is NOT in deploy.yml — it's deployed manually; use
+# the -e flag.) Wrangler named environments do NOT inherit vars or bindings —
+# add any NEW binding/var to BOTH [env.personal] AND [env.corp].
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-[vars]
-# TD Synnex API base URL
+# ════════════════════════════ PERSONAL — chrisg-ec1 (dev/test) ════════════════════════════
+[env.personal]
+name = "stratus-tdsynnex-pricing"
+account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
+
+[env.personal.vars]
 TDSYNNEX_API_BASE = "https://ws.us.tdsynnex.com/webservice/ltd/api"
-# Rate limit: requests per second (conservative to avoid throttling)
 RATE_LIMIT_PER_SEC = 2
-# Qualifier for TD Synnex API
 QUALIFIER = "MG"
+# Secret (--env personal): TDSYNNEX_AUTH_TOKEN.
 
-# TD Synnex credentials stored as secret:
-#   wrangler secret put TDSYNNEX_AUTH_TOKEN
-#   Value: <set via `wrangler secret put TDSYNNEX_AUTH_TOKEN` — never commit the literal>
-
-# Shared pricing KV — same namespace as bot workers so they can read cost data
-[[kv_namespaces]]
+[[env.personal.kv_namespaces]]
 binding = "PRICES_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
 
-# D1 analytics for logging refresh history
-[[d1_databases]]
+[[env.personal.d1_databases]]
 binding = "ANALYTICS_DB"
 database_name = "stratus-bot-analytics"
 database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
 
-# Daily cron at 5:00 AM CT (11:00 UTC) — runs after Zoho price cron
-[triggers]
+[env.personal.triggers]
+crons = ["0 11 * * *"]
+
+# ════════════════════════════ CORP — it-262 (production) ════════════════════════════
+# Fill every <CORP_*> placeholder, then deploy with `wrangler deploy -e corp`.
+# (Verify QUALIFIER "MG" is correct for the corp TD SYNNEX account.)
+[env.corp]
+name = "stratus-tdsynnex-pricing"
+account_id = "<CORP_ACCOUNT_ID>"
+
+[env.corp.vars]
+TDSYNNEX_API_BASE = "https://ws.us.tdsynnex.com/webservice/ltd/api"
+RATE_LIMIT_PER_SEC = 2
+QUALIFIER = "MG"
+# Secret (--env corp): TDSYNNEX_AUTH_TOKEN (corp's).
+
+[[env.corp.kv_namespaces]]
+binding = "PRICES_KV"
+id = "<CORP_KV_SHARED_ID>"
+
+[[env.corp.d1_databases]]
+binding = "ANALYTICS_DB"
+database_name = "stratus-bot-analytics"
+database_id = "<CORP_D1_ID>"
+
+[env.corp.triggers]
 crons = ["0 11 * * *"]
