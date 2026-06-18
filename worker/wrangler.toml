@@ -1,55 +1,88 @@
-name = "stratus-ai-bot"
-account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
+# stratus-ai-bot (Webex bot)
+#
+# ⚠️ DEPLOY WITH AN EXPLICIT ENVIRONMENT — never a bare `wrangler deploy`:
+#     wrangler deploy -e personal     # chrisg-ec1  (dev / test)
+#     wrangler deploy -e corp         # corp it-262 (production)
+# Top-level intentionally has NO name/account_id/bindings, so a flag-less deploy
+# fails loudly instead of shipping a binding-less worker to the wrong account.
+#
+# Wrangler named environments do NOT inherit vars or bindings. When you add a NEW
+# binding or var, add it to BOTH [env.personal] AND [env.corp] below.
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-[vars]
+# ════════════════════════════ PERSONAL — chrisg-ec1 (dev/test) ════════════════════════════
+[env.personal]
+name = "stratus-ai-bot"
+account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 
-# V3 model-intent quoting kill-switch. NOT a var (would enable corp too) — set per-deploy as a
-# SECRET so personal can be on while corp stays off. Absent secret => undefined => OFF (safe default).
-# Enable:  wrangler secret put CF_QUOTE_V3_ENABLED   (value: true)   Disable: wrangler secret delete CF_QUOTE_V3_ENABLED
-# Non-secret config (secrets set via `wrangler secret put`)
-# WEBEX_BOT_TOKEN = set via wrangler secret
-# ANTHROPIC_API_KEY = set via wrangler secret
-
-# Product_info waterfall feature flag. Plain-text env var (not secret) so the value
-# is guaranteed clean — stdin-uploaded secrets can pick up trailing newlines that
-# break strict equality checks. Toggle "true"/"false" here, push to redeploy.
+[env.personal.vars]
+# Product_info waterfall feature flag (plain var, not a secret, to avoid trailing-newline issues).
 USE_PRODUCT_INFO_WATERFALL = "true"
-
-# Anthropic CF AI Gateway URL — env-overridable so the code ports 1:1 to corp (corp sets its own account).
+# Anthropic CF AI Gateway URL (account-specific).
 ANTHROPIC_GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages"
+# Secrets (set via `wrangler secret put <NAME> --env personal`): WEBEX_BOT_TOKEN, ANTHROPIC_API_KEY.
+# CF_QUOTE_V3_ENABLED is a per-deploy SECRET (set "true" on personal; leave UNSET on corp).
 
-# ── D1 Database: Analytics & history ─────────────────────────────────
-# Quote history, bot usage analytics, CRM operation log, pricing history
-[[d1_databases]]
+[[env.personal.d1_databases]]
 binding = "ANALYTICS_DB"
 database_name = "stratus-bot-analytics"
 database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
 migrations_dir = "../migrations"
 
-[[kv_namespaces]]
+[[env.personal.kv_namespaces]]
 binding = "CONVERSATION_KV"
 id = "360fbb8a75bf400e87cb96893a811a56"
 
-# ── Analytics Engine: Real-time telemetry ────────────────────────────
-# High-frequency metrics: latency, throughput, error rates, cost tracking
-[[analytics_engine_datasets]]
-binding = "BOT_METRICS"
-dataset = "stratus_bot_metrics"
-
-# ── R2 Object Storage: Quote PDFs, attachments, reports ─────────────
-# Zero-egress storage for generated files. Bucket: stratus-bot-storage
-[[r2_buckets]]
-binding = "BOT_STORAGE"
-bucket_name = "stratus-bot-storage"
-
-# ── Workers AI: Vision model for image analysis A/B test ───────────
-[ai]
-binding = "AI"
-
-# Shared pricing KV — written by GChat worker's daily cron, read here for live prices
-[[kv_namespaces]]
+[[env.personal.kv_namespaces]]
 binding = "PRICES_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
 
+[[env.personal.analytics_engine_datasets]]
+binding = "BOT_METRICS"
+dataset = "stratus_bot_metrics"
+
+[[env.personal.r2_buckets]]
+binding = "BOT_STORAGE"
+bucket_name = "stratus-bot-storage"
+
+[env.personal.ai]
+binding = "AI"
+
+# ════════════════════════════ CORP — it-262 (production) ════════════════════════════
+# Fill every <CORP_*> placeholder with the corporate account's real values, then
+# deploy with `wrangler deploy -e corp`. Resource IDs are account-scoped — create
+# them in the corp account first (see corp-deploy/README.md).
+[env.corp]
+name = "stratus-ai-bot"
+account_id = "<CORP_ACCOUNT_ID>"
+
+[env.corp.vars]
+USE_PRODUCT_INFO_WATERFALL = "true"
+ANTHROPIC_GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1/<CORP_ACCOUNT_ID>/<CORP_GATEWAY_NAME>/anthropic/v1/messages"
+# Secrets (--env corp): WEBEX_BOT_TOKEN (corp bot), ANTHROPIC_API_KEY. Do NOT set CF_QUOTE_V3_ENABLED.
+
+[[env.corp.d1_databases]]
+binding = "ANALYTICS_DB"
+database_name = "stratus-bot-analytics"
+database_id = "<CORP_D1_ID>"
+migrations_dir = "../migrations"
+
+[[env.corp.kv_namespaces]]
+binding = "CONVERSATION_KV"
+id = "<CORP_KV_WEBEX_ID>"
+
+[[env.corp.kv_namespaces]]
+binding = "PRICES_KV"
+id = "<CORP_KV_SHARED_ID>"
+
+[[env.corp.analytics_engine_datasets]]
+binding = "BOT_METRICS"
+dataset = "stratus_bot_metrics"
+
+[[env.corp.r2_buckets]]
+binding = "BOT_STORAGE"
+bucket_name = "stratus-bot-storage"
+
+[env.corp.ai]
+binding = "AI"

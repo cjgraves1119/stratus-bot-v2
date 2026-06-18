@@ -1,40 +1,66 @@
-name = "stratus-ai-bot-gateway"
-account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
+# stratus-ai-bot-gateway (Gemma-first → Claude-fallback waterfall; delegates to gchat)
+#
+# ⚠️ DEPLOY WITH AN EXPLICIT ENVIRONMENT — never a bare `wrangler deploy`:
+#     wrangler deploy -e personal     # chrisg-ec1  (dev / test)
+#     wrangler deploy -e corp         # corp it-262 (production)
+# Top-level intentionally has NO name/account_id/bindings, so a flag-less deploy
+# fails loudly instead of shipping a binding-less worker to the wrong account.
+#
+# Wrangler named environments do NOT inherit vars or bindings. When you add a NEW
+# binding or var, add it to BOTH [env.personal] AND [env.corp] below.
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-# Gateway worker: thin routing layer that implements the
-# Gemma-first → Claude-fallback waterfall for CRM tool-use.
-# Delegates heavy lifting to stratus-ai-bot-gchat via service binding.
-# Existing clients (Chrome extension, Webex bot, GChat bot) stay on
-# the main worker unless explicitly pointed here for testing.
+# ════════════════════════════ PERSONAL — chrisg-ec1 (dev/test) ════════════════════════════
+[env.personal]
+name = "stratus-ai-bot-gateway"
+account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 
-[vars]
+[env.personal.vars]
 GATEWAY_VERSION = "1.0.0-gemma-first"
+# Secrets (--env personal): GATEWAY_API_KEY, GATEWAY_INTERNAL_SECRET (must MATCH stratus-ai-bot-gchat —
+# forwarded as X-Gateway-Secret so service-binding callers authenticate).
 
-# GATEWAY_INTERNAL_SECRET is set as a Worker secret via:
-#   wrangler secret put GATEWAY_INTERNAL_SECRET
-# The gateway forwards this as X-Gateway-Secret to the main worker's
-# /api/chat-waterfall endpoint so service-binding callers authenticate.
-# The same secret must be set on stratus-ai-bot-gchat.
-
-# Service binding to main worker (where tool execution lives)
-[[services]]
+[[env.personal.services]]
 binding = "MAIN_WORKER"
 service = "stratus-ai-bot-gchat"
 
-# AI binding (Cloudflare Workers AI — free inference)
-[ai]
+[env.personal.ai]
 binding = "AI"
 
-# Shared KV for conversation history (same namespace as main worker)
-[[kv_namespaces]]
+[[env.personal.kv_namespaces]]
 binding = "CONVERSATION_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
 
-# Analytics: log waterfall outcomes for hit-rate analysis
-[[d1_databases]]
+[[env.personal.d1_databases]]
 binding = "ANALYTICS_DB"
 database_name = "stratus-bot-analytics"
 database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
+migrations_dir = "../migrations"
+
+# ════════════════════════════ CORP — it-262 (production) ════════════════════════════
+# Fill every <CORP_*> placeholder, then deploy with `wrangler deploy -e corp`.
+[env.corp]
+name = "stratus-ai-bot-gateway"
+account_id = "<CORP_ACCOUNT_ID>"
+
+[env.corp.vars]
+GATEWAY_VERSION = "1.0.0-gemma-first"
+# Secrets (--env corp): GATEWAY_API_KEY, GATEWAY_INTERNAL_SECRET (must match the corp gchat worker).
+
+[[env.corp.services]]
+binding = "MAIN_WORKER"
+service = "stratus-ai-bot-gchat"
+
+[env.corp.ai]
+binding = "AI"
+
+[[env.corp.kv_namespaces]]
+binding = "CONVERSATION_KV"
+id = "<CORP_KV_SHARED_ID>"
+
+[[env.corp.d1_databases]]
+binding = "ANALYTICS_DB"
+database_name = "stratus-bot-analytics"
+database_id = "<CORP_D1_ID>"
 migrations_dir = "../migrations"

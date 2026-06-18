@@ -1,97 +1,62 @@
-name = "stratus-ai-bot-gchat"
-account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
+# stratus-ai-bot-gchat (Google Chat bot + Chrome-extension backend)
+#
+# ⚠️ DEPLOY WITH AN EXPLICIT ENVIRONMENT — never a bare `wrangler deploy`:
+#     wrangler deploy -e personal     # chrisg-ec1  (dev / test)
+#     wrangler deploy -e corp         # corp it-262 (production)
+# Top-level intentionally has NO name/account_id/bindings, so a flag-less deploy
+# fails loudly instead of shipping a binding-less worker to the wrong account.
+#
+# Wrangler named environments do NOT inherit vars or bindings. When you add a NEW
+# binding or var, add it to BOTH [env.personal] AND [env.corp] below.
+#
+# Workers Paid plan ($5/mo) required: no wall-clock limit on ctx.waitUntil(),
+# and Queues + Workflows below are Paid-only features.
 main = "src/index.js"
 compatibility_date = "2024-01-01"
 
-# Workers Paid plan ($5/month): no wall-clock limit on ctx.waitUntil().
-# Free plan caps at ~30s which isn't enough for multi-step CRM agentic loops.
-# usage_model = "unbound" is deprecated and ignored by modern Wrangler.
+# ════════════════════════════ PERSONAL — chrisg-ec1 (dev/test) ════════════════════════════
+[env.personal]
+name = "stratus-ai-bot-gchat"
+account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 
-[vars]
-
-# V3 model-intent quoting kill-switch. NOT a var (would enable corp too) — set per-deploy as a
-# SECRET so personal can be on while corp stays off. Absent secret => undefined => OFF (safe default).
-# Enable:  wrangler secret put CF_QUOTE_V3_ENABLED   (value: true)   Disable: wrangler secret delete CF_QUOTE_V3_ENABLED
-# Non-secret config (secrets set via `wrangler secret put`)
-# ANTHROPIC_API_KEY = set via wrangler secret
-# DEEPSEEK_API_KEY = set via wrangler secret
-# DeepSeek rollout flags. Keep disabled after the 2026-05-07 council closeout;
-# reopen only with fresh sealed eval evidence.
+[env.personal.vars]
 USE_DEEPSEEK_TIER_3 = "false"
 USE_DEEPSEEK_ADVISORY = "false"
-# Phase 3 (2026-05-12) — kill switch for QuotePoWorkflow durable orchestrator.
-# Default off so first deploy after merge does NOT change behavior. Flip via:
-#   wrangler secret put QUOTE_PO_WORKFLOW_ENABLED --name stratus-ai-bot-gchat
-# or set here as "true" and redeploy. When off, quote_to_po_and_esign falls
-# back to inline synchronous execution (identical to pre-Phase-3 behavior).
 QUOTE_PO_WORKFLOW_ENABLED = "true"
-# 2026-05-19 Fix C cross-account billing guard. Default off; flip to "true"
-# to enforce that Quote Billing_*/Shipping_* writes match the linked Account.
 BOT_ADDRESS_GUARD_ENABLED = "true"
-# Caller-derived owner mapping (PII refactor, 2026-05-18). SYSTEM_OWNER_ID is
-# the fallback Zoho user id used for cron jobs, system tasks, and unknown
-# callers; PRICE_CRON_NOTIFY_EMAIL is the operator who receives the daily
-# price-cron Google Chat DM. Both default to Chris on personal so behavior is
-# identical; corp will override with corp-side IDs.
 SYSTEM_OWNER_ID = "2570562000141711002"
 SYSTEM_OWNER_EMAIL = "chrisg@stratusinfosystems.com"
 SYSTEM_OWNER_NAME = "Chris Graves"
 PRICE_CRON_NOTIFY_EMAIL = "chrisg@stratusinfosystems.com"
-# Anthropic CF AI Gateway URL — env-overridable so the code ports 1:1 to corp (corp sets its own account).
 ANTHROPIC_GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1/ec1888c5a0b51dc3eebf6bae13a3922b/stratus-ai-bot/anthropic/v1/messages"
-# GOOGLE_PROJECT_NUMBER = set via wrangler secret (for JWT verification)
-#
-# ─── CRM & Email Agent Secrets (POC) ───
-# Set these via: wrangler secret put <NAME>
-#
-# Zoho CRM OAuth (create Self Client at api-console.zoho.com)
-# ZOHO_CLIENT_ID = Zoho self-client ID
-# ZOHO_CLIENT_SECRET = Zoho self-client secret
-# ZOHO_REFRESH_TOKEN = Zoho offline refresh token (scope: ZohoCRM.modules.ALL,ZohoCRM.settings.fields.ALL,ZohoCRM.coql.READ)
-#
-# Gmail API OAuth (uses existing GCP project swift-catfish-474413-d5)
-# GOOGLE_CLIENT_ID = GCP OAuth client ID
-# GOOGLE_CLIENT_SECRET = GCP OAuth client secret
-# GOOGLE_REFRESH_TOKEN = Gmail offline refresh token (scope: gmail.readonly,gmail.compose,gmail.send)
-#
-# Google Chat Async Response (service account for Chat API)
-# GCP_SERVICE_ACCOUNT_KEY = Full JSON key from GCP service account (scope: chat.bot)
-#   Create at: https://console.cloud.google.com/iam-admin/serviceaccounts?project=swift-catfish-474413-d5
-#   Required for CRM/email queries that exceed Google Chat's 30-second sync timeout
+# Secrets (`wrangler secret put <NAME> --env personal`): ANTHROPIC_API_KEY, ZOHO_CLIENT_ID/SECRET/
+# REFRESH_TOKEN, GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN, GCP_SERVICE_ACCOUNT_KEY, GOOGLE_PROJECT_NUMBER,
+# GMAIL_ADDON_API_KEY, GITHUB_PAT, GATEWAY_INTERNAL_SECRET (must match the gateway worker).
+# CF_QUOTE_V3_ENABLED is a per-deploy SECRET — "true" on personal, UNSET on corp.
 
-[[kv_namespaces]]
+[[env.personal.kv_namespaces]]
 binding = "CONVERSATION_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
 
-# Shared pricing KV — daily cron writes prices_live here, both workers read from it
-[[kv_namespaces]]
+[[env.personal.kv_namespaces]]
 binding = "PRICES_KV"
 id = "af24db17eaa644fe9456e2ae74379766"
 
-# Shared D1 analytics database — both workers write usage, quotes, traces
-[[d1_databases]]
+[[env.personal.d1_databases]]
 binding = "ANALYTICS_DB"
 database_name = "stratus-bot-analytics"
 database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
 migrations_dir = "../migrations"
 
-# Service binding to self: Workers can't fetch their own URL directly
-# (same-zone restriction). This binding lets us self-invoke /_work and
-# /_continue endpoints for long-running CRM agentic loops.
-[[services]]
+[[env.personal.services]]
 binding = "SELF"
 service = "stratus-ai-bot-gchat"
 
-# ── Cloudflare Queue: CRM work dispatch ─────────────────────────────
-# Webhook handler produces a message → queue consumer processes it in
-# a completely independent execution context (15-min wall-clock limit).
-# This bypasses the 30s ctx.waitUntil wall-clock limit that kills
-# multi-step agentic CRM loops (2-3 Anthropic calls @ 8-12s each).
-[[queues.producers]]
+[[env.personal.queues.producers]]
 queue = "stratus-gchat-crm-queue"
 binding = "CRM_QUEUE"
 
-[[queues.consumers]]
+[[env.personal.queues.consumers]]
 queue = "stratus-gchat-crm-queue"
 max_batch_size = 1
 max_retries = 3
@@ -99,54 +64,106 @@ max_batch_timeout = 30
 retry_delay = 30
 dead_letter_queue = "stratus-gchat-crm-dlq"
 
-# Cloudflare Workers AI — used for intent classification (CF-first waterfall)
-[ai]
+[env.personal.ai]
 binding = "AI"
 
-# Daily price refresh from Zoho WooProducts → KV
-# Runs at 11:00 UTC (6:00 AM CT / 5:00 AM CST)
-[triggers]
+[env.personal.triggers]
 crons = ["0 11 * * *"]
 
-# ── Cloudflare Workflows: durable CRM dispatch ──────────────────────────────
-# CrmWorkflow is defined in src/index.js and is the intended primary
-# transport for CRM work (Queue is the fallback). The live account already
-# has a Workflow resource named `stratus-gchat-crm-workflow` bound to class
-# CrmWorkflow on script stratus-ai-bot-gchat — this binding makes the code
-# path reachable. Without it, env.CRM_WORKFLOW is undefined and dispatch
-# silently falls through to the Queue.
-[[workflows]]
+[[env.personal.workflows]]
 name = "stratus-gchat-crm-workflow"
-account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 binding = "CRM_WORKFLOW"
 class_name = "CrmWorkflow"
 
-# Phase 3 (2026-05-12) — Quote-to-PO/esign durable orchestrator.
-# QuotePoWorkflow is defined in src/index.js. Wraps the existing synchronous
-# handleQuoteToPoAndEsign in a Workflow step so the request can return early
-# while the chain finishes in the background. Kill-switched by env var
-# QUOTE_PO_WORKFLOW_ENABLED (defaults "false" — falls back to inline exec).
-# Without this binding, the wrapper silently falls back to inline.
-[[workflows]]
+[[env.personal.workflows]]
 name = "stratus-gchat-quote-po-workflow"
-account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 binding = "QUOTE_PO_WORKFLOW"
 class_name = "QuotePoWorkflow"
 
-# ── Analytics Engine: real-time telemetry ───────────────────────────────────
-# writeMetric() in src/index.js already writes to env.BOT_METRICS with
-# blobs[bot, path, model] + doubles[duration, input_tokens, output_tokens,
-# cost_usd] + indexes[person_id]. Without this binding all GChat AE writes
-# are silent no-ops.
-[[analytics_engine_datasets]]
+[[env.personal.analytics_engine_datasets]]
 binding = "BOT_METRICS"
 dataset = "stratus_bot_metrics"
 
-# ── R2 Object Storage ───────────────────────────────────────────────────────
-# r2Put/r2Get/r2Delete/r2List helpers in src/index.js reference
-# env.BOT_STORAGE. Bucket must exist before deploy:
-#   npx wrangler r2 bucket create stratus-bot-storage
-[[r2_buckets]]
+[[env.personal.r2_buckets]]
 binding = "BOT_STORAGE"
 bucket_name = "stratus-bot-storage"
 
+# ════════════════════════════ CORP — it-262 (production) ════════════════════════════
+# Fill every <CORP_*> placeholder with the corporate account's real values, then
+# deploy with `wrangler deploy -e corp`. Create the account-scoped resources in the
+# corp account first (see corp-deploy/README.md). Corp runs the EXTENSION, not the
+# Google Chat bot — so the Google-Chat secrets (GCP_SERVICE_ACCOUNT_KEY,
+# GOOGLE_PROJECT_NUMBER) and JWT_VERIFY_ENFORCE are NOT needed; Gmail OAuth is
+# optional (only for the bot's draft/send-email tools).
+[env.corp]
+name = "stratus-ai-bot-gchat"
+account_id = "<CORP_ACCOUNT_ID>"
+
+[env.corp.vars]
+USE_DEEPSEEK_TIER_3 = "false"
+USE_DEEPSEEK_ADVISORY = "false"
+QUOTE_PO_WORKFLOW_ENABLED = "true"
+BOT_ADDRESS_GUARD_ENABLED = "true"
+PRICE_CRON_READONLY = "true"
+SYSTEM_OWNER_ID = "<CORP_ZOHO_USER_ID>"
+SYSTEM_OWNER_EMAIL = "<corp-operator-email>"
+SYSTEM_OWNER_NAME = "<Corp Operator>"
+PRICE_CRON_NOTIFY_EMAIL = "<corp-ops-distro>"
+ANTHROPIC_GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1/<CORP_ACCOUNT_ID>/<CORP_GATEWAY_NAME>/anthropic/v1/messages"
+# Secrets (--env corp): ANTHROPIC_API_KEY, ZOHO_CLIENT_ID/SECRET/REFRESH_TOKEN, GMAIL_ADDON_API_KEY,
+# GATEWAY_INTERNAL_SECRET (match gateway), GITHUB_PAT (optional). Gmail OAuth (GOOGLE_*) only if the
+# bot must draft/send email. Do NOT set CF_QUOTE_V3_ENABLED, GCP_SERVICE_ACCOUNT_KEY, GOOGLE_PROJECT_NUMBER.
+
+[[env.corp.kv_namespaces]]
+binding = "CONVERSATION_KV"
+id = "<CORP_KV_SHARED_ID>"
+
+[[env.corp.kv_namespaces]]
+binding = "PRICES_KV"
+id = "<CORP_KV_SHARED_ID>"
+
+[[env.corp.d1_databases]]
+binding = "ANALYTICS_DB"
+database_name = "stratus-bot-analytics"
+database_id = "<CORP_D1_ID>"
+migrations_dir = "../migrations"
+
+[[env.corp.services]]
+binding = "SELF"
+service = "stratus-ai-bot-gchat"
+
+[[env.corp.queues.producers]]
+queue = "stratus-gchat-crm-queue"
+binding = "CRM_QUEUE"
+
+[[env.corp.queues.consumers]]
+queue = "stratus-gchat-crm-queue"
+max_batch_size = 1
+max_retries = 3
+max_batch_timeout = 30
+retry_delay = 30
+dead_letter_queue = "stratus-gchat-crm-dlq"
+
+[env.corp.ai]
+binding = "AI"
+
+[env.corp.triggers]
+crons = ["0 11 * * *"]
+
+[[env.corp.workflows]]
+name = "stratus-gchat-crm-workflow"
+binding = "CRM_WORKFLOW"
+class_name = "CrmWorkflow"
+
+[[env.corp.workflows]]
+name = "stratus-gchat-quote-po-workflow"
+binding = "QUOTE_PO_WORKFLOW"
+class_name = "QuotePoWorkflow"
+
+[[env.corp.analytics_engine_datasets]]
+binding = "BOT_METRICS"
+dataset = "stratus_bot_metrics"
+
+[[env.corp.r2_buckets]]
+binding = "BOT_STORAGE"
+bucket_name = "stratus-bot-storage"
