@@ -1,54 +1,5 @@
 /* Stratus AI — Content Script Styles (injected into Gmail) */
 
-/* CRM Banner */
-.stratus-crm-banner {
-  animation: stratus-slide-in 0.3s ease-out;
-}
-
-@keyframes stratus-slide-in {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* SKU Highlighting */
-.stratus-sku-highlight {
-  transition: background 0.15s ease;
-}
-
-.stratus-sku-highlight:hover {
-  background: #c8e6f4 !important;
-  border-color: #1a73a7 !important;
-}
-
-/* SKU Tooltip */
-.stratus-sku-tooltip {
-  animation: stratus-fade-in 0.15s ease-out;
-}
-
-@keyframes stratus-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-/* Compose Toolbar Button */
-.stratus-compose-btn {
-  transition: background 0.15s ease, transform 0.1s ease;
-}
-
-.stratus-compose-btn:hover {
-  transform: scale(1.05);
-}
-
-.stratus-compose-btn:active {
-  transform: scale(0.95);
-}
-
 /* Email Hover Popup */
 .stratus-email-link {
   cursor: pointer;

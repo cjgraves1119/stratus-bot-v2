@@ -177,14 +177,6 @@ export default function OptionsPage() {
         </div>
       </Section>
 
-      {/* Feature Toggles */}
-      <Section title="Features">
-        <Toggle label="Desktop Notifications" description="Task due reminders, quote completion alerts" checked={settings.enableNotifications} onChange={(v) => updateSetting('enableNotifications', v)} />
-        <Toggle label="SKU Highlighting" description="Highlight Cisco/Meraki SKUs in email body text" checked={settings.enableSkuHighlighting} onChange={(v) => updateSetting('enableSkuHighlighting', v)} />
-        <Toggle label="CRM Banner" description="Show account info banner when viewing emails" checked={settings.enableCrmBanner} onChange={(v) => updateSetting('enableCrmBanner', v)} />
-        <Toggle label="Compose Button" description="Add quote button to Gmail compose toolbar" checked={settings.enableComposeButton} onChange={(v) => updateSetting('enableComposeButton', v)} />
-      </Section>
-
       {/* Save */}
       <div style={{ marginTop: 24 }}>
         <button onClick={handleSave} disabled={saving} style={{
@@ -245,33 +237,6 @@ function Field({ label, value, onChange, placeholder, type = 'text' }) {
           borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box',
         }}
       />
-    </div>
-  );
-}
-
-function Toggle({ label, description, checked, onChange }) {
-  return (
-    <div style={{
-      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      padding: '10px 0', borderBottom: `1px solid ${COLORS.BORDER}`,
-    }}>
-      <div>
-        <div style={{ fontSize: 13, fontWeight: 500, color: COLORS.TEXT_PRIMARY }}>{label}</div>
-        <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY }}>{description}</div>
-      </div>
-      <label style={{ position: 'relative', display: 'inline-block', width: 40, height: 22, cursor: 'pointer' }}>
-        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} style={{ opacity: 0, width: 0, height: 0 }} />
-        <span style={{
-          position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: checked ? COLORS.STRATUS_BLUE : '#ccc',
-          borderRadius: 22, transition: '0.3s',
-        }}>
-          <span style={{
-            position: 'absolute', height: 18, width: 18, left: checked ? 19 : 2, bottom: 2,
-            backgroundColor: 'white', borderRadius: '50%', transition: '0.3s',
-          }} />
-        </span>
-      </label>
     </div>
   );
 }

@@ -8,7 +8,6 @@
  * - Cache management
  * - Keyboard shortcuts
  * - Context menus
- * - Notifications
  */
 
 import { MSG } from '../lib/constants.js';
@@ -24,7 +23,6 @@ import * as api from './api-client.js';
 import { startZohoAuth, getAuthStatus, disconnectZoho, getValidZohoToken } from './auth.js';
 import { setupCacheAlarms, handleAlarm, refreshPriceCatalog } from './cache.js';
 import { setupContextMenus, handleContextMenuClick } from './context-menus.js';
-import { showNotification, handleNotificationClick, checkDueTasks } from './notifications.js';
 import { handleCommand } from './shortcuts.js';
 
 // ─────────────────────────────────────────────
@@ -69,9 +67,6 @@ chrome.runtime.onInstalled.addListener((details) => {
 chrome.runtime.onStartup.addListener(() => {
   console.log('[Stratus AI] Extension started.');
   setupCacheAlarms();
-
-  // Check for due tasks on startup
-  setTimeout(() => checkDueTasks(), 5000);
 });
 
 // ─────────────────────────────────────────────
@@ -353,14 +348,6 @@ registerMessageHandlers({
           tasks: openTasks,
         };
 
-        // Show notification with task count
-        const { showNotification } = await import('./notifications.js');
-        showNotification(
-          'Tasks to Reschedule',
-          `Found ${openTasks.length} open task${openTasks.length > 1 ? 's' : ''} for the recipient${recipients.length > 1 ? 's' : ''}. Would you like to reschedule?`,
-          { id: 'task-reschedule', requireInteraction: true }
-        );
-
         return { success: true, tasksFound: openTasks.length };
       }
 
@@ -638,12 +625,6 @@ chrome.commands.onCommand.addListener(handleCommand);
 // ─────────────────────────────────────────────
 
 chrome.contextMenus.onClicked.addListener(handleContextMenuClick);
-
-// ─────────────────────────────────────────────
-// Notifications
-// ─────────────────────────────────────────────
-
-chrome.notifications.onClicked.addListener(handleNotificationClick);
 
 // ─────────────────────────────────────────────
 // Side Panel

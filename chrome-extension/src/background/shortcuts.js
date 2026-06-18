@@ -30,7 +30,7 @@ export async function handleCommand(command) {
       setTimeout(() => {
         chrome.runtime.sendMessage({
           type: MSG.SIDEBAR_NAVIGATE,
-          panel: 'quote',
+          panel: 'chat',
         });
       }, 300);
       break;
@@ -50,7 +50,7 @@ export async function handleCommand(command) {
       setTimeout(() => {
         chrome.runtime.sendMessage({
           type: MSG.SIDEBAR_NAVIGATE,
-          panel: 'email',
+          panel: 'chat',
           action: 'analyze',
         });
       }, 300);
@@ -71,7 +71,8 @@ export async function handleCommand(command) {
       setTimeout(() => {
         chrome.runtime.sendMessage({
           type: MSG.SIDEBAR_NAVIGATE,
-          panel: 'draft',
+          panel: 'chat',
+          action: 'draft',
         });
       }, 300);
       break;
