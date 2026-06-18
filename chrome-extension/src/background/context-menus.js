@@ -134,8 +134,8 @@ export async function handleContextMenuClick(info, tab) {
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
-            panel: 'quote',
-            data: { skuText: selectedText.trim() },
+            panel: 'chat',
+            data: { quoteSkuText: selectedText.trim() },
           });
         }, 500);
       } catch (err) {
@@ -186,7 +186,7 @@ export async function handleContextMenuClick(info, tab) {
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
-            panel: 'quote',
+            panel: 'chat',
             data: { imageBase64: base64 },
           });
         }, 500);
@@ -228,7 +228,7 @@ export async function handleContextMenuClick(info, tab) {
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: 'SIDEBAR_NAVIGATE',
-            panel: 'quote',
+            panel: 'chat',
             data: { imageBase64: base64 },
           });
         }, 500);

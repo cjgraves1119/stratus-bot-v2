@@ -72,11 +72,7 @@ const DEFAULT_SETTINGS = {
   apiKey: '',
   userName: '',
   userEmail: '',
-  enableNotifications: true,
-  enableSkuHighlighting: true,
-  enableCrmBanner: true,
-  enableComposeButton: true,
-  sidebarDefaultPanel: 'email', // email, crm, quote, tasks
+  sidebarDefaultPanel: 'crm',
   theme: 'light',
 };
 

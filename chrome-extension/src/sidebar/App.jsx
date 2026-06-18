@@ -2,7 +2,8 @@
  * Stratus AI Chrome Extension — Sidebar App
  *
  * Main sidebar application with tabbed navigation.
- * Panels: Email (with Draft), CRM (with Info/Deals/Tasks), Quote, Chat, Search
+ * Panels: CRM/Zoho, Chat (quoting + email reply/analyze), Search.
+ * (Email and Quote tabs were folded into Chat on 2026-06-17.)
  */
 
 import { useState, useEffect, useCallback, lazy, Suspense, Component } from 'react';
@@ -14,10 +15,8 @@ import {
   minimalContextFromUrl,
 } from '../lib/zoho-url.js';
 
-// Eager load the default panel; lazy load the rest for faster initial render
-import EmailPanel from './panels/EmailPanel';
+// Lazy load panels for faster initial render
 const CrmPanel = lazy(() => import('./panels/CrmPanel'));
-const QuotePanel = lazy(() => import('./panels/QuotePanel'));
 const ChatPanel = lazy(() => import('./panels/ChatPanel'));
 const SearchPanel = lazy(() => import('./panels/SearchPanel'));
 
@@ -75,11 +74,13 @@ class PanelErrorBoundary extends Component {
 
 const TABS = [
   { id: 'crm', label: 'Zoho', icon: '🏢' },
-  { id: 'email', label: 'Email', icon: '📧' },
-  { id: 'quote', label: 'Quote', icon: '📋' },
   { id: 'chat', label: 'Chat', icon: '💬' },
   { id: 'search', label: 'Search', icon: '🔍' },
 ];
+
+// Valid panel ids — guards deep-link navigations that may still target a
+// now-removed tab (Email/Quote were folded into Chat 2026-06-17).
+const VALID_PANELS = new Set(TABS.map((t) => t.id));
 
 // Per-tab storage key prefix — must match the background service worker.
 // The Zoho content script's context is keyed by the tab it lives in so that
@@ -397,9 +398,12 @@ export default function App() {
   useEffect(() => {
     return onMessage(MSG.SIDEBAR_NAVIGATE, (data) => {
       if (data.panel) {
-        // Map legacy 'tasks'/'draft' routes to new locations
-        const panelMap = { tasks: 'crm', draft: 'email', zoho: 'crm' };
-        const targetPanel = panelMap[data.panel] || data.panel;
+        // Email/Quote/Draft now live in Chat; Tasks/Zoho in the CRM panel.
+        // Unknown/removed ids fall back to CRM so a stale deep-link never
+        // lands on a blank pane.
+        const panelMap = { tasks: 'crm', draft: 'chat', email: 'chat', quote: 'chat', zoho: 'crm' };
+        const mapped = panelMap[data.panel] || data.panel;
+        const targetPanel = VALID_PANELS.has(mapped) ? mapped : 'crm';
         setActiveTab(targetPanel);
         if (data.data) setNavData(data.data);
         if (data.action) setNavData(prev => ({ ...prev, action: data.action }));
@@ -420,8 +424,9 @@ export default function App() {
   }, []);
 
   const handleNavigate = useCallback((panel, data) => {
-    const panelMap = { tasks: 'crm', draft: 'email', zoho: 'crm' };
-    const targetPanel = panelMap[panel] || panel;
+    const panelMap = { tasks: 'crm', draft: 'chat', email: 'chat', quote: 'chat', zoho: 'crm' };
+    const mapped = panelMap[panel] || panel;
+    const targetPanel = VALID_PANELS.has(mapped) ? mapped : 'crm';
     setActiveTab(targetPanel);
     setNavData(data || null);
   }, []);
@@ -529,9 +534,7 @@ export default function App() {
       <div style={{ flex: 1, overflow: 'auto' }}>
         <PanelErrorBoundary activeTab={activeTab}>
           <Suspense fallback={<PanelLoader />}>
-            {activeTab === 'email' && <EmailPanel emailContext={emailContext} navData={navData} onNavigate={handleNavigate} />}
             {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
-            {activeTab === 'quote' && <QuotePanel navData={navData} emailContext={emailContext} onNavigate={handleNavigate} zohoPageContext={zohoPageContext} />}
             {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} zohoPageContext={zohoPageContext} />}
             {activeTab === 'search' && <SearchPanel navData={navData} />}
           </Suspense>

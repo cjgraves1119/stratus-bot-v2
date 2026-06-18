@@ -4,13 +4,11 @@
  * Runs in the Gmail page context. Responsible for:
  * - Detecting email opens/changes via MutationObserver
  * - Extracting email data from the DOM
- * - Injecting CRM banner above email threads
- * - Highlighting SKUs in email body text
- * - Adding quote button to compose toolbar
+ * - Adding the Send + Task button to the compose toolbar
  * - Clipboard operations
  */
 
-import { MSG, SKU_PATTERN, DEAL_ID_PATTERN, CONSUMER_DOMAINS, COLORS } from '../lib/constants.js';
+import { MSG, DEAL_ID_PATTERN, CONSUMER_DOMAINS, COLORS } from '../lib/constants.js';
 import { sendToBackground, onMessage } from '../lib/messaging.js';
 import './gmail-observer.js';
 
@@ -38,18 +36,6 @@ window.addEventListener('unhandledrejection', (event) => {
 console.log('[Stratus AI] Content script loaded on Gmail.');
 
 let lastEmailHash = '';
-let settings = null;
-
-// Load settings
-async function loadSettings() {
-  try {
-    settings = await sendToBackground(MSG.GET_SETTINGS);
-  } catch {
-    settings = { enableSkuHighlighting: true, enableCrmBanner: true, enableComposeButton: true };
-  }
-}
-
-loadSettings();
 
 // Bot/notification emails — exclude from contact extraction (module-scoped for reuse)
 const BOT_EMAILS = new Set([
@@ -406,204 +392,21 @@ async function onEmailChanged() {
 
   if (primaryDomain && !CONSUMER_DOMAINS.has(primaryDomain)) {
     try {
-      const crmResult = await sendToBackground(MSG.CRM_LOOKUP, {
+      // Populate the background CRM context for the sidebar to read
+      // (GET_CRM_CONTEXT). The in-email CRM banner was removed 2026-06-17.
+      await sendToBackground(MSG.CRM_LOOKUP, {
         email: primaryEmail,
         domain: primaryDomain,
       });
-
-      if (crmResult && crmResult.found && settings?.enableCrmBanner) {
-        injectCrmBanner(crmResult);
-      }
     } catch {
       // CRM lookup failure is non-fatal
     }
-  }
-
-  // SKU highlighting
-  if (settings?.enableSkuHighlighting && data.body) {
-    highlightSkusInEmail();
   }
 
   // 2026-05-12: Removed Deal ID green-highlight feature (decorated 13–19
   // digit Deal IDs in approval emails, opened Zoho deal on click). Function
   // definitions for highlightDealIdsInEmail / handleDealIdHover /
   // handleDealIdClick removed below as well.
-}
-
-// ─────────────────────────────────────────────
-// CRM Banner Injection
-// ─────────────────────────────────────────────
-
-function injectCrmBanner(crmData) {
-  // Remove existing banner
-  document.querySelectorAll('.stratus-crm-banner').forEach(el => el.remove());
-
-  const account = crmData.account;
-  const contact = crmData.contact;
-  if (!account && !contact) return;
-
-  const banner = document.createElement('div');
-  banner.className = 'stratus-crm-banner';
-  banner.style.cssText = `
-    display: flex; align-items: center; gap: 12px; padding: 8px 16px;
-    background: ${COLORS.STRATUS_LIGHT}; border: 1px solid ${COLORS.STRATUS_BLUE}33;
-    border-radius: 8px; margin: 8px 0; font-family: -apple-system, sans-serif;
-    font-size: 13px; color: ${COLORS.TEXT_PRIMARY};
-  `;
-
-  const accountName = account?.name || 'Unknown Account';
-  const zohoUrl = account?.zohoUrl || '#';
-  const contactName = contact?.name || contact?.email || '';
-  const contactTitle = contact?.title || '';
-
-  banner.innerHTML = `
-    <div style="flex: 1; display: flex; align-items: center; gap: 8px;">
-      <span style="font-weight: 600; color: ${COLORS.STRATUS_DARK};">${accountName}</span>
-      ${contactName ? `<span style="color: ${COLORS.TEXT_SECONDARY};">|</span>
-        <span>${contactName}${contactTitle ? ` (${contactTitle})` : ''}</span>` : ''}
-    </div>
-    <a href="${zohoUrl}" target="_blank" rel="noopener"
-       style="color: ${COLORS.STRATUS_BLUE}; text-decoration: none; font-weight: 500; font-size: 12px;">
-      Open in Zoho &rarr;
-    </a>
-    <button class="stratus-crm-banner-close" style="
-      background: none; border: none; cursor: pointer; color: ${COLORS.TEXT_SECONDARY};
-      font-size: 16px; padding: 0 4px; line-height: 1;
-    ">&times;</button>
-  `;
-
-  // Close button
-  banner.querySelector('.stratus-crm-banner-close').addEventListener('click', () => {
-    banner.remove();
-  });
-
-  // Insert above the email content
-  const emailContainer = document.querySelector('.nH.if') || document.querySelector('.AO');
-  if (emailContainer) {
-    emailContainer.insertBefore(banner, emailContainer.firstChild);
-  }
-}
-
-// ─────────────────────────────────────────────
-// SKU Highlighting
-// ─────────────────────────────────────────────
-
-function highlightSkusInEmail() {
-  const bodyEls = document.querySelectorAll('.a3s.aiL, .ii.gt div');
-
-  bodyEls.forEach((el) => {
-    // Skip if already processed
-    if (el.dataset.stratusProcessed) return;
-    el.dataset.stratusProcessed = 'true';
-
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
-    const textNodes = [];
-    while (walker.nextNode()) {
-      textNodes.push(walker.currentNode);
-    }
-
-    textNodes.forEach((node) => {
-      // Skip text nodes inside <a> tags — highlighting breaks links (e.g. order URLs with SKUs)
-      if (node.parentElement?.closest('a')) return;
-
-      const text = node.textContent;
-      if (!SKU_PATTERN.test(text)) return;
-
-      // Reset regex lastIndex
-      SKU_PATTERN.lastIndex = 0;
-
-      const fragment = document.createDocumentFragment();
-      let lastIndex = 0;
-      let match;
-
-      while ((match = SKU_PATTERN.exec(text)) !== null) {
-        // Add text before match
-        if (match.index > lastIndex) {
-          fragment.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
-        }
-
-        // Create highlighted span
-        const span = document.createElement('span');
-        span.className = 'stratus-sku-highlight';
-        span.textContent = match[0];
-        span.dataset.sku = match[0].toUpperCase();
-        span.style.cssText = `
-          background: ${COLORS.STRATUS_LIGHT}; border: 1px solid ${COLORS.STRATUS_BLUE}44;
-          border-radius: 3px; padding: 0 3px; cursor: pointer; font-weight: 500;
-        `;
-
-        // Tooltip on hover (async price lookup)
-        span.addEventListener('mouseenter', handleSkuHover);
-        span.addEventListener('click', handleSkuClick);
-
-        fragment.appendChild(span);
-        lastIndex = match.index + match[0].length;
-      }
-
-      // Add remaining text
-      if (lastIndex < text.length) {
-        fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
-      }
-
-      node.parentNode.replaceChild(fragment, node);
-    });
-  });
-}
-
-async function handleSkuHover(event) {
-  const span = event.target;
-  const sku = span.dataset.sku;
-
-  // Show loading tooltip
-  let tooltip = document.querySelector('.stratus-sku-tooltip');
-  if (!tooltip) {
-    tooltip = document.createElement('div');
-    tooltip.className = 'stratus-sku-tooltip';
-    tooltip.style.cssText = `
-      position: fixed; z-index: 99999; background: white; border: 1px solid ${COLORS.BORDER};
-      border-radius: 8px; padding: 10px 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-      font-size: 12px; font-family: -apple-system, sans-serif; max-width: 280px;
-      pointer-events: none;
-    `;
-    document.body.appendChild(tooltip);
-  }
-
-  const rect = span.getBoundingClientRect();
-  tooltip.style.left = `${rect.left}px`;
-  tooltip.style.top = `${rect.bottom + 6}px`;
-  tooltip.innerHTML = `<div style="color: ${COLORS.TEXT_SECONDARY};">Loading ${sku}...</div>`;
-  tooltip.style.display = 'block';
-
-  // Fetch price from background
-  try {
-    const price = await sendToBackground(MSG.GET_PRICE, { sku });
-    if (price) {
-      tooltip.innerHTML = `
-        <div style="font-weight: 600; color: ${COLORS.STRATUS_DARK}; margin-bottom: 4px;">${sku}</div>
-        <div>List: $${price.list?.toLocaleString() || 'N/A'}</div>
-        <div>Ecomm: $${price.ecomm?.toLocaleString() || 'N/A'}</div>
-        <div style="color: ${COLORS.TEXT_SECONDARY}; margin-top: 4px; font-size: 11px;">Click to add to quote</div>
-      `;
-    } else {
-      tooltip.innerHTML = `
-        <div style="font-weight: 600; color: ${COLORS.STRATUS_DARK};">${sku}</div>
-        <div style="color: ${COLORS.TEXT_SECONDARY};">Pricing not cached. Click to quote.</div>
-      `;
-    }
-  } catch {
-    tooltip.innerHTML = `<div style="font-weight: 600;">${sku}</div>`;
-  }
-
-  // Hide tooltip on mouse leave
-  span.addEventListener('mouseleave', () => {
-    tooltip.style.display = 'none';
-  }, { once: true });
-}
-
-function handleSkuClick(event) {
-  const sku = event.target.dataset.sku;
-  // Open sidebar with quote panel pre-filled with this SKU
-  sendToBackground(MSG.SIDEBAR_NAVIGATE, { panel: 'quote', data: { skuText: sku } }).catch(() => {});
 }
 
 // ─────────────────────────────────────────────
@@ -979,187 +782,9 @@ function getComposeSubject(composeEl) {
   return subjectInput?.value || '';
 }
 
-/**
- * Extract the original/quoted email from a Gmail compose window.
- * Gmail wraps the quoted text in a div.gmail_quote inside the compose body.
- * Also extracts sender info from the "On [date], [name] <email> wrote:" line.
- */
-function getComposeQuotedEmail(composeEl) {
-  const bodyEl = composeEl.querySelector('[role="textbox"][aria-label*="Body"], div[aria-label*="Message Body"], .Am.Al.editable');
-  if (!bodyEl) return { body: '', senderEmail: '', senderName: '' };
-
-  // Try gmail_quote first (standard reply format)
-  const quoteEl = bodyEl.querySelector('.gmail_quote');
-  let quotedBody = '';
-  let senderEmail = '';
-  let senderName = '';
-
-  if (quoteEl) {
-    quotedBody = quoteEl.innerText.substring(0, 8000);
-    // Parse "On Mon, Apr 7, 2026 at 10:30 AM Sharon Halnyj <shalnyj@fitzfinishing.com> wrote:"
-    const quoteHeader = quoteEl.previousElementSibling?.textContent || quoteEl.textContent.split('\n')[0] || '';
-    const wroteMatch = quoteHeader.match(/([^<]+)<([^>]+)>\s*wrote/i);
-    if (wroteMatch) {
-      senderName = wroteMatch[1].trim().replace(/^.*?,\s*/, '').replace(/\s+at\s+.*/, '').trim();
-      senderEmail = wroteMatch[2].trim();
-    }
-  }
-
-  // Fallback: if no gmail_quote, look for the "--- Forwarded message ---" or "------" separator
-  if (!quotedBody) {
-    const fullText = bodyEl.innerText || '';
-    const separators = [
-      /^-+\s*Forwarded message\s*-+$/m,
-      /^On\s.+wrote:$/m,
-      /^>{1,}/m,
-    ];
-    for (const sep of separators) {
-      const match = fullText.match(sep);
-      if (match) {
-        quotedBody = fullText.substring(match.index).substring(0, 8000);
-        break;
-      }
-    }
-  }
-
-  // If we still don't have sender info, try the compose recipients (they ARE the original sender in a reply)
-  if (!senderEmail) {
-    const recipients = getComposeRecipients(composeEl);
-    if (recipients.length > 0) senderEmail = recipients[0];
-  }
-
-  // Try to get sender name from recipient chip
-  if (!senderName && senderEmail) {
-    const chipEl = composeEl.querySelector(`span[email="${senderEmail}"]`);
-    if (chipEl) {
-      senderName = chipEl.getAttribute('name') || chipEl.textContent.trim();
-    }
-  }
-
-  return { body: quotedBody, senderEmail, senderName };
-}
-
-/**
- * Show inline draft reply popup attached to a compose window.
- * Self-contained — no sidebar dependency.
- */
-function showComposeDraftPopup(composeEl, drafts, subject) {
-  // Remove existing popup
-  document.querySelector('.stratus-draft-popup')?.remove();
-
-  const popup = document.createElement('div');
-  popup.className = 'stratus-draft-popup';
-  popup.style.cssText = `
-    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    z-index: 99999; background: white; border-radius: 12px;
-    box-shadow: 0 8px 40px rgba(0,0,0,0.25), 0 2px 8px rgba(0,0,0,0.1);
-    font-family: -apple-system, BlinkMacSystemFont, 'Google Sans', sans-serif;
-    max-width: 540px; width: 90vw; max-height: 80vh; overflow-y: auto;
-    border: 1px solid #e0e0e0; animation: stratusSlideIn 0.2s ease;
-  `;
-
-  // Inject keyframe if needed
-  if (!document.querySelector('#stratus-popup-style')) {
-    const style = document.createElement('style');
-    style.id = 'stratus-popup-style';
-    style.textContent = '@keyframes stratusSlideIn { from { opacity:0; transform:translate(-50%,-50%) translateY(16px); } to { opacity:1; transform:translate(-50%,-50%) translateY(0); } }';
-    document.head.appendChild(style);
-  }
-
-  // Header
-  const header = document.createElement('div');
-  header.style.cssText = `
-    display: flex; align-items: center; gap: 10px; padding: 16px 20px;
-    border-bottom: 1px solid #e8e8e8; background: #f8f9fa; border-radius: 12px 12px 0 0;
-  `;
-  header.innerHTML = `
-    <div style="width:36px;height:36px;border-radius:50%;background:${COLORS.STRATUS_BLUE};display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:16px;">S</div>
-    <div>
-      <div style="font-weight:600;font-size:14px;color:#202124;">Choose a Draft</div>
-      <div style="font-size:12px;color:#5f6368;">Select the reply you prefer</div>
-    </div>
-    <div style="margin-left:auto;cursor:pointer;font-size:20px;color:#5f6368;padding:4px 8px;" class="stp-close">✕</div>
-  `;
-  popup.appendChild(header);
-
-  // Draft options
-  drafts.forEach((draft, i) => {
-    const draftBody = typeof draft === 'string' ? draft : (draft.body || draft.text || '');
-    const section = document.createElement('div');
-    section.style.cssText = `padding: 16px 20px; ${i > 0 ? 'border-top: 1px solid #e8e8e8;' : ''}`;
-
-    const label = document.createElement('div');
-    label.style.cssText = 'font-size: 12px; color: #5f6368; margin-bottom: 8px; font-weight: 500;';
-    label.textContent = `Option ${i + 1}`;
-    section.appendChild(label);
-
-    const preview = document.createElement('div');
-    preview.style.cssText = 'font-size: 13px; color: #202124; line-height: 1.5; margin-bottom: 10px; white-space: pre-wrap;';
-    preview.textContent = draftBody.length > 400 ? draftBody.substring(0, 400) + '…' : draftBody;
-    section.appendChild(preview);
-
-    const useBtn = document.createElement('button');
-    useBtn.style.cssText = `
-      padding: 8px 16px; background: ${COLORS.STRATUS_BLUE}; color: white;
-      border: none; border-radius: 8px; font-size: 12px; font-weight: 600;
-      cursor: pointer; transition: background 0.2s;
-    `;
-    useBtn.textContent = `Use Option ${i + 1}`;
-    useBtn.addEventListener('mouseenter', () => { useBtn.style.background = COLORS.STRATUS_DARK; });
-    useBtn.addEventListener('mouseleave', () => { useBtn.style.background = COLORS.STRATUS_BLUE; });
-    useBtn.addEventListener('click', () => {
-      // Insert draft into compose body
-      const bodyInput = composeEl.querySelector('[role="textbox"][aria-label*="Body"], div[aria-label*="Message Body"], .Am.Al.editable');
-      if (bodyInput) {
-        // Preserve the quoted email — insert draft BEFORE the quote
-        const quoteEl = bodyInput.querySelector('.gmail_quote');
-        if (quoteEl) {
-          const draftNode = document.createElement('div');
-          draftNode.innerHTML = draftBody.replace(/\n/g, '<br>');
-          draftNode.innerHTML += '<br>';
-          bodyInput.insertBefore(draftNode, quoteEl);
-        } else {
-          // No quote — just set the body
-          bodyInput.innerHTML = draftBody.replace(/\n/g, '<br>') + (bodyInput.innerHTML || '');
-        }
-        bodyInput.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      popup.remove();
-      overlay.remove();
-    });
-    section.appendChild(useBtn);
-    popup.appendChild(section);
-  });
-
-  // Back/close button
-  const footer = document.createElement('div');
-  footer.style.cssText = 'padding: 12px 20px; border-top: 1px solid #e8e8e8; text-align: center;';
-  const backBtn = document.createElement('button');
-  backBtn.style.cssText = `
-    padding: 8px 20px; background: transparent; border: 1px solid #dadce0;
-    border-radius: 8px; font-size: 12px; cursor: pointer; color: ${COLORS.STRATUS_BLUE};
-    font-weight: 500;
-  `;
-  backBtn.textContent = '← Back';
-  backBtn.addEventListener('click', () => { popup.remove(); overlay.remove(); });
-  footer.appendChild(backBtn);
-  popup.appendChild(footer);
-
-  // Overlay
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.3);z-index:99998;';
-  overlay.addEventListener('click', () => { popup.remove(); overlay.remove(); });
-
-  // Close button handler
-  popup.querySelector('.stp-close').addEventListener('click', () => { popup.remove(); overlay.remove(); });
-
-  document.body.appendChild(overlay);
-  document.body.appendChild(popup);
-}
-
 function injectComposeButton(composeEl) {
-  // Check if already injected
-  if (composeEl.querySelector('.stratus-compose-btn')) return;
+  // Check if already injected (keyed on the surviving Send + Task button)
+  if (composeEl.querySelector('.stratus-send-task-btn')) return;
 
   const toolbar = composeEl.querySelector('.btC') || composeEl.querySelector('[role="toolbar"]');
   if (!toolbar) return;
@@ -1280,124 +905,8 @@ function injectComposeButton(composeEl) {
     }, 3000);
   });
 
-  // ── Stratus AI button (self-contained draft reply, no sidebar dependency) ──
-  const btn = document.createElement('div');
-  btn.className = 'stratus-compose-btn';
-  btn.title = 'Generate AI Draft Reply';
-  btn.style.cssText = `
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
-    background: ${COLORS.STRATUS_BLUE}; color: white; font-size: 14px;
-    font-weight: 700; margin-left: 6px; transition: background 0.2s;
-    position: relative; z-index: 10;
-  `;
-  btn.textContent = 'S';
-  btn.addEventListener('mouseenter', () => { if (!btn._busy) btn.style.background = COLORS.STRATUS_DARK; });
-  btn.addEventListener('mouseleave', () => { if (!btn._busy) btn.style.background = COLORS.STRATUS_BLUE; });
-  btn.addEventListener('click', async () => {
-    if (btn._busy) return;
-
-    // Show tone picker dropdown
-    document.querySelector('.stratus-tone-picker')?.remove();
-    const picker = document.createElement('div');
-    picker.className = 'stratus-tone-picker';
-    picker.style.cssText = `
-      position: absolute; bottom: 40px; right: 0; z-index: 99999;
-      background: white; border-radius: 8px; padding: 6px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.2), 0 1px 4px rgba(0,0,0,0.1);
-      font-family: -apple-system, BlinkMacSystemFont, 'Google Sans', sans-serif;
-      display: flex; flex-direction: column; gap: 2px; min-width: 130px;
-    `;
-
-    const tones = ['warm', 'professional', 'brief', 'follow-up'];
-    tones.forEach(t => {
-      const opt = document.createElement('div');
-      opt.style.cssText = `
-        padding: 7px 12px; font-size: 12px; cursor: pointer; border-radius: 5px;
-        color: #202124; text-transform: capitalize; transition: background 0.15s;
-      `;
-      opt.textContent = t;
-      opt.addEventListener('mouseenter', () => { opt.style.background = '#e8f0fe'; });
-      opt.addEventListener('mouseleave', () => { opt.style.background = 'transparent'; });
-      opt.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        picker.remove();
-        btn._busy = true;
-        btn.textContent = '…';
-        btn.style.background = COLORS.STRATUS_DARK;
-        btn.style.cursor = 'default';
-
-        try {
-          const subject = getComposeSubject(composeEl);
-          const { body, senderEmail, senderName } = getComposeQuotedEmail(composeEl);
-
-          if (!senderEmail && !body) {
-            const threadData = extractEmailData();
-            if (threadData) {
-              const result = await sendToBackground(MSG.DRAFT_REPLY, {
-                subject: threadData.subject || subject,
-                body: threadData.body || '',
-                senderEmail: threadData.customerEmail || threadData.senderEmail || '',
-                senderName: threadData.senderName || '',
-                tone: t,
-                instructions: '',
-              });
-              if (result?.drafts?.length) {
-                showComposeDraftPopup(composeEl, result.drafts, subject);
-              } else {
-                showSendConfirmation('Could not generate drafts. Try the sidebar instead.');
-              }
-              return;
-            }
-            showSendConfirmation('No email context found. Open an email thread and reply to use this feature.');
-            return;
-          }
-
-          const result = await sendToBackground(MSG.DRAFT_REPLY, {
-            subject,
-            body,
-            senderEmail,
-            senderName,
-            tone: t,
-            instructions: '',
-          });
-
-          if (result?.drafts?.length) {
-            showComposeDraftPopup(composeEl, result.drafts, subject);
-          } else if (result?.draft) {
-            showComposeDraftPopup(composeEl, [result.draft], subject);
-          } else {
-            showSendConfirmation('No drafts generated. Check the email context and try again.');
-          }
-        } catch (err) {
-          console.error('[Stratus] Draft reply error:', err);
-          showSendConfirmation('Draft failed: ' + (err.message || 'connection error'));
-        } finally {
-          btn.textContent = 'S';
-          btn.style.background = COLORS.STRATUS_BLUE;
-          btn.style.cursor = 'pointer';
-          btn._busy = false;
-        }
-      });
-      picker.appendChild(opt);
-    });
-
-    // Position relative to button
-    btn.style.position = 'relative';
-    btn.appendChild(picker);
-
-    // Close picker on outside click
-    const closePicker = (e) => {
-      if (!picker.contains(e.target) && e.target !== btn) {
-        picker.remove();
-        document.removeEventListener('click', closePicker);
-      }
-    };
-    setTimeout(() => document.addEventListener('click', closePicker), 0);
-  });
-
-  // Append both buttons: S first, then Send+Task (right-side group)
-  toolbar.appendChild(btn);
+  // Append the Send + Task button. The round "S" AI-draft button was removed
+  // 2026-06-17 — draft-reply generation now lives in the sidebar Chat tab.
   toolbar.appendChild(sendTaskBtn);
 }
 
@@ -1774,19 +1283,17 @@ function checkForEmailView() {
 const observer = new MutationObserver((mutations) => {
   checkForEmailView();
 
-  // Debounced compose button injection (300ms)
-  if (settings?.enableComposeButton) {
-    if (_composeCheckTimer) clearTimeout(_composeCheckTimer);
-    _composeCheckTimer = setTimeout(() => {
-      _composeCheckTimer = null;
-      document.querySelectorAll('.T-I.J-J5-Ji').forEach((el) => {
-        const composeContainer = el.closest('.nH');
-        if (composeContainer) {
-          injectComposeButton(composeContainer);
-        }
-      });
-    }, 300);
-  }
+  // Debounced Send + Task button injection (300ms)
+  if (_composeCheckTimer) clearTimeout(_composeCheckTimer);
+  _composeCheckTimer = setTimeout(() => {
+    _composeCheckTimer = null;
+    document.querySelectorAll('.T-I.J-J5-Ji').forEach((el) => {
+      const composeContainer = el.closest('.nH');
+      if (composeContainer) {
+        injectComposeButton(composeContainer);
+      }
+    });
+  }, 300);
 });
 
 // Start observing Gmail DOM — observe attributes too for Gmail SPA transitions
@@ -1897,13 +1404,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       return true;
 
-    case MSG.CRM_DATA_READY:
-      if (settings?.enableCrmBanner) {
-        injectCrmBanner(message.data);
-      }
-      sendResponse({ success: true });
-      break;
-
     case MSG.GET_FULL_EMAIL_CONTEXT:
       sendResponse(extractEmailData({ includeFullThread: true }) || { empty: true });
       break;
@@ -1918,11 +1418,7 @@ function onHashChange() {
   if (currentHash !== lastHash) {
     lastHash = currentHash;
     lastEmailHash = ''; // Reset to trigger re-detection
-    // Clean up old banners and highlights
-    document.querySelectorAll('.stratus-crm-banner').forEach(el => el.remove());
-    document.querySelectorAll('[data-stratus-processed]').forEach(el => {
-      el.removeAttribute('data-stratus-processed');
-    });
+    // Clean up stale per-thread processing markers
     document.querySelectorAll('[data-stratus-deals-processed]').forEach(el => {
       el.removeAttribute('data-stratus-deals-processed');
     });

@@ -7,13 +7,18 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { sendToBackground, onMessage } from '../../lib/messaging';
-import { MSG, COLORS } from '../../lib/constants';
+import { MSG, COLORS, SKU_PATTERN } from '../../lib/constants';
 import {
   parseZohoRecordUrl,
   contextMatchesUrl,
   minimalContextFromUrl,
 } from '../../lib/zoho-url.js';
-// Quote generation routed through worker API (same engine as Webex/GChat bots)
+import QuoteResult from '../components/QuoteResult';
+import EmailAnalysisResult from '../components/EmailAnalysisResult';
+// Quoting + screenshot parsing routed through the worker API (the same
+// deterministic engine the Webex/GChat bots use), consolidated into Chat
+// 2026-06-17 when the standalone Quote and Email tabs were removed.
+import { runQuote, analyzeImage, orderSummaryFromResult } from '../../lib/quote-client';
 
 // Per-tab storage key prefix — must match the background service worker.
 // Reading by tab id ensures the chat panel never picks up a different
@@ -108,6 +113,54 @@ function renderMarkdown(text) {
   });
 }
 
+// Small "Copy" affordance shown under assistant replies and drafts.
+function CopyButton({ text }) {
+  const [done, setDone] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    setDone(true);
+    setTimeout(() => setDone(false), 1500);
+  }
+  return (
+    <button
+      onClick={copy}
+      title="Copy to clipboard"
+      style={{
+        marginTop: 6, background: 'none', border: 'none', padding: 0,
+        fontSize: 10, color: COLORS.STRATUS_BLUE, cursor: 'pointer', opacity: 0.8,
+      }}
+    >
+      {done ? '✓ Copied' : '⧉ Copy'}
+    </button>
+  );
+}
+
+// Chat history sent to the worker MUST have non-empty content for every turn —
+// Anthropic 400s with "messages.N.content: Field required" otherwise. Structured
+// messages (quote / analysis cards) carry no `content`, so render a short text
+// stand-in so they ride along in history without breaking the request.
+function messageHistoryText(m) {
+  if (m && m.content) return m.content;
+  if (m && m.kind === 'quote' && m.result) {
+    const urls = (m.result.urls || []).map((u) => `${u.label || 'Option'}: ${u.url}`).join('\n');
+    const head = `[Generated an ecomm quote]${m.skuText ? ` for: ${m.skuText}` : ''}`;
+    return (urls ? `${head}\n${urls}` : head).trim();
+  }
+  if (m && m.kind === 'analysis' && m.analysis) {
+    return `[Analyzed the open email]${m.analysis.summary ? `: ${m.analysis.summary}` : ''}`;
+  }
+  return (m && m.note) || '[message]';
+}
+
 const QUICK_ACTIONS = [
   { label: 'Recent Quotes', text: 'Show my most recent quotes in Zoho' },
   { label: 'Open Deals', text: 'Show my open deals in Zoho CRM' },
@@ -123,6 +176,41 @@ function isQuoteFromEmailRequest(text) {
     || /\bfrom (this|the|current) (email|thread|conversation)\b/.test(value)
     || /\brequested items?\b/.test(value)
     || /\bwhat (needs|need) to be quoted\b/.test(value);
+}
+
+// Detect a deterministic ecommerce/URL quote request (the Webex-bot path: SKUs
+// in → 1/3/5-year order links out). Deliberately conservative: anything that
+// targets Zoho/CRM, references "this quote/deal", asks to modify a record, or
+// quotes from the email goes to the CRM agent (/api/chat) instead.
+function isEcommQuoteRequest(text) {
+  const v = (text || '').toLowerCase().trim();
+  if (!v) return false;
+  if (/\b(zoho|crm)\b/.test(v)) return false;
+  if (isQuoteFromEmailRequest(text)) return false;
+  if (/\b(add|remove|update|change|modify|edit|append|delete|convert|attach)\b/.test(v)) return false;
+  if (/\b(this|that|the)\s+(quote|deal|order|account|invoice|so|po)\b/.test(v)) return false;
+  SKU_PATTERN.lastIndex = 0;
+  // SKU_PATTERN doesn't cover the synthetic MR-ENT / "MR Enterprise" token,
+  // which quote-client handles — match it explicitly so typed MR-ENT asks
+  // still route to the deterministic engine.
+  const hasSku = SKU_PATTERN.test(text) || /\b(MR[-_]ENT|MR\s+Enterprise)\b/i.test(text);
+  SKU_PATTERN.lastIndex = 0;
+  if (!hasSku) return false;
+  const wantsQuote = /\b(quote|price|pricing|cost|order link|order url|url quote|ecomm|e-comm|ecommerce|buy|purchase|co-?term|link|links)\b/.test(v);
+  const skuDominant = /^\s*(\d+\s*[xX×]?\s*)?(mr|ms|mx|cw|mv|mt|mg|z\d|c9|lic-)/i.test(v) && v.length <= 160;
+  return wantsQuote || skuDominant;
+}
+
+// A short follow-up about an ALREADY-generated quote ("cost of option 2",
+// "hardware only", "the 3-year option") carries no SKU, so it would otherwise
+// fall through to the CRM agent. Route it back to the deterministic engine
+// (same personId quote session) — but only when a prior quote exists in the
+// thread, and never for Zoho/CRM/email asks.
+function isQuoteFollowUp(text) {
+  const v = (text || '').toLowerCase().trim();
+  if (!v || v.length > 80) return false;
+  if (/\b(zoho|crm|deal|account|invoice|task|email)\b/.test(v)) return false;
+  return /\b(option\s*\d|opt\s*\d|cost(\s+of)?|how much|price|pricing|grand total|\btotal\b|hardware[ -]?only|license[ -]?only|\d\s*-?\s*year|co-?term|cheaper|the\s+(1|3|5)\s*-?\s*year)\b/.test(v);
 }
 
 function buildRequestedQuoteEmailContext(emailContext) {
@@ -244,6 +332,11 @@ export default function ChatPanel({
   const lastSendRef = useRef(0); // Rate-limit: min 1s between sends
   // Active progress poll interval — cleared when request completes
   const progressIntervalRef = useRef(null);
+  // Persistent personId for deterministic quotes (lets the worker keep a quote
+  // session for pricing follow-ups / revisions, mirroring the old Quote tab).
+  const personIdRef = useRef('chrome-ext-chat-quote-' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now()));
+  // Hidden <input type=file> for the "Upload image" action (attachments / pasted images).
+  const fileInputRef = useRef(null);
 
   // Auto-scroll
   useEffect(() => {
@@ -360,6 +453,27 @@ export default function ChatPanel({
     if (navData?.prefillText) setInput(navData.prefillText);
   }, [navData]);
 
+  // Screenshot / image capture routed in from the right-click menu (or the
+  // in-chat 📷 button). Parsed SKUs become a deterministic quote in the thread.
+  useEffect(() => {
+    if (navData?.imageBase64) handleImageQuote(null, navData.imageBase64);
+    else if (navData?.imageUrl) handleImageQuote(navData.imageUrl, null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navData?.imageBase64, navData?.imageUrl]);
+
+  // "Quote these SKUs with Stratus" from the right-click selection menu.
+  useEffect(() => {
+    if (navData?.quoteSkuText) runAndPushQuote(navData.quoteSkuText);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navData?.quoteSkuText]);
+
+  // Email quick-actions deep-linked from keyboard shortcuts.
+  useEffect(() => {
+    if (navData?.action === 'analyze') handleAnalyzeEmail();
+    else if (navData?.action === 'draft') handleDraftReply();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navData?.action]);
+
   // Close dropdown when clicking outside
   useEffect(() => {
     if (!contextDropdownOpen) return;
@@ -401,7 +515,7 @@ export default function ChatPanel({
     try {
       const historyForApi = (messages || []).slice(-10).map(m => ({
         role: m.role,
-        content: m.content,
+        content: messageHistoryText(m),
       }));
 
       // ── Resolve the ACTIVE Zoho record from the active tab URL ─────────
@@ -737,6 +851,200 @@ export default function ChatPanel({
     }
   }, [input, loading, messages, emailContext, onMessagesChange, zohoPageContext, manualRecord, selectedContextEmail, participantOptions]);
 
+  // ─────────────────────────────────────────────
+  // Consolidated quoting + email actions (from the former Quote / Email tabs)
+  // ─────────────────────────────────────────────
+  const nextId = () => Date.now() + Math.floor(Math.random() * 1000);
+  const appendMessage = (msg) => onMessagesChange((prev) => [...(prev || []), msg]);
+  const updateMessage = (id, patch) =>
+    onMessagesChange((prev) => (prev || []).map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  const infoMsg = (text) => ({ id: nextId(), role: 'assistant', content: text, timestamp: new Date().toISOString() });
+
+  // Run the deterministic engine for free-text SKUs and push a quote card.
+  async function runAndPushQuote(skuText, { pushUser = true } = {}) {
+    const text = (skuText || '').trim();
+    if (!text || loading) return;
+    lastSendRef.current = Date.now();
+    if (pushUser) appendMessage({ id: nextId(), role: 'user', content: text, timestamp: new Date().toISOString() });
+    setLoading(true);
+    setError(null);
+    const { result, error } = await runQuote(text, personIdRef.current);
+    setLoading(false);
+    if (error) { appendMessage(infoMsg(`⚠️ ${error}`)); return; }
+    appendMessage({ id: nextId(), role: 'assistant', kind: 'quote', result, skuText: text, timestamp: new Date().toISOString() });
+  }
+
+  // Apply / stack a "did you mean?" suggestion: re-quote and replace the card.
+  async function handleQuoteSuggestion(msg, suggestion, mode) {
+    if (loading) return;
+    const base = msg.skuText || '';
+    const replacement = suggestion.suggest && suggestion.suggest[0];
+    if (!replacement) return;
+    let newText;
+    if (mode === 'apply') {
+      const escaped = String(suggestion.input).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(escaped + '(?![A-Z0-9-])', 'gi');
+      newText = base.replace(re, replacement);
+      if (newText === base) newText = replacement;
+    } else {
+      newText = base.trim() ? `${base.trim()}, ${replacement}` : replacement;
+    }
+    updateMessage(msg.id, { busy: true });
+    setLoading(true);
+    setError(null);
+    const { result, error } = await runQuote(newText, personIdRef.current);
+    setLoading(false);
+    if (error) { updateMessage(msg.id, { busy: false }); appendMessage(infoMsg(`⚠️ ${error}`)); return; }
+    updateMessage(msg.id, { result, skuText: newText, busy: false });
+  }
+
+  // Vision: parse a screenshot/dashboard image into SKUs and quote them.
+  async function handleImageQuote(imageUrl, imageBase64) {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    const out = await analyzeImage(imageUrl, imageBase64);
+    if (out.error) { setLoading(false); appendMessage(infoMsg(`⚠️ ${out.error}`)); return; }
+    if (out.kind === 'message') { setLoading(false); appendMessage(infoMsg(out.note)); return; }
+    if (out.kind === 'result') {
+      setLoading(false);
+      appendMessage({ id: nextId(), role: 'assistant', kind: 'quote', result: out.result, note: out.note, eolMapping: out.eolMapping, skuText: (out.detectedSkus || []).join(', '), timestamp: new Date().toISOString() });
+      return;
+    }
+    // kind === 'skus' → run the deterministic engine on the detected SKUs.
+    const { result, error } = await runQuote(out.skuText, personIdRef.current);
+    setLoading(false);
+    if (error) { appendMessage(infoMsg(`⚠️ ${error}`)); return; }
+    appendMessage({ id: nextId(), role: 'assistant', kind: 'quote', result, note: out.note, eolMapping: out.eolMapping, skuText: out.skuText, timestamp: new Date().toISOString() });
+  }
+
+  async function handleCaptureScreenshot() {
+    if (loading) return;
+    try {
+      const cap = await sendToBackground(MSG.CAPTURE_TAB, {});
+      if (!cap || !cap.success) throw new Error(cap?.error || 'Screenshot capture failed');
+      await handleImageQuote(null, cap.base64);
+    } catch (err) {
+      appendMessage(infoMsg('⚠️ Screenshot capture failed: ' + (err?.message || err)));
+    }
+  }
+
+  // Upload or paste an image (e.g. a dashboard that arrived as an email
+  // attachment, or a screenshot copied to the clipboard) → parse SKUs → quote,
+  // same pipeline as the capture button.
+  function handleImageFile(file) {
+    if (!file || !file.type || !file.type.startsWith('image/')) {
+      appendMessage(infoMsg("That doesn't look like an image file. Use a PNG/JPG of the dashboard."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+      if (base64) handleImageQuote(null, base64);
+    };
+    reader.onerror = () => appendMessage(infoMsg('⚠️ Could not read that image file.'));
+    reader.readAsDataURL(file);
+  }
+
+  // Paste an image straight into the chat input (Cmd/Ctrl-V) to quote it.
+  function handlePasteImage(e) {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.type && it.type.startsWith('image/')) {
+        const file = it.getAsFile();
+        if (file) { e.preventDefault(); handleImageFile(file); return; }
+      }
+    }
+  }
+
+  // Draft a reply to the current Gmail thread. Any text in the input box is
+  // used as optional instructions. Output gets a Copy button.
+  async function handleDraftReply() {
+    if (loading) return;
+    if (!emailContext) { appendMessage(infoMsg('Open an email thread in Gmail, then use "Reply to email".')); return; }
+    const instructions = input.trim();
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await sendToBackground(MSG.DRAFT_REPLY, {
+        subject: emailContext.subject,
+        body: emailContext.body,
+        senderEmail: emailContext.senderEmail,
+        senderName: emailContext.senderName,
+        tone: 'professional',
+        instructions,
+      });
+      const drafts = (result && result.drafts) || (result && result.draft ? [result.draft] : []);
+      if (!drafts.length) {
+        appendMessage(infoMsg('No draft generated. Try again, or add instructions in the input box first.'));
+      } else {
+        if (instructions) setInput('');
+        drafts.forEach((d, i) => appendMessage({
+          id: nextId() + i,
+          role: 'assistant',
+          kind: 'draft',
+          content: typeof d === 'string' ? d : (d.body || d.text || ''),
+          label: drafts.length > 1 ? `Draft option ${i + 1}` : 'Draft reply',
+          timestamp: new Date().toISOString(),
+        }));
+      }
+    } catch (err) {
+      appendMessage(infoMsg('⚠️ Draft failed: ' + (err?.message || err)));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Analyze the current Gmail thread (summary / urgency / action items / SKUs).
+  async function handleAnalyzeEmail() {
+    if (loading) return;
+    if (!emailContext) { appendMessage(infoMsg('Open an email in Gmail, then use "Analyze email".')); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      const analysis = await sendToBackground(MSG.ANALYZE_EMAIL, {
+        subject: emailContext.subject,
+        body: emailContext.body,
+        senderEmail: emailContext.senderEmail,
+        senderName: emailContext.senderName,
+      });
+      if (!analysis || (!analysis.summary && !analysis.actionItems?.length && !analysis.detectedSkus?.length)) {
+        appendMessage(infoMsg('No analysis returned for this email.'));
+      } else {
+        appendMessage({ id: nextId(), role: 'assistant', kind: 'analysis', analysis, timestamp: new Date().toISOString() });
+      }
+    } catch (err) {
+      appendMessage(infoMsg('⚠️ Analysis failed: ' + (err?.message || err)));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Hand a finished ecomm quote to the CRM agent to create a Zoho quote.
+  // selectedUrlIdx is the term the user copied/opened in the card.
+  function handleSendQuoteToZoho(result, selectedUrlIdx = 0) {
+    const { orderUrl, skuSummary } = orderSummaryFromResult(result, selectedUrlIdx);
+    let text = 'Create a Zoho CRM quote from this Stratus quote';
+    if (orderUrl) text += `: ${orderUrl}`;
+    if (skuSummary) text += `\nLine items: ${skuSummary}`;
+    handleSendMessage(text);
+  }
+
+  // Send dispatcher: route obvious ecomm-quote asks to the deterministic
+  // engine; everything else goes to the CRM chat agent.
+  function handleSend(overrideText) {
+    const text = overrideText || input.trim();
+    if (!text || loading) return;
+    const hasPriorQuote = (messages || []).some((m) => m.kind === 'quote');
+    if (isEcommQuoteRequest(text) || (hasPriorQuote && isQuoteFollowUp(text))) {
+      if (!overrideText) setInput('');
+      runAndPushQuote(text);
+    } else {
+      handleSendMessage(overrideText);
+    }
+  }
+
   // ── Manual CRM search (inside context dropdown) ──
   const handleCrmSearch = useCallback(async () => {
     const q = searchQuery.trim();
@@ -837,11 +1145,18 @@ export default function ChatPanel({
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSendMessage();
+      handleSend();
     }
   };
 
   const msgList = messages || [];
+
+  const chipStyle = (disabled) => ({
+    padding: '5px 10px', background: COLORS.BG_SECONDARY,
+    color: COLORS.STRATUS_BLUE, border: `1px solid ${COLORS.STRATUS_BLUE}33`,
+    borderRadius: 14, fontSize: 11, fontWeight: 600,
+    cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.5 : 1,
+  });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: COLORS.BG_PRIMARY }}>
@@ -855,10 +1170,12 @@ export default function ChatPanel({
             <div style={{ fontSize: 28, marginBottom: 8 }}>💬</div>
             <p style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 16 }}>
               Chat with Stratus AI. Full Zoho CRM access — create deals, quotes, look up accounts, manage tasks.
+              Ask for an ecomm quote (e.g. <em>"quote 10 MR44 with 3yr license"</em>) to get 1/3/5-year order links,
+              or use the actions below the input to reply to or analyze the open email.
             </p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center' }}>
               {QUICK_ACTIONS.map((action, i) => (
-                <button key={i} onClick={() => handleSendMessage(action.text)}
+                <button key={i} onClick={() => handleSend(action.text)}
                   style={{
                     padding: '6px 12px', background: COLORS.STRATUS_LIGHT,
                     color: COLORS.STRATUS_BLUE, border: `1px solid ${COLORS.STRATUS_BLUE}33`,
@@ -874,22 +1191,86 @@ export default function ChatPanel({
           </div>
         )}
 
-        {msgList.map((msg) => (
-          <div key={msg.id} style={{
-            alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-            maxWidth: '90%', padding: '8px 12px', borderRadius: 8,
-            background: msg.role === 'user' ? COLORS.STRATUS_BLUE : COLORS.BG_SECONDARY,
-            color: msg.role === 'user' ? 'white' : COLORS.TEXT_PRIMARY,
-            fontSize: 13, lineHeight: 1.5, wordWrap: 'break-word',
-          }}>
-            {msg.role === 'assistant' ? renderMarkdown(msg.content) : msg.content}
-            {msg.usedTools && (
-              <div style={{ fontSize: 10, color: msg.role === 'user' ? '#ffffff99' : '#7b1fa2', marginTop: 4 }}>
-                Used CRM tools
+        {msgList.map((msg) => {
+          // Deterministic ecomm quote card (1/3/5-yr URLs + refresh suggestions)
+          if (msg.role === 'assistant' && msg.kind === 'quote') {
+            return (
+              <div key={msg.id} style={{
+                alignSelf: 'stretch', maxWidth: '100%', padding: '10px 12px',
+                borderRadius: 8, background: COLORS.BG_SECONDARY, fontSize: 13,
+              }}>
+                {msg.note && (
+                  <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>{msg.note}</div>
+                )}
+                {msg.eolMapping && msg.eolMapping.length > 0 && (
+                  <div style={{
+                    marginBottom: 8, padding: 8, background: '#fef7e0',
+                    border: '1px solid #fbbc0433', borderRadius: 8,
+                  }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#e37400', marginBottom: 4 }}>
+                      EOL → Replacement
+                    </div>
+                    {msg.eolMapping.map((line, idx) => (
+                      <div key={idx} style={{ fontSize: 12, color: COLORS.TEXT_PRIMARY, padding: '1px 0' }}>{line}</div>
+                    ))}
+                  </div>
+                )}
+                <QuoteResult
+                  result={msg.result}
+                  busy={msg.busy}
+                  onApplySuggestion={(s) => handleQuoteSuggestion(msg, s, 'apply')}
+                  onStackSuggestion={(s) => handleQuoteSuggestion(msg, s, 'stack')}
+                  onSendToZoho={handleSendQuoteToZoho}
+                />
               </div>
-            )}
-          </div>
-        ))}
+            );
+          }
+          // Email analysis card
+          if (msg.role === 'assistant' && msg.kind === 'analysis') {
+            return (
+              <div key={msg.id} style={{
+                alignSelf: 'stretch', maxWidth: '100%', padding: '10px 12px',
+                borderRadius: 8, background: COLORS.BG_SECONDARY,
+              }}>
+                <EmailAnalysisResult analysis={msg.analysis} onQuoteSkus={(t) => runAndPushQuote(t)} />
+              </div>
+            );
+          }
+          // Draft reply (copy-only handoff)
+          if (msg.role === 'assistant' && msg.kind === 'draft') {
+            return (
+              <div key={msg.id} style={{
+                alignSelf: 'flex-start', maxWidth: '95%', padding: '8px 12px',
+                borderRadius: 8, background: COLORS.BG_SECONDARY, color: COLORS.TEXT_PRIMARY,
+                fontSize: 13, lineHeight: 1.5,
+              }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 4 }}>
+                  {msg.label || 'Draft reply'}
+                </div>
+                <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                <CopyButton text={msg.content} />
+              </div>
+            );
+          }
+          // Default text bubble (user message or CRM-agent reply)
+          return (
+            <div key={msg.id} style={{
+              alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              maxWidth: '90%', padding: '8px 12px', borderRadius: 8,
+              background: msg.role === 'user' ? COLORS.STRATUS_BLUE : COLORS.BG_SECONDARY,
+              color: msg.role === 'user' ? 'white' : COLORS.TEXT_PRIMARY,
+              fontSize: 13, lineHeight: 1.5, wordWrap: 'break-word',
+            }}>
+              {msg.role === 'assistant' ? renderMarkdown(msg.content) : msg.content}
+              {msg.usedTools && (
+                <div style={{ fontSize: 10, color: msg.role === 'user' ? '#ffffff99' : '#7b1fa2', marginTop: 4 }}>
+                  Used CRM tools
+                </div>
+              )}
+              {msg.role === 'assistant' && msg.content && <CopyButton text={msg.content} />}
+            </div>
+          );
+        })}
 
         {loading && (
           <div style={{
@@ -1316,12 +1697,44 @@ export default function ChatPanel({
           </div>
         </div>
 
+        {/* Consolidated quick actions: screenshot quote + email reply/analyze */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+          <button onClick={handleCaptureScreenshot} disabled={loading} style={chipStyle(loading)}
+            title="Capture the visible browser tab and quote the SKUs shown in it">
+            📷 Screenshot quote
+          </button>
+          <button onClick={() => fileInputRef.current && fileInputRef.current.click()} disabled={loading} style={chipStyle(loading)}
+            title="Upload or paste a dashboard image (use this when it's an email attachment, not shown on screen)">
+            🖼️ Upload image
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) handleImageFile(f); e.target.value = ''; }}
+          />
+          {emailContext && (
+            <button onClick={handleDraftReply} disabled={loading} style={chipStyle(loading)}
+              title="Draft a reply to the open email (uses input box text as instructions)">
+              ✉️ Reply to email
+            </button>
+          )}
+          {emailContext && (
+            <button onClick={handleAnalyzeEmail} disabled={loading} style={chipStyle(loading)}
+              title="Analyze the open email">
+              🔎 Analyze email
+            </button>
+          )}
+        </div>
+
         <div style={{ display: 'flex', gap: 8 }}>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder={loading ? 'Working on it...' : 'Ask about CRM, quotes, accounts...'}
+            onPaste={handlePasteImage}
+            placeholder={loading ? 'Working on it...' : 'Ask, quote SKUs, or paste a dashboard image...'}
             disabled={loading}
             style={{
               flex: 1, padding: '8px 12px', border: `1px solid ${COLORS.BORDER}`,
@@ -1331,7 +1744,7 @@ export default function ChatPanel({
             }}
           />
           <button
-            onClick={() => handleSendMessage()}
+            onClick={() => handleSend()}
             disabled={!input.trim() || loading}
             style={{
               padding: '8px 16px',
