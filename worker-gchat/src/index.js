@@ -11882,6 +11882,155 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         };
       }
 
+      // ── Description→SKU candidate finder (R3, 2026-06-18): recover the RIGHT SKU from
+      //    free text instead of fabricating one. The SEDA C9200L case dead-ended because
+      //    the model guessed C9200L-PWR-125WAC (not a real SKU) and exact-lookup missed
+      //    with no fallback. Here we derive distinctive tokens from the DESCRIPTION (e.g.
+      //    "125W AC" → 125WAC) and match catalog keys. Local cache scan first (zero API),
+      //    then ONE bounded COQL LIKE query. zohoApiCall has no 429 retry — never fan out. ──
+      case 'find_product_candidates': {
+        const fpcDesc = String(toolInput.description || '').trim();
+        const fpcExplicit = Array.isArray(toolInput.keywords) ? toolInput.keywords : [];
+        const fpcPrefix = String(toolInput.prefix || '').trim().toUpperCase();
+        const fpcUpper = fpcDesc.toUpperCase();
+
+        // Distinctive, high-signal tokens: (1) wattage+AC/DC squashed to catalog form
+        // ("125W AC" → 125WAC, "1KW AC" → 1KWAC); (2) "config N" → C{N}; (3) alphanumeric
+        // run-tokens (len≥3) containing a digit; (4) caller-supplied keywords.
+        const fpcTokenSet = new Set();
+        for (const m of fpcUpper.matchAll(/(\d+\s*K?)\s*W?\s*(AC|DC)\b/g)) {
+          fpcTokenSet.add(m[1].replace(/\s+/g, '') + 'W' + m[2]);
+        }
+        for (const m of fpcUpper.matchAll(/CONFIG\s*-?\s*(\d+)/g)) fpcTokenSet.add('C' + m[1]);
+        for (const w of fpcUpper.split(/[^A-Z0-9]+/)) {
+          if (w.length >= 3 && /[0-9]/.test(w)) fpcTokenSet.add(w);
+        }
+        for (const k of fpcExplicit) {
+          const t = String(k || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+          if (t.length >= 2) fpcTokenSet.add(t);
+        }
+        const fpcSquash = s => String(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const fpcTokens = [...fpcTokenSet].map(fpcSquash).filter(t => t.length >= 2);
+        const fpcRank = (sku) => {
+          const sq = fpcSquash(sku);
+          let score = 0;
+          for (const t of fpcTokens) if (sq.includes(t)) score += t.length;
+          return score;
+        };
+
+        // Stage 1 — zero-API local scan over the price cache keys.
+        let fpcPool = Object.keys(prices);
+        if (fpcPrefix) {
+          const barePrefix = fpcSquash(fpcPrefix);
+          fpcPool = fpcPool.filter(k => k.toUpperCase().startsWith(fpcPrefix) || fpcSquash(k).startsWith(barePrefix));
+        }
+        const fpcLocal = fpcPool
+          .map(sku => ({ sku, score: fpcRank(sku) }))
+          .filter(x => x.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 10)
+          .map(x => {
+            const p = prices[x.sku] || {};
+            return { sku: x.sku, list_price: p.list || null, ecomm_price: p.price || null, product_id: p.zoho_product_id || null };
+          });
+
+        if (fpcLocal.length > 0) {
+          console.log(`[FIND-CANDIDATES] local cache hit: ${fpcLocal.length} for tokens [${fpcTokens.join(',')}]`);
+          return {
+            success: true,
+            source: 'local_cache',
+            tokens: fpcTokens,
+            candidates: fpcLocal,
+            hint: `Matched ${fpcLocal.length} catalog SKU(s) by description tokens [${fpcTokens.join(', ')}] with ZERO API calls. Propose the closest match and CONFIRM with the user before quoting, then resolve it via batch_product_lookup / create_deal_and_quote. If none fit, ask the user or call web_search_sku.`
+          };
+        }
+
+        // Stage 2 — ONE bounded COQL LIKE query (zohoApiCall has no 429 retry: do NOT loop).
+        if (fpcTokens.length > 0) {
+          try {
+            const likeTokens = fpcTokens.slice(0, 4).map(t => t.replace(/'/g, ''));
+            const where = likeTokens.map(t => `Product_Code like '%${t}%'`).join(' or ');
+            const prefixClause = fpcPrefix ? ` and Product_Code like '${fpcPrefix.replace(/'/g, '')}%'` : '';
+            const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where (${where})${prefixClause} limit 10`;
+            const r = await zohoApiCall('POST', 'coql', env, { select_query: coql });
+            const rows = Array.isArray(r?.data) ? r.data : [];
+            const fpcCoql = rows
+              .map(row => ({
+                sku: row.Product_Code,
+                score: fpcRank(row.Product_Code),
+                product_id: row.id,
+                product_name: row.Product_Name,
+                list_price: prices[row.Product_Code]?.list || row.Unit_Price || null,
+                ecomm_price: prices[row.Product_Code]?.price || null
+              }))
+              .sort((a, b) => b.score - a.score)
+              .slice(0, 10);
+            console.log(`[FIND-CANDIDATES] COQL returned ${fpcCoql.length} for tokens [${fpcTokens.join(',')}]`);
+            return {
+              success: true,
+              source: 'coql_catalog',
+              tokens: fpcTokens,
+              candidates: fpcCoql,
+              hint: fpcCoql.length
+                ? `Found ${fpcCoql.length} live catalog SKU(s) matching tokens [${fpcTokens.join(', ')}]. Propose the closest, CONFIRM with the user, then resolve the chosen SKU via batch_product_lookup. If none fit, call web_search_sku.`
+                : `No catalog SKU matched tokens [${fpcTokens.join(', ')}]. Ask the user for the exact SKU, or call web_search_sku to look up the canonical Cisco/Meraki part number.`
+            };
+          } catch (e) {
+            return { success: false, tokens: fpcTokens, candidates: [], error: e.message, hint: `Catalog search failed (${e.message}). Ask the user for the exact SKU or call web_search_sku.` };
+          }
+        }
+
+        return { success: true, source: 'no_tokens', tokens: [], candidates: [], hint: `No distinctive tokens found in the description. Ask the user to clarify the product, or call web_search_sku with the description.` };
+      }
+
+      // ── Web search for a canonical Cisco/Meraki SKU (R4, 2026-06-18): LAST RESORT.
+      //    Any SKU returned here is a LEAD ONLY — the model MUST re-validate it via
+      //    batch_product_lookup before it can reach a Quote (the FABRICATED PRODUCT ID
+      //    preflight already blocks unvalidated product_ids from being written). Mirrors
+      //    the CF-gateway→direct plumbing of callWebSearchEnrichment (~line 21710). ──
+      case 'web_search_sku': {
+        const wssDesc = String(toolInput.description || '').trim();
+        if (!wssDesc) return { success: false, candidates: [], error: 'description required' };
+        const wssSystem = 'You are a Cisco/Meraki product catalog assistant. Given a free-text product description, use web_search to find the exact canonical Cisco or Meraki ordering PART NUMBER(S) (SKU). Prefer official cisco.com / meraki.com / authorized-reseller pages. Return ONLY raw JSON (no markdown): {"candidates":[{"sku":"","name":"","source_url":""}]}. Use the precise ordering SKU (e.g. PWR-C5-125WAC-M), not a marketing name. Return an empty candidates array if you cannot verify a SKU from the web.';
+        const wssBody = JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 1024,
+          tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 2 }],
+          system: wssSystem,
+          messages: [{ role: 'user', content: 'Product description: ' + wssDesc }]
+        });
+        const wssHeaders = { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
+        const wssFetch = (u) => fetch(u, { method: 'POST', headers: u === ANTHROPIC_API_URL ? { ...wssHeaders, 'cf-aig-cache-ttl': '3600' } : wssHeaders, body: wssBody });
+        let wssResp;
+        try {
+          wssResp = await wssFetch(ANTHROPIC_API_URL);
+          if (wssResp.status >= 500) wssResp = await wssFetch(ANTHROPIC_API_DIRECT);
+        } catch (gwErr) {
+          try { wssResp = await wssFetch(ANTHROPIC_API_DIRECT); } catch (e) { return { success: false, candidates: [], error: 'web search failed: ' + e.message }; }
+        }
+        if (!wssResp || !wssResp.ok) return { success: false, candidates: [], error: 'web search API error: ' + (wssResp ? wssResp.status : 'no response') };
+        const wssData = await wssResp.json();
+        let wssText = '';
+        for (const b of (wssData.content || [])) if (b.type === 'text') wssText += b.text;
+        let wssParsed = {};
+        try { wssParsed = JSON.parse(wssText.replace(/```json\n?|\n?```/g, '').trim()); }
+        catch { const m = wssText.match(/\{[\s\S]*\}/); if (m) { try { wssParsed = JSON.parse(m[0]); } catch {} } }
+        const wssRaw = Array.isArray(wssParsed.candidates) ? wssParsed.candidates : [];
+        const wssCandidates = wssRaw.map(c => {
+          const sku = String(c?.sku || '').trim().toUpperCase();
+          return { sku, name: c?.name || null, source_url: c?.source_url || null, in_catalog: !!(sku && prices[sku]?.zoho_product_id) };
+        }).filter(c => c.sku);
+        console.log(`[WEB-SEARCH-SKU] ${wssCandidates.length} candidate(s) for "${wssDesc.slice(0, 60)}"`);
+        return {
+          success: true,
+          source: 'web_search',
+          candidates: wssCandidates,
+          hint: wssCandidates.length
+            ? `Web SKU candidates are LEADS, not confirmed. MANDATORY: re-run batch_product_lookup on the chosen SKU and quote it ONLY if it resolves to a real product_id. in_catalog:true means it already matches our price cache. Confirm with the user before quoting.`
+            : `Web search returned no usable SKU. Ask the user for the exact part number.`
+        };
+      }
+
       // ── Parse Stratus Quote URL into ordered line items with cached product IDs ──
       case 'parse_quote_url': {
         const { url } = toolInput;
@@ -15160,6 +15309,20 @@ const CRM_EMAIL_TOOLS = [
       required: ['skus']
     }
   },
+  // Description→SKU candidate finder (the inverse of batch_product_lookup) — use when UNSURE of an exact SKU
+  {
+    name: 'find_product_candidates',
+    description: 'Find catalog SKUs from a free-text product DESCRIPTION when you do NOT know the exact SKU — the inverse of batch_product_lookup (which needs an exact SKU). Use this BEFORE guessing or fabricating a SKU whenever a line is described in words (e.g. "125W AC config 5 power supply", "24-port data-only switch"). Pass the customer\'s original wording as `description`. Returns ranked candidate SKUs (with list/ecomm price) matching the distinctive tokens; propose the closest to the user, confirm, then resolve it normally via batch_product_lookup / create_deal_and_quote. Zero API calls when a local cache match exists; one bounded catalog (COQL) search otherwise. Returns candidates:[] when nothing matches — then ask the user, or use web_search_sku if they asked you to find the SKU.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        description: { type: 'string', description: 'The customer\'s free-text wording for the product, e.g. "125W AC CONFIG 5 POWER SUPPLY W/MERAKI".' },
+        keywords: { type: 'array', items: { type: 'string' }, description: 'Optional explicit distinctive tokens to match (e.g. ["125WAC","PWR"]). Usually unnecessary — derived from description.' },
+        prefix: { type: 'string', description: 'Optional SKU prefix to constrain the search (e.g. "PWR-C", "MS130").' }
+      },
+      required: ['description']
+    }
+  },
   // Parse Stratus quote URL into ordered line items
   {
     name: 'parse_quote_url',
@@ -15296,6 +15459,18 @@ const CRM_EMAIL_TOOLS = [
         domain: { type: 'string', description: 'The email domain to look up (e.g., "riverside.k12.wi.us", "acmecorp.com"). Do NOT include "www." or "https://".' }
       },
       required: ['domain']
+    }
+  },
+  // SKU web lookup — LAST RESORT when catalog + find_product_candidates both miss
+  {
+    name: 'web_search_sku',
+    description: 'Last-resort web search for the canonical Cisco/Meraki PART NUMBER (SKU) of a product described in words — use ONLY when find_product_candidates returned nothing AND the user explicitly asked you to find / look up / search for the right SKU. Returns candidate SKUs from the web. CRITICAL: a web result is a LEAD, not a confirmed catalog SKU — you MUST re-run batch_product_lookup on the chosen SKU and quote it ONLY if it resolves to a real product_id. Never write a web-derived SKU to a Quote without that catalog re-validation. Do NOT call this on every miss; try find_product_candidates first.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        description: { type: 'string', description: 'The product description to resolve, with vendor/context, e.g. "Cisco Catalyst C9200L 125W AC config 5 power supply for Meraki".' }
+      },
+      required: ['description']
     }
   },
   // Velocity Hub deal approval submission
@@ -15573,7 +15748,7 @@ const TOOL_SUBSETS = Object.freeze({
     'create_deal_and_quote', 'create_quote_on_deal',
     'zoho_create_record', 'zoho_update_record',
     'clone_quote', 'apply_margin_to_quote', 'undo_crm_action',
-    'batch_product_lookup', 'parse_quote_url',
+    'batch_product_lookup', 'find_product_candidates', 'web_search_sku', 'parse_quote_url',
     'zoho_search_records', 'zoho_get_record',
     // 2026-06-09 SEDA postmortem: "create a quote based off this email" classifies as
     // crm_write, but without the Gmail READ tools the agent cannot recover a missing
@@ -15593,7 +15768,7 @@ const TOOL_SUBSETS = Object.freeze({
     'zoho_search_records', 'zoho_create_record'
   ],
   // Stratus URL ecomm-link generation only.
-  quote_url: ['parse_quote_url', 'batch_product_lookup'],
+  quote_url: ['parse_quote_url', 'batch_product_lookup', 'find_product_candidates', 'web_search_sku'],
   // Subscription / renewal admin work — DID generation, PO conversion,
   // e-sign — quote_to_po_and_esign is the workflow wrapper.
   subscription: [
@@ -15611,7 +15786,7 @@ const TOOL_SUBSETS = Object.freeze({
   general: [
     'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
     'zoho_create_record', 'zoho_update_record',
-    'batch_product_lookup', 'create_deal_and_quote', 'clone_quote',
+    'batch_product_lookup', 'find_product_candidates', 'create_deal_and_quote', 'clone_quote',
     'apply_margin_to_quote'
   ]
 });
@@ -15889,15 +16064,18 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 
 **Systems Manager (LIC-SME): 1YR/3YR terms only — 5YR is deprecated. Never quote LIC-SME-5YR; cap to 3YR and flag the change to the user.**
 
+**Catalyst switch power supplies (C9200/C9300 class) follow a strict grammar: \`PWR-C{config}-{wattage}{AC|DC}-M[-O]\`.** Decode the customer's words: "CONFIG 5" / "config-5" → \`C5\`; the wattage + AC/DC squashed with no space ("125W AC" → \`125WAC\`, "1KW AC" → \`1KWAC\`); "W/Meraki" / "for Meraki" / Meraki-managed → the \`-M\` suffix. Prefer the base \`-M\` key as canonical; only use \`-M-O\` if the user explicitly typed \`-O\`. Real catalog keys (do NOT invent others): PWR-C5-125WAC-M, PWR-C5-600WAC-M, PWR-C5-1KWAC-M, PWR-C1-350WAC-P-M, PWR-C1-715WAC-P-M, PWR-C1-1100WAC-P-M, PWR-C1-1900WAC-P-M. So "125W AC CONFIG 5 POWER SUPPLY W/MERAKI" → **PWR-C5-125WAC-M**.
+❌ NEVER derive a power-supply SKU from the SWITCH family — the PSU for a C9200L is NOT \`C9200L-PWR-125WAC\` (not a real SKU). A switch PSU starts with \`PWR-C*\`, never \`C9200L-PWR-*\`. Meraki AP / sensor / adapter power is the separate \`MA-PWR-*\` family (e.g. MA-PWR-30W-US) — never use an MA-PWR AP adapter for a switch power-supply line. **If you are unsure of ANY SKU, call \`find_product_candidates\` with the customer's wording instead of guessing — do not fabricate an exact SKU string.**
+
 ## ZOHO SEARCH
 
 Accounts FIRST, then Contacts (can run parallel). Quote lookups → search Quotes directly (first result auto-expands with full Quoted_Items — no separate zoho_get_record). Use "contains" when unsure. Never pass record IDs into name search fields — use zoho_get_related_records. Call independent tools in the SAME response; never serialize independent calls (each API call ~2-3s).
 
 ## PRODUCT LOOKUP & PRICING
 
-**batch_product_lookup** for ALL product lookups; **parse_quote_url** for Stratus URLs. Both resolve product IDs from cache with zero API calls. NEVER search Products/WooProducts individually.
+**batch_product_lookup** for ALL product lookups (you must already know the SKU); **parse_quote_url** for Stratus URLs. Both resolve product IDs from cache with zero API calls. NEVER search Products/WooProducts individually. When you do NOT know the exact SKU for a described item, call **find_product_candidates** with the customer's wording FIRST — never fabricate a SKU string and hope it resolves.
 
-**found: false ≠ invalid/inactive** — it means the SKU string matched no Product_Code. For a LIC-* SKU, search Zoho Products directly before giving up; report "not available" only if BOTH fail. NEVER claim "inactive" / "discontinued" unless Zoho returned \`Product_Active: false\` on that specific record — non-standard terms (7YR, 10YR) may exist even if 1/3/5 are the defaults. The tool returns \`live_alternatives\` / \`hint\` (live query on the family prefix): propose the closest match from that list (it confirms the SKU exists → retry exact; only 1/3/5/10 exist → ask which). Never invent a reason.
+**found: false ≠ invalid/inactive** — it means the SKU string matched no Product_Code. For a LIC-* SKU, the tool returns \`live_alternatives\` on the family prefix. For a HARDWARE / accessory SKU (e.g. a power supply) that misses, do NOT tell the user it "isn't in the catalog" — call \`find_product_candidates\` with the customer's wording to surface the real SKU (and \`web_search_sku\` only if that also misses AND the user asked you to find it; then re-validate any web SKU via batch_product_lookup before quoting). Report "not available" only after those finders fail. NEVER claim "inactive" / "discontinued" unless Zoho returned \`Product_Active: false\` on that specific record — non-standard terms (7YR, 10YR) may exist even if 1/3/5 are the defaults. The tool returns \`live_alternatives\` / \`hint\` (live query on the family prefix): propose the closest match from that list (it confirms the SKU exists → retry exact; only 1/3/5/10 exist → ask which). Never invent a reason.
 
 ### Ecomm Pricing (DEFAULT)
 Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT set unit_price (Zoho uses stored list) or Description. List pricing only if the user explicitly asks "list price" / "no discount".
@@ -16218,6 +16396,8 @@ function toolProgressMessage(toolName, toolInput) {
       const skuCount = toolInput.skus?.length || 0;
       return `📦 Resolving ${skuCount} product${skuCount !== 1 ? 's' : ''} (cached IDs + pricing)...`;
     }
+    case 'find_product_candidates':
+      return `🔎 Searching the catalog for SKUs matching "${String(toolInput.description || '').slice(0, 40)}"...`;
     case 'parse_quote_url':
       return `📦 Parsing URL → ordered line items with cached pricing...`;
     case 'create_deal_and_quote': {
@@ -16232,6 +16412,8 @@ function toolProgressMessage(toolName, toolInput) {
     case 'web_search_domain': {
       return `🌐 Looking up ${toolInput.domain || 'domain'}...`;
     }
+    case 'web_search_sku':
+      return `🌐 Web-searching for the canonical Cisco/Meraki SKU...`;
     case 'gmail_search_messages': {
       const q = (toolInput.query || '').substring(0, 50);
       return `📧 Searching Gmail: ${q}...`;
