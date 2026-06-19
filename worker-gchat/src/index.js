@@ -4253,6 +4253,101 @@ function narrowVariantsBySpecs(variants, rawText) {
   return pool;
 }
 
+// ─── Variant differentiator decode (for the spec-narrowed family clarify) ─────
+// When narrowVariantsBySpecs leaves >1 valid Catalyst-family variant, we hand the
+// Claude-default agent a human-readable decode of WHAT differs so it can explain
+// it in plain English (PoE class / uplink / port count) and the user can pick —
+// instead of a bare SKU list. Conservative by design: only well-known suffix
+// tokens are decoded; anything unrecognized is left undecoded so we never assert
+// a wrong spec. 2026-06-19.
+const POE_CLASS_DECODE = {
+  T: 'data-only (no PoE)', E: 'data-only (no PoE)',
+  P: 'PoE+', PL: 'PoE+ (reduced "lite" PoE budget)',
+  PXG: 'multigigabit UPOE (mGig)', FP: 'full PoE+ (UPOE)',
+  U: 'UPOE', UX: 'UPOE mGig', UXM: 'UPOE mGig',
+};
+const UPLINK_TOKEN_DECODE = {
+  '4G': '4× 1G uplinks', '4X': '4× 10G uplinks', '2Y': '2× 25G uplinks',
+  '8X': '8× 10G uplinks', '2Q': '2× 40G uplinks', '4Y': '4× 25G uplinks',
+};
+// Decode a switch SKU like "C9200L-48PXG-4X-M" → {ports:'48', poe:'PXG', uplink:'4X'}.
+// Returns nulls for dimensions we can't confidently read.
+function decodeVariantSku(sku) {
+  const segs = String(sku || '').toUpperCase().split('-');
+  let ports = null, poe = null, uplink = null;
+  for (const seg of segs.slice(1)) {
+    let m;
+    if (ports === null && (m = seg.match(/^(\d{2,3})([A-Z]{1,3})$/))) {
+      ports = m[1];
+      if (POE_CLASS_DECODE[m[2]]) poe = m[2];
+      continue;
+    }
+    if (uplink === null && UPLINK_TOKEN_DECODE[seg]) uplink = seg;
+  }
+  return { ports, poe, uplink };
+}
+// Given a family stem ("C9200L") and the narrowed SKU list, build:
+//   contextBlock — authoritative decode injected into the agent prompt
+//   detSentence  — deterministic fallback explanation if the agent call fails
+//   labels       — per-SKU short human label (for forward-compat chip rendering)
+// Returns null when fewer than 2 variants (nothing to differentiate).
+function explainVariantDifferentiators(input, skus) {
+  const list = (Array.isArray(skus) ? skus : []).filter(Boolean);
+  if (list.length < 2) return null;
+  const decoded = list.map(s => ({ sku: s, ...decodeVariantSku(s) }));
+  const varies = (key) => new Set(decoded.map(d => d[key])).size > 1;
+  const vPorts = varies('ports'), vPoe = varies('poe'), vUplink = varies('uplink');
+  const label = (d) => {
+    const parts = [];
+    if (d.ports) parts.push(`${d.ports}-port`);
+    if (d.poe && POE_CLASS_DECODE[d.poe]) parts.push(POE_CLASS_DECODE[d.poe]);
+    if (d.uplink && UPLINK_TOKEN_DECODE[d.uplink]) parts.push(UPLINK_TOKEN_DECODE[d.uplink].replace(/ uplinks?$/, ''));
+    return parts.join(' · ') || d.sku;
+  };
+  const lines = decoded.map(d => `- ${d.sku} — ${label(d)}`);
+  const legend = [];
+  if (vPoe) {
+    const vals = [...new Set(decoded.filter(d => d.poe && POE_CLASS_DECODE[d.poe]).map(d => `${d.poe} = ${POE_CLASS_DECODE[d.poe]}`))];
+    if (vals.length) legend.push(`PoE class: ${vals.join(', ')}`);
+  }
+  if (vUplink) {
+    const vals = [...new Set(decoded.filter(d => d.uplink && UPLINK_TOKEN_DECODE[d.uplink]).map(d => `${d.uplink} = ${UPLINK_TOKEN_DECODE[d.uplink]}`))];
+    if (vals.length) legend.push(`Uplink: ${vals.join(', ')}`);
+  }
+  if (vPorts) {
+    const vals = [...new Set(decoded.filter(d => d.ports).map(d => `${d.ports} ports`))];
+    if (vals.length) legend.push(`Port count: ${vals.join(', ')}`);
+  }
+  const contextBlock = `Options for "${input}":\n${lines.join('\n')}`
+    + (legend.length ? `\nThey differ in — ${legend.join('; ')}.` : '');
+  const diffDims = [vPoe && 'PoE class', vUplink && 'uplink speed', vPorts && 'port count'].filter(Boolean);
+  const detSentence = `A few "${input}" configs match your specs`
+    + (diffDims.length ? `, differing in ${diffDims.join(' and ')}` : '')
+    + ' — pick the exact config below.';
+  return { contextBlock, detSentence, labels: decoded.map(d => ({ sku: d.sku, label: label(d) })) };
+}
+// Build a "did you mean" suggestion, applying spec-driven narrowing to the
+// candidate list. Used by BOTH the parsed-item and dropped-token validation loops
+// in /api/quote — the C9200L-style ambiguity usually surfaces as a DROPPED stem
+// token (parseMessage expands "C9200L 48-port" into valid items + drops the bare
+// stem), so narrowing has to run in both places, not just on invalid parsed items.
+// narrowedFamily flags a stem that narrowed to a SMALL (2–8) set → the caller routes
+// it to the agent-explained variant-clarify path instead of a bare picklist dump.
+function buildNarrowedSuggestion(input, validation, rawText, wasDropped) {
+  const narrowed = narrowVariantsBySpecs(validation.suggest || [], rawText);
+  const didNarrow = narrowed.length && narrowed.length < (validation.suggest || []).length;
+  return {
+    input,
+    reason: didNarrow
+      ? `${input}: matched your specs to these — pick the exact config (or tell me the remaining detail).`
+      : (validation.reason || `${input} is not a recognized SKU${wasDropped ? ' — did you mean a specific variant?' : ''}`),
+    suggest: narrowed.length ? narrowed : (validation.suggest || []),
+    isCommonMistake: !!validation.isCommonMistake,
+    narrowedFamily: !!(didNarrow && narrowed.length >= 2 && narrowed.length <= 8),
+    ...(wasDropped ? { wasDropped: true } : {}),
+  };
+}
+
 // Infer a "{N}-Year" label from a license SKU's term suffix ("…-3YR" / "…-3Y" →
 // "3-Year"). Used to label a single directLicense quote URL correctly for the
 // extension UI (extractQuoteUrls' positional fallback would mislabel it "1-Year").
@@ -23170,19 +23265,9 @@ CRITICAL URL RULES:
                 const validation = validateSku(base);
                 parsedWithValidation.push({ sku: base, qty: item.qty, validation });
                 if (!validation.valid) {
-                  // Spec-driven narrowing: when the request named port/uplink/PoE specs and
-                  // this is an ambiguous family dump, narrow the picklist to matching variants
-                  // so the user picks the few that fit (2026-06-19).
-                  const _narrowed = narrowVariantsBySpecs(validation.suggest || [], text);
-                  const _didNarrow = _narrowed.length && _narrowed.length < (validation.suggest || []).length;
-                  suggestions.push({
-                    input: base,
-                    reason: _didNarrow
-                      ? `${base}: matched your specs to these — pick the exact config (or tell me the remaining detail).`
-                      : (validation.reason || `${base} is not a recognized SKU`),
-                    suggest: _narrowed.length ? _narrowed : (validation.suggest || []),
-                    isCommonMistake: !!validation.isCommonMistake,
-                  });
+                  // Spec-driven narrowing + narrowedFamily flag (shared with the
+                  // dropped-token loop below). 2026-06-19.
+                  suggestions.push(buildNarrowedSuggestion(base, validation, text, false));
                 } else {
                   validItems.push(item);
                 }
@@ -23194,13 +23279,11 @@ CRITICAL URL RULES:
               const validation = validateSku(token);
               parsedWithValidation.push({ sku: token, qty: 1, validation });
               if (!validation.valid) {
-                suggestions.push({
-                  input: token,
-                  reason: validation.reason || `${token} is not a recognized SKU — did you mean a specific variant?`,
-                  suggest: validation.suggest || [],
-                  isCommonMistake: !!validation.isCommonMistake,
-                  wasDropped: true,
-                });
+                // Spec-driven narrowing applies here too — a bare family stem like
+                // "C9200L" with port/uplink/PoE specs lands as a dropped token, and
+                // its picklist must narrow + flag narrowedFamily just like an invalid
+                // parsed item (2026-06-19).
+                suggestions.push(buildNarrowedSuggestion(token, validation, text, true));
               }
               // If dropped token IS valid/EOL, parseMessage should have caught it — don't add to validItems
               // since parseMessage already extracted what it could
@@ -23283,6 +23366,47 @@ CRITICAL URL RULES:
                 console.error('[API/quote] Claude fallback error:', claudeErr);
                 apiResult = { error: 'No valid SKUs detected and AI fallback failed. Try formats like: 10 MR44, 5 MS130-24P, 2 MX67' };
               }
+              break;
+            }
+
+            // Spec-narrowed family clarify: when the ONLY thing blocking the quote is
+            // ambiguous family stem(s) that the user's specs narrowed to a SMALL set of
+            // valid variants (2–8), don't just dump the bare picklist — have the
+            // Claude-default agent EXPLAIN what differs (PoE class / uplink / port count)
+            // in plain English, then let the user pick. The deterministic picklist still
+            // renders (+buttons) for the click; the agent reply adds the differentiator
+            // narrative. Tools are intentionally OFF here: the candidate set is already
+            // LOCKED by narrowVariantsBySpecs — find_product_candidates would re-expand it
+            // and could reintroduce variants we deliberately filtered out. 2026-06-19.
+            const _narrowedSugs = suggestions.filter(s => s.narrowedFamily);
+            const _onlyNarrowed = suggestions.length > 0 && _narrowedSugs.length === suggestions.length;
+            if (_onlyNarrowed) {
+              const _diffCtx = _narrowedSugs
+                .map(s => explainVariantDifferentiators(s.input, s.suggest))
+                .filter(Boolean);
+              const _detExplain = _diffCtx.map(d => d.detSentence).join('\n');
+              let _clarifyReply = '';
+              try {
+                const _ctxBlock = _diffCtx.map(d => d.contextBlock).join('\n\n');
+                const _agentPrompt = `${text}\n\n[VARIANT CLARIFY — the user's specs matched MULTIPLE valid configurations. These are the ONLY valid options; do NOT offer, invent, rename, or alter any other SKU, and do NOT quote a switch yet.\n\n${_ctxBlock}\n\nIn ONE short, plain-English sentence, tell the user what differs between these options (PoE class / uplink speed / port count) and ask which they want. Do not mention pricing. Do not output a Stratus order URL.]`;
+                const _cr = await askClaude(_agentPrompt, quotePersonId, env, null, false);
+                // Strip any [[SUGGESTIONS]] block so raw chip JSON never leaks; the
+                // clickable +button picklist below already lets the user pick.
+                const { reply: _crStripped } = extractSuggestionsBlock((_cr || '').replace(/\[object Object\]/g, ''));
+                _clarifyReply = stripEmptyOrderUrls(_crStripped).trim();
+              } catch (clarifyErr) {
+                console.error('[API/quote] variant-clarify agent error:', clarifyErr);
+              }
+              // Deterministic fallback so the reply is never bare if the agent fails.
+              if (!_clarifyReply) _clarifyReply = _detExplain || 'A few configurations match your specs — pick the exact config below.';
+              apiResult = await finalizeQuoteResponse({
+                quoteUrls: [],
+                eolWarnings: [],
+                parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                claudeResponse: _clarifyReply,
+                suggestions, // legacy array → narrowed +button picklist (renders today)
+                handlerType: 'variant-clarify',
+              }, _clarifyReply);
               break;
             }
 
