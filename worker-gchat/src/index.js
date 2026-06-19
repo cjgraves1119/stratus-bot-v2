@@ -15776,6 +15776,39 @@ function extractSuggestionsBlock(reply) {
   return { reply: cleaned || reply.replace(m[0], '').trim(), suggestions };
 }
 
+// Deterministically lock a create-quote flow's line items to the CURRENT turn.
+// 2026-06-19 SEDA C9200L postmortem: across a multi-turn clarify dance (account
+// → contact → term), the Claude CRM agent sometimes never calls parse_quote_url
+// and "forgets" the items the user already gave via a Stratus order URL, then
+// re-asks "what products/SKUs would you like to quote?". getHistory returns the
+// full history (turn 1's URL IS present), but the model ignores old turns — so we
+// re-pin the items to the live message every turn. Pulls the MOST RECENT Stratus
+// order URL from the current text first, else walks recent history backward.
+// Returns null when no order URL with items is found (→ no injection).
+function extractLockedQuoteItems(currentText, history) {
+  const urlRe = /stratusinfosystems\.com\/order\/\?item=([A-Za-z0-9_,\-]+)&qty=([0-9,]+)/i;
+  const sources = [String(currentText || '')];
+  if (Array.isArray(history)) {
+    // newest-first, bounded lookback so a brand-new flow doesn't grab a stale URL
+    for (let i = history.length - 1; i >= 0 && sources.length < 11; i--) {
+      const c = history[i] && history[i].content;
+      if (typeof c === 'string') sources.push(c);
+    }
+  }
+  for (const src of sources) {
+    const mm = src.match(urlRe);
+    if (!mm) continue;
+    const items = mm[1].split(',').map(s => s.trim()).filter(Boolean);
+    const qtys = mm[2].split(',').map(s => s.trim());
+    if (!items.length) continue;
+    const lines = items.map((sku, i) => `- ${qtys[i] || '1'}x ${sku}`);
+    const url = `https://${mm[0]}`;
+    const header = `[LINE ITEMS ALREADY SPECIFIED — the user has already chosen these EXACT items for the quote. Use them. Do NOT ask "what products/SKUs would you like to quote". Resolve product IDs by calling parse_quote_url on the source URL below:]\n${lines.join('\n')}\n[Source URL: ${url}]`;
+    return { items, qtys, url, header };
+  }
+  return null;
+}
+
 // ─── CRM/Email Intent Detection ──────────────────────────────────────────────
 function detectCrmEmailIntent(text) {
   const lower = text.toLowerCase();
@@ -16142,6 +16175,8 @@ New deal+quote → **create_deal_and_quote** (Account, Contact, Deal, products, 
 ## CLARIFYING QUESTIONS — ASK BEFORE CREATING
 
 Before any Deal or Quote create you MUST have: Company name (Account); Contact name; Products / SKUs and quantities; Cisco rep involvement? (determines Lead_Source); Billing address (Zoho Account first, then Gmail thread, then ask). Anything missing → STOP and ask for everything in ONE friendly message — never guess or use placeholders.
+
+**PRODUCTS ARE NOT MISSING IF ALREADY GIVEN.** If a Stratus order URL (\`stratusinfosystems.com/order/?item=…\`), a \`[LINE ITEMS ALREADY SPECIFIED …]\` block, or an explicit SKU/BOM list appears ANYWHERE earlier in this conversation, those ARE the products — they are RESOLVED. NEVER ask "what products/SKUs would you like to quote" again, even after several clarify turns about account/contact/term. Resolve their product IDs with \`parse_quote_url\` (for a URL) or \`batch_product_lookup\` (for a SKU list) and proceed. Only the still-unknown fields (account, contact, rep, billing) may be asked.
 
 **CLICKABLE CONFIRMATIONS (reduce typing — ALWAYS do this when asking the user to pick/confirm).** Whenever your reply asks the user to choose or confirm anything with a small set of answers — contact, license term, Cisco rep / Lead_Source, a SKU correction, which existing deal, yes/no — you MUST (1) resolve a sensible DEFAULT and say it in your prose, then (2) append ONE machine-readable block at the very END of your reply that the app turns into clickable buttons (and strips from the visible text). DEFAULTS to assume (mark as the recommended option):
 - **Contact:** if none was referenced, look up the Account's contacts (\`zoho_search_records\` Contacts for that Account) and propose the primary/first one as recommended.
@@ -24605,6 +24640,15 @@ CRITICAL URL RULES:
                 // (e.g. "Acme Corp not found"). Falls back to the waterfall if Claude stalls.
                 const _lastAsst = Array.isArray(wHistory) ? [...wHistory].reverse().find(m => m && m.role === 'assistant') : null;
                 const _crmFollowUp = !!(_lastAsst && /\b(quotes?|deals?|accounts?|contacts?|license\s*term|cisco\s*rep|meraki\s*isr|which\s+deal|need (a few|some) details|before (i|we) (build|create)|attach (this|the) quote|company name)\b/i.test(String(_lastAsst.content || '')));
+                // Pin already-specified line items to THIS turn so a multi-turn
+                // clarify can't make the agent forget what to quote (2026-06-19).
+                const _wantsQuoteCreate = _crmFollowUp
+                  || /\b(create|build|make|generate|draft|set\s*up)\b[^.]{0,40}\b(deal|quote)\b/i.test(wText || '')
+                  || /create a zoho crm quote from this/i.test(wText || '');
+                if (_wantsQuoteCreate) {
+                  const _locked = extractLockedQuoteItems(wText, wHistory);
+                  if (_locked) wEnrichedMessage = `${_locked.header}\n\n${wEnrichedMessage}`;
+                }
                 const forcedBenchmarkModel = BENCHMARK_MODELS.find(m => m.id === forcedModel);
                 // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
