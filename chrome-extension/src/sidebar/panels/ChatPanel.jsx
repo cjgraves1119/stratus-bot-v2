@@ -8,6 +8,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { sendToBackground, onMessage } from '../../lib/messaging';
 import { MSG, COLORS, SKU_PATTERN } from '../../lib/constants';
+import { getLocalStorage, setLocalStorage } from '../../lib/storage';
 import {
   parseZohoRecordUrl,
   contextMatchesUrl,
@@ -144,6 +145,225 @@ function CopyButton({ text }) {
   );
 }
 
+// Extract a Zoho Quotes record reference from assistant text — the CRM agent
+// returns a crm.zoho.com/.../tab/Quotes/{id} link whenever it creates or finds
+// a quote, which is exactly where the "Download Zoho PDF" affordance belongs.
+function extractZohoQuoteRef(text) {
+  if (!text) return null;
+  const m = String(text).match(/crm\.zoho\.com\/crm\/(org\d+)\/tab\/Quotes\/(\d{10,19})/i);
+  return m ? { org: m[1], recordId: m[2] } : null;
+}
+
+function downloadBase64Pdf(base64, filename) {
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || 'quote.pdf';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+const DEFAULT_PDF_TEMPLATES = ['Hardware Quote', 'Professional Services Quote'];
+
+// "Download Zoho PDF" — pulls Zoho's OWN templated PDF for a quote via the
+// background (which drives a hidden crm.zoho.com tab on the live session).
+// Defaults to Hardware Quote, remembers the last pick, and on any non-PDF
+// response shows a graceful error + an "open in Zoho" link.
+function QuotePdfButton({ recordId, org }) {
+  const [state, setState] = useState('idle'); // idle | working | done | error
+  const [err, setErr] = useState('');
+  const [template, setTemplate] = useState('Hardware Quote');
+  const [templates, setTemplates] = useState(DEFAULT_PDF_TEMPLATES);
+
+  useEffect(() => {
+    getLocalStorage(['zohoPdfTemplate', 'zohoPdfTemplates']).then((s) => {
+      if (s.zohoPdfTemplate) setTemplate(s.zohoPdfTemplate);
+      if (Array.isArray(s.zohoPdfTemplates) && s.zohoPdfTemplates.length) setTemplates(s.zohoPdfTemplates);
+    });
+  }, []);
+
+  async function download() {
+    setState('working');
+    setErr('');
+    try {
+      const res = await sendToBackground(MSG.EXPORT_ZOHO_PDF, { recordId, org, templateName: template });
+      if (res && res.success && res.base64) {
+        downloadBase64Pdf(res.base64, res.filename);
+        if (Array.isArray(res.templates) && res.templates.length) {
+          setTemplates(res.templates);
+          setLocalStorage({ zohoPdfTemplates: res.templates });
+        }
+        setState('done');
+        setTimeout(() => setState('idle'), 2500);
+      } else {
+        setErr((res && res.error) || 'failed');
+        setState('error');
+      }
+    } catch (e) {
+      setErr(e.message || 'failed');
+      setState('error');
+    }
+  }
+
+  function onTemplateChange(e) {
+    setTemplate(e.target.value);
+    setLocalStorage({ zohoPdfTemplate: e.target.value });
+  }
+
+  const errText =
+    err === 'not_pdf' ? 'Zoho didn’t return a PDF'
+      : err === 'not_logged_in' ? 'Log into Zoho, then retry'
+      : err === 'no_templates' ? 'No print template found'
+      : 'Export failed';
+
+  return (
+    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+      <button
+        onClick={download}
+        disabled={state === 'working'}
+        title="Download Zoho's templated PDF for this quote"
+        style={{
+          background: COLORS.STRATUS_BLUE, color: 'white', border: 'none',
+          borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 600,
+          cursor: state === 'working' ? 'default' : 'pointer', opacity: state === 'working' ? 0.7 : 1,
+        }}
+      >
+        {state === 'working' ? '⏳ Downloading…' : state === 'done' ? '✓ Downloaded' : '⬇ Download Zoho PDF'}
+      </button>
+      <select
+        value={template}
+        onChange={onTemplateChange}
+        title="Quote template"
+        style={{
+          fontSize: 11, padding: '3px 4px', borderRadius: 6,
+          border: `1px solid ${COLORS.BORDER}`, color: COLORS.TEXT_PRIMARY, background: 'white',
+        }}
+      >
+        {templates.map((t) => <option key={t} value={t}>{t}</option>)}
+      </select>
+      {state === 'error' && (
+        <span style={{ fontSize: 10, color: '#c5221f' }}>
+          {errText} —{' '}
+          <a
+            href={`https://crm.zoho.com/crm/${org || 'org647122552'}/tab/Quotes/${recordId}`}
+            target="_blank" rel="noreferrer"
+            style={{ color: COLORS.STRATUS_BLUE }}
+          >
+            open in Zoho
+          </a>
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ── Confirmation form (clickable picklist) ──────────────────────────────────
+// The worker attaches `suggestions` to a clarifying reply; the agent groups them
+// (Contact / License term / Cisco rep / which deal …) and marks one recommended
+// default per group. This renders a SELECT-THEN-CONFIRM form, NOT fire-on-click:
+// each group is a single-choice picklist with the default pre-selected; the user
+// can change ANY of them, then hits one "Confirm" that submits all picks as a
+// single combined message. Layout stacks vertically so it reads cleanly at any
+// width. Submits via handleSendMessage(text,{bypassRateLimit}) so the combined
+// answer reaches the CRM agent (not the ecomm URL engine) and isn't debounced.
+function normalizeSuggestionGroups(suggestions) {
+  let groups = [];
+  if (Array.isArray(suggestions)) groups = [{ options: suggestions }];
+  else if (Array.isArray(suggestions?.groups)) groups = suggestions.groups;
+  else if (Array.isArray(suggestions?.options)) groups = [{ label: suggestions.question, options: suggestions.options }];
+  return groups
+    .map((g) => ({ label: g?.label, options: (Array.isArray(g?.options) ? g.options : []).filter((o) => o && (o.send || o.label)) }))
+    .filter((g) => g.options.length);
+}
+
+function SuggestionChips({ suggestions, onPick, disabled }) {
+  const groups = normalizeSuggestionGroups(suggestions);
+  // Selected option index per group — default to the recommended one (else first).
+  const [sel, setSel] = useState(() => groups.map((g) => {
+    const r = g.options.findIndex((o) => o.recommended);
+    return r >= 0 ? r : 0;
+  }));
+  const [submitted, setSubmitted] = useState(false);
+  if (!groups.length) return null;
+
+  const sendText = (o) => (o.send != null ? o.send : o.label);
+  const confirm = () => {
+    if (disabled || submitted) return;
+    const parts = groups.map((g, gi) => g.options[sel[gi]]).filter(Boolean).map(sendText);
+    if (!parts.length) return;
+    setSubmitted(true);
+    onPick(parts.join('. '));
+  };
+  const locked = disabled || submitted;
+
+  return (
+    <div style={{
+      marginTop: 8, border: `1px solid ${COLORS.STRATUS_BLUE}33`, borderRadius: 10,
+      padding: 12, background: COLORS.BG_SECONDARY,
+    }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 }}>
+        Tap to choose · then Confirm
+      </div>
+      {groups.map((g, gi) => (
+        <div key={gi} style={{ marginBottom: 12 }}>
+          {g.label && (
+            <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 5 }}>{g.label}</div>
+          )}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {g.options.map((o, oi) => {
+              const isSel = sel[gi] === oi;
+              return (
+                <button
+                  key={oi}
+                  onClick={() => !locked && setSel((s) => { const n = [...s]; n[gi] = oi; return n; })}
+                  disabled={locked}
+                  title={sendText(o)}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 7,
+                    background: isSel ? COLORS.STRATUS_BLUE : 'white',
+                    color: isSel ? 'white' : COLORS.STRATUS_BLUE,
+                    border: `1.5px solid ${COLORS.STRATUS_BLUE}`,
+                    borderRadius: 18, padding: '6px 13px', fontSize: 12,
+                    fontWeight: isSel ? 700 : 500, lineHeight: 1.2,
+                    cursor: locked ? 'default' : 'pointer',
+                    opacity: submitted && !isSel ? 0.4 : 1,
+                  }}
+                >
+                  <span style={{
+                    width: 13, height: 13, borderRadius: '50%', flexShrink: 0,
+                    border: `2px solid ${isSel ? 'white' : COLORS.STRATUS_BLUE}`,
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    {isSel && <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'white' }} />}
+                  </span>
+                  {o.label || sendText(o)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <button
+        onClick={confirm}
+        disabled={locked}
+        style={{
+          width: '100%', marginTop: 2, padding: '9px 12px', borderRadius: 8, border: 'none',
+          background: submitted ? COLORS.TEXT_SECONDARY : COLORS.STRATUS_BLUE, color: 'white',
+          fontSize: 13, fontWeight: 700, cursor: locked ? 'default' : 'pointer', opacity: disabled && !submitted ? 0.6 : 1,
+        }}
+      >
+        {submitted ? '✓ Sent' : '✓ Confirm'}
+      </button>
+      <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, opacity: 0.8, marginTop: 7, textAlign: 'center' }}>
+        or type your own answer below
+      </div>
+    </div>
+  );
+}
+
 // Chat history sent to the worker MUST have non-empty content for every turn —
 // Anthropic 400s with "messages.N.content: Field required" otherwise. Structured
 // messages (quote / analysis cards) carry no `content`, so render a short text
@@ -182,9 +402,21 @@ function isQuoteFromEmailRequest(text) {
 // in → 1/3/5-year order links out). Deliberately conservative: anything that
 // targets Zoho/CRM, references "this quote/deal", asks to modify a record, or
 // quotes from the email goes to the CRM agent (/api/chat) instead.
+// Accessory / PSU SKU-find requests must go to the CRM agent (/api/chat-waterfall),
+// which resolves the SKU AND strips+renders the [[SUGGESTIONS]] chip block. The
+// deterministic /api/quote engine would quote the HOST switch and leaks the raw block
+// (Round E bug). Mirrors the worker's isAccessorySkuFindRequest (2026-06-19).
+function isAccessoryRequest(text) {
+  const t = text || '';
+  // Explicit orderable accessory SKU present → normal quote, not a discovery (Codex review).
+  if (/\b(pwr-[a-z0-9][a-z0-9-]+|ma-pwr-[a-z0-9-]+|ma-inj-[a-z0-9-]+|glc-[a-z0-9-]+|sfp-[a-z0-9-]+|qsfp-[a-z0-9-]+|stack-[a-z0-9-]+|[a-z0-9]{2,}-stk-[a-z0-9-]+|cab-[a-z0-9-]+)\b/i.test(t)) return false;
+  return /\b(power\s*supply|psu|power\s*adapter|power\s*injector|stack(?:ing)?\s*(?:cable|kit|module)|transceiver|sfp\+?|qsfp\+?|gbic|patch\s*cable|mounting\s*(?:kit|bracket)|rack\s*(?:kit|mount)|rail\s*kit|antenna|wall\s*(?:mount|adapter))\b/i.test(t);
+}
+
 function isEcommQuoteRequest(text) {
   const v = (text || '').toLowerCase().trim();
   if (!v) return false;
+  if (isAccessoryRequest(v)) return false; // PSU/accessory → CRM agent (chip-capable), not the deterministic /api/quote engine
   if (/\b(zoho|crm)\b/.test(v)) return false;
   if (isQuoteFromEmailRequest(text)) return false;
   if (/\b(add|remove|update|change|modify|edit|append|delete|convert|attach)\b/.test(v)) return false;
@@ -488,11 +720,14 @@ export default function ChatPanel({
     : (selectedContextEmail || emailContext?.customerEmail || null);
   const activeContact = participantOptions.find(p => p.email === activeContextEmail);
 
-  const handleSendMessage = useCallback(async (overrideText) => {
+  const handleSendMessage = useCallback(async (overrideText, opts = {}) => {
     const messageText = overrideText || input.trim();
     if (!messageText || loading) return;
     const now = Date.now();
-    if (now - lastSendRef.current < 1000) return; // Rate-limit: 1 send/sec
+    // Rate-limit: 1 send/sec. Chip clicks bypass it — the deterministic gate can
+    // reply in <1s, so a fast confirmation click would otherwise be silently
+    // dropped (Codex review finding 5).
+    if (!opts.bypassRateLimit && now - lastSendRef.current < 1000) return;
     lastSendRef.current = now;
 
     const userMsg = {
@@ -824,6 +1059,9 @@ export default function ChatPanel({
           role: 'assistant',
           content: response.reply,
           usedTools: response.usedTools || false,
+          // Clickable confirmation chips emitted by the worker (license term,
+          // SKU fix, which-deal, …). Absent on older replies => no chips.
+          suggestions: response.suggestions || null,
           timestamp: new Date().toISOString(),
         };
         onMessagesChange([...updatedMessages, assistantMsg]);
@@ -1268,6 +1506,17 @@ export default function ChatPanel({
                 </div>
               )}
               {msg.role === 'assistant' && msg.content && <CopyButton text={msg.content} />}
+              {msg.role === 'assistant' && (() => {
+                const ref = extractZohoQuoteRef(msg.content);
+                return ref ? <QuotePdfButton recordId={ref.recordId} org={ref.org} /> : null;
+              })()}
+              {msg.role === 'assistant' && msg.suggestions && (
+                <SuggestionChips
+                  suggestions={msg.suggestions}
+                  onPick={(send) => handleSendMessage(send, { bypassRateLimit: true })}
+                  disabled={loading}
+                />
+              )}
             </div>
           );
         })}

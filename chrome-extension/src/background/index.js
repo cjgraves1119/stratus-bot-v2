@@ -26,6 +26,67 @@ import { setupContextMenus, handleContextMenuClick } from './context-menus.js';
 import { handleCommand } from './shortcuts.js';
 
 // ─────────────────────────────────────────────
+// Zoho Quote → PDF export (web-UI "Export to PDF") helpers
+// ─────────────────────────────────────────────
+//
+// No official Zoho CRM API returns the templated Quote PDF, and the internal
+// export endpoint is session-cookie-gated. So we briefly open an INACTIVE
+// crm.zoho.com print-preview tab (the user's live session), let the Zoho
+// content script run the 2-step export there, return the PDF as base64, then
+// close the tab. The sidebar turns the base64 into the actual download.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; chrome.tabs.onUpdated.removeListener(onUpd); resolve(ok); } };
+    const onUpd = (id, info) => { if (id === tabId && info.status === 'complete') finish(true); };
+    chrome.tabs.onUpdated.addListener(onUpd);
+    // Already-complete fast path + hard timeout backstop.
+    chrome.tabs.get(tabId, (t) => { if (!chrome.runtime.lastError && t && t.status === 'complete') finish(true); });
+    setTimeout(() => finish(false), timeoutMs);
+  });
+}
+
+async function exportZohoQuotePdf({ recordId, templateName, org }) {
+  if (!recordId) return { success: false, error: 'missing_recordId' };
+  const orgId = org || 'org647122552';
+  const previewUrl =
+    `https://crm.zoho.com/crm/${orgId}/tab/Quotes/${recordId}/export-pdf?flag=false&module=Quotes`;
+
+  let tab;
+  try {
+    tab = await chrome.tabs.create({ url: previewUrl, active: false });
+  } catch (e) {
+    return { success: false, error: 'tab_create_failed: ' + (e.message || e) };
+  }
+
+  try {
+    await waitForTabComplete(tab.id, 20000);
+
+    // If Zoho bounced to the sign-in page, the content script never loaded.
+    try {
+      const t = await chrome.tabs.get(tab.id);
+      if (/accounts\.zoho\.com/i.test(t.url || '')) return { success: false, error: 'not_logged_in' };
+    } catch { /* tab may already be gone */ }
+
+    // The content script may not be injected/ready immediately, and it polls
+    // internally for Zoho's JS to populate the template <select>. Retry until
+    // it answers (non-null) or we give up.
+    let result = null;
+    for (let i = 0; i < 14; i++) {
+      result = await sendToTab(tab.id, MSG.EXPORT_ZOHO_PDF, { recordId, templateName });
+      if (result) break;
+      await sleep(600);
+    }
+    return result || { success: false, error: 'content_script_unreachable' };
+  } finally {
+    try { await chrome.tabs.remove(tab.id); } catch { /* non-fatal */ }
+  }
+}
+
+// ─────────────────────────────────────────────
 // Extension Lifecycle
 // ─────────────────────────────────────────────
 
@@ -393,6 +454,11 @@ registerMessageHandlers({
 
   [MSG.ASSIGN_REP]: async ({ dealId, repEmail, repName }) => {
     return api.assignCiscoRep(dealId, repEmail, repName);
+  },
+
+  // ── Download Zoho's native templated Quote PDF (web-UI "Export to PDF") ──
+  [MSG.EXPORT_ZOHO_PDF]: async ({ recordId, templateName, org }) => {
+    return exportZohoQuotePdf({ recordId, templateName, org });
   },
 
   // ── Suggest Task ──

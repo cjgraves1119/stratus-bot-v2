@@ -532,8 +532,108 @@ document.addEventListener('contextmenu', (e) => {
   }
 });
 
+// ─────────────────────────────────────────────
+// Quote "Export to PDF" — reproduce the web-UI button (2026-06-18)
+// ─────────────────────────────────────────────
+//
+// The background opens an inactive crm.zoho.com print-preview tab
+// (…/tab/Quotes/{id}/export-pdf?flag=false&module=Quotes) and forwards
+// EXPORT_ZOHO_PDF here. Zoho's "Export to PDF" is a 2-step session-cookie
+// flow: the preview page carries a hidden <form action=…/specific/ExportPDF.do>
+// with a per-session crmcsrfparam token; submitting it (with a chosen template
+// in layoutName) returns the PDF binary. The template dropdown is populated by
+// Zoho's JS after load, so we poll for it. We return the PDF as base64 to the
+// sidebar (which triggers the actual download) so closing this tab can't
+// cancel an in-flight download. Rides the user's live Zoho session — no
+// OAuth/API; there is no official CRM endpoint for the templated PDF.
+
+function abToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+async function runQuotePdfExport(recordId, templateName) {
+  // Wait (up to ~9s) for Zoho's JS to render the ExportPDF form AND populate
+  // the template <select> — neither is present in the initial server HTML.
+  const deadline = Date.now() + 9000;
+  let form = null;
+  let options = [];
+  while (Date.now() < deadline) {
+    form = [...document.querySelectorAll('form')].find(
+      (f) => /ExportPDF\.do/i.test(f.getAttribute('action') || '')
+    );
+    const tmplSelect = [...document.querySelectorAll('select')].find((s) =>
+      [...s.options].some((o) => /Hardware Quote|Professional Services|Quote Template/i.test(o.text || ''))
+    );
+    options = tmplSelect
+      ? [...tmplSelect.options]
+          .filter((o) => o.value && !/do not use/i.test(o.text || ''))
+          .map((o) => ({ name: (o.text || '').trim(), value: o.value }))
+      : [];
+    if (form && options.length) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  if (!form) return { success: false, error: 'preview_form_not_found' };
+  if (!options.length) return { success: false, error: 'no_templates' };
+
+  // Default to "Hardware Quote"; honor an explicit (remembered) choice; else first.
+  const chosen =
+    options.find((o) => o.name.toLowerCase() === String(templateName || '').toLowerCase()) ||
+    options.find((o) => /^hardware quote/i.test(o.name)) ||
+    options[0];
+
+  // Build the POST body from the form's pre-filled hidden fields (incl. the
+  // crmcsrfparam token), then set the three template-dependent fields.
+  const params = new URLSearchParams();
+  for (const el of form.querySelectorAll('[name]')) params.append(el.name, el.value ?? '');
+  params.set('layoutName', chosen.value);
+  params.set('viewType', 'portrait');
+  params.set('pdfVersion', 'new');
+
+  const action = new URL(form.getAttribute('action'), location.origin).href;
+  const resp = await fetch(action, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const ct = resp.headers.get('content-type') || '';
+  const buf = await resp.arrayBuffer();
+  const head = String.fromCharCode.apply(null, new Uint8Array(buf.slice(0, 5)));
+  if (!/pdf/i.test(ct) && head !== '%PDF-') {
+    // Guard: Zoho changed something / not a PDF → let the sidebar fall back.
+    return { success: false, error: 'not_pdf', notPdf: true, templates: options.map((o) => o.name) };
+  }
+  return {
+    success: true,
+    base64: abToBase64(buf),
+    filename: `Quote-${recordId}.pdf`,
+    chosenTemplate: chosen.name,
+    templates: options.map((o) => o.name),
+    size: buf.byteLength,
+  };
+}
+
 // Listen for requests from the sidebar/background to get current context
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Run the Quote → PDF export on this (preview) page and return base64.
+  if (msg.type === 'EXPORT_ZOHO_PDF') {
+    (async () => {
+      try {
+        sendResponse(await runQuotePdfExport(msg.recordId, msg.templateName));
+      } catch (e) {
+        sendResponse({ success: false, error: e.message || 'export_failed' });
+      }
+    })();
+    return true; // async sendResponse
+  }
+
   if (msg.type === 'GET_ZOHO_PAGE_DATA') {
     const urlInfo = parseZohoRecordUrl(window.location.href);
     const base = urlInfo && urlInfo.isRecord

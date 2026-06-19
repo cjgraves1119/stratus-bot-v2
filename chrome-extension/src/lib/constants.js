@@ -158,6 +158,12 @@ export const MSG = {
   //   /api/quote (same engine as the bots) and returns the order URL(s).
   GET_ZOHO_QUOTE_ITEMS: 'GET_ZOHO_QUOTE_ITEMS',
   BUILD_URL_QUOTE: 'BUILD_URL_QUOTE',
+
+  // Download Zoho's native templated Quote PDF (the web-UI "Export to PDF").
+  // Sidebar → background → it opens an inactive crm.zoho.com preview tab and
+  // forwards this to the content script, which runs the 2-step export
+  // (preview page → ExportPDF.do) and returns the PDF as base64.
+  EXPORT_ZOHO_PDF: 'EXPORT_ZOHO_PDF',
 };
 
 // Keyboard shortcut command names (match manifest.json)
