@@ -4223,6 +4223,36 @@ function expandFamily(rawText) {
   };
 }
 
+// Spec-driven narrowing of an ambiguous family variant list. 2026-06-19 (Chris):
+// "quote a C9200L switch with 48 ports 10 gig uplinks and poe" dumped all 14 C9200L
+// variants. Given the request text, filter the variant picklist to those matching the
+// stated port count / uplink speed / PoE so the user picks from the few that fit (and a
+// clarifying question is implicit in the remaining options). Each dimension only applies
+// when it leaves ≥1 match (never filter to empty). Returns the narrowed list (or the
+// original if nothing to narrow). Decode mirrors expandFamily's switch-suffix rules.
+function narrowVariantsBySpecs(variants, rawText) {
+  if (!Array.isArray(variants) || variants.length <= 1) return variants;
+  const t = String(rawText || '').toUpperCase();
+  let pool = variants.slice();
+  const apply = (filtered) => { if (filtered.length) pool = filtered; };
+  // Port count: "48 ports", "24-port"
+  const portM = t.match(/(\d{1,3})\s*[-]?\s*PORTS?\b/);
+  if (portM) {
+    const portRe = new RegExp(`(^|[-])${portM[1]}[A-Z]{0,4}?(-|$)`);
+    apply(pool.filter(s => portRe.test(s.toUpperCase())));
+  }
+  // Uplink: 10G ("10 gig", "10g", "ten gig", "sfp+") → -4X/-2Y; else 1G ("1 gig","1g") → -4G
+  const wants10G = /\b(10\s*G(?:IG|BE|IGABIT)?|TEN\s*GIG|SFP\+)\b/.test(t);
+  const wants1G = !wants10G && /\b(1\s*G(?:IG|BE|IGABIT)?|GIG(?:ABIT)?\s*UPLINK)\b/.test(t);
+  if (wants10G) apply(pool.filter(s => /-(4X|2Y)(-M)?$/i.test(s)));
+  else if (wants1G) apply(pool.filter(s => /-4G(-M)?$/i.test(s)));
+  // PoE: data-only/non-PoE → -…T-; PoE → -…(P|FP|LP|MP|U|UN|UX|UXM|PL|PXG)-
+  const noPoe = /\b(NON[-\s]?POE|NO\s*POE|DATA[-\s]?ONLY)\b/.test(t);
+  if (noPoe) apply(pool.filter(s => /-\d+T(-|$)/i.test(s)));
+  else if (/\bPOE\+?\b/.test(t)) apply(pool.filter(s => /-\d+(P|FP|LP|MP|U|UN|UX|UXM|PL|PXG)(-|$)/i.test(s)));
+  return pool;
+}
+
 // Infer a "{N}-Year" label from a license SKU's term suffix ("…-3YR" / "…-3Y" →
 // "3-Year"). Used to label a single directLicense quote URL correctly for the
 // extension UI (extractQuoteUrls' positional fallback would mislabel it "1-Year").
@@ -23140,10 +23170,17 @@ CRITICAL URL RULES:
                 const validation = validateSku(base);
                 parsedWithValidation.push({ sku: base, qty: item.qty, validation });
                 if (!validation.valid) {
+                  // Spec-driven narrowing: when the request named port/uplink/PoE specs and
+                  // this is an ambiguous family dump, narrow the picklist to matching variants
+                  // so the user picks the few that fit (2026-06-19).
+                  const _narrowed = narrowVariantsBySpecs(validation.suggest || [], text);
+                  const _didNarrow = _narrowed.length && _narrowed.length < (validation.suggest || []).length;
                   suggestions.push({
                     input: base,
-                    reason: validation.reason || `${base} is not a recognized SKU`,
-                    suggest: validation.suggest || [],
+                    reason: _didNarrow
+                      ? `${base}: matched your specs to these — pick the exact config (or tell me the remaining detail).`
+                      : (validation.reason || `${base} is not a recognized SKU`),
+                    suggest: _narrowed.length ? _narrowed : (validation.suggest || []),
                     isCommonMistake: !!validation.isCommonMistake,
                   });
                 } else {
