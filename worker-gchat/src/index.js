@@ -15821,6 +15821,31 @@ function extractLockedQuoteItems(currentText, history) {
   return null;
 }
 
+// Deterministically guarantee a "License term" chip row on any license-bearing quote
+// confirmation card. Chris 2026-06-19: term must always be one-click changeable, but the
+// agent omits it when the term is implied by a license SKU (…-3Y) — a prompt can't reliably
+// override that, so we inject it here. Only AUGMENTS an existing chip card (never fabricates
+// one on a plain reply); no-ops if a term/year group is already present or no license exists.
+function ensureTermSuggestionGroup(suggestions, replyText, agentMsg, history) {
+  if (!suggestions || !Array.isArray(suggestions.groups) || !suggestions.groups.length) return suggestions;
+  if (suggestions.groups.some(g => /\b(term|year|yr)\b/i.test(g.label || ''))) return suggestions;
+  const haystack = [String(agentMsg || ''), String(replyText || '')].concat(
+    Array.isArray(history) ? history.slice(-8).map(m => (m && typeof m.content === 'string') ? m.content : '') : []
+  ).join('\n');
+  const licMatch = haystack.match(/\bLIC-[A-Z0-9\-]+/i);
+  if (!licMatch) return suggestions; // hardware-only / no license → no term row
+  const termMatch = licMatch[0].match(/-(\d)Y(?:R)?\b/i);
+  const curTerm = termMatch ? parseInt(termMatch[1], 10) : 3;
+  const isSme = /\bLIC-SME\b|\bSME\b|systems?\s+manager/i.test(haystack); // SME: 1/3yr only ([[stratus-sme-3yr-cap]])
+  const years = isSme ? [1, 3] : [1, 3, 5];
+  const options = years.map(y => ({ label: `${y}-year`, send: `${y} year`, recommended: y === curTerm }));
+  if (!options.some(o => o.recommended)) (options.find(o => o.send === '3 year') || options[0]).recommended = true;
+  const groups = suggestions.groups.slice();
+  const contactIdx = groups.findIndex(g => /contact/i.test(g.label || ''));
+  groups.splice(contactIdx >= 0 ? contactIdx + 1 : groups.length, 0, { label: 'License term', options });
+  return { ...suggestions, groups: groups.slice(0, 4) };
+}
+
 // ─── CRM/Email Intent Detection ──────────────────────────────────────────────
 function detectCrmEmailIntent(text) {
   const lower = text.toLowerCase();
@@ -24719,6 +24744,8 @@ CRITICAL URL RULES:
               // Extract any agent-emitted [[SUGGESTIONS]] block → clickable chips, and
               // strip it from the visible AND stored text (chips are UI-only). 2026-06-19.
               const { reply: _cleanReply, suggestions: _agentSuggestions } = extractSuggestionsBlock(outcome.reply);
+              // Force a License term chip row onto any license-bearing quote card (Chris 2026-06-19).
+              const _finalSuggestions = ensureTermSuggestionGroup(_agentSuggestions, _cleanReply, wAgentMessage, wHistory);
               const replyWithBadge = `${_cleanReply}\n\n---\n_${badge}_`;
 
               // Save to conversation history (without badge or chip block — both UI-only)
@@ -24738,7 +24765,7 @@ CRITICAL URL RULES:
               apiResult = {
                 success: true,
                 reply: replyWithBadge,
-                suggestions: _agentSuggestions || undefined,
+                suggestions: _finalSuggestions || undefined,
                 model: outcome.model,
                 tierUsed: outcome.tierUsed,
                 tierPath: outcomeTierPath,
