@@ -23210,7 +23210,10 @@ CRITICAL URL RULES:
                   null,   // no image
                   _accessoryFind,  // accessory SKU-find → run TOOLED; else no tools (technical Q)
                 );
-                const sanitizedFallback = stripEmptyOrderUrls((claudeReply || '').replace(/\[object Object\]/g, ''));
+                // Strip any [[SUGGESTIONS]] block so the raw chip JSON never leaks into the
+                // visible /api/quote reply (Round E bug); keep the chips as data on apiResult.
+                const { reply: _fbStripped1, suggestions: _fbSug1 } = extractSuggestionsBlock((claudeReply || '').replace(/\[object Object\]/g, ''));
+                const sanitizedFallback = stripEmptyOrderUrls(_fbStripped1);
                 const claudeUrls = sanitizedFallback.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
                 const cleanFallbackUrls = claudeUrls
                   .map(u => u.replace(/,{2,}/g, ',').replace(/,&/g, '&').replace(/item=,/g, 'item=').replace(/,$/g, ''))
@@ -23221,6 +23224,7 @@ CRITICAL URL RULES:
                   eolWarnings: [],
                   parsedItems: [],
                   claudeResponse: sanitizedFallback,
+                  suggestions: _fbSug1 || synthesizeSuggestionsFromReply(sanitizedFallback) || undefined,
                   handlerType: 'claude-fallback',
                 }, sanitizedFallback);
               } catch (claudeErr) {
@@ -23259,7 +23263,9 @@ CRITICAL URL RULES:
                   _accessoryFind, // accessory SKU-find → run TOOLED (find_product_candidates / web_search_sku)
                 );
                 // Sanitize: strip [object Object] from Claude's response (hallucination safety net)
-                const sanitizedFb = stripEmptyOrderUrls((claudeReply || '').replace(/\[object Object\]/g, ''));
+                // Strip any [[SUGGESTIONS]] block so the raw chip JSON never leaks (Round E bug).
+                const { reply: _fbStripped2, suggestions: _fbSug2 } = extractSuggestionsBlock((claudeReply || '').replace(/\[object Object\]/g, ''));
+                const sanitizedFb = stripEmptyOrderUrls(_fbStripped2);
                 const claudeUrls = sanitizedFb.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
                 // Clean up URL artifacts from sanitization (trailing commas, empty items)
                 const cleanFbUrls = claudeUrls
@@ -23271,6 +23277,7 @@ CRITICAL URL RULES:
                   eolWarnings: [],
                   parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
                   claudeResponse: sanitizedFb,
+                  suggestions: _fbSug2 || synthesizeSuggestionsFromReply(sanitizedFb) || undefined,
                   handlerType: 'claude-fallback',
                 }, sanitizedFb);
               } catch (claudeErr) {
