@@ -14036,7 +14036,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             const delRes = await zohoApiCall('DELETE', `${origModule}/${origRecordId}`, env);
             const delStatus = delRes?.data?.[0]?.status;
             if (delStatus !== 'success') {
-              return { success: false, error: `Undo delete failed: ${delRes?.data?.[0]?.message || 'unknown'}`, detail: delRes };
+              const _uMsg = delRes?.data?.[0]?.message || 'unknown';
+              const _uPerm = /permission|not\s+allowed|unauthor|no_permission|denied/i.test(_uMsg);
+              return {
+                success: false,
+                error: `Undo delete failed: ${_uMsg}`,
+                detail: delRes,
+                ...(_uPerm ? { message: `Undo could NOT delete the created ${origModule.replace(/s$/, '')} — Zoho returned a permission error ("${_uMsg}"). The bot's Zoho integration lacks DELETE permission, so it cannot reverse a create. A Zoho admin must grant the integration's profile Delete permission on ${origModule} (or re-authorize its OAuth token with a delete scope). Nothing was changed; the record still exists. The user can delete it manually in Zoho meanwhile.` } : {})
+              };
             }
             reversalResult = delRes;
             reversalSummary = `Undid ${lookup.operation} — deleted ${origModule.replace(/s$/, '')} ${origRecordId}.`;
@@ -14935,12 +14942,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             requestPayload: { module: module_name, record_id },
             responsePayload: delRes
           });
+          const _delMsg = delRes?.data?.[0]?.message || 'unknown';
+          const _permDenied = /permission|not\s+allowed|unauthor|no_permission|denied/i.test(_delMsg);
           return {
             success: false,
-            error: `Delete failed: ${delRes?.data?.[0]?.message || 'unknown'}`,
+            error: `Delete failed: ${_delMsg}`,
             detail: delRes,
             _no_partial_success: true,
-            message: `Delete did NOT succeed. Do not claim ${module_name}/${record_id} was deleted.`
+            message: _permDenied
+              ? `Delete did NOT succeed — Zoho returned a permission error ("${_delMsg}"). The record is readable and not locked, so the bot's Zoho integration simply lacks DELETE permission on ${module_name}. To enable deletes, a Zoho admin must grant the integration's user/profile Delete permission on this module (Zoho Setup → Users & Control → Profiles → Delete), or re-authorize the integration's OAuth token with a delete-inclusive scope. Tell the user this plainly and that they can delete it manually in Zoho meanwhile. Do NOT claim ${module_name}/${record_id} was deleted.`
+              : `Delete did NOT succeed. Do not claim ${module_name}/${record_id} was deleted.`
           };
         }
 
@@ -15976,7 +15987,7 @@ const TOOL_SUBSETS = Object.freeze({
   crm_write: [
     'create_deal_and_quote', 'create_quote_on_deal',
     'zoho_create_record', 'zoho_update_record',
-    'clone_quote', 'apply_margin_to_quote', 'undo_crm_action',
+    'clone_quote', 'apply_margin_to_quote', 'undo_crm_action', 'zoho_delete_record',
     'batch_product_lookup', 'find_product_candidates', 'web_search_sku', 'parse_quote_url',
     'zoho_search_records', 'zoho_get_record',
     // 2026-06-09 SEDA postmortem: "create a quote based off this email" classifies as
