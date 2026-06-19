@@ -15826,6 +15826,33 @@ function extractLockedQuoteItems(currentText, history) {
 // agent omits it when the term is implied by a license SKU (…-3Y) — a prompt can't reliably
 // override that, so we inject it here. Only AUGMENTS an existing chip card (never fabricates
 // one on a plain reply); no-ops if a term/year group is already present or no license exists.
+// Deterministic chip SAFETY NET: when the agent asks a discrete-option question in
+// prose but forgot to emit a [[SUGGESTIONS]] block, synthesize the picklist from the
+// prose so the chip UI is CONSISTENT regardless of the model. 2026-06-19: Sonnet asked
+// "Wattage — 125W, 600W, or 1KW AC?" / "Config — CONFIG 1 or CONFIG 5?" as plain text.
+// Handles "**Label** — a, b, or c?" and the numbered "1. **Label** — a or b?" shapes.
+function synthesizeSuggestionsFromReply(reply) {
+  if (typeof reply !== 'string' || !reply) return null;
+  // Skip deterministic quotes / "Create it?" confirmations — those are not option-clarifies
+  // and their summary lines could otherwise be mis-parsed into bogus chips.
+  if (/stratusinfosystems\.com\/order|\bcreate it\?/i.test(reply)) return null;
+  const groups = [];
+  const re = /(?:^|\n)\s*(?:\d+[.)]\s*)?\*\*([^*\n]{2,40}?)\*\*\s*[—:-]\s*([^?\n]{3,140})\?/g;
+  let m;
+  while ((m = re.exec(reply)) !== null && groups.length < 4) {
+    const label = m[1].trim().replace(/[:?]+$/, '');
+    // Split the option list on commas and the word "or"; drop filler like "etc."
+    const opts = m[2].split(/,|\bor\b/i)
+      .map(s => s.trim().replace(/^(a|an|the)\s+/i, '').replace(/[.?!]+$/, '').trim())
+      .filter(s => s && s.length <= 40 && !/^(etc|e\.g|i\.e|none|other)$/i.test(s));
+    const uniq = [...new Set(opts)];
+    if (uniq.length >= 2 && uniq.length <= 6) {
+      groups.push({ label, options: uniq.map(o => ({ label: o, send: o })) });
+    }
+  }
+  return groups.length ? { groups: groups.slice(0, 4) } : null;
+}
+
 function ensureTermSuggestionGroup(suggestions, replyText, agentMsg, history) {
   if (!suggestions || !Array.isArray(suggestions.groups) || !suggestions.groups.length) return suggestions;
   if (suggestions.groups.some(g => /\b(term|year|yr)\b/i.test(g.label || ''))) return suggestions;
@@ -16224,7 +16251,7 @@ Before any Deal or Quote create you MUST have: Company name (Account); Contact n
 
 **PRODUCTS ARE NOT MISSING IF ALREADY GIVEN.** If a Stratus order URL (\`stratusinfosystems.com/order/?item=…\`), a \`[LINE ITEMS ALREADY SPECIFIED …]\` block, or an explicit SKU/BOM list appears earlier in this conversation, those ARE the products — they are RESOLVED. NEVER ask "what products/SKUs would you like to quote" again, even after several clarify turns about account/contact/term. Resolve their product IDs with \`parse_quote_url\` (for a URL) or \`batch_product_lookup\` (for a SKU list) and proceed. Only the still-unknown fields (account, contact, rep, billing) may be asked. EXCEPTION: if the user LATER changes the items (adds/removes/swaps a SKU or pastes a new list/URL), the most recent items win — re-resolve and use those.
 
-**CLICKABLE CONFIRMATIONS (reduce typing — ALWAYS do this when asking the user to pick/confirm).** Whenever your reply asks the user to choose or confirm anything with a small set of answers — contact, license term, Cisco rep / Lead_Source, a SKU correction, which existing deal, yes/no — you MUST (1) resolve a sensible DEFAULT and say it in your prose, then (2) append ONE machine-readable block at the very END of your reply that the app turns into clickable buttons (and strips from the visible text). DEFAULTS to assume (mark as the recommended option):
+**CLICKABLE CONFIRMATIONS (reduce typing — ALWAYS do this when asking the user to pick/confirm).** Whenever your reply asks the user to choose or confirm from a small discrete set of answers, you MUST render it as chips. This is GENERAL — it is NOT limited to a fixed list: it covers contact, license term, Cisco rep / Lead_Source, a SKU correction, which existing deal, yes/no, **PSU wattage, hardware config, product variant, transceiver/optic type, port count, color/region**, and ANY other question where you would otherwise list 2–6 options in prose ("… A, B, or C?"). RULE OF THUMB: if your prose contains a question with 2–6 enumerated options, it MUST have a chip group. You MUST (1) resolve a sensible DEFAULT and say it in your prose, then (2) append ONE machine-readable block at the very END of your reply that the app turns into clickable buttons (and strips from the visible text). One group per question (e.g. a Wattage group AND a Config group). DEFAULTS to assume (mark as the recommended option):
 - **Contact:** if none was referenced, look up the Account's contacts (\`zoho_search_records\` Contacts for that Account) and propose the primary/first one as recommended.
 - **License term:** ALWAYS include a "License term" group whenever the quote has ANY license/subscription line — even if a term is already implied by a license SKU (e.g. …-3Y) or was stated earlier. Pre-select the known/resolved term as recommended (default **3 year** if none stated), and still offer the others so the user can change it in one click: 1/3/5 year (SME: only 1/3 year). Omit the Term group for hardware-only quotes with no license — AND for **accessory-only** quotes (power supply/PSU, adapter, cable, transceiver, mount): an accessory has NO license term, so NEVER show a License term chip for it; ask only its variant (e.g. PSU wattage) when needed.
 - **Cisco rep / Lead_Source:** default **"Stratus Referal" (no rep)** recommended, UNLESS a Cisco/Meraki rep appears in the email/thread/context.
@@ -21324,7 +21351,14 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // High-stakes CRM writes go to Claude first because cheaper CF models have
   // historically paraphrased write intent instead of invoking tools. If Claude
   // stalls or fails, fall back to the normal waterfall instead of dead-ending.
-  const autoForceClaudeForWrite = shouldForceClaudeForWrite(userMessage) || options.crmFollowUp === true || isAccessorySkuFindRequest(userMessage);
+  // CLAUDE-DEFAULT (Hybrid, 2026-06-19): when CRM_AGENT_CLAUDE_DEFAULT=true, Sonnet is the
+  // default responder for EVERY request — Llama/Gemma stay only as the V3 intent classifier
+  // (classifyV3, upstream) and a failure fallback below. Llama's flaky free-text responses
+  // (fabricated SKUs, no chips, punts) were the root of most inconsistency. Reversible: set
+  // the var to false to restore the Llama-first waterfall. The deterministic engine still
+  // handles explicit SKU quotes upstream, so this only affects conversational/CRM/SKU-find.
+  const claudeDefault = String(env.CRM_AGENT_CLAUDE_DEFAULT) === 'true';
+  const autoForceClaudeForWrite = claudeDefault || shouldForceClaudeForWrite(userMessage) || options.crmFollowUp === true || isAccessorySkuFindRequest(userMessage);
   let autoClaudeResult = null;
   let autoClaudeFailure = null;
   if (autoForceClaudeForWrite) {
@@ -24783,8 +24817,11 @@ CRITICAL URL RULES:
               // Extract any agent-emitted [[SUGGESTIONS]] block → clickable chips, and
               // strip it from the visible AND stored text (chips are UI-only). 2026-06-19.
               const { reply: _cleanReply, suggestions: _agentSuggestions } = extractSuggestionsBlock(outcome.reply);
+              // Chip safety net: if the agent asked a discrete-option question in prose but omitted
+              // the [[SUGGESTIONS]] block, synthesize the picklist from the prose (Chris 2026-06-19).
+              const _synthSuggestions = _agentSuggestions || synthesizeSuggestionsFromReply(_cleanReply);
               // Force a License term chip row onto any license-bearing quote card (Chris 2026-06-19).
-              const _finalSuggestions = ensureTermSuggestionGroup(_agentSuggestions, _cleanReply, wEnrichedMessage, wHistory);
+              const _finalSuggestions = ensureTermSuggestionGroup(_synthSuggestions, _cleanReply, wEnrichedMessage, wHistory);
               const replyWithBadge = `${_cleanReply}\n\n---\n_${badge}_`;
 
               // Save to conversation history (without badge or chip block — both UI-only)

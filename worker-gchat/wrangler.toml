@@ -28,6 +28,14 @@ QUOTE_PO_WORKFLOW_ENABLED = "true"
 # 2026-05-19 Fix C cross-account billing guard. Default off; flip to "true"
 # to enforce that Quote Billing_*/Shipping_* writes match the linked Account.
 BOT_ADDRESS_GUARD_ENABLED = "true"
+# CLAUDE-DEFAULT (Hybrid, 2026-06-19): Sonnet 4.6 is the default responder for EVERY
+# conversational/CRM/SKU-find request; Llama stays only as the V3 intent classifier +
+# failure fallback. The deterministic engine still handles explicit SKU quotes upstream.
+# Reason: Llama's free-text responses (fabricated SKUs, missing chips, punts) drove most
+# of the inconsistency. Reversible: set to "false" to restore the Llama-first waterfall.
+# CORP NOTE: this is a committed var (personal auto-deploys via CI). On the corp atomic
+# cutover, review/flip this for cost (Claude-on-everything ~$0.03/turn cached) before go-live.
+CRM_AGENT_CLAUDE_DEFAULT = "true"
 # Caller-derived owner mapping (PII refactor, 2026-05-18). SYSTEM_OWNER_ID is
 # the fallback Zoho user id used for cron jobs, system tasks, and unknown
 # callers; PRICE_CRON_NOTIFY_EMAIL is the operator who receives the daily
