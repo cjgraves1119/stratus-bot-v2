@@ -24745,7 +24745,7 @@ CRITICAL URL RULES:
               // strip it from the visible AND stored text (chips are UI-only). 2026-06-19.
               const { reply: _cleanReply, suggestions: _agentSuggestions } = extractSuggestionsBlock(outcome.reply);
               // Force a License term chip row onto any license-bearing quote card (Chris 2026-06-19).
-              const _finalSuggestions = ensureTermSuggestionGroup(_agentSuggestions, _cleanReply, wAgentMessage, wHistory);
+              const _finalSuggestions = ensureTermSuggestionGroup(_agentSuggestions, _cleanReply, wEnrichedMessage, wHistory);
               const replyWithBadge = `${_cleanReply}\n\n---\n_${badge}_`;
 
               // Save to conversation history (without badge or chip block — both UI-only)
