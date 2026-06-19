@@ -21137,6 +21137,10 @@ function shouldForceClaudeForWrite(userMessage) {
 function isAccessorySkuFindRequest(userMessage) {
   if (!userMessage || typeof userMessage !== 'string') return false;
   const t = userMessage.toLowerCase();
+  // Codex review 2026-06-19: if an explicit orderable accessory SKU is already named
+  // (e.g. PWR-C5-600WAC-M, MA-INJ-5-US, GLC-…, SFP-…), it's a normal quote — the SKU already
+  // specifies wattage/type — NOT a find. Don't force the agent or re-ask the variant.
+  if (/\b(pwr-[a-z0-9][a-z0-9-]+|ma-pwr-[a-z0-9-]+|ma-inj-[a-z0-9-]+|glc-[a-z0-9-]+|sfp-[a-z0-9-]+|qsfp-[a-z0-9-]+|stack-[a-z0-9-]+|[a-z0-9]{2,}-stk-[a-z0-9-]+|cab-[a-z0-9-]+)\b/i.test(t)) return false;
   // Explicit accessory nouns (power supply / PSU / injector / stack cable / transceiver / mount …)
   const accessory = /\b(power\s*supply|psu|power\s*adapter|power\s*injector|stack(?:ing)?\s*(?:cable|kit|module)|transceiver|sfp\+?|qsfp\+?|gbic|patch\s*cable|mounting\s*(?:kit|bracket)|rack\s*(?:kit|mount)|rail\s*kit|antenna|wall\s*(?:mount|adapter))\b/i;
   // Generic "find the SKU / part number" for a described product
