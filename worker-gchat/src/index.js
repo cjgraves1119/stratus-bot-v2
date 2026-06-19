@@ -4338,8 +4338,10 @@ function buildNarrowedSuggestion(input, validation, rawText, wasDropped) {
   const didNarrow = narrowed.length && narrowed.length < (validation.suggest || []).length;
   return {
     input,
+    // NB: the extension renderer already prepends "{input}: " — so the reason
+    // must NOT re-include the stem (else "C9200L: C9200L: matched…").
     reason: didNarrow
-      ? `${input}: matched your specs to these — pick the exact config (or tell me the remaining detail).`
+      ? `matched your specs to these — pick the exact config (or tell me the remaining detail).`
       : (validation.reason || `${input} is not a recognized SKU${wasDropped ? ' — did you mean a specific variant?' : ''}`),
     suggest: narrowed.length ? narrowed : (validation.suggest || []),
     isCommonMistake: !!validation.isCommonMistake,
@@ -23388,7 +23390,7 @@ CRITICAL URL RULES:
               let _clarifyReply = '';
               try {
                 const _ctxBlock = _diffCtx.map(d => d.contextBlock).join('\n\n');
-                const _agentPrompt = `${text}\n\n[VARIANT CLARIFY — the user's specs matched MULTIPLE valid configurations. These are the ONLY valid options; do NOT offer, invent, rename, or alter any other SKU, and do NOT quote a switch yet.\n\n${_ctxBlock}\n\nIn ONE short, plain-English sentence, tell the user what differs between these options (PoE class / uplink speed / port count) and ask which they want. Do not mention pricing. Do not output a Stratus order URL.]`;
+                const _agentPrompt = `${text}\n\n[VARIANT CLARIFY — the user's specs matched MULTIPLE valid configurations. These are the ONLY valid options; do NOT offer, invent, rename, or alter any other SKU, and do NOT quote a switch yet.\n\n${_ctxBlock}\n\nReply with: (1) ONE short plain-English sentence naming what differs (PoE class / uplink speed / port count), then (2) a simple dash list, one option per line formatted exactly as "- <SKU> — <short plain description>". Do NOT use a markdown table or pipe "|" characters — the chat renders plain text, so a table shows as raw symbols. End by asking which they want. No pricing, no Stratus order URL.]`;
                 const _cr = await askClaude(_agentPrompt, quotePersonId, env, null, false);
                 // Strip any [[SUGGESTIONS]] block so raw chip JSON never leaks; the
                 // clickable +button picklist below already lets the user pick.
