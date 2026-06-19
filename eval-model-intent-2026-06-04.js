@@ -40,7 +40,8 @@ const os = require('os');
 
 // ── Config (all overridable via env) ─────────────────────────────────────────
 const BASE_URL       = process.env.BASE_URL || 'https://stratus-ai-bot.chrisg-ec1.workers.dev';
-const BENCH_KEY      = process.env.BENCH_KEY || 'Biscuit4';
+const BENCH_KEY      = process.env.BENCH_KEY; // must match the worker DASHBOARD_KEY secret (no hardcoded fallback)
+if (!BENCH_KEY) { console.error('Set BENCH_KEY env var (value of the worker DASHBOARD_KEY secret) before running.'); process.exit(1); }
 const MODEL          = process.env.MODEL || '@cf/meta/llama-4-scout-17b-16e-instruct';
 const PROMPT_VARIANT = process.env.PROMPT_VARIANT || 'v2';
 const ENGINE_DIR     = process.env.ENGINE_DIR || 'worker';            // which worker's engine to load

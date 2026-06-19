@@ -8777,8 +8777,8 @@ export default {
     const DASH_CORS = {'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET, OPTIONS','Access-Control-Allow-Headers':'Content-Type, X-Dashboard-Key'};
     if (url.pathname.startsWith('/dashboard/')) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
-      const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
-      if (dashKey !== 'Biscuit4') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+      const dashKey = request.headers.get('X-Dashboard-Key'); // header-only: ?key= leaks the secret into CF/proxy access logs
+      if (!env.DASHBOARD_KEY || dashKey !== env.DASHBOARD_KEY) return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
       const db = env.ANALYTICS_DB; // may be undefined if D1 binding missing
 
       if (request.method === 'GET' && url.pathname === '/dashboard/stats') {
@@ -10221,8 +10221,8 @@ export default {
     if (url.pathname === '/api/benchmark-classifier') {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key, X-Eval-Run-Id' } });
       if (request.method !== 'POST') return new Response('POST required', { status: 405 });
-      const key = request.headers.get('X-Bench-Key') || new URL(request.url).searchParams.get('key');
-      if (key !== 'Biscuit4') return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
+      const key = request.headers.get('X-Bench-Key'); // header-only: ?key= leaks the secret into CF/proxy access logs
+      if (!env.DASHBOARD_KEY || key !== env.DASHBOARD_KEY) return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
       try {
         const body = await request.json();
         const input = body.input;
@@ -10440,8 +10440,8 @@ export default {
     if (url.pathname === '/api/benchmark-product-info') {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'POST, OPTIONS', 'Access-Control-Allow-Headers':'Content-Type, X-Bench-Key, X-Eval-Run-Id' } });
       if (request.method !== 'POST') return new Response('POST required', { status: 405 });
-      const key = request.headers.get('X-Bench-Key') || new URL(request.url).searchParams.get('key');
-      if (key !== 'Biscuit4') return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
+      const key = request.headers.get('X-Bench-Key'); // header-only: ?key= leaks the secret into CF/proxy access logs
+      if (!env.DASHBOARD_KEY || key !== env.DASHBOARD_KEY) return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type':'application/json' } });
       try {
         const body = await request.json();
         const input = body.input;

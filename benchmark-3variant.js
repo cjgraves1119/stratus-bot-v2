@@ -27,7 +27,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ENDPOINT = 'https://stratus-ai-bot.chrisg-ec1.workers.dev/api/benchmark-classifier';
-const KEY = 'Biscuit4';
+const KEY = process.env.BENCH_KEY; // must match the DASHBOARD_KEY secret set on the worker (no hardcoded fallback)
+if (!KEY) { console.error('Set BENCH_KEY env var (value of the worker DASHBOARD_KEY secret) before running.'); process.exit(1); }
 const EVAL_MODE = 'live_benchmark_classifier';
 const DECISION_GRADE_LIVE_LLM = true;
 const EVAL_RUN_ID = process.env.EVAL_RUN_ID || `classifier-${Date.now()}`;

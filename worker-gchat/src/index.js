@@ -21872,8 +21872,8 @@ export default {
     const DASH_CORS = {'Content-Type':'application/json','Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET, OPTIONS','Access-Control-Allow-Headers':'Content-Type, X-Dashboard-Key'};
     if (url.pathname.startsWith('/dashboard/')) {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: DASH_CORS });
-      const dashKey = request.headers.get('X-Dashboard-Key') || url.searchParams.get('key');
-      if (dashKey !== 'Biscuit4') return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
+      const dashKey = request.headers.get('X-Dashboard-Key'); // header-only: ?key= leaks the secret into CF/proxy access logs
+      if (!env.DASHBOARD_KEY || dashKey !== env.DASHBOARD_KEY) return new Response(JSON.stringify({error:'Unauthorized'}), {status:401, headers:DASH_CORS});
       const db = env.ANALYTICS_DB;
 
       if (request.method === 'GET' && url.pathname === '/dashboard/stats') {
