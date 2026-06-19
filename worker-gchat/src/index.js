@@ -33,6 +33,7 @@ import pricesData from './data/prices.json';
 import catalogData from './data/auto-catalog.json';
 import specsData from './data/specs.json';
 import accessoriesData from './data/accessories.json';
+import voiceSkillData from './email-reply-voice-skill.json';
 
 const staticPrices = pricesData.prices;
 let livePrices = null;       // KV-cached prices (refreshed daily by cron)
@@ -9623,6 +9624,107 @@ async function ensureQuoteDidAndVelocity(quote, env, personId = null) {
   };
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Read-only Cisco license claim-key recovery. Resolves the deal's most-recent
+// Sales Order, finds the TD SYNNEX / Cisco license-delivery email, verifies the
+// email belongs to THIS order, and extracts the Dashboard Software License Claim
+// Key. NO Zoho writes. Shared by the find_customer_license_claim_key tool and
+// the /api/find-license-key endpoint so the two paths cannot drift.
+// TODO: multi-SO fallback — v1 takes the most-recent Sales Order only.
+// ───────────────────────────────────────────────────────────────────────────
+async function recoverLicenseClaimKey(env, dealId) {
+  try {
+    // Contract: deal_id must be a Zoho record id (numeric, 13-19 digits).
+    if (!dealId || !/^\d{13,19}$/.test(String(dealId).trim())) {
+      return { success: false, reason: 'invalid_deal_id', message: 'deal_id must be a numeric Zoho record id' };
+    }
+    const did = String(dealId).trim();
+
+    // 1. Resolve the linked Sales Order (most-recent).
+    const soQuery = `select SO_Number, Web_Order_ID, Purchase_Order, Deal_Name from Sales_Orders where Deal_Name.id = '${coqlEscape(did)}' order by Created_Time desc limit 1`;
+    let soResp;
+    try {
+      soResp = await zohoApiCall('POST', 'coql', env, { select_query: soQuery });
+    } catch (e) {
+      return { success: false, reason: 'crm_error', message: `Zoho lookup failed: ${String((e && e.message) || e)}` };
+    }
+    const so = soResp && Array.isArray(soResp.data) && soResp.data.length ? soResp.data[0] : null;
+    if (!so) return { success: false, reason: 'no_sales_order', message: `No Sales Order found for deal ${did}` };
+
+    const soNumber = String(so.SO_Number || '').trim();
+    const webOrderId = String(so.Web_Order_ID || '').trim();
+    const po = String(so.Purchase_Order || '').trim();
+
+    // 2. Sanitize identifiers (drop quotes/backslashes; keep [A-Za-z0-9._-]) so a token
+    //    cannot inject Gmail operators or broaden the search to another customer.
+    const safe = (t) => String(t).replace(/["\\]/g, '').trim();
+    const cleanTokens = [webOrderId, po, soNumber].map(safe).filter((t) => t && /^[A-Za-z0-9._\-]+$/.test(t));
+    // Search set: tokens long enough to be a useful Gmail query term.
+    const searchTokens = cleanTokens.filter((t) => t.length >= 4);
+    // Ownership set: only HIGH-ENTROPY tokens (>=6 chars) may confirm an email belongs
+    // to this order, so generic values ("IT", "PO", "TBD", "123") cannot.
+    const ownTokens = cleanTokens.filter((t) => t.length >= 6);
+    if (!searchTokens.length) {
+      return { success: false, reason: 'no_order_identifier', message: 'Sales Order has no Web Order / PO / SO number to match against an email' };
+    }
+    if (!ownTokens.length) {
+      return { success: false, reason: 'no_verifiable_identifier', message: 'Sales Order identifiers are too generic to safely confirm the right license email' };
+    }
+    const tokenClause = ` (${searchTokens.map((t) => `"${t}"`).join(' OR ')})`;
+    const gmailQuery = `from:ciscob2bupdates@tdsynnex.com subject:"Software licenses delivered"${tokenClause}`;
+    const searchParams = new URLSearchParams({ q: gmailQuery, maxResults: '5' });
+    let searchResp;
+    try {
+      searchResp = await gmailApiCall('GET', `messages?${searchParams}`, env);
+    } catch (e) {
+      return { success: false, reason: 'gmail_error', message: `Gmail search failed: ${String((e && e.message) || e)}` };
+    }
+    const messages = (searchResp && Array.isArray(searchResp.messages)) ? searchResp.messages : [];
+    if (!messages.length) {
+      return { success: false, reason: 'no_license_email', message: 'No Cisco license-delivery email found for this order' };
+    }
+
+    // 3. Scan candidates; ONLY accept an email whose decoded body contains one of THIS
+    //    order's high-entropy identifiers on a TOKEN BOUNDARY (no substring/generic hits),
+    //    so we never return another customer's key.
+    const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const ownedToken = (text) => ownTokens.find((t) => new RegExp(`(^|[^A-Za-z0-9])${escapeRe(t)}([^A-Za-z0-9]|$)`).test(text)) || null;
+    const decodeData = (d) => atob(String(d).replace(/-/g, '+').replace(/_/g, '/'));
+    for (const ref of messages) {
+      let data;
+      try {
+        data = await gmailApiCall('GET', `messages/${ref.id}?format=full`, env);
+      } catch (e) {
+        return { success: false, reason: 'gmail_error', message: `Gmail read failed: ${String((e && e.message) || e)}` };
+      }
+      const hdr = ((data.payload && data.payload.headers) || []).reduce((acc, h) => { acc[(h.name || '').toLowerCase()] = h.value; return acc; }, {});
+      let raw = '';
+      const walk = (part) => {
+        if (!part) return;
+        if (part.body && part.body.data) { try { raw += decodeData(part.body.data) + '\n'; } catch (e) {} }
+        if (Array.isArray(part.parts)) part.parts.forEach(walk);
+      };
+      walk(data.payload);
+      const text = raw.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim();
+      const matchedToken = ownedToken(text);
+      if (!matchedToken) continue;   // not this order's email — skip
+      const m = text.match(/Dashboard\s+Software\s+License\s+Claim\s+Key[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})/i);
+      if (!m) continue;              // right order, no parseable key — try next candidate
+      return {
+        success: true,
+        claimKey: m[1].toUpperCase(),
+        soNumber, webOrderId, po,
+        messageId: ref.id,
+        matchedOn: (matchedToken === webOrderId ? 'web_order_id' : (matchedToken === po ? 'po' : 'so_number')),
+        emailFrom: hdr.from || '', emailSubject: hdr.subject || '', emailDate: hdr.date || ''
+      };
+    }
+    return { success: false, reason: 'claim_key_not_found', message: 'License-delivery email(s) found but none matched this order with a parseable claim key' };
+  } catch (err) {
+    return { success: false, reason: 'recovery_failed', message: String((err && err.message) || err) };
+  }
+}
+
 async function findSalesOrdersForDeal(dealId, env) {
   if (!dealId) return [];
   const fields = 'id,Subject,SO_Number,Grand_Total,Status,Deal_Name,Account_Name,Client_Send_Status,Disti_Tracking_Number,Disti_Estimated_Ship_Date,Vendor_SO_Number,Created_Time,Modified_Time';
@@ -15236,6 +15338,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         return await gmailApiCall('POST', 'drafts', env, draftBody);
       }
 
+      case 'find_customer_license_claim_key': {
+        const { deal_id } = toolInput;
+        return await recoverLicenseClaimKey(env, deal_id);
+      }
+
       case 'gmail_send_email': {
         const { to, subject, body, cc, bcc, in_reply_to, thread_id } = toolInput;
         let raw = `To: ${to}\r\n`;
@@ -15700,6 +15807,17 @@ const CRM_EMAIL_TOOLS = [
     }
   },
   {
+    name: 'find_customer_license_claim_key',
+    description: 'Recover a customer Cisco license claim key by finding the Cisco license-delivery email for this deal and extracting the Dashboard Software License Claim Key. Read-only.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        deal_id: { type: 'string', description: 'Zoho Deal record id' }
+      },
+      required: ['deal_id']
+    }
+  },
+  {
     name: 'gmail_send_email',
     description: 'Send an email directly via Gmail. WARNING: Only use after explicit user approval. Prefer gmail_create_draft for composing responses, then send only after review.',
     input_schema: {
@@ -16125,14 +16243,14 @@ const TOOL_SUBSETS = Object.freeze({
   // Pure read / lookup. No mutations possible.
   crm_read: [
     'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
-    'zoho_get_field'
+    'zoho_get_field', 'find_customer_license_claim_key'
   ],
   // Email-centric flows. Includes zoho_create_record so tasks can be made
   // from an email context without re-classifying.
   email: [
     'gmail_search_messages', 'gmail_read_message', 'gmail_read_thread',
     'gmail_create_draft', 'gmail_send_email',
-    'zoho_search_records', 'zoho_create_record'
+    'zoho_search_records', 'zoho_create_record', 'find_customer_license_claim_key'
   ],
   // Stratus URL ecomm-link generation only.
   quote_url: ['parse_quote_url', 'batch_product_lookup', 'find_product_candidates', 'web_search_sku'],
@@ -16154,7 +16272,7 @@ const TOOL_SUBSETS = Object.freeze({
     'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
     'zoho_create_record', 'zoho_update_record',
     'batch_product_lookup', 'find_product_candidates', 'create_deal_and_quote', 'clone_quote',
-    'apply_margin_to_quote'
+    'apply_margin_to_quote', 'find_customer_license_claim_key'
   ]
 });
 
@@ -16288,6 +16406,13 @@ function classifyCrmIntent(text, ctx = {}) {
   if ((ctx.hasActivePageContext || ctx.hasQuoteSession)
       && /\b(update(?!\s+me\s+(?:on|about))|change|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.8 };
+  }
+
+  // 6b. License-key recovery — find / locate / recover the Cisco claim key for a
+  // deal or order. Routed to crm_read, which now includes find_customer_license_claim_key.
+  if (/\b(find|locate|recover|retrieve|look\s*up|get|where(?:'?s| is))\b[^.!?]{0,40}\b(licen[sc]e|claim)\s*key\b/.test(t)
+      || /\b(licen[sc]e|claim)\s*key\b[^.!?]{0,40}\b(deal|order|customer|sales\s*order|\bso\b|\bpo\b)\b/.test(t)) {
+    return { class: 'crm_read', confidence: 0.9 };
   }
 
   // 7. Pure read operations
@@ -16813,6 +16938,8 @@ function toolProgressMessage(toolName, toolInput) {
       return `✍️ Creating draft email to ${toolInput.to || ''}...`;
     case 'gmail_send_email':
       return `📤 Sending email to ${toolInput.to || ''}...`;
+    case 'find_customer_license_claim_key':
+      return 'Recovering license claim key from Sales Order...';
     case 'assign_cisco_rep_to_deal':
       return `👤 Assigning Cisco rep ${toolInput.rep_email || ''} to deal...`;
     default:
@@ -22887,7 +23014,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
               body: JSON.stringify({
                 model: 'claude-sonnet-4-6',
                 max_tokens: 1500,
-                system: `You are drafting email replies for a Stratus Information Systems sales rep (Cisco/Meraki exclusive reseller specializing in Meraki). Write in a friendly, consultative voice:
+                system: (String(env.CF_REPLY_VOICE_ENABLED) === 'true' ? (voiceSkillData.prompt || '') + '\n\n' : '') + `You are drafting email replies for a Stratus Information Systems sales rep (Cisco/Meraki exclusive reseller specializing in Meraki). Write in a friendly, consultative voice:
 
 STYLE RULES:
 - Personable, consultative, and concise
@@ -24569,6 +24696,17 @@ CRITICAL URL RULES:
               }
             }
             apiResult = { skus };
+            break;
+          }
+
+          // Direct, deterministic license-key recovery for the deal-preview button.
+          // Read-only; shares recoverLicenseClaimKey with the chat tool.
+          case '/api/find-license-key': {
+            const { deal_id } = apiBody;
+            if (!deal_id) {
+              return new Response(JSON.stringify({ error: 'deal_id required' }), { status: 400, headers: jsonHeaders });
+            }
+            apiResult = await recoverLicenseClaimKey(env, deal_id);
             break;
           }
 
