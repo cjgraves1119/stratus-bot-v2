@@ -251,6 +251,14 @@ function buildQuoteFromV3(v3, rawText) {
   if (!items.length) return null;
   const mods = v3.modifiers || {};
 
+  // A classifier 'hardware' label is only honored when the user's ACTUAL text
+  // expressed hardware-only intent. Otherwise a V3 Llama misclassification of a
+  // bare SKU ("create quote for a C9200L-24P-4G-M") sets hardwareOnly=true and
+  // wrongly drops the auto-paired license, collapsing to a single bare-hardware
+  // URL. parseMessage already derives per-item hardwareOnly from text — line ~310
+  // must not override that with the raw (flaky) classifier label. (2026-06-19)
+  const textHasHwOnly = /\b(hardware\s+only|hw\s+only|just\s+the\s+hardware|without\s+(a\s+)?licen[cs]e|no\s+licen[cs]e)\b/i.test(String(rawText || ''));
+
   // List-level single term (null → buildQuoteResponse expands 1/3/5YR). all_terms wins.
   let requestedTerm = null;
   if (!mods.all_terms) {
@@ -307,7 +315,7 @@ function buildQuoteFromV3(v3, rawText) {
 
     if (!Array.isArray(p.items)) continue;
     for (const pi of p.items) {
-      pi.hardwareOnly = (intent === 'hardware');
+      pi.hardwareOnly = (intent === 'hardware') && textHasHwOnly;
       pi.licenseOnly = (intent === 'license');
       combinedItems.push(pi);
     }
