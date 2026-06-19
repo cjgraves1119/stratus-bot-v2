@@ -15653,6 +15653,121 @@ async function fastPathQuoteLookup(userMessage, envObj) {
   }
 }
 
+// ── Quote-reference fast-path (A1/A2/A3, 2026-06-19) ─────────────────────────
+// Resolve a pasted Zoho Quotes URL or a bare quote id/number DIRECTLY (never a
+// 0-result text search that dead-ends in "No records found") and reply with the
+// View link so the extension's client-side "Download Zoho PDF" button appears.
+// Fires only for a clear view/download/reference intent — never hijacks a
+// create/modify request. Returns { reply } on a confident hit, else null (fall
+// through to the normal waterfall tiers). The Chrome-extension chat reaches this
+// worker via the gateway → /api/chat-waterfall, so this lives on that path.
+async function tryQuoteRefFastPath(userMessage, envObj) {
+  try {
+    const raw = String(userMessage || '');
+    // The extension prepends an active-page context hint ("<hint w/ Quotes URL>\n\n
+    // User message: <text>", ChatPanel.jsx). Operate ONLY on the user's actual words
+    // so the ACTIVE page's quote can't hijack the reference (Codex review finding 1).
+    const _umIdx = raw.lastIndexOf('User message:');
+    const text = _umIdx >= 0 ? raw.slice(_umIdx + 'User message:'.length) : raw;
+    // Never swallow a create/modify/admin request — those need the agent.
+    if (/\b(create|build|make|add|remove|delete|swap|replace|change|update|modify|set|margin|discount|send|convert|sign|e-?sign|attach|clone|duplicate|renew|new\s+deal|po\b|purchase\s*order)\b/i.test(text)) return null;
+
+    const wantsPdf = /\b(pdf|download|export|save)\b/i.test(text);
+    // Content questions ("what SKUs / line items / total / stage / status") need the
+    // agent to fetch and answer — the fast-path only returns the View link, so step
+    // aside for ANY content question (even alongside a pdf ask — compound requests go
+    // to the agent, which still emits the link so the button appears). Codex finding 4.
+    const contentQuestion = /\b(sku|skus|line\s*items?|items?|products?|contents?|grand\s*total|total|stage|status|pricing|price|cost|how\s+much|what('?s|\s+is|\s+are)|which|list)\b/i.test(text);
+    if (contentQuestion) return null;
+    const refVerb = wantsPdf || /\b(show|view|open|pull\s*up|see)\b/i.test(text);
+
+    const FIELDS = 'id,Subject,Quote_Number,Account_Name,Grand_Total,Quote_Stage';
+    // 1) Pasted Zoho Quotes URL → unambiguous record id.
+    const urlM = text.match(/crm\.zoho\.com\/crm\/(org\d+)\/tab\/Quotes\/(\d{10,19})/i);
+    let org = urlM ? urlM[1] : 'org647122552';
+    let recordId = urlM ? urlM[2] : null;
+    let quote = null;
+
+    if (recordId) {
+      const detail = await zohoApiCall('GET', `Quotes/${recordId}?fields=${FIELDS}`, envObj).catch(() => null);
+      quote = Array.isArray(detail?.data) ? detail.data[0] : detail?.data;
+      if (!quote) return null; // bad/foreign URL → let the agent handle
+    } else {
+      // 2) Bare 15-19 digit token — only with a quote-reference intent, and not
+      //    when it clearly names another record type.
+      if (!refVerb || !/\bquote\b/i.test(text)) return null;
+      if (/\b(deal|account|contact|sales\s*order|invoice|purchase\s*order)\b/i.test(text)) return null;
+      const idM = text.match(/(?<![\d./-])(\d{15,19})(?![\d./-])/);
+      if (!idM) return null;
+      const token = idM[1];
+      // A bare number is ambiguous — it can be a customer-facing Quote_Number OR an
+      // internal record id (both 19-digit). Resolve BOTH; if they hit DIFFERENT
+      // records, defer to the agent rather than risk returning the wrong quote
+      // (Codex review finding 2). A search ERROR vs 0-results both yield null here,
+      // so the disagreement check is the safety net.
+      const byNum = await zohoApiCall('GET', `Quotes/search?criteria=(Quote_Number:equals:${encodeURIComponent(token)})&fields=${FIELDS}`, envObj).catch(() => null);
+      const numHit = Array.isArray(byNum?.data) ? byNum.data[0] : null;
+      const byId = await zohoApiCall('GET', `Quotes/${token}?fields=${FIELDS}`, envObj).catch(() => null);
+      const idHit = Array.isArray(byId?.data) ? byId.data[0] : (byId?.data?.id ? byId.data : null);
+      if (numHit && idHit && numHit.id !== idHit.id) return null; // ambiguous → agent clarifies
+      quote = numHit || idHit;
+      if (!quote) return null; // genuinely unresolved → fall through (agent may clarify)
+      recordId = quote.id;
+    }
+
+    if (!recordId) return null;
+    const subj = quote && quote.Subject ? quote.Subject : 'Quote';
+    const qnum = quote && quote.Quote_Number ? ` (Quote #${quote.Quote_Number})` : '';
+    let reply = `**${subj}**${qnum} — [View in Zoho CRM](https://crm.zoho.com/crm/${org}/tab/Quotes/${recordId})`;
+    if (quote && quote.Grand_Total) {
+      reply += `\n\nTotal: $${Number(quote.Grand_Total).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+      if (quote.Quote_Stage) reply += `  |  Stage: ${quote.Quote_Stage}`;
+    }
+    if (wantsPdf) {
+      reply += `\n\nClick the **Download Zoho PDF** button below to download it.`;
+    }
+    return { reply };
+  } catch (e) {
+    console.log(`[QUOTE-REF-FASTPATH] skipped: ${e && e.message}`);
+    return null;
+  }
+}
+
+// ── Agent-emitted confirmation chips (2026-06-19) ────────────────────────────
+// The CRM agent appends a machine-readable block when it asks the user a
+// pick-one/confirm question (contact, license term, Cisco rep, SKU fix, …):
+//   [[SUGGESTIONS]]{"groups":[{"label":"...","options":[{"label","send","recommended"}]}]}[[/SUGGESTIONS]]
+// This parses that block into a normalized `suggestions` object for the extension
+// to render as clickable chips, and STRIPS it from the visible reply text. Free-
+// form typing always stays available. Malformed/absent block → {suggestions:null}.
+function extractSuggestionsBlock(reply) {
+  if (typeof reply !== 'string') return { reply, suggestions: null };
+  const m = reply.match(/\[\[SUGGESTIONS\]\]\s*([\s\S]*?)\s*\[\[\/SUGGESTIONS\]\]/);
+  if (!m) return { reply, suggestions: null };
+  let suggestions = null;
+  try {
+    const parsed = JSON.parse(m[1].trim());
+    const rawGroups = Array.isArray(parsed?.groups) ? parsed.groups
+      : (Array.isArray(parsed?.options) ? [{ label: parsed.label, options: parsed.options }] : null);
+    if (rawGroups) {
+      const groups = rawGroups.map(g => ({
+        label: g && g.label ? String(g.label).slice(0, 40) : undefined,
+        options: (Array.isArray(g?.options) ? g.options : [])
+          .filter(o => o && (o.send || o.label))
+          .slice(0, 8)
+          .map(o => ({
+            label: String(o.label || o.send).slice(0, 40),
+            send: String(o.send != null ? o.send : o.label).slice(0, 200),
+            ...(o.recommended ? { recommended: true } : {})
+          }))
+      })).filter(g => g.options.length);
+      if (groups.length) suggestions = { groups: groups.slice(0, 4) };
+    }
+  } catch { /* malformed JSON → just strip the block, no chips */ }
+  const cleaned = reply.replace(m[0], '').replace(/\n{3,}/g, '\n\n').trim();
+  return { reply: cleaned || reply.replace(m[0], '').trim(), suggestions };
+}
+
 // ─── CRM/Email Intent Detection ──────────────────────────────────────────────
 function detectCrmEmailIntent(text) {
   const lower = text.toLowerCase();
@@ -16002,6 +16117,9 @@ User mentions a quote number → \`zoho_search_records(Quotes, criteria=(Quote_N
 **[Session: Most recently worked quote] header** → that IS "the quote" / "that quote" / "same quote" — use it immediately without asking.
 **[Active Zoho page:...] header** → the user is VIEWING that record now; "this quote", "this deal", "modify this", "the current one" all mean it. Use its recordId directly via zoho_get_record / zoho_update_record — do not search.
 
+## QUOTE PDF / EXPORT
+**Download/export the PDF of a quote** (user says "download/export/save the pdf of quote X", pastes a Quotes URL, or refers to "the quote"): RESOLVE the quote first — a pasted \`.../tab/Quotes/{id}\` URL or a record id → \`zoho_get_record(Quotes, {id})\`; a customer-facing Quote # → the Quote_Number rule above. Then REPLY with \`[View in Zoho CRM](https://crm.zoho.com/crm/org647122552/tab/Quotes/{record_id})\` followed by exactly: "Click the **Download Zoho PDF** button below to download it." You CANNOT trigger the download yourself — it is a client-side button that appears on any reply containing a Quotes link. NEVER claim you downloaded, exported, or attached the PDF, and NEVER reply "No records found" for a valid id/URL.
+
 ## CREATE PATH
 New deal+quote → **create_deal_and_quote** (Account, Contact, Deal, products, Quote+ecomm pricing, verification, Task — ONE call, ~10s). Do NOT chain zoho_create_record. Target iterations: new deal+quote=2; URL update=2-3; quote modify=3-4 (incl. re-fetch verify); simple lookup=1-2. NEVER exceed 4 for quote ops.
 
@@ -16016,6 +16134,14 @@ New deal+quote → **create_deal_and_quote** (Account, Contact, Deal, products, 
 ## CLARIFYING QUESTIONS — ASK BEFORE CREATING
 
 Before any Deal or Quote create you MUST have: Company name (Account); Contact name; Products / SKUs and quantities; Cisco rep involvement? (determines Lead_Source); Billing address (Zoho Account first, then Gmail thread, then ask). Anything missing → STOP and ask for everything in ONE friendly message — never guess or use placeholders.
+
+**CLICKABLE CONFIRMATIONS (reduce typing — ALWAYS do this when asking the user to pick/confirm).** Whenever your reply asks the user to choose or confirm anything with a small set of answers — contact, license term, Cisco rep / Lead_Source, a SKU correction, which existing deal, yes/no — you MUST (1) resolve a sensible DEFAULT and say it in your prose, then (2) append ONE machine-readable block at the very END of your reply that the app turns into clickable buttons (and strips from the visible text). DEFAULTS to assume (mark as the recommended option):
+- **Contact:** if none was referenced, look up the Account's contacts (\`zoho_search_records\` Contacts for that Account) and propose the primary/first one as recommended.
+- **License term:** default **3 year** (recommended). (SME: only 1/3 year.)
+- **Cisco rep / Lead_Source:** default **"Stratus Referal" (no rep)** recommended, UNLESS a Cisco/Meraki rep appears in the email/thread/context.
+Block format — valid JSON on ONE line, 1–3 groups, EXACTLY one \`"recommended":true\` per group; each option's \`send\` is the literal chat message a click submits:
+\`[[SUGGESTIONS]]{"groups":[{"label":"Contact","options":[{"label":"Patrick Uphill","send":"Contact is Patrick Uphill","recommended":true}]},{"label":"License term","options":[{"label":"3-year","send":"3 year","recommended":true},{"label":"1-year","send":"1 year"},{"label":"5-year","send":"5 year"}]},{"label":"Cisco rep","options":[{"label":"Stratus Referral (no rep)","send":"No Cisco rep, Stratus Referal","recommended":true},{"label":"A rep referred this","send":"A Cisco rep referred this"}]}]}[[/SUGGESTIONS]]\`
+Still ask the question in plain prose ABOVE the block. Omit the block entirely on replies that are NOT asking the user to pick/confirm (e.g. a finished quote summary).
 
 **Pasted multi-line product lists (BOM):** parse the ENTIRE list into one bill of materials FIRST — every line with SKU + qty + term. A global quantity phrase ("Qty 2 each") applies to EVERY line unless a line overrides it; a term stated once ("3 YEAR") or embedded in a license SKU (…-3Y) is RESOLVED — do not re-ask it. Echo the full parsed BOM in ONE confirmation message (SKU + qty per line — no extra lookups first), get a single approval, then call create_deal_and_quote ONCE with the complete skus[] array. NEVER build the quote one item per turn, and NEVER call create_deal_and_quote with only a subset of the confirmed items.
 
@@ -16064,7 +16190,7 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 
 **Systems Manager (LIC-SME): 1YR/3YR terms only — 5YR is deprecated. Never quote LIC-SME-5YR; cap to 3YR and flag the change to the user.**
 
-**Catalyst switch power supplies (C9200/C9300 class) follow a strict grammar: \`PWR-C{config}-{wattage}{AC|DC}-M[-O]\`.** Decode the customer's words: "CONFIG 5" / "config-5" → \`C5\`; the wattage + AC/DC squashed with no space ("125W AC" → \`125WAC\`, "1KW AC" → \`1KWAC\`); "W/Meraki" / "for Meraki" / Meraki-managed → the \`-M\` suffix. Prefer the base \`-M\` key as canonical; only use \`-M-O\` if the user explicitly typed \`-O\`. Real catalog keys (do NOT invent others): PWR-C5-125WAC-M, PWR-C5-600WAC-M, PWR-C5-1KWAC-M, PWR-C1-350WAC-P-M, PWR-C1-715WAC-P-M, PWR-C1-1100WAC-P-M, PWR-C1-1900WAC-P-M. So "125W AC CONFIG 5 POWER SUPPLY W/MERAKI" → **PWR-C5-125WAC-M**.
+**Catalyst switch power supplies (C9200/C9300 class) follow a strict grammar: \`PWR-C{config}-{wattage}{AC|DC}-M[-O]\`.** Decode the customer's words: "CONFIG 5" / "config-5" → \`C5\`; the wattage + AC/DC squashed with no space ("125W AC" → \`125WAC\`, "1KW AC" → \`1KWAC\`); "W/Meraki" / "for Meraki" / Meraki-managed → the \`-M\` suffix. Prefer the base \`-M\` key as canonical; only use \`-M-O\` if the user explicitly typed \`-O\`. Real catalog keys (do NOT invent others): PWR-C5-125WAC-M, PWR-C5-600WAC-M, PWR-C5-1KWAC-M, PWR-C1-350WAC-P-M, PWR-C1-715WAC-P-M, PWR-C1-1100WAC-P-M, PWR-C1-1900WAC-P-M. So "125W AC CONFIG 5 POWER SUPPLY W/MERAKI" → **PWR-C5-125WAC-M**. (C5 keys are \`PWR-C5-{w}-M\`; **C1 keys carry an extra \`-P-\` segment: \`PWR-C1-{w}WAC-P-M\`** — don't drop it. Always map the words to ONE of the exact keys listed above; never emit a key that isn't on that list.)
 ❌ NEVER derive a power-supply SKU from the SWITCH family — the PSU for a C9200L is NOT \`C9200L-PWR-125WAC\` (not a real SKU). A switch PSU starts with \`PWR-C*\`, never \`C9200L-PWR-*\`. Meraki AP / sensor / adapter power is the separate \`MA-PWR-*\` family (e.g. MA-PWR-30W-US) — never use an MA-PWR AP adapter for a switch power-supply line. **If you are unsure of ANY SKU, call \`find_product_candidates\` with the customer's wording instead of guessing — do not fabricate an exact SKU string.**
 
 ## ZOHO SEARCH
@@ -24350,6 +24476,42 @@ CRITICAL URL RULES:
                   elapsedMs: 0,
                   totalMs: outcome.totalMs,
                   iterations: 0,
+                  toolCallCount: 0,
+                  // Clickable chips for the extension (worker emits, client renders).
+                  // 3-year is the recommended DEFAULT (highlighted) but still a click —
+                  // NOT a silent auto-apply, so it doesn't repeat the v666 silent-1YR
+                  // failure. SME caps at 3YR (5YR deprecated).
+                  suggestions: {
+                    question: _ambigLic.askMessage,
+                    allow_freeform: true,
+                    group: 'term',
+                    options: (/sme/i.test(_ambigLic.family || '')
+                      ? [{ label: '3-year', send: '3 year', recommended: true }, { label: '1-year', send: '1 year' }]
+                      : [{ label: '3-year', send: '3 year', recommended: true }, { label: '1-year', send: '1 year' }, { label: '5-year', send: '5 year' }])
+                  }
+                };
+                break;
+              }
+
+              // ── Quote-reference fast-path (A1/A2/A3, 2026-06-19): a pasted Zoho
+              //    Quotes URL or a bare quote id/number → resolve the quote DIRECTLY
+              //    and reply with its View link so the client "Download Zoho PDF"
+              //    button appears; never a 0-result search that dead-ends in
+              //    "No records found". Runs before the LLM tiers. ──
+              const _qref = await tryQuoteRefFastPath(wText, env);
+              if (_qref) {
+                console.log('[WATERFALL] Quote-reference fast-path hit');
+                await addToHistory(env.CONVERSATION_KV, wPersonId, 'user', wEnrichedMessage);
+                await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', _qref.reply);
+                apiResult = {
+                  success: true,
+                  reply: _qref.reply,
+                  model: 'deterministic-quote-ref',
+                  tierUsed: 'deterministic',
+                  stallReason: null,
+                  elapsedMs: 0,
+                  totalMs: Date.now() - (typeof t0 !== 'undefined' ? t0 : Date.now()),
+                  iterations: 0,
                   toolCallCount: 0
                 };
                 break;
@@ -24471,11 +24633,14 @@ CRITICAL URL RULES:
                 'claude-advisory-fallback': `🔶 Claude Sonnet 4.6 (advisory fallback, DeepSeek advisory disabled — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`
               };
               const badge = tierBadges[outcome.tierUsed] || `model: ${outcome.model}`;
-              const replyWithBadge = `${outcome.reply}\n\n---\n_${badge}_`;
+              // Extract any agent-emitted [[SUGGESTIONS]] block → clickable chips, and
+              // strip it from the visible AND stored text (chips are UI-only). 2026-06-19.
+              const { reply: _cleanReply, suggestions: _agentSuggestions } = extractSuggestionsBlock(outcome.reply);
+              const replyWithBadge = `${_cleanReply}\n\n---\n_${badge}_`;
 
-              // Save to conversation history (without badge — badge is UI-only)
+              // Save to conversation history (without badge or chip block — both UI-only)
               await addToHistory(env.CONVERSATION_KV, wPersonId, 'user', wEnrichedMessage);
-              await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', outcome.reply);
+              await addToHistory(env.CONVERSATION_KV, wPersonId, 'assistant', _cleanReply);
 
               const outcomeTierPath = outcome.tierUsed === 'deterministic'
                 ? 'deterministic'
@@ -24490,6 +24655,7 @@ CRITICAL URL RULES:
               apiResult = {
                 success: true,
                 reply: replyWithBadge,
+                suggestions: _agentSuggestions || undefined,
                 model: outcome.model,
                 tierUsed: outcome.tierUsed,
                 tierPath: outcomeTierPath,
