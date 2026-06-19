@@ -21212,7 +21212,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // High-stakes CRM writes go to Claude first because cheaper CF models have
   // historically paraphrased write intent instead of invoking tools. If Claude
   // stalls or fails, fall back to the normal waterfall instead of dead-ending.
-  const autoForceClaudeForWrite = shouldForceClaudeForWrite(userMessage);
+  const autoForceClaudeForWrite = shouldForceClaudeForWrite(userMessage) || options.crmFollowUp === true;
   let autoClaudeResult = null;
   let autoClaudeFailure = null;
   if (autoForceClaudeForWrite) {
@@ -24589,9 +24589,18 @@ CRITICAL URL RULES:
                 // detect in-prompt "confirm:true" phrases for destructive ops
                 // and auto-inject consent when Llama fails to propagate it.
                 env.__USER_PROMPT_RAW = wText || '';
+                // CRM-write follow-up routing (2026-06-19): if the prior assistant
+                // turn was a CRM clarify / quote-build question, the user's short
+                // answer ("3 year", "attach to the HPE deal", a contact name) is a
+                // WRITE CONTINUATION. Force the Claude agent — the Llama read tier
+                // loses the quote/account context and hallucinates accounts
+                // (e.g. "Acme Corp not found"). Falls back to the waterfall if Claude stalls.
+                const _lastAsst = Array.isArray(wHistory) ? [...wHistory].reverse().find(m => m && m.role === 'assistant') : null;
+                const _crmFollowUp = !!(_lastAsst && /\b(quotes?|deals?|accounts?|contacts?|license\s*term|cisco\s*rep|meraki\s*isr|which\s+deal|need (a few|some) details|before (i|we) (build|create)|attach (this|the) quote|company name)\b/i.test(String(_lastAsst.content || '')));
                 const forcedBenchmarkModel = BENCHMARK_MODELS.find(m => m.id === forcedModel);
                 // Run the waterfall (Llama → Gemma → Claude)
                 outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
+                  crmFollowUp: _crmFollowUp,
                   forceLlama: forcedModel === 'llama',
                   forceGemma: forcedModel === 'gemma',
                   forceClaude: forcedModel === 'claude',
