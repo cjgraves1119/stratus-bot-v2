@@ -31,6 +31,8 @@ paths = [
     # Large test data files (hundreds of SKUs, no secrets)
     '''data/pricing/''',
     '''classifier-fixtures\.json$''',
+    # License-key matcher unit test — synthetic claim-key fixtures only (no real keys)
+    '''worker-gchat/test-license-key-matching\.js$''',
 ]
 
 regexes = [
