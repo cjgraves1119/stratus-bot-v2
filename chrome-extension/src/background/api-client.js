@@ -457,6 +457,16 @@ export async function sendHandoff(requestText, emailContext, history) {
   }, { timeout: 60000 });
 }
 
+/**
+ * Recover a customer's Cisco license claim key for a deal (read-only).
+ * Resolves the deal's Sales Order, finds the Cisco/TD SYNNEX license-delivery
+ * email, and returns { success, claimKey, ... } or { error, message }.
+ * No Zoho writes.
+ */
+export async function findLicenseKey(dealId) {
+  return apiCall('/api/find-license-key', { deal_id: dealId }, { timeout: 30000 });
+}
+
 // ─────────────────────────────────────────────
 // CCW / Velocity Hub
 // ─────────────────────────────────────────────

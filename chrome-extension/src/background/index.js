@@ -456,6 +456,11 @@ registerMessageHandlers({
     return api.assignCiscoRep(dealId, repEmail, repName);
   },
 
+  // ── License-key recovery (read-only; deal-preview "Find License Key" button) ──
+  [MSG.FIND_LICENSE_KEY]: async ({ dealId }) => {
+    return api.findLicenseKey(dealId);
+  },
+
   // ── Download Zoho's native templated Quote PDF (web-UI "Export to PDF") ──
   [MSG.EXPORT_ZOHO_PDF]: async ({ recordId, templateName, org }) => {
     return exportZohoQuotePdf({ recordId, templateName, org });

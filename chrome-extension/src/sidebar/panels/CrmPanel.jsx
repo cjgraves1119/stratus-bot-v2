@@ -1555,6 +1555,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
 function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRep }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedRep, setSelectedRep] = useState('');
+  const [licenseKey, setLicenseKey] = useState(deal.licenseKey || null);
+  const [keyLoading, setKeyLoading] = useState(false);
+  const [keyError, setKeyError] = useState('');
 
   const dealName = typeof (deal.name || deal.Deal_Name) === 'object'
     ? (deal.name || deal.Deal_Name)?.name : (deal.name || deal.Deal_Name);
@@ -1562,7 +1565,7 @@ function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRe
     ? (deal.stage || deal.Stage)?.name : (deal.stage || deal.Stage);
   const amount = Number(deal.amount || deal.Amount || 0);
 
-  const hasSoData = deal.soNumber || deal.trackingNumber || deal.estimatedShipDate || deal.poStatus;
+  const hasSoData = deal.soNumber || deal.trackingNumber || deal.estimatedShipDate || deal.poStatus || licenseKey;
 
   return (
     <div style={{ borderBottom: !isLast ? `1px solid ${COLORS.BORDER}` : 'none', paddingBottom: 8, marginBottom: 8 }}>
@@ -1601,8 +1604,32 @@ function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRe
               {deal.poStatus && <div style={{ fontSize: 11 }}><strong>PO Status:</strong> {deal.poStatus}</div>}
               {deal.trackingNumber && <div style={{ fontSize: 11 }}><strong>Tracking:</strong> {deal.trackingNumber}</div>}
               {deal.estimatedShipDate && <div style={{ fontSize: 11 }}><strong>Est. Ship:</strong> {deal.estimatedShipDate}</div>}
+              {licenseKey && <div style={{ fontSize: 11 }}><strong>License Key:</strong> <code style={{ fontSize: 10, background: '#f5f5f5', padding: '2px 4px', borderRadius: 2, fontFamily: 'monospace' }}>{licenseKey}</code></div>}
             </div>
           )}
+
+          {/* License Key recovery — opt-in, live, no Zoho write */}
+          <div style={{ marginBottom: 8 }}>
+            <button
+              onClick={async () => {
+                setKeyLoading(true); setKeyError('');
+                try {
+                  const res = await sendToBackground(MSG.FIND_LICENSE_KEY, { dealId: deal.id });
+                  if (res && res.success && res.claimKey) setLicenseKey(res.claimKey);
+                  else setKeyError((res && res.message) || 'No license key found');
+                } catch (e) {
+                  setKeyError('Lookup failed');
+                } finally {
+                  setKeyLoading(false);
+                }
+              }}
+              disabled={keyLoading}
+              style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, border: `1px solid ${COLORS.BORDER}`, background: '#fff', cursor: keyLoading ? 'default' : 'pointer', color: COLORS.STRATUS_BLUE }}
+            >
+              {keyLoading ? 'Searching Gmail…' : (licenseKey ? 'Re-check License Key' : '🔑 Find License Key')}
+            </button>
+            {keyError && <div style={{ fontSize: 10, color: '#c62828', marginTop: 4 }}>{keyError}</div>}
+          </div>
 
           {/* 2026-05-12: Velocity Hub button removed per Chris. Server-side
               velocity_hub_submit tool stays intact for use by the

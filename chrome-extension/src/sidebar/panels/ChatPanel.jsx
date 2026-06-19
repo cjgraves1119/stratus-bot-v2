@@ -386,6 +386,7 @@ const QUICK_ACTIONS = [
   { label: 'Open Deals', text: 'Show my open deals in Zoho CRM' },
   { label: 'Create Quote', text: 'Help me create a quote in Zoho CRM' },
   { label: 'Look Up Account', text: 'Look up the account for this email in Zoho CRM' },
+  { label: 'Find License Key', text: 'Find the license key for this deal' },
 ];
 
 function isQuoteFromEmailRequest(text) {
