@@ -15832,6 +15832,12 @@ function ensureTermSuggestionGroup(suggestions, replyText, agentMsg, history) {
   // Only augment a FIELD-CLARIFY card (collecting contact/rep/account) — never a
   // proceed/decision card ("Create it now" / "New deal" / "Add to existing").
   if (!suggestions.groups.some(g => /\b(contact|cisco|rep|lead\s*source|account)\b/i.test(g.label || ''))) return suggestions;
+  // Accessories (PSU / adapter / cable / transceiver) carry NO license term. If the card is
+  // already collecting wattage/PSU, or the turn is about a power supply/accessory, do NOT add
+  // a term row — even if a stale LIC- from an earlier switch quote is still in history
+  // (2026-06-19: "just the psu for the switch" wrongly got a License-term chip).
+  if (suggestions.groups.some(g => /\b(wattage|psu|power\s*supply|adapter)\b/i.test(g.label || ''))) return suggestions;
+  if (/\b(psu|power\s*supply|power\s*adapter|power\s*injector|wattage|\baccessor)/i.test(String(agentMsg || '') + ' ' + String(replyText || ''))) return suggestions;
   const haystack = [String(agentMsg || ''), String(replyText || '')].concat(
     Array.isArray(history) ? history.slice(-8).map(m => (m && typeof m.content === 'string') ? m.content : '') : []
   ).join('\n');
@@ -16220,7 +16226,7 @@ Before any Deal or Quote create you MUST have: Company name (Account); Contact n
 
 **CLICKABLE CONFIRMATIONS (reduce typing — ALWAYS do this when asking the user to pick/confirm).** Whenever your reply asks the user to choose or confirm anything with a small set of answers — contact, license term, Cisco rep / Lead_Source, a SKU correction, which existing deal, yes/no — you MUST (1) resolve a sensible DEFAULT and say it in your prose, then (2) append ONE machine-readable block at the very END of your reply that the app turns into clickable buttons (and strips from the visible text). DEFAULTS to assume (mark as the recommended option):
 - **Contact:** if none was referenced, look up the Account's contacts (\`zoho_search_records\` Contacts for that Account) and propose the primary/first one as recommended.
-- **License term:** ALWAYS include a "License term" group whenever the quote has ANY license/subscription line — even if a term is already implied by a license SKU (e.g. …-3Y) or was stated earlier. Pre-select the known/resolved term as recommended (default **3 year** if none stated), and still offer the others so the user can change it in one click: 1/3/5 year (SME: only 1/3 year). Omit the Term group ONLY for hardware-only quotes with no license.
+- **License term:** ALWAYS include a "License term" group whenever the quote has ANY license/subscription line — even if a term is already implied by a license SKU (e.g. …-3Y) or was stated earlier. Pre-select the known/resolved term as recommended (default **3 year** if none stated), and still offer the others so the user can change it in one click: 1/3/5 year (SME: only 1/3 year). Omit the Term group for hardware-only quotes with no license — AND for **accessory-only** quotes (power supply/PSU, adapter, cable, transceiver, mount): an accessory has NO license term, so NEVER show a License term chip for it; ask only its variant (e.g. PSU wattage) when needed.
 - **Cisco rep / Lead_Source:** default **"Stratus Referal" (no rep)** recommended, UNLESS a Cisco/Meraki rep appears in the email/thread/context.
 Block format — valid JSON on ONE line, 1–3 groups, EXACTLY one \`"recommended":true\` per group; each option's \`send\` is the literal chat message a click submits:
 \`[[SUGGESTIONS]]{"groups":[{"label":"Contact","options":[{"label":"Patrick Uphill","send":"Contact is Patrick Uphill","recommended":true}]},{"label":"License term","options":[{"label":"3-year","send":"3 year","recommended":true},{"label":"1-year","send":"1 year"},{"label":"5-year","send":"5 year"}]},{"label":"Cisco rep","options":[{"label":"Stratus Referral (no rep)","send":"No Cisco rep, Stratus Referal","recommended":true},{"label":"A rep referred this","send":"A Cisco rep referred this"}]}]}[[/SUGGESTIONS]]\`
@@ -16281,7 +16287,7 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 **Systems Manager (LIC-SME): 1YR/3YR terms only — 5YR is deprecated. Never quote LIC-SME-5YR; cap to 3YR and flag the change to the user.**
 
 **Catalyst switch power supplies (C9200/C9300 class) follow a strict grammar: \`PWR-C{config}-{wattage}{AC|DC}-M[-O]\`.** Decode the customer's words: "CONFIG 5" / "config-5" → \`C5\`; the wattage + AC/DC squashed with no space ("125W AC" → \`125WAC\`, "1KW AC" → \`1KWAC\`); "W/Meraki" / "for Meraki" / Meraki-managed → the \`-M\` suffix. Prefer the base \`-M\` key as canonical; only use \`-M-O\` if the user explicitly typed \`-O\`. Real catalog keys (do NOT invent others): PWR-C5-125WAC-M, PWR-C5-600WAC-M, PWR-C5-1KWAC-M, PWR-C1-350WAC-P-M, PWR-C1-715WAC-P-M, PWR-C1-1100WAC-P-M, PWR-C1-1900WAC-P-M. So "125W AC CONFIG 5 POWER SUPPLY W/MERAKI" → **PWR-C5-125WAC-M**. (C5 keys are \`PWR-C5-{w}-M\`; **C1 keys carry an extra \`-P-\` segment: \`PWR-C1-{w}WAC-P-M\`** — don't drop it. Always map the words to ONE of the exact keys listed above; never emit a key that isn't on that list.)
-❌ NEVER derive a power-supply SKU from the SWITCH family — the PSU for a C9200L is NOT \`C9200L-PWR-125WAC\` (not a real SKU). A switch PSU starts with \`PWR-C*\`, never \`C9200L-PWR-*\`. Meraki AP / sensor / adapter power is the separate \`MA-PWR-*\` family (e.g. MA-PWR-30W-US) — never use an MA-PWR AP adapter for a switch power-supply line. **If you are unsure of ANY SKU, call \`find_product_candidates\` with the customer's wording instead of guessing — do not fabricate an exact SKU string.**
+❌ NEVER derive a power-supply SKU from the SWITCH family — the PSU for a C9200L is NOT \`C9200L-PWR-125WAC\` (not a real SKU). A switch PSU starts with \`PWR-C*\`, never \`C9200L-PWR-*\`. When the user asks for "a PSU / power supply for a {switch}", the requested item is the POWER SUPPLY, not the switch — resolve the PSU via \`find_product_candidates\` (ask wattage if unspecified: 125W / 600W / 1KW AC) and quote ONLY the PSU. Do NOT add the {switch} or a license unless the user also asks for them. Meraki AP / sensor / adapter power is the separate \`MA-PWR-*\` family (e.g. MA-PWR-30W-US) — never use an MA-PWR AP adapter for a switch power-supply line. **If you are unsure of ANY SKU, call \`find_product_candidates\` with the customer's wording instead of guessing — do not fabricate an exact SKU string.**
 
 ## ZOHO SEARCH
 
@@ -21095,6 +21101,22 @@ function shouldForceClaudeForWrite(userMessage) {
   return writePatterns.some(p => p.test(userMessage));
 }
 
+// Accessory / SKU-FIND requests must go to the TOOLED Claude (Sonnet) agent, where the
+// find_product_candidates + PSU-naming discipline lives. 2026-06-19: "PSU for C9200L"
+// fabricated SKUs on Llama (id 5730 PWR-C1-S2-90) or punted (id 5697), and "quote a PSU
+// for C9200L" made the deterministic engine quote the host SWITCH. The PSU SKU depends on
+// wattage and is never the switch family (PWR-C*, not C9200L-PWR-*), so this both routes to
+// Sonnet AND suppresses the deterministic host-switch quote.
+function isAccessorySkuFindRequest(userMessage) {
+  if (!userMessage || typeof userMessage !== 'string') return false;
+  const t = userMessage.toLowerCase();
+  // Explicit accessory nouns (power supply / PSU / injector / stack cable / transceiver / mount …)
+  const accessory = /\b(power\s*supply|psu|power\s*adapter|power\s*injector|stack(?:ing)?\s*(?:cable|kit|module)|transceiver|sfp\+?|qsfp\+?|gbic|patch\s*cable|mounting\s*(?:kit|bracket)|rack\s*(?:kit|mount)|rail\s*kit|antenna|wall\s*(?:mount|adapter))\b/i;
+  // Generic "find the SKU / part number" for a described product
+  const skufind = /\b(what(?:'s| is)\s+the\s+(?:sku|part\s*(?:number|#)?)|find\s+(?:the\s+)?(?:right\s+|correct\s+)?(?:sku|part)|which\s+sku|correct\s+sku|look\s*up\s+(?:the\s+)?(?:sku|part))\b/i;
+  return accessory.test(t) || skufind.test(t);
+}
+
 function claudeResultLooksUsable(result) {
   if (!result || typeof result !== 'object') return false;
   if (Array.isArray(result.errors) && result.errors.length > 0) return false;
@@ -21302,7 +21324,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // High-stakes CRM writes go to Claude first because cheaper CF models have
   // historically paraphrased write intent instead of invoking tools. If Claude
   // stalls or fails, fall back to the normal waterfall instead of dead-ending.
-  const autoForceClaudeForWrite = shouldForceClaudeForWrite(userMessage) || options.crmFollowUp === true;
+  const autoForceClaudeForWrite = shouldForceClaudeForWrite(userMessage) || options.crmFollowUp === true || isAccessorySkuFindRequest(userMessage);
   let autoClaudeResult = null;
   let autoClaudeFailure = null;
   if (autoForceClaudeForWrite) {
@@ -22995,14 +23017,19 @@ CRITICAL URL RULES:
             // falls through to the deterministic parseMessage path. Mirrors the webex wiring.
             // A tier-continuation match skips the classifier: the synthesized request is exactly
             // the deterministic engine's input shape, so an AI call would only add latency.
+            // Accessory / SKU-find requests ("PSU for C9200L", "power supply for X") must NOT
+            // be deterministically quoted as the host switch — the PSU SKU depends on wattage
+            // and needs the tooled Claude agent (find_product_candidates). Suppress the
+            // deterministic quote here; the validItems===0 fallback below runs TOOLED for these.
+            const _accessoryFind = isAccessorySkuFindRequest(text);
             let parsed = null;
-            if (!_tierRequest && String(env.CF_QUOTE_V3_ENABLED) === 'true') {
+            if (!_accessoryFind && !_tierRequest && String(env.CF_QUOTE_V3_ENABLED) === 'true') {
               try {
                 const _v3 = await classifyV3(text, '', env);
                 if (_v3 && _v3.intent === 'quote') parsed = buildQuoteFromV3(_v3, text) || null;
               } catch (_) { parsed = null; }
             }
-            if (!parsed) parsed = parseMessage(_tierRequest || text);
+            if (!_accessoryFind && !parsed) parsed = parseMessage(_tierRequest || text);
 
             // Clarification prompts (e.g. "which Duo tier?") — return as clarification response.
             // Store the question as an assistant turn so the NEXT message ("Essentials") can be
@@ -23023,8 +23050,10 @@ CRITICAL URL RULES:
               (parsed?.items || []).map(i => (i.baseSku || i.sku || '').toUpperCase())
             );
 
-            // Find SKU-like tokens that parseMessage dropped (couldn't resolve to a valid item)
-            const droppedTokens = rawSkuTokens.filter(t => !parsedSkuSet.has(t));
+            // Find SKU-like tokens that parseMessage dropped (couldn't resolve to a valid item).
+            // For an accessory request the host-switch token (e.g. C9200L) is CONTEXT, not an
+            // item to quote or "did you mean" — drop it so it doesn't block routing to Sonnet.
+            const droppedTokens = _accessoryFind ? [] : rawSkuTokens.filter(t => !parsedSkuSet.has(t));
 
             // Validate ALL tokens: both parsed items and dropped tokens
             const suggestions = [];
@@ -23145,7 +23174,7 @@ CRITICAL URL RULES:
                   quotePersonId,
                   env,
                   null,   // no image
-                  false,  // no tools
+                  _accessoryFind,  // accessory SKU-find → run TOOLED; else no tools (technical Q)
                 );
                 const sanitizedFallback = stripEmptyOrderUrls((claudeReply || '').replace(/\[object Object\]/g, ''));
                 const claudeUrls = sanitizedFallback.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
@@ -23193,7 +23222,7 @@ CRITICAL URL RULES:
                   quotePersonId,
                   env,
                   null,
-                  false,
+                  _accessoryFind, // accessory SKU-find → run TOOLED (find_product_candidates / web_search_sku)
                 );
                 // Sanitize: strip [object Object] from Claude's response (hallucination safety net)
                 const sanitizedFb = stripEmptyOrderUrls((claudeReply || '').replace(/\[object Object\]/g, ''));
