@@ -15829,6 +15829,9 @@ function extractLockedQuoteItems(currentText, history) {
 function ensureTermSuggestionGroup(suggestions, replyText, agentMsg, history) {
   if (!suggestions || !Array.isArray(suggestions.groups) || !suggestions.groups.length) return suggestions;
   if (suggestions.groups.some(g => /\b(term|year|yr)\b/i.test(g.label || ''))) return suggestions;
+  // Only augment a FIELD-CLARIFY card (collecting contact/rep/account) — never a
+  // proceed/decision card ("Create it now" / "New deal" / "Add to existing").
+  if (!suggestions.groups.some(g => /\b(contact|cisco|rep|lead\s*source|account)\b/i.test(g.label || ''))) return suggestions;
   const haystack = [String(agentMsg || ''), String(replyText || '')].concat(
     Array.isArray(history) ? history.slice(-8).map(m => (m && typeof m.content === 'string') ? m.content : '') : []
   ).join('\n');
@@ -16225,9 +16228,16 @@ Still ask the question in plain prose ABOVE the block. Omit the block entirely o
 
 **Pasted multi-line product lists (BOM):** parse the ENTIRE list into one bill of materials FIRST — every line with SKU + qty + term. A global quantity phrase ("Qty 2 each") applies to EVERY line unless a line overrides it; a term stated once ("3 YEAR") or embedded in a license SKU (…-3Y) is RESOLVED — do not re-ask it. Echo the full parsed BOM in ONE confirmation message (SKU + qty per line — no extra lookups first), get a single approval, then call create_deal_and_quote ONCE with the complete skus[] array. NEVER build the quote one item per turn, and NEVER call create_deal_and_quote with only a subset of the confirmed items.
 
-## PRE-CREATION VALIDATION TABLE (MANDATORY)
+## PRE-CREATION CONFIRMATION
 
-Before \`zoho_create_record\` for a Deal or Quote, show a table (Field | Value | Status), each row ✓ or ⚠. ANY ⚠ / missing → STOP and resolve. **EXCEPTION:** \`create_deal_and_quote\` validates internally — skip the table.
+For a raw \`zoho_create_record\` Deal/Quote: show a table (Field | Value | Status), each row ✓ or ⚠; ANY ⚠ / missing → STOP and resolve.
+
+**For the normal quote path (\`create_deal_and_quote\` / \`create_quote_on_deal\`): do NOT show a validation table or ANY markdown table — the chat UI renders \`| … |\` as raw text. Give a TIGHT confirmation (≤3 short lines), then chips:**
+- One line: \`Ready to quote **{Account}**: {qty}× {SKU} + {qty}× {LICENSE} ({N}-year) · {Contact} · {Lead_Source}.\` (use a plain bullet per line item if more than ~2 items — never a table).
+- Then a single short question: \`Create it?\`
+- **Billing/shipping is automatic — NEVER fetch or display the account's billing/shipping address, never list it as a confirmation field, and never narrate "got the billing address."** \`create_deal_and_quote\`/\`create_quote_on_deal\` read the Account's billing+shipping authoritatively at create time. A separate account read just to show the address is a wasted tool call. The ONLY time you mention the address is when the account resolution / [CRM context] flagged a billing field as MISSING — then ask the user for that field.
+- **Existing open deal:** do NOT pre-decide or write a paragraph justifying a new deal. Keep it to one clause ("this account already has an open deal") and let the chips decide. Use chips "New deal (recommended)" + "Add to the existing deal"; set \`confirm_new_deal:true\` ONLY when the user picks New.
+- Otherwise end with chips: "Create it now" (recommended) + "Change something".
 
 ## DEAL CREATION — REQUIRED PAYLOAD
 
