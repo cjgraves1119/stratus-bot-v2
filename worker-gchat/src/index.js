@@ -16236,8 +16236,8 @@ For a raw \`zoho_create_record\` Deal/Quote: show a table (Field | Value | Statu
 - One line: \`Ready to quote **{Account}**: {qty}× {SKU} + {qty}× {LICENSE} ({N}-year) · {Contact} · {Lead_Source}.\` (use a plain bullet per line item if more than ~2 items — never a table).
 - Then a single short question: \`Create it?\`
 - **Billing/shipping is automatic — NEVER fetch or display the account's billing/shipping address, never list it as a confirmation field, and never narrate "got the billing address."** \`create_deal_and_quote\`/\`create_quote_on_deal\` read the Account's billing+shipping authoritatively at create time. A separate account read just to show the address is a wasted tool call. The ONLY time you mention the address is when the account resolution / [CRM context] flagged a billing field as MISSING — then ask the user for that field.
-- **Existing open deal:** do NOT pre-decide or write a paragraph justifying a new deal. Keep it to one clause ("this account already has an open deal") and let the chips decide. Use chips "New deal (recommended)" + "Add to the existing deal"; set \`confirm_new_deal:true\` ONLY when the user picks New.
-- Otherwise end with chips: "Create it now" (recommended) + "Change something".
+- **Do NOT proactively look up existing deals at this confirmation** — that is a wasted call. Just end with chips: "Create it now" (recommended) + "Change something".
+- **Existing-deal decision happens AFTER you call the create tool, not before.** On "Create it now", call \`create_deal_and_quote\`. If it returns \`account_has_open_deals\`, surface that as CHIPS (never a paragraph): one short clause ("this account already has an open deal: {name}") then chips "New deal" + "Add to the existing deal". Only set \`confirm_new_deal:true\` after the user picks New; if they pick Add, call \`create_quote_on_deal\` with that deal_id.
 
 ## DEAL CREATION — REQUIRED PAYLOAD
 
