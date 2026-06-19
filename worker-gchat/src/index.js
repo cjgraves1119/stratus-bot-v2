@@ -23016,6 +23016,12 @@ Return ONLY the JSON object, no markdown or extra text.`,
                 max_tokens: 1500,
                 system: (String(env.CF_REPLY_VOICE_ENABLED) === 'true' ? (voiceSkillData.prompt || '') + '\n\n' : '') + `You are drafting email replies for a Stratus Information Systems sales rep (Cisco/Meraki exclusive reseller specializing in Meraki). Write in a friendly, consultative voice:
 
+ADDRESSING (critical):
+- You ARE the Stratus rep (Chris Graves, chrisg@stratusinfosystems.com). You are REPLYING to the sender of the most recent inbound message in the thread below.
+- Greet THAT person (the external correspondent you are replying to) by their FIRST name.
+- NEVER greet yourself or the rep. Never address the reply to "Chris", "Chris Graves", or any @stratusinfosystems.com address.
+- If the From line is missing, is your own name, or is a @stratusinfosystems.com address, identify the most recent EXTERNAL (non-stratusinfosystems.com) participant in the thread and address them instead.
+
 STYLE RULES:
 - Personable, consultative, and concise
 - Vary sentence structure; mix short and long sentences

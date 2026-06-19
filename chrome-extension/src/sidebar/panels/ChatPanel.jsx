@@ -1206,11 +1206,29 @@ export default function ChatPanel({
     setLoading(true);
     setError(null);
     try {
+      // Address the reply to the person being replied to, never to ourselves.
+      // Prefer the participant the user selected; else the detected inbound sender
+      // IF it is external. If neither yields an external correspondent (the
+      // detected sender is our own @stratusinfosystems.com address, or extraction
+      // failed), send NO sender and let the worker's ADDRESSING guard infer the
+      // correct external recipient from the thread. Never pass our own address as
+      // the person being greeted, and do not guess a wrong external contact.
+      const isStratus = (e) => (e || '').toLowerCase().includes('@stratusinfosystems.com');
+      const picked = participantOptions.find((p) => p.email === selectedContextEmail);
+      let recName = '';
+      let recEmail = '';
+      if (picked && !isStratus(picked.email)) {
+        recName = picked.name || picked.email;
+        recEmail = picked.email;
+      } else if (emailContext.senderEmail && !isStratus(emailContext.senderEmail)) {
+        recName = emailContext.senderName || emailContext.senderEmail;
+        recEmail = emailContext.senderEmail;
+      }
       const result = await sendToBackground(MSG.DRAFT_REPLY, {
         subject: emailContext.subject,
         body: emailContext.body,
-        senderEmail: emailContext.senderEmail,
-        senderName: emailContext.senderName,
+        senderEmail: recEmail,
+        senderName: recName,
         tone: 'professional',
         instructions,
       });
