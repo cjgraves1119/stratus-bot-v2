@@ -15786,25 +15786,37 @@ function extractSuggestionsBlock(reply) {
 // order URL from the current text first, else walks recent history backward.
 // Returns null when no order URL with items is found (→ no injection).
 function extractLockedQuoteItems(currentText, history) {
-  const urlRe = /stratusinfosystems\.com\/order\/\?item=([A-Za-z0-9_,\-]+)&qty=([0-9,]+)/i;
-  const sources = [String(currentText || '')];
+  // Parse a Stratus order URL via URLSearchParams — robust to %2C-encoded commas,
+  // reordered/extra query params, and odd SKU chars (Codex review 2026-06-19).
+  const parseOrderUrl = (src) => {
+    const m = String(src || '').match(/https?:\/\/[^\s)\]]*stratusinfosystems\.com\/order\/\?[^\s)\]]+/i);
+    if (!m) return null;
+    let sp;
+    try { sp = new URL(m[0]).searchParams; } catch { return null; }
+    const itemRaw = sp.get('item');
+    if (!itemRaw) return null;
+    const items = itemRaw.split(',').map(s => s.trim()).filter(Boolean);
+    if (!items.length) return null;
+    const qtys = (sp.get('qty') || '').split(',').map(s => s.trim()).filter(Boolean);
+    // Only assert quantities when they 1:1 match the items and are all numeric —
+    // otherwise list SKUs without a fabricated qty (parse_quote_url gives exact qty).
+    const qtysReliable = qtys.length === items.length && qtys.every(q => /^[0-9]+$/.test(q));
+    const lines = qtysReliable ? items.map((s, i) => `- ${qtys[i]}x ${s}`) : items.map(s => `- ${s}`);
+    const header = `[LINE ITEMS ALREADY SPECIFIED — the user has already chosen these EXACT items for the quote. Use them. Do NOT ask "what products/SKUs would you like to quote". Resolve product IDs and exact quantities by calling parse_quote_url on the source URL below:]\n${lines.join('\n')}\n[Source URL: ${m[0]}]`;
+    return { items, qtys: qtysReliable ? qtys : null, url: m[0], header };
+  };
+  // Current turn wins (a fresh URL is the authoritative correction).
+  const cur = parseOrderUrl(currentText);
+  if (cur) return cur;
+  // Else walk recent history newest-first; SKIP our own injected lock blocks so a
+  // stale Source URL can't self-seed (Codex HIGH-2). Bounded to avoid ancient flows.
   if (Array.isArray(history)) {
-    // newest-first, bounded lookback so a brand-new flow doesn't grab a stale URL
-    for (let i = history.length - 1; i >= 0 && sources.length < 11; i--) {
+    for (let i = history.length - 1; i >= 0 && (history.length - i) <= 30; i--) {
       const c = history[i] && history[i].content;
-      if (typeof c === 'string') sources.push(c);
+      if (typeof c !== 'string' || c.includes('[LINE ITEMS ALREADY SPECIFIED')) continue;
+      const h = parseOrderUrl(c);
+      if (h) return h;
     }
-  }
-  for (const src of sources) {
-    const mm = src.match(urlRe);
-    if (!mm) continue;
-    const items = mm[1].split(',').map(s => s.trim()).filter(Boolean);
-    const qtys = mm[2].split(',').map(s => s.trim());
-    if (!items.length) continue;
-    const lines = items.map((sku, i) => `- ${qtys[i] || '1'}x ${sku}`);
-    const url = `https://${mm[0]}`;
-    const header = `[LINE ITEMS ALREADY SPECIFIED — the user has already chosen these EXACT items for the quote. Use them. Do NOT ask "what products/SKUs would you like to quote". Resolve product IDs by calling parse_quote_url on the source URL below:]\n${lines.join('\n')}\n[Source URL: ${url}]`;
-    return { items, qtys, url, header };
   }
   return null;
 }
@@ -16176,7 +16188,7 @@ New deal+quote → **create_deal_and_quote** (Account, Contact, Deal, products, 
 
 Before any Deal or Quote create you MUST have: Company name (Account); Contact name; Products / SKUs and quantities; Cisco rep involvement? (determines Lead_Source); Billing address (Zoho Account first, then Gmail thread, then ask). Anything missing → STOP and ask for everything in ONE friendly message — never guess or use placeholders.
 
-**PRODUCTS ARE NOT MISSING IF ALREADY GIVEN.** If a Stratus order URL (\`stratusinfosystems.com/order/?item=…\`), a \`[LINE ITEMS ALREADY SPECIFIED …]\` block, or an explicit SKU/BOM list appears ANYWHERE earlier in this conversation, those ARE the products — they are RESOLVED. NEVER ask "what products/SKUs would you like to quote" again, even after several clarify turns about account/contact/term. Resolve their product IDs with \`parse_quote_url\` (for a URL) or \`batch_product_lookup\` (for a SKU list) and proceed. Only the still-unknown fields (account, contact, rep, billing) may be asked.
+**PRODUCTS ARE NOT MISSING IF ALREADY GIVEN.** If a Stratus order URL (\`stratusinfosystems.com/order/?item=…\`), a \`[LINE ITEMS ALREADY SPECIFIED …]\` block, or an explicit SKU/BOM list appears earlier in this conversation, those ARE the products — they are RESOLVED. NEVER ask "what products/SKUs would you like to quote" again, even after several clarify turns about account/contact/term. Resolve their product IDs with \`parse_quote_url\` (for a URL) or \`batch_product_lookup\` (for a SKU list) and proceed. Only the still-unknown fields (account, contact, rep, billing) may be asked. EXCEPTION: if the user LATER changes the items (adds/removes/swaps a SKU or pastes a new list/URL), the most recent items win — re-resolve and use those.
 
 **CLICKABLE CONFIRMATIONS (reduce typing — ALWAYS do this when asking the user to pick/confirm).** Whenever your reply asks the user to choose or confirm anything with a small set of answers — contact, license term, Cisco rep / Lead_Source, a SKU correction, which existing deal, yes/no — you MUST (1) resolve a sensible DEFAULT and say it in your prose, then (2) append ONE machine-readable block at the very END of your reply that the app turns into clickable buttons (and strips from the visible text). DEFAULTS to assume (mark as the recommended option):
 - **Contact:** if none was referenced, look up the Account's contacts (\`zoho_search_records\` Contacts for that Account) and propose the primary/first one as recommended.
@@ -24640,18 +24652,28 @@ CRITICAL URL RULES:
                 // (e.g. "Acme Corp not found"). Falls back to the waterfall if Claude stalls.
                 const _lastAsst = Array.isArray(wHistory) ? [...wHistory].reverse().find(m => m && m.role === 'assistant') : null;
                 const _crmFollowUp = !!(_lastAsst && /\b(quotes?|deals?|accounts?|contacts?|license\s*term|cisco\s*rep|meraki\s*isr|which\s+deal|need (a few|some) details|before (i|we) (build|create)|attach (this|the) quote|company name)\b/i.test(String(_lastAsst.content || '')));
-                // Pin already-specified line items to THIS turn so a multi-turn
-                // clarify can't make the agent forget what to quote (2026-06-19).
-                const _wantsQuoteCreate = _crmFollowUp
+                // Pin already-specified line items onto THIS turn (AGENT COPY ONLY,
+                // never stored to history) so a multi-turn clarify can't make the
+                // agent forget what to quote. Codex review 2026-06-19: tight gate so
+                // we don't inject on generic CRM reads ("here are your open quotes"),
+                // and a current-correction guard so a fresh free-text SKU change isn't
+                // overridden by a stale URL.
+                let wAgentMessage = wEnrichedMessage;
+                const _quoteBuildFollowUp = !!(_lastAsst && /\b(who is this for|need (a few|some) (more )?details|before (i|we) (can )?(build|create)|what products|products?\s*\/?\s*skus?|license\s*term|cisco\s*rep|confirm (the )?(contact|account|term|quote)|company name|create the quote|build the quote|deal name)\b/i.test(String(_lastAsst.content || '')));
+                const _wantsQuoteCreate = _quoteBuildFollowUp
                   || /\b(create|build|make|generate|draft|set\s*up)\b[^.]{0,40}\b(deal|quote)\b/i.test(wText || '')
                   || /create a zoho crm quote from this/i.test(wText || '');
-                if (_wantsQuoteCreate) {
+                const _currentHasOrderUrl = /stratusinfosystems\.com\/order\/\?/i.test(wText || '');
+                const _currentNamesProductFreeText = !_currentHasOrderUrl
+                  && /\b(C9[0-9]{3}|MR\d{2}|MX\d{2,3}|MS\d{3}|MG\d{2}|MV\d{1,2}|MT\d{2}|LIC-)/i.test(wText || '');
+                if (_wantsQuoteCreate && !_currentNamesProductFreeText) {
                   const _locked = extractLockedQuoteItems(wText, wHistory);
-                  if (_locked) wEnrichedMessage = `${_locked.header}\n\n${wEnrichedMessage}`;
+                  if (_locked) wAgentMessage = `${_locked.header}\n\n${wEnrichedMessage}`;
                 }
                 const forcedBenchmarkModel = BENCHMARK_MODELS.find(m => m.id === forcedModel);
-                // Run the waterfall (Llama → Gemma → Claude)
-                outcome = await askWithWaterfall(wEnrichedMessage, env, wPersonId, {
+                // Run the waterfall (Llama → Gemma → Claude). Pass the agent copy
+                // (with the locked-items header); history still stores wEnrichedMessage.
+                outcome = await askWithWaterfall(wAgentMessage, env, wPersonId, {
                   crmFollowUp: _crmFollowUp,
                   forceLlama: forcedModel === 'llama',
                   forceGemma: forcedModel === 'gemma',
