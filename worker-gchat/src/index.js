@@ -9640,8 +9640,12 @@ async function recoverLicenseClaimKey(env, dealId) {
     }
     const did = String(dealId).trim();
 
-    // 1. Resolve the linked Sales Order (most-recent).
-    const soQuery = `select SO_Number, Web_Order_ID, Purchase_Order, Deal_Name from Sales_Orders where Deal_Name.id = '${coqlEscape(did)}' order by Created_Time desc limit 1`;
+    // 1. Resolve the linked Sales Order (most-recent). Select EVERY field that can show
+    //    up as an order identifier in a Cisco/Meraki/distributor license-delivery email.
+    //    Different distributors use different ones: TD SYNNEX keys off Web Order # /
+    //    "Customer Reference" (= the SO record id); Comstor/Meraki ship-notification keys
+    //    off "Cisco order number" (= Vendor_SO_Number) and "Stratus PO number" (= SO id).
+    const soQuery = `select id, SO_Number, Web_Order_ID, Purchase_Order, Vendor_SO_Number, Vendor_Order_Number, Deal_Name from Sales_Orders where Deal_Name.id = '${coqlEscape(did)}' order by Created_Time desc limit 1`;
     let soResp;
     try {
       soResp = await zohoApiCall('POST', 'coql', env, { select_query: soQuery });
@@ -9651,28 +9655,40 @@ async function recoverLicenseClaimKey(env, dealId) {
     const so = soResp && Array.isArray(soResp.data) && soResp.data.length ? soResp.data[0] : null;
     if (!so) return { success: false, reason: 'no_sales_order', message: `No Sales Order found for deal ${did}` };
 
-    const soNumber = String(so.SO_Number || '').trim();
-    const webOrderId = String(so.Web_Order_ID || '').trim();
-    const po = String(so.Purchase_Order || '').trim();
+    const safe = (v) => String(v == null ? '' : v).replace(/["\\]/g, '').trim();
 
-    // 2. Sanitize identifiers (drop quotes/backslashes; keep [A-Za-z0-9._-]) so a token
-    //    cannot inject Gmail operators or broaden the search to another customer.
-    const safe = (t) => String(t).replace(/["\\]/g, '').trim();
-    const cleanTokens = [webOrderId, po, soNumber].map(safe).filter((t) => t && /^[A-Za-z0-9._\-]+$/.test(t));
-    // Search set: tokens long enough to be a useful Gmail query term.
-    const searchTokens = cleanTokens.filter((t) => t.length >= 4);
-    // Ownership set: only HIGH-ENTROPY tokens (>=6 chars) may confirm an email belongs
-    // to this order, so generic values ("IT", "PO", "TBD", "123") cannot.
-    const ownTokens = cleanTokens.filter((t) => t.length >= 6);
-    if (!searchTokens.length) {
-      return { success: false, reason: 'no_order_identifier', message: 'Sales Order has no Web Order / PO / SO number to match against an email' };
+    // 2. Build the identifier token set (labeled, priority order). The SO record id
+    //    doubles as the "Stratus PO number" / "Customer Reference" in delivery emails.
+    //    Keep only HIGH-ENTROPY tokens (>=6 chars) so generic values ("IT","PO","123")
+    //    cannot inject Gmail operators or match the wrong customer's email.
+    const candidateFields = [
+      ['so_record_id', so.id],
+      ['vendor_so', so.Vendor_SO_Number],
+      ['vendor_order', so.Vendor_Order_Number],
+      ['web_order_id', so.Web_Order_ID],
+      ['purchase_order', so.Purchase_Order],
+      ['so_number', so.SO_Number],
+    ];
+    const seenTok = new Set();
+    const tokens = [];
+    for (const [label, val] of candidateFields) {
+      const t = safe(val);
+      if (t && t.length >= 6 && /^[A-Za-z0-9._\-]+$/.test(t) && !seenTok.has(t)) {
+        seenTok.add(t);
+        tokens.push({ label, value: t });
+      }
     }
-    if (!ownTokens.length) {
-      return { success: false, reason: 'no_verifiable_identifier', message: 'Sales Order identifiers are too generic to safely confirm the right license email' };
+    if (!tokens.length) {
+      return { success: false, reason: 'no_order_identifier', message: 'Sales Order has no usable order/PO/vendor identifier to match against a license email' };
     }
-    const tokenClause = ` (${searchTokens.map((t) => `"${t}"`).join(' OR ')})`;
-    const gmailQuery = `from:ciscob2bupdates@tdsynnex.com subject:"Software licenses delivered"${tokenClause}`;
-    const searchParams = new URLSearchParams({ q: gmailQuery, maxResults: '5' });
+
+    // 3. Distributor-agnostic Gmail search: any order token AND a license-key phrase.
+    //    NO sender/subject filter (TD SYNNEX = ciscob2bupdates@tdsynnex.com "Software
+    //    licenses delivered"; Comstor/Meraki = ship-notification@meraki.com "Your Meraki
+    //    order has shipped"; others differ). Ownership + key extraction below do the gating.
+    const tokenClause = `(${tokens.map((t) => `"${t.value}"`).join(' OR ')})`;
+    const gmailQuery = `${tokenClause} ("license key" OR "claim key")`;
+    const searchParams = new URLSearchParams({ q: gmailQuery, maxResults: '10' });
     let searchResp;
     try {
       searchResp = await gmailApiCall('GET', `messages?${searchParams}`, env);
@@ -9681,14 +9697,16 @@ async function recoverLicenseClaimKey(env, dealId) {
     }
     const messages = (searchResp && Array.isArray(searchResp.messages)) ? searchResp.messages : [];
     if (!messages.length) {
-      return { success: false, reason: 'no_license_email', message: 'No Cisco license-delivery email found for this order' };
+      return { success: false, reason: 'no_license_email', message: 'No license-delivery email found for this order' };
     }
 
-    // 3. Scan candidates; ONLY accept an email whose decoded body contains one of THIS
-    //    order's high-entropy identifiers on a TOKEN BOUNDARY (no substring/generic hits),
-    //    so we never return another customer's key.
+    // Key labels across formats: "Dashboard Software License Claim Key" (TD SYNNEX),
+    // "Dashboard license key:" (Comstor/Meraki), generic "claim key"/"license key".
+    const KEY_RE = /(?:Dashboard\s+Software\s+License\s+Claim\s+Key|Dashboard\s+license\s+key|claim\s+key|license\s+key)\s*:?\s*([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})(?![A-Z0-9-])/ig;
     const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const ownedToken = (text) => ownTokens.find((t) => new RegExp(`(^|[^A-Za-z0-9])${escapeRe(t)}([^A-Za-z0-9]|$)`).test(text)) || null;
+    // Ownership: a token must appear on a TOKEN BOUNDARY (no substring hits) so we never
+    // return another customer's key.
+    const ownerToken = (text) => tokens.find((t) => new RegExp(`(^|[^A-Za-z0-9._-])${escapeRe(t.value)}([^A-Za-z0-9._-]|$)`).test(text)) || null;
     const decodeData = (d) => atob(String(d).replace(/-/g, '+').replace(/_/g, '/'));
     for (const ref of messages) {
       let data;
@@ -9706,20 +9724,32 @@ async function recoverLicenseClaimKey(env, dealId) {
       };
       walk(data.payload);
       const text = raw.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim();
-      const matchedToken = ownedToken(text);
-      if (!matchedToken) continue;   // not this order's email — skip
-      const m = text.match(/Dashboard\s+Software\s+License\s+Claim\s+Key[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})/i);
-      if (!m) continue;              // right order, no parseable key — try next candidate
+      const matched = ownerToken(text);
+      if (!matched) continue;   // not this order's email — skip
+      const keys = [];
+      let m;
+      KEY_RE.lastIndex = 0;
+      while ((m = KEY_RE.exec(text)) !== null) {
+        const k = m[1].toUpperCase();
+        if (!keys.includes(k)) keys.push(k);
+      }
+      if (!keys.length) continue;   // right order, no parseable key — try next candidate
       return {
         success: true,
-        claimKey: m[1].toUpperCase(),
-        soNumber, webOrderId, po,
+        claimKey: keys[0],
+        claimKeys: keys,
+        matchedOn: matched.label,
+        matchedValue: matched.value,
+        soRecordId: safe(so.id),
+        soNumber: safe(so.SO_Number),
+        webOrderId: safe(so.Web_Order_ID),
+        po: safe(so.Purchase_Order),
+        vendorSo: safe(so.Vendor_SO_Number),
         messageId: ref.id,
-        matchedOn: (matchedToken === webOrderId ? 'web_order_id' : (matchedToken === po ? 'po' : 'so_number')),
         emailFrom: hdr.from || '', emailSubject: hdr.subject || '', emailDate: hdr.date || ''
       };
     }
-    return { success: false, reason: 'claim_key_not_found', message: 'License-delivery email(s) found but none matched this order with a parseable claim key' };
+    return { success: false, reason: 'claim_key_not_found', message: 'License email(s) found but none matched this order with a parseable key' };
   } catch (err) {
     return { success: false, reason: 'recovery_failed', message: String((err && err.message) || err) };
   }

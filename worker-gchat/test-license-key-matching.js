@@ -13,8 +13,10 @@
 // ── Inlined pure functions (mirror Agent A1) ───────────────────────────────────
 
 // EXACT regex per spec. Label-anchored so bare keys/dates do not match.
+// Generalized across distributor formats: TD SYNNEX ("Dashboard Software License
+// Claim Key"), Comstor/Meraki ship-notification ("Dashboard license key:"), etc.
 const CLAIM_KEY_RE =
-  /Dashboard\s+Software\s+License\s+Claim\s+Key[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})/i;
+  /(?:Dashboard\s+Software\s+License\s+Claim\s+Key|Dashboard\s+license\s+key|claim\s+key|license\s+key)\s*:?\s*([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})(?![A-Z0-9-])/i;
 
 function extractClaimKey(text) {
   if (!text) return null;
@@ -65,7 +67,7 @@ function ownedToken(text, tokens) {
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return (tokens || [])
     .filter((t) => t && t.length >= 6)
-    .find((t) => new RegExp(`(^|[^A-Za-z0-9])${esc(t)}([^A-Za-z0-9]|$)`).test(String(text))) || null;
+    .find((t) => new RegExp(`(^|[^A-Za-z0-9._-])${esc(t)}([^A-Za-z0-9._-]|$)`).test(String(text))) || null;
 }
 
 // ── Tiny assert helper ─────────────────────────────────────────────────────────
@@ -88,6 +90,16 @@ eq(
   'canonical-format key extracted',
   extractClaimKey('Dashboard Software License Claim Key Z29N-6SBM-5R9D'),
   'Z29N-6SBM-5R9D'
+);
+eq(
+  'Comstor/Meraki "Dashboard license key:" format extracted',
+  extractClaimKey('Cisco order number: 117191974 Dashboard license key: Z2AB-MBXG-MHDM Comstor PO number: 34267383'),
+  'Z2AB-MBXG-MHDM'
+);
+eq(
+  'prose "license key, which must be added" -> null (no key follows the label)',
+  extractClaimKey('this e-mail contains your cloud Dashboard license key, which must be added to your Dashboard'),
+  null
 );
 eq(
   'synthetic key extracted',
@@ -234,6 +246,11 @@ check('generic short token (<6 chars) cannot confirm ownership',
   ownedToken('PO PO PO ' + ownBody, ['PO']) === null);
 check('substring inside a longer number does not match (token boundary)',
   ownedToken('ref 1239999 here', ['123999']) === null);
+check('token that is a prefix of a longer DASHED id does not match (codex round-2)',
+  ownedToken('ref ABC-123-999 here', ['ABC-123']) === null);
+eq('key that is a prefix of a longer token -> null (trailing boundary, codex round-2)',
+  extractClaimKey('Dashboard license key: ABCD-1234-WXYZ-9999'),
+  null);
 
 console.log(`\nPASS ${passed}/${total}`);
 if (passed !== total) process.exit(1);
