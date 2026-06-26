@@ -93,5 +93,19 @@ const hasUrl = (urls, expectItems, expectQtys) =>
     requestedFive);
 }
 
+{
+  const parsed = parseMessage('LIC-SME-3YR x10, LIC-ENT-3YR x1');
+  check('mixed SME+ENT input parses as production directLicenseList',
+    parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length === 2,
+    JSON.stringify(parsed));
+  const msg = messageOf(buildQuoteResponse(parsed));
+  check('mixed SME+ENT directLicenseList does not emit deprecated SME 5-year SKU',
+    !/LIC-SME-5YR/.test(msg),
+    msg);
+  check('mixed SME+ENT directLicenseList stays on detected 3-year term',
+    /LIC-SME-3YR/.test(msg) && /LIC-ENT-3YR/.test(msg) && !/5-Year Co-Term/.test(msg),
+    msg);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
