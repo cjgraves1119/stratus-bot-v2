@@ -107,6 +107,41 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(/MR44-HW,LIC-ENT-5YR/.test(urls), `MR44 5YR URL missing: ${urls}`);
     assert.ok(JSON.stringify(r.suggestions || []).includes('MX999'), `MX999 suggestion missing: ${JSON.stringify(r).slice(0, 500)}`);
   });
+  await t('SKU-list syntax variants bypass V3 and return partial quote', async () => {
+    const inputs = [
+      '5x MR44 + 2x MX999',
+      'MR44 qty 5, MX999 qty 2',
+      'MR44 quantity 5; MX999 quantity 2',
+      'MR44=5, MX999=2',
+    ];
+    for (const input of inputs) {
+      let aiCalls = 0;
+      const r = await callQuote(input, {
+        CF_QUOTE_V3_ENABLED: 'true',
+        AI: {
+          run: async () => {
+            aiCalls++;
+            return { response: JSON.stringify({
+              intent: 'quote',
+              confidence: 0.99,
+              clarify: { needed: true, question: 'Which MX model did you mean?' },
+              items: [],
+              modifiers: { term_years: null, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+              revision: {},
+              reference: {},
+              dashboard: { is_meraki_license_page: false },
+            }) };
+          },
+        },
+      });
+      assert.strictEqual(aiCalls, 0, `${input}: V3 classifier should be skipped for SKU-list syntax`);
+      assert.strictEqual(r.handlerType, 'deterministic', `${input}: wrong handler: ${JSON.stringify(r).slice(0, 300)}`);
+      assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 3, `${input}: expected 3 quote URLs, got ${JSON.stringify(r.quoteUrls)}`);
+      const urls = r.quoteUrls.map(u => u.url).join('\n');
+      assert.ok(/MR44-HW,LIC-ENT-3YR/.test(urls) && /qty=5,5/.test(urls), `${input}: MR44 3YR URL missing/wrong qty: ${urls}`);
+      assert.ok(JSON.stringify(r.suggestions || []).includes('MX999'), `${input}: MX999 suggestion missing: ${JSON.stringify(r).slice(0, 500)}`);
+    }
+  });
   await t('"5 MV63 license renewal" (bare MV-AGN) → quote, not rejected', async () => {
     const r = await callQuote('5 MV63 license renewal');
     assert.notStrictEqual(r.handlerType, 'suggestions-only', `suggestions-only: ${JSON.stringify(r.suggestions)}`);

@@ -273,5 +273,44 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
     JSON.stringify(parseExplicitSkuRequestBeforeClassifier('what is MR44?')));
 }
 
+{
+  const cases = [
+    { label: 'compact x-plus mixed hardware', input: '5x MR44 + 2x MX999' },
+    { label: 'qty-word mixed hardware', input: 'MR44 qty 5, MX999 qty 2' },
+    { label: 'quantity-word mixed hardware', input: 'MR44 quantity 5; MX999 quantity 2' },
+    { label: 'equals-sign mixed hardware', input: 'MR44=5, MX999=2' },
+  ];
+  for (const { label, input } of cases) {
+    const parsed = parseExplicitSkuRequestBeforeClassifier(input);
+    check(`${label} bypass parses MR44 and MX999`,
+      parsed && Array.isArray(parsed.items) &&
+        parsed.items.some(i => i.baseSku === 'MR44' && i.qty === 5) &&
+        parsed.items.some(i => i.baseSku === 'MX999' && i.qty === 2),
+      JSON.stringify(parsed));
+    if (parsed) {
+      const msg = messageOf(buildQuoteResponse(parsed));
+      const urls = decodeAllUrls(msg);
+      check(`${label} renders partial quote plus invalid suggestion`,
+        /MX999/.test(msg) && hasUrl(urls, ['MR44-HW', 'LIC-ENT-3YR'], [5, 5]),
+        msg);
+    }
+  }
+}
+
+{
+  const nonQuoteInputs = [
+    'how much is 5 MR44?',
+    'what licenses does MX67 need?',
+    'compare MR44 and MR46',
+    'is MX67 compatible with LIC-MX67-SEC-3YR?',
+    'pricing for LIC-ENT-3YR x1 and LIC-MV-3YR x12',
+  ];
+  for (const input of nonQuoteInputs) {
+    check(`SKU-list bypass ignores non-quote info question: ${input}`,
+      parseExplicitSkuRequestBeforeClassifier(input) === null,
+      JSON.stringify(parseExplicitSkuRequestBeforeClassifier(input)));
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

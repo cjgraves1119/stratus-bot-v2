@@ -5081,8 +5081,12 @@ function parseExplicitDirectLicenseListBeforeClassifier(rawText) {
 }
 
 function parseExplicitSkuRequestBeforeClassifier(rawText) {
-  const text = String(rawText || '').trim();
+  let text = String(rawText || '').trim();
   if (!text) return null;
+  const skuTokenPattern = '(LIC-[A-Z0-9-]+|(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\\d[\\w-]*)';
+  text = text
+    .replace(new RegExp(`\\b(\\d+)\\s*[x×]\\s*${skuTokenPattern}\\b`, 'gi'), (_m, qty, sku) => `${qty} ${sku}`)
+    .replace(new RegExp(`\\b${skuTokenPattern}\\s*(?:=|x|×|qty\\.?|quantity)\\s*(\\d+)\\b`, 'gi'), (_m, sku, qty) => `${qty} ${sku}`);
   const upper = text.toUpperCase().replace(/https?:\/\/\S+/g, ' ');
 
   const skuTokens = upper.match(/\b(?:LIC-[A-Z0-9-]+|(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/g) || [];
