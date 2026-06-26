@@ -4544,7 +4544,15 @@ function hasOtherQuoteSkuForSme(upper) {
 
 function extractEmbeddedDirectLicenseList(rawText) {
   const text = String(rawText || '');
-  if (/stratusinfosystems\.com\/order\//i.test(text)) return null;
+  if (/stratusinfosystems\.com\/order\/|stratus\.supply\/|[?&]item=/i.test(text)) return null;
+
+  const explicitQuoteIntent = /\b(?:QUOTE|PRICE|PRICING|CART|ORDER|RENEW|RENEWAL|CO-?TERM|COTERM)\b/i.test(text);
+  const advisoryContext = /\b(?:COMPARE|COMPARISON|DIFFEREN(?:CE|CES|T)|VERSUS|VS\.?|WHICH|EXPLAIN|DESCRIBE)\b/i.test(text)
+    || (/\?/.test(text) && /\b(?:WHAT(?:'S| IS)|HOW (?:DO|DOES|WOULD|SHOULD)|CAN YOU|COULD YOU|SHOULD I|DO I NEED)\b/i.test(text));
+  if (!explicitQuoteIntent && advisoryContext) return null;
+  if (/\b(?:CHANGE|UPDATE|SWAP|REPLACE|MOVE|INCREASE|DECREASE)\b/i.test(text) &&
+      /\bFROM\s+\d{1,5}\b/i.test(text) &&
+      /\bTO\s+\d{1,5}\b/i.test(text)) return null;
 
   const matches = [...text.matchAll(/\bLIC-[A-Z0-9-]+\b/gi)];
   if (matches.length < 2) return null;

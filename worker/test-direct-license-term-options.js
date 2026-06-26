@@ -53,6 +53,12 @@ const hasUrl = (urls, expectItems, expectQtys) =>
     u.items.every((s, i) => s === expectItems[i]) &&
     u.qtys.every((q, i) => q === expectQtys[i])
   );
+const expectNoEmbeddedDirectLicenseList = (label, input) => {
+  const parsed = parseMessage(input);
+  check(`${label} does not over-trigger embedded directLicenseList`,
+    !(parsed && Array.isArray(parsed.directLicenseList)),
+    JSON.stringify(parsed));
+};
 const expectArchDirectLicenseQuote = (label, input) => {
   const parsed = parseMessage(input);
   check(`${label} parses embedded LIC SKUs as directLicenseList`,
@@ -131,6 +137,22 @@ expectArchDirectLicenseQuote('natural quantity-before direct list',
     hasUrl(urls, ['LIC-ENT-3YR', 'LIC-MV-3YR'], [1, 1]) &&
       !urls.some(u => u.qtys.includes(500)),
     JSON.stringify(urls));
+}
+
+expectNoEmbeddedDirectLicenseList('comparison advisory',
+  'Can you compare LIC-ENT-3YR and LIC-MV-3YR?');
+expectNoEmbeddedDirectLicenseList('difference advisory',
+  'what is the difference between LIC-ENT-3YR and LIC-MV-3YR');
+expectNoEmbeddedDirectLicenseList('from-to revision',
+  'change LIC-ENT-3YR from 1 to 2 and LIC-MV-3YR from 12 to 14');
+expectNoEmbeddedDirectLicenseList('existing order URL',
+  'https://stratus.supply/?item=LIC-ENT-3YR,LIC-MV-3YR&qty=1,12');
+
+{
+  const parsed = parseMessage('Can you quote LIC-ENT-3YR and LIC-MV-3YR?');
+  check('explicit quote question still parses embedded LIC SKUs',
+    parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length === 2,
+    JSON.stringify(parsed));
 }
 
 {
