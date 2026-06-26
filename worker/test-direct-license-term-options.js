@@ -100,6 +100,39 @@ expectArchDirectLicenseQuote('parenthesized quantity direct list',
 expectArchDirectLicenseQuote('natural quantity-before direct list',
   'Please quote 1 LIC-ENT-3YR, 12 LIC-MV-3YR, and 2 LIC-MX67W-SEC-3YR.');
 
+// R4: a stray trailing bare number / year after the last SKU must NOT be read
+// as a quantity. Only explicit markers (x12, qty 12, (12), : 12) count.
+{
+  const parsed = parseMessage('quote LIC-ENT-3YR LIC-MV-3YR 2024');
+  check('R4 trailing bare year is not absorbed as quantity',
+    parsed && Array.isArray(parsed.directLicenseList) &&
+      parsed.directLicenseList.length === 2 &&
+      parsed.directLicenseList.every(l => l.qty === 1),
+    JSON.stringify(parsed && parsed.directLicenseList));
+  const urls = decodeAllUrls(messageOf(buildQuoteResponse(parsed)));
+  check('R4 emits 3-year URL with qty 1,1 (no phantom 2024)',
+    hasUrl(urls, ['LIC-ENT-3YR', 'LIC-MV-3YR'], [1, 1]) &&
+      !urls.some(u => u.qtys.includes(2024)),
+    JSON.stringify(urls));
+}
+
+// R6: a leading number glued to a currency symbol ("$500") is a price, not a
+// quantity, and must not become the first SKU's qty. A clean leading token
+// like "1 LIC-..." (covered above) still counts.
+{
+  const parsed = parseMessage('$500 LIC-ENT-3YR and LIC-MV-3YR');
+  check('R6 leading price is not absorbed as quantity',
+    parsed && Array.isArray(parsed.directLicenseList) &&
+      parsed.directLicenseList.length === 2 &&
+      parsed.directLicenseList.every(l => l.qty === 1),
+    JSON.stringify(parsed && parsed.directLicenseList));
+  const urls = decodeAllUrls(messageOf(buildQuoteResponse(parsed)));
+  check('R6 emits 3-year URL with qty 1,1 (no phantom 500)',
+    hasUrl(urls, ['LIC-ENT-3YR', 'LIC-MV-3YR'], [1, 1]) &&
+      !urls.some(u => u.qtys.includes(500)),
+    JSON.stringify(urls));
+}
+
 {
   const smeList = [{ sku: 'LIC-SME-3YR', qty: 10 }];
   check('SME direct list is not safe to rewrite across all terms',

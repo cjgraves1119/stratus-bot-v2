@@ -4585,12 +4585,19 @@ function extractEmbeddedDirectLicenseList(rawText) {
     const sku = match[0].toUpperCase();
     const before = text.slice(Math.max(0, match.index - 48), match.index);
     const after = text.slice(match.index + match[0].length, match.index + match[0].length + 48);
-    const afterQty = after.match(/^\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*|[:=]\s*|[-–—]\s*)?(\d{1,5})(?:\s*\)|\s*\]|\b)/i)
+    // A quantity AFTER the SKU must carry an explicit marker (x12, qty 12,
+    // : 12, - 12, or a parenthesized (12)). A bare trailing number is rejected
+    // so a stray token / year like "...LIC-MV-3YR 2024" is never read as qty.
+    const afterQty = after.match(/^\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*|[:=]\s*|[-–—]\s*)(\d{1,5})(?:\s*\)|\s*\]|\b)/i)
       || after.match(/^\s*[\(\[]\s*(\d{1,5})\s*[\)\]]/);
-    const beforeQty = before.match(/(?:^|[^A-Z0-9-])(\d{1,5})\s*(?:[xX×]\s*)?$/i);
+    // A quantity BEFORE the SKU is accepted only as a clean standalone token
+    // (list/prose rhythm like "1 LIC-ENT-3YR" or ", 12 LIC-MV-3YR"). A number
+    // glued to a currency symbol ("$500 LIC-...") is a price, not a quantity.
+    const beforeRaw = before.match(/(^|[^A-Z0-9-])(\d{1,5})\s*(?:[xX×]\s*)?$/i);
+    const beforeQty = beforeRaw && !/[$€£¥]/.test(beforeRaw[1]) ? beforeRaw : null;
     let qty = 1;
     if (afterQty) qty = parseInt(afterQty[1], 10);
-    else if (beforeQty) qty = parseInt(beforeQty[1], 10);
+    else if (beforeQty) qty = parseInt(beforeQty[2], 10);
     items.push({ sku, qty: Number.isFinite(qty) && qty > 0 ? qty : 1 });
   }
 
