@@ -53,6 +53,26 @@ const hasUrl = (urls, expectItems, expectQtys) =>
     u.items.every((s, i) => s === expectItems[i]) &&
     u.qtys.every((q, i) => q === expectQtys[i])
   );
+const expectArchDirectLicenseQuote = (label, input) => {
+  const parsed = parseMessage(input);
+  check(`${label} parses embedded LIC SKUs as directLicenseList`,
+    parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length === 3 &&
+      Array.isArray(parsed.items) && parsed.items.length === 0,
+    JSON.stringify(parsed));
+  const urls = decodeAllUrls(messageOf(buildQuoteResponse(parsed)));
+  check(`${label} emits 1-year URL`,
+    hasUrl(urls, ['LIC-ENT-1YR', 'LIC-MV-1YR', 'LIC-MX67W-SEC-1YR'], [1, 12, 2]),
+    JSON.stringify(urls));
+  check(`${label} emits 3-year URL`,
+    hasUrl(urls, ['LIC-ENT-3YR', 'LIC-MV-3YR', 'LIC-MX67W-SEC-3YR'], [1, 12, 2]),
+    JSON.stringify(urls));
+  check(`${label} emits 5-year URL`,
+    hasUrl(urls, ['LIC-ENT-5YR', 'LIC-MV-5YR', 'LIC-MX67W-SEC-5YR'], [1, 12, 2]),
+    JSON.stringify(urls));
+  check(`${label} does not quote MX67W as hardware fallback`,
+    !urls.some(u => u.items.includes('MX67W') || u.items.includes('MX67W-HW')),
+    JSON.stringify(urls));
+};
 
 {
   const parsed = parseMessage('LIC-ENT-3YR x1, LIC-MV-3YR x12, LIC-MX67W-SEC-3YR x2');
@@ -72,6 +92,13 @@ const hasUrl = (urls, expectItems, expectQtys) =>
     hasUrl(urls, ['LIC-ENT-5YR', 'LIC-MV-5YR', 'LIC-MX67W-SEC-5YR'], [1, 12, 2]),
     JSON.stringify(urls));
 }
+
+expectArchDirectLicenseQuote('quote-prefixed direct list',
+  'quote LIC-ENT-3YR x1 LIC-MV-3YR x12 LIC-MX67W-SEC-3YR x2');
+expectArchDirectLicenseQuote('parenthesized quantity direct list',
+  'LIC-ENT-3YR (1), LIC-MV-3YR (12), LIC-MX67W-SEC-3YR (2)');
+expectArchDirectLicenseQuote('natural quantity-before direct list',
+  'Please quote 1 LIC-ENT-3YR, 12 LIC-MV-3YR, and 2 LIC-MX67W-SEC-3YR.');
 
 {
   const smeList = [{ sku: 'LIC-SME-3YR', qty: 10 }];

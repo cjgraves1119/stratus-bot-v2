@@ -4542,6 +4542,37 @@ function hasOtherQuoteSkuForSme(upper) {
   return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
 }
 
+function extractEmbeddedDirectLicenseList(rawText) {
+  const text = String(rawText || '');
+  if (/stratusinfosystems\.com\/order\//i.test(text)) return null;
+
+  const matches = [...text.matchAll(/\bLIC-[A-Z0-9-]+\b/gi)];
+  if (matches.length < 2) return null;
+
+  const items = [];
+  for (const match of matches) {
+    const sku = match[0].toUpperCase();
+    const before = text.slice(Math.max(0, match.index - 48), match.index);
+    const after = text.slice(match.index + match[0].length, match.index + match[0].length + 48);
+    const afterQty = after.match(/^\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*|[:=]\s*|[-–—]\s*)?(\d{1,5})(?:\s*\)|\s*\]|\b)/i)
+      || after.match(/^\s*[\(\[]\s*(\d{1,5})\s*[\)\]]/);
+    const beforeQty = before.match(/(?:^|[^A-Z0-9-])(\d{1,5})\s*(?:[xX×]\s*)?$/i);
+    let qty = 1;
+    if (afterQty) qty = parseInt(afterQty[1], 10);
+    else if (beforeQty) qty = parseInt(beforeQty[1], 10);
+    items.push({ sku, qty: Number.isFinite(qty) && qty > 0 ? qty : 1 });
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const item of items) {
+    if (seen.has(item.sku)) continue;
+    seen.add(item.sku);
+    deduped.push(item);
+  }
+  return deduped.length >= 2 ? deduped : null;
+}
+
 // ─── Per-item (per-clause) intent ─────────────────────────────────────────────
 // Bug #2: license/hardware intent is detected globally but users express it
 // per clause ("6 mr AND 1 mx84 license renewal AND 1 CW9172I hardware only").
@@ -4765,6 +4796,20 @@ function parseMessage(text) {
         showPricing: false
       };
     }
+  }
+
+  const embeddedLicItems = extractEmbeddedDirectLicenseList(text);
+  if (embeddedLicItems) {
+    return {
+      items: [],
+      directLicenseList: embeddedLicItems,
+      requestedTerm: null,
+      modifiers: { hardwareOnly: false, licenseOnly: true },
+      requestedTier: null,
+      isAdvisory: false,
+      isRevision: false,
+      showPricing: false
+    };
   }
 
   // Multi-line bare model list (one device per line, no quantities)
