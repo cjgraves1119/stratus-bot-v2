@@ -480,19 +480,27 @@ function rewriteSkuTerm(sku, newTerm) {
 
 function canRewriteDirectLicenseListForAllTerms(list) {
   if (!Array.isArray(list) || list.length === 0) return false;
-  return list.every(({ sku }) => {
-    if (!sku || !String(sku).toUpperCase().startsWith('LIC-')) return false;
-    return [1, 3, 5].every(term => {
-      const rewritten = rewriteSkuTerm(sku, term);
-      return rewritten && prices[rewritten];
-    });
-  });
+  return [1, 3, 5].every(term => canRewriteDirectLicenseListForTerm(list, term));
+}
+
+function directLicenseSkuForTerm(sku, term) {
+  if (!sku || !String(sku).toUpperCase().startsWith('LIC-')) return null;
+  const key = `${Number(term)}Y`;
+  const siblings = licenseTermSiblings(sku);
+  if (siblings) return siblings[key] || null;
+  const rewritten = rewriteSkuTerm(sku, term);
+  return rewritten && prices[rewritten] ? rewritten : null;
+}
+
+function canRewriteDirectLicenseListForTerm(list, term) {
+  if (!Array.isArray(list) || list.length === 0 || ![1, 3, 5].includes(Number(term))) return false;
+  return list.every(({ sku }) => !!directLicenseSkuForTerm(sku, term));
 }
 
 function rewriteDirectLicenseListForTerm(list, term) {
   return list.map(({ sku, qty }) => {
-    const rewritten = rewriteSkuTerm(sku, term);
-    return { sku: rewritten && prices[rewritten] ? rewritten : sku, qty };
+    const rewritten = directLicenseSkuForTerm(sku, term);
+    return { sku: rewritten || sku, qty };
   });
 }
 
@@ -6854,9 +6862,14 @@ function buildQuoteResponse(parsed) {
       const termMatch = sku.match(/(\d+)\s*Y(?:R|EA|-S\d+)?$/i);
       if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
     }
+    const requestedTerm = parsed.requestedTerm ? Number(parsed.requestedTerm) : null;
     const canRenderAllTerms = canRewriteDirectLicenseListForAllTerms(parsed.directLicenseList);
-    const terms = parsed.requestedTerm
-      ? [parsed.requestedTerm]
+    const canRenderRequestedTerm = requestedTerm
+      ? canRewriteDirectLicenseListForTerm(parsed.directLicenseList, requestedTerm)
+      : false;
+    const shouldRewriteDirectLicenseTerms = canRenderAllTerms || canRenderRequestedTerm;
+    const terms = requestedTerm
+      ? (canRenderRequestedTerm ? [requestedTerm] : detectedTerm ? [detectedTerm] : [requestedTerm])
       : canRenderAllTerms
         ? [1, 3, 5]
         : detectedTerm ? [detectedTerm] : [1, 3, 5];
@@ -6897,7 +6910,7 @@ function buildQuoteResponse(parsed) {
     lines.push(`**Option 1 - Renew As-Is:**`);
     lines.push('');
     for (const term of terms) {
-      const termItems = canRenderAllTerms || parsed.requestedTerm
+      const termItems = shouldRewriteDirectLicenseTerms
         ? rewriteDirectLicenseListForTerm(parsed.directLicenseList, term)
         : parsed.directLicenseList;
       const url = buildStratusUrl(termItems);
@@ -6937,8 +6950,8 @@ function buildQuoteResponse(parsed) {
           } else if (!eolEntry) {
             // Non-EOL license - carry the same term as the refresh option when
             // the SKU supports safe term rewriting.
-            const rewritten = (canRenderAllTerms || parsed.requestedTerm) ? rewriteSkuTerm(sku, term) : null;
-            urlItems.push({ sku: rewritten && prices[rewritten] ? rewritten : sku, qty });
+            const rewritten = shouldRewriteDirectLicenseTerms ? directLicenseSkuForTerm(sku, term) : null;
+            urlItems.push({ sku: rewritten || sku, qty });
           }
         }
         return urlItems;

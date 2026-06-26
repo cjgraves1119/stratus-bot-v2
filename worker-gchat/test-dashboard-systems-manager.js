@@ -13,12 +13,11 @@
 const fs = require('fs'), path = require('path'), os = require('os');
 const here = path.resolve(__dirname);
 let src = fs.readFileSync(path.join(here, 'src/index.js'), 'utf8');
-const escPath = p => path.join(here, p).replace(/\\/g, '\\\\');
-src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
-src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${escPath('src/data/prices.json')}');`);
-src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
-src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${escPath('src/data/specs.json')}');`);
-src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+const escPath = rel => path.join(here, 'src', rel).replace(/\\/g, '\\\\');
+src = src.replace(/^import\s+(\w+)\s+from\s+'(\.\/[^']+\.json)';?$/mg,
+  (_, name, rel) => `const ${name} = require('${escPath(rel)}');`);
+src = src.replace(/^import\s+\{[^}]*\}\s+from\s+'cloudflare:workers';?$/m,
+  'const WorkflowEntrypoint = class {};');
 src = src.replace(/^export\s+(class|function|const|let|var)\s+/gm, '$1 ');
 const edIdx = src.indexOf('export default');
 if (edIdx > -1) {
