@@ -2028,6 +2028,37 @@ function applySuffix(sku) {
 }
 
 // ─── License SKU Rules ───────────────────────────────────────────────────────
+// ── Dashboard license-row passthrough ──────────────────────────────────────
+// A Cisco Meraki license-dashboard "License information" row is ALREADY a
+// fully-formed license SKU (e.g. LIC-ENT-3YR, LIC-MV-3YR, LIC-MX67W-SEC-3YR,
+// LIC-MX85-SEC-3Y). getLicenseSkus only maps *hardware* models → licenses, so
+// routing such a row through it returns null and the dashboard line is silently
+// dropped (the screenshot→empty-quote bug, Arch Technology 2026-06-25). Given a
+// termed LIC- SKU, return a { '1Y'|'3Y'|'5Y' → sku } map of its term siblings
+// limited to SKUs that exist in prices.json (so a deprecated sibling like
+// LIC-SME-5YR is omitted), or null when `sku` is not a termed LIC- SKU (hardware
+// rows then fall through to getLicenseSkus untouched).
+function licenseTermSiblings(sku) {
+  const upper = String(sku || '').toUpperCase();
+  // Family stem + term suffix style: -1YR/-3YR/-5YR (legacy) or -1Y/-3Y/-5Y
+  // (MX75/85/95/105, SDW). Non-greedy stem so the trailing term anchors the match.
+  const m = upper.match(/^(LIC-.+?)-([135])(YR?)$/);
+  if (!m) return null;
+  const stem = m[1];
+  const yr = m[3]; // 'YR' or 'Y'
+  // Systems Manager (LIC-SME) is capped at SME_MAX_TERM (3yr) — the 5yr SKU is
+  // deprecated and must never be quoted even though LIC-SME-5YR still exists in
+  // prices.json. Mirrors smeCapTerm. (Codex council, 2026-06-25.)
+  const isSme = stem === 'LIC-SME';
+  const map = {};
+  for (const [term, n] of [['1Y', '1'], ['3Y', '3'], ['5Y', '5']]) {
+    if (isSme && Number(n) > SME_MAX_TERM) continue;
+    const candidate = `${stem}-${n}${yr}`;
+    if (candidate in prices) map[term] = candidate;
+  }
+  return Object.keys(map).length ? map : null;
+}
+
 function getLicenseSkus(baseSku, requestedTier) {
   if (requiresMsLicenseModelInputValidation(baseSku) && !hasKnownMsLicenseModelInput(baseSku)) {
     console.warn(`[LICENSE] Invalid switch model token for license generation: ${baseSku}`);
@@ -2416,6 +2447,28 @@ function dedupeSkus(skus) {
   return Array.from(map.entries()).map(([sku, qty]) => ({ sku, qty }));
 }
 
+// OCR sanity filter. When a vision pass emits BOTH a fully-termed license SKU
+// (LIC-ENT-3YR) and a term-stripped fragment of it (LIC-ENT), the bare row is an
+// OCR artifact — drop it so it can't inject a phantom quote line or a bogus qty
+// (e.g. the "67" that bled out of "MX67W" in the Arch Technology screenshot).
+// Keep the termed row; leave non-license rows and standalone term-less LIC rows
+// (no termed sibling) untouched. 2026-06-25.
+function collapseLicenseTermlessDuplicates(skus) {
+  if (!Array.isArray(skus) || skus.length < 2) return skus;
+  const termedStems = new Set();
+  for (const s of skus) {
+    const m = String(s?.sku || '').toUpperCase().match(/^(LIC-.+?)-[135]YR?$/);
+    if (m) termedStems.add(m[1]);
+  }
+  if (termedStems.size === 0) return skus;
+  return skus.filter(s => {
+    const up = String(s?.sku || '').toUpperCase();
+    if (!up.startsWith('LIC-')) return true;     // non-license: keep
+    if (/-[135]YR?$/.test(up)) return true;      // termed license: keep
+    return !termedStems.has(up);                 // term-less: drop iff a termed sibling exists
+  });
+}
+
 function extractSkusFromVisionText(text) {
   const skus = [];
   if (!text) return skus;
@@ -2456,7 +2509,7 @@ function extractSkusFromVisionText(text) {
         if (smActive > 0 && smQty > 0 && smQty <= 500) skus.push({ sku: 'SM-ENT', qty: smQty });
       }
     }
-    if (skus.length > 0) return dedupeSkus(skus);
+    if (skus.length > 0) return collapseLicenseTermlessDuplicates(dedupeSkus(skus));
   }
 
   const mrEntRe = /MR\s+Enterprise[^\n\d]{0,40}?(\d+)/gi;
@@ -2493,13 +2546,107 @@ function extractSkusFromVisionText(text) {
       }
     }
   }
-  return dedupeSkus(skus);
+  return collapseLicenseTermlessDuplicates(dedupeSkus(skus));
 }
 
 // ─── Dashboard vision prompt + audit pass ───────────────────────────────────
 // Pulled out of the fetch handler so the prompt is testable and the audit pass
 // (second-shot vision call when the first pass looks suspicious) can re-use
 // the same parsing rules.
+// ── Workers AI (Llama 4 Scout) dashboard vision + audit pass ────────────────
+// Ported from the webex worker (worker/src/index.js) for cross-surface parity:
+// the extension's /api/parse-dashboard used Claude Sonnet vision, which
+// free-formed noisy multi-row output on some screenshots. This is the SAME free
+// Llama-4-Scout vision path the webex bot uses, including the second-shot audit
+// pass that recovers rows hidden behind colored annotations. (F5, 2026-06-25.)
+async function askCFVision(prompt, imageData, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: `data:${imageData.mediaType};base64,${imageData.base64}` } }
+          ]
+        }],
+        max_tokens: 1500
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('CF_VISION_TIMEOUT')), 15000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const response = extractAIResponse(result);
+    if (response.length < 20) return null;
+    const cantSee = /(can'?t see|cannot see|don'?t see|unable to (see|view)|no image|text-based|upload)/i;
+    if (cantSee.test(response)) {
+      console.log(`[CF-Vision] Model can't see image (${elapsed}ms), falling back to Claude`);
+      return null;
+    }
+    console.log(`[CF-Vision] Success (${elapsed}ms, ${response.length} chars)`);
+    return { response, elapsed };
+  } catch (err) {
+    console.error(`[CF-Vision] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
+  }
+}
+
+function getDashboardVisionAuditPrompt(firstResponse) {
+  const safeFirst = String(firstResponse || '').slice(0, 2000);
+  return `You already produced this LICENSE_DASHBOARD_PARSE_V1 output for the screenshot:
+
+---FIRST PASS---
+${safeFirst}
+---END FIRST PASS---
+
+Now re-scan the SAME image. Your job is to catch rows the first pass may have missed — especially rows whose ACTIVE >= 1 that sit just below or above a colored annotation (red/yellow/blue underline, cross, circle, highlighter stroke). Annotations are user markup, NOT table boundaries; the License information table continues below them.
+
+Focus checks:
+- For every MX, MR Enterprise, Systems Manager, MS, MT, MV, MG, Z, CW, or C9 row visible in the License information table with ACTIVE >= 1, confirm it is present in the first pass. (Systems Manager → SM-ENT.)
+- If you see an MX65 row, also look immediately above and below it for an MX85, MX67, MX68, MX75, MX95, MX105, MX250, or MX450 row that the first pass may have skipped.
+- Do not invent SKUs. Only confirm or add rows that are literally visible in the top License information table.
+
+Respond with ONLY a fresh LICENSE_DASHBOARD_PARSE_V1 block in the same format as before, listing every row with ACTIVE >= 1 you can see. The caller will merge this with the first pass by taking the MAX qty per SKU (not the sum), so it is safe to repeat rows the first pass already had.`;
+}
+
+// Trigger heuristic for the audit pass. Returns true when the first response
+// looks suspicious in a way the audit prompt is good at catching.
+function shouldAuditDashboardVision(firstResponse) {
+  if (!firstResponse) return false;
+  const skus = extractSkusFromVisionText(firstResponse);
+  if (skus.length === 0) return false;
+  const upper = (s) => String(s.sku || '').toUpperCase();
+  const hasMrEnt = skus.some(s => upper(s) === 'MR-ENT' || upper(s) === 'MR_ENT');
+  const hasDeviceFamily = skus.some(s => /^(MX|MS|MV|MG|Z|CW|C9)\d/i.test(upper(s)));
+  // Pattern A: MR-only (no device family) — common when annotations hide MX rows.
+  if (hasMrEnt && !hasDeviceFamily) return true;
+  // Pattern B: MX65 present but MX85/MX95/MX105/MX67/MX68/MX75/MX250/MX450 absent.
+  const hasMx65 = skus.some(s => /^MX65\b/i.test(upper(s)));
+  const hasOtherMx = skus.some(s => /^MX(?:67|68|75|85|95|105|250|450)\b/i.test(upper(s)));
+  if (hasMx65 && !hasOtherMx) return true;
+  return false;
+}
+
+// Merge two SKU lists by taking MAX qty per SKU (not sum). Used for first +
+// audit pass merging where re-emitted rows would otherwise double-count.
+function mergeVisionSkusMax(first, audit) {
+  const out = new Map();
+  const ingest = (list) => {
+    for (const it of (list || [])) {
+      if (!it || !it.sku) continue;
+      const sku = String(it.sku).toUpperCase();
+      const qty = Number(it.qty) || 0;
+      if (qty <= 0) continue;
+      const prev = out.get(sku);
+      if (!prev || qty > prev.qty) out.set(sku, { sku, qty });
+    }
+  };
+  ingest(first);
+  ingest(audit);
+  return Array.from(out.values());
+}
+
 function getDashboardVisionPrompt() {
   return `You are analyzing a Cisco Meraki license dashboard screenshot.
 
@@ -2594,6 +2741,15 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
       ordered.push({ kind: 'sm', qty });
       continue;
     }
+    // Dashboard "License information" rows are already fully-formed license SKUs.
+    // Carry them forward directly at every term — getLicenseSkus has no LIC-
+    // branch and would drop them (the screenshot→empty-quote bug). Gate strictly
+    // on a termed LIC- SKU present in prices so hardware rows are untouched.
+    const licSiblings = licenseTermSiblings(upper);
+    if (licSiblings) {
+      ordered.push({ kind: 'lic', siblings: licSiblings, qty });
+      continue;
+    }
     if (isEol(upper)) {
       const row = { model: upper, qty, replacement: checkEol(upper) };
       eolDevices.push(row);
@@ -2625,6 +2781,10 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
     if (row.kind === 'sm') {
       const sme = smeCapTerm(parseInt(term, 10));
       return { sku: `LIC-SME-${sme.term}YR`, qty: row.qty, smeCapped: sme.capped };
+    }
+    if (row.kind === 'lic') {
+      const sku = row.siblings[term];
+      return sku ? { sku, qty: row.qty } : null;
     }
     const lic = licFor(row.model, term);
     return lic ? { sku: lic.sku, qty: row.qty } : null;
@@ -4382,6 +4542,44 @@ function hasOtherQuoteSkuForSme(upper) {
   return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
 }
 
+function extractEmbeddedDirectLicenseList(rawText) {
+  const text = String(rawText || '');
+  if (/stratusinfosystems\.com\/order\//i.test(text)) return null;
+
+  const matches = [...text.matchAll(/\bLIC-[A-Z0-9-]+\b/gi)];
+  if (matches.length < 2) return null;
+
+  const items = [];
+  for (const match of matches) {
+    const sku = match[0].toUpperCase();
+    const before = text.slice(Math.max(0, match.index - 48), match.index);
+    const after = text.slice(match.index + match[0].length, match.index + match[0].length + 48);
+    // A quantity AFTER the SKU must carry an explicit marker (x12, qty 12,
+    // : 12, - 12, or a parenthesized (12)). A bare trailing number is rejected
+    // so a stray token / year like "...LIC-MV-3YR 2024" is never read as qty.
+    const afterQty = after.match(/^\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*|[:=]\s*|[-–—]\s*)(\d{1,5})(?:\s*\)|\s*\]|\b)/i)
+      || after.match(/^\s*[\(\[]\s*(\d{1,5})\s*[\)\]]/);
+    // A quantity BEFORE the SKU is accepted only as a clean standalone token
+    // (list/prose rhythm like "1 LIC-ENT-3YR" or ", 12 LIC-MV-3YR"). A number
+    // glued to a currency symbol ("$500 LIC-...") is a price, not a quantity.
+    const beforeRaw = before.match(/(^|[^A-Z0-9-])(\d{1,5})\s*(?:[xX×]\s*)?$/i);
+    const beforeQty = beforeRaw && !/[$€£¥]/.test(beforeRaw[1]) ? beforeRaw : null;
+    let qty = 1;
+    if (afterQty) qty = parseInt(afterQty[1], 10);
+    else if (beforeQty) qty = parseInt(beforeQty[2], 10);
+    items.push({ sku, qty: Number.isFinite(qty) && qty > 0 ? qty : 1 });
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const item of items) {
+    if (seen.has(item.sku)) continue;
+    seen.add(item.sku);
+    deduped.push(item);
+  }
+  return deduped.length >= 2 ? deduped : null;
+}
+
 // ─── Per-item (per-clause) intent ─────────────────────────────────────────────
 // Bug #2: license/hardware intent is detected globally but users express it
 // per clause ("6 mr AND 1 mx84 license renewal AND 1 CW9172I hardware only").
@@ -4605,6 +4803,20 @@ function parseMessage(text) {
         showPricing: false
       };
     }
+  }
+
+  const embeddedLicItems = extractEmbeddedDirectLicenseList(text);
+  if (embeddedLicItems) {
+    return {
+      items: [],
+      directLicenseList: embeddedLicItems,
+      requestedTerm: null,
+      modifiers: { hardwareOnly: false, licenseOnly: true },
+      requestedTier: null,
+      isAdvisory: false,
+      isRevision: false,
+      showPricing: false
+    };
   }
 
   // Multi-line bare model list (one device per line, no quantities)
@@ -5433,7 +5645,17 @@ function buildQuoteResponse(parsed) {
       const termMatch = sku.match(/(\d+)\s*Y(?:R|EA|-S\d+)?$/i);
       if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
     }
-    const terms = detectedTerm ? [detectedTerm] : [1, 3, 5];
+    const requestedTerm = parsed.requestedTerm ? Number(parsed.requestedTerm) : null;
+    const canRenderAllTerms = canRewriteDirectLicenseListForAllTerms(parsed.directLicenseList);
+    const canRenderRequestedTerm = requestedTerm
+      ? canRewriteDirectLicenseListForTerm(parsed.directLicenseList, requestedTerm)
+      : false;
+    const shouldRewriteDirectLicenseTerms = canRenderAllTerms || canRenderRequestedTerm;
+    const terms = requestedTerm
+      ? (canRenderRequestedTerm ? [requestedTerm] : detectedTerm ? [detectedTerm] : [requestedTerm])
+      : canRenderAllTerms
+        ? [1, 3, 5]
+        : detectedTerm ? [detectedTerm] : [1, 3, 5];
     const requestedTier = parsed.requestedTier || null;
 
     // Extract base hardware model from each license SKU and check EOL
@@ -5471,7 +5693,10 @@ function buildQuoteResponse(parsed) {
     lines.push(`**Option 1 - Renew As-Is:**`);
     lines.push('');
     for (const term of terms) {
-      const url = buildStratusUrl(parsed.directLicenseList);
+      const termItems = shouldRewriteDirectLicenseTerms
+        ? rewriteDirectLicenseListForTerm(parsed.directLicenseList, term)
+        : parsed.directLicenseList;
+      const url = buildStratusUrl(termItems);
       const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
       lines.push(`${termLabel}: ${url}`);
       lines.push('');
@@ -5500,8 +5725,10 @@ function buildQuoteResponse(parsed) {
               if (licSku) urlItems.push({ sku: licSku, qty });
             }
           } else if (!eolEntry) {
-            // Non-EOL license — pass through as-is
-            urlItems.push({ sku, qty });
+            // Non-EOL license - carry the same term as the refresh option when
+            // the SKU supports safe term rewriting.
+            const rewritten = shouldRewriteDirectLicenseTerms ? directLicenseSkuForTerm(sku, term) : null;
+            urlItems.push({ sku: rewritten || sku, qty });
           }
         }
         return urlItems;
@@ -17326,6 +17553,32 @@ function rewriteSkuTerm(sku, newTerm) {
   return s.replace(/-([135])(YR|Y-S\d+|Y)$/, `-${newTerm}$2`);
 }
 
+function canRewriteDirectLicenseListForAllTerms(list) {
+  if (!Array.isArray(list) || list.length === 0) return false;
+  return [1, 3, 5].every(term => canRewriteDirectLicenseListForTerm(list, term));
+}
+
+function directLicenseSkuForTerm(sku, term) {
+  if (!sku || !String(sku).toUpperCase().startsWith('LIC-')) return null;
+  const key = `${Number(term)}Y`;
+  const siblings = licenseTermSiblings(sku);
+  if (siblings) return siblings[key] || null;
+  const rewritten = rewriteSkuTerm(sku, term);
+  return rewritten && prices[rewritten] ? rewritten : null;
+}
+
+function canRewriteDirectLicenseListForTerm(list, term) {
+  if (!Array.isArray(list) || list.length === 0 || ![1, 3, 5].includes(Number(term))) return false;
+  return list.every(({ sku }) => !!directLicenseSkuForTerm(sku, term));
+}
+
+function rewriteDirectLicenseListForTerm(list, term) {
+  return list.map(({ sku, qty }) => {
+    const rewritten = directLicenseSkuForTerm(sku, term);
+    return { sku: rewritten || sku, qty };
+  });
+}
+
 // Strip lines containing an empty Stratus order URL (?item=&qty=) from a Claude
 // reply — Sonnet has templated these on the revise path (webex #129; same guard
 // here for gchat/extension parity). Deterministic handlers never produce them.
@@ -23333,8 +23586,14 @@ CRITICAL URL RULES:
             // STEP 4: Pre-validate ALL SKU-like tokens from raw text
             // Catches SKUs that parseMessage might silently drop (e.g., "MS225", "MS130" without variant)
             // ────────────────────────────────────────────
+            // Blank out full LIC- license SKUs BEFORE scanning for bare hardware
+            // tokens. Without this, a license SKU like "LIC-MX67W-SEC-3YR" has its
+            // inner "MX67W-SEC-3YR" matched as a phantom hardware model (the "-" is
+            // a word boundary) → fails model validation → "did you mean MX67?" →
+            // blocks the whole quote. The trailing .filter is now belt-and-suspenders.
+            // (Arch Technology screenshot, 2026-06-25.)
             const rawSkuTokens = [...new Set(
-              (text.toUpperCase().match(/\b((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/gi) || [])
+              (text.toUpperCase().replace(/\bLIC-[A-Z0-9-]+/g, ' ').match(/\b((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/gi) || [])
                 .map(s => s.toUpperCase())
                 .filter(s => !s.startsWith('LIC-'))
             )];
@@ -23466,6 +23725,10 @@ CRITICAL URL RULES:
                   quoteUrls,
                   eolWarnings: [],
                   parsedItems: parsed.directLicenseList.map(p => ({ sku: p.sku, qty: p.qty })),
+                  // Carry any leftover "did you mean" suggestions (e.g. an invalid
+                  // hardware token typed alongside the license list) so they aren't
+                  // silently dropped. (Codex pre-deploy review, 2026-06-25.)
+                  ...(suggestions.length > 0 ? { suggestions } : {}),
                   handlerType: 'deterministic',
                 };
                 break;
@@ -23494,6 +23757,9 @@ CRITICAL URL RULES:
                   quoteUrls,
                   eolWarnings: [],
                   parsedItems: [{ sku, qty }],
+                  // Carry leftover suggestions (parity with the directLicenseList /
+                  // main deterministic paths). (Codex pre-deploy review, 2026-06-25.)
+                  ...(suggestions.length > 0 ? { suggestions } : {}),
                   handlerType: 'deterministic',
                 };
                 break;
@@ -23575,9 +23841,17 @@ CRITICAL URL RULES:
               break;
             }
 
-            // If ANY suggestions exist (invalid or unrecognized SKUs), BLOCK quote output
-            // User must resolve all SKU issues before we generate URLs
-            if (suggestions.length > 0) {
+            // Block quote output ONLY when there's nothing quotable. A phantom or
+            // advisory suggestion (e.g. an unrecognized accessory token, or a model
+            // substring mis-carved from a LIC- SKU) must NOT zero out an otherwise
+            // valid quote that has real items / license SKUs. Previously a single
+            // bad token forced suggestions-only and returned no URLs even when the
+            // screenshot's real LIC- rows were perfectly quotable. (2026-06-25.)
+            const hasQuotable =
+              validItems.length > 0 ||
+              (parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length > 0) ||
+              (parsed && parsed.directLicense);
+            if (suggestions.length > 0 && !hasQuotable) {
               apiResult = {
                 quoteUrls: [],
                 eolWarnings: [],
@@ -23704,6 +23978,13 @@ CRITICAL URL RULES:
               quoteUrls,
               eolWarnings,
               parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+              // If we proceeded past the suggestions bail because a quote was
+              // buildable (F3 hasQuotable), STILL surface any leftover "did you
+              // mean" suggestions for tokens we couldn't resolve (e.g. a typo'd
+              // SKU typed alongside a valid one) — buildQuoteResponse silently
+              // omits them from the URL, so without this the user never learns
+              // their bad token was dropped. (Codex council, 2026-06-25.)
+              ...(suggestions.length > 0 ? { suggestions } : {}),
               handlerType: 'deterministic',
             };
             break;
@@ -23761,9 +24042,56 @@ CRITICAL URL RULES:
               // worker/). A caller-supplied `instructions` override still wins.
               const dashPrompt = dashInstructions || getDashboardVisionPrompt();
 
-              // Call Claude with vision (reuse existing askClaude)
               const imageData = { base64: resolvedBase64, mediaType: resolvedMediaType };
-              const claudeResponse = await askClaude(dashPrompt, 'dashboard', env, imageData);
+
+              // F5 parity: try the FREE Workers AI vision path (Llama 4 Scout)
+              // with the same audit/merge second pass the webex bot uses, then
+              // fall back to Claude vision on any miss (no env.AI, timeout,
+              // can't-see, or empty). This keeps the extension and webex on one
+              // OCR pipeline instead of diverging Claude-vs-Llama outputs.
+              // 2026-06-25.
+              let claudeResponse;
+              let cfVision = await askCFVision(dashPrompt, imageData, env);
+              if (cfVision && cfVision.response && shouldAuditDashboardVision(cfVision.response)) {
+                console.log('[CF-Vision] parse-dashboard first pass suspicious, running audit pass');
+                const auditPrompt = getDashboardVisionAuditPrompt(cfVision.response);
+                const audit = await askCFVision(auditPrompt, imageData, env);
+                if (audit && audit.response) {
+                  const firstSkus = extractSkusFromVisionText(cfVision.response);
+                  const auditSkus = extractSkusFromVisionText(audit.response);
+                  const merged = mergeVisionSkusMax(firstSkus, auditSkus);
+                  // Stitch a synthetic LICENSE_DASHBOARD_PARSE_V1 block from the
+                  // merged list, preserving the first pass's metadata tail
+                  // (EXPIRATION / MX_EDITION / MR_EDITION).
+                  const tail = cfVision.response.split(/\n---\n/).slice(2).join('\n---\n');
+                  const skuLines = merged.map(s => `SKU: ${s.sku} | LIMIT: ${s.qty} | ACTIVE: ${s.qty}`).join('\n');
+                  cfVision = { ...cfVision, response: `LICENSE_DASHBOARD_PARSE_V1\n---\n${skuLines}\n---${tail ? '\n' + tail : ''}` };
+                }
+              }
+              // Accept the free Llama pass ONLY if it actually produced a
+              // parseable dashboard — the structured LICENSE_DASHBOARD_PARSE_V1
+              // block OR at least one extractable SKU. Llama sometimes free-forms
+              // prose; accepting that as success would yield an empty quote and
+              // SKIP the Claude fallback. This path was Claude-first before F5, so
+              // Claude MUST remain the fallback for format misses, not just for
+              // hard failures. (Codex pre-deploy review, 2026-06-25.)
+              // Require the STRUCTURED block (which carries explicit LIMIT/ACTIVE
+              // counts) — not just any extractable SKU. The line-based fallback
+              // parser defaults qty=1, so Llama prose like "I see LIC-ENT-3YR,
+              // LIC-MV-3YR" would otherwise be accepted at qty 1,1,1 instead of
+              // falling back to Claude. Audited/stitched output and legitimately
+              // empty dashboards both still carry the block. (Codex review #2.)
+              const cfUsable = !!(cfVision && cfVision.response &&
+                /LICENSE_DASHBOARD_PARSE_V1/.test(cfVision.response));
+              if (cfUsable) {
+                claudeResponse = cfVision.response;
+              } else {
+                // Tier 2 fallback: Claude vision (paid) — original behavior.
+                if (cfVision && cfVision.response) {
+                  console.log('[CF-Vision] parse-dashboard response unparseable, falling back to Claude');
+                }
+                claudeResponse = await askClaude(dashPrompt, 'dashboard', env, imageData);
+              }
 
               // WS2: parse the LICENSE_DASHBOARD_PARSE_V1 block into structured
               // SKUs + metadata, then build the deterministic license-renewal quote

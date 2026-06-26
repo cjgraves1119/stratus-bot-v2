@@ -478,6 +478,32 @@ function rewriteSkuTerm(sku, newTerm) {
   return s.replace(/-([135])(YR|Y-S\d+|Y)$/, `-${newTerm}$2`);
 }
 
+function canRewriteDirectLicenseListForAllTerms(list) {
+  if (!Array.isArray(list) || list.length === 0) return false;
+  return [1, 3, 5].every(term => canRewriteDirectLicenseListForTerm(list, term));
+}
+
+function directLicenseSkuForTerm(sku, term) {
+  if (!sku || !String(sku).toUpperCase().startsWith('LIC-')) return null;
+  const key = `${Number(term)}Y`;
+  const siblings = licenseTermSiblings(sku);
+  if (siblings) return siblings[key] || null;
+  const rewritten = rewriteSkuTerm(sku, term);
+  return rewritten && prices[rewritten] ? rewritten : null;
+}
+
+function canRewriteDirectLicenseListForTerm(list, term) {
+  if (!Array.isArray(list) || list.length === 0 || ![1, 3, 5].includes(Number(term))) return false;
+  return list.every(({ sku }) => !!directLicenseSkuForTerm(sku, term));
+}
+
+function rewriteDirectLicenseListForTerm(list, term) {
+  return list.map(({ sku, qty }) => {
+    const rewritten = directLicenseSkuForTerm(sku, term);
+    return { sku: rewritten || sku, qty };
+  });
+}
+
 const catalog = catalogData;
 const specs = specsData;
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
@@ -1928,6 +1954,28 @@ function dedupeSkus(skus) {
   return Array.from(map.entries()).map(([sku, qty]) => ({ sku, qty }));
 }
 
+// OCR sanity filter. When a vision pass emits BOTH a fully-termed license SKU
+// (LIC-ENT-3YR) and a term-stripped fragment of it (LIC-ENT), the bare row is an
+// OCR artifact — drop it so it can't inject a phantom quote line or a bogus qty
+// (e.g. the "67" that bled out of "MX67W" in the Arch Technology screenshot).
+// Keep the termed row; leave non-license rows and standalone term-less LIC rows
+// (no termed sibling) untouched. 2026-06-25.
+function collapseLicenseTermlessDuplicates(skus) {
+  if (!Array.isArray(skus) || skus.length < 2) return skus;
+  const termedStems = new Set();
+  for (const s of skus) {
+    const m = String(s?.sku || '').toUpperCase().match(/^(LIC-.+?)-[135]YR?$/);
+    if (m) termedStems.add(m[1]);
+  }
+  if (termedStems.size === 0) return skus;
+  return skus.filter(s => {
+    const up = String(s?.sku || '').toUpperCase();
+    if (!up.startsWith('LIC-')) return true;     // non-license: keep
+    if (/-[135]YR?$/.test(up)) return true;      // termed license: keep
+    return !termedStems.has(up);                 // term-less: drop iff a termed sibling exists
+  });
+}
+
 function extractSkusFromVisionText(text) {
   const skus = [];
   if (!text) return skus;
@@ -1968,7 +2016,7 @@ function extractSkusFromVisionText(text) {
         if (smActive > 0 && smQty > 0 && smQty <= 500) skus.push({ sku: 'SM-ENT', qty: smQty });
       }
     }
-    if (skus.length > 0) return dedupeSkus(skus);
+    if (skus.length > 0) return collapseLicenseTermlessDuplicates(dedupeSkus(skus));
   }
 
   const mrEntRe = /MR\s+Enterprise[^\n\d]{0,40}?(\d+)/gi;
@@ -2005,7 +2053,7 @@ function extractSkusFromVisionText(text) {
       }
     }
   }
-  return dedupeSkus(skus);
+  return collapseLicenseTermlessDuplicates(dedupeSkus(skus));
 }
 
 // ─── Dashboard vision prompt + audit pass ───────────────────────────────────
@@ -2166,6 +2214,15 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
       ordered.push({ kind: 'sm', qty });
       continue;
     }
+    // Dashboard "License information" rows are already fully-formed license SKUs.
+    // Carry them forward directly at every term — getLicenseSkus has no LIC-
+    // branch and would drop them (the screenshot→empty-quote bug). Gate strictly
+    // on a termed LIC- SKU present in prices so hardware rows are untouched.
+    const licSiblings = licenseTermSiblings(upper);
+    if (licSiblings) {
+      ordered.push({ kind: 'lic', siblings: licSiblings, qty });
+      continue;
+    }
     if (isEol(upper)) {
       const row = { model: upper, qty, replacement: checkEol(upper) };
       eolDevices.push(row);
@@ -2197,6 +2254,10 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
     if (row.kind === 'sm') {
       const sme = smeCapTerm(parseInt(term, 10));
       return { sku: `LIC-SME-${sme.term}YR`, qty: row.qty, smeCapped: sme.capped };
+    }
+    if (row.kind === 'lic') {
+      const sku = row.siblings[term];
+      return sku ? { sku, qty: row.qty } : null;
     }
     const lic = licFor(row.model, term);
     return lic ? { sku: lic.sku, qty: row.qty } : null;
@@ -2463,6 +2524,37 @@ function applySuffix(sku) {
 }
 
 // ─── License SKU Rules ───────────────────────────────────────────────────────
+// ── Dashboard license-row passthrough ──────────────────────────────────────
+// A Cisco Meraki license-dashboard "License information" row is ALREADY a
+// fully-formed license SKU (e.g. LIC-ENT-3YR, LIC-MV-3YR, LIC-MX67W-SEC-3YR,
+// LIC-MX85-SEC-3Y). getLicenseSkus only maps *hardware* models → licenses, so
+// routing such a row through it returns null and the dashboard line is silently
+// dropped (the screenshot→empty-quote bug, Arch Technology 2026-06-25). Given a
+// termed LIC- SKU, return a { '1Y'|'3Y'|'5Y' → sku } map of its term siblings
+// limited to SKUs that exist in prices.json (so a deprecated sibling like
+// LIC-SME-5YR is omitted), or null when `sku` is not a termed LIC- SKU (hardware
+// rows then fall through to getLicenseSkus untouched).
+function licenseTermSiblings(sku) {
+  const upper = String(sku || '').toUpperCase();
+  // Family stem + term suffix style: -1YR/-3YR/-5YR (legacy) or -1Y/-3Y/-5Y
+  // (MX75/85/95/105, SDW). Non-greedy stem so the trailing term anchors the match.
+  const m = upper.match(/^(LIC-.+?)-([135])(YR?)$/);
+  if (!m) return null;
+  const stem = m[1];
+  const yr = m[3]; // 'YR' or 'Y'
+  // Systems Manager (LIC-SME) is capped at SME_MAX_TERM (3yr) — the 5yr SKU is
+  // deprecated and must never be quoted even though LIC-SME-5YR still exists in
+  // prices.json. Mirrors smeCapTerm. (Codex council, 2026-06-25.)
+  const isSme = stem === 'LIC-SME';
+  const map = {};
+  for (const [term, n] of [['1Y', '1'], ['3Y', '3'], ['5Y', '5']]) {
+    if (isSme && Number(n) > SME_MAX_TERM) continue;
+    const candidate = `${stem}-${n}${yr}`;
+    if (candidate in prices) map[term] = candidate;
+  }
+  return Object.keys(map).length ? map : null;
+}
+
 function getLicenseSkus(baseSku, requestedTier) {
   if (requiresMsLicenseModelInputValidation(baseSku) && !hasKnownMsLicenseModelInput(baseSku)) {
     console.warn(`[LICENSE] Invalid switch model token for license generation: ${baseSku}`);
@@ -4481,6 +4573,44 @@ function hasOtherQuoteSkuForSme(upper) {
   return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
 }
 
+function extractEmbeddedDirectLicenseList(rawText) {
+  const text = String(rawText || '');
+  if (/stratusinfosystems\.com\/order\//i.test(text)) return null;
+
+  const matches = [...text.matchAll(/\bLIC-[A-Z0-9-]+\b/gi)];
+  if (matches.length < 2) return null;
+
+  const items = [];
+  for (const match of matches) {
+    const sku = match[0].toUpperCase();
+    const before = text.slice(Math.max(0, match.index - 48), match.index);
+    const after = text.slice(match.index + match[0].length, match.index + match[0].length + 48);
+    // A quantity AFTER the SKU must carry an explicit marker (x12, qty 12,
+    // : 12, - 12, or a parenthesized (12)). A bare trailing number is rejected
+    // so a stray token / year like "...LIC-MV-3YR 2024" is never read as qty.
+    const afterQty = after.match(/^\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*|[:=]\s*|[-–—]\s*)(\d{1,5})(?:\s*\)|\s*\]|\b)/i)
+      || after.match(/^\s*[\(\[]\s*(\d{1,5})\s*[\)\]]/);
+    // A quantity BEFORE the SKU is accepted only as a clean standalone token
+    // (list/prose rhythm like "1 LIC-ENT-3YR" or ", 12 LIC-MV-3YR"). A number
+    // glued to a currency symbol ("$500 LIC-...") is a price, not a quantity.
+    const beforeRaw = before.match(/(^|[^A-Z0-9-])(\d{1,5})\s*(?:[xX×]\s*)?$/i);
+    const beforeQty = beforeRaw && !/[$€£¥]/.test(beforeRaw[1]) ? beforeRaw : null;
+    let qty = 1;
+    if (afterQty) qty = parseInt(afterQty[1], 10);
+    else if (beforeQty) qty = parseInt(beforeQty[2], 10);
+    items.push({ sku, qty: Number.isFinite(qty) && qty > 0 ? qty : 1 });
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const item of items) {
+    if (seen.has(item.sku)) continue;
+    seen.add(item.sku);
+    deduped.push(item);
+  }
+  return deduped.length >= 2 ? deduped : null;
+}
+
 // ─── V2 Classifier → parseMessage-shape Adapter (PR 2) ─────────────────────
 // Consumes the Llama V2 classifier's rich JSON schema and produces the same
 // shape `parseMessage` returns, so `buildQuoteResponse` can run untouched.
@@ -5878,6 +6008,20 @@ function parseMessage(text) {
     }
   }
 
+  const embeddedLicItems = extractEmbeddedDirectLicenseList(text);
+  if (embeddedLicItems) {
+    return {
+      items: [],
+      directLicenseList: embeddedLicItems,
+      requestedTerm: null,
+      modifiers: { hardwareOnly: false, licenseOnly: true },
+      requestedTier: null,
+      isAdvisory: false,
+      isRevision: false,
+      showPricing: false
+    };
+  }
+
   // Multi-line bare model list (one device per line, no quantities)
   // Detects patterns like: MR36\nMR36\nMS250-24P\nMR44\n...
   // Counts occurrences of each model to derive quantities
@@ -6770,7 +6914,17 @@ function buildQuoteResponse(parsed) {
       const termMatch = sku.match(/(\d+)\s*Y(?:R|EA|-S\d+)?$/i);
       if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
     }
-    const terms = detectedTerm ? [detectedTerm] : [1, 3, 5];
+    const requestedTerm = parsed.requestedTerm ? Number(parsed.requestedTerm) : null;
+    const canRenderAllTerms = canRewriteDirectLicenseListForAllTerms(parsed.directLicenseList);
+    const canRenderRequestedTerm = requestedTerm
+      ? canRewriteDirectLicenseListForTerm(parsed.directLicenseList, requestedTerm)
+      : false;
+    const shouldRewriteDirectLicenseTerms = canRenderAllTerms || canRenderRequestedTerm;
+    const terms = requestedTerm
+      ? (canRenderRequestedTerm ? [requestedTerm] : detectedTerm ? [detectedTerm] : [requestedTerm])
+      : canRenderAllTerms
+        ? [1, 3, 5]
+        : detectedTerm ? [detectedTerm] : [1, 3, 5];
     const requestedTier = parsed.requestedTier || null;
 
     // Extract base hardware model from each license SKU and check EOL
@@ -6808,13 +6962,16 @@ function buildQuoteResponse(parsed) {
     lines.push(`**Option 1 - Renew As-Is:**`);
     lines.push('');
     for (const term of terms) {
-      const url = buildStratusUrl(parsed.directLicenseList);
+      const termItems = shouldRewriteDirectLicenseTerms
+        ? rewriteDirectLicenseListForTerm(parsed.directLicenseList, term)
+        : parsed.directLicenseList;
+      const url = buildStratusUrl(termItems);
       const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
       lines.push(`${termLabel}: ${url}`);
       // Exact-group pricing: price the full list as rendered in this URL.
       // Strict boolean check to prevent leaking pricing on non-revise flows.
       if (parsed.showPricing === true) {
-        const priceItems = parsed.directLicenseList.map(l => ({ sku: l.sku, qty: l.qty }));
+        const priceItems = termItems.map(l => ({ sku: l.sku, qty: l.qty }));
         lines.push(buildPricingBlock(priceItems, true).trim());
       }
       lines.push('');
@@ -6843,8 +7000,10 @@ function buildQuoteResponse(parsed) {
               if (licSku) urlItems.push({ sku: licSku, qty });
             }
           } else if (!eolEntry) {
-            // Non-EOL license — pass through as-is
-            urlItems.push({ sku, qty });
+            // Non-EOL license - carry the same term as the refresh option when
+            // the SKU supports safe term rewriting.
+            const rewritten = shouldRewriteDirectLicenseTerms ? directLicenseSkuForTerm(sku, term) : null;
+            urlItems.push({ sku: rewritten || sku, qty });
           }
         }
         return urlItems;
@@ -9070,9 +9229,13 @@ export default {
                     ctx.waitUntil(T.flush());
                     return;
                   }
-                  // No renewal items resolvable (e.g. all rows EOL with no license map,
-                  // or unknown family) — fall back to the bare summary block.
-                  const summaryTail = '';
+                  // No renewal items resolvable (e.g. all rows EOL with no license
+                  // map, or an unknown family). Don't present a bare SKU list as if
+                  // it were a finished quote — say plainly that an automatic renewal
+                  // quote couldn't be built and invite a manual quote, so detection
+                  // isn't mistaken for a completed answer. (After the LIC- passthrough
+                  // fix this path is now a rare safety net.) 2026-06-25.
+                  const summaryTail = '\n\n⚠️ I detected these SKUs but couldn\'t auto-build a renewal quote. Reply **"quote that"** and I\'ll put the options together, or double-check the SKUs above.';
                   const summaryMsg = `**Detected SKUs:**\n${skuSummary}${summaryTail}`;
                   await addToHistory(kv, personId, 'assistant', summaryMsg);
                   T.step('wx-send', 'enter');
