@@ -21,12 +21,15 @@ if (edIdx > -1) {
   }
   src = src.slice(0, edIdx) + src.slice(end + 1);
 }
-src += '\nmodule.exports = { parseMessage, buildQuoteResponse, canRewriteDirectLicenseListForAllTerms, canRewriteDirectLicenseListForTerm, rewriteDirectLicenseListForTerm };';
+src += '\nmodule.exports = { parseMessage, buildQuoteResponse, buildQuoteFromV3, parseExplicitDirectLicenseListBeforeClassifier, parseExplicitSkuRequestBeforeClassifier, canRewriteDirectLicenseListForAllTerms, canRewriteDirectLicenseListForTerm, rewriteDirectLicenseListForTerm };';
 const tmp = path.join(os.tmpdir(), `stratus-gchat-direct-license-${process.pid}.cjs`);
 fs.writeFileSync(tmp, src);
 const {
   parseMessage,
   buildQuoteResponse,
+  buildQuoteFromV3,
+  parseExplicitDirectLicenseListBeforeClassifier,
+  parseExplicitSkuRequestBeforeClassifier,
   canRewriteDirectLicenseListForAllTerms,
   canRewriteDirectLicenseListForTerm,
   rewriteDirectLicenseListForTerm,
@@ -81,7 +84,8 @@ const expectArchDirectLicenseQuote = (label, input) => {
 };
 
 {
-  const parsed = parseMessage('LIC-ENT-3YR x1, LIC-MV-3YR x12, LIC-MX67W-SEC-3YR x2');
+  const input = 'LIC-ENT-3YR x1, LIC-MV-3YR x12, LIC-MX67W-SEC-3YR x2';
+  const parsed = parseMessage(input);
   check('typed Arch direct license list parses as directLicenseList',
     parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length === 3,
     JSON.stringify(parsed));
@@ -97,6 +101,34 @@ const expectArchDirectLicenseQuote = (label, input) => {
   check('typed Arch list emits 5-year URL',
     hasUrl(urls, ['LIC-ENT-5YR', 'LIC-MV-5YR', 'LIC-MX67W-SEC-5YR'], [1, 12, 2]),
     JSON.stringify(urls));
+
+  const bypassParsed = parseExplicitDirectLicenseListBeforeClassifier(input);
+  check('typed Arch list bypasses V3 classifier when V3 is enabled',
+    bypassParsed && Array.isArray(bypassParsed.directLicenseList) && bypassParsed.directLicenseList.length === 3,
+    JSON.stringify(bypassParsed));
+  const bypassUrls = decodeAllUrls(messageOf(buildQuoteResponse(bypassParsed)));
+  check('typed Arch V3 bypass preserves 1/3/5 output',
+    bypassUrls.length === 3 &&
+      hasUrl(bypassUrls, ['LIC-ENT-1YR', 'LIC-MV-1YR', 'LIC-MX67W-SEC-1YR'], [1, 12, 2]) &&
+      hasUrl(bypassUrls, ['LIC-ENT-3YR', 'LIC-MV-3YR', 'LIC-MX67W-SEC-3YR'], [1, 12, 2]) &&
+      hasUrl(bypassUrls, ['LIC-ENT-5YR', 'LIC-MV-5YR', 'LIC-MX67W-SEC-5YR'], [1, 12, 2]),
+    JSON.stringify(bypassUrls));
+  const v3Collapsed = buildQuoteFromV3({
+    intent: 'quote',
+    confidence: 1,
+    clarify: { needed: false, question: '' },
+    items: [
+      { product: 'LIC-ENT-3YR', qty: 1, intent: 'license' },
+      { product: 'LIC-MV-3YR', qty: 12, intent: 'license' },
+      { product: 'LIC-MX67W-SEC-3YR', qty: 2, intent: 'license' },
+    ],
+    modifiers: { term_years: 3, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+  }, input);
+  const v3Urls = decodeAllUrls(messageOf(buildQuoteResponse(v3Collapsed)));
+  check('control: V3 collapsed direct license list would emit only 3-year',
+    v3Urls.length === 1 &&
+      hasUrl(v3Urls, ['LIC-ENT-3YR', 'LIC-MV-3YR', 'LIC-MX67W-SEC-3YR'], [1, 12, 2]),
+    JSON.stringify(v3Urls));
 }
 
 expectArchDirectLicenseQuote('quote-prefixed direct list',
@@ -227,6 +259,18 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
   check('mixed valid/invalid hardware still emits MR44 5-year URL',
     hasUrl(urls, ['MR44-HW', 'LIC-ENT-5YR'], [5, 5]),
     JSON.stringify(urls));
+}
+
+{
+  const parsed = parseExplicitSkuRequestBeforeClassifier('5 MR44 and 2 MX999');
+  check('SKU-list pre-classifier bypass keeps mixed valid/invalid hardware parse',
+    parsed && Array.isArray(parsed.items) &&
+      parsed.items.some(i => i.baseSku === 'MR44' && i.qty === 5) &&
+      parsed.items.some(i => i.baseSku === 'MX999' && i.qty === 2),
+    JSON.stringify(parsed));
+  check('SKU-list pre-classifier bypass ignores product-info questions',
+    parseExplicitSkuRequestBeforeClassifier('what is MR44?') === null,
+    JSON.stringify(parseExplicitSkuRequestBeforeClassifier('what is MR44?')));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

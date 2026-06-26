@@ -5066,6 +5066,53 @@ function buildQuoteFromV3(v3, rawText) {
   };
 }
 
+function parseExplicitDirectLicenseListBeforeClassifier(rawText) {
+  const upper = String(rawText || '').toUpperCase();
+  const explicitLicTerms = upper.match(/\bLIC-[A-Z0-9-]+-[135]YR?\b/g) || [];
+  if (new Set(explicitLicTerms).size < 2) return null;
+  try {
+    const parsed = parseMessage(rawText);
+    return parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length >= 2
+      ? parsed
+      : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseExplicitSkuRequestBeforeClassifier(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return null;
+  const upper = text.toUpperCase().replace(/https?:\/\/\S+/g, ' ');
+
+  const skuTokens = upper.match(/\b(?:LIC-[A-Z0-9-]+|(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/g) || [];
+  if (skuTokens.length === 0) return null;
+
+  // Keep product-info / pricing questions on the classifier path. This bypass is
+  // only for SKU-list syntax where the deterministic parser is the source of truth.
+  if (/\b(WHAT|WHICH|DIFFERENCE|COMPARE|RECOMMEND|SUPPORT|COMPATIBLE|SPEC|SPECS|DATASHEET|EOL|END\s+OF\s+LIFE|WHEN\s+DOES|HOW\s+MUCH|COST|PRICE|PRICING)\b/.test(upper)) {
+    return null;
+  }
+
+  const residue = upper
+    .replace(/\bLIC-[A-Z0-9-]+\b/g, ' ')
+    .replace(/\b(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*\b/g, ' ')
+    .replace(/\b\d+\b/g, ' ')
+    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
+    .replace(/[,\s+*×;:(){}[\]"'`./\\-]+/g, '');
+  if (residue) return null;
+
+  try {
+    const parsed = parseMessage(text);
+    const hasParsedItems = parsed && Array.isArray(parsed.items) && parsed.items.length > 0;
+    const hasDirectLicenseList = parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length > 0;
+    const hasDirectLicense = parsed && parsed.directLicense;
+    return (hasParsedItems || hasDirectLicenseList || hasDirectLicense || parsed?.isClarification) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ─── V2 Revision Applicator (PR 2) ─────────────────────────────────────────
 // Applies a V2 revision object to a prior parseMessage-shape quote and returns
 // a new parseMessage-shape result that can feed straight into buildQuoteResponse.
@@ -9788,12 +9835,12 @@ export default {
               // belt-and-suspenders regex inside buildQuoteFromV2 catches
               // separate_quotes phrasing at the adapter layer (not the routing
               // layer) so the renderer gets the right flag.
-              let quoteParsed = null;
+              let quoteParsed = parseExplicitDirectLicenseListBeforeClassifier(text) || parseExplicitSkuRequestBeforeClassifier(text);
               // V3 model-intent path (flag-gated via CF_QUOTE_V3_ENABLED, OFF by default). When on,
               // classify per-item intent and build via buildQuoteFromV3 (same parseMessage-shape
               // output, incl. clarification). Falls through to the V2-direct adapter / parseMessage
               // on any miss. Mirrors the gchat /api/quote wiring so both engines behave identically.
-              if (_v3Promise) {
+              if (_v3Promise && !quoteParsed) {
                 try {
                   const _v3 = await _v3Promise; // started in parallel with the V2 classifier above
                   if (_v3 && _v3.intent === 'quote') quoteParsed = buildQuoteFromV3(_v3, text) || null;

@@ -399,6 +399,13 @@ function isQuoteFromEmailRequest(text) {
     || /\bwhat (needs|need) to be quoted\b/.test(value);
 }
 
+function newQuotePersonId() {
+  const suffix = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `chrome-ext-chat-quote-${suffix}`;
+}
+
 // Detect a deterministic ecommerce/URL quote request (the Webex-bot path: SKUs
 // in → 1/3/5-year order links out). Deliberately conservative: anything that
 // targets Zoho/CRM, references "this quote/deal", asks to modify a record, or
@@ -567,7 +574,7 @@ export default function ChatPanel({
   const progressIntervalRef = useRef(null);
   // Persistent personId for deterministic quotes (lets the worker keep a quote
   // session for pricing follow-ups / revisions, mirroring the old Quote tab).
-  const personIdRef = useRef('chrome-ext-chat-quote-' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now()));
+  const personIdRef = useRef(newQuotePersonId());
   // Hidden <input type=file> for the "Upload image" action (attachments / pasted images).
   const fileInputRef = useRef(null);
 
@@ -1393,6 +1400,7 @@ export default function ChatPanel({
 
   const handleNewConversation = useCallback(() => {
     if (abortRef.current) abortRef.current.aborted = true;
+    personIdRef.current = newQuotePersonId();
     setLoading(false);
     setError(null);
     setInput('');

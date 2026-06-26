@@ -30,13 +30,13 @@ const db = { prepare: () => ({ bind: () => ({ run: async () => ({ success: true 
 const env = { GMAIL_ADDON_API_KEY: 'test-key', CONVERSATION_KV: kv, PRICES_KV: kv, ANALYTICS_DB: db, BOT_METRICS: { writeDataPoint: () => {} }, BOT_STORAGE: kv };
 const ctx = { waitUntil: (p) => { try { if (p && p.catch) p.catch(() => {}); } catch (_) {} } };
 
-async function callQuote(text) {
+async function callQuote(text, envOverrides = {}) {
   const req = new Request('https://x.workers.dev/api/quote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-API-Key': 'test-key' },
     body: JSON.stringify({ text, personId: 'test-harness' }),
   });
-  const res = await worker.fetch(req, env, ctx);
+  const res = await worker.fetch(req, { ...env, ...envOverrides }, ctx);
   return await res.json();
 }
 
@@ -77,6 +77,35 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(/LIC-ENT-1YR,LIC-MV-1YR,LIC-MX67W-SEC-1YR/.test(urls), `1YR URL missing: ${urls}`);
     assert.ok(/LIC-ENT-3YR,LIC-MV-3YR,LIC-MX67W-SEC-3YR/.test(urls), `3YR URL missing: ${urls}`);
     assert.ok(/LIC-ENT-5YR,LIC-MV-5YR,LIC-MX67W-SEC-5YR/.test(urls), `5YR URL missing: ${urls}`);
+  });
+  await t('mixed valid/invalid SKU list bypasses V3 clarification and returns partial quote', async () => {
+    let aiCalls = 0;
+    const r = await callQuote('5 MR44 and 2 MX999', {
+      CF_QUOTE_V3_ENABLED: 'true',
+      AI: {
+        run: async () => {
+          aiCalls++;
+          return { response: JSON.stringify({
+            intent: 'quote',
+            confidence: 0.99,
+            clarify: { needed: true, question: 'Which MX model did you mean?' },
+            items: [],
+            modifiers: { term_years: null, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+            revision: {},
+            reference: {},
+            dashboard: { is_meraki_license_page: false },
+          }) };
+        },
+      },
+    });
+    assert.strictEqual(aiCalls, 0, 'V3 classifier should be skipped for SKU-list syntax');
+    assert.strictEqual(r.handlerType, 'deterministic', `wrong handler: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 3, `expected 3 quote URLs, got ${JSON.stringify(r.quoteUrls)}`);
+    const urls = r.quoteUrls.map(u => u.url).join('\n');
+    assert.ok(/MR44-HW,LIC-ENT-1YR/.test(urls) && /qty=5,5/.test(urls), `MR44 1YR URL missing/wrong qty: ${urls}`);
+    assert.ok(/MR44-HW,LIC-ENT-3YR/.test(urls), `MR44 3YR URL missing: ${urls}`);
+    assert.ok(/MR44-HW,LIC-ENT-5YR/.test(urls), `MR44 5YR URL missing: ${urls}`);
+    assert.ok(JSON.stringify(r.suggestions || []).includes('MX999'), `MX999 suggestion missing: ${JSON.stringify(r).slice(0, 500)}`);
   });
   await t('"5 MV63 license renewal" (bare MV-AGN) → quote, not rejected', async () => {
     const r = await callQuote('5 MV63 license renewal');

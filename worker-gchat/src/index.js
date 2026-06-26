@@ -337,6 +337,53 @@ function buildQuoteFromV3(v3, rawText) {
   };
 }
 
+function parseExplicitDirectLicenseListBeforeClassifier(rawText) {
+  const upper = String(rawText || '').toUpperCase();
+  const explicitLicTerms = upper.match(/\bLIC-[A-Z0-9-]+-[135]YR?\b/g) || [];
+  if (new Set(explicitLicTerms).size < 2) return null;
+  try {
+    const parsed = parseMessage(rawText);
+    return parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length >= 2
+      ? parsed
+      : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseExplicitSkuRequestBeforeClassifier(rawText) {
+  const text = String(rawText || '').trim();
+  if (!text) return null;
+  const upper = text.toUpperCase().replace(/https?:\/\/\S+/g, ' ');
+
+  const skuTokens = upper.match(/\b(?:LIC-[A-Z0-9-]+|(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/g) || [];
+  if (skuTokens.length === 0) return null;
+
+  // Keep product-info / pricing questions on the classifier path. This bypass is
+  // only for SKU-list syntax where the deterministic parser is the source of truth.
+  if (/\b(WHAT|WHICH|DIFFERENCE|COMPARE|RECOMMEND|SUPPORT|COMPATIBLE|SPEC|SPECS|DATASHEET|EOL|END\s+OF\s+LIFE|WHEN\s+DOES|HOW\s+MUCH|COST|PRICE|PRICING)\b/.test(upper)) {
+    return null;
+  }
+
+  const residue = upper
+    .replace(/\bLIC-[A-Z0-9-]+\b/g, ' ')
+    .replace(/\b(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*\b/g, ' ')
+    .replace(/\b\d+\b/g, ' ')
+    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
+    .replace(/[,\s+*×;:(){}[\]"'`./\\-]+/g, '');
+  if (residue) return null;
+
+  try {
+    const parsed = parseMessage(text);
+    const hasParsedItems = parsed && Array.isArray(parsed.items) && parsed.items.length > 0;
+    const hasDirectLicenseList = parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length > 0;
+    const hasDirectLicense = parsed && parsed.directLicense;
+    return (hasParsedItems || hasDirectLicenseList || hasDirectLicense || parsed?.isClarification) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
 // Pricing per 1M tokens (USD) by model
 const MODEL_PRICING = {
@@ -23630,8 +23677,10 @@ CRITICAL URL RULES:
             // and needs the tooled Claude agent (find_product_candidates). Suppress the
             // deterministic quote here; the validItems===0 fallback below runs TOOLED for these.
             const _accessoryFind = isAccessorySkuFindRequest(text);
-            let parsed = null;
-            if (!_accessoryFind && !_tierRequest && String(env.CF_QUOTE_V3_ENABLED) === 'true') {
+            let parsed = !_accessoryFind && !_tierRequest
+              ? (parseExplicitDirectLicenseListBeforeClassifier(text) || parseExplicitSkuRequestBeforeClassifier(text))
+              : null;
+            if (!_accessoryFind && !_tierRequest && !parsed && String(env.CF_QUOTE_V3_ENABLED) === 'true') {
               try {
                 const _v3 = await classifyV3(text, '', env);
                 if (_v3 && _v3.intent === 'quote') parsed = buildQuoteFromV3(_v3, text) || null;
