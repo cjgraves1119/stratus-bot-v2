@@ -143,6 +143,10 @@ expectNoEmbeddedDirectLicenseList('comparison advisory',
   'Can you compare LIC-ENT-3YR and LIC-MV-3YR?');
 expectNoEmbeddedDirectLicenseList('difference advisory',
   'what is the difference between LIC-ENT-3YR and LIC-MV-3YR');
+expectNoEmbeddedDirectLicenseList('better-than advisory',
+  'is LIC-ENT-3YR better than LIC-ENT-1YR?');
+expectNoEmbeddedDirectLicenseList('or-choice advisory',
+  'LIC-ENT-3YR or LIC-ENT-1YR?');
 expectNoEmbeddedDirectLicenseList('from-to revision',
   'change LIC-ENT-3YR from 1 to 2 and LIC-MV-3YR from 12 to 14');
 expectNoEmbeddedDirectLicenseList('license-to-license revision',

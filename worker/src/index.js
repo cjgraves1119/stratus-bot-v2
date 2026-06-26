@@ -4578,8 +4578,9 @@ function extractEmbeddedDirectLicenseList(rawText) {
   if (/stratusinfosystems\.com\/order\/|stratus\.supply\/|[?&]item=/i.test(text)) return null;
 
   const explicitQuoteIntent = /\b(?:QUOTE|PRICE|PRICING|CART|ORDER|RENEW|RENEWAL|CO-?TERM|COTERM)\b/i.test(text);
-  const advisoryContext = /\b(?:COMPARE|COMPARISON|DIFFEREN(?:CE|CES|T)|VERSUS|VS\.?|WHICH|EXPLAIN|DESCRIBE)\b/i.test(text)
-    || (/\?/.test(text) && /\b(?:WHAT(?:'S| IS)|HOW (?:DO|DOES|WOULD|SHOULD)|CAN YOU|COULD YOU|SHOULD I|DO I NEED)\b/i.test(text));
+  const advisoryContext = /\b(?:COMPARE|COMPARISON|DIFFEREN(?:CE|CES|T)|VERSUS|VS\.?|WHICH|EXPLAIN|DESCRIBE|RECOMMEND(?:ED|ATION)?|BEST|BETTER|WORSE)\b/i.test(text)
+    || /\bLIC-[A-Z0-9-]+\b\s+OR\s+\bLIC-[A-Z0-9-]+\b/i.test(text)
+    || (/\?/.test(text) && /\b(?:WHAT(?:'S| IS)|HOW (?:DO|DOES|WOULD|SHOULD)|IS|ARE|CAN YOU|COULD YOU|SHOULD I|DO I NEED)\b/i.test(text));
   if (!explicitQuoteIntent && advisoryContext) return null;
   if (/\b(?:CHANGE|UPDATE|SWAP|REPLACE|MOVE|INCREASE|DECREASE|UPGRADE|DOWNGRADE)\b/i.test(text) &&
       /\b(?:FROM|TO)\s+(?:LIC-[A-Z0-9-]+|\d{1,5})\b/i.test(text)) return null;
