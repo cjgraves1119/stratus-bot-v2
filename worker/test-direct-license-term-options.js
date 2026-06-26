@@ -339,6 +339,28 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
       hasUrl(justDirectMxUrls, ['LIC-MX67-SEC-5YR'], [1]),
     JSON.stringify(justDirectMxUrls));
 
+  const trailingOnlyDirectMx = parseExplicitSkuRequestBeforeClassifier('quote LIC-MX67-SEC-3YR 3-year only');
+  const trailingOnlyDirectMxUrls = decodeAllUrls(messageOf(buildQuoteResponse(trailingOnlyDirectMx)));
+  check('explicit trailing term-only wording still stays direct-license only',
+    trailingOnlyDirectMx && Array.isArray(trailingOnlyDirectMx.directLicenseList) &&
+      !trailingOnlyDirectMx.items?.length &&
+      !trailingOnlyDirectMxUrls.some(u => u.items.includes('MX67-HW')),
+    JSON.stringify({ parsed: trailingOnlyDirectMx, urls: trailingOnlyDirectMxUrls }));
+  check('explicit trailing term-only wording still emits all LIC-MX siblings',
+    hasUrl(trailingOnlyDirectMxUrls, ['LIC-MX67-SEC-1YR'], [1]) &&
+      hasUrl(trailingOnlyDirectMxUrls, ['LIC-MX67-SEC-3YR'], [1]) &&
+      hasUrl(trailingOnlyDirectMxUrls, ['LIC-MX67-SEC-5YR'], [1]),
+    JSON.stringify(trailingOnlyDirectMxUrls));
+
+  const leadingOnlyDirectMx = parseExplicitSkuRequestBeforeClassifier('only 3-year quote LIC-MX67-SEC-3YR');
+  const leadingOnlyDirectMxUrls = decodeAllUrls(messageOf(buildQuoteResponse(leadingOnlyDirectMx)));
+  check('explicit leading term-only wording still emits all LIC-MX siblings',
+    hasUrl(leadingOnlyDirectMxUrls, ['LIC-MX67-SEC-1YR'], [1]) &&
+      hasUrl(leadingOnlyDirectMxUrls, ['LIC-MX67-SEC-3YR'], [1]) &&
+      hasUrl(leadingOnlyDirectMxUrls, ['LIC-MX67-SEC-5YR'], [1]) &&
+      !leadingOnlyDirectMxUrls.some(u => u.items.includes('MX67-HW')),
+    JSON.stringify({ parsed: leadingOnlyDirectMx, urls: leadingOnlyDirectMxUrls }));
+
   const directMxQty = parseExplicitSkuRequestBeforeClassifier('quote LIC-MX67-SEC-3YR x2');
   check('SKU-list bypass preserves LIC-MX license token with explicit x quantity as all-term list',
     directMxQty && Array.isArray(directMxQty.directLicenseList) &&

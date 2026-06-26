@@ -171,6 +171,35 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(/LIC-MX67-SEC-5YR/.test(urls), `5-year LIC-MX67 URL missing: ${urls}`);
     assert.ok(!/LIC-M-SEC-3YR/.test(urls), `corrupted LIC-M token leaked: ${urls}`);
   });
+  await t('LIC-MX direct license with explicit term-only wording still emits all terms', async () => {
+    let aiCalls = 0;
+    const r = await callQuote('quote LIC-MX67-SEC-3YR 3-year only', {
+      CF_QUOTE_V3_ENABLED: 'true',
+      AI: {
+        run: async () => {
+          aiCalls++;
+          return { response: JSON.stringify({
+            intent: 'quote',
+            confidence: 0.99,
+            clarify: { needed: false, question: '' },
+            items: [{ sku: 'LIC-M-SEC-3YR', qty: 67 }],
+            modifiers: { term_years: 3, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+            revision: {},
+            reference: {},
+            dashboard: { is_meraki_license_page: false },
+          }) };
+        },
+      },
+    });
+    assert.strictEqual(aiCalls, 0, 'V3 classifier should be skipped for explicit direct LIC-MX term wording');
+    assert.strictEqual(r.handlerType, 'deterministic', `wrong handler: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 3, `expected 1/3/5 quote URLs: ${JSON.stringify(r.quoteUrls)}`);
+    const urls = (r.quoteUrls || []).map(u => u.url).join('\n');
+    assert.ok(/LIC-MX67-SEC-1YR/.test(urls), `1-year LIC-MX67 URL missing: ${urls}`);
+    assert.ok(/LIC-MX67-SEC-3YR/.test(urls), `3-year LIC-MX67 URL missing: ${urls}`);
+    assert.ok(/LIC-MX67-SEC-5YR/.test(urls), `5-year LIC-MX67 URL missing: ${urls}`);
+    assert.ok(!/MX67-HW/.test(urls), `hardware-paired quote leaked into direct license response: ${urls}`);
+  });
   await t('"5 MV63 license renewal" (bare MV-AGN) → quote, not rejected', async () => {
     const r = await callQuote('5 MV63 license renewal');
     assert.notStrictEqual(r.handlerType, 'suggestions-only', `suggestions-only: ${JSON.stringify(r.suggestions)}`);

@@ -4927,13 +4927,20 @@ function parseMessage(text) {
     // phrases like "price for", "get me", "can you quote" all collapse away.
     // Order the alternation from longest to shortest to avoid "PRICE" eating
     // half of "PRICE FOR" and leaving "FOR" behind.
-    const PREAMBLE_RE = /^\s*(?:PLEASE\s+|JUST\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE|JUST)\s+/i;
-    const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
+    const PREAMBLE_RE = /^\s*(?:PLEASE\s+|JUST\s+|ONLY\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE|JUST|ONLY)\s+/i;
+    const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|ONLY|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
+    const TERM_PREFIX_RE = /^\s*(?:(?:JUST|ONLY)\s+(?:THE\s+)?)?(?:A\s+)?[135]\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)(?:\s+(?:TERM\s+)?ONLY)?\s+/i;
+    const TERM_TRAILER_RE = /\s+(?:(?:JUST|ONLY)\s+(?:THE\s+)?)?(?:A\s+)?[135]\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)(?:\s+(?:TERM\s+)?ONLY)?\s*$/i;
     let stripped = upper.replace(/\s+(?:QTY|QUANTITY)\s+(\d+)\s*$/i, ' $1').trim();  // "qty 30" -> " 30"
     // Apply preamble + trailer strips repeatedly until stable (handles stacked modifiers)
     for (let i = 0; i < 4; i++) {
       const before = stripped;
-      stripped = stripped.replace(PREAMBLE_RE, '').replace(TRAILER_RE, '').trim();
+      stripped = stripped
+        .replace(PREAMBLE_RE, '')
+        .replace(TRAILER_RE, '')
+        .replace(TERM_PREFIX_RE, '')
+        .replace(TERM_TRAILER_RE, '')
+        .trim();
       if (stripped === before) break;
     }
 
@@ -17657,15 +17664,10 @@ function rewriteDirectLicenseListForTerm(list, term) {
 }
 
 function shouldPreserveTypedDirectLicenseTerm(rawText, sku) {
-  const upper = String(rawText || '').toUpperCase();
-  const typedSku = String(sku || '').toUpperCase();
-  const termMatch = typedSku.match(/-([135])Y(?:R|-S\d+)?$/i);
-  if (!termMatch || !/\b(JUST|ONLY)\b/.test(upper)) return false;
-
-  const term = termMatch[1];
-  const termWord = `${term}\\s*-?\\s*(?:Y|YR|YRS|YEAR|YEARS)`;
-  if (new RegExp(`\\b(?:JUST|ONLY)\\s+(?:THE\\s+)?${termWord}\\b`, 'i').test(upper)) return true;
-  if (new RegExp(`\\b${termWord}\\s+(?:TERM\\s+)?ONLY\\b`, 'i').test(upper)) return true;
+  void rawText;
+  void sku;
+  // Direct typed license SKUs always render the available term set. Term-only
+  // narrowing still belongs to quote-revision flows, not initial LIC-* quotes.
   return false;
 }
 
