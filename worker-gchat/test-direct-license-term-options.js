@@ -145,8 +145,17 @@ expectNoEmbeddedDirectLicenseList('difference advisory',
   'what is the difference between LIC-ENT-3YR and LIC-MV-3YR');
 expectNoEmbeddedDirectLicenseList('from-to revision',
   'change LIC-ENT-3YR from 1 to 2 and LIC-MV-3YR from 12 to 14');
+expectNoEmbeddedDirectLicenseList('license-to-license revision',
+  'change LIC-ENT-3YR to LIC-ENT-5YR');
 expectNoEmbeddedDirectLicenseList('existing order URL',
   'https://stratus.supply/?item=LIC-ENT-3YR,LIC-MV-3YR&qty=1,12');
+{
+  const parsed = parseMessage('MR44 with LIC-ENT-3YR and LIC-MV-3YR');
+  check('hardware plus license text does not drop hardware into direct list',
+    parsed && !Array.isArray(parsed.directLicenseList) &&
+      Array.isArray(parsed.items) && parsed.items.some(i => i.baseSku === 'MR44'),
+    JSON.stringify(parsed));
+}
 
 {
   const parsed = parseMessage('Can you quote LIC-ENT-3YR and LIC-MV-3YR?');

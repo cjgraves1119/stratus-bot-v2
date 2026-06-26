@@ -4581,12 +4581,13 @@ function extractEmbeddedDirectLicenseList(rawText) {
   const advisoryContext = /\b(?:COMPARE|COMPARISON|DIFFEREN(?:CE|CES|T)|VERSUS|VS\.?|WHICH|EXPLAIN|DESCRIBE)\b/i.test(text)
     || (/\?/.test(text) && /\b(?:WHAT(?:'S| IS)|HOW (?:DO|DOES|WOULD|SHOULD)|CAN YOU|COULD YOU|SHOULD I|DO I NEED)\b/i.test(text));
   if (!explicitQuoteIntent && advisoryContext) return null;
-  if (/\b(?:CHANGE|UPDATE|SWAP|REPLACE|MOVE|INCREASE|DECREASE)\b/i.test(text) &&
-      /\bFROM\s+\d{1,5}\b/i.test(text) &&
-      /\bTO\s+\d{1,5}\b/i.test(text)) return null;
+  if (/\b(?:CHANGE|UPDATE|SWAP|REPLACE|MOVE|INCREASE|DECREASE|UPGRADE|DOWNGRADE)\b/i.test(text) &&
+      /\b(?:FROM|TO)\s+(?:LIC-[A-Z0-9-]+|\d{1,5})\b/i.test(text)) return null;
 
   const matches = [...text.matchAll(/\bLIC-[A-Z0-9-]+\b/gi)];
   if (matches.length < 2) return null;
+  const textWithoutLicenseSkus = text.replace(/\bLIC-[A-Z0-9-]+\b/gi, ' ');
+  if (/\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*)\b/i.test(textWithoutLicenseSkus)) return null;
 
   const items = [];
   for (const match of matches) {
