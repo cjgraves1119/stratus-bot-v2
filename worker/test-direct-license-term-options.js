@@ -167,5 +167,32 @@ expectArchDirectLicenseQuote('natural quantity-before direct list',
     msg);
 }
 
+{
+  const parsed = parseMessage('5 MR44 and 2 MX999');
+  check('mixed valid/invalid hardware parses both requested tokens',
+    parsed && Array.isArray(parsed.items) &&
+      parsed.items.some(i => i.baseSku === 'MR44' && i.qty === 5) &&
+      parsed.items.some(i => i.baseSku === 'MX999' && i.qty === 2),
+    JSON.stringify(parsed));
+  const result = buildQuoteResponse(parsed);
+  const msg = messageOf(result);
+  const urls = decodeAllUrls(msg);
+  check('mixed valid/invalid hardware stays deterministic',
+    result && result.needsLlm === false,
+    JSON.stringify(result));
+  check('mixed valid/invalid hardware keeps invalid SKU warning',
+    /MX999/.test(msg) && /which variant|not a recognized/i.test(msg),
+    msg);
+  check('mixed valid/invalid hardware still emits MR44 1-year URL',
+    hasUrl(urls, ['MR44-HW', 'LIC-ENT-1YR'], [5, 5]),
+    JSON.stringify(urls));
+  check('mixed valid/invalid hardware still emits MR44 3-year URL',
+    hasUrl(urls, ['MR44-HW', 'LIC-ENT-3YR'], [5, 5]),
+    JSON.stringify(urls));
+  check('mixed valid/invalid hardware still emits MR44 5-year URL',
+    hasUrl(urls, ['MR44-HW', 'LIC-ENT-5YR'], [5, 5]),
+    JSON.stringify(urls));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
