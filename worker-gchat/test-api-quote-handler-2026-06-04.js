@@ -14,10 +14,8 @@ function loadWorker() {
   let src = fs.readFileSync(path.join(here, 'src/index.js'), 'utf8');
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
-  src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
-  src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
-  src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
-  src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
+  src = src.replace(/^import\s+(\w+)\s+from\s+'\.\/([^']+\.json)';?$/mg,
+    (_, name, rel) => `const ${name} = require('${esc('src/' + rel)}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   src = src.replace(/^export default /m, 'module.exports.__worker = ');
@@ -69,6 +67,16 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     const r = await callQuote('10 lic-sme-5yr');
     const urls = (r.quoteUrls || []).map(u => u.url).join(' ');
     assert.ok(/LIC-SME-3YR/.test(urls) && !/LIC-SME-5YR/.test(urls), `cap failed: ${urls}`);
+  });
+  await t('typed direct license list → 1/3/5 URLs through real /api/quote handler', async () => {
+    const r = await callQuote('LIC-ENT-3YR x1, LIC-MV-3YR x12, LIC-MX67W-SEC-3YR x2');
+    assert.strictEqual(r.handlerType, 'deterministic', `wrong handler: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.ok(Array.isArray(r.quoteUrls), `quoteUrls missing: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.strictEqual(r.quoteUrls.length, 3, `expected 3 quote URLs, got ${r.quoteUrls.length}: ${JSON.stringify(r.quoteUrls)}`);
+    const urls = r.quoteUrls.map(u => u.url).join('\n');
+    assert.ok(/LIC-ENT-1YR,LIC-MV-1YR,LIC-MX67W-SEC-1YR/.test(urls), `1YR URL missing: ${urls}`);
+    assert.ok(/LIC-ENT-3YR,LIC-MV-3YR,LIC-MX67W-SEC-3YR/.test(urls), `3YR URL missing: ${urls}`);
+    assert.ok(/LIC-ENT-5YR,LIC-MV-5YR,LIC-MX67W-SEC-5YR/.test(urls), `5YR URL missing: ${urls}`);
   });
   await t('"5 MV63 license renewal" (bare MV-AGN) → quote, not rejected', async () => {
     const r = await callQuote('5 MV63 license renewal');
