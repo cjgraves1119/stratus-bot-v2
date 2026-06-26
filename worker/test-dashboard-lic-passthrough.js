@@ -77,6 +77,9 @@ const hasUrl = (urls, expectItems, expectQtys) =>
 // ─── 2. licenseTermSiblings rejects non-license / term-less / hardware input ─
 {
   check('term-less LIC-ENT → null (OCR phantom, not a quotable row)', licenseTermSiblings('LIC-ENT') === null);
+  check('subscription SKU LIC-MR-E → null (not in ecomm catalog)', licenseTermSiblings('LIC-MR-E') === null);
+  check('subscription SKU LIC-MX-M-E → null (not in ecomm catalog)', licenseTermSiblings('LIC-MX-M-E') === null);
+  check('subscription SKU LIC-MS-100-L-E → null (not in ecomm catalog)', licenseTermSiblings('LIC-MS-100-L-E') === null);
   check('hardware model MX67W → null (falls through to getLicenseSkus)', licenseTermSiblings('MX67W') === null);
   check('hardware model MR44 → null', licenseTermSiblings('MR44') === null);
   check('empty input → null', licenseTermSiblings('') === null);
@@ -111,6 +114,37 @@ MR_EDITION: Enterprise`;
     hasUrl(urls, ['LIC-ENT-5YR', 'LIC-MV-5YR', 'LIC-MX67W-SEC-5YR'], [1, 12, 2]),
     `urls: ${JSON.stringify(urls)}`);
   check('renewal quote is license-only (no "-HW" hardware SKU)', !/-HW\b/.test(q.message), 'found a -HW SKU in a renewal');
+}
+
+// ─── 3b. Dashboard subscription SKUs are ignored for ecomm quoting ───────────
+{
+  const subOnly = [
+    { sku: 'LIC-MR-E', qty: 2 },
+    { sku: 'LIC-MX-M-E', qty: 1 },
+    { sku: 'LIC-MS-100-L-E', qty: 5 },
+  ];
+  const q = buildDashboardRenewalQuote(subOnly, { mxEdition: 'Advanced Security', mrEdition: 'Enterprise' });
+  check('subscription-only dashboard rows produce no ecomm quote',
+    q === null,
+    JSON.stringify(q));
+}
+
+{
+  const mixed = [
+    { sku: 'LIC-MR-E', qty: 2 },
+    { sku: 'LIC-MX-M-E', qty: 1 },
+    { sku: 'MR-ENT', qty: 2 },
+    { sku: 'MX64', qty: 1 },
+  ];
+  const q = buildDashboardRenewalQuote(mixed, { mxEdition: 'Advanced Security', mrEdition: 'Enterprise' });
+  const msg = (q && q.message) || '';
+  const urls = decodeAllUrls(msg);
+  check('mixed subscription + co-term dashboard rows still quote real co-term renewal',
+    hasUrl(urls, ['LIC-ENT-3YR', 'LIC-MX64-SEC-3YR'], [2, 1]),
+    `urls: ${JSON.stringify(urls)}`);
+  check('mixed dashboard quote never includes subscription SKUs',
+    !/LIC-MR-E|LIC-MX-M-E|LIC-MS-100-L-E/.test(msg),
+    msg);
 }
 
 // ─── 4. OCR-garbage resilience: 3 real rows + 3 term-less phantoms ───────────

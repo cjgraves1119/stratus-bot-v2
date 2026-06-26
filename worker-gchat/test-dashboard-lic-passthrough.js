@@ -59,6 +59,9 @@ const hasUrl = (urls, expectItems, expectQtys) =>
 check('licenseTermSiblings(LIC-ENT-3YR).3Y === LIC-ENT-3YR', licenseTermSiblings('LIC-ENT-3YR') ?.['3Y'] === 'LIC-ENT-3YR');
 check('licenseTermSiblings(LIC-ENT-3YR).1Y === LIC-ENT-1YR', licenseTermSiblings('LIC-ENT-3YR') ?.['1Y'] === 'LIC-ENT-1YR');
 check('term-less LIC-ENT → null', licenseTermSiblings('LIC-ENT') === null);
+check('subscription LIC-MR-E → null', licenseTermSiblings('LIC-MR-E') === null);
+check('subscription LIC-MX-M-E → null', licenseTermSiblings('LIC-MX-M-E') === null);
+check('subscription LIC-MS-100-L-E → null', licenseTermSiblings('LIC-MS-100-L-E') === null);
 check('hardware MX67W → null', licenseTermSiblings('MX67W') === null);
 
 // Full Arch Technology dashboard → real per-term URLs
@@ -79,6 +82,31 @@ MR_EDITION: Enterprise`;
     hasUrl(urls, ['LIC-ENT-3YR', 'LIC-MV-3YR', 'LIC-MX67W-SEC-3YR'], [1, 12, 2]), JSON.stringify(urls));
   check('1-Year sibling present', hasUrl(urls, ['LIC-ENT-1YR', 'LIC-MV-1YR', 'LIC-MX67W-SEC-1YR'], [1, 12, 2]), JSON.stringify(urls));
   check('5-Year sibling present', hasUrl(urls, ['LIC-ENT-5YR', 'LIC-MV-5YR', 'LIC-MX67W-SEC-5YR'], [1, 12, 2]), JSON.stringify(urls));
+}
+
+// Dashboard subscription SKUs are ignored for ecomm quoting
+{
+  const q = buildDashboardRenewalQuote([
+    { sku: 'LIC-MR-E', qty: 2 },
+    { sku: 'LIC-MX-M-E', qty: 1 },
+    { sku: 'LIC-MS-100-L-E', qty: 5 },
+  ], { mxEdition: 'Advanced Security' });
+  check('subscription-only dashboard rows produce no ecomm quote', q === null, JSON.stringify(q));
+}
+
+{
+  const q = buildDashboardRenewalQuote([
+    { sku: 'LIC-MR-E', qty: 2 },
+    { sku: 'LIC-MX-M-E', qty: 1 },
+    { sku: 'MR-ENT', qty: 2 },
+    { sku: 'MX64', qty: 1 },
+  ], { mxEdition: 'Advanced Security' });
+  const msg = (q && q.message) || '';
+  const urls = decodeAllUrls(msg);
+  check('mixed subscription + co-term rows still quote real renewal',
+    hasUrl(urls, ['LIC-ENT-3YR', 'LIC-MX64-SEC-3YR'], [2, 1]), JSON.stringify(urls));
+  check('mixed dashboard quote never includes subscription SKUs',
+    !/LIC-MR-E|LIC-MX-M-E|LIC-MS-100-L-E/.test(msg), msg);
 }
 
 // Garbage resilience: phantom term-less rows dropped, true qtys kept

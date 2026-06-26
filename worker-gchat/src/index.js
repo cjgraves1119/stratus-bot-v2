@@ -2802,6 +2802,11 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
       ordered.push({ kind: 'lic', siblings: licSiblings, qty });
       continue;
     }
+    // Meraki dashboards may show subscription-license SKUs (for example
+    // LIC-MR-E, LIC-MX-M-E, LIC-MS-100-L-E). Stratus ecomm quotes only catalog
+    // co-term SKUs, so any dashboard LIC-* row that did not pass the
+    // catalog-backed term-sibling gate above is intentionally ignored.
+    if (upper.startsWith('LIC-')) continue;
     if (isEol(upper)) {
       const row = { model: upper, qty, replacement: checkEol(upper) };
       eolDevices.push(row);
@@ -24233,6 +24238,7 @@ CRITICAL URL RULES:
                 const qmsg = dashMessage || '';
                 for (const s of visionSkus) {
                   const upper = String(s.sku).toUpperCase();
+                  if (upper.startsWith('LIC-') && !licenseTermSiblings(upper)) continue;
                   let seen = false;
                   if (upper === 'MR-ENT' || upper === 'MR_ENT') {
                     seen = /\bLIC-ENT-[135]YR?\b/.test(qmsg);
@@ -24250,7 +24256,12 @@ CRITICAL URL RULES:
 
               // WS2: structured parsedItems sourced from the vision parse so SM-ENT
               // (and every other detected row) flows through to the client UI.
-              const parsedItemsForClient = visionSkus.map(s => ({ sku: s.sku, qty: s.qty }));
+              const parsedItemsForClient = visionSkus
+                .filter(s => {
+                  const upper = String(s.sku || '').toUpperCase();
+                  return !(upper.startsWith('LIC-') && !licenseTermSiblings(upper));
+                })
+                .map(s => ({ sku: s.sku, qty: s.qty }));
 
               apiResult = {
                 analysis: dashMessage,
