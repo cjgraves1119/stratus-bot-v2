@@ -312,5 +312,21 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
   }
 }
 
+{
+  const directMx = parseExplicitSkuRequestBeforeClassifier('quote LIC-MX67-SEC-3YR');
+  check('SKU-list bypass does not split LIC-MX license token',
+    directMx && directMx.directLicense &&
+      directMx.directLicense.sku === 'LIC-MX67-SEC-3YR' &&
+      directMx.directLicense.qty === 1,
+    JSON.stringify(directMx));
+
+  const directMxQty = parseExplicitSkuRequestBeforeClassifier('quote LIC-MX67-SEC-3YR x2');
+  check('SKU-list bypass preserves LIC-MX license token with explicit x quantity',
+    directMxQty && directMxQty.directLicense &&
+      directMxQty.directLicense.sku === 'LIC-MX67-SEC-3YR' &&
+      directMxQty.directLicense.qty === 2,
+    JSON.stringify(directMxQty));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

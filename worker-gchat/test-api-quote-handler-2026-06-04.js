@@ -142,6 +142,32 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
       assert.ok(JSON.stringify(r.suggestions || []).includes('MX999'), `${input}: MX999 suggestion missing: ${JSON.stringify(r).slice(0, 500)}`);
     }
   });
+  await t('LIC-MX direct license bypass is not corrupted by x-normalization', async () => {
+    let aiCalls = 0;
+    const r = await callQuote('quote LIC-MX67-SEC-3YR', {
+      CF_QUOTE_V3_ENABLED: 'true',
+      AI: {
+        run: async () => {
+          aiCalls++;
+          return { response: JSON.stringify({
+            intent: 'quote',
+            confidence: 0.99,
+            clarify: { needed: false, question: '' },
+            items: [{ sku: 'LIC-M-SEC-3YR', qty: 67 }],
+            modifiers: { term_years: null, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+            revision: {},
+            reference: {},
+            dashboard: { is_meraki_license_page: false },
+          }) };
+        },
+      },
+    });
+    assert.strictEqual(aiCalls, 0, `V3 classifier should be skipped for direct LIC-MX quote`);
+    assert.strictEqual(r.handlerType, 'deterministic', `wrong handler: ${JSON.stringify(r).slice(0, 300)}`);
+    const urls = (r.quoteUrls || []).map(u => u.url).join('\n');
+    assert.ok(/LIC-MX67-SEC-3YR/.test(urls), `correct LIC-MX67 URL missing: ${urls}`);
+    assert.ok(!/LIC-M-SEC-3YR/.test(urls), `corrupted LIC-M token leaked: ${urls}`);
+  });
   await t('"5 MV63 license renewal" (bare MV-AGN) → quote, not rejected', async () => {
     const r = await callQuote('5 MV63 license renewal');
     assert.notStrictEqual(r.handlerType, 'suggestions-only', `suggestions-only: ${JSON.stringify(r.suggestions)}`);
