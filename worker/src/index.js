@@ -504,6 +504,19 @@ function rewriteDirectLicenseListForTerm(list, term) {
   });
 }
 
+function shouldPreserveTypedDirectLicenseTerm(rawText, sku) {
+  const upper = String(rawText || '').toUpperCase();
+  const typedSku = String(sku || '').toUpperCase();
+  const termMatch = typedSku.match(/-([135])Y(?:R|-S\d+)?$/i);
+  if (!termMatch || !/\b(JUST|ONLY)\b/.test(upper)) return false;
+
+  const term = termMatch[1];
+  const termWord = `${term}\\s*-?\\s*(?:Y|YR|YRS|YEAR|YEARS)`;
+  if (new RegExp(`\\b(?:JUST|ONLY)\\s+(?:THE\\s+)?${termWord}\\b`, 'i').test(upper)) return true;
+  if (new RegExp(`\\b${termWord}\\s+(?:TERM\\s+)?ONLY\\b`, 'i').test(upper)) return true;
+  return false;
+}
+
 const catalog = catalogData;
 const specs = specsData;
 const EOL_PRODUCTS = catalog._EOL_PRODUCTS || {};
@@ -4751,18 +4764,15 @@ function buildQuoteFromV2(v2, rawText) {
       // "200 dns advantage" — the user never stated a term, but the V2 classifier emitted a
       // term-bearing SKU (LIC-UMB-DNS-ADV-K9-3YR, term hallucinated), and the directLicense
       // shape below renders as ONE bare unlabeled URL via buildQuoteResponse. When the RAW
-      // TEXT carries no explicit term token and the user didn't literally type the SKU
-      // (where the suffix would be their own term choice), expand the lone license across
-      // 1/3/5 via rewriteSkuTerm and route through the isTermOptionQuote renderer (labeled
-      // per-term URLs). Catalog-validated; SME never expands to 5YR (deprecated — and SME
-      // is short-circuited to parseMessage above anyway). If fewer than 2 terms validate,
-      // fall through to the original single-URL shape.
+      // TEXT does not deliberately narrow to one term ("just"/"only"), expand the
+      // lone license across 1/3/5 via rewriteSkuTerm and route through the
+      // isTermOptionQuote renderer (labeled per-term URLs). Catalog-validated; SME
+      // never expands to 5YR (deprecated — and SME is short-circuited to parseMessage
+      // above anyway). If fewer than 2 terms validate, fall through to the original
+      // single-URL shape.
       const _loneSku = licItems[0].sku;
       const _loneTermM = _loneSku.match(/-([135])(YR|Y-S\d+|Y)$/i);
-      const _userStatedTerm =
-        /(?<![\w-])[135]\s*-?\s*Y(?:R|EAR|EARS)?\b/i.test(rawStr) ||  // "3 year", "5yr", "1-yr"
-        rawStr.toUpperCase().includes(_loneSku);                       // user typed the SKU itself
-      if (_loneTermM && !_userStatedTerm) {
+      if (_loneTermM && !shouldPreserveTypedDirectLicenseTerm(rawStr, _loneSku)) {
         const _expanded = [];
         for (const t of [1, 3, 5]) {
           if (t === 5 && /^LIC-SME/i.test(_loneSku)) continue; // SME 5-year is deprecated
@@ -5103,7 +5113,7 @@ function parseExplicitSkuRequestBeforeClassifier(rawText) {
     .replace(/\bLIC-[A-Z0-9-]+\b/g, ' ')
     .replace(/\b(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*\b/g, ' ')
     .replace(/\b\d+\b/g, ' ')
-    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
+    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|JUST|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
     .replace(/[,\s+*×;:(){}[\]"'`./\\-]+/g, '');
   if (residue) return null;
 
@@ -6130,7 +6140,7 @@ function parseMessage(text) {
     // phrases like "price for", "get me", "can you quote" all collapse away.
     // Order the alternation from longest to shortest to avoid "PRICE" eating
     // half of "PRICE FOR" and leaving "FOR" behind.
-    const PREAMBLE_RE = /^\s*(?:PLEASE\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE)\s+/i;
+    const PREAMBLE_RE = /^\s*(?:PLEASE\s+|JUST\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE|JUST)\s+/i;
     const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
     let stripped = upper.replace(/\s+(?:QTY|QUANTITY)\s+(\d+)\s*$/i, ' $1').trim();  // "qty 30" -> " 30"
     // Apply preamble + trailer strips repeatedly until stable (handles stacked modifiers)
@@ -6161,9 +6171,24 @@ function parseMessage(text) {
         licSku = `LIC-SME-${_sme.term}YR`;
         if (_sme.capped) _smeNote = SME_5YR_FLAG;
       }
+      const _directLicenseItem = { sku: licSku, qty };
+      if (!shouldPreserveTypedDirectLicenseTerm(text, licSku) &&
+          canRewriteDirectLicenseListForAllTerms([_directLicenseItem])) {
+        return {
+          items: [],
+          directLicenseList: [_directLicenseItem],
+          requestedTerm: null,
+          modifiers: { hardwareOnly: false, licenseOnly: true },
+          requestedTier: null,
+          isAdvisory: false,
+          isRevision: false,
+          showPricing: false,
+          clarificationNote: _smeNote || undefined
+        };
+      }
       return {
         items: [],
-        directLicense: { sku: licSku, qty },
+        directLicense: _directLicenseItem,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
         requestedTier: null,

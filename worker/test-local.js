@@ -2374,6 +2374,12 @@ for (const test of allTests) {
 // If you touch parseMessage in src/index.js, these must stay green.
 if (_realParseMessage) {
   console.log('\n─── parseMessage integration tests (real src/index.js) ───');
+  const directLicenseEntry = (r) => r?.directLicense ||
+    (Array.isArray(r?.directLicenseList) ? r.directLicenseList[0] : null);
+  const hasDirectLicenseEntry = (r, sku, qty) => {
+    const entry = directLicenseEntry(r);
+    return entry?.sku === sku && entry?.qty === qty;
+  };
 
   const parserFixtures = [
     // ═══════════════════════════════════════════════════════════════════════
@@ -2384,8 +2390,8 @@ if (_realParseMessage) {
       run: () => {
         const r = _realParseMessage('lic-mv-1yr x 30');
         return {
-          pass: r?.directLicense?.sku === 'LIC-MV-1YR' && r?.directLicense?.qty === 30,
-          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+          pass: hasDirectLicenseEntry(r, 'LIC-MV-1YR', 30),
+          actual: JSON.stringify(r?.directLicense ?? r?.directLicenseList ?? r?.items ?? null),
         };
       },
     },
@@ -2394,8 +2400,8 @@ if (_realParseMessage) {
       run: () => {
         const r = _realParseMessage('LIC-MV-1YR \u00D7 30');
         return {
-          pass: r?.directLicense?.sku === 'LIC-MV-1YR' && r?.directLicense?.qty === 30,
-          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+          pass: hasDirectLicenseEntry(r, 'LIC-MV-1YR', 30),
+          actual: JSON.stringify(r?.directLicense ?? r?.directLicenseList ?? r?.items ?? null),
         };
       },
     },
@@ -2404,8 +2410,8 @@ if (_realParseMessage) {
       run: () => {
         const r = _realParseMessage('pricing on LIC-MV-1YR x 30');
         return {
-          pass: r?.directLicense?.sku === 'LIC-MV-1YR' && r?.directLicense?.qty === 30,
-          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+          pass: hasDirectLicenseEntry(r, 'LIC-MV-1YR', 30),
+          actual: JSON.stringify(r?.directLicense ?? r?.directLicenseList ?? r?.items ?? null),
         };
       },
     },
@@ -2414,8 +2420,8 @@ if (_realParseMessage) {
       run: () => {
         const r = _realParseMessage('quote me LIC-ENT-3YR x 50');
         return {
-          pass: r?.directLicense?.sku === 'LIC-ENT-3YR' && r?.directLicense?.qty === 50,
-          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+          pass: hasDirectLicenseEntry(r, 'LIC-ENT-3YR', 50),
+          actual: JSON.stringify(r?.directLicense ?? r?.directLicenseList ?? r?.items ?? null),
         };
       },
     },
@@ -2424,8 +2430,8 @@ if (_realParseMessage) {
       run: () => {
         const r = _realParseMessage('LIC-MV-3YR qty 12');
         return {
-          pass: r?.directLicense?.sku === 'LIC-MV-3YR' && r?.directLicense?.qty === 12,
-          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+          pass: hasDirectLicenseEntry(r, 'LIC-MV-3YR', 12),
+          actual: JSON.stringify(r?.directLicense ?? r?.directLicenseList ?? r?.items ?? null),
         };
       },
     },
@@ -2513,12 +2519,12 @@ if (_realParseMessage) {
       },
     },
     {
-      name: '[PARSER] "LIC-ENT-3YR" bare → qty=1 directLicense',
+      name: '[PARSER] "LIC-ENT-3YR" bare → qty=1 direct license entry',
       run: () => {
         const r = _realParseMessage('LIC-ENT-3YR');
         return {
-          pass: r?.directLicense?.sku === 'LIC-ENT-3YR' && r?.directLicense?.qty === 1,
-          actual: JSON.stringify(r?.directLicense ?? r?.items ?? null),
+          pass: hasDirectLicenseEntry(r, 'LIC-ENT-3YR', 1),
+          actual: JSON.stringify(r?.directLicense ?? r?.directLicenseList ?? r?.items ?? null),
         };
       },
     },
@@ -2797,7 +2803,7 @@ if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
       },
     },
     {
-      name: '[V2] license-only → directLicense with qty',
+      name: '[V2] license-only → all-term license quote with qty',
       run: () => {
         const v2 = {
           intent: 'quote',
@@ -2806,10 +2812,13 @@ if (_realBuildQuoteFromV2 && _realApplyV2Revision) {
         };
         const r = _realBuildQuoteFromV2(v2, 'LIC-ENT-3YR x 50');
         const ok = (r?.directLicense?.sku === 'LIC-ENT-3YR' && r?.directLicense?.qty === 50)
-          || (r?.directLicenseList?.[0]?.sku === 'LIC-ENT-3YR' && r?.directLicenseList?.[0]?.qty === 50);
+          || (r?.directLicenseList?.[0]?.sku === 'LIC-ENT-3YR' && r?.directLicenseList?.[0]?.qty === 50)
+          || (r?.isTermOptionQuote === true &&
+              ['LIC-ENT-1YR', 'LIC-ENT-3YR', 'LIC-ENT-5YR'].every(sku =>
+                r.items?.some(i => i.baseSku === sku && i.qty === 50)));
         return {
           pass: ok,
-          actual: JSON.stringify({ dl: r?.directLicense, dll: r?.directLicenseList }),
+          actual: JSON.stringify({ dl: r?.directLicense, dll: r?.directLicenseList, termItems: r?.items }),
         };
       },
     },

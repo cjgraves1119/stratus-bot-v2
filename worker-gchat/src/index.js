@@ -374,7 +374,7 @@ function parseExplicitSkuRequestBeforeClassifier(rawText) {
     .replace(/\bLIC-[A-Z0-9-]+\b/g, ' ')
     .replace(/\b(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*\b/g, ' ')
     .replace(/\b\d+\b/g, ' ')
-    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
+    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|JUST|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
     .replace(/[,\s+*×;:(){}[\]"'`./\\-]+/g, '');
   if (residue) return null;
 
@@ -4927,7 +4927,7 @@ function parseMessage(text) {
     // phrases like "price for", "get me", "can you quote" all collapse away.
     // Order the alternation from longest to shortest to avoid "PRICE" eating
     // half of "PRICE FOR" and leaving "FOR" behind.
-    const PREAMBLE_RE = /^\s*(?:PLEASE\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE)\s+/i;
+    const PREAMBLE_RE = /^\s*(?:PLEASE\s+|JUST\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE|JUST)\s+/i;
     const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
     let stripped = upper.replace(/\s+(?:QTY|QUANTITY)\s+(\d+)\s*$/i, ' $1').trim();  // "qty 30" -> " 30"
     // Apply preamble + trailer strips repeatedly until stable (handles stacked modifiers)
@@ -4958,9 +4958,24 @@ function parseMessage(text) {
         licSku = `LIC-SME-${_sme.term}YR`;
         if (_sme.capped) _smeNote = SME_5YR_FLAG;
       }
+      const _directLicenseItem = { sku: licSku, qty };
+      if (!shouldPreserveTypedDirectLicenseTerm(text, licSku) &&
+          canRewriteDirectLicenseListForAllTerms([_directLicenseItem])) {
+        return {
+          items: [],
+          directLicenseList: [_directLicenseItem],
+          note: _smeNote,
+          requestedTerm: null,
+          modifiers: { hardwareOnly: false, licenseOnly: true },
+          requestedTier: null,
+          isAdvisory: false,
+          isRevision: false,
+          showPricing: false
+        };
+      }
       return {
         items: [],
-        directLicense: { sku: licSku, qty },
+        directLicense: _directLicenseItem,
         note: _smeNote,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
@@ -17639,6 +17654,19 @@ function rewriteDirectLicenseListForTerm(list, term) {
     const rewritten = directLicenseSkuForTerm(sku, term);
     return { sku: rewritten || sku, qty };
   });
+}
+
+function shouldPreserveTypedDirectLicenseTerm(rawText, sku) {
+  const upper = String(rawText || '').toUpperCase();
+  const typedSku = String(sku || '').toUpperCase();
+  const termMatch = typedSku.match(/-([135])Y(?:R|-S\d+)?$/i);
+  if (!termMatch || !/\b(JUST|ONLY)\b/.test(upper)) return false;
+
+  const term = termMatch[1];
+  const termWord = `${term}\\s*-?\\s*(?:Y|YR|YRS|YEAR|YEARS)`;
+  if (new RegExp(`\\b(?:JUST|ONLY)\\s+(?:THE\\s+)?${termWord}\\b`, 'i').test(upper)) return true;
+  if (new RegExp(`\\b${termWord}\\s+(?:TERM\\s+)?ONLY\\b`, 'i').test(upper)) return true;
+  return false;
 }
 
 // Strip lines containing an empty Stratus order URL (?item=&qty=) from a Claude

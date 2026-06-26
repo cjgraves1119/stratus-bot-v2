@@ -164,8 +164,11 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     });
     assert.strictEqual(aiCalls, 0, `V3 classifier should be skipped for direct LIC-MX quote`);
     assert.strictEqual(r.handlerType, 'deterministic', `wrong handler: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 3, `expected 1/3/5 quote URLs: ${JSON.stringify(r.quoteUrls)}`);
     const urls = (r.quoteUrls || []).map(u => u.url).join('\n');
+    assert.ok(/LIC-MX67-SEC-1YR/.test(urls), `1-year LIC-MX67 URL missing: ${urls}`);
     assert.ok(/LIC-MX67-SEC-3YR/.test(urls), `correct LIC-MX67 URL missing: ${urls}`);
+    assert.ok(/LIC-MX67-SEC-5YR/.test(urls), `5-year LIC-MX67 URL missing: ${urls}`);
     assert.ok(!/LIC-M-SEC-3YR/.test(urls), `corrupted LIC-M token leaked: ${urls}`);
   });
   await t('"5 MV63 license renewal" (bare MV-AGN) → quote, not rejected', async () => {

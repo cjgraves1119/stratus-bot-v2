@@ -314,17 +314,37 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
 
 {
   const directMx = parseExplicitSkuRequestBeforeClassifier('quote LIC-MX67-SEC-3YR');
-  check('SKU-list bypass does not split LIC-MX license token',
-    directMx && directMx.directLicense &&
-      directMx.directLicense.sku === 'LIC-MX67-SEC-3YR' &&
-      directMx.directLicense.qty === 1,
+  check('SKU-list bypass promotes single LIC-MX license token to all-term list',
+    directMx && Array.isArray(directMx.directLicenseList) &&
+      directMx.directLicenseList.length === 1 &&
+      directMx.directLicenseList[0].sku === 'LIC-MX67-SEC-3YR' &&
+      directMx.directLicenseList[0].qty === 1,
     JSON.stringify(directMx));
+  const directMxUrls = decodeAllUrls(messageOf(buildQuoteResponse(directMx)));
+  check('single LIC-MX bypass emits 1-year sibling',
+    hasUrl(directMxUrls, ['LIC-MX67-SEC-1YR'], [1]),
+    JSON.stringify(directMxUrls));
+  check('single LIC-MX bypass emits 3-year sibling',
+    hasUrl(directMxUrls, ['LIC-MX67-SEC-3YR'], [1]),
+    JSON.stringify(directMxUrls));
+  check('single LIC-MX bypass emits 5-year sibling',
+    hasUrl(directMxUrls, ['LIC-MX67-SEC-5YR'], [1]),
+    JSON.stringify(directMxUrls));
+
+  const justDirectMx = parseExplicitSkuRequestBeforeClassifier('just quote LIC-MX67-SEC-3YR');
+  const justDirectMxUrls = decodeAllUrls(messageOf(buildQuoteResponse(justDirectMx)));
+  check('casual "just quote" wording still emits all LIC-MX siblings',
+    hasUrl(justDirectMxUrls, ['LIC-MX67-SEC-1YR'], [1]) &&
+      hasUrl(justDirectMxUrls, ['LIC-MX67-SEC-3YR'], [1]) &&
+      hasUrl(justDirectMxUrls, ['LIC-MX67-SEC-5YR'], [1]),
+    JSON.stringify(justDirectMxUrls));
 
   const directMxQty = parseExplicitSkuRequestBeforeClassifier('quote LIC-MX67-SEC-3YR x2');
-  check('SKU-list bypass preserves LIC-MX license token with explicit x quantity',
-    directMxQty && directMxQty.directLicense &&
-      directMxQty.directLicense.sku === 'LIC-MX67-SEC-3YR' &&
-      directMxQty.directLicense.qty === 2,
+  check('SKU-list bypass preserves LIC-MX license token with explicit x quantity as all-term list',
+    directMxQty && Array.isArray(directMxQty.directLicenseList) &&
+      directMxQty.directLicenseList.length === 1 &&
+      directMxQty.directLicenseList[0].sku === 'LIC-MX67-SEC-3YR' &&
+      directMxQty.directLicenseList[0].qty === 2,
     JSON.stringify(directMxQty));
 }
 
