@@ -8,7 +8,7 @@
 
 import { useState, useEffect, useCallback, lazy, Suspense, Component } from 'react';
 import { sendToBackground, onMessage } from '../lib/messaging';
-import { MSG, COLORS } from '../lib/constants';
+import { MSG, COLORS, IS_DEV_BUILD, API_BASE } from '../lib/constants';
 import {
   parseZohoRecordUrl,
   contextMatchesUrl,
@@ -468,10 +468,15 @@ export default function App() {
       {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', padding: '10px 16px',
-        background: COLORS.STRATUS_DARK, color: 'white',
+        background: IS_DEV_BUILD ? COLORS.DEV_HEADER : COLORS.STRATUS_DARK, color: 'white',
         flexWrap: 'wrap', gap: 6,
       }}>
-        <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>Stratus AI</div>
+        <div
+          style={{ fontWeight: 700, fontSize: 15, flex: 1 }}
+          title={IS_DEV_BUILD ? 'DEV build → ' + API_BASE : undefined}
+        >
+          Stratus AI{IS_DEV_BUILD ? ' · DEV' : ''}
+        </div>
 
         {/* Blue pill — shows current Zoho record across ALL tabs, always visible */}
         {zohoPageContext?.recordId && (
