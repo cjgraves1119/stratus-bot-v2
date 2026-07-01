@@ -10,7 +10,7 @@
  * - Context menus
  */
 
-import { MSG } from '../lib/constants.js';
+import { MSG, IS_DEV_BUILD, API_BASE } from '../lib/constants.js';
 import { registerMessageHandlers, sendToTab } from '../lib/messaging.js';
 import { getSettings } from '../lib/storage.js';
 import {
@@ -107,8 +107,24 @@ self.addEventListener('unhandledrejection', (event) => {
   );
 });
 
+// DEV-build toolbar marker: an orange "DEV" badge so the unpacked test build's icon is
+// visually distinct from the Web Store build even with the side panel closed. No-op in
+// production — IS_DEV_BUILD is false unless the bundle was built with STRATUS_ENV=dev.
+function applyDevBadge() {
+  if (!IS_DEV_BUILD) return;
+  try {
+    chrome.action.setBadgeText({ text: 'DEV' });
+    chrome.action.setBadgeBackgroundColor({ color: '#c2410c' });
+    if (chrome.action.setBadgeTextColor) chrome.action.setBadgeTextColor({ color: '#ffffff' });
+    chrome.action.setTitle({ title: 'Stratus AI (DEV) -> ' + API_BASE });
+  } catch (e) { /* action API not ready yet */ }
+}
+applyDevBadge();
+
 chrome.runtime.onInstalled.addListener((details) => {
   console.log('[Stratus AI] Extension installed/updated:', details.reason);
+
+  applyDevBadge();
 
   // Set up context menus
   setupContextMenus();
@@ -127,6 +143,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 chrome.runtime.onStartup.addListener(() => {
   console.log('[Stratus AI] Extension started.');
+  applyDevBadge();
   setupCacheAlarms();
 });
 

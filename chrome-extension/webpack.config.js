@@ -3,6 +3,7 @@ const CopyPlugin = require('copy-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const CssMinimizerPlugin = require('css-minimizer-webpack-plugin');
+const webpack = require('webpack');
 
 module.exports = (env, argv) => {
   const isProd = argv.mode === 'production';
@@ -53,6 +54,13 @@ module.exports = (env, argv) => {
       ],
     },
     plugins: [
+      // Build-time config. STRATUS_API_BASE points the bundle at a worker; STRATUS_ENV='dev'
+      // turns on the DEV color/banner. For a local test build pointed at your own worker:
+      //   STRATUS_API_BASE="https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev" STRATUS_ENV=dev npm run build
+      new webpack.DefinePlugin({
+        STRATUS_API_BASE: JSON.stringify(process.env.STRATUS_API_BASE || ''),
+        STRATUS_ENV: JSON.stringify(process.env.STRATUS_ENV || 'prod'),
+      }),
       new MiniCssExtractPlugin({
         filename: '[name].css',
       }),
