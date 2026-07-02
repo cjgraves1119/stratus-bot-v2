@@ -356,6 +356,11 @@ registerMessageHandlers({
     return api.draftReply(subject, body, senderEmail, senderName, tone, instructions);
   },
 
+  // ── Report Issue ── forwards the sidebar's snapshot to /api/report-issue.
+  [MSG.REPORT_ISSUE]: async (report) => {
+    return api.reportIssue(report);
+  },
+
   // ── SKU Detection ──
   [MSG.DETECT_SKUS]: async ({ text }) => {
     return api.detectSkus(text);

@@ -21968,6 +21968,110 @@ function normalizeMerakiIsrPayload(module_name, data) {
   return data;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ERROR REPORTING — extension 🐛 button → error_reports table → daily digest.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Store one issue report. Idempotent DDL per-isolate (matches classifier_shadow
+// pattern). All fields capped; JSON blobs stringified. Returns the new row id.
+async function storeErrorReport(env, rep) {
+  if (!env.ANALYTICS_DB) throw new Error('ANALYTICS_DB not bound');
+  if (!globalThis.__errorReportsTableReady) {
+    await env.ANALYTICS_DB.prepare(`CREATE TABLE IF NOT EXISTS error_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT DEFAULT (datetime('now')),
+      reporter TEXT, version TEXT, env TEXT, url TEXT,
+      active_tab TEXT, page_type TEXT,
+      note TEXT, context_json TEXT, chat_json TEXT, errors_json TEXT,
+      user_agent TEXT, source TEXT, emailed INTEGER DEFAULT 0
+    )`).run();
+    globalThis.__errorReportsTableReady = true;
+  }
+  const cap = (v, n) => (v == null ? null : String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, n));
+  const res = await env.ANALYTICS_DB.prepare(`INSERT INTO error_reports
+    (reporter, version, env, url, active_tab, page_type, note, context_json, chat_json, errors_json, user_agent, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+    cap(rep.reporter, 200), cap(rep.version, 40), cap(rep.envBuild, 20), cap(rep.url, 500),
+    cap(rep.activeTab, 40), cap(rep.pageType, 40), cap(rep.note, 4000),
+    cap(rep.context, 4000), cap(rep.lastChat, 12000), cap(rep.recentErrors, 12000),
+    cap(rep.userAgent, 400), 'extension'
+  ).run();
+  return res?.meta?.last_row_id ?? null;
+}
+
+function _escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Build the digest HTML from error_reports rows (newest first).
+function buildErrorDigestHtml(rows) {
+  const card = (r) => {
+    let ctx = '', chat = '', errs = '';
+    try { const c = r.context_json ? JSON.parse(r.context_json) : null;
+      if (c) ctx = `<div style="color:#5f6368;font-size:12px">${_escapeHtml(JSON.stringify(c))}</div>`; } catch (_) {}
+    try { const ch = r.chat_json ? JSON.parse(r.chat_json) : [];
+      if (Array.isArray(ch) && ch.length) chat = '<div style="margin-top:6px"><b>Recent chat:</b><br>' +
+        ch.map(m => `<span style="color:#5f6368">${_escapeHtml(m.role)}:</span> ${_escapeHtml(String(m.content || '').slice(0, 400))}`).join('<br>') + '</div>'; } catch (_) {}
+    try { const e = r.errors_json ? JSON.parse(r.errors_json) : [];
+      if (Array.isArray(e) && e.length) errs = '<div style="margin-top:6px"><b>Recent errors:</b><pre style="white-space:pre-wrap;background:#fef2f2;color:#991b1b;padding:6px;border-radius:4px;font-size:11px;margin:4px 0">' +
+        e.map(x => _escapeHtml(`[${x.kind || 'err'}] ${x.text || ''}`)).join('\n') + '</pre></div>'; } catch (_) {}
+    return `<div style="border:1px solid #dadce0;border-radius:6px;padding:12px;margin:10px 0">
+      <div><b>${_escapeHtml(r.reporter || 'unknown')}</b> · v${_escapeHtml(r.version || '?')} · <span style="color:#c2410c">${_escapeHtml(r.env || 'prod')}</span> · <span style="color:#5f6368">${_escapeHtml(r.created_at || '')} UTC</span></div>
+      ${r.note ? `<div style="margin-top:6px"><b>Note:</b> ${_escapeHtml(r.note)}</div>` : '<div style="margin-top:6px;color:#5f6368"><i>(no note)</i></div>'}
+      ${r.url ? `<div style="margin-top:4px;font-size:12px;color:#5f6368">Page: ${_escapeHtml(r.url)}${r.page_type ? ' (' + _escapeHtml(r.page_type) + ')' : ''}</div>` : ''}
+      ${ctx}${chat}${errs}
+    </div>`;
+  };
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px">
+    <h2 style="color:#0d4f73">Stratus AI — ${rows.length} issue report${rows.length === 1 ? '' : 's'} (last 24h)</h2>
+    <p style="color:#5f6368">Reported from the extension's 🐛 button. Newest first.</p>
+    ${rows.map(card).join('')}
+  </div>`;
+}
+
+// Send an HTML email via the Gmail mailbox (GOOGLE_REFRESH_TOKEN account).
+async function sendDigestEmail(env, recipients, subject, html) {
+  let raw = `To: ${recipients.join(', ')}\r\n`;
+  raw += `Subject: ${subject}\r\n`;
+  raw += `Content-Type: text/html; charset=UTF-8\r\n\r\n`;
+  raw += html;
+  const encoded = btoa(unescape(encodeURIComponent(raw)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return await gmailApiCall('POST', 'messages/send', env, { raw: encoded });
+}
+
+// Daily digest: email the last 24h of issue reports to the team. Recipients from
+// ERROR_DIGEST_RECIPIENTS (comma list); defaults to the system owner (Chris) so
+// the personal TEST deploy only emails Chris until corp sets the full list.
+async function sendDailyErrorDigest(env) {
+  if (!env.ANALYTICS_DB) return;
+  const recipients = String(env.ERROR_DIGEST_RECIPIENTS || env.SYSTEM_OWNER_EMAIL || 'chrisg@stratusinfosystems.com')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (!recipients.length) return;
+  let rows = [];
+  try {
+    rows = (await env.ANALYTICS_DB.prepare(
+      `SELECT id, created_at, reporter, version, env, url, page_type, note, context_json, chat_json, errors_json
+         FROM error_reports WHERE created_at >= datetime('now','-1 day')
+        ORDER BY created_at DESC LIMIT 200`
+    ).all())?.results || [];
+  } catch (e) {
+    // Table may not exist yet (no reports ever filed) — nothing to send.
+    console.log(`[ERROR-DIGEST] query skipped: ${e.message}`);
+    return;
+  }
+  if (!rows.length) { console.log('[ERROR-DIGEST] no reports in last 24h — skipping'); return; }
+  const subject = `[Stratus AI] ${rows.length} issue report${rows.length === 1 ? '' : 's'} — last 24h`;
+  await sendDigestEmail(env, recipients, subject, buildErrorDigestHtml(rows));
+  console.log(`[ERROR-DIGEST] sent ${rows.length} report(s) to ${recipients.join(', ')}`);
+  try {
+    const ids = rows.map(r => r.id).filter(x => x != null);
+    if (ids.length) await env.ANALYTICS_DB.prepare(`UPDATE error_reports SET emailed=1 WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
+  } catch (_) { /* audit flag only */ }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL;
@@ -22832,6 +22936,28 @@ Return ONLY the JSON object, no markdown or extra text.`,
           }
 
           // ── Draft Reply: AI-generated reply options with product intelligence ──
+          // ── Report Issue ── the extension's 🐛 button POSTs a snapshot here.
+          // Authed (not under /api/benchmark/). Stores to error_reports; the
+          // daily cron emails a digest to the team. Never throws to the caller.
+          case '/api/report-issue': {
+            try {
+              const r = apiBody || {};
+              const reporter = request.headers.get('X-User-Email') || r.reporter || 'unknown';
+              const id = await storeErrorReport(env, {
+                reporter,
+                note: r.note, version: r.version, envBuild: r.env, url: r.url,
+                activeTab: r.activeTab, pageType: r.pageType,
+                context: r.context, lastChat: r.lastChat, recentErrors: r.recentErrors,
+                userAgent: r.userAgent,
+              });
+              apiResult = { ok: true, id };
+            } catch (e) {
+              console.error('[REPORT-ISSUE] store failed:', e.message);
+              apiResult = { ok: false, error: e.message };
+            }
+            break;
+          }
+
           case '/api/draft-reply': {
             const { subject, body, senderEmail, senderName, tone, instructions } = apiBody;
             if (!body && !subject) {
@@ -28722,6 +28848,16 @@ Return ONLY a JSON object (no markdown, no explanation):
       }
     } catch (canaryErr) {
       console.error(`[PR-B-CANARY] error: ${canaryErr.message}`);
+    }
+
+    // ── Daily issue-report digest ── email the last 24h of extension bug
+    // reports to the team. Runs on the daily tick, BEFORE the Zoho-cred early
+    // return below, and is fully isolated so a digest failure can't affect the
+    // price refresh (and vice versa). Skips silently when there are 0 reports.
+    try {
+      await sendDailyErrorDigest(env);
+    } catch (digestErr) {
+      console.error(`[ERROR-DIGEST] error: ${digestErr.message}`);
     }
 
     // Use PRICES_KV (shared across both workers) with CONVERSATION_KV fallback

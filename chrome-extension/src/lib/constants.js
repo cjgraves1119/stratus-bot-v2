@@ -172,6 +172,9 @@ export const MSG = {
   // forwards this to the content script, which runs the 2-step export
   // (preview page → ExportPDF.do) and returns the PDF as base64.
   EXPORT_ZOHO_PDF: 'EXPORT_ZOHO_PDF',
+
+  // Report Issue — sidebar → background → POST /api/report-issue with a snapshot
+  REPORT_ISSUE: 'REPORT_ISSUE',
 };
 
 // Keyboard shortcut command names (match manifest.json)

@@ -545,6 +545,15 @@ export async function getAdminUsage() {
   return apiCall('/api/admin-usage', {});
 }
 
+/**
+ * Report an issue/glitch with a snapshot of extension state.
+ * @param {Object} report - { note, version, url, context, lastChat, recentErrors, userAgent }
+ * @returns {Promise<{ok:boolean, id:number}>}
+ */
+export async function reportIssue(report) {
+  return apiCall('/api/report-issue', report, { timeout: 15000 });
+}
+
 // ─────────────────────────────────────────────
 // Utilities
 // ─────────────────────────────────────────────
