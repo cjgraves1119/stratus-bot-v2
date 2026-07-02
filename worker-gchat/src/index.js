@@ -20903,6 +20903,11 @@ const BENCHMARK_MODELS = [
   { id: SEA_LION_MODEL_ID, label: 'SEA-LION V4 27B (CF)', type: 'cf' },
   { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
   { id: '@cf/moonshotai/kimi-k2.6', label: 'Kimi K2.6 (CF)', type: 'cf' },
+  // GLM-5.2 — Z.ai flagship agentic model on Workers AI (added 2026-07-01).
+  // Candidate to replace Sonnet 4.6 on the CRM agent for cost savings: runs via
+  // the CF path (askCfModel) with dry-run write-stubbing like every other 'cf'
+  // entry, so benchmarking it never touches live Zoho.
+  { id: '@cf/zai-org/glm-5.2', label: 'GLM-5.2 (CF)', type: 'cf' },
   { id: '@cf/openai/gpt-oss-120b', label: 'GPT-OSS 120B (CF)', type: 'cf' },
   { id: '@cf/nvidia/nemotron-3-120b-a12b', label: 'Nemotron 3 Super 120B A12B (CF)', type: 'cf' },
   { id: '@cf/qwen/qwen3-30b-a3b-fp8', label: 'Qwen3 30B A3B FP8 (CF)', type: 'cf' },
@@ -24916,6 +24921,86 @@ CRITICAL URL RULES:
           // ── A/B Benchmark: list available tasks and models ──
           case '/api/benchmark/list': {
             apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
+            break;
+          }
+
+          // ── Eval Replay: run ONE real captured request through ONE model ──
+          // Lives under /api/eval/ (NOT /api/benchmark/) ON PURPOSE, so it hits
+          // the authenticated default gate — it runs paid models on caller-
+          // supplied text and handles real customer request_text, so it must
+          // NOT be spam-open like the benchmark routes. dryRun is FORCED true:
+          // replaying a real CRM request live would re-execute its writes
+          // (duplicate deals/quotes), so writes are always stubbed here.
+          // Use to A/B GLM-5.2 / Opus 4.8 vs Sonnet on REAL traffic safely.
+          case '/api/eval/replay': {
+            const { request_text, modelId } = apiBody;
+            const rReasoningPolicy = normalizeReasoningPolicy(apiBody.reasoning_policy || apiBody.reasoningPolicy || REASONING_POLICY_DISABLED);
+            if (!request_text || !modelId) {
+              apiResult = { error: 'request_text and modelId are required' };
+              break;
+            }
+            const rModel = BENCHMARK_MODELS.find(m => m.id === modelId);
+            if (!rModel) {
+              apiResult = { error: `Unknown model id: ${modelId}` };
+              break;
+            }
+            try {
+              const replayPersonId = `replay:${Date.now()}`;
+              const replayTask = { id: 'replay', prompt: String(request_text).substring(0, 8000) };
+              const runId = (evalContext && evalContext.runId) || apiBody.runId || `replay-${Date.now()}`;
+              // Always log to bot_usage_eval (separate from prod bot_usage). Note:
+              // the CF path (GLM et al.) doesn't meter tokens, so its cost row is
+              // absent — GLM's cost is a fixed Workers-AI rate lookup; the replay's
+              // signal for CF models is behavioral parity + latency. Claude models
+              // (Sonnet/Opus) DO log real tokens+cost here.
+              const replayEvalContext = {
+                runId,
+                endpoint: url.pathname,
+                requestText: replayTask.prompt,
+                requestedModel: modelId,
+                personId: replayPersonId,
+                bot: 'eval-replay',
+                reasoningPolicy: rReasoningPolicy
+              };
+              const result = await runBenchmarkTask(
+                replayTask, rModel, env, replayPersonId,
+                true, // dryRun FORCED — never execute real writes on replayed traffic
+                'full', replayEvalContext, rReasoningPolicy
+              );
+              const toolPlan = Array.isArray(result?.toolCalls) ? result.toolCalls.map(t => t.name) : [];
+              apiResult = { modelId, runId, dryRun: true, toolPlan, ...result };
+            } catch (rErr) {
+              apiResult = { modelId, error: rErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
+            }
+            break;
+          }
+
+          // ── Eval Replay: sample recent REAL requests worth replaying ──
+          // AUTH-GATED. Returns request_text + the model/cost that ran live, so a
+          // caller (or a scheduled task) can drive a replay batch across candidate
+          // models via /api/eval/replay. Only rows that actually hit a model
+          // (cost_usd > 0) are returned; dedups identical requests.
+          case '/api/eval/replay-sample': {
+            if (!env.ANALYTICS_DB) { apiResult = { error: 'ANALYTICS_DB not bound' }; break; }
+            const sLimit = Math.min(Math.max(parseInt(apiBody.limit, 10) || 20, 1), 100);
+            const sBot = typeof apiBody.bot === 'string' ? apiBody.bot : 'gchat';
+            const sSinceDays = Math.min(Math.max(parseInt(apiBody.sinceDays, 10) || 30, 1), 365);
+            try {
+              const rows = await env.ANALYTICS_DB.prepare(
+                `SELECT request_text, MAX(created_at) AS created_at, model AS live_model, MAX(cost_usd) AS live_cost_usd
+                   FROM bot_usage
+                  WHERE bot = ?
+                    AND request_text IS NOT NULL AND length(trim(request_text)) > 0
+                    AND cost_usd > 0
+                    AND created_at >= datetime('now', ?)
+                  GROUP BY request_text
+                  ORDER BY created_at DESC
+                  LIMIT ?`
+              ).bind(sBot, `-${sSinceDays} day`, sLimit).all();
+              apiResult = { bot: sBot, sinceDays: sSinceDays, count: rows?.results?.length || 0, requests: rows?.results || [] };
+            } catch (sErr) {
+              apiResult = { error: sErr.message };
+            }
             break;
           }
 
