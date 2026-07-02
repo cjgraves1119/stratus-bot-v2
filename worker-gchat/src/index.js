@@ -19901,7 +19901,9 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
   // Llama 4 Scout, Gemma 4, Mistral, and newer CF OpenAI-compatible models
   // reject flat tools — require OpenAI-wrapped format.
   // Llama 3.3 70B and Hermes accept flat.
-  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi|moonshot|qwen|gpt-oss|openai|nemotron|nvidia/i.test(modelId);
+  // GLM (zai-org) is OpenAI-Chat-Completions style: it 400s on flat tools with
+  // "body.tools.0.function: Field required" — must be OpenAI-wrapped too.
+  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi|moonshot|qwen|gpt-oss|openai|nemotron|nvidia|glm|zai/i.test(modelId);
   if (needsOpenAiWrap) {
     return flat.map(t => ({ type: 'function', function: t }));
   }
