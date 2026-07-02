@@ -145,13 +145,37 @@ function CopyButton({ text }) {
   );
 }
 
-// Extract a Zoho Quotes record reference from assistant text — the CRM agent
-// returns a crm.zoho.com/.../tab/Quotes/{id} link whenever it creates or finds
-// a quote, which is exactly where the "Download Zoho PDF" affordance belongs.
-function extractZohoQuoteRef(text) {
-  if (!text) return null;
-  const m = String(text).match(/crm\.zoho\.com\/crm\/(org\d+)\/tab\/Quotes\/(\d{10,19})/i);
-  return m ? { org: m[1], recordId: m[2] } : null;
+// Extract ALL Zoho Quotes record references from assistant text — the CRM
+// agent returns a crm.zoho.com/.../tab/Quotes/{id} link whenever it creates or
+// finds a quote, which is exactly where the "Download Zoho PDF" affordance
+// belongs. When one message creates MULTIPLE quotes (e.g. a 3-year and a
+// 5-year option), the old first-match-only version bound the button to an
+// arbitrary quote — now every quote gets its own labeled button. Each ref
+// carries a best-effort term label pulled from the text just before the link
+// ("3-Year" / "5YR" / "1 yr" → "3-Year" etc.), used to caption the buttons.
+function extractZohoQuoteRefs(text) {
+  if (!text) return [];
+  const s = String(text);
+  const re = /crm\.zoho\.com\/crm\/(org\d+)\/tab\/Quotes\/(\d{10,19})/gi;
+  const refs = [];
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (seen.has(m[2])) continue;
+    seen.add(m[2]);
+    // Look backward a short window for the nearest term mention (the quote's
+    // heading, e.g. "*Quote 1 — 3-Year (...)*" precedes its URL).
+    const windowText = s.slice(Math.max(0, m.index - 250), m.index);
+    const termMatches = [...windowText.matchAll(/(\d+)\s*[-–]?\s*(?:year|yr)s?\b/gi)];
+    const label = termMatches.length ? `${termMatches[termMatches.length - 1][1]}-Year` : null;
+    refs.push({ org: m[1], recordId: m[2], label });
+  }
+  // Labels only help when they disambiguate — drop them if duplicated (e.g.
+  // two quotes both preceded by "3-Year" text would mislabel; fall back to
+  // positional labels at the render site instead).
+  const labels = refs.map((r) => r.label).filter(Boolean);
+  if (new Set(labels).size !== labels.length) refs.forEach((r) => { r.label = null; });
+  return refs;
 }
 
 function downloadBase64Pdf(base64, filename) {
@@ -172,7 +196,7 @@ const DEFAULT_PDF_TEMPLATES = ['Hardware Quote', 'Professional Services Quote'];
 // background (which drives a hidden crm.zoho.com tab on the live session).
 // Defaults to Hardware Quote, remembers the last pick, and on any non-PDF
 // response shows a graceful error + an "open in Zoho" link.
-function QuotePdfButton({ recordId, org }) {
+function QuotePdfButton({ recordId, org, label }) {
   const [state, setState] = useState('idle'); // idle | working | done | error
   const [err, setErr] = useState('');
   const [template, setTemplate] = useState('Hardware Quote');
@@ -231,7 +255,7 @@ function QuotePdfButton({ recordId, org }) {
           cursor: state === 'working' ? 'default' : 'pointer', opacity: state === 'working' ? 0.7 : 1,
         }}
       >
-        {state === 'working' ? '⏳ Downloading…' : state === 'done' ? '✓ Downloaded' : '⬇ Download Zoho PDF'}
+        {state === 'working' ? '⏳ Downloading…' : state === 'done' ? '✓ Downloaded' : (label ? `⬇ ${label} PDF` : '⬇ Download Zoho PDF')}
       </button>
       <select
         value={template}
@@ -1526,8 +1550,19 @@ export default function ChatPanel({
               )}
               {msg.role === 'assistant' && msg.content && <CopyButton text={msg.content} />}
               {msg.role === 'assistant' && (() => {
-                const ref = extractZohoQuoteRef(msg.content);
-                return ref ? <QuotePdfButton recordId={ref.recordId} org={ref.org} /> : null;
+                const refs = extractZohoQuoteRefs(msg.content);
+                if (!refs.length) return null;
+                // One labeled button per quote — a 2-quote message (3yr + 5yr
+                // options) renders "⬇ 3-Year PDF" and "⬇ 5-Year PDF" instead of
+                // a single ambiguous button bound to the first link.
+                return refs.map((ref, i) => (
+                  <QuotePdfButton
+                    key={ref.recordId}
+                    recordId={ref.recordId}
+                    org={ref.org}
+                    label={ref.label || (refs.length > 1 ? `Quote ${i + 1}` : null)}
+                  />
+                ));
               })()}
               {msg.role === 'assistant' && msg.suggestions && (
                 <SuggestionChips

@@ -8234,8 +8234,18 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
         data.Closing_Date = corrected;
       }
     }
-    // Auto-fill defaults for commonly skipped fields
-    if (!data.Meraki_ISR && isCreate) data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
+    // Auto-fill defaults for commonly skipped fields.
+    // 2026-07-02 consistency rule (Chris): a "Meraki ISR Referal" deal must
+    // NEVER carry the Stratus Sales placeholder — block instead of defaulting.
+    // Stratus Referal (and everything else) still defaults to Stratus Sales.
+    if (isCreate && data.Lead_Source === 'Meraki ISR Referal') {
+      const _isrIdOnCreate = data.Meraki_ISR?.id || (typeof data.Meraki_ISR === 'string' ? data.Meraki_ISR : null);
+      if (!_isrIdOnCreate || String(_isrIdOnCreate) === '2570562000027286729') {
+        errors.push('Lead_Source "Meraki ISR Referal" requires the referring Cisco rep in Meraki_ISR — Stratus Sales (or a missing ISR) is never valid on an ISR referral. Resolve the rep via the Meraki_ISRs module (or use create_deal_and_quote with meraki_isr_email / assign_cisco_rep_to_deal). If no Cisco rep is involved, use Lead_Source "Stratus Referal" instead.');
+      }
+    } else if (!data.Meraki_ISR && isCreate) {
+      data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
+    }
     if (!data.Owner) data.Owner = { id: await getOwnerForCaller(env) };
   }
 
@@ -12468,7 +12478,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id, meraki_isr_email, force_new_deal } = toolInput;
         let { lead_source } = toolInput;
         const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         let _eolRefreshUnits = [];
@@ -12746,6 +12756,44 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
           results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
 
+          // ── Master-deal reuse (2026-07-02) ── when the SAME conversation
+          // creates multiple quotes for the SAME account (e.g. a 3-year and a
+          // 5-year option in one message), every quote must hang off ONE deal.
+          // Previously this depended on the model passing existing_deal_id (or
+          // bouncing off HARD GATE #3b's hints) — this makes it deterministic.
+          // MUST run BEFORE gate #3b: the just-created deal IS an open deal, so
+          // the gate would otherwise refuse the second call instead of reusing.
+          // The KV hit is verified live (deal still exists AND belongs to this
+          // account) before trusting it; stale entries are deleted. 30-min TTL
+          // bounds cross-conversation reuse; force_new_deal opts out.
+          const dealReuseKey = (personId && accountId && env.CONVERSATION_KV)
+            ? `recent_deal:${personId}:${accountId}` : null;
+          let reusedDealFromKv = false;
+          if (!existingDealId && !force_new_deal && dealReuseKey) {
+            try {
+              const recent = await env.CONVERSATION_KV.get(dealReuseKey, 'json');
+              if (recent?.dealId) {
+                const candidateId = String(recent.dealId);
+                let verified = null;
+                try {
+                  // Same field set as the explicit existing_deal_id fetch above —
+                  // downstream steps read Contact_Name/Lead_Source off existingDealData.
+                  const dealCheck = await zohoApiCall('GET', `Deals/${candidateId}?fields=id,Deal_Name,Account_Name,Contact_Name,Lead_Source,Owner,Closing_Date`, env);
+                  verified = dealCheck?.data?.[0] || null;
+                } catch (_) { verified = null; }
+                if (verified?.id && String(verified?.Account_Name?.id || '') === String(accountId)) {
+                  existingDealId = candidateId;
+                  existingDealData = verified;
+                  reusedDealFromKv = true;
+                  results.steps.push(`Reusing Deal "${verified.Deal_Name}" (${candidateId}) created earlier in this conversation — multi-option quotes share one master deal (pass force_new_deal:true for a separate deal)`);
+                } else {
+                  // Deal deleted or belongs to a different account — drop it.
+                  try { await env.CONVERSATION_KV.delete(dealReuseKey); } catch (_) { }
+                }
+              }
+            } catch (_) { /* reuse is best-effort; fall through to normal flow */ }
+          }
+
           // ── HARD GATE #3b: Account has existing open Deals — refuse silent new-Deal creation ──
           // 2026-05-13: prior behavior auto-created a new Deal under the Account whenever
           // create_deal_and_quote was called without existing_deal_id, even if the Account
@@ -12888,11 +12936,55 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // Coerce unknown / invalid values to "Stratus Referal". Explicitly
           // rejects "Website" as a default when caller didn't mean it (the
           // Skty bug where Llama guessed "Website" from email context).
+          // 2026-07-02: normalize the correctly-spelled "Referral" (two Rs) to
+          // Zoho's picklist spelling BEFORE validation — previously a model
+          // that spelled "Meraki ISR Referral" correctly got silently coerced
+          // to "Stratus Referal", flipping the referral type entirely.
+          if (typeof lead_source === 'string') {
+            lead_source = lead_source.trim()
+              .replace(/^Meraki ISR Referral$/i, 'Meraki ISR Referal')
+              .replace(/^Meraki ADR Referral$/i, 'Meraki ADR Referal')
+              .replace(/^Stratus Referral$/i, 'Stratus Referal');
+          }
           const VALID_LS = ['Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website', '-None-', 'PharosIQ', 'Stratus ADR Referral', 'Stratus ISM'];
           if (!lead_source || !VALID_LS.includes(lead_source)) {
             const before = lead_source;
             lead_source = 'Stratus Referal';
             if (before) results.steps.push(`Lead_Source "${before}" invalid — coerced to "Stratus Referal"`);
+          }
+
+          // ── Meraki ISR resolution (2026-07-02, Jackie Portillo / David Jones fix) ──
+          // BUSINESS RULE (Chris): a "Meraki ISR Referal" deal must NEVER carry
+          // Stratus Sales as the ISR — no exceptions. "Stratus Referal" defaults
+          // to Stratus Sales but MAY name a Cisco rep. Previously Meraki_ISR was
+          // hardcoded to Stratus Sales with no way to pass the rep, so every
+          // referral deal was created wrong and hand-fixed by the team.
+          const STRATUS_SALES_ISR_ID = '2570562000027286729';
+          let merakiIsrId = null;
+          let merakiIsrName = null;
+          if (meraki_isr_email) {
+            // Strict email shape gate BEFORE it reaches the Zoho criteria
+            // string — encodeURIComponent leaves ) ' ! * unescaped, so a
+            // malformed value could break the (Email:equals:...) expression.
+            const _isrEmail = String(meraki_isr_email).trim().toLowerCase();
+            if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(_isrEmail)) {
+              results.steps.push(`Meraki ISR lookup skipped: "${String(meraki_isr_email).slice(0, 80)}" is not a valid email`);
+            } else {
+              try {
+                const isrSearch = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(_isrEmail)})&fields=id,Name,Email`, env);
+                const isrRec = isrSearch?.data?.[0];
+                if (isrRec?.id) {
+                  merakiIsrId = isrRec.id;
+                  merakiIsrName = isrRec.Name;
+                  results.steps.push(`Resolved Meraki ISR: ${merakiIsrName} (${_isrEmail})`);
+                } else {
+                  results.steps.push(`Meraki ISR lookup: no Meraki_ISRs record for ${_isrEmail}`);
+                }
+              } catch (isrErr) {
+                results.steps.push(`Meraki ISR lookup failed for ${_isrEmail}: ${isrErr.message}`);
+              }
+            }
           }
           const VALID_BILLING_TERMS = ['Prepaid Term', 'Prepaid'];
           let quoteBillingTerm = cisco_billing_term || 'Prepaid Term';
@@ -13293,23 +13385,44 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Account_Name: { id: accountId },
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
-            Meraki_ISR: { id: '2570562000027286729' },
+            // 2026-07-02: resolved Cisco rep when provided; Stratus Sales is
+            // ONLY the default for non-ISR-referral lead sources (gate below).
+            Meraki_ISR: { id: merakiIsrId || STRATUS_SALES_ISR_ID },
             Owner: { id: await getOwnerForCaller(env) },
             Closing_Date: closingDate
           };
           if (contactId) dealData.Contact_Name = { id: contactId };
 
           let dealId = existingDealId || null;
-          if (existingDealId) {
-            results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
+
+          if (dealId) {
+            if (!reusedDealFromKv) results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
           } else {
+            // ── HARD GATE (2026-07-02): "Meraki ISR Referal" REQUIRES a real
+            // Cisco rep — creating it with the Stratus Sales placeholder is
+            // forbidden (business rule, no exceptions). Applies only to NEW
+            // deal creation; reused deals already carry their ISR.
+            if (lead_source === 'Meraki ISR Referal' && !merakiIsrId) {
+              return {
+                success: false,
+                error: 'meraki_isr_required',
+                needs_meraki_isr: true,
+                instruction: `STOP — do NOT create this Deal yet, and do NOT fall back to Stratus Sales. Lead_Source "Meraki ISR Referal" requires the referring Cisco rep. ${meraki_isr_email ? `The email "${meraki_isr_email}" did not match any Meraki_ISRs record — confirm the exact @cisco.com email with the user.` : `Ask the user which Cisco rep (@cisco.com email) referred this deal.`} Then retry create_deal_and_quote with meraki_isr_email set. If NO Cisco rep is actually involved, use lead_source "Stratus Referal" instead.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
             const dealResult = await zohoApiCall('POST', 'Deals', env, { data: [dealData] });
             dealId = dealResult?.data?.[0]?.details?.id;
             if (!dealId) {
               results.errors.push('Failed to create Deal: ' + JSON.stringify(dealResult?.data?.[0]));
               return { success: false, ...results, wall_ms: Date.now() - _startMs };
             }
-            results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})`);
+            results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})${merakiIsrName ? ` — Meraki ISR: ${merakiIsrName}` : ''}`);
+            // Remember this deal for same-conversation multi-quote reuse.
+            if (dealReuseKey) {
+              try { await env.CONVERSATION_KV.put(dealReuseKey, JSON.stringify({ dealId }), { expirationTtl: 1800 }); } catch (_) { }
+            }
           }
           results.records.deal = { id: dealId, name: dealData.Deal_Name, url: `https://crm.zoho.com/crm/org647122552/tab/Deals/${dealId}` };
 
@@ -15662,7 +15775,9 @@ const CRM_EMAIL_TOOLS = [
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
         license_only: { type: 'boolean', description: '(2026-05-20) Set true for a license-only quote (no hardware). Triggers the same model-agnostic family collapse as renewal. Leave unset/false for hardware purchases.' },
-        lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
+        lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal" (Stratus found/introduced the deal). Use "Meraki ISR Referal" ONLY when a Cisco rep referred the deal — and then meraki_isr_email is REQUIRED (the server refuses a Meraki ISR Referal without a real rep; it will NEVER default to Stratus Sales).' },
+        meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal". OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        force_new_deal: { type: 'boolean', description: 'Set true ONLY when the user explicitly wants a separate NEW deal. By default, quotes created in the same conversation for the same account reuse one master deal (e.g. 3-year and 5-year option quotes share a single deal).' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
         confirm_new_deal: { type: 'boolean', description: '(2026-05-13) Default false. Set true ONLY after the user has explicitly confirmed they want a brand-new Deal even though the resolved Account already has open Deals. Bypasses the account_has_open_deals refusal. Never set without explicit user consent on the same turn.' },
         billing_address: {
@@ -16603,7 +16718,9 @@ Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / ema
 
 **Lead_Source valid values** (ONE R, intentional): "Stratus Referal" (DEFAULT, 99%), "Meraki ISR Referal" (Cisco rep referred), "Meraki ADR Referal" (prompt for ADR name), "VDC", "Website". NEVER "-None-" or invented values.
 
-**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729). Meraki ISR Referal → Meraki_ISR REQUIRED (ask rep name), Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
+**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729) UNLESS a Cisco rep is involved — then pass meraki_isr_email to list them. Meraki ISR Referal → the referring rep is MANDATORY: pass their @cisco.com email as \`meraki_isr_email\` on create_deal_and_quote (the server resolves it against Meraki_ISRs and REFUSES to create a Meraki ISR Referal deal without it — Stratus Sales is never valid on an ISR referral). Don't know the rep? ASK the user before creating. Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
+
+**Multi-option quotes (e.g. 3-year AND 5-year):** all option quotes for the same account in one conversation share ONE master deal — the server enforces this automatically (second create_deal_and_quote call reuses the deal). Only pass force_new_deal:true if the user explicitly asks for a separate deal.
 
 **CRITICAL — Cisco reps live in the Meraki_ISRs module (NOT Contacts).** Any @cisco.com email is a Meraki ISR. Assign/update a deal's Meraki ISR / Cisco rep via \`assign_cisco_rep_to_deal\` — never search Contacts for @cisco.com.
 
