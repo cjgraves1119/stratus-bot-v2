@@ -21992,13 +21992,30 @@ async function storeErrorReport(env, rep) {
     )`).run();
     globalThis.__errorReportsTableReady = true;
   }
-  const cap = (v, n) => (v == null ? null : String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, n));
+  const cap = (v, n) => (v == null ? null : String(v).slice(0, n));
+  // Cap JSON fields by trimming the STRUCTURE (drop array items) before
+  // serializing — slicing a serialized JSON string mid-token yields invalid
+  // JSON that the digest's JSON.parse silently drops. Always stores valid JSON.
+  const capJson = (v, n) => {
+    if (v == null) return null;
+    try {
+      let s = JSON.stringify(v);
+      if (s.length <= n) return s;
+      if (Array.isArray(v)) {
+        let arr = v.slice();
+        while (arr.length && JSON.stringify(arr).length > n) arr = arr.slice(0, -1);
+        s = JSON.stringify(arr);
+        return s.length <= n ? s : JSON.stringify([{ truncated: true }]);
+      }
+      return JSON.stringify({ truncated: true, bytes: s.length });
+    } catch { return null; }
+  };
   const res = await env.ANALYTICS_DB.prepare(`INSERT INTO error_reports
     (reporter, version, env, url, active_tab, page_type, note, context_json, chat_json, errors_json, user_agent, source)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
     cap(rep.reporter, 200), cap(rep.version, 40), cap(rep.envBuild, 20), cap(rep.url, 500),
     cap(rep.activeTab, 40), cap(rep.pageType, 40), cap(rep.note, 4000),
-    cap(rep.context, 4000), cap(rep.lastChat, 12000), cap(rep.recentErrors, 12000),
+    capJson(rep.context, 4000), capJson(rep.lastChat, 12000), capJson(rep.recentErrors, 12000),
     cap(rep.userAgent, 400), 'extension'
   ).run();
   return res?.meta?.last_row_id ?? null;
@@ -22058,8 +22075,12 @@ async function sendDailyErrorDigest(env) {
   let rows = [];
   try {
     rows = (await env.ANALYTICS_DB.prepare(
+      // Gate on emailed=0 so a re-invocation of scheduled() (e.g. a manual
+      // price-refresh trigger) never re-sends already-digested reports. The
+      // 2-day window bounds the catch-up if a daily tick was ever missed.
       `SELECT id, created_at, reporter, version, env, url, page_type, note, context_json, chat_json, errors_json
-         FROM error_reports WHERE created_at >= datetime('now','-1 day')
+         FROM error_reports
+        WHERE (emailed IS NULL OR emailed = 0) AND created_at >= datetime('now','-2 day')
         ORDER BY created_at DESC LIMIT 200`
     ).all())?.results || [];
   } catch (e) {

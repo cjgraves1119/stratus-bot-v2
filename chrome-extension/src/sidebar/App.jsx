@@ -132,7 +132,9 @@ export default function App() {
     let activeUrl = '';
     try {
       const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
-      activeUrl = t?.url || '';
+      // Redact: keep only origin + path. Gmail/Zoho URLs carry message ids,
+      // search terms, and tokens in the query/hash we should not exfiltrate.
+      if (t?.url) { const u = new URL(t.url); activeUrl = (u.origin + u.pathname).slice(0, 300); }
     } catch (_) { /* ignore */ }
     try {
       const snapshot = {
