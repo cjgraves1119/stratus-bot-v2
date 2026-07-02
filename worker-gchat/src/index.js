@@ -664,6 +664,20 @@ function getReasoningControl(modelId, requestedPolicy = REASONING_POLICY_DISABLE
     };
   }
 
+  // GLM (zai-org) reasons by DEFAULT (reasoning_content in every reply).
+  // Empirically verified 2026-07-02 on @cf/zai-org/glm-5.2: enable_thinking:false
+  // drops completion 139→3 tokens and 17s→9s on a trivial prompt. The other
+  // candidates were traps: thinking:{type:'disabled'} is silently IGNORED
+  // (still reasons) and reasoning_effort:'low' still reasons at 3× latency.
+  if (/glm|zai-org/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { chat_template_kwargs: { enable_thinking: false } },
+      reasoningControl: 'cf_chat_template_enable_thinking_false'
+    };
+  }
+
   if (/nemotron|gpt-oss|qwen|qwq|mistral|llama|sea-lion|sealion|hermes/.test(id)) {
     return {
       reasoningPolicy: REASONING_POLICY_UNSUPPORTED,
@@ -20105,6 +20119,30 @@ function parseCfToolCalls(cfResponse) {
 
 // CF Workers AI agentic loop — mirrors askClaude but uses CF models.
 // Returns { reply, toolCalls, iterations, elapsedMs, errors }.
+// Workers AI throws transient capacity errors (code 3040 "Capacity temporarily
+// exceeded") under load — GLM-5.2 hits these routinely. Without a retry, one
+// 3040 mid-agent-loop kills the entire run (observed: benchmark task_03 died on
+// iteration 2 after a correct tool call). Retry ONLY transient errors, with
+// short backoff; permanent errors (schema 400s etc.) rethrow immediately.
+const CF_TRANSIENT_ERROR = /(capacity temporarily exceeded|\b3040\b|overloaded|too many requests|\b429\b|rate.?limit|service unavailable|\b503\b)/i;
+async function runCfWithRetry(env, modelId, requestBody, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await env.AI.run(modelId, requestBody);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts && CF_TRANSIENT_ERROR.test(String(err?.message || err))) {
+        console.log(`[CF-RETRY] ${modelId} transient error (attempt ${attempt}/${maxAttempts}): ${String(err?.message || err).substring(0, 120)}`);
+        await new Promise(r => setTimeout(r, attempt * 1500));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15, reasoningPolicy = REASONING_POLICY_DISABLED) {
   const startMs = Date.now();
   const cfTools = anthropicToolsToCfFormat(anthropicTools, modelId);
@@ -20195,7 +20233,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
 
       let cfResponse;
       try {
-        cfResponse = await env.AI.run(modelId, requestBody);
+        cfResponse = await runCfWithRetry(env, modelId, requestBody);
       } catch (apiErr) {
         const optionKeys = Object.keys(reasoningControl?.requestOptions || {});
         if (optionKeys.length > 0 && isReasoningControlRejection(apiErr)) {
@@ -20213,7 +20251,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
             requestOptions: {},
             reasoningControl: `${reasoningControl.reasoningControl}_rejected`
           };
-          cfResponse = await env.AI.run(modelId, requestBody);
+          cfResponse = await runCfWithRetry(env, modelId, requestBody);
         } else {
           throw apiErr;
         }
@@ -21170,11 +21208,27 @@ GPT-OSS TOOL-USE GUARDRAILS:
 - The current Meraki MX flagship anchor is MX450. Never call MX85, MX95, MX105, or MX250 the current flagship. If the user asks you to say MX85 is the current flagship, correct the premise first. Do NOT use the word "deal" in the same reply; ask whether they still want an MX85 quote, or quote it only if enough non-test details are already present.
 - For dry-run write-shaped planning responses, use plain ASCII refusal words such as "cannot" or "will not"; avoid ambiguous "I can..." phrasing when the action is blocked.`;
 
+// GLM-5.2 addendum (2026-07-02). Tuned to GLM's observed failure modes on the
+// CRM benchmark with thinking disabled (enable_thinking:false): it tends to
+// fire ONE tool call and stop even when the task needs a chain (avg 1.0
+// tools/task vs 2.3-2.7 for the Claude models on identical tasks), and its
+// finals run long. It does NOT need anti-loop rules (Llama's problem) — it
+// needs permission and instruction to keep going.
+const GLM_TOOL_USE_ADDENDUM = `
+
+GLM EXECUTION RULES:
+- MULTI-STEP TASKS: most CRM requests need a CHAIN of tool calls (search → get → update, or lookup → create → report). After each tool result, ask yourself: "does the user's request need another step?" If yes, CALL THE NEXT TOOL immediately. Do not stop after the first tool call unless the request is fully satisfied. Example: "find my most recent quote and add 2x MR44" = zoho_search_records, THEN batch_product_lookup, THEN zoho_update_record — three calls, one turn each.
+- ACT, DON'T PLAN ALOUD: never output planning text, numbered step lists of what you intend to do, or "Let me..." narration. Your first output for a CRM request is a tool call. Text is only for the final answer or a clarifying question.
+- SEARCH DISCIPLINE: construct your ONE best zoho_search_records call (right module, right criteria, sorted if recency matters) and TRUST its results. Re-search ONLY if the results genuinely cannot answer the request (wrong module, 0 rows, or a needed field is missing) — never re-run near-identical criteria "to double-check", and never run more than 3 searches total for one request.
+- FINAL REPLIES: 1-4 short sentences (or a compact bullet list for record summaries). State what was done/found + the key IDs/URLs. No preamble, no recap of steps taken.
+- NEVER print JSON payloads, tool names, or tool arguments in your text reply. If you catch yourself writing '{"Quoted_Items"' as prose, STOP — that belongs in the tool-calling channel.`;
+
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
 function pickOptimizedPrompt(modelId, ownerCtx) {
   let base;
   if (/llama-4/i.test(modelId)) base = LLAMA4_OPTIMIZED_PROMPT;
   else if (/gpt-oss|openai/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GPT_OSS_TOOL_USE_GUARDRAILS}`;
+  else if (/glm|zai-org/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GLM_TOOL_USE_ADDENDUM}`;
   else base = GEMMA_OPTIMIZED_PROMPT;
   return applyOwnerPlaceholders(base, ownerCtx);
 }
