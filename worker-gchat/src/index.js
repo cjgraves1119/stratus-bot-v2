@@ -21248,10 +21248,24 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
   if (modelConfig.type === 'claude') {
     return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext, modelConfig.forceModel || null);
   }
+
+  // PR-A parity for CF/DeepSeek benchmark runs (2026-07-02): Claude is measured
+  // WITH intent-class tool subsetting (selectToolSubset → 3-8 relevant tools),
+  // but CF models were handed all 27 CRM_EMAIL_TOOLS every call — larger prompt
+  // (slower prefill, worst on GLM) and more distraction. Apply the identical
+  // deterministic subsetting so "can X replace Sonnet" measures the same job.
+  const _crmCtx_benchPRA = {
+    hasActivePageContext: /\[Active Zoho page[:\s]/i.test(task.prompt),
+    hasQuoteSession: /\[Session: Most recently worked quote/i.test(task.prompt)
+  };
+  const _benchIntent = classifyCrmIntent(task.prompt, _crmCtx_benchPRA);
+  const _benchSubset = selectToolSubset(_benchIntent, CRM_EMAIL_TOOLS);
+  const benchTools = _benchSubset.length > 0 ? _benchSubset : CRM_EMAIL_TOOLS;
+
   if (modelConfig.type === 'deepseek') {
-    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
+    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
   }
-  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
+  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
 }
 
 // HTML dashboard for benchmark results
