@@ -174,17 +174,17 @@ MR_EDITION: Enterprise`;
     `urls: ${JSON.stringify(urls)}`);
 }
 
-// ─── 5. SME 3-year cap (Codex council) — LIC-SME must never emit 5YR ─────────
+// ─── 5. SME discontinued — LIC-SME maps to the replacement (Ivanti MDM) family ───
 {
   const sme = licenseTermSiblings('LIC-SME-3YR');
   check('licenseTermSiblings(LIC-SME-3YR) returns a map', !!sme, `got ${JSON.stringify(sme)}`);
-  check('  → includes 1Y (LIC-SME-1YR)', sme && sme['1Y'] === 'LIC-SME-1YR', `got ${sme && sme['1Y']}`);
-  check('  → includes 3Y (LIC-SME-3YR)', sme && sme['3Y'] === 'LIC-SME-3YR', `got ${sme && sme['3Y']}`);
-  check('  → OMITS deprecated 5Y (no LIC-SME-5YR)', sme && sme['5Y'] === undefined, `got ${sme && sme['5Y']}`);
+  check('  → includes 1Y (replacement)', sme && sme['1Y'] === 'LIC-MI-EMSC-D-1YMC-A-1YR', `got ${sme && sme['1Y']}`);
+  check('  → includes 3Y (replacement)', sme && sme['3Y'] === 'LIC-MI-EMSC-D-1YMC-A-3YR', `got ${sme && sme['3Y']}`);
+  check('  → includes 5Y (replacement supports all terms)', sme && sme['5Y'] === 'LIC-MI-EMSC-D-1YMC-A-5YR', `got ${sme && sme['5Y']}`);
 
   // And the rendered quote for an SME dashboard row must carry no 5-Year SME line.
   const q = buildDashboardRenewalQuote([{ sku: 'LIC-SME-3YR', qty: 10 }]);
-  if (q && q.message) check('SME renewal quote contains no LIC-SME-5YR', !/LIC-SME-5YR/.test(q.message), q.message);
+  if (q && q.message) check('SME renewal quote contains no legacy LIC-SME SKU', !/LIC-SME-\d/.test(q.message), q.message);
 }
 
 // ─── 6. F6 OCR sanity filter — collapse term-less LIC duplicates ─────────────

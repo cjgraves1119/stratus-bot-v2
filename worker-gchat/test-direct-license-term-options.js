@@ -201,22 +201,22 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
 }
 
 {
+  // SME is discontinued: legacy LIC-SME lists rewrite onto the replacement
+  // (Ivanti MDM) family, which supports every term including 5-year.
   const smeList = [{ sku: 'LIC-SME-3YR', qty: 10 }];
-  check('SME direct list is not safe to rewrite across all terms',
-    !canRewriteDirectLicenseListForAllTerms(smeList));
-  check('SME direct list can rewrite to 1-year',
-    canRewriteDirectLicenseListForTerm(smeList, 1));
-  check('SME direct list cannot rewrite to deprecated 5-year',
-    !canRewriteDirectLicenseListForTerm(smeList, 5));
-  check('SME rewrite-to-5 fallback preserves submitted 3-year SKU',
-    rewriteDirectLicenseListForTerm(smeList, 5)[0].sku === 'LIC-SME-3YR');
+  check('legacy SME direct list is safe to rewrite across all terms (replacement family)',
+    canRewriteDirectLicenseListForAllTerms(smeList));
+  check('legacy SME direct list rewrites to replacement 1-year',
+    rewriteDirectLicenseListForTerm(smeList, 1)[0].sku === 'LIC-MI-EMSC-D-1YMC-A-1YR');
+  check('legacy SME direct list rewrites to replacement 5-year',
+    rewriteDirectLicenseListForTerm(smeList, 5)[0].sku === 'LIC-MI-EMSC-D-1YMC-A-5YR');
 
   const requestedFive = messageOf(buildQuoteResponse({ directLicenseList: smeList, requestedTerm: 5 }));
-  check('requested SME 5-year does not emit LIC-SME-5YR',
-    !/LIC-SME-5YR/.test(requestedFive),
+  check('requested SME 5-year does not emit any legacy LIC-SME SKU',
+    !/LIC-SME-\d/.test(requestedFive),
     requestedFive);
-  check('requested SME 5-year falls back to the detected 3-year SKU',
-    /LIC-SME-3YR/.test(requestedFive) && !/5-Year Co-Term/.test(requestedFive),
+  check('requested SME 5-year renders the replacement at 5-year',
+    /LIC-MI-EMSC-D-1YMC-A-5YR/.test(requestedFive) && /5-Year Co-Term/.test(requestedFive),
     requestedFive);
 }
 
@@ -226,11 +226,11 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
     parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length === 2,
     JSON.stringify(parsed));
   const msg = messageOf(buildQuoteResponse(parsed));
-  check('mixed SME+ENT directLicenseList does not emit deprecated SME 5-year SKU',
-    !/LIC-SME-5YR/.test(msg),
+  check('mixed SME+ENT directLicenseList does not emit any legacy LIC-SME SKU',
+    !/LIC-SME-\d/.test(msg),
     msg);
-  check('mixed SME+ENT directLicenseList stays on detected 3-year term',
-    /LIC-SME-3YR/.test(msg) && /LIC-ENT-3YR/.test(msg) && !/5-Year Co-Term/.test(msg),
+  check('mixed SME+ENT directLicenseList quotes the replacement alongside ENT at 3-year',
+    /LIC-MI-EMSC-D-1YMC-A-3YR/.test(msg) && /LIC-ENT-3YR/.test(msg),
     msg);
 }
 

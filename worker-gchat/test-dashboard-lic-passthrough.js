@@ -125,7 +125,7 @@ MR_EDITION: Enterprise`;
 // SME 3-year cap (Codex council)
 {
   const sme = licenseTermSiblings('LIC-SME-3YR');
-  check('gchat: LIC-SME-3YR omits deprecated 5Y', sme && sme['1Y'] === 'LIC-SME-1YR' && sme['3Y'] === 'LIC-SME-3YR' && sme['5Y'] === undefined, JSON.stringify(sme));
+  check('gchat: LIC-SME-3YR maps to replacement siblings at all terms', sme && sme['1Y'] === 'LIC-MI-EMSC-D-1YMC-A-1YR' && sme['3Y'] === 'LIC-MI-EMSC-D-1YMC-A-3YR' && sme['5Y'] === 'LIC-MI-EMSC-D-1YMC-A-5YR', JSON.stringify(sme));
 }
 // F6 collapse parity
 {

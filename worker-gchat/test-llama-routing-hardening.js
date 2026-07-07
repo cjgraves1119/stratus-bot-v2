@@ -249,7 +249,6 @@ function renderQuote(text) {
 [
   'LIC-MR-ENT-3YR',
   'LIC-DUO-ESSENTIALS-3YR',
-  'LIC-SME-3YR',
   'LIC-L-AC-APX-3Y-S1',
 ].forEach(sku => {
   const out = renderQuote(`quote ${sku}`);
@@ -257,6 +256,14 @@ function renderQuote(text) {
     out && new RegExp(`item=${sku}`).test(out.message),
     out ? out.message : 'no output');
 });
+{
+  // LIC-SME is discontinued: the canonicalizer must not mangle it, and the
+  // engine substitutes the replacement (Ivanti MDM) SKU.
+  const out = renderQuote('quote LIC-SME-3YR');
+  check('LIC-SME-3YR direct license renders the replacement, untouched by MS canonicalizer',
+    out && /item=LIC-MI-EMSC-D-1YMC-A-3YR/.test(out.message) && !/item=LIC-SME/.test(out.message),
+    out ? out.message : 'no output');
+}
 
 {
   const reply24 = buildClassifierClarifyReply('quote MS150-24', { intent: 'quote', extracted: 'quote MS150-24' });

@@ -55,18 +55,18 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(/MX84|MX85/.test(urls), `MX84 EOL handling missing: ${urls}`);
     assert.ok(!/MR-AGN/.test(JSON.stringify(r)), `MR-AGN alias leaked to response: ${JSON.stringify(r).slice(0,200)}`);
   });
-  await t('"4 mr44, 2 sme, 5 MS130-12X" → quote with hardware + LIC-SME, no error', async () => {
+  await t('"4 mr44, 2 sme, 5 MS130-12X" → quote with hardware + SME replacement, no error', async () => {
     const r = await callQuote('4 mr44, 2 sme, 5 MS130-12X');
     assert.notStrictEqual(r.handlerType, 'suggestions-only', `suggestions-only: ${JSON.stringify(r.suggestions)}`);
     assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length > 0, `no quoteUrls: ${JSON.stringify(r).slice(0,200)}`);
     const urls = r.quoteUrls.map(u => u.url).join(' ');
-    assert.ok(/MR44-HW/.test(urls) && /MS130/.test(urls) && /LIC-SME-[13]YR/.test(urls), `mixed contents wrong: ${urls}`);
-    assert.ok(!/LIC-SME-5YR/.test(urls), `5YR SME leaked: ${urls}`);
+    assert.ok(/MR44-HW/.test(urls) && /MS130/.test(urls) && /LIC-MI-EMSC-D-1YMC-A-[135]YR/.test(urls), `mixed contents wrong: ${urls}`);
+    assert.ok(!/LIC-SME-\d/.test(urls), `legacy SME SKU leaked: ${urls}`);
   });
-  await t('"10 lic-sme-5yr" → 3YR (capped), deterministic, no alias leak', async () => {
+  await t('"10 lic-sme-5yr" → replacement (all terms), deterministic, no legacy leak', async () => {
     const r = await callQuote('10 lic-sme-5yr');
     const urls = (r.quoteUrls || []).map(u => u.url).join(' ');
-    assert.ok(/LIC-SME-3YR/.test(urls) && !/LIC-SME-5YR/.test(urls), `cap failed: ${urls}`);
+    assert.ok(/LIC-MI-EMSC-D-1YMC-A-5YR/.test(urls) && !/LIC-SME-\d/.test(urls), `substitution failed: ${urls}`);
   });
   await t('typed direct license list → 1/3/5 URLs through real /api/quote handler', async () => {
     const r = await callQuote('LIC-ENT-3YR x1, LIC-MV-3YR x12, LIC-MX67W-SEC-3YR x2');

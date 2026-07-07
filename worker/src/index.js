@@ -360,10 +360,7 @@ function normalizeDirectLicenseSku(sku) {
   const upper = String(sku || '').trim().toUpperCase();
   const smeDirect = upper.match(/^LIC-SME-(\d+)Y(R)?$/i);
   if (smeDirect) {
-    const sme = smeCapTerm(smeDirect[1]);
-    return sme.capped
-      ? { sku: 'LIC-SME-3YR', note: SME_5YR_FLAG }
-      : { sku: `LIC-SME-${sme.term}YR` };
+    return { sku: smeReplacementSku(smeDirect[1]), note: SME_EOL_FLAG };
   }
   if (prices[upper]) return { sku: upper };
 
@@ -2265,8 +2262,7 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   const renewItem = (row, term) => {
     if (row.kind === 'mr') return { sku: `LIC-ENT-${termYr[term]}`, qty: row.qty };
     if (row.kind === 'sm') {
-      const sme = smeCapTerm(parseInt(term, 10));
-      return { sku: `LIC-SME-${sme.term}YR`, qty: row.qty, smeCapped: sme.capped };
+      return { sku: smeReplacementSku(parseInt(term, 10)), qty: row.qty };
     }
     if (row.kind === 'lic') {
       const sku = row.siblings[term];
@@ -2332,13 +2328,15 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   // Render helpers
   const renderTerms = (groups) => {
     const lines = [];
+    let smeReplaced = false;
     for (const term of TERMS) {
       if (groups[term].length === 0) continue;
       const url = buildStratusUrl(groups[term]);
       const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
-      const note = term === '5Y' && groups[term].some(i => i.smeCapped) ? `\n_${SME_5YR_FLAG}_` : '';
-      lines.push(`${label} Co-Term: ${url}${note}`);
+      if (groups[term].some(i => String(i.sku || '').toUpperCase().startsWith(SME_REPLACEMENT_BASE))) smeReplaced = true;
+      lines.push(`${label} Co-Term: ${url}`);
     }
+    if (smeReplaced) lines.push(`_${SME_EOL_FLAG}_`);
     // Blank line between each co-term option so the quote pastes into Gmail
     // with paragraph spacing instead of a cramped block.
     return lines.join('\n\n');
@@ -2544,8 +2542,8 @@ function applySuffix(sku) {
 // routing such a row through it returns null and the dashboard line is silently
 // dropped (the screenshot→empty-quote bug, Arch Technology 2026-06-25). Given a
 // termed LIC- SKU, return a { '1Y'|'3Y'|'5Y' → sku } map of its term siblings
-// limited to SKUs that exist in prices.json (so a deprecated sibling like
-// LIC-SME-5YR is omitted), or null when `sku` is not a termed LIC- SKU (hardware
+// limited to SKUs that exist in prices.json (deprecated siblings are omitted),
+// or null when `sku` is not a termed LIC- SKU (hardware
 // rows then fall through to getLicenseSkus untouched).
 function licenseTermSiblings(sku) {
   const upper = String(sku || '').toUpperCase();
@@ -2553,15 +2551,13 @@ function licenseTermSiblings(sku) {
   // (MX75/85/95/105, SDW). Non-greedy stem so the trailing term anchors the match.
   const m = upper.match(/^(LIC-.+?)-([135])(YR?)$/);
   if (!m) return null;
-  const stem = m[1];
-  const yr = m[3]; // 'YR' or 'Y'
-  // Systems Manager (LIC-SME) is capped at SME_MAX_TERM (3yr) — the 5yr SKU is
-  // deprecated and must never be quoted even though LIC-SME-5YR still exists in
-  // prices.json. Mirrors smeCapTerm. (Codex council, 2026-06-25.)
-  const isSme = stem === 'LIC-SME';
+  let stem = m[1];
+  let yr = m[3]; // 'YR' or 'Y'
+  // Systems Manager (LIC-SME) is discontinued — a dashboard LIC-SME row renews
+  // on the replacement family (Ivanti MDM, all three terms valid) instead.
+  if (stem === 'LIC-SME') { stem = SME_REPLACEMENT_BASE; yr = 'YR'; }
   const map = {};
   for (const [term, n] of [['1Y', '1'], ['3Y', '3'], ['5Y', '5']]) {
-    if (isSme && Number(n) > SME_MAX_TERM) continue;
     const candidate = `${stem}-${n}${yr}`;
     if (candidate in prices) map[term] = candidate;
   }
@@ -3660,7 +3656,7 @@ async function handleFollowUpModifier(text, personId, kv) {
   };
 
   let filteredTerms = Object.entries(termItems);
-  let smeCapApplied = false; // set when a 5-year request on SME is capped to 3-year (note appended in render)
+  let smeReplacedApplied = false; // set when a legacy LIC-SME token is substituted with the replacement SKU (note appended in render)
 
   // Apply term filter — single-intent ("just 3 year") or the compound pass's term
   // component ("price for the 3 year"); identical machinery either way (F2).
@@ -3681,7 +3677,7 @@ async function handleFollowUpModifier(text, personId, kv) {
       let anyTermBearing = false;
       let anyFailed = false;
       for (const [, items] of filteredTerms) {
-        for (const it of items) {
+        for (let it of items) {
           const tm = String(it.sku).match(/-([135])(YR|Y-S\d+|Y)$/i);
           if (!tm) {
             // Non-term-bearing SKU (rare in this branch — keep as-is).
@@ -3690,22 +3686,19 @@ async function handleFollowUpModifier(text, personId, kv) {
           }
           anyTermBearing = true;
           const currentTerm = parseInt(tm[1], 10);
+          // Legacy Systems Manager tokens (from prior-quote URLs in history):
+          // SME is discontinued — substitute the replacement SKU at the same
+          // term before the term rewrite. The replacement supports 1/3/5.
+          if (/^LIC-SME/i.test(String(it.sku))) {
+            it = { sku: smeReplacementSku(currentTerm), qty: it.qty };
+            smeReplacedApplied = true;
+          }
           if (currentTerm === wantTerm) {
             // Already at requested term, no rewrite needed.
             rewrittenItems.push(it);
             continue;
           }
-          // SME business rule: 5-year is deprecated — LIC-SME-5YR must NEVER be emitted even
-          // though it still exists in the price catalog (sweep 2026-06-09: "5 year" after an SME
-          // quote produced LIC-SME-5YR). Cap to the 3-year SKU and surface the standard note.
-          const _isSme = /^LIC-SME/i.test(String(it.sku));
-          const effectiveTerm = (_isSme && wantTerm === 5) ? 3 : wantTerm;
-          if (_isSme && wantTerm === 5) smeCapApplied = true;
-          if (effectiveTerm === currentTerm) {
-            rewrittenItems.push(it); // already at the capped term (e.g. LIC-SME-3YR asked for 5yr)
-            continue;
-          }
-          const newSku = rewriteSkuTerm(it.sku, effectiveTerm);
+          const newSku = rewriteSkuTerm(it.sku, wantTerm);
           if (newSku && newSku !== it.sku && (newSku in prices)) {
             rewrittenItems.push({ sku: newSku, qty: it.qty });
           } else {
@@ -3724,11 +3717,7 @@ async function handleFollowUpModifier(text, personId, kv) {
           if (!_seen.has(k) || _seen.get(k).qty < it.qty) _seen.set(k, it);
         }
         const _deduped = [..._seen.values()];
-        // Label honesty: if EVERYTHING in the bucket is SME capped to 3-year, label it 3-Year —
-        // never present a 3YR SKU under a "5-Year Co-Term" heading. Mixed quotes keep the
-        // requested-term label (non-SME items really are 5-year) and the cap note explains SME.
-        const _allCappedSme = smeCapApplied && _deduped.every(it => /^LIC-SME/i.test(String(it.sku)));
-        filteredTerms = [[String(_allCappedSme ? 3 : wantTerm), _deduped]];
+        filteredTerms = [[String(wantTerm), _deduped]];
       }
       // else (no term-bearing items at all): leave filteredTerms unchanged.
     }
@@ -3738,29 +3727,28 @@ async function handleFollowUpModifier(text, personId, kv) {
   // Source bucket: the first prior term bucket (term buckets are ALTERNATIVES of the same
   // line set, so any one of them seeds the expansion). Term-bearing SKUs are rewritten per
   // bucket via rewriteSkuTerm (catalog-validated, fail-closed); non-term items (hardware,
-  // accessories) pass through unchanged into every bucket. SME: 5-year is deprecated — a
-  // pure-SME quote expands to [1,3] only, a mixed quote keeps non-SME items at 5-year and
-  // caps the SME line to 3YR with the standard note. NEVER emits LIC-SME-5YR.
+  // accessories) pass through unchanged into every bucket. Legacy LIC-SME tokens are
+  // substituted with the replacement SKU (SME is discontinued; the replacement
+  // supports all three terms, so the expansion is always [1,3,5]).
   if (isAllTerms) {
     const srcItems = filteredTerms.length > 0 ? filteredTerms[0][1] : null;
     if (!srcItems || srcItems.length === 0) return null;
     const TERM_SUFFIX_RE = /-([135])(YR|Y-S\d+|Y)$/i;
     const termBearing = srcItems.filter(it => TERM_SUFFIX_RE.test(String(it.sku)));
     if (termBearing.length === 0) return null; // nothing to expand across terms — fail closed
-    const allSme = termBearing.every(it => /^LIC-SME/i.test(String(it.sku)));
-    const targetTerms = allSme ? [1, 3] : [1, 3, 5];
-    if (allSme) smeCapApplied = true; // surface the standard note for the omitted 5-year
+    const targetTerms = [1, 3, 5];
     const buckets = [];
     for (const t of targetTerms) {
       const bucket = [];
-      for (const it of srcItems) {
+      for (let it of srcItems) {
         const tm = String(it.sku).match(TERM_SUFFIX_RE);
         if (!tm) { bucket.push(it); continue; }
-        const _isSme = /^LIC-SME/i.test(String(it.sku));
-        const effectiveTerm = (_isSme && t === 5) ? 3 : t;
-        if (_isSme && t === 5) smeCapApplied = true;
-        if (parseInt(tm[1], 10) === effectiveTerm) { bucket.push(it); continue; }
-        const newSku = rewriteSkuTerm(it.sku, effectiveTerm);
+        if (/^LIC-SME/i.test(String(it.sku))) {
+          it = { sku: smeReplacementSku(parseInt(tm[1], 10)), qty: it.qty };
+          smeReplacedApplied = true;
+        }
+        if (parseInt(tm[1], 10) === t) { bucket.push(it); continue; }
+        const newSku = rewriteSkuTerm(it.sku, t);
         if (newSku && newSku !== it.sku && (newSku in prices)) bucket.push({ sku: newSku, qty: it.qty });
         else return null; // any unrewritable term-bearing SKU → fail closed
       }
@@ -3809,7 +3797,7 @@ async function handleFollowUpModifier(text, personId, kv) {
     }
     lines.push('');
   }
-  if (smeCapApplied) lines.push(`_${SME_5YR_FLAG}_`, '');
+  if (smeReplacedApplied) lines.push(`_${SME_EOL_FLAG}_`, '');
   return lines.join('\n').trim();
 }
 
@@ -4563,18 +4551,21 @@ function convertWordNumbers(text) {
   return result;
 }
 
-// Systems Manager (LIC-SME) max term. The 5-year option was deprecated in 2026
-// (Systems Manager itself sunsets in under 5 years), so only 1YR and 3YR are
-// quotable. Any non-1YR/non-3YR SME request is capped to 3YR and flagged.
-// Applies across the typed, NL, model-agnostic, and dashboard paths.
-const SME_MAX_TERM = 3;
-const SME_5YR_FLAG = 'Systems Manager is offered only in 1-year and 3-year terms (5-year is no longer available) — quoted at 3-year.';
-// Cap a requested SME term; only 1YR and 3YR are valid.
-function smeCapTerm(term) {
+// Systems Manager (LIC-SME) is fully discontinued — as of 2026-07 every term
+// is inactive in Zoho and none may be quoted. The replacement product is
+// Ivanti Neurons for MDM per device (MI-EMSC-D-1YMC-A), catalogued per term as
+// LIC-MI-EMSC-D-1YMC-A-{1,3,5}YR. Every SME entry path (typed SKU, bare
+// "SME"/"Systems Manager", model-agnostic, dashboard SM-ENT rows, legacy
+// LIC-SME tokens in prior-quote URLs) substitutes the replacement at the
+// requested term and surfaces SME_EOL_FLAG so the user sees the SKU changed.
+const SME_REPLACEMENT_BASE = 'LIC-MI-EMSC-D-1YMC-A';
+const SME_EOL_FLAG = 'Cisco Meraki Systems Manager (LIC-SME) licenses are discontinued — quoted the replacement, Ivanti Neurons for MDM per device (MI-EMSC-D-1YMC-A), at the requested term.';
+// Map a requested SME term to the replacement SKU. 1/3/5 are all valid on the
+// replacement; anything else falls back to 3-year (mirrors the old cap).
+function smeReplacementSku(term) {
   const t = parseInt(term, 10);
-  return (t === 1 || t === SME_MAX_TERM)
-    ? { term: t, capped: false }
-    : { term: SME_MAX_TERM, capped: true };
+  const valid = (t === 1 || t === 3 || t === 5) ? t : 3;
+  return `${SME_REPLACEMENT_BASE}-${valid}YR`;
 }
 function findBareSmeMention(upper) {
   const smeRe = /(?:(\d+)\s*[X×]?\s*)?(?:LIC-SME\b(?!-\d+YR?\b)|(?<![-A-Za-z0-9])SME\b|SYSTEMS?\s+MANAGER\b)/gi;
@@ -4770,12 +4761,15 @@ function buildQuoteFromV2(v2, rawText) {
       // never expands to 5YR (deprecated — and SME is short-circuited to parseMessage
       // above anyway). If fewer than 2 terms validate, fall through to the original
       // single-URL shape.
-      const _loneSku = licItems[0].sku;
+      let _loneSku = licItems[0].sku;
+      // Legacy Systems Manager SKU from the classifier: substitute the
+      // replacement (SME is discontinued; replacement has all three terms).
+      const _loneSmeM = String(_loneSku).match(/^LIC-SME-([135])Y(R)?$/i);
+      if (_loneSmeM) _loneSku = smeReplacementSku(_loneSmeM[1]);
       const _loneTermM = _loneSku.match(/-([135])(YR|Y-S\d+|Y)$/i);
       if (_loneTermM && !shouldPreserveTypedDirectLicenseTerm(rawStr, _loneSku)) {
         const _expanded = [];
         for (const t of [1, 3, 5]) {
-          if (t === 5 && /^LIC-SME/i.test(_loneSku)) continue; // SME 5-year is deprecated
           const s = (parseInt(_loneTermM[1], 10) === t) ? _loneSku : rewriteSkuTerm(_loneSku, t);
           if (s && (s in prices)) _expanded.push({ baseSku: s, qty: licItems[0].qty, isLicenseOnly: true });
         }
@@ -5029,20 +5023,22 @@ function buildQuoteFromV3(v3, rawText) {
     else if (p.isTermOptionQuote && Array.isArray(p.items)) licEntries = p.items.map(e => ({ sku: e.baseSku, qty: e.qty }));
 
     if (licEntries) {
+      // Legacy Systems Manager SKUs: SME is discontinued — substitute the
+      // replacement (Ivanti MDM) SKU at the same term before grouping.
+      licEntries = licEntries.map(e => {
+        const sm = String(e.sku || '').match(/^LIC-SME-([135])Y(R)?$/i);
+        return sm ? { ...e, sku: smeReplacementSku(sm[1]) } : e;
+      });
       const byBase = new Map();
       for (const e of licEntries) {
         const m = String(e.sku || '').match(/^(LIC-.+?)-([135])Y(?:R)?(?:-S\d+)?$/i);
         if (!m) { combinedItems.push({ baseSku: e.sku, qty: e.qty || qty, hardwareOnly: false, licenseOnly: true }); continue; }
         const base = m[1].toUpperCase();
-        if (!byBase.has(base)) byBase.set(base, { qty: e.qty || qty, licenseSkus: [], sme: /^LIC-SME/i.test(base) });
+        if (!byBase.has(base)) byBase.set(base, { qty: e.qty || qty, licenseSkus: [], sme: base === SME_REPLACEMENT_BASE });
         byBase.get(base).licenseSkus.push({ term: `${m[2]}Y`, sku: e.sku });
       }
       for (const [base, info] of byBase) {
-        if (info.sme && requestedTerm === 5) { // explicit 5yr → cap to the 3YR SKU
-          const three = info.licenseSkus.find(l => l.term === '3Y');
-          if (three && !info.licenseSkus.some(l => l.term === '5Y')) info.licenseSkus.push({ term: '5Y', sku: three.sku });
-        }
-        combinedItems.push({ baseSku: base, qty: info.qty, _v3PreLicense: info.licenseSkus, smeCapped: info.sme, hardwareOnly: false, licenseOnly: true });
+        combinedItems.push({ baseSku: base, qty: info.qty, _v3PreLicense: info.licenseSkus, smeReplaced: info.sme, hardwareOnly: false, licenseOnly: true });
       }
       continue;
     }
@@ -5435,7 +5431,7 @@ function applyV2Revision(priorParsed, v2) {
 // Covers:
 //   LIC-MV-{1,3,5}YR       — standalone MV camera licenses
 //   LIC-MT-{1,3,5}Y        — standalone MT sensor licenses (single Y, not YR)
-//   LIC-SME-{1,3,5}YR      — standalone Systems Manager licenses (5YR caps later)
+//   LIC-SME-{1,3,5}YR      — legacy Systems Manager licenses (substituted with the Ivanti MDM replacement downstream)
 //   LIC-(ENT|SEC|SDW)-{1,3,5}YR — tier-agnostic MR licenses
 //
 // Hardware-tied licenses (LIC-MX67-SEC-*YR, LIC-MS150-*, etc.) intentionally
@@ -6170,13 +6166,12 @@ function parseMessage(text) {
     else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
 
     if (licSku && licSku.startsWith('LIC-')) {
-      // SME is only sold in 1-year and 3-year terms; cap any other typed term.
+      // SME is discontinued; substitute the replacement SKU at the typed term.
       let _smeNote = null;
       const _smeDirect = licSku.match(/^LIC-SME-(\d+)Y(R)?$/i);
       if (_smeDirect) {
-        const _sme = smeCapTerm(_smeDirect[1]);
-        licSku = `LIC-SME-${_sme.term}YR`;
-        if (_sme.capped) _smeNote = SME_5YR_FLAG;
+        licSku = smeReplacementSku(_smeDirect[1]);
+        _smeNote = SME_EOL_FLAG;
       }
       const _directLicenseItem = { sku: licSku, qty };
       if (!shouldPreserveTypedDirectLicenseTerm(text, licSku) &&
@@ -6533,11 +6528,10 @@ function parseMessage(text) {
     const smeQty = smeBareMention.qty;
     const smeTermMatch = upper.match(/\b(\d+)\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
     if (smeTermMatch) {
-      const sme = smeCapTerm(smeTermMatch[1]);
       return {
         items: [],
-        directLicense: { sku: `LIC-SME-${sme.term}YR`, qty: smeQty },
-        clarificationNote: sme.capped ? SME_5YR_FLAG : undefined,
+        directLicense: { sku: smeReplacementSku(smeTermMatch[1]), qty: smeQty },
+        clarificationNote: SME_EOL_FLAG,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true, separateQuotes: false },
         requestedTier: null,
@@ -6547,13 +6541,13 @@ function parseMessage(text) {
         unresolvedCategories: []
       };
     }
-    const smeItems = ['1', '3'].map(t => ({ baseSku: `LIC-SME-${t}YR`, qty: smeQty, isLicenseOnly: true }));
+    const smeItems = ['1', '3', '5'].map(t => ({ baseSku: `${SME_REPLACEMENT_BASE}-${t}YR`, qty: smeQty, isLicenseOnly: true }));
     return {
       items: smeItems,
       isQuote: true,
       isTermOptionQuote: true,
       modifiers: { hardwareOnly: false, licenseOnly: true, separateQuotes: false },
-      clarificationNote: SME_5YR_FLAG,
+      clarificationNote: SME_EOL_FLAG,
       unresolvedCategories: []
     };
   }
@@ -7175,7 +7169,8 @@ function buildQuoteResponse(parsed) {
     }
 
     let _msg = lines.join('\n').trim();
-    if (parsed.clarificationNote) _msg = `_${parsed.clarificationNote}_\n\n${_msg}`;
+    const _dlNote = [parsed.note, parsed.clarificationNote].filter(Boolean).join(' ');
+    if (_dlNote) _msg = `_${_dlNote}_\n\n${_msg}`;
     return { message: _msg, needsLlm: false };
   }
 
@@ -7202,8 +7197,10 @@ function buildQuoteResponse(parsed) {
   const terms = parsed.requestedTerm ? [parsed.requestedTerm] : [1, 3, 5];
   const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
   const requestedTier = parsed.requestedTier || null;
-  const sme5yrNote = (term, urlItems) => (parseInt(term, 10) === 5 && (urlItems || []).some(i => i.smeCapped))
-    ? `\n_${SME_5YR_FLAG}_`
+  // Systems Manager replacement note — appended once, on the last rendered
+  // term line, whenever the quote contains substituted (ex-SME) items.
+  const sme5yrNote = (term, urlItems) => ((urlItems || []).some(i => i.smeReplaced) && String(term) === String(terms[terms.length - 1]))
+    ? `\n_${SME_EOL_FLAG}_`
     : '';
   const eolItems = [];
   const errors = [];
@@ -7218,14 +7215,14 @@ function buildQuoteResponse(parsed) {
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
 
-  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeCapped: itemSmeCapped } of parsed.items) {
+  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeReplaced: itemSmeReplaced } of parsed.items) {
     // ── V3 collapsed named/multi-term license (Phase 3) ──
     // buildQuoteFromV3 collapses a named license (Duo/Umbrella/SME/AnyConnect/…) into ONE item
     // carrying its already-resolved per-term SKUs in _v3PreLicense. Emit it as a single agnostic
     // license-only item so the term loop places one SKU per term, separate_quotes gives it one
     // group, buildStratusUrl sums shared SKUs, and the SME 5yr-cap note can fire.
     if (Array.isArray(_v3PreLicense) && _v3PreLicense.length) {
-      const preItem = { baseSku, hwSku: null, qty, licenseSkus: _v3PreLicense, eol: false, isAgnosticLicense: true, hardwareOnly: false, licenseOnly: true, smeCapped: Boolean(itemSmeCapped) };
+      const preItem = { baseSku, hwSku: null, qty, licenseSkus: _v3PreLicense, eol: false, isAgnosticLicense: true, hardwareOnly: false, licenseOnly: true, smeReplaced: Boolean(itemSmeReplaced) };
       resolvedItems.push(preItem);
       ordered.push({ kind: 'resolved', ref: preItem });
       continue;
@@ -7256,13 +7253,15 @@ function buildQuoteResponse(parsed) {
           { term: '5Y', sku: 'LIC-MT-5Y' }
         ];
       } else if (family === 'SME') {
+        // SME is discontinued — the agnostic family quotes the replacement
+        // (Ivanti MDM) at every term; the smeReplaced flag surfaces the note.
         licSkus = [
-          { term: '1Y', sku: 'LIC-SME-1YR' },
-          { term: '3Y', sku: 'LIC-SME-3YR' },
-          { term: '5Y', sku: 'LIC-SME-3YR' }
+          { term: '1Y', sku: `${SME_REPLACEMENT_BASE}-1YR` },
+          { term: '3Y', sku: `${SME_REPLACEMENT_BASE}-3YR` },
+          { term: '5Y', sku: `${SME_REPLACEMENT_BASE}-5YR` }
         ];
       }
-      const agnItem = { baseSku: family === 'SME' ? 'Systems Manager' : `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true, smeCapped: family === 'SME', hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
+      const agnItem = { baseSku: family === 'SME' ? 'Systems Manager' : `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true, smeReplaced: family === 'SME', hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
       resolvedItems.push(agnItem);
       ordered.push({ kind: 'resolved', ref: agnItem });
       continue;
@@ -7287,12 +7286,15 @@ function buildQuoteResponse(parsed) {
     // directLicense / directLicenseList / isTermOptionQuote and never reach here.
     const preLic = baseSku.match(/^LIC-.+-([135])Y(?:R)?(?:-S\d+)?$/i);
     if (preLic) {
+      // Legacy Systems Manager SKU: substitute the replacement at the same term.
+      const _preSmeReplaced = /^LIC-SME-/i.test(baseSku);
+      const effectiveSku = _preSmeReplaced ? smeReplacementSku(preLic[1]) : baseSku;
       const preItem = {
-        baseSku, hwSku: null, qty,
-        licenseSkus: [{ term: `${preLic[1]}Y`, sku: baseSku }],
+        baseSku: effectiveSku, hwSku: null, qty,
+        licenseSkus: [{ term: `${preLic[1]}Y`, sku: effectiveSku }],
         eol: false, isAgnosticLicense: true,
         hardwareOnly: false, licenseOnly: true,
-        smeCapped: /^LIC-SME-/i.test(baseSku)
+        smeReplaced: _preSmeReplaced
       };
       resolvedItems.push(preItem);
       ordered.push({ kind: 'resolved', ref: preItem });
@@ -7463,11 +7465,11 @@ function buildQuoteResponse(parsed) {
               if (licSku) urlItems.push({ sku: licSku, qty });
             }
           } else {
-            const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
+            const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = entry.ref;
             if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
             if (licenseSkus && !itHw) {
               const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-              if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+              if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
             }
           }
         }
@@ -7510,11 +7512,11 @@ function buildQuoteResponse(parsed) {
             if (licSku) urlItems.push({ sku: licSku, qty });
           }
         } else {
-          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
+          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = entry.ref;
           if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itHw) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
         }
       }
@@ -7724,7 +7726,7 @@ function buildQuoteResponse(parsed) {
       // within each block. Each item carries its own license so each quote is
       // self-contained.
       for (const item of resolvedItems) {
-        const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = item;
+        const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = item;
         // Per-item intent with global fallback (Bug #2).
         const itemHardwareOnly = item.hardwareOnly ?? modifiers.hardwareOnly;
         const itemLicenseOnly = item.licenseOnly ?? modifiers.licenseOnly;
@@ -7735,7 +7737,7 @@ function buildQuoteResponse(parsed) {
           if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itemHardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
           if (urlItems.length > 0) {
             const url = buildStratusUrl(urlItems);
@@ -7750,7 +7752,7 @@ function buildQuoteResponse(parsed) {
       for (const term of terms) {
         const urlItems = [];
         for (const it of resolvedItems) {
-          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = it;
+          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = it;
           // Per-item intent with global fallback (Bug #2). The license push gains a
           // !itemHardwareOnly gate so a per-item hardware-only item among licensed
           // items emits its hardware with no license.
@@ -7759,7 +7761,7 @@ function buildQuoteResponse(parsed) {
           if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itemHardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
         }
         if (urlItems.length > 0) {
@@ -9299,7 +9301,8 @@ export default {
                       if (upper === 'MR-ENT' || upper === 'MR_ENT') {
                         seen = /\bLIC-ENT-[135]YR?\b/.test(qmsg);
                       } else if (upper === 'SM-ENT' || upper === 'SM_ENT' || upper === 'SME' || upper === 'SM') {
-                        seen = /\bLIC-SME-[135]YR?\b/.test(qmsg);
+                        // SME rows render as the replacement (Ivanti MDM) SKU.
+                        seen = /\bLIC-(?:SME|MI-EMSC-D-1YMC-A)-[135]YR?\b/.test(qmsg);
                       } else {
                         const escaped = upper.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                         const directRe = new RegExp(`\\b${escaped}\\b`);
