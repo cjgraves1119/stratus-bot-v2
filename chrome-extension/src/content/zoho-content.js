@@ -557,6 +557,48 @@ function abToBase64(buf) {
   return btoa(binary);
 }
 
+// ── Direct Quote-PDF export from ANY crm.zoho.com page (2026-07-08) ──
+// The hidden-preview-tab flow below proved fragile in the field (generic
+// "Export failed" with the preview tab dying before its content script
+// answered). ExportPDF.do actually needs only: the CSRF token — which every
+// CRM page carries in the CSRF_TOKEN cookie (the preview form's crmcsrfparam
+// is byte-identical to it, verified live) — plus the record id and a NUMERIC
+// template id (layoutName). userId is optional (verified). So any open Zoho
+// tab can run the export same-origin with no preview page. The background
+// seeds/caches template ids; the preview flow remains fallback + harvester.
+async function runQuotePdfExportDirect(recordId, templateId, templateName, expectedOrg) {
+  const orgMatch = window.location.pathname.match(/^\/crm\/(org\d+)\//);
+  if (!orgMatch) return { success: false, error: 'not_a_crm_org_page' };
+  const org = orgMatch[1];
+  if (expectedOrg && expectedOrg !== org) return { success: false, error: 'org_mismatch' };
+  const csrf = (document.cookie.split(';').map((c) => c.trim()).find((c) => c.startsWith('CSRF_TOKEN=')) || '')
+    .slice('CSRF_TOKEN='.length);
+  if (!csrf) return { success: false, error: 'no_csrf_cookie' };
+  if (!templateId) return { success: false, error: 'template_id_unknown' };
+  const params = new URLSearchParams({
+    step: 'exportPDF', entId: String(recordId), module: 'Quotes', flag: 'false',
+    paperType: 'default', viewType: 'portrait', pdfVersion: 'new',
+    layoutName: String(templateId),
+    fileName: `Quote-${recordId}`, pdfName: `Quote-${recordId}`,
+    crmcsrfparam: csrf,
+  });
+  const resp = await fetch(`/crm/${org}/specific/ExportPDF.do`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const ct = resp.headers.get('content-type') || '';
+  const buf = await resp.arrayBuffer();
+  const head = String.fromCharCode.apply(null, new Uint8Array(buf.slice(0, 5)));
+  if (!/pdf/i.test(ct) && head !== '%PDF-') {
+    return { success: false, error: 'not_pdf', notPdf: true };
+  }
+  return {
+    success: true, base64: abToBase64(buf), filename: `Quote-${recordId}.pdf`,
+    chosenTemplate: templateName || null, size: buf.byteLength, via: 'direct',
+  };
+}
+
 async function runQuotePdfExport(recordId, templateName) {
   // Wait (up to ~9s) for Zoho's JS to render the ExportPDF form AND populate
   // the template <select> — neither is present in the initial server HTML.
@@ -608,7 +650,11 @@ async function runQuotePdfExport(recordId, templateName) {
   const head = String.fromCharCode.apply(null, new Uint8Array(buf.slice(0, 5)));
   if (!/pdf/i.test(ct) && head !== '%PDF-') {
     // Guard: Zoho changed something / not a PDF → let the sidebar fall back.
-    return { success: false, error: 'not_pdf', notPdf: true, templates: options.map((o) => o.name) };
+    return {
+      success: false, error: 'not_pdf', notPdf: true,
+      templates: options.map((o) => o.name),
+      templateIds: Object.fromEntries(options.map((o) => [o.name, o.value])),
+    };
   }
   return {
     success: true,
@@ -616,6 +662,8 @@ async function runQuotePdfExport(recordId, templateName) {
     filename: `Quote-${recordId}.pdf`,
     chosenTemplate: chosen.name,
     templates: options.map((o) => o.name),
+    // name → numeric layout id, harvested for the direct-export fast path.
+    templateIds: Object.fromEntries(options.map((o) => [o.name, o.value])),
     size: buf.byteLength,
   };
 }
@@ -623,6 +671,18 @@ async function runQuotePdfExport(recordId, templateName) {
 // Listen for requests from the sidebar/background to get current context
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Run the Quote → PDF export on this (preview) page and return base64.
+  // Direct export — runs on whatever CRM page this content script lives in.
+  if (msg.type === 'EXPORT_ZOHO_PDF_DIRECT') {
+    (async () => {
+      try {
+        sendResponse(await runQuotePdfExportDirect(msg.recordId, msg.templateId, msg.templateName, msg.org));
+      } catch (e) {
+        sendResponse({ success: false, error: e.message || 'export_failed' });
+      }
+    })();
+    return true; // async sendResponse
+  }
+
   if (msg.type === 'EXPORT_ZOHO_PDF') {
     (async () => {
       try {

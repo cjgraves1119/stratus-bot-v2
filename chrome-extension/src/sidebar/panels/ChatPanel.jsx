@@ -217,7 +217,7 @@ function QuotePdfButton({ recordId, org }) {
     err === 'not_pdf' ? 'Zoho didn’t return a PDF'
       : err === 'not_logged_in' ? 'Log into Zoho, then retry'
       : err === 'no_templates' ? 'No print template found'
-      : 'Export failed';
+      : `Export failed${err && err !== 'failed' ? ` (${String(err).slice(0, 60)})` : ''}`;
 
   return (
     <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
