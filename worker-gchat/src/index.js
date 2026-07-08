@@ -3872,6 +3872,14 @@ function getRelevantPriceContext(text, history) {
 
   if (skusToLookup.size === 0) return null;
 
+  // Legacy Systems Manager tokens (typed or from history URLs): price the
+  // replacement instead — SME is discontinued and pricing context must never
+  // re-seed a dead SKU into the conversation.
+  for (const sku of [...skusToLookup]) {
+    const sm = sku.match(/^LIC-SME-([135])Y(R?)$/);
+    if (sm) { skusToLookup.delete(sku); skusToLookup.add(smeReplacementSku(sm[1])); }
+  }
+
   // Look up prices for all detected SKUs
   const priceLines = [];
   for (const sku of skusToLookup) {
