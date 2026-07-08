@@ -46,9 +46,14 @@ const check = (desc, cond, diag) => {
   const parsed = buildQuoteFromV2(v2, 'quote 10 AnyConnect Apex 3 year');
   check('buildQuoteFromV2 returns parsed result',
     !!parsed, JSON.stringify(parsed));
+  // Series 2026-06-25+: a lone term-bearing license expands across 1/3/5 as
+  // isTermOptionQuote items instead of a single directLicense — the clamp
+  // now lives on every expanded item (or on directLicense when no expansion).
+  const _clampQty = (parsed && parsed.directLicense && parsed.directLicense.qty)
+    ?? (parsed && parsed.items && parsed.items[0] && parsed.items[0].qty);
   check('buildQuoteFromV2 clamps qty 10 → 25',
-    parsed && parsed.directLicense && parsed.directLicense.qty === 25,
-    `qty=${parsed && parsed.directLicense && parsed.directLicense.qty}`);
+    _clampQty === 25 && (!parsed.items || parsed.items.every(i => i.qty === 25)),
+    `qty=${_clampQty}`);
   check('buildQuoteFromV2 sets clarificationNote',
     parsed && /AnyConnect.*25.*minimum/i.test(parsed.clarificationNote || ''),
     `note=${parsed && parsed.clarificationNote}`);
