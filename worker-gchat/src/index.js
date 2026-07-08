@@ -128,9 +128,10 @@ function hasKnownMsLicenseModelInput(modelToken) {
 // quotes.
 function normalizeDirectLicenseSku(sku) {
   const upper = String(sku || '').trim().toUpperCase();
-  const smeDirect = upper.match(/^LIC-SME-(\d+)Y(R)?$/i);
+  const smeDirect = upper.match(/^LIC-SME(?:-(\d+)Y(R)?)?$/i);
   if (smeDirect) {
-    return { sku: smeReplacementSku(smeDirect[1]), note: SME_EOL_FLAG };
+    // Bare "LIC-SME" (no term) falls back to 3-year, like the old cap default.
+    return { sku: smeReplacementSku(smeDirect[1] || 3), note: SME_EOL_FLAG };
   }
   if (prices[upper]) return { sku: upper };
 
@@ -12509,7 +12510,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         };
 
         // Stage 1 — zero-API local scan over the price cache keys.
-        let fpcPool = Object.keys(prices);
+        // Skip catalog entries whose Zoho product is deactivated (e.g. the
+        // discontinued LIC-SME family) — candidates must be quotable.
+        let fpcPool = Object.keys(prices).filter(k => (prices[k] || {}).zoho_active !== false);
         if (fpcPrefix) {
           const barePrefix = fpcSquash(fpcPrefix);
           fpcPool = fpcPool.filter(k => k.toUpperCase().startsWith(fpcPrefix) || fpcSquash(k).startsWith(barePrefix));
