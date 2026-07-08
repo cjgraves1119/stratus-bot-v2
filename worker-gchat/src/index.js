@@ -16653,9 +16653,16 @@ const TOOL_SUBSETS = Object.freeze({
   quote_url: ['parse_quote_url', 'batch_product_lookup', 'find_product_candidates', 'web_search_sku'],
   // Subscription / renewal admin work — DID generation, PO conversion,
   // e-sign — quote_to_po_and_esign is the workflow wrapper.
+  // 2026-07-08 (Blue Grass Energy bug report): the subset had NO search
+  // tools, so "update the PO created today" / "list the POs for this
+  // account" dead-ended with "I don't have a search tool" — the whole
+  // class is about acting on records the user references by description,
+  // not by id. Search + related-records reads added (read-only, no new
+  // mutation surface).
   subscription: [
     'quote_to_po_and_esign', 'quote_to_po_status',
-    'zoho_get_record', 'zoho_update_record',
+    'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
+    'zoho_update_record',
     'velocity_hub_submit'
   ],
   // Cisco rep assignment paths. Reads + the dedicated assignment tool.
