@@ -12194,7 +12194,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 // could have been regenerated and we'd still catch it here.
                 // Per Codex round-7: row-fingerprint match alone is sufficient
                 // to refuse success — totals are downstream of items.
-                if (triedQuotedItems && itemFingerprintMatches) {
+                // 2026-07-08 fix: only when a fingerprint-VISIBLE change was
+                // requested. The fingerprint is (product_id, qty, discount) —
+                // a Description/List_Price-only modification legitimately
+                // leaves it unchanged and false-alarmed here (Greenlight
+                // Family Services quote); for those the per-row modification
+                // verifier above is authoritative.
+                const FP_KEYS = ['Quantity', 'Discount', 'Product_Name'];
+                const fingerprintChangeIntended =
+                  requested.some(r => r.delete || r.add) ||
+                  requestedModifications.some(r => r.raw && FP_KEYS.some(k => Object.prototype.hasOwnProperty.call(r.raw, k)));
+                verification.verification.fingerprint_change_intended = fingerprintChangeIntended;
+                if (triedQuotedItems && itemFingerprintMatches && fingerprintChangeIntended) {
                   warnings.push(
                     `ZOHO_DROPPED_QUOTED_ITEMS: Zoho returned SUCCESS but your Quoted_Items payload had NO effect on the quote. The live row fingerprint (product_id, quantity, discount per row) is identical to pre-update state. Pre Grand_Total=$${preTotal}, post Grand_Total=$${postTotal}. The line-item changes you intended were silently rejected. Possible causes: payload shape mismatch, _delete on the only remaining item (Zoho refuses to leave a Quote with zero items), stale subform ids, or Do_Not_Auto_Update_Prices conflict. Do NOT claim the line items were changed — surface the failure to the user and offer to retry.`
                   );
@@ -16982,7 +16993,7 @@ Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT
 1. zoho_get_record → current Quoted_Items with List_Price + Quantity.
 2. Per line: \`new_discount_dollars = List_Price * Quantity * (new_pct / 100)\` — MUST differ from the current Discount dollar, else you have the wrong number.
 3. Update \`Quoted_Items: [{ "id": "<existing_line_id>", "Discount": new_discount_dollars, "Description": "NN% Discount" }]\`. Discount is the ONLY lever — never touch Product_Name or unit_price for pricing. Server auto-injects \`Do_Not_Auto_Update_Prices:true\`.
-4. **MANDATORY response check:** \`verification.WARNING\` present or \`verification.success: false\` → update did NOT land; tell the user, retry corrected. \`verification.any_item_changed: false\` → no-op (wrong numbers); recompute and retry. Claim success ONLY when \`verification.success === true\` AND \`verification.any_item_changed === true\` AND \`actual_line_items\` show the new Discounts — never from Zoho's top-level "code: SUCCESS" alone (fires even on no-ops).
+4. **MANDATORY response check:** \`verification.WARNING\` present or \`verification.success: false\` → update did NOT land; tell the user, retry corrected. \`verification.any_item_changed: false\` while you changed Quantity/Discount/Product → no-op (wrong numbers); recompute and retry. If you ONLY changed non-pricing line fields (e.g. Description), \`any_item_changed\` stays false by design — judge by \`requested_operations.modifications_applied\` and \`actual_line_items\` instead. Claim success ONLY when \`verification.success === true\` AND the change is visible in \`actual_line_items\` (new Discounts for pricing edits, new field values for non-pricing edits) — never from Zoho's top-level "code: SUCCESS" alone (fires even on no-ops).
 
 ### Margin-Target Pricing (apply_margin_to_quote)
 "apply 20% margin" / "price at X% margin" / "set discounts to reflect a 20% margin" → call \`apply_margin_to_quote({quote_id, target_margin})\` (accepts 0.20 or 20). Do NOT compute the discounts yourself or via zoho_update_record: a flat % off list is NOT a margin — margin is measured against Stratus's distributor cost, which only this tool can pull (LIVE_GetQuoteData, CCW-approved cost). Errors: \`no_ccw_deal_number\` → quote must be Cisco-approved (DID) first, don't estimate; \`cost_data_unavailable\` / \`cost_match_failed\` → relay verbatim, quote NOT changed, don't guess. Claim success only on \`verification.success === true\`; report per-line evidence + undo token from \`message\`.
