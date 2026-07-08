@@ -3117,7 +3117,10 @@ function getPrice(sku) {
 function parseStratusUrl(url) {
   try {
     const u = new URL(url);
-    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean)
+      // Legacy Systems Manager tokens in pasted/old URLs: substitute the
+      // replacement (SME is discontinued) before re-pricing or re-rendering.
+      .map(s => { const sm = s.match(/^LIC-SME-([135])Y(R?)$/i); return sm ? smeReplacementSku(sm[1]) : s; });
     const qtyStr = (u.searchParams.get('qty') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
     if (items.length === 0) return null;
     // If qtys missing or mismatched, default all to 1
@@ -3472,12 +3475,21 @@ async function handleFollowUpModifier(text, personId, kv) {
       const qtys = m[2].split(',').map(q => parseInt(decodeURIComponent(q.trim()), 10));
       if (skus.length !== qtys.length) return null;
       if (skus.some(s => !s) || qtys.some(q => !Number.isFinite(q) || q <= 0)) return null;
-      return skus.map((sku, i) => ({ sku, qty: qtys[i] }));
+      return skus.map((sku, i) => {
+        // Legacy Systems Manager tokens from prior-quote history: substitute
+        // the replacement (SME is discontinued) at ingestion so EVERY
+        // follow-up branch (labeled-term filter, qty change, add/remove,
+        // hardware/license-only, pricing) inherits the live catalog SKU.
+        const sm = String(sku).match(/^LIC-SME-([135])Y(R?)$/i);
+        if (sm) smeIngestSubstituted = true;
+        return { sku: sm ? smeReplacementSku(sm[1]) : sku, qty: qtys[i] };
+      });
     } catch { return null; }
   };
 
   // For mutations, we apply to all terms (hw only, license only, term reduction) OR a specific one.
   // Build a map of term → items.
+  let smeIngestSubstituted = false; // set by urlToItems when a legacy LIC-SME token was substituted
   const termItems = {};
   for (const entry of lastTermLabels) {
     const items = urlToItems(entry.url);
@@ -3798,7 +3810,7 @@ async function handleFollowUpModifier(text, personId, kv) {
     }
     lines.push('');
   }
-  if (smeReplacedApplied) lines.push(`_${SME_EOL_FLAG}_`, '');
+  if (smeReplacedApplied || smeIngestSubstituted) lines.push(`_${SME_EOL_FLAG}_`, '');
   return lines.join('\n').trim();
 }
 
@@ -7890,6 +7902,8 @@ Three license tiers exist for MX/Z:
 - ENT (Enterprise): Available for ALL product families
 - SEC (Advanced Security): Available for MX (all models), Z4/Z4C. DEFAULT for MX and Z4/Z4C.
 - SDW (SD-WAN): Available for MX (all models) only. ALWAYS uses -Y suffix regardless of model age.
+
+**Systems Manager (LIC-SME) is DISCONTINUED — every LIC-SME term is inactive in Zoho and must never be quoted. Quote the replacement instead: LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM per device) at the requested term, and tell the user about the substitution.**
 
 EXACT license SKU mappings by product family:
 

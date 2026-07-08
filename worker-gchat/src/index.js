@@ -3393,7 +3393,10 @@ function checkSkuDescriptionMismatch(entries) {
 function parseStratusUrl(url) {
   try {
     const u = new URL(url);
-    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean)
+      // Legacy Systems Manager tokens in pasted/old URLs: substitute the
+      // replacement (SME is discontinued) before re-pricing or re-rendering.
+      .map(s => { const sm = s.match(/^LIC-SME-([135])Y(R?)$/i); return sm ? smeReplacementSku(sm[1]) : s; });
     const qtyStr = (u.searchParams.get('qty') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
     if (items.length === 0) return null;
     // If qtys missing or mismatched, default all to 1
@@ -4964,7 +4967,7 @@ function parseMessage(text) {
     else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
 
     if (licSku && licSku.startsWith('LIC-')) {
-      // SME is only sold in 1-year and 3-year terms; cap any other typed term.
+      // SME is discontinued; substitute the replacement SKU at the typed term.
       let _smeNote = null;
       const _smeDirect = licSku.match(/^LIC-SME-(\d+)Y(R)?$/i);
       if (_smeDirect) {
@@ -12376,6 +12379,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               discount_per_unit: cachedPrice.discount_per_unit || 0,
               discount_pct: cachedPrice.discount_pct || 0,
               product_active: cachedPrice.zoho_active === false ? false : true,
+              replaced_by: cachedPrice.zoho_active === false ? (cachedPrice.replaced_by || null) : undefined,
               found: true
             };
             if (resolved !== suffixed) {
@@ -12544,7 +12548,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             const likeTokens = fpcTokens.slice(0, 4).map(t => t.replace(/'/g, ''));
             const where = likeTokens.map(t => `Product_Code like '%${t}%'`).join(' or ');
             const prefixClause = fpcPrefix ? ` and Product_Code like '${fpcPrefix.replace(/'/g, '')}%'` : '';
-            const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where (${where})${prefixClause} limit 10`;
+            const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where ((${where})${prefixClause}) and Product_Active = true limit 10`;
             const r = await zohoApiCall('POST', 'coql', env, { select_query: coql });
             const rows = Array.isArray(r?.data) ? r.data : [];
             const fpcCoql = rows
@@ -12631,7 +12635,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const urlObj = new URL(url);
           const itemParam = urlObj.searchParams.get('item') || '';
           const qtyParam = urlObj.searchParams.get('qty') || '';
-          const rawSkus = itemParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+          const rawSkus = itemParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+            // Legacy Systems Manager tokens in old URLs: substitute the
+            // replacement (SME is discontinued) so downstream product-id
+            // resolution and quote staging use a writable, active product.
+            .map(s => { const sm = s.match(/^LIC-SME-([135])Y(R?)$/); return sm ? smeReplacementSku(sm[1]) : s; });
           const rawQtys = qtyParam.split(',').map(s => parseInt(s) || 1);
 
           if (rawSkus.length === 0) {
@@ -13236,7 +13244,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const pendingProducts = []; // {suffixed, qty, cached} waiting for product ID
 
           function stageProduct(sku, qty) {
-            const { key: suffixed, entry: cached } = resolveCachedProduct(sku);
+            let { key: suffixed, entry: cached } = resolveCachedProduct(sku);
+            // Discontinued products (zoho_active:false — e.g. the LIC-SME
+            // family): stage the replacement instead. Writing the dead
+            // product id would fail Zoho's NOT_ALLOWED inactive check.
+            if (cached && cached.zoho_active === false) {
+              const alt = cached.replaced_by ? resolveCachedProduct(cached.replaced_by) : null;
+              if (alt && alt.entry && alt.entry.zoho_active !== false) {
+                results.steps.push(`${suffixed} is discontinued — substituted its replacement ${alt.key}`);
+                suffixed = alt.key;
+                cached = alt.entry;
+              } else {
+                results.steps.push(`${suffixed} is INACTIVE in Zoho with no active replacement — line skipped, ask the user for an alternative`);
+                return false;
+              }
+            }
             console.log(`[COMPOUND] stageProduct: sku=${sku} suffixed=${suffixed} hasPid=${!!cached?.zoho_product_id} hasPrice=${!!cached?.price}`);
             if (cached) {
               pendingProducts.push({ suffixed, qty, cached, hasPid: !!cached.zoho_product_id });
@@ -17827,12 +17849,21 @@ async function handleFollowUpModifier(text, personId, kv) {
       const qtys = m[2].split(',').map(q => parseInt(decodeURIComponent(q.trim()), 10));
       if (skus.length !== qtys.length) return null;
       if (skus.some(s => !s) || qtys.some(q => !Number.isFinite(q) || q <= 0)) return null;
-      return skus.map((sku, i) => ({ sku, qty: qtys[i] }));
+      return skus.map((sku, i) => {
+        // Legacy Systems Manager tokens from prior-quote history: substitute
+        // the replacement (SME is discontinued) at ingestion so EVERY
+        // follow-up branch (labeled-term filter, qty change, add/remove,
+        // hardware/license-only, pricing) inherits the live catalog SKU.
+        const sm = String(sku).match(/^LIC-SME-([135])Y(R?)$/i);
+        if (sm) smeIngestSubstituted = true;
+        return { sku: sm ? smeReplacementSku(sm[1]) : sku, qty: qtys[i] };
+      });
     } catch { return null; }
   };
 
   // For mutations, we apply to all terms (hw only, license only, term reduction) OR a specific one.
   // Build a map of term → items.
+  let smeIngestSubstituted = false; // set by urlToItems when a legacy LIC-SME token was substituted
   const termItems = {};
   for (const entry of lastTermLabels) {
     const items = urlToItems(entry.url);
@@ -18153,7 +18184,7 @@ async function handleFollowUpModifier(text, personId, kv) {
     }
     lines.push('');
   }
-  if (smeReplacedApplied) lines.push(`_${SME_EOL_FLAG}_`, '');
+  if (smeReplacedApplied || smeIngestSubstituted) lines.push(`_${SME_EOL_FLAG}_`, '');
   return lines.join('\n').trim();
 }
 
