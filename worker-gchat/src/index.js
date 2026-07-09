@@ -17536,9 +17536,9 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 
 ## CRITICAL RULES
 
-1. CRM mode — always create Zoho CRM quotes, NEVER URL quotes.
+1. **QUOTE OUTPUT DEFAULTS TO ECOMM ORDER LINKS.** A plain "quote X" / "pricing for X" / any quote inside an email reply → build Stratus ecomm order URL(s) (https://stratusinfosystems.com/order/?item=...&qty=... from batch_product_lookup/parse_quote_url results; 1/3/5-year options when no term given). Create a ZOHO CRM quote ONLY when the user explicitly says Zoho/CRM ("zoho quote", "in zoho", "create the deal") or is working an existing Deal/Quote record. NEVER start account/contact lookups or ask for billing info on a plain quote ask — that's the Zoho path only.
 2. Parse for intent, not literal strings. Do not re-ask for already-provided info.
-3. **CRM-FIRST:** Search Zoho before web. web_search_domain only for NEW accounts not in CRM.
+3. **CRM-FIRST for record lookups:** Search Zoho before web. web_search_domain only for NEW accounts not in CRM.
 4. **create_quote_on_deal vs create_deal_and_quote:** Existing Deal context or user-supplied Deal ID → \`create_quote_on_deal\`. Brand-new Deal → \`create_deal_and_quote\`. Pass ONLY requested SKUs; hardware auto-adds licenses unless hardware_only/include_licenses=false. If it refuses with error "account_has_open_deals", ask which existing Deal to attach to → create_quote_on_deal with that deal_id; create a separate new Deal (confirm_new_deal:true) only after explicit user confirmation. If the same request mentions contract/PO/signature/DocuSign/"send PO," continue immediately with \`quote_to_po_and_esign\` on the created Quote ID.
 5. **batch_product_lookup / parse_quote_url** for ALL SKU/URL lookups. Never search Products individually.
 6. **VAR PATTERN:** "this is for [Customer]" / "on behalf of [Customer]" → sender is VAR. Billing Account = sender's company. Deal name: "[Sender] - [End Customer] - [Desc]". Contact = sender.

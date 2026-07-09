@@ -79,6 +79,29 @@ async function cachePdfTemplateIds(orgId, ids) {
   } catch { /* non-fatal */ }
 }
 
+// 2026-07-09 (content_script_unreachable): Chrome never injects manifest
+// content_scripts into tabs that were already open when the extension was
+// loaded/reloaded/updated — those tabs keep an ORPHANED script whose runtime
+// port is dead, and Memory-Saver-discarded tabs answer nothing at all. That's
+// why the direct PDF path "worked once" (fresh tab) "then broke" (extension
+// reload orphaned the script). On an unreachable tab, inject the bundle on
+// demand (scripting permission + existing crm.zoho.com host permission) and
+// retry. The zoho-content DOM work is dataset-guarded, so re-injection into a
+// tab with a live script is harmless (first sendResponse wins).
+async function sendToZohoTabWithInjection(tabId, type, payload) {
+  let resp = await sendToTab(tabId, type, payload);
+  if (resp) return resp;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['zoho-content.bundle.js'] });
+  } catch (e) {
+    console.warn('[Stratus AI] on-demand zoho-content injection failed for tab', tabId, e?.message || e);
+    return null;
+  }
+  await sleep(250);
+  resp = await sendToTab(tabId, type, payload);
+  return resp;
+}
+
 async function exportZohoQuotePdf({ recordId, templateName, org }) {
   if (!recordId) return { success: false, error: 'missing_recordId' };
   const orgId = org || 'org647122552';
@@ -91,19 +114,23 @@ async function exportZohoQuotePdf({ recordId, templateName, org }) {
   // generic "Export failed") motivated this. Falls back to the preview flow
   // when no matching Zoho tab is open, the template id is unknown, or the
   // direct POST fails for any reason.
+  // 2026-07-09: try EVERY matching Zoho tab (active first) with on-demand
+  // injection — previously only candidates[0] got one un-retried shot.
   try {
     const directTemplateId = await resolvePdfTemplateId(orgId, templateName || 'Hardware Quote');
     if (directTemplateId) {
       const zohoTabs = await chrome.tabs.query({ url: 'https://crm.zoho.com/*' });
-      const candidates = zohoTabs.filter((t) => (t.url || '').includes(`/crm/${orgId}/`));
-      const target = candidates.find((t) => t.active) || candidates[0];
-      if (target) {
-        const direct = await sendToTab(target.id, MSG.EXPORT_ZOHO_PDF_DIRECT, {
+      const candidates = zohoTabs
+        .filter((t) => (t.url || '').includes(`/crm/${orgId}/`))
+        .sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0));
+      for (const target of candidates) {
+        const direct = await sendToZohoTabWithInjection(target.id, MSG.EXPORT_ZOHO_PDF_DIRECT, {
           recordId, org: orgId, templateId: directTemplateId, templateName,
         });
         if (direct && direct.success) return direct;
-        console.warn('[Stratus AI] Direct PDF export unavailable (' +
-          ((direct && direct.error) || 'no_response') + ') — falling back to preview-tab flow.');
+        console.warn('[Stratus AI] Direct PDF export unavailable on tab ' + target.id + ' (' +
+          ((direct && direct.error) || 'no_response') + ')' +
+          (target === candidates[candidates.length - 1] ? ' — falling back to preview-tab flow.' : ' — trying next Zoho tab.'));
       }
     }
   } catch (e) {
@@ -121,7 +148,8 @@ async function exportZohoQuotePdf({ recordId, templateName, org }) {
   }
 
   try {
-    await waitForTabComplete(tab.id, 20000);
+    const loaded = await waitForTabComplete(tab.id, 20000);
+    if (!loaded) console.warn('[Stratus AI] PDF preview tab did not reach complete in 20s — pinging anyway.');
 
     // If Zoho bounced to the sign-in page, the content script never loaded.
     try {
@@ -131,16 +159,30 @@ async function exportZohoQuotePdf({ recordId, templateName, org }) {
 
     // The content script may not be injected/ready immediately, and it polls
     // internally for Zoho's JS to populate the template <select>. Retry until
-    // it answers (non-null) or we give up.
+    // it answers (non-null) or we give up. 2026-07-09: check the tab is still
+    // ALIVE each round (preview tabs have died mid-session in the field — a
+    // vanished tab used to silently burn all 14 retries), and half-way through
+    // inject the content script on demand in case document_idle never fired.
     let result = null;
+    let tabGone = false;
     for (let i = 0; i < 14; i++) {
-      result = await sendToTab(tab.id, MSG.EXPORT_ZOHO_PDF, { recordId, templateName });
+      try {
+        await chrome.tabs.get(tab.id);
+      } catch {
+        tabGone = true;
+        break;
+      }
+      if (i === 6) {
+        result = await sendToZohoTabWithInjection(tab.id, MSG.EXPORT_ZOHO_PDF, { recordId, templateName });
+      } else {
+        result = await sendToTab(tab.id, MSG.EXPORT_ZOHO_PDF, { recordId, templateName });
+      }
       if (result) break;
       await sleep(600);
     }
     // Harvest name→id template map for the direct-export fast path.
     if (result && result.templateIds) await cachePdfTemplateIds(orgId, result.templateIds);
-    return result || { success: false, error: 'content_script_unreachable' };
+    return result || { success: false, error: tabGone ? 'preview_tab_closed_midway' : 'content_script_unreachable' };
   } finally {
     try { await chrome.tabs.remove(tab.id); } catch { /* non-fatal */ }
   }
