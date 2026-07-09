@@ -3434,7 +3434,10 @@ async function handleFollowUpModifier(text, personId, kv) {
   const hasSwapPrefix = /^(CHANGE|SWAP|REPLACE|SWITCH)\b/i.test(upper);
 
   // Pure modifier phrases (no SKU tokens needed)
-  const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?)\s*\.?\s*$/i.test(upper);
+  // 2026-07-09: remove-phrasings added ("remove the licenses", "drop licenses",
+  // "take the licenses off/out") so corrections hit the deterministic hardware-only
+  // revision instead of falling through to the CRM agent.
+  const isHwOnly = /^(?:PLEASE\s+|CAN\s+YOU\s+|COULD\s+YOU\s+)?(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?|(?:REMOVE|DROP|TAKE)\s+(?:OUT\s+|OFF\s+)?(?:THE\s+|ALL\s+)?LICEN[SC]E[S]?(?:\s+(?:OUT|OFF))?(?:\s+(?:FROM|OF)\s+(?:THE\s+|THAT\s+|THIS\s+)?(?:QUOTE|CART|ORDER))?)(?:\s+PLEASE)?\s*[.!?]?\s*$/i.test(upper);
   const isLicOnly = /^(LICENSE[S]?\s+ONLY|LICENCE[S]?\s+ONLY|JUST\s+(THE\s+)?LICENSE[S]?|LICENSE[S]?\s+RENEWAL|RENEWAL\s+ONLY|NO\s+HARDWARE)\s*\.?\s*$/i.test(upper);
   const isTermOnly = upper.match(/^(?:(?:CHANGE|SWAP|REPLACE|SWITCH|MAKE|GO)(?:\s+(?:TO|WITH\s+THE|WITH|IT\s+TO|IT|THAT|TERM\s+TO))?\s+)?(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(?:A\s+)?([135])\s*-?\s*(?:YEAR|YR)S?(?:\s+(?:ONLY|PLEASE|LICENSE[S]?|TERM))?\s*\.?\s*$/i);
   const isAddPricing = /^(ADD\s+PRICING|WITH\s+PRICING|INCLUDE\s+PRICING|SHOW\s+ME\s+PRICING|HOW\s+MUCH(\s+(IS|ARE)\s+(IT|THAT|THOSE|THIS|THESE|THEM))?\s*\??\s*)$/i.test(upper);
@@ -5984,11 +5987,17 @@ function assignClauseIntent(items, upper, modifiers) {
   // hardware") or "hardware for …". Deliberately NOT matching "hardware <noun>"
   // (e.g. "hardware support/specs/model"), which is descriptive, not hardware-only
   // intent — so a license is never dropped on those.
-  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE))\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
+  // 2026-07-09: plural forms added — "WITHOUT LICENSES"/"NO LICENSES" never
+  // matched (singular-only + \b), so those asks quoted LICENSE-ONLY (verified
+  // on baseline: "quote 3 MS130-24P without licenses" → LIC-only, all terms).
+  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?|(?<!\b(?:HAS|HAVE|HAD|GOT|ARE|IS|WAS|WERE)\s)NO\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?)\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
   const LIC_RE = /\b(LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|RENEWAL[S]?|RENEW)\b/;
+  // 2026-07-09 (parity with gchat): "WITH … license(s)" is a BUNDLING phrase
+  // (hardware + license), not a license-only signal — neutralize before LIC_RE.
+  const WITH_LIC_RE = /\bWITH\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?\b/g;
   for (const c of clauses) {
     c.hardwareOnly = HW_ONLY_RE.test(c.text);
-    c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text);
+    c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text.replace(WITH_LIC_RE, ' '));
   }
 
   const anyExplicit = clauses.some(c => c.hardwareOnly || c.licenseOnly);
@@ -6011,7 +6020,15 @@ function assignClauseIntent(items, upper, modifiers) {
   // covers every item (mirror of leading "license for …"). Trailing "… hardware" stays
   // item-attached (so "renew MX67 then add MR44 hardware" keeps MR44 local).
   const leadingListHardware = /^\s*(QUOTE\s+)?(HARDWARE\s+ONLY\s+FOR|HARDWARE\s+FOR|HW\s+FOR)\b/.test(upper);
-  const inheritGlobalHardware = hasHW && !hasLic && leadingListHardware;
+  // 2026-07-09: a trailing PURE intent clause ("quote 2 MR46, no licenses" — the
+  // comma strands "no licenses" in an item-less clause) applies list-wide, same
+  // as trailing "… licenses" does for license intent. Only when the clause holds
+  // no item, so "renew MX67 then add MR44 hardware" keeps MR44 local.
+  const _lastClause = clauses[clauses.length - 1];
+  const _lastClauseHasItem = items.some(it => typeof it.position === 'number'
+    && it.position >= _lastClause.start && it.position < _lastClause.end);
+  const trailingBareHardware = _lastClause.hardwareOnly && !_lastClauseHasItem;
+  const inheritGlobalHardware = hasHW && !hasLic && (leadingListHardware || trailingBareHardware);
 
   const clauseFor = (pos) => {
     if (typeof pos !== 'number') return null;
@@ -6027,9 +6044,12 @@ function assignClauseIntent(items, upper, modifiers) {
       item.hardwareOnly = false; item.licenseOnly = true;
     } else if (inheritGlobalLicense || inheritGlobalHardware) {
       // Item's clause has no explicit intent, but a list-level modifier (leading
-      // "license/renewal for …" / trailing "… licenses", or leading "hardware for …")
-      // covers the whole request → inherit the global modifier.
-      item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly;
+      // "license/renewal for …" / trailing "… licenses", or a leading/trailing
+      // hardware-only phrase) covers the whole request → inherit it. Hardware
+      // inheritance is set explicitly — the GLOBAL modifier regexes may not have
+      // matched the clause-local phrasing that set the clause flag.
+      if (inheritGlobalHardware) { item.hardwareOnly = true; item.licenseOnly = false; }
+      else { item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly; }
     } else {
       // No explicit intent on this item and no list-level modifier (or there is a
       // hardware/license conflict, or the intent is attached to another item) →
@@ -6058,8 +6078,8 @@ function parseMessage(text) {
     const _upper = text.toUpperCase();
     const _LIC_WORD  = `(?:LICENSE|LICENCE|LISCENSE|LISCENCE|LICESE|LIC)`;
     const _LIC_WORDS = `(?:LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|LIC)`;
-    const _hwOnlyRe  = /\b(HARDWARE\s+ONLY|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/;
-    const _hwExcl    = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
+    const _hwOnlyRe = /\b(HARDWARE\s+ONLY|WITHOUT\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?|(?<!\b(?:HAS|HAVE|HAD|GOT|ARE|IS|WAS|WERE)\s)NO\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/;
+    const _hwExcl = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
     const _licOnlyRe = new RegExp(`\\b(${_LIC_WORDS}\\s+ONLY|JUST\\s+THE\\s+${_LIC_WORD}|JUST\\s+${_LIC_WORD}|NO\\s+HARDWARE|RENEWAL\\s+ONLY|${_LIC_WORD}\\s+RENEWAL|RENEW\\s+(THE\\s+)?${_LIC_WORDS})\\b`);
     if (_hwOnlyRe.test(_upper) && !_hwExcl.test(_upper)) {
       _expandedFamily.modifiers.hardwareOnly = true;

@@ -489,7 +489,11 @@ function isQuoteFollowUp(text) {
   const v = (text || '').toLowerCase().trim();
   if (!v || v.length > 80) return false;
   if (/\b(zoho|crm|deal|account|invoice|task|email)\b/.test(v)) return false;
-  return /\b(option\s*\d|opt\s*\d|cost(\s+of)?|how much|price|pricing|grand total|\btotal\b|hardware[ -]?only|license[ -]?only|\d\s*-?\s*year|co-?term|cheaper|the\s+(1|3|5)\s*-?\s*year)\b/.test(v);
+  // 2026-07-09: license-removal corrections ("remove the licenses", "no licenses",
+  // "just the hardware") must reach the deterministic quote session — previously
+  // the remove/change verb guard in isEcommQuoteRequest sent them to the CRM agent.
+  return /\b(option\s*\d|opt\s*\d|cost(\s+of)?|how much|price|pricing|grand total|\btotal\b|hardware[ -]?only|license[ -]?only|\d\s*-?\s*year|co-?term|cheaper|the\s+(1|3|5)\s*-?\s*year)\b/.test(v)
+    || /\b(no\s+licenses?|without\s+licenses?|just\s+(the\s+)?hardware|(remove|drop)\s+(the\s+|all\s+)?licen[sc]es?|take\s+(the\s+)?licen[sc]es?\s+(out|off))\b/.test(v);
 }
 
 function buildRequestedQuoteEmailContext(emailContext) {
@@ -511,7 +515,7 @@ function buildRequestedQuoteEmailContext(emailContext) {
     'Full visible Gmail thread text for identifying requested quote items:',
     threadText.substring(0, 18000),
     '',
-    'Use this thread text only because the user asked for it. Identify the requested items and quantities from the email before creating or preparing a quote. If the thread is ambiguous, ask one concise clarification instead of guessing.'
+    'Use this thread text only because the user asked for it. Identify the requested items and quantities from the email before creating or preparing a quote. Default deliverable: Stratus ecomm order URL(s) for those items — create a Zoho CRM quote ONLY if the user explicitly asked for a Zoho/CRM quote. If the thread is ambiguous, ask one concise clarification instead of guessing.'
   );
   return lines.join('\n');
 }
@@ -1376,8 +1380,22 @@ export default function ChatPanel({
   function handleSend(overrideText) {
     const text = overrideText || input.trim();
     if (!text || loading) return;
-    const hasPriorQuote = (messages || []).some((m) => m.kind === 'quote');
-    if (isEcommQuoteRequest(text) || (hasPriorQuote && isQuoteFollowUp(text))) {
+    const msgs = messages || [];
+    let lastQuoteIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].kind === 'quote') { lastQuoteIdx = i; break; }
+    }
+    const hasPriorQuote = lastQuoteIdx !== -1;
+    // 2026-07-09: once the quote moved to Zoho (Send-to-Zoho handoff, or a created
+    // Zoho quote link appearing after the ecomm card), follow-ups like "remove the
+    // licenses" mean the ZOHO quote — routing them to the stale ecomm session
+    // would mutate the wrong quote. Let the CRM agent handle them instead.
+    const zohoTookOver = hasPriorQuote && msgs.slice(lastQuoteIdx + 1).some((m) => {
+      const body = typeof m.content === 'string' ? m.content : '';
+      return /create a zoho crm quote from this stratus quote/i.test(body)
+        || /crm\.zoho\.com\/crm\/[^\s)]*\/tab\/Quotes\//i.test(body);
+    });
+    if (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text))) {
       if (!overrideText) setInput('');
       runAndPushQuote(text);
     } else {

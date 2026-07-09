@@ -4710,11 +4710,20 @@ function assignClauseIntent(items, upper, modifiers) {
   // hardware") or "hardware for …". Deliberately NOT matching "hardware <noun>"
   // (e.g. "hardware support/specs/model"), which is descriptive, not hardware-only
   // intent — so a license is never dropped on those.
-  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE))\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
+  // 2026-07-09: plural forms added — "WITHOUT LICENSES"/"NO LICENSES" never
+  // matched (singular-only + \b), so those asks quoted LICENSE-ONLY (verified
+  // on baseline: "quote 3 MS130-24P without licenses" → LIC-only, all terms).
+  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?|(?<!\b(?:HAS|HAVE|HAD|GOT|ARE|IS|WAS|WERE)\s)NO\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?)\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
   const LIC_RE = /\b(LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|RENEWAL[S]?|RENEW)\b/;
+  // 2026-07-09 (corp: "quote 3 MS130-24P with 5-year licenses" → license-only):
+  // "WITH … license(s)" is a BUNDLING phrase (hardware + license), not a
+  // license-only signal. The global modifier block already guards !WITH; the
+  // clause pass didn't. Neutralize the bundling phrase before the LIC_RE test.
+  // \bWITH\b cannot match inside WITHOUT, so hardware-only detection is safe.
+  const WITH_LIC_RE = /\bWITH\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?\b/g;
   for (const c of clauses) {
     c.hardwareOnly = HW_ONLY_RE.test(c.text);
-    c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text);
+    c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text.replace(WITH_LIC_RE, ' '));
   }
 
   const anyExplicit = clauses.some(c => c.hardwareOnly || c.licenseOnly);
@@ -4737,7 +4746,15 @@ function assignClauseIntent(items, upper, modifiers) {
   // covers every item (mirror of leading "license for …"). Trailing "… hardware" stays
   // item-attached (so "renew MX67 then add MR44 hardware" keeps MR44 local).
   const leadingListHardware = /^\s*(QUOTE\s+)?(HARDWARE\s+ONLY\s+FOR|HARDWARE\s+FOR|HW\s+FOR)\b/.test(upper);
-  const inheritGlobalHardware = hasHW && !hasLic && leadingListHardware;
+  // 2026-07-09: a trailing PURE intent clause ("quote 2 MR46, no licenses" — the
+  // comma strands "no licenses" in an item-less clause) applies list-wide, same
+  // as trailing "… licenses" does for license intent. Only when the clause holds
+  // no item, so "renew MX67 then add MR44 hardware" keeps MR44 local.
+  const _lastClause = clauses[clauses.length - 1];
+  const _lastClauseHasItem = items.some(it => typeof it.position === 'number'
+    && it.position >= _lastClause.start && it.position < _lastClause.end);
+  const trailingBareHardware = _lastClause.hardwareOnly && !_lastClauseHasItem;
+  const inheritGlobalHardware = hasHW && !hasLic && (leadingListHardware || trailingBareHardware);
 
   const clauseFor = (pos) => {
     if (typeof pos !== 'number') return null;
@@ -4753,9 +4770,12 @@ function assignClauseIntent(items, upper, modifiers) {
       item.hardwareOnly = false; item.licenseOnly = true;
     } else if (inheritGlobalLicense || inheritGlobalHardware) {
       // Item's clause has no explicit intent, but a list-level modifier (leading
-      // "license/renewal for …" / trailing "… licenses", or leading "hardware for …")
-      // covers the whole request → inherit the global modifier.
-      item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly;
+      // "license/renewal for …" / trailing "… licenses", or a leading/trailing
+      // hardware-only phrase) covers the whole request → inherit it. Hardware
+      // inheritance is set explicitly — the GLOBAL modifier regexes may not have
+      // matched the clause-local phrasing that set the clause flag.
+      if (inheritGlobalHardware) { item.hardwareOnly = true; item.licenseOnly = false; }
+      else { item.hardwareOnly = modifiers.hardwareOnly; item.licenseOnly = modifiers.licenseOnly; }
     } else {
       // No explicit intent on this item and no list-level modifier (or there is a
       // hardware/license conflict, or the intent is attached to another item) →
@@ -4784,8 +4804,8 @@ function parseMessage(text) {
     const _upper = text.toUpperCase();
     const _LIC_WORD  = `(?:LICENSE|LICENCE|LISCENSE|LISCENCE|LICESE|LIC)`;
     const _LIC_WORDS = `(?:LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|LIC)`;
-    const _hwOnlyRe  = /\b(HARDWARE\s+ONLY|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/;
-    const _hwExcl    = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
+    const _hwOnlyRe = /\b(HARDWARE\s+ONLY|WITHOUT\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?|(?<!\b(?:HAS|HAVE|HAD|GOT|ARE|IS|WAS|WERE)\s)NO\s+(?:(?:A|AN|ANY|THE|\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)|ENT(?:ERPRISE)?|SEC(?:URITY)?|ADV(?:ANCED)?|ESS(?:ENTIALS?)?|PLUS|AGN(?:OSTIC)?)\s+){0,4}(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?|JUST\s+THE\s+HARDWARE|HW\s+ONLY)\b/;
+    const _hwExcl = /\b(HARDWARE\s+(SPECS?|INFO|DETAILS?|QUESTION|ISSUE|PROBLEM|SUPPORT|FAILURE|WARRANTY))\b/;
     const _licOnlyRe = new RegExp(`\\b(${_LIC_WORDS}\\s+ONLY|JUST\\s+THE\\s+${_LIC_WORD}|JUST\\s+${_LIC_WORD}|NO\\s+HARDWARE|RENEWAL\\s+ONLY|${_LIC_WORD}\\s+RENEWAL|RENEW\\s+(THE\\s+)?${_LIC_WORDS})\\b`);
     if (_hwOnlyRe.test(_upper) && !_hwExcl.test(_upper)) {
       _expandedFamily.modifiers.hardwareOnly = true;
@@ -6897,6 +6917,19 @@ Here is the email to analyze:
 ${emailText}`;
 }
 
+// 2026-07-09 (blank Reply-To-Email drafts): the corp AI Gateway's serving config
+// makes claude-sonnet-5 prepend a thinking block on longer prompts even when the
+// request doesn't ask for one — content[0] is then NOT the text block, and every
+// one-shot `content[0].text` reader returned '' (or threw). Concatenate ALL text
+// blocks instead of trusting position. Live-verified 2026-07-09: same request via
+// gateway → [thinking, text]; direct API → [text].
+function extractClaudeText(data) {
+  return (data?.content || [])
+    .filter(b => b && b.type === 'text' && typeof b.text === 'string')
+    .map(b => b.text)
+    .join('');
+}
+
 /**
  * Process an email thread: detect products via Claude, then run through deterministic engine
  */
@@ -6916,6 +6949,9 @@ async function processEmailThread(text, personId, env, kv) {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 512,
+        // Deterministic JSON task — no thinking (the corp AI Gateway otherwise
+        // injects a thinking block that displaces content[0]).
+        thinking: { type: 'disabled' },
         system: 'You are a JSON extraction tool. Return ONLY valid JSON with no markdown or extra text.',
         messages: [{ role: 'user', content: prompt }]
       })
@@ -6928,7 +6964,7 @@ async function processEmailThread(text, personId, env, kv) {
 
     const data = await response.json();
     trackUsage(env, 'claude-sonnet-4-6', data.usage, 'email-parse').catch(() => {});
-    const rawJson = data.content[0].text.trim();
+    const rawJson = extractClaudeText(data).trim();
 
     // Parse JSON response
     let parsed;
@@ -17511,9 +17547,9 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 
 ## CRITICAL RULES
 
-1. CRM mode — always create Zoho CRM quotes, NEVER URL quotes.
+1. **QUOTE OUTPUT DEFAULTS TO ECOMM ORDER LINKS.** A plain "quote X" / "pricing for X" / any quote inside an email reply → build Stratus ecomm order URL(s): https://stratusinfosystems.com/order/?item=<comma-joined suffixed_sku values from batch_product_lookup>&qty=<matching quantities> — 1/3/5-year options when no term given, exact SKU spellings from the lookup result only. Create a ZOHO CRM quote when the user explicitly says Zoho/CRM ("zoho quote", "in zoho"), asks to create a deal/record, names a customer ACCOUNT for the quote ("create a quote for Hudson Lake" — a CRM record ask), or is working an existing Deal/Quote record. In EMAIL REPLIES, quotes are ALWAYS ecomm links unless the user says zoho — never start account/contact lookups or ask for billing info to put a quote in an email.
 2. Parse for intent, not literal strings. Do not re-ask for already-provided info.
-3. **CRM-FIRST:** Search Zoho before web. web_search_domain only for NEW accounts not in CRM.
+3. **CRM-FIRST for record lookups:** Search Zoho before web. web_search_domain only for NEW accounts not in CRM.
 4. **create_quote_on_deal vs create_deal_and_quote:** Existing Deal context or user-supplied Deal ID → \`create_quote_on_deal\`. Brand-new Deal → \`create_deal_and_quote\`. Pass ONLY requested SKUs; hardware auto-adds licenses unless hardware_only/include_licenses=false. If it refuses with error "account_has_open_deals", ask which existing Deal to attach to → create_quote_on_deal with that deal_id; create a separate new Deal (confirm_new_deal:true) only after explicit user confirmation. If the same request mentions contract/PO/signature/DocuSign/"send PO," continue immediately with \`quote_to_po_and_esign\` on the created Quote ID.
 5. **batch_product_lookup / parse_quote_url** for ALL SKU/URL lookups. Never search Products individually.
 6. **VAR PATTERN:** "this is for [Customer]" / "on behalf of [Customer]" → sender is VAR. Billing Account = sender's company. Deal name: "[Sender] - [End Customer] - [Desc]". Contact = sender.
@@ -18213,7 +18249,10 @@ async function handleFollowUpModifier(text, personId, kv) {
   const hasSwapPrefix = /^(CHANGE|SWAP|REPLACE|SWITCH)\b/i.test(upper);
 
   // Pure modifier phrases (no SKU tokens needed)
-  const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?)\s*\.?\s*$/i.test(upper);
+  // 2026-07-09: remove-phrasings added ("remove the licenses", "drop licenses",
+  // "take the licenses off/out") so corrections hit the deterministic hardware-only
+  // revision instead of falling through to the CRM agent.
+  const isHwOnly = /^(?:PLEASE\s+|CAN\s+YOU\s+|COULD\s+YOU\s+)?(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?|(?:REMOVE|DROP|TAKE)\s+(?:OUT\s+|OFF\s+)?(?:THE\s+|ALL\s+)?LICEN[SC]E[S]?(?:\s+(?:OUT|OFF))?(?:\s+(?:FROM|OF)\s+(?:THE\s+|THAT\s+|THIS\s+)?(?:QUOTE|CART|ORDER))?)(?:\s+PLEASE)?\s*[.!?]?\s*$/i.test(upper);
   const isLicOnly = /^(LICENSE[S]?\s+ONLY|LICENCE[S]?\s+ONLY|JUST\s+(THE\s+)?LICENSE[S]?|LICENSE[S]?\s+RENEWAL|RENEWAL\s+ONLY|NO\s+HARDWARE)\s*\.?\s*$/i.test(upper);
   const isTermOnly = upper.match(/^(?:(?:CHANGE|SWAP|REPLACE|SWITCH|MAKE|GO)(?:\s+(?:TO|WITH\s+THE|WITH|IT\s+TO|IT|THAT|TERM\s+TO))?\s+)?(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(?:A\s+)?([135])\s*-?\s*(?:YEAR|YR)S?(?:\s+(?:ONLY|PLEASE|LICENSE[S]?|TERM))?\s*\.?\s*$/i);
   const isAddPricing = /^(ADD\s+PRICING|WITH\s+PRICING|INCLUDE\s+PRICING|SHOW\s+ME\s+PRICING|HOW\s+MUCH(\s+(IS|ARE)\s+(IT|THAT|THOSE|THIS|THESE|THEM))?\s*\??\s*)$/i.test(upper);
@@ -23852,6 +23891,7 @@ async function enrichCompanyV2(rawDomain, opts) {
                 body: JSON.stringify({
                   model: 'claude-sonnet-4-6',
                   max_tokens: 500,
+                  thinking: { type: 'disabled' },
                   system: `You are a concise email analyzer for a Stratus Information Systems sales rep (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
 {
   "summary": "2-3 sentence summary of the email",
@@ -23867,7 +23907,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
               if (summaryResp.ok) {
                 const summaryData = await summaryResp.json();
                 ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', summaryData.usage, 'addon-analyze'));
-                const text = summaryData.content?.[0]?.text || '';
+                const text = extractClaudeText(summaryData);
                 try {
                   const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
                   summary = parsed.summary;
@@ -24121,6 +24161,10 @@ Return ONLY the JSON object, no markdown or extra text.`,
               body: JSON.stringify({
                 model: 'claude-sonnet-4-6',
                 max_tokens: 1500,
+                // 2026-07-09 (blank drafts): sonnet-5 runs adaptive thinking when the
+                // param is omitted — the thinking block displaced content[0] AND its
+                // spend ate the max_tokens budget. Deterministic JSON task: disable.
+                thinking: { type: 'disabled' },
                 system: (String(env.CF_REPLY_VOICE_ENABLED) === 'true' ? (voiceSkillData.prompt || '') + '\n\n' : '') + `You are drafting email replies for a Stratus Information Systems sales rep (Cisco/Meraki exclusive reseller specializing in Meraki). Write in a friendly, consultative voice:
 
 ADDRESSING (critical):
@@ -24174,7 +24218,7 @@ CRITICAL URL RULES:
 
             const draftData = await draftResp.json();
             ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', draftData.usage, 'addon-draft'));
-            const draftText = draftData.content?.[0]?.text || '';
+            const draftText = extractClaudeText(draftData);
             var parsedDraft;
             try {
               // Try direct parse first (clean JSON response)
@@ -24192,9 +24236,21 @@ CRITICAL URL RULES:
                 parsedDraft = { drafts: [draftText.substring(0, 2000)] };
               }
             }
-            // Validate drafts array exists and has content
+            // Validate drafts array exists and has content. 2026-07-09: also drop
+            // empty/non-string entries — {drafts:['']} previously sailed through the
+            // length check and shipped a blank draft bubble to the extension.
+            if (Array.isArray(parsedDraft.drafts)) {
+              parsedDraft.drafts = parsedDraft.drafts.filter(d => typeof d === 'string' && d.trim());
+            }
             if (!parsedDraft.drafts || !Array.isArray(parsedDraft.drafts) || parsedDraft.drafts.length === 0) {
               parsedDraft = { drafts: [draftText.replace(/```json\n?|\n?```/g, '').trim().substring(0, 2000)] };
+            }
+            // Terminal guard: if the model genuinely returned no usable text
+            // (empty content array, refusal), surface an ERROR — never a blank
+            // draft bubble (indistinguishable from the bug this fixes).
+            if (!parsedDraft.drafts.some(d => typeof d === 'string' && d.trim())) {
+              apiResult = { error: 'draft_generation_empty', stop_reason: draftData.stop_reason || null };
+              break;
             }
 
             // Build real Stratus URLs from suggestedProducts (products Claude recommends)
