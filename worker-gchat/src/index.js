@@ -2154,7 +2154,9 @@ function isHardwareOnlyQuoteIntent(text) {
 function collectQuotePreResolveSkuTokens(text, options = {}) {
   const preSkuTokens = [];
   const hardwareOnly = options.hardwareOnly === true || isHardwareOnlyQuoteIntent(text);
-  const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C8|C9|Z)\d[A-Z0-9-]*/gi;
+  // 2026-07-09: trailing '=' kept — Cisco spare SKUs (SFP-H25G-CU5M=) carry it in
+  // the catalog and stripping it here defeated the downstream exact lookup.
+  const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C8|C9|Z)\d[A-Z0-9-]*=?/gi;
   let m;
   while ((m = skuRegex.exec((text || '').toUpperCase())) !== null) {
     preSkuTokens.push(m[0]);
@@ -3190,11 +3192,14 @@ function detectFamily(sku) {
 // lookup miss, match the input against catalog keys with ALL dashes stripped; return the single
 // canonical (dashed) key, or null if none/ambiguous. Only fires on a miss → cannot override a valid
 // match. 0 dash-strip collisions across the 1058-key catalog (verified), so the mapping is unambiguous.
+// 2026-07-09 (SFP-H25G-CU5M, corp error_reports #3): Cisco spare SKUs carry a trailing '='
+// (SFP-H25G-CU5M=, AIR-AP-BRACKET-1=) that users almost never type — strip '=' in the bare
+// comparison too so both directions match ('=' typed vs catalog bare, and vice versa).
 function dashInsensitiveCatalogKey(upper) {
-  const bare = upper.replace(/-/g, '');
+  const bare = upper.replace(/[-=]/g, '');
   let hit = null;
   for (const k of Object.keys(prices)) {
-    if (k.toUpperCase().replace(/-/g, '') === bare) { if (hit) return null; hit = k; }
+    if (k.toUpperCase().replace(/[-=]/g, '') === bare) { if (hit) return null; hit = k; }
   }
   return hit;
 }
@@ -10823,8 +10828,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // When Claude searches Products by Product_Code, resolve from prices.json cache instead.
         // This eliminates unnecessary Zoho API calls (~2-3s each) for SKUs already in the cache.
         if (module_name === 'Products' && criteria) {
-          const equalsMatch = criteria.match(/Product_Code:equals:([A-Z0-9\-]+)/i);
-          const startsWithMatch = !equalsMatch && criteria.match(/Product_Code:starts_with:([A-Z0-9\-]+)/i);
+          const equalsMatch = criteria.match(/Product_Code:equals:([A-Z0-9\-=]+)/i);
+          const startsWithMatch = !equalsMatch && criteria.match(/Product_Code:starts_with:([A-Z0-9\-=]+)/i);
 
           if (equalsMatch) {
             const sku = equalsMatch[1].toUpperCase();
@@ -10883,7 +10888,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
         // ── INTERCEPT: Redirect WooProducts lookups through batch cache ──
         if (module_name === 'WooProducts' && criteria) {
-          const wooMatch = criteria.match(/WooProduct_Code:equals:([A-Z0-9\-]+)/i);
+          const wooMatch = criteria.match(/WooProduct_Code:equals:([A-Z0-9\-=]+)/i);
           if (wooMatch) {
             const sku = wooMatch[1].toUpperCase();
             const { key: suffixed, entry: cached } = resolveCachedProduct(sku);
@@ -12516,9 +12521,27 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               env
             );
             const records = prodResult?.data || [];
-            const match = records.find(r => r.Product_Code === resolved);
+            let match = records.find(r => r.Product_Code === resolved);
+            let matchedCode = match ? resolved : null;
+            // 2026-07-09 (SFP-H25G-CU5M, corp error_reports #3): Cisco spare SKUs live
+            // in the catalog with a trailing '=' (SFP-H25G-CU5M=) that users rarely
+            // type — and the live catalog holds Cisco parts absent from prices.json,
+            // so the cache-side '=' normalization can't help. On an exact miss, retry
+            // the '='-toggled variant before reporting not-found.
+            if (!match) {
+              const eqVariant = resolved.endsWith('=') ? resolved.slice(0, -1) : `${resolved}=`;
+              const eqResult = await zohoApiCall('GET',
+                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+                env
+              ).catch(() => null);
+              const eqMatch = (eqResult?.data || []).find(r => r.Product_Code === eqVariant);
+              if (eqMatch) {
+                match = eqMatch;
+                matchedCode = eqVariant;
+              }
+            }
             const apiResult = {
-              suffixed_sku: resolved,
+              suffixed_sku: matchedCode || resolved,
               qty,
               product_id: match?.id || null,
               product_name: match?.Product_Name || resolved,
@@ -12528,7 +12551,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               discount_pct: cachedPrice?.discount_pct || 0,
               found: !!match
             };
-            if (resolved !== suffixed) {
+            if (matchedCode && matchedCode !== resolved) {
+              apiResult.normalized_from = resolved;
+              apiResult.note = `Resolved spare-variant: "${resolved}" → "${matchedCode}" (Cisco '=' spare suffix). Use "${matchedCode}" as the catalog SKU.`;
+            } else if (resolved !== suffixed) {
               apiResult.normalized_from = suffixed;
             }
             if (!rawSku.startsWith('LIC-')) {
@@ -12543,7 +12569,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // "inactive" when the real reason is "SKU string mismatch" AND we
             // surface actual live alternatives rather than guesses.
             if (!match) {
-              apiResult.not_found_reason = `SKU "${resolved}" was not found via Product_Code:equals search. This does NOT mean the product is inactive — it means this exact SKU string is not in the catalog.`;
+              apiResult.not_found_reason = `SKU "${resolved}" was not found via Product_Code:equals search (also tried the '='-spare variant). This does NOT mean the product is inactive — it means this exact SKU string is not in the catalog. Do NOT tell the user it is unavailable until you have checked live_alternatives below (when present) and, if the SKU came from the web or free text, retried with the exact catalog spelling.`;
               if (rawSku.startsWith('LIC-')) {
                 try {
                   // Derive the license family prefix: LIC-MV-7YR → LIC-MV-
@@ -12568,6 +12594,30 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 } catch (altErr) {
                   apiResult.hint = `Could not query live alternatives (${altErr.message}). Tell the user the exact SKU was not found and ask them to clarify the term.`;
                 }
+              } else {
+                // 2026-07-09: non-LIC misses got a bare found:false with no leads,
+                // which is what sent the agent off to the web and back (SFP thrash).
+                // One bounded family probe: drop the last dash segment and
+                // starts_with-search it (SFP-H25G-CU5M → SFP-H25G- → all 4 lengths).
+                try {
+                  const famSegs = resolved.replace(/=+$/, '').split('-');
+                  if (famSegs.length >= 3) {
+                    const famPrefix = famSegs.slice(0, -1).join('-') + '-';
+                    const famResult = await zohoApiCall('GET',
+                      `Products/search?criteria=(Product_Code:starts_with:${encodeURIComponent(famPrefix)})&fields=id,Product_Code,Product_Name,Product_Active`,
+                      env
+                    );
+                    const famAlternatives = (famResult?.data || [])
+                      .filter(r => r.Product_Active !== false)
+                      .map(r => r.Product_Code)
+                      .sort()
+                      .slice(0, 15);
+                    if (famAlternatives.length > 0) {
+                      apiResult.live_alternatives = famAlternatives;
+                      apiResult.hint = `Live Zoho catalog has these active SKUs starting with "${famPrefix}": ${famAlternatives.join(', ')}. If one matches the user's request (watch for trailing '=' spare variants and length/size suffixes), re-run batch_product_lookup with that exact SKU — do NOT declare the product unavailable or resort to web search while an alternative here fits.`;
+                    }
+                  }
+                } catch (_) { /* alternatives probe is best-effort */ }
               }
             }
             batchResults[rawSku] = apiResult;
@@ -12656,7 +12706,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (fpcTokens.length > 0) {
           try {
             const likeTokens = fpcTokens.slice(0, 4).map(t => t.replace(/'/g, ''));
-            const where = likeTokens.map(t => `Product_Code like '%${t}%'`).join(' or ');
+            // 2026-07-09 (SFP-H25G-CU5M): marketing-description tokens (25GBASE, SFP28)
+            // appear only in Product_Name ("5M CBL 25GBASE-CU SFP28"), never in the
+            // Product_Code — match BOTH columns so a description-worded ask can find
+            // a part whose code the user doesn't know.
+            const where = likeTokens.map(t => `Product_Code like '%${t}%' or Product_Name like '%${t}%'`).join(' or ');
             const prefixClause = fpcPrefix ? ` and Product_Code like '${fpcPrefix.replace(/'/g, '')}%'` : '';
             const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where ((${where})${prefixClause}) and Product_Active = true limit 10`;
             const r = await zohoApiCall('POST', 'coql', env, { select_query: coql });
@@ -12664,7 +12718,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             const fpcCoql = rows
               .map(row => ({
                 sku: row.Product_Code,
-                score: fpcRank(row.Product_Code),
+                score: fpcRank(row.Product_Code) + fpcRank(row.Product_Name || ''),
                 product_id: row.id,
                 product_name: row.Product_Name,
                 list_price: prices[row.Product_Code]?.list || row.Unit_Price || null,
@@ -12725,7 +12779,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const wssRaw = Array.isArray(wssParsed.candidates) ? wssParsed.candidates : [];
         const wssCandidates = wssRaw.map(c => {
           const sku = String(c?.sku || '').trim().toUpperCase();
-          return { sku, name: c?.name || null, source_url: c?.source_url || null, in_catalog: !!(sku && prices[sku]?.zoho_product_id) };
+          // 2026-07-09: normalize before the cache probe ('=' spare suffix, dashes,
+          // -Y/-YR) — a bare in_catalog:false on a normalizable variant sent the
+          // agent into declare-unavailable territory (SFP-H25G-CU5M incident).
+          const catalogEntry = sku ? resolveCachedProduct(sku) : { key: null, entry: null };
+          return { sku, name: c?.name || null, source_url: c?.source_url || null, in_catalog: !!catalogEntry?.entry?.zoho_product_id, catalog_sku: catalogEntry?.entry ? catalogEntry.key : null };
         }).filter(c => c.sku);
         console.log(`[WEB-SEARCH-SKU] ${wssCandidates.length} candidate(s) for "${wssDesc.slice(0, 60)}"`);
         return {
@@ -16211,7 +16269,7 @@ const CRM_EMAIL_TOOLS = [
   // Batch Product Lookup (parallel, with KV pricing)
   {
     name: 'batch_product_lookup',
-    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU. IMPORTANT: Use quote_unit_price (ecomm price) for Quoted_Items.unit_price when creating quotes — this is the Stratus default. Use this for ALL product lookups — never search Products/WooProducts individually.',
+    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically, including dash variants, -Y/-YR license terms, and the Cisco \'=\' spare suffix (SFP-H25G-CU5M finds SFP-H25G-CU5M= and vice versa). Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU; on a miss it returns live_alternatives (near-miss catalog SKUs from the same family) — check those BEFORE declaring a product unavailable or searching the web. IMPORTANT: Use quote_unit_price (ecomm price) for Quoted_Items.unit_price when creating quotes — this is the Stratus default. Use this for ALL product lookups — never search Products/WooProducts individually.',
     input_schema: {
       type: 'object',
       properties: {
@@ -17250,6 +17308,8 @@ Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / ema
 ## SKU SUFFIX & LICENSE RULES
 
 Tools handle suffixes + hardware→license pairing automatically: batch_product_lookup / parse_quote_url apply suffixes (MR44 → MR44-HW, CW9172I → CW9172I-RTG); create_deal_and_quote auto-adds a license per hardware SKU (license qty = hardware qty, 1:1). "hardware only" / "no license" / "just the hardware" → \`hardware_only:true\` + \`include_licenses:false\`, no LIC-* rows. Explicit LIC SKU named → pass as-is. License-only request → never convert to hardware; use the explicit LIC SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN).
+
+**PRODUCT NOT FOUND — EXHAUST THE CATALOG BEFORE DECLARING UNAVAILABLE.** The mandatory ladder for an exact SKU: (1) batch_product_lookup (auto-normalizes dashes, -Y/-YR terms, and the Cisco '=' spare suffix); (2) if found:false, check its live_alternatives — a near-miss there (trailing '=', different length/size suffix) IS usually the right part: confirm with the user and re-run batch_product_lookup on that exact spelling; (3) find_product_candidates with the user's wording (matches catalog descriptions too); (4) web_search_sku ONLY after 1–3 miss (or the user asked for a web search) — a web SKU is a LEAD: re-validate it via batch_product_lookup before quoting. NEVER tell the user a part "isn't in our catalog" until steps 1–3 have all missed, and never interleave account/contact work between lookup attempts — finish resolving the product first, then report ONE definitive answer.
 
 **MR Enterprise License — UNIVERSAL across all MR APs.** Only valid: LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR. NEVER invent (not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
 "5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1 year, 3 year, or 5 year?" — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.

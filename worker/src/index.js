@@ -3153,11 +3153,12 @@ function detectFamily(sku) {
 // defeats catalog lookup. As a LAST resort on a miss, match the input against catalog keys with ALL
 // dashes stripped; return the single canonical (dashed) key, or null if none/ambiguous. Only fires
 // on a miss → cannot override a valid match. 0 dash-strip collisions across the 1058-key catalog.
+// 2026-07-09: '=' stripped too (Cisco spare-SKU suffix, e.g. AIR-AP-BRACKET-1=) — parity with gchat.
 function dashInsensitiveCatalogKey(upper) {
-  const bare = upper.replace(/-/g, '');
+  const bare = upper.replace(/[-=]/g, '');
   let hit = null;
   for (const k of Object.keys(prices)) {
-    if (k.toUpperCase().replace(/-/g, '') === bare) { if (hit) return null; hit = k; }
+    if (k.toUpperCase().replace(/[-=]/g, '') === bare) { if (hit) return null; hit = k; }
   }
   return hit;
 }
