@@ -13513,6 +13513,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                       }
                       results.steps.push(`Reactivated Meraki ISR ${_isrName} (unchecked Inactive, user-approved)`);
                     } else {
+                      // On a non-ISR-referral lead source the rep attachment is
+                      // optional — offer proceeding without the rep as well, so
+                      // an inactive rep doesn't dead-end a Stratus Referal deal.
+                      const _declinePath = (lead_source === 'Meraki ISR Referal')
+                        ? ''
+                        : ` If the user would rather NOT reactivate, retry WITHOUT meraki_isr_email to proceed with the default rep — allowed here because Lead_Source "${lead_source || 'Stratus Referal'}" does not require the referring rep.`;
                       return {
                         success: false,
                         error: 'meraki_isr_inactive',
@@ -13520,7 +13526,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                         isr_id: isrRec.id,
                         isr_name: _isrName,
                         instruction: buildInactiveIsrInstruction(_isrName,
-                          'retry this SAME create_deal_and_quote call with reactivate_inactive_isr: true'),
+                          'retry this SAME create_deal_and_quote call with reactivate_inactive_isr: true') + _declinePath,
                         ...results,
                         wall_ms: Date.now() - _startMs
                       };
@@ -21869,6 +21875,7 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - DRY RUN / CONFIRM:FALSE (HARD RULE): When the user writes "confirm false", "confirm:false", "dry run", "dry-run", or "what would be deleted", you MUST pass {"confirm": false} to zoho_delete_record (NOT true). The server returns a preview. Echo the preview with "confirm:false — this was a dry run, nothing was deleted". NEVER claim the record was "deleted successfully" when confirm:false is requested.
 - CONFIRM:TRUE PASSTHROUGH: When the user writes "confirm true" or "confirm:true", pass {"confirm": true} to zoho_delete_record in the SAME tool call. If the server says "confirm:true is required", retry with confirm:true — the user already confirmed.
 - ISR ACCEPT ANYWAY REFUSAL: If lead_source="Meraki ISR Referal" and the named rep is NOT in Meraki_ISRs, REFUSE. Never create the deal "anyway" or fall back to Stratus Sales in the same response that says "rep not found".
+- EMAIL DRAFTS RENDER IN CHAT: when asked to draft/compose a reply, output the COMPLETE email body inline in your response (body only — no To/Cc/Subject). gmail_create_draft is DISABLED — never call it, never claim a draft was saved to Gmail. NEVER call gmail_send_email unless the user explicitly approved the exact body you rendered in THIS conversation.
 - ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains \`meraki_isr_inactive: true\`, the named ISR is flagged Inactive on their Meraki_ISRs record (NOT Zoho Settings → Users — Cisco reps are not Zoho users). ASK the user EXACTLY: "<isr_name> is marked Inactive in the ISR roster — would you like me to uncheck the Inactive flag so the rep can be properly assigned?" If the user approves, retry create_deal_and_quote or assign_cisco_rep_to_deal with reactivate_inactive_isr: true (ONLY those two tools accept it — never pass it to zoho_create_record/zoho_update_record). DO NOT silently swap to a different ISR or to Stratus Sales, DO NOT change the Lead_Source to work around it, and DO NOT hallucinate a "tool missing" message — the tool worked and returned an actionable error.
 - ZOHO ERROR — MERAKI_ISR FILTER REJECTED (active but blocked): When a CRM tool result contains \`meraki_isr_filter_rejected: true\`, the user IS active but Zoho's lookup filter still rejected them. Tell the user: "Zoho rejected the Meraki ISR \`<isr_name>\` even though they're active — there may be a profile, department, role, or sharing-rule constraint on the Meraki_ISR lookup field. Please review the Zoho field config or pick a different valid ISR." DO NOT retry with the same id and DO NOT swap to Stratus Sales blindly.
 
@@ -22001,6 +22008,7 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - CONFIRM:TRUE PASSTHROUGH: If the user explicitly says "confirm true", "confirm:true", "confirm=true", "with confirm true", or "force delete", pass {"confirm": true} to zoho_delete_record in the SAME tool call. Do NOT call zoho_delete_record once without confirm and then ask the user to confirm — the user has already confirmed. If the server returns "confirm:true is required", it means you forgot to pass confirm:true; retry the tool call with confirm:true added.
 - CHAIN TASK DELETE: When the user says "create a task X then delete it with confirm true", the second tool call MUST be zoho_delete_record({module_name:"Tasks", record_id:"<new_id>", confirm:true}). Passing confirm:true is non-negotiable — the user gave it in the prompt.
 - ISR ACCEPT ANYWAY REFUSAL: When creating a deal with lead_source="Meraki ISR Referal" and the named Cisco rep does NOT exist in Meraki_ISRs, REFUSE — do NOT create the deal "anyway" or "with Stratus Sales as fallback". Reply "No Cisco rep named <X> found — please confirm the exact name or email" and STOP. NEVER say "deal created" in the same response as "rep not found".
+- EMAIL DRAFTS RENDER IN CHAT: when asked to draft/compose a reply, output the COMPLETE email body inline in your response (body only — no To/Cc/Subject). gmail_create_draft is DISABLED — never call it, never claim a draft was saved to Gmail. NEVER call gmail_send_email unless the user explicitly approved the exact body you rendered in THIS conversation.
 - ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains \`meraki_isr_inactive: true\`, the named ISR is flagged Inactive on their Meraki_ISRs record (NOT Zoho Settings → Users — Cisco reps are not Zoho users). ASK the user EXACTLY: "<isr_name> is marked Inactive in the ISR roster — would you like me to uncheck the Inactive flag so the rep can be properly assigned?" If the user approves, retry create_deal_and_quote or assign_cisco_rep_to_deal with reactivate_inactive_isr: true (ONLY those two tools accept it — never pass it to zoho_create_record/zoho_update_record). DO NOT silently swap to a different ISR or to Stratus Sales, DO NOT change the Lead_Source to work around it, and DO NOT hallucinate a "tool missing" message — the tool worked and returned an actionable error.
 - ZOHO ERROR — MERAKI_ISR FILTER REJECTED (active but blocked): When a CRM tool result contains \`meraki_isr_filter_rejected: true\`, the user IS active but Zoho's lookup filter still rejected them. Tell the user: "Zoho rejected the Meraki ISR \`<isr_name>\` even though they're active — there may be a profile, department, role, or sharing-rule constraint on the Meraki_ISR lookup field. Please review the Zoho field config or pick a different valid ISR." DO NOT retry with the same id and DO NOT swap to Stratus Sales blindly.
 
