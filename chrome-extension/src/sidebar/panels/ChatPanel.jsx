@@ -423,6 +423,19 @@ function isQuoteFromEmailRequest(text) {
     || /\bwhat (needs|need) to be quoted\b/.test(value);
 }
 
+// 2026-07-09 (corp bug report #4): drafting asks ("generate a response", "draft a
+// reply") previously only got the full thread when they HAPPENED to trip the
+// quote-extraction detector above — and then with a quote-extraction banner that
+// biased the agent toward quoting. Detect drafting intent in its own right so the
+// reply is grounded in the whole thread with drafting framing.
+function isDraftReplyRequest(text) {
+  const value = (text || '').toLowerCase();
+  return /\b(generate|draft|write|compose|create)\b[^.!?]{0,40}\b(response|reply|follow[\s-]?up)\b/.test(value)
+    || /\b(draft|write|compose)\s+(an?\s+|the\s+)?email\b/.test(value)
+    || /\breply\s+to\s+(this|the|him|her|them)\b/.test(value)
+    || /\brespond\s+to\s+(this|the)\s+(email|thread|message)\b/.test(value);
+}
+
 function newQuotePersonId() {
   const suffix = (typeof crypto !== 'undefined' && crypto.randomUUID)
     ? crypto.randomUUID()
@@ -497,6 +510,33 @@ function buildRequestedQuoteEmailContext(emailContext) {
     threadText.substring(0, 18000),
     '',
     'Use this thread text only because the user asked for it. Identify the requested items and quantities from the email before creating or preparing a quote. If the thread is ambiguous, ask one concise clarification instead of guessing.'
+  );
+  return lines.join('\n');
+}
+
+// Neutral drafting framing — same thread payload as the quote-extraction builder,
+// but instructs the agent to mine the WHOLE thread for the reply instead of
+// treating it as a line-item source.
+function buildDraftReplyEmailContext(emailContext) {
+  if (!emailContext) return '';
+  const threadText = (emailContext.fullThreadBody || emailContext.body || '').trim();
+  if (!threadText) return '';
+  const lines = [
+    '[User asked to draft a reply in the current Gmail thread.]',
+    `Subject: ${emailContext.subject || ''}`,
+  ];
+  if (emailContext.senderName || emailContext.senderEmail) {
+    lines.push(`From: ${emailContext.senderName || ''} <${emailContext.senderEmail || ''}>`);
+  }
+  if (emailContext.customerEmail) {
+    lines.push(`Customer: ${emailContext.customerName || ''} <${emailContext.customerEmail}>`);
+  }
+  lines.push(
+    '',
+    'Full visible Gmail thread text for grounding the reply:',
+    threadText.substring(0, 18000),
+    '',
+    'Ground the reply in this ENTIRE thread: prior asks, commitments, and topics other participants raised. Render the complete email body inline in your chat response (body only). Do not invent facts that are not in the thread.'
   );
   return lines.join('\n');
 }
@@ -847,7 +887,8 @@ export default function ChatPanel({
           ? { ...gatedEmailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
           : gatedEmailContext || null;
 
-      const shouldReadFullEmailForQuote = isQuoteFromEmailRequest(messageText);
+      const isDraftAsk = isDraftReplyRequest(messageText);
+      const shouldReadFullEmailForQuote = isQuoteFromEmailRequest(messageText) || isDraftAsk;
       if (shouldReadFullEmailForQuote) {
         try {
           const fullEmailContext = await sendToBackground(MSG.GET_FULL_EMAIL_CONTEXT, {});
@@ -942,10 +983,15 @@ export default function ChatPanel({
       }
 
       if (shouldReadFullEmailForQuote) {
-        const quoteEmailContext = buildRequestedQuoteEmailContext(effectiveContext);
-        if (quoteEmailContext) {
-          textToSend = `${quoteEmailContext}\n\n${textToSend}`;
-        } else {
+        // Drafting asks take drafting framing; quote asks keep the quote-extraction
+        // banner. A message that is both (rare) is treated as a draft — the reply
+        // body is the deliverable and the agent can still reference quote items.
+        const fullEmailBlock = isDraftAsk
+          ? buildDraftReplyEmailContext(effectiveContext)
+          : buildRequestedQuoteEmailContext(effectiveContext);
+        if (fullEmailBlock) {
+          textToSend = `${fullEmailBlock}\n\n${textToSend}`;
+        } else if (!isDraftAsk) {
           textToSend = `[User explicitly asked to generate a quote from the current email, but the extension could not read visible thread body text. Ask the user to open/expand the Gmail thread or paste the requested items before creating the quote.]\n\n${textToSend}`;
         }
       }
