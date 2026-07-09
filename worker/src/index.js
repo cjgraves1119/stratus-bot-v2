@@ -1383,6 +1383,46 @@ async function classifyWithGemma4(userMessage, priorContext, env) {
   }
 }
 
+// ── V3 shadow classifier (Llama CF_MODEL, Schema V3 prompt) ──
+// Instrumented sibling of classifyWithCFv2/classifyWithGemma4 that returns the
+// same { intent, confidence, elapsed, raw, parseError|error, ... } shape so it
+// logs into classifier_shadow's v3_* columns identically. Shadow-ONLY: never
+// drives routing. classifyV3() (the bare-JSON variant used elsewhere) is left
+// untouched; this wrapper adds timing + raw capture for the comparison log.
+async function classifyWithV3Shadow(userMessage, priorContext, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const userText = priorContext ? `Prior assistant context:\n${priorContext}\n\nUser message:\n${userMessage}` : userMessage;
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [
+          { role: 'system', content: CF_CLASSIFIER_PROMPT_V3 },
+          { role: 'user', content: userText }
+        ],
+        max_tokens: 512
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('V3_TIMEOUT')), 8000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const rawResponse = result?.response ?? result?.choices?.[0]?.message?.content;
+    if (typeof rawResponse === 'object' && rawResponse !== null && rawResponse.intent) {
+      return { ...rawResponse, elapsed, raw: JSON.stringify(rawResponse) };
+    }
+    const raw = typeof rawResponse === 'string' ? rawResponse.trim() : String(rawResponse || '');
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { elapsed, raw, parseError: 'no JSON found' };
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return { ...parsed, elapsed, raw };
+    } catch (e) {
+      return { elapsed, raw, parseError: e.message };
+    }
+  } catch (err) {
+    return { elapsed: Date.now() - startMs, error: err.message };
+  }
+}
+
 const ROUTING_AMBIGUOUS_STEM = /^(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)$/i;
 const ROUTING_AMBIGUOUS_TEXT_STEM = /\b(MS125-24|MS125-48|MS130-24|MS130-48|MS150-24|MS150-48|MS210-24|MS210-48|MS225-24|MS225-48|MS250-24|MS250-48|MS350-24|MS350-48|MS390-24|MS390-48|MS130|MS150|MS250|MS350|MS390|MS425|MR|MX|MV|MT|MG|CW)\b(?![A-Z0-9-])/i;
 
@@ -1790,7 +1830,7 @@ async function callClaudeClassifierJsonFallback(env, { systemPrompt, userText })
 }
 
 // Async-fire-and-forget: log the shadow comparison to D1 via ctx.waitUntil.
-async function logShadowClassification(env, { personId, requestText, priorContext, legacy, v2, gemma4 }) {
+async function logShadowClassification(env, { personId, requestText, priorContext, legacy, v2, gemma4, v3 }) {
   if (!env.ANALYTICS_DB) return;
   try {
     // One-time DDL per isolate: matches the ensureTraceTable pattern above.
@@ -1826,7 +1866,17 @@ async function logShadowClassification(env, { personId, requestText, priorContex
         gemma4_reference TEXT,
         gemma4_raw TEXT,
         gemma4_parse_error TEXT,
-        gemma4_agree INTEGER
+        gemma4_agree INTEGER,
+        v3_intent TEXT,
+        v3_confidence REAL,
+        v3_elapsed_ms INTEGER,
+        v3_items TEXT,
+        v3_modifiers TEXT,
+        v3_revision TEXT,
+        v3_reference TEXT,
+        v3_raw TEXT,
+        v3_parse_error TEXT,
+        v3_agree INTEGER
       )`).run();
       // Safe migration for existing tables: add columns if missing (SQLite ignores duplicate ADD COLUMN errors)
       try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_intent TEXT`).run(); } catch {}
@@ -1839,13 +1889,27 @@ async function logShadowClassification(env, { personId, requestText, priorContex
       try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_raw TEXT`).run(); } catch {}
       try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_parse_error TEXT`).run(); } catch {}
       try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN gemma4_agree INTEGER`).run(); } catch {}
+      // V3 shadow columns (added 2026-07-01) — mirror the gemma4_* set.
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_intent TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_confidence REAL`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_elapsed_ms INTEGER`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_items TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_modifiers TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_revision TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_reference TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_raw TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_parse_error TEXT`).run(); } catch {}
+      try { await env.ANALYTICS_DB.prepare(`ALTER TABLE classifier_shadow ADD COLUMN v3_agree INTEGER`).run(); } catch {}
       globalThis.__shadowTableReady = true;
     }
     const intentAgree = legacy?.intent && v2?.intent ? (String(legacy.intent).toLowerCase() === String(v2.intent).toLowerCase() ? 1 : 0) : null;
     const gemma4Agree = legacy?.intent && gemma4?.intent ? (String(legacy.intent).toLowerCase() === String(gemma4.intent).toLowerCase() ? 1 : 0) : null;
+    // v3_agree = V3 vs legacy (same baseline as gemma4_agree); V3-vs-V2 can be
+    // derived at query time from the stored v3_intent/v2_intent columns.
+    const v3Agree = legacy?.intent && v3?.intent ? (String(legacy.intent).toLowerCase() === String(v3.intent).toLowerCase() ? 1 : 0) : null;
     await env.ANALYTICS_DB.prepare(`INSERT INTO classifier_shadow
-      (person_id, request_text, prior_context, legacy_intent, legacy_elapsed_ms, legacy_raw, v2_intent, v2_confidence, v2_elapsed_ms, v2_items, v2_modifiers, v2_revision, v2_reference, v2_raw, v2_parse_error, intent_agree, gemma4_intent, gemma4_confidence, gemma4_elapsed_ms, gemma4_items, gemma4_modifiers, gemma4_revision, gemma4_reference, gemma4_raw, gemma4_parse_error, gemma4_agree)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+      (person_id, request_text, prior_context, legacy_intent, legacy_elapsed_ms, legacy_raw, v2_intent, v2_confidence, v2_elapsed_ms, v2_items, v2_modifiers, v2_revision, v2_reference, v2_raw, v2_parse_error, intent_agree, gemma4_intent, gemma4_confidence, gemma4_elapsed_ms, gemma4_items, gemma4_modifiers, gemma4_revision, gemma4_reference, gemma4_raw, gemma4_parse_error, gemma4_agree, v3_intent, v3_confidence, v3_elapsed_ms, v3_items, v3_modifiers, v3_revision, v3_reference, v3_raw, v3_parse_error, v3_agree)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
       personId || null,
       String(requestText || '').substring(0, 1000),
       String(priorContext || '').substring(0, 2000),
@@ -1871,7 +1935,17 @@ async function logShadowClassification(env, { personId, requestText, priorContex
       gemma4?.reference ? JSON.stringify(gemma4.reference).substring(0, 200) : null,
       String(gemma4?.raw || '').substring(0, 2000),
       gemma4?.parseError || gemma4?.error || null,
-      gemma4Agree
+      gemma4Agree,
+      v3?.intent || null,
+      v3?.confidence || null,
+      v3?.elapsed || null,
+      v3?.items ? JSON.stringify(v3.items).substring(0, 1000) : null,
+      v3?.modifiers ? JSON.stringify(v3.modifiers).substring(0, 500) : null,
+      v3?.revision ? JSON.stringify(v3.revision).substring(0, 500) : null,
+      v3?.reference ? JSON.stringify(v3.reference).substring(0, 200) : null,
+      String(v3?.raw || '').substring(0, 2000),
+      v3?.parseError || v3?.error || null,
+      v3Agree
     ).run();
   } catch (e) {
     console.warn('[Shadow] log failed:', e.message);
@@ -9713,9 +9787,15 @@ export default {
               }
               if (v2c) console.log(`[Shadow-V2] intent=${v2c.intent || 'ERR'} conf=${v2c.confidence || '?'} (${v2c.elapsed || 0}ms)${v2c.parseError ? ' parseErr=' + v2c.parseError : ''}`);
               if (g4c) console.log(`[Shadow-Gemma4] intent=${g4c.intent || 'ERR'} conf=${g4c.confidence || '?'} (${g4c.elapsed || 0}ms)${g4c.parseError ? ' parseErr=' + g4c.parseError : ''}${g4c.timeout ? ' timeout=true' : ''}`);
+              // V3 shadow — pure comparison, runs off the hot path here so it never
+              // adds routing latency. One extra CF Llama call per message; failures are
+              // swallowed to NULL so a V3 hiccup can never break the shadow log.
+              let v3c = null;
+              try { v3c = await classifyWithV3Shadow(text, priorCtxForV2, env); } catch (e) { v3c = { error: e?.message }; }
+              if (v3c) console.log(`[Shadow-V3] intent=${v3c.intent || 'ERR'} conf=${v3c.confidence || '?'} (${v3c.elapsed || 0}ms)${v3c.parseError ? ' parseErr=' + v3c.parseError : ''}`);
               await logShadowClassification(env, {
                 personId, requestText: text, priorContext: priorCtxForV2,
-                legacy: classification, v2: v2c, gemma4: g4c
+                legacy: classification, v2: v2c, gemma4: g4c, v3: v3c
               });
             } catch (e) { console.warn('[Shadow] error:', e?.message); }
           })());

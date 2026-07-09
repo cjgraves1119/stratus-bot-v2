@@ -9,6 +9,7 @@
 import { useState, useEffect, useCallback, lazy, Suspense, Component } from 'react';
 import { sendToBackground, onMessage } from '../lib/messaging';
 import { MSG, COLORS, IS_DEV_BUILD, API_BASE } from '../lib/constants';
+import { installErrorCapture, getRecentErrors } from '../lib/errorBuffer';
 import {
   parseZohoRecordUrl,
   contextMatchesUrl,
@@ -116,6 +117,58 @@ export default function App() {
 
   const [pageType, setPageType] = useState(null); // 'gmail' | 'zoho' | 'other'
   const [zohoPageContext, setZohoPageContext] = useState(null);
+
+  // ── Report Issue ── one-click bug/glitch reporting for the team.
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportNote, setReportNote] = useState('');
+  const [reportStatus, setReportStatus] = useState('idle'); // idle | sending | sent | error
+
+  // Capture recent console errors / uncaught exceptions so a report shows what
+  // actually broke. Installed once, off the render path.
+  useEffect(() => { installErrorCapture(); }, []);
+
+  const handleReportIssue = useCallback(async () => {
+    setReportStatus('sending');
+    let activeUrl = '';
+    try {
+      const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+      // Redact: keep only origin + path. Gmail/Zoho URLs carry message ids,
+      // search terms, and tokens in the query/hash we should not exfiltrate.
+      if (t?.url) { const u = new URL(t.url); activeUrl = (u.origin + u.pathname).slice(0, 300); }
+    } catch (_) { /* ignore */ }
+    try {
+      const snapshot = {
+        note: String(reportNote || '').slice(0, 4000),
+        version: (chrome?.runtime?.getManifest?.().version) || 'unknown',
+        env: IS_DEV_BUILD ? 'dev' : 'prod',
+        url: activeUrl,
+        activeTab,
+        pageType,
+        context: {
+          email: emailContext ? {
+            subject: emailContext.subject, senderEmail: emailContext.senderEmail,
+            senderName: emailContext.senderName, customerDomain: emailContext.customerDomain,
+          } : null,
+          zoho: zohoPageContext ? {
+            module: zohoPageContext.module, recordId: zohoPageContext.recordId,
+            recordName: zohoPageContext.recordName,
+          } : null,
+        },
+        lastChat: (chatMessages || []).slice(-6).map((m) => ({
+          role: m.role, content: String(m.content || '').slice(0, 1500),
+        })),
+        recentErrors: getRecentErrors().slice(-15),
+        userAgent: (typeof navigator !== 'undefined' ? navigator.userAgent : ''),
+      };
+      await sendToBackground(MSG.REPORT_ISSUE, snapshot);
+      setReportStatus('sent');
+      setReportNote('');
+      setTimeout(() => { setReportOpen(false); setReportStatus('idle'); }, 1800);
+    } catch (e) {
+      console.error('[Stratus AI] report failed:', e?.message);
+      setReportStatus('error');
+    }
+  }, [reportNote, activeTab, pageType, emailContext, zohoPageContext, chatMessages]);
 
   // Detect page context first, then load appropriate data.
   //
@@ -498,6 +551,17 @@ export default function App() {
         )}
 
         <button
+          onClick={() => { setReportStatus('idle'); setReportOpen((v) => !v); }}
+          style={{
+            background: 'none', border: 'none', color: 'white', cursor: 'pointer',
+            fontSize: 16, opacity: reportOpen ? 1 : 0.7, padding: 4,
+          }}
+          title="Report an issue"
+        >
+          🐛
+        </button>
+
+        <button
           onClick={() => chrome.runtime.openOptionsPage()}
           style={{
             background: 'none', border: 'none', color: 'white', cursor: 'pointer',
@@ -508,6 +572,53 @@ export default function App() {
           ⚙️
         </button>
       </div>
+
+      {/* Report Issue form — appears under the header when 🐛 is clicked */}
+      {reportOpen && (
+        <div style={{
+          padding: '10px 16px', background: COLORS.BG_PRIMARY,
+          borderBottom: `1px solid ${COLORS.BORDER}`,
+        }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 6 }}>
+            Report an issue
+          </div>
+          <textarea
+            value={reportNote}
+            onChange={(e) => setReportNote(e.target.value)}
+            placeholder="What went wrong? (optional) — a snapshot of your recent activity and any errors is included automatically."
+            rows={3}
+            style={{
+              width: '100%', boxSizing: 'border-box', fontSize: 12, padding: 6,
+              border: `1px solid ${COLORS.BORDER}`, borderRadius: 4, resize: 'vertical',
+              fontFamily: 'inherit',
+            }}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+            <button
+              onClick={handleReportIssue}
+              disabled={reportStatus === 'sending'}
+              style={{
+                background: COLORS.STRATUS_BLUE, color: 'white', border: 'none',
+                borderRadius: 4, padding: '5px 12px', fontSize: 12, cursor: 'pointer',
+                opacity: reportStatus === 'sending' ? 0.6 : 1,
+              }}
+            >
+              {reportStatus === 'sending' ? 'Sending…' : 'Send report'}
+            </button>
+            <button
+              onClick={() => { setReportOpen(false); setReportStatus('idle'); }}
+              style={{
+                background: 'none', border: `1px solid ${COLORS.BORDER}`, color: COLORS.TEXT_SECONDARY,
+                borderRadius: 4, padding: '5px 12px', fontSize: 12, cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+            {reportStatus === 'sent' && <span style={{ fontSize: 12, color: COLORS.SUCCESS }}>Thanks — reported ✓</span>}
+            {reportStatus === 'error' && <span style={{ fontSize: 12, color: COLORS.ERROR }}>Failed to send — try again</span>}
+          </div>
+        </div>
+      )}
 
       {/* Tab Bar */}
       <div style={{

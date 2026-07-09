@@ -716,6 +716,20 @@ function getReasoningControl(modelId, requestedPolicy = REASONING_POLICY_DISABLE
     };
   }
 
+  // GLM (zai-org) reasons by DEFAULT (reasoning_content in every reply).
+  // Empirically verified 2026-07-02 on @cf/zai-org/glm-5.2: enable_thinking:false
+  // drops completion 139→3 tokens and 17s→9s on a trivial prompt. The other
+  // candidates were traps: thinking:{type:'disabled'} is silently IGNORED
+  // (still reasons) and reasoning_effort:'low' still reasons at 3× latency.
+  if (/glm|zai-org/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { chat_template_kwargs: { enable_thinking: false } },
+      reasoningControl: 'cf_chat_template_enable_thinking_false'
+    };
+  }
+
   if (/nemotron|gpt-oss|qwen|qwq|mistral|llama|sea-lion|sealion|hermes/.test(id)) {
     return {
       reasoningPolicy: REASONING_POLICY_UNSUPPORTED,
@@ -8555,8 +8569,18 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
         data.Closing_Date = corrected;
       }
     }
-    // Auto-fill defaults for commonly skipped fields
-    if (!data.Meraki_ISR && isCreate) data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
+    // Auto-fill defaults for commonly skipped fields.
+    // 2026-07-02 consistency rule (Chris): a "Meraki ISR Referal" deal must
+    // NEVER carry the Stratus Sales placeholder — block instead of defaulting.
+    // Stratus Referal (and everything else) still defaults to Stratus Sales.
+    if (isCreate && data.Lead_Source === 'Meraki ISR Referal') {
+      const _isrIdOnCreate = data.Meraki_ISR?.id || (typeof data.Meraki_ISR === 'string' ? data.Meraki_ISR : null);
+      if (!_isrIdOnCreate || String(_isrIdOnCreate) === '2570562000027286729') {
+        errors.push('Lead_Source "Meraki ISR Referal" requires the referring Cisco rep in Meraki_ISR — Stratus Sales (or a missing ISR) is never valid on an ISR referral. Resolve the rep via the Meraki_ISRs module (or use create_deal_and_quote with meraki_isr_email / assign_cisco_rep_to_deal). If no Cisco rep is involved, use Lead_Source "Stratus Referal" instead.');
+      }
+    } else if (!data.Meraki_ISR && isCreate) {
+      data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
+    }
     if (!data.Owner) data.Owner = { id: await getOwnerForCaller(env) };
   }
 
@@ -12807,7 +12831,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id, meraki_isr_email, force_new_deal } = toolInput;
         let { lead_source } = toolInput;
         const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         let _eolRefreshUnits = [];
@@ -13085,6 +13109,44 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
           results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
 
+          // ── Master-deal reuse (2026-07-02) ── when the SAME conversation
+          // creates multiple quotes for the SAME account (e.g. a 3-year and a
+          // 5-year option in one message), every quote must hang off ONE deal.
+          // Previously this depended on the model passing existing_deal_id (or
+          // bouncing off HARD GATE #3b's hints) — this makes it deterministic.
+          // MUST run BEFORE gate #3b: the just-created deal IS an open deal, so
+          // the gate would otherwise refuse the second call instead of reusing.
+          // The KV hit is verified live (deal still exists AND belongs to this
+          // account) before trusting it; stale entries are deleted. 30-min TTL
+          // bounds cross-conversation reuse; force_new_deal opts out.
+          const dealReuseKey = (personId && accountId && env.CONVERSATION_KV)
+            ? `recent_deal:${personId}:${accountId}` : null;
+          let reusedDealFromKv = false;
+          if (!existingDealId && !force_new_deal && dealReuseKey) {
+            try {
+              const recent = await env.CONVERSATION_KV.get(dealReuseKey, 'json');
+              if (recent?.dealId) {
+                const candidateId = String(recent.dealId);
+                let verified = null;
+                try {
+                  // Same field set as the explicit existing_deal_id fetch above —
+                  // downstream steps read Contact_Name/Lead_Source off existingDealData.
+                  const dealCheck = await zohoApiCall('GET', `Deals/${candidateId}?fields=id,Deal_Name,Account_Name,Contact_Name,Lead_Source,Owner,Closing_Date`, env);
+                  verified = dealCheck?.data?.[0] || null;
+                } catch (_) { verified = null; }
+                if (verified?.id && String(verified?.Account_Name?.id || '') === String(accountId)) {
+                  existingDealId = candidateId;
+                  existingDealData = verified;
+                  reusedDealFromKv = true;
+                  results.steps.push(`Reusing Deal "${verified.Deal_Name}" (${candidateId}) created earlier in this conversation — multi-option quotes share one master deal (pass force_new_deal:true for a separate deal)`);
+                } else {
+                  // Deal deleted or belongs to a different account — drop it.
+                  try { await env.CONVERSATION_KV.delete(dealReuseKey); } catch (_) { }
+                }
+              }
+            } catch (_) { /* reuse is best-effort; fall through to normal flow */ }
+          }
+
           // ── HARD GATE #3b: Account has existing open Deals — refuse silent new-Deal creation ──
           // 2026-05-13: prior behavior auto-created a new Deal under the Account whenever
           // create_deal_and_quote was called without existing_deal_id, even if the Account
@@ -13227,11 +13289,55 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // Coerce unknown / invalid values to "Stratus Referal". Explicitly
           // rejects "Website" as a default when caller didn't mean it (the
           // Skty bug where Llama guessed "Website" from email context).
+          // 2026-07-02: normalize the correctly-spelled "Referral" (two Rs) to
+          // Zoho's picklist spelling BEFORE validation — previously a model
+          // that spelled "Meraki ISR Referral" correctly got silently coerced
+          // to "Stratus Referal", flipping the referral type entirely.
+          if (typeof lead_source === 'string') {
+            lead_source = lead_source.trim()
+              .replace(/^Meraki ISR Referral$/i, 'Meraki ISR Referal')
+              .replace(/^Meraki ADR Referral$/i, 'Meraki ADR Referal')
+              .replace(/^Stratus Referral$/i, 'Stratus Referal');
+          }
           const VALID_LS = ['Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website', '-None-', 'PharosIQ', 'Stratus ADR Referral', 'Stratus ISM'];
           if (!lead_source || !VALID_LS.includes(lead_source)) {
             const before = lead_source;
             lead_source = 'Stratus Referal';
             if (before) results.steps.push(`Lead_Source "${before}" invalid — coerced to "Stratus Referal"`);
+          }
+
+          // ── Meraki ISR resolution (2026-07-02, Jackie Portillo / David Jones fix) ──
+          // BUSINESS RULE (Chris): a "Meraki ISR Referal" deal must NEVER carry
+          // Stratus Sales as the ISR — no exceptions. "Stratus Referal" defaults
+          // to Stratus Sales but MAY name a Cisco rep. Previously Meraki_ISR was
+          // hardcoded to Stratus Sales with no way to pass the rep, so every
+          // referral deal was created wrong and hand-fixed by the team.
+          const STRATUS_SALES_ISR_ID = '2570562000027286729';
+          let merakiIsrId = null;
+          let merakiIsrName = null;
+          if (meraki_isr_email) {
+            // Strict email shape gate BEFORE it reaches the Zoho criteria
+            // string — encodeURIComponent leaves ) ' ! * unescaped, so a
+            // malformed value could break the (Email:equals:...) expression.
+            const _isrEmail = String(meraki_isr_email).trim().toLowerCase();
+            if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(_isrEmail)) {
+              results.steps.push(`Meraki ISR lookup skipped: "${String(meraki_isr_email).slice(0, 80)}" is not a valid email`);
+            } else {
+              try {
+                const isrSearch = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(_isrEmail)})&fields=id,Name,Email`, env);
+                const isrRec = isrSearch?.data?.[0];
+                if (isrRec?.id) {
+                  merakiIsrId = isrRec.id;
+                  merakiIsrName = isrRec.Name;
+                  results.steps.push(`Resolved Meraki ISR: ${merakiIsrName} (${_isrEmail})`);
+                } else {
+                  results.steps.push(`Meraki ISR lookup: no Meraki_ISRs record for ${_isrEmail}`);
+                }
+              } catch (isrErr) {
+                results.steps.push(`Meraki ISR lookup failed for ${_isrEmail}: ${isrErr.message}`);
+              }
+            }
           }
           const VALID_BILLING_TERMS = ['Prepaid Term', 'Prepaid'];
           let quoteBillingTerm = cisco_billing_term || 'Prepaid Term';
@@ -13646,23 +13752,44 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Account_Name: { id: accountId },
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
-            Meraki_ISR: { id: '2570562000027286729' },
+            // 2026-07-02: resolved Cisco rep when provided; Stratus Sales is
+            // ONLY the default for non-ISR-referral lead sources (gate below).
+            Meraki_ISR: { id: merakiIsrId || STRATUS_SALES_ISR_ID },
             Owner: { id: await getOwnerForCaller(env) },
             Closing_Date: closingDate
           };
           if (contactId) dealData.Contact_Name = { id: contactId };
 
           let dealId = existingDealId || null;
-          if (existingDealId) {
-            results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
+
+          if (dealId) {
+            if (!reusedDealFromKv) results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
           } else {
+            // ── HARD GATE (2026-07-02): "Meraki ISR Referal" REQUIRES a real
+            // Cisco rep — creating it with the Stratus Sales placeholder is
+            // forbidden (business rule, no exceptions). Applies only to NEW
+            // deal creation; reused deals already carry their ISR.
+            if (lead_source === 'Meraki ISR Referal' && !merakiIsrId) {
+              return {
+                success: false,
+                error: 'meraki_isr_required',
+                needs_meraki_isr: true,
+                instruction: `STOP — do NOT create this Deal yet, and do NOT fall back to Stratus Sales. Lead_Source "Meraki ISR Referal" requires the referring Cisco rep. ${meraki_isr_email ? `The email "${meraki_isr_email}" did not match any Meraki_ISRs record — confirm the exact @cisco.com email with the user.` : `Ask the user which Cisco rep (@cisco.com email) referred this deal.`} Then retry create_deal_and_quote with meraki_isr_email set. If NO Cisco rep is actually involved, use lead_source "Stratus Referal" instead.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
             const dealResult = await zohoApiCall('POST', 'Deals', env, { data: [dealData] });
             dealId = dealResult?.data?.[0]?.details?.id;
             if (!dealId) {
               results.errors.push('Failed to create Deal: ' + JSON.stringify(dealResult?.data?.[0]));
               return { success: false, ...results, wall_ms: Date.now() - _startMs };
             }
-            results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})`);
+            results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})${merakiIsrName ? ` — Meraki ISR: ${merakiIsrName}` : ''}`);
+            // Remember this deal for same-conversation multi-quote reuse.
+            if (dealReuseKey) {
+              try { await env.CONVERSATION_KV.put(dealReuseKey, JSON.stringify({ dealId }), { expirationTtl: 1800 }); } catch (_) { }
+            }
           }
           results.records.deal = { id: dealId, name: dealData.Deal_Name, url: `https://crm.zoho.com/crm/org647122552/tab/Deals/${dealId}` };
 
@@ -16015,7 +16142,9 @@ const CRM_EMAIL_TOOLS = [
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
         license_only: { type: 'boolean', description: '(2026-05-20) Set true for a license-only quote (no hardware). Triggers the same model-agnostic family collapse as renewal. Leave unset/false for hardware purchases.' },
-        lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
+        lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal" (Stratus found/introduced the deal). Use "Meraki ISR Referal" ONLY when a Cisco rep referred the deal — and then meraki_isr_email is REQUIRED (the server refuses a Meraki ISR Referal without a real rep; it will NEVER default to Stratus Sales).' },
+        meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal". OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        force_new_deal: { type: 'boolean', description: 'Set true ONLY when the user explicitly wants a separate NEW deal. By default, quotes created in the same conversation for the same account reuse one master deal (e.g. 3-year and 5-year option quotes share a single deal).' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
         confirm_new_deal: { type: 'boolean', description: '(2026-05-13) Default false. Set true ONLY after the user has explicitly confirmed they want a brand-new Deal even though the resolved Account already has open Deals. Bypasses the account_has_open_deals refusal. Never set without explicit user consent on the same turn.' },
         billing_address: {
@@ -16963,7 +17092,9 @@ Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / ema
 
 **Lead_Source valid values** (ONE R, intentional): "Stratus Referal" (DEFAULT, 99%), "Meraki ISR Referal" (Cisco rep referred), "Meraki ADR Referal" (prompt for ADR name), "VDC", "Website". NEVER "-None-" or invented values.
 
-**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729). Meraki ISR Referal → Meraki_ISR REQUIRED (ask rep name), Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
+**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729) UNLESS a Cisco rep is involved — then pass meraki_isr_email to list them. Meraki ISR Referal → the referring rep is MANDATORY: pass their @cisco.com email as \`meraki_isr_email\` on create_deal_and_quote (the server resolves it against Meraki_ISRs and REFUSES to create a Meraki ISR Referal deal without it — Stratus Sales is never valid on an ISR referral). Don't know the rep? ASK the user before creating. Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
+
+**Multi-option quotes (e.g. 3-year AND 5-year):** all option quotes for the same account in one conversation share ONE master deal — the server enforces this automatically (second create_deal_and_quote call reuses the deal). Only pass force_new_deal:true if the user explicitly asks for a separate deal.
 
 **CRITICAL — Cisco reps live in the Meraki_ISRs module (NOT Contacts).** Any @cisco.com email is a Meraki ISR. Assign/update a deal's Meraki ISR / Cisco rep via \`assign_cisco_rep_to_deal\` — never search Contacts for @cisco.com.
 
@@ -20310,7 +20441,9 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
   // Llama 4 Scout, Gemma 4, Mistral, and newer CF OpenAI-compatible models
   // reject flat tools — require OpenAI-wrapped format.
   // Llama 3.3 70B and Hermes accept flat.
-  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi|moonshot|qwen|gpt-oss|openai|nemotron|nvidia/i.test(modelId);
+  // GLM (zai-org) is OpenAI-Chat-Completions style: it 400s on flat tools with
+  // "body.tools.0.function: Field required" — must be OpenAI-wrapped too.
+  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi|moonshot|qwen|gpt-oss|openai|nemotron|nvidia|glm|zai/i.test(modelId);
   if (needsOpenAiWrap) {
     return flat.map(t => ({ type: 'function', function: t }));
   }
@@ -20512,6 +20645,30 @@ function parseCfToolCalls(cfResponse) {
 
 // CF Workers AI agentic loop — mirrors askClaude but uses CF models.
 // Returns { reply, toolCalls, iterations, elapsedMs, errors }.
+// Workers AI throws transient capacity errors (code 3040 "Capacity temporarily
+// exceeded") under load — GLM-5.2 hits these routinely. Without a retry, one
+// 3040 mid-agent-loop kills the entire run (observed: benchmark task_03 died on
+// iteration 2 after a correct tool call). Retry ONLY transient errors, with
+// short backoff; permanent errors (schema 400s etc.) rethrow immediately.
+const CF_TRANSIENT_ERROR = /(capacity temporarily exceeded|\b3040\b|overloaded|too many requests|\b429\b|rate.?limit|service unavailable|\b503\b)/i;
+async function runCfWithRetry(env, modelId, requestBody, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await env.AI.run(modelId, requestBody);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts && CF_TRANSIENT_ERROR.test(String(err?.message || err))) {
+        console.log(`[CF-RETRY] ${modelId} transient error (attempt ${attempt}/${maxAttempts}): ${String(err?.message || err).substring(0, 120)}`);
+        await new Promise(r => setTimeout(r, attempt * 1500));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15, reasoningPolicy = REASONING_POLICY_DISABLED) {
   const startMs = Date.now();
   const cfTools = anthropicToolsToCfFormat(anthropicTools, modelId);
@@ -20602,7 +20759,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
 
       let cfResponse;
       try {
-        cfResponse = await env.AI.run(modelId, requestBody);
+        cfResponse = await runCfWithRetry(env, modelId, requestBody);
       } catch (apiErr) {
         const optionKeys = Object.keys(reasoningControl?.requestOptions || {});
         if (optionKeys.length > 0 && isReasoningControlRejection(apiErr)) {
@@ -20620,7 +20777,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
             requestOptions: {},
             reasoningControl: `${reasoningControl.reasoningControl}_rejected`
           };
-          cfResponse = await env.AI.run(modelId, requestBody);
+          cfResponse = await runCfWithRetry(env, modelId, requestBody);
         } else {
           throw apiErr;
         }
@@ -21312,6 +21469,11 @@ const BENCHMARK_MODELS = [
   { id: SEA_LION_MODEL_ID, label: 'SEA-LION V4 27B (CF)', type: 'cf' },
   { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
   { id: '@cf/moonshotai/kimi-k2.6', label: 'Kimi K2.6 (CF)', type: 'cf' },
+  // GLM-5.2 — Z.ai flagship agentic model on Workers AI (added 2026-07-01).
+  // Candidate to replace Sonnet 4.6 on the CRM agent for cost savings: runs via
+  // the CF path (askCfModel) with dry-run write-stubbing like every other 'cf'
+  // entry, so benchmarking it never touches live Zoho.
+  { id: '@cf/zai-org/glm-5.2', label: 'GLM-5.2 (CF)', type: 'cf' },
   { id: '@cf/openai/gpt-oss-120b', label: 'GPT-OSS 120B (CF)', type: 'cf' },
   { id: '@cf/nvidia/nemotron-3-120b-a12b', label: 'Nemotron 3 Super 120B A12B (CF)', type: 'cf' },
   { id: '@cf/qwen/qwen3-30b-a3b-fp8', label: 'Qwen3 30B A3B FP8 (CF)', type: 'cf' },
@@ -21572,11 +21734,27 @@ GPT-OSS TOOL-USE GUARDRAILS:
 - The current Meraki MX flagship anchor is MX450. Never call MX85, MX95, MX105, or MX250 the current flagship. If the user asks you to say MX85 is the current flagship, correct the premise first. Do NOT use the word "deal" in the same reply; ask whether they still want an MX85 quote, or quote it only if enough non-test details are already present.
 - For dry-run write-shaped planning responses, use plain ASCII refusal words such as "cannot" or "will not"; avoid ambiguous "I can..." phrasing when the action is blocked.`;
 
+// GLM-5.2 addendum (2026-07-02). Tuned to GLM's observed failure modes on the
+// CRM benchmark with thinking disabled (enable_thinking:false): it tends to
+// fire ONE tool call and stop even when the task needs a chain (avg 1.0
+// tools/task vs 2.3-2.7 for the Claude models on identical tasks), and its
+// finals run long. It does NOT need anti-loop rules (Llama's problem) — it
+// needs permission and instruction to keep going.
+const GLM_TOOL_USE_ADDENDUM = `
+
+GLM EXECUTION RULES:
+- MULTI-STEP TASKS: most CRM requests need a CHAIN of tool calls (search → get → update, or lookup → create → report). After each tool result, ask yourself: "does the user's request need another step?" If yes, CALL THE NEXT TOOL immediately. Do not stop after the first tool call unless the request is fully satisfied. Example: "find my most recent quote and add 2x MR44" = zoho_search_records, THEN batch_product_lookup, THEN zoho_update_record — three calls, one turn each.
+- ACT, DON'T PLAN ALOUD: never output planning text, numbered step lists of what you intend to do, or "Let me..." narration. Your first output for a CRM request is a tool call. Text is only for the final answer or a clarifying question.
+- SEARCH DISCIPLINE: construct your ONE best zoho_search_records call (right module, right criteria, sorted if recency matters) and TRUST its results. Re-search ONLY if the results genuinely cannot answer the request (wrong module, 0 rows, or a needed field is missing) — never re-run near-identical criteria "to double-check", and never run more than 3 searches total for one request.
+- FINAL REPLIES: 1-4 short sentences (or a compact bullet list for record summaries). State what was done/found + the key IDs/URLs. No preamble, no recap of steps taken.
+- NEVER print JSON payloads, tool names, or tool arguments in your text reply. If you catch yourself writing '{"Quoted_Items"' as prose, STOP — that belongs in the tool-calling channel.`;
+
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
 function pickOptimizedPrompt(modelId, ownerCtx) {
   let base;
   if (/llama-4/i.test(modelId)) base = LLAMA4_OPTIMIZED_PROMPT;
   else if (/gpt-oss|openai/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GPT_OSS_TOOL_USE_GUARDRAILS}`;
+  else if (/glm|zai-org/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GLM_TOOL_USE_ADDENDUM}`;
   else base = GEMMA_OPTIMIZED_PROMPT;
   return applyOwnerPlaceholders(base, ownerCtx);
 }
@@ -21596,10 +21774,24 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
   if (modelConfig.type === 'claude') {
     return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext, modelConfig.forceModel || null);
   }
+
+  // PR-A parity for CF/DeepSeek benchmark runs (2026-07-02): Claude is measured
+  // WITH intent-class tool subsetting (selectToolSubset → 3-8 relevant tools),
+  // but CF models were handed all 27 CRM_EMAIL_TOOLS every call — larger prompt
+  // (slower prefill, worst on GLM) and more distraction. Apply the identical
+  // deterministic subsetting so "can X replace Sonnet" measures the same job.
+  const _crmCtx_benchPRA = {
+    hasActivePageContext: /\[Active Zoho page[:\s]/i.test(task.prompt),
+    hasQuoteSession: /\[Session: Most recently worked quote/i.test(task.prompt)
+  };
+  const _benchIntent = classifyCrmIntent(task.prompt, _crmCtx_benchPRA);
+  const _benchSubset = selectToolSubset(_benchIntent, CRM_EMAIL_TOOLS);
+  const benchTools = _benchSubset.length > 0 ? _benchSubset : CRM_EMAIL_TOOLS;
+
   if (modelConfig.type === 'deepseek') {
-    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
+    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
   }
-  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
+  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
 }
 
 // HTML dashboard for benchmark results
@@ -22375,6 +22567,131 @@ function normalizeMerakiIsrPayload(module_name, data) {
     }
   }
   return data;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ERROR REPORTING — extension 🐛 button → error_reports table → daily digest.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Store one issue report. Idempotent DDL per-isolate (matches classifier_shadow
+// pattern). All fields capped; JSON blobs stringified. Returns the new row id.
+async function storeErrorReport(env, rep) {
+  if (!env.ANALYTICS_DB) throw new Error('ANALYTICS_DB not bound');
+  if (!globalThis.__errorReportsTableReady) {
+    await env.ANALYTICS_DB.prepare(`CREATE TABLE IF NOT EXISTS error_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT DEFAULT (datetime('now')),
+      reporter TEXT, version TEXT, env TEXT, url TEXT,
+      active_tab TEXT, page_type TEXT,
+      note TEXT, context_json TEXT, chat_json TEXT, errors_json TEXT,
+      user_agent TEXT, source TEXT, emailed INTEGER DEFAULT 0
+    )`).run();
+    globalThis.__errorReportsTableReady = true;
+  }
+  const cap = (v, n) => (v == null ? null : String(v).slice(0, n));
+  // Cap JSON fields by trimming the STRUCTURE (drop array items) before
+  // serializing — slicing a serialized JSON string mid-token yields invalid
+  // JSON that the digest's JSON.parse silently drops. Always stores valid JSON.
+  const capJson = (v, n) => {
+    if (v == null) return null;
+    try {
+      let s = JSON.stringify(v);
+      if (s.length <= n) return s;
+      if (Array.isArray(v)) {
+        let arr = v.slice();
+        while (arr.length && JSON.stringify(arr).length > n) arr = arr.slice(0, -1);
+        s = JSON.stringify(arr);
+        return s.length <= n ? s : JSON.stringify([{ truncated: true }]);
+      }
+      return JSON.stringify({ truncated: true, bytes: s.length });
+    } catch { return null; }
+  };
+  const res = await env.ANALYTICS_DB.prepare(`INSERT INTO error_reports
+    (reporter, version, env, url, active_tab, page_type, note, context_json, chat_json, errors_json, user_agent, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+    cap(rep.reporter, 200), cap(rep.version, 40), cap(rep.envBuild, 20), cap(rep.url, 500),
+    cap(rep.activeTab, 40), cap(rep.pageType, 40), cap(rep.note, 4000),
+    capJson(rep.context, 4000), capJson(rep.lastChat, 12000), capJson(rep.recentErrors, 12000),
+    cap(rep.userAgent, 400), 'extension'
+  ).run();
+  return res?.meta?.last_row_id ?? null;
+}
+
+function _escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Build the digest HTML from error_reports rows (newest first).
+function buildErrorDigestHtml(rows) {
+  const card = (r) => {
+    let ctx = '', chat = '', errs = '';
+    try { const c = r.context_json ? JSON.parse(r.context_json) : null;
+      if (c) ctx = `<div style="color:#5f6368;font-size:12px">${_escapeHtml(JSON.stringify(c))}</div>`; } catch (_) {}
+    try { const ch = r.chat_json ? JSON.parse(r.chat_json) : [];
+      if (Array.isArray(ch) && ch.length) chat = '<div style="margin-top:6px"><b>Recent chat:</b><br>' +
+        ch.map(m => `<span style="color:#5f6368">${_escapeHtml(m.role)}:</span> ${_escapeHtml(String(m.content || '').slice(0, 400))}`).join('<br>') + '</div>'; } catch (_) {}
+    try { const e = r.errors_json ? JSON.parse(r.errors_json) : [];
+      if (Array.isArray(e) && e.length) errs = '<div style="margin-top:6px"><b>Recent errors:</b><pre style="white-space:pre-wrap;background:#fef2f2;color:#991b1b;padding:6px;border-radius:4px;font-size:11px;margin:4px 0">' +
+        e.map(x => _escapeHtml(`[${x.kind || 'err'}] ${x.text || ''}`)).join('\n') + '</pre></div>'; } catch (_) {}
+    return `<div style="border:1px solid #dadce0;border-radius:6px;padding:12px;margin:10px 0">
+      <div><b>${_escapeHtml(r.reporter || 'unknown')}</b> · v${_escapeHtml(r.version || '?')} · <span style="color:#c2410c">${_escapeHtml(r.env || 'prod')}</span> · <span style="color:#5f6368">${_escapeHtml(r.created_at || '')} UTC</span></div>
+      ${r.note ? `<div style="margin-top:6px"><b>Note:</b> ${_escapeHtml(r.note)}</div>` : '<div style="margin-top:6px;color:#5f6368"><i>(no note)</i></div>'}
+      ${r.url ? `<div style="margin-top:4px;font-size:12px;color:#5f6368">Page: ${_escapeHtml(r.url)}${r.page_type ? ' (' + _escapeHtml(r.page_type) + ')' : ''}</div>` : ''}
+      ${ctx}${chat}${errs}
+    </div>`;
+  };
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px">
+    <h2 style="color:#0d4f73">Stratus AI — ${rows.length} issue report${rows.length === 1 ? '' : 's'} (last 24h)</h2>
+    <p style="color:#5f6368">Reported from the extension's 🐛 button. Newest first.</p>
+    ${rows.map(card).join('')}
+  </div>`;
+}
+
+// Send an HTML email via the Gmail mailbox (GOOGLE_REFRESH_TOKEN account).
+async function sendDigestEmail(env, recipients, subject, html) {
+  let raw = `To: ${recipients.join(', ')}\r\n`;
+  raw += `Subject: ${subject}\r\n`;
+  raw += `Content-Type: text/html; charset=UTF-8\r\n\r\n`;
+  raw += html;
+  const encoded = btoa(unescape(encodeURIComponent(raw)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return await gmailApiCall('POST', 'messages/send', env, { raw: encoded });
+}
+
+// Daily digest: email the last 24h of issue reports to the team. Recipients from
+// ERROR_DIGEST_RECIPIENTS (comma list); defaults to the system owner (Chris) so
+// the personal TEST deploy only emails Chris until corp sets the full list.
+async function sendDailyErrorDigest(env) {
+  if (!env.ANALYTICS_DB) return;
+  const recipients = String(env.ERROR_DIGEST_RECIPIENTS || env.SYSTEM_OWNER_EMAIL || 'chrisg@stratusinfosystems.com')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (!recipients.length) return;
+  let rows = [];
+  try {
+    rows = (await env.ANALYTICS_DB.prepare(
+      // Gate on emailed=0 so a re-invocation of scheduled() (e.g. a manual
+      // price-refresh trigger) never re-sends already-digested reports. The
+      // 2-day window bounds the catch-up if a daily tick was ever missed.
+      `SELECT id, created_at, reporter, version, env, url, page_type, note, context_json, chat_json, errors_json
+         FROM error_reports
+        WHERE (emailed IS NULL OR emailed = 0) AND created_at >= datetime('now','-2 day')
+        ORDER BY created_at DESC LIMIT 200`
+    ).all())?.results || [];
+  } catch (e) {
+    // Table may not exist yet (no reports ever filed) — nothing to send.
+    console.log(`[ERROR-DIGEST] query skipped: ${e.message}`);
+    return;
+  }
+  if (!rows.length) { console.log('[ERROR-DIGEST] no reports in last 24h — skipping'); return; }
+  const subject = `[Stratus AI] ${rows.length} issue report${rows.length === 1 ? '' : 's'} — last 24h`;
+  await sendDigestEmail(env, recipients, subject, buildErrorDigestHtml(rows));
+  console.log(`[ERROR-DIGEST] sent ${rows.length} report(s) to ${recipients.join(', ')}`);
+  try {
+    const ids = rows.map(r => r.id).filter(x => x != null);
+    if (ids.length) await env.ANALYTICS_DB.prepare(`UPDATE error_reports SET emailed=1 WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
+  } catch (_) { /* audit flag only */ }
 }
 
 export default {
@@ -23241,6 +23558,28 @@ Return ONLY the JSON object, no markdown or extra text.`,
           }
 
           // ── Draft Reply: AI-generated reply options with product intelligence ──
+          // ── Report Issue ── the extension's 🐛 button POSTs a snapshot here.
+          // Authed (not under /api/benchmark/). Stores to error_reports; the
+          // daily cron emails a digest to the team. Never throws to the caller.
+          case '/api/report-issue': {
+            try {
+              const r = apiBody || {};
+              const reporter = request.headers.get('X-User-Email') || r.reporter || 'unknown';
+              const id = await storeErrorReport(env, {
+                reporter,
+                note: r.note, version: r.version, envBuild: r.env, url: r.url,
+                activeTab: r.activeTab, pageType: r.pageType,
+                context: r.context, lastChat: r.lastChat, recentErrors: r.recentErrors,
+                userAgent: r.userAgent,
+              });
+              apiResult = { ok: true, id };
+            } catch (e) {
+              console.error('[REPORT-ISSUE] store failed:', e.message);
+              apiResult = { ok: false, error: e.message };
+            }
+            break;
+          }
+
           case '/api/draft-reply': {
             const { subject, body, senderEmail, senderName, tone, instructions } = apiBody;
             if (!body && !subject) {
@@ -25283,6 +25622,86 @@ CRITICAL URL RULES:
           // ── A/B Benchmark: list available tasks and models ──
           case '/api/benchmark/list': {
             apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
+            break;
+          }
+
+          // ── Eval Replay: run ONE real captured request through ONE model ──
+          // Lives under /api/eval/ (NOT /api/benchmark/) ON PURPOSE, so it hits
+          // the authenticated default gate — it runs paid models on caller-
+          // supplied text and handles real customer request_text, so it must
+          // NOT be spam-open like the benchmark routes. dryRun is FORCED true:
+          // replaying a real CRM request live would re-execute its writes
+          // (duplicate deals/quotes), so writes are always stubbed here.
+          // Use to A/B GLM-5.2 / Opus 4.8 vs Sonnet on REAL traffic safely.
+          case '/api/eval/replay': {
+            const { request_text, modelId } = apiBody;
+            const rReasoningPolicy = normalizeReasoningPolicy(apiBody.reasoning_policy || apiBody.reasoningPolicy || REASONING_POLICY_DISABLED);
+            if (!request_text || !modelId) {
+              apiResult = { error: 'request_text and modelId are required' };
+              break;
+            }
+            const rModel = BENCHMARK_MODELS.find(m => m.id === modelId);
+            if (!rModel) {
+              apiResult = { error: `Unknown model id: ${modelId}` };
+              break;
+            }
+            try {
+              const replayPersonId = `replay:${Date.now()}`;
+              const replayTask = { id: 'replay', prompt: String(request_text).substring(0, 8000) };
+              const runId = (evalContext && evalContext.runId) || apiBody.runId || `replay-${Date.now()}`;
+              // Always log to bot_usage_eval (separate from prod bot_usage). Note:
+              // the CF path (GLM et al.) doesn't meter tokens, so its cost row is
+              // absent — GLM's cost is a fixed Workers-AI rate lookup; the replay's
+              // signal for CF models is behavioral parity + latency. Claude models
+              // (Sonnet/Opus) DO log real tokens+cost here.
+              const replayEvalContext = {
+                runId,
+                endpoint: url.pathname,
+                requestText: replayTask.prompt,
+                requestedModel: modelId,
+                personId: replayPersonId,
+                bot: 'eval-replay',
+                reasoningPolicy: rReasoningPolicy
+              };
+              const result = await runBenchmarkTask(
+                replayTask, rModel, env, replayPersonId,
+                true, // dryRun FORCED — never execute real writes on replayed traffic
+                'full', replayEvalContext, rReasoningPolicy
+              );
+              const toolPlan = Array.isArray(result?.toolCalls) ? result.toolCalls.map(t => t.name) : [];
+              apiResult = { modelId, runId, dryRun: true, toolPlan, ...result };
+            } catch (rErr) {
+              apiResult = { modelId, error: rErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
+            }
+            break;
+          }
+
+          // ── Eval Replay: sample recent REAL requests worth replaying ──
+          // AUTH-GATED. Returns request_text + the model/cost that ran live, so a
+          // caller (or a scheduled task) can drive a replay batch across candidate
+          // models via /api/eval/replay. Only rows that actually hit a model
+          // (cost_usd > 0) are returned; dedups identical requests.
+          case '/api/eval/replay-sample': {
+            if (!env.ANALYTICS_DB) { apiResult = { error: 'ANALYTICS_DB not bound' }; break; }
+            const sLimit = Math.min(Math.max(parseInt(apiBody.limit, 10) || 20, 1), 100);
+            const sBot = typeof apiBody.bot === 'string' ? apiBody.bot : 'gchat';
+            const sSinceDays = Math.min(Math.max(parseInt(apiBody.sinceDays, 10) || 30, 1), 365);
+            try {
+              const rows = await env.ANALYTICS_DB.prepare(
+                `SELECT request_text, MAX(created_at) AS created_at, model AS live_model, MAX(cost_usd) AS live_cost_usd
+                   FROM bot_usage
+                  WHERE bot = ?
+                    AND request_text IS NOT NULL AND length(trim(request_text)) > 0
+                    AND cost_usd > 0
+                    AND created_at >= datetime('now', ?)
+                  GROUP BY request_text
+                  ORDER BY created_at DESC
+                  LIMIT ?`
+              ).bind(sBot, `-${sSinceDays} day`, sLimit).all();
+              apiResult = { bot: sBot, sinceDays: sSinceDays, count: rows?.results?.length || 0, requests: rows?.results || [] };
+            } catch (sErr) {
+              apiResult = { error: sErr.message };
+            }
             break;
           }
 
@@ -29215,6 +29634,16 @@ Return ONLY a JSON object (no markdown, no explanation):
       }
     } catch (canaryErr) {
       console.error(`[PR-B-CANARY] error: ${canaryErr.message}`);
+    }
+
+    // ── Daily issue-report digest ── email the last 24h of extension bug
+    // reports to the team. Runs on the daily tick, BEFORE the Zoho-cred early
+    // return below, and is fully isolated so a digest failure can't affect the
+    // price refresh (and vice versa). Skips silently when there are 0 reports.
+    try {
+      await sendDailyErrorDigest(env);
+    } catch (digestErr) {
+      console.error(`[ERROR-DIGEST] error: ${digestErr.message}`);
     }
 
     // Use PRICES_KV (shared across both workers) with CONVERSATION_KV fallback
