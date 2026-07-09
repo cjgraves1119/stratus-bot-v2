@@ -10810,7 +10810,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
         'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
-        'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
+        'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
         'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
         'webex_send_message': { success: true, message_id: mockId, dry_run: true },
       };
@@ -16011,21 +16011,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       case 'gmail_create_draft': {
-        const { to, subject, body, cc, bcc, in_reply_to, thread_id } = toolInput;
-        // Build RFC 2822 message
-        let raw = `To: ${to}\r\n`;
-        if (cc) raw += `Cc: ${cc}\r\n`;
-        if (bcc) raw += `Bcc: ${bcc}\r\n`;
-        raw += `Subject: ${subject}\r\n`;
-        if (in_reply_to) raw += `In-Reply-To: ${in_reply_to}\r\nReferences: ${in_reply_to}\r\n`;
-        raw += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`;
-        raw += body;
-        // Base64url encode
-        const encoded = btoa(unescape(encodeURIComponent(raw)))
-          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        const draftBody = { message: { raw: encoded } };
-        if (thread_id) draftBody.message.threadId = thread_id;
-        return await gmailApiCall('POST', 'drafts', env, draftBody);
+        // 2026-07-09 (corp error_reports #4): DISABLED. Drafts were created via the
+        // worker's shared-mailbox OAuth (gmailApiCall users/me), so they landed in a
+        // mailbox the requesting user can't see — the agent then told the user "the
+        // draft is saved in Gmail" while their Drafts folder stayed empty. The tool
+        // is removed from the email subset; this redirect covers tiers that pass the
+        // full tool list (Llama waterfall) or stale cached toolsets.
+        return {
+          success: false,
+          draft_disabled: true,
+          instruction: 'Gmail draft creation is disabled. Render the COMPLETE email body inline in your chat reply (body only — no To/Cc/Subject headers) so the user can copy it into Gmail. Do NOT claim a draft was saved anywhere.'
+        };
       }
 
       case 'find_customer_license_claim_key': {
@@ -16522,7 +16518,10 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'gmail_create_draft',
-    description: 'Create a Gmail draft reply or new email. The draft will appear in the user\'s Drafts folder for review before sending. Use this for composing email responses.',
+    // 2026-07-09: DISABLED (kept in the registry only so stale references resolve;
+    // no tool subset includes it and the executor returns a redirect). Drafts via
+    // the shared-mailbox OAuth were invisible to the requesting user.
+    description: 'DISABLED — do not call. Render the complete email body inline in your chat reply instead (body only, no To/Cc/Subject). Drafts cannot be saved to Gmail from here.',
     input_schema: {
       type: 'object',
       properties: {
@@ -16550,7 +16549,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'gmail_send_email',
-    description: 'Send an email directly via Gmail. WARNING: Only use after explicit user approval. Prefer gmail_create_draft for composing responses, then send only after review.',
+    description: 'Send an email directly via Gmail. WARNING: Only use after the user has EXPLICITLY approved the exact body you rendered inline in chat. Never send a body the user has not seen and approved in this conversation.',
     input_schema: {
       type: 'object',
       properties: {
@@ -16978,9 +16977,14 @@ const TOOL_SUBSETS = Object.freeze({
   ],
   // Email-centric flows. Includes zoho_create_record so tasks can be made
   // from an email context without re-classifying.
+  // 2026-07-09 (corp error_reports #4): gmail_create_draft REMOVED — the worker's
+  // shared-mailbox OAuth saved drafts into a mailbox the user can't see, and the
+  // agent then claimed "the draft is saved in Gmail". Drafts now render inline
+  // in chat (see EMAIL RULES in the system prompt); the executor case returns a
+  // redirect for any tier that still tries it.
   email: [
     'gmail_search_messages', 'gmail_read_message', 'gmail_read_thread',
-    'gmail_create_draft', 'gmail_send_email',
+    'gmail_send_email',
     'zoho_search_records', 'zoho_create_record', 'find_customer_license_claim_key'
   ],
   // Stratus URL ecomm-link generation only.
@@ -17114,12 +17118,24 @@ function classifyCrmIntent(text, ctx = {}) {
   }
 
   // 4. Email composition / inbox
-  if (/\b(draft|compose|write|send|reply)\s+(an?\s+)?(email|message|response|follow[\s-]?up|reply)/.test(t)
+  // 2026-07-09 (corp error_reports #4): 'generate' added — "generate a response"
+  // is the extension's most common drafting phrasing and previously fell through.
+  if (/\b(draft|compose|write|send|reply|generate)\s+(an?\s+)?(email|message|response|follow[\s-]?up|reply)/.test(t)
       || /\b(check|read|search|scan|summarize|review)\s+.{0,30}(email|inbox|gmail|thread)/.test(t)
       || /\bgmail\b/.test(t)
       || /\binbox\b/.test(t)
       || /\bdraft\s+a\s+reply\b/.test(t)) {
     return { class: 'email', confidence: 0.85 };
+  }
+
+  // 4b. Draft follow-ups (2026-07-09): "show/edit/shorten the draft" on the turn
+  // AFTER a draft was rendered has no compose-verb bigram and was landing in
+  // crm_write (no gmail reads → the agent denied the draft existed). A bare
+  // draft/reply-noun reference stays in the email class. Excludes draft
+  // quote/deal/PO ("revise the draft quote"), which are CRM mutations.
+  if (/\b(show|display|view|see|render|edit|revise|reword|rewrite|shorten|lengthen|tweak|redo)\b[^.!?]{0,25}\b(draft|reply|response)\b(?!\s*(quote|deal|po|order|invoice))/.test(t)
+    || /\b(the|that|this|my)\s+draft\b(?!\s*(quote|deal|po|order|invoice))/.test(t)) {
+    return { class: 'email', confidence: 0.8 };
   }
 
   // 5. CRM mutation verbs on Zoho records. `update` excludes the read idiom
@@ -17382,10 +17398,16 @@ NEVER create new dropdown values — Zoho silently accepts invalid values and cr
 - Before closing a task on an active deal, check for successor tasks.
 - Every new Deal MUST have a follow-up task created as the FINAL step before reporting done.
 
-## EMAIL RULES
-- Always create a Gmail draft first (gmail_create_draft) — NEVER send without approval.
-- Blank line between paragraphs. Sign as: {{OWNER_DISPLAY_NAME}}, Stratus Information Systems.
-- Voice: friendly, consultative, concise. End every customer email with a question or CTA.
+## EMAIL RULES — DRAFTS RENDER IN CHAT
+- When asked to draft/generate/compose/write an email or reply: output the COMPLETE email body directly in your chat response, as plain text the user can copy. Body ONLY — no To:/Cc:/Subject: headers, no commentary mixed into the body (unless the user explicitly asks for recipients/subject).
+- You CANNOT create or save Gmail drafts. NEVER claim a draft was saved to Gmail or anywhere else. If asked to "save it as a draft", explain the body is here to copy into Gmail.
+- NEVER send an email without the user's explicit approval of the exact body you rendered.
+- **Ground the draft in the FULL thread.** Use the email context block and gmail_read_thread / gmail_search_messages (when available) to mine the WHOLE conversation: prior asks, commitments, and topics other participants raised (e.g. a Cisco rep's licensing or tier-upgrade explanation). When another participant raised something Stratus can help with, add ONE short paragraph offering specific help on it, naming the specifics — never a generic "anything else we can help with?".
+- **Voice ({{OWNER_DISPLAY_NAME}} / Stratus):** warm, confident, consultative. Warm intro (a rep/partner introduced us): thank the referrer FIRST by name, then greet the customer by first name, then the credibility line ("We are Cisco/Meraki specialists, and look forward to making your experience even better through our involvement."). Default lean — the shortest reply that fully answers, then at most one clearly-secondary value-add. Contractions are natural. NO em dashes. NO filler openers ("hope this finds you well") or AI phrases ("I'd be happy to assist"). Blank line between every paragraph. End on a question or ONE specific CTA. Never invent SKUs/prices/URLs; never mention Stratus margin. Sign off:
+
+Best,
+{{OWNER_DISPLAY_NAME}}
+Stratus Information Systems
 
 ## GMAIL SEARCH
 Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:2026/01/01\`.
@@ -17474,7 +17496,7 @@ Present complete summary before creating records: Email Thread, Account (NEW/EXI
 After confirmation, call **create_deal_and_quote** with ALL details (one tool call). Do NOT manually create records. Report results with Zoho links.
 
 ### PHASE 7 — OPTIONAL: DRAFT REPLY
-Offer to draft a reply (gmail_create_draft, never auto-send).
+Offer to draft a reply — render the full body inline in chat for the user to copy (per EMAIL RULES; drafts can NOT be saved to Gmail, never claim otherwise).
 `;
 
 const CRM_PROMPT_ADMIN_ACTION = `
@@ -17677,7 +17699,7 @@ function toolProgressMessage(toolName, toolInput) {
     case 'gmail_read_thread':
       return `📧 Loading email thread...`;
     case 'gmail_create_draft':
-      return `✍️ Creating draft email to ${toolInput.to || ''}...`;
+      return `✍️ Composing email...`;
     case 'gmail_send_email':
       return `📤 Sending email to ${toolInput.to || ''}...`;
     case 'find_customer_license_claim_key':
@@ -19149,7 +19171,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     // GChat CRM path (ctx.waitUntil 30s limit): only 2 messages to fit agentic flow in ~15-20s.
     // Chrome extension chat (120s timeout): 10 messages for multi-turn context retention.
     // Non-CRM quoting path: full history (default 10 from KV).
-    const isExtensionChat = personId && personId.startsWith('ext:');
+    // 2026-07-09 (corp error_reports #4): the extension now arrives via the gateway
+    // with personId `gw:<email>` — only the legacy direct path used `ext:`. The gw:
+    // prefix was falling into the 2-message GChat branch, so follow-up turns lost
+    // the thread/draft context from two turns back.
+    const isExtensionChat = personId && (personId.startsWith('ext:') || personId.startsWith('gw:'));
     const effectiveHistory = useTools
       ? (isExtensionChat ? history.slice(-10) : history.slice(-2))
       : history;
@@ -20615,7 +20641,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
       'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
-      'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
+      'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
       'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
       'webex_send_message': { success: true, message_id: mockId, dry_run: true },
       'zoho_create_note': { data: [{ code: 'SUCCESS', details: { id: mockId } }] },
