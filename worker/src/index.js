@@ -3434,7 +3434,10 @@ async function handleFollowUpModifier(text, personId, kv) {
   const hasSwapPrefix = /^(CHANGE|SWAP|REPLACE|SWITCH)\b/i.test(upper);
 
   // Pure modifier phrases (no SKU tokens needed)
-  const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?)\s*\.?\s*$/i.test(upper);
+  // 2026-07-09: remove-phrasings added ("remove the licenses", "drop licenses",
+  // "take the licenses off/out") so corrections hit the deterministic hardware-only
+  // revision instead of falling through to the CRM agent.
+  const isHwOnly = /^(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+(THE\s+)?HARDWARE|NO\s+LICENSE[S]?|WITHOUT\s+LICENSE[S]?|(?:REMOVE|DROP|TAKE)\s+(?:OUT\s+|OFF\s+)?(?:THE\s+|ALL\s+)?LICEN[SC]E[S]?(?:\s+(?:OUT|OFF))?(?:\s+(?:FROM|OF)\s+(?:THE\s+|THAT\s+|THIS\s+)?(?:QUOTE|CART|ORDER))?)\s*\.?\s*$/i.test(upper);
   const isLicOnly = /^(LICENSE[S]?\s+ONLY|LICENCE[S]?\s+ONLY|JUST\s+(THE\s+)?LICENSE[S]?|LICENSE[S]?\s+RENEWAL|RENEWAL\s+ONLY|NO\s+HARDWARE)\s*\.?\s*$/i.test(upper);
   const isTermOnly = upper.match(/^(?:(?:CHANGE|SWAP|REPLACE|SWITCH|MAKE|GO)(?:\s+(?:TO|WITH\s+THE|WITH|IT\s+TO|IT|THAT|TERM\s+TO))?\s+)?(?:JUST\s+(?:THE\s+)?|ONLY\s+(?:THE\s+)?)?(?:A\s+)?([135])\s*-?\s*(?:YEAR|YR)S?(?:\s+(?:ONLY|PLEASE|LICENSE[S]?|TERM))?\s*\.?\s*$/i);
   const isAddPricing = /^(ADD\s+PRICING|WITH\s+PRICING|INCLUDE\s+PRICING|SHOW\s+ME\s+PRICING|HOW\s+MUCH(\s+(IS|ARE)\s+(IT|THAT|THOSE|THIS|THESE|THEM))?\s*\??\s*)$/i.test(upper);
@@ -5984,11 +5987,17 @@ function assignClauseIntent(items, upper, modifiers) {
   // hardware") or "hardware for …". Deliberately NOT matching "hardware <noun>"
   // (e.g. "hardware support/specs/model"), which is descriptive, not hardware-only
   // intent — so a license is never dropped on those.
-  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(A\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE))\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
+  // 2026-07-09: plural forms added — "WITHOUT LICENSES"/"NO LICENSES" never
+  // matched (singular-only + \b), so those asks quoted LICENSE-ONLY (verified
+  // on baseline: "quote 3 MS130-24P without licenses" → LIC-only, all terms).
+  const HW_ONLY_RE = /\b(HARDWARE\s+ONLY|HW\s+ONLY|JUST\s+THE\s+HARDWARE|WITHOUT\s+(A\s+|ANY\s+)?(?:LICENSE|LICENCE|LISCENSE|LISCENCE)S?|NO\s+(?:LICENSE|LICENCE|LISCENSE|LISCENCE)S?)\b|\bHARDWARE\s*$|\bHARDWARE\s+FOR\b/;
   const LIC_RE = /\b(LICENSE[S]?|LICENCE[S]?|LISCENSE[S]?|LISCENCE[S]?|LICESE[S]?|RENEWAL[S]?|RENEW)\b/;
+  // 2026-07-09 (parity with gchat): "WITH … license(s)" is a BUNDLING phrase
+  // (hardware + license), not a license-only signal — neutralize before LIC_RE.
+  const WITH_LIC_RE = /\bWITH\s+(?:A\s+|AN\s+|THE\s+)?(?:\d+\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)\s+)?(?:ENT(?:ERPRISE)?\s+|SEC(?:URITY)?\s+|ADV(?:ANCED)?\s+)?(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?\b/g;
   for (const c of clauses) {
     c.hardwareOnly = HW_ONLY_RE.test(c.text);
-    c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text);
+    c.licenseOnly = !c.hardwareOnly && LIC_RE.test(c.text.replace(WITH_LIC_RE, ' '));
   }
 
   const anyExplicit = clauses.some(c => c.hardwareOnly || c.licenseOnly);
