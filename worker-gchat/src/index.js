@@ -9357,6 +9357,31 @@ async function fetchLiveSkuPricing(sku, productId, env) {
     }
   }
   if (!(ecommPrice > 0)) {
+    // 2026-07-09 (SFP-H25G-CU5M=, corp error_reports #3): live-Products-only parts
+    // (no WooProducts row, absent from the embedded cache — one-off Cisco spares)
+    // have no ecomm price at all; the hard fail here blocked the whole quote even
+    // after the SKU live-validated. Quote them at LIST (Products.Unit_Price) with
+    // ZERO discount — conservative (highest price, no invented discount) and how
+    // the desk actually sells these. Only when the Woo query itself SUCCEEDED —
+    // a real outage still fails loud.
+    if (wooResult.status === 'fulfilled') {
+      const productData0 = productResult.status === 'fulfilled' ? productResult.value?.data || [] : [];
+      // productId fetch is id-authoritative; code-based search must still match.
+      const rec0 = productId ? productData0[0] : productData0.find(r => r.Product_Code === suffixed);
+      const listOnly = moneyValue(rec0?.Unit_Price);
+      if (listOnly > 0) {
+        console.warn(`[LIVE-PRICING] No WooProducts/cache ecomm price for ${suffixed}; quoting at LIST $${listOnly} (no discount). Backfill WooProducts.`);
+        return {
+          success: true,
+          sku: suffixed,
+          ecomm_price: roundMoney(listOnly),
+          list_price: roundMoney(listOnly),
+          product_id: rec0?.id || productId || null,
+          pricing_source: 'live_zoho_products_list_only',
+          note: 'No ecomm price on file — quoted at list price with no discount.'
+        };
+      }
+    }
     return {
       success: false,
       sku: suffixed,
@@ -9370,7 +9395,9 @@ async function fetchLiveSkuPricing(sku, productId, env) {
   let productRecord = productId
     ? productData[0]
     : productData.find(record => record.Product_Code === suffixed);
-  if (productRecord?.Product_Code && productRecord.Product_Code !== suffixed) {
+  // '='-insensitive (2026-07-09): an id-fetched spare record legitimately carries
+  // the '='-suffixed code while the staged key may not.
+  if (productRecord?.Product_Code && productRecord.Product_Code.replace(/=+$/, '') !== suffixed.replace(/=+$/, '')) {
     productRecord = null;
   }
   if (!productRecord || !(moneyValue(productRecord.Unit_Price) > 0)) {
