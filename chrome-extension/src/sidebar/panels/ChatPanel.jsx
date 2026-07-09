@@ -430,7 +430,9 @@ function isQuoteFromEmailRequest(text) {
 // reply is grounded in the whole thread with drafting framing.
 function isDraftReplyRequest(text) {
   const value = (text || '').toLowerCase();
-  return /\b(generate|draft|write|compose|create)\b[^.!?]{0,40}\b(response|reply|follow[\s-]?up)\b/.test(value)
+  // The compose verb must bind DIRECTLY to the reply noun — a loose gap made
+  // "create a quote from this email in response to their request" a draft ask.
+  return /\b(generate|draft|write|compose|create)\s+(an?\s+|the\s+|a\s+(?:quick|short|brief)\s+)?(response|reply|follow[\s-]?up)\b/.test(value)
     || /\b(draft|write|compose)\s+(an?\s+|the\s+)?email\b/.test(value)
     || /\breply\s+to\s+(this|the|him|her|them)\b/.test(value)
     || /\brespond\s+to\s+(this|the)\s+(email|thread|message)\b/.test(value);
@@ -991,7 +993,11 @@ export default function ChatPanel({
           : buildRequestedQuoteEmailContext(effectiveContext);
         if (fullEmailBlock) {
           textToSend = `${fullEmailBlock}\n\n${textToSend}`;
-        } else if (!isDraftAsk) {
+        } else if (isDraftAsk) {
+          // Same '[User asked to draft a reply' marker prefix as the full banner —
+          // the worker classifier keys on it to force the email toolset.
+          textToSend = `[User asked to draft a reply, but the extension could not read the visible thread text. Fetch the thread with gmail_search_messages / gmail_read_thread before drafting, and tell the user if there is context you could not see.]\n\n${textToSend}`;
+        } else {
           textToSend = `[User explicitly asked to generate a quote from the current email, but the extension could not read visible thread body text. Ask the user to open/expand the Gmail thread or paste the requested items before creating the quote.]\n\n${textToSend}`;
         }
       }

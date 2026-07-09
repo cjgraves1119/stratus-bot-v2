@@ -2154,9 +2154,11 @@ function isHardwareOnlyQuoteIntent(text) {
 function collectQuotePreResolveSkuTokens(text, options = {}) {
   const preSkuTokens = [];
   const hardwareOnly = options.hardwareOnly === true || isHardwareOnlyQuoteIntent(text);
-  // 2026-07-09: trailing '=' kept — Cisco spare SKUs (SFP-H25G-CU5M=) carry it in
-  // the catalog and stripping it here defeated the downstream exact lookup.
-  const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C8|C9|Z)\d[A-Z0-9-]*=?/gi;
+  // NOTE (2026-07-09): the trailing '=' on Cisco spare SKUs is deliberately NOT
+  // captured here — resolveCachedProduct is '='-insensitive on the cache side, and
+  // capturing '=' would defeat applySuffix promotions (C9200L-24T-4G= would no
+  // longer promote to the catalog's -M form).
+  const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C8|C9|Z)\d[A-Z0-9-]*/gi;
   let m;
   while ((m = skuRegex.exec((text || '').toUpperCase())) !== null) {
     preSkuTokens.push(m[0]);
@@ -10828,8 +10830,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         // When Claude searches Products by Product_Code, resolve from prices.json cache instead.
         // This eliminates unnecessary Zoho API calls (~2-3s each) for SKUs already in the cache.
         if (module_name === 'Products' && criteria) {
-          const equalsMatch = criteria.match(/Product_Code:equals:([A-Z0-9\-=]+)/i);
-          const startsWithMatch = !equalsMatch && criteria.match(/Product_Code:starts_with:([A-Z0-9\-=]+)/i);
+          const equalsMatch = criteria.match(/Product_Code:equals:([A-Z0-9\-]+)/i);
+          const startsWithMatch = !equalsMatch && criteria.match(/Product_Code:starts_with:([A-Z0-9\-]+)/i);
 
           if (equalsMatch) {
             const sku = equalsMatch[1].toUpperCase();
@@ -10888,7 +10890,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
         // ── INTERCEPT: Redirect WooProducts lookups through batch cache ──
         if (module_name === 'WooProducts' && criteria) {
-          const wooMatch = criteria.match(/WooProduct_Code:equals:([A-Z0-9\-=]+)/i);
+          const wooMatch = criteria.match(/WooProduct_Code:equals:([A-Z0-9\-]+)/i);
           if (wooMatch) {
             const sku = wooMatch[1].toUpperCase();
             const { key: suffixed, entry: cached } = resolveCachedProduct(sku);
@@ -12527,8 +12529,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // in the catalog with a trailing '=' (SFP-H25G-CU5M=) that users rarely
             // type — and the live catalog holds Cisco parts absent from prices.json,
             // so the cache-side '=' normalization can't help. On an exact miss, retry
-            // the '='-toggled variant before reporting not-found.
-            if (!match) {
+            // the '='-toggled variant before reporting not-found. LIC-* SKUs never
+            // carry the spare suffix — skip the wasted call.
+            if (!match && !resolved.startsWith('LIC-')) {
               const eqVariant = resolved.endsWith('=') ? resolved.slice(0, -1) : `${resolved}=`;
               const eqResult = await zohoApiCall('GET',
                 `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price`,
@@ -12706,15 +12709,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (fpcTokens.length > 0) {
           try {
             const likeTokens = fpcTokens.slice(0, 4).map(t => t.replace(/'/g, ''));
-            // 2026-07-09 (SFP-H25G-CU5M): marketing-description tokens (25GBASE, SFP28)
-            // appear only in Product_Name ("5M CBL 25GBASE-CU SFP28"), never in the
-            // Product_Code — match BOTH columns so a description-worded ask can find
-            // a part whose code the user doesn't know.
-            const where = likeTokens.map(t => `Product_Code like '%${t}%' or Product_Name like '%${t}%'`).join(' or ');
             const prefixClause = fpcPrefix ? ` and Product_Code like '${fpcPrefix.replace(/'/g, '')}%'` : '';
-            const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where ((${where})${prefixClause}) and Product_Active = true limit 10`;
+            // Stage 2a — code-only LIKE (pre-existing behavior, kept first so code
+            // matches can never be crowded out of the server-side limit-10).
+            const whereCode = likeTokens.map(t => `Product_Code like '%${t}%'`).join(' or ');
+            const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where ((${whereCode})${prefixClause}) and Product_Active = true limit 10`;
             const r = await zohoApiCall('POST', 'coql', env, { select_query: coql });
-            const rows = Array.isArray(r?.data) ? r.data : [];
+            let rows = Array.isArray(r?.data) ? r.data : [];
+            // Stage 2b (2026-07-09, SFP-H25G-CU5M): marketing-description tokens
+            // (25GBASE, SFP28) appear only in Product_Name ("5M CBL 25GBASE-CU
+            // SFP28"), never in Product_Code — when the code query returns NOTHING,
+            // retry matching both columns so a description-worded ask can still
+            // find a part whose code the user doesn't know.
+            if (rows.length === 0) {
+              const whereBoth = likeTokens.map(t => `Product_Code like '%${t}%' or Product_Name like '%${t}%'`).join(' or ');
+              const coqlBoth = `select id, Product_Code, Product_Name, Unit_Price from Products where ((${whereBoth})${prefixClause}) and Product_Active = true limit 10`;
+              const rBoth = await zohoApiCall('POST', 'coql', env, { select_query: coqlBoth }).catch(() => null);
+              rows = Array.isArray(rBoth?.data) ? rBoth.data : [];
+            }
             const fpcCoql = rows
               .map(row => ({
                 sku: row.Product_Code,
@@ -13548,7 +13560,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               pendingProducts.push({ suffixed, qty, cached, hasPid: !!cached.zoho_product_id });
               return true;
             }
-            return false;
+            // 2026-07-09 (SFP-H25G-CU5M=): live-Zoho-only SKUs (Cisco parts absent
+            // from prices.json) were unstageable — stageProduct returned false and
+            // HARD GATE #6 refused the quote even after batch_product_lookup had
+            // just live-validated the SKU. Stage them for the API lookup below
+            // (live-verified, with the '='-spare retry); a real miss still lands
+            // in missingProducts and the gates still fire.
+            pendingProducts.push({ suffixed, qty, cached: null, hasPid: false });
+            return true;
           }
 
           // Build ordered pairs: hardware → license, hardware → license
@@ -13738,28 +13757,35 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             console.log(`[COMPOUND] API lookup for ${p.suffixed} (no cached product ID)`);
             try {
               const prodResult = await zohoApiCall('GET',
-                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(p.suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`, env);
-              let match = prodResult?.data?.find(r => r.Product_Code === p.suffixed);
+                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(p.suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`, env);
+              let match = prodResult?.data?.find(r => r.Product_Code === p.suffixed && r.Product_Active !== false);
               let matchedSku = match ? p.suffixed : null;
               // 2026-07-09: '='-spare-variant retry — mirrors batch_product_lookup so a
               // SKU passed directly to create_deal_and_quote resolves the same way.
-              if (!match) {
+              // LIC-* SKUs never carry the spare suffix — skip the wasted call.
+              if (!match && !p.suffixed.startsWith('LIC-')) {
                 const eqVariant = p.suffixed.endsWith('=') ? p.suffixed.slice(0, -1) : `${p.suffixed}=`;
                 const eqResult = await zohoApiCall('GET',
-                  `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price`, env
+                  `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`, env
                 ).catch(() => null);
-                const eqMatch = (eqResult?.data || []).find(r => r.Product_Code === eqVariant);
+                const eqMatch = (eqResult?.data || []).find(r => r.Product_Code === eqVariant && r.Product_Active !== false);
                 if (eqMatch) { match = eqMatch; matchedSku = eqVariant; }
               }
               if (match) {
                 resolvedProducts.push({
-                  sku: matchedSku, qty: p.qty,
+                  // sku keeps the STAGED key — orderedPairs/licenseQtyMap join on it;
+                  // catalog_sku carries the real live Product_Code when it differs.
+                  sku: p.suffixed, qty: p.qty,
+                  catalog_sku: matchedSku,
                   product_id: match.id,
-                  list_price: p.cached.list || match.Unit_Price || null,
-                  ecomm_price: p.cached.price || null,
-                  discount_per_unit: p.cached.discount_per_unit || 0,
-                  discount_pct: p.cached.discount_pct || 0
+                  list_price: p.cached?.list || match.Unit_Price || null,
+                  ecomm_price: p.cached?.price || null,
+                  discount_per_unit: p.cached?.discount_per_unit || 0,
+                  discount_pct: p.cached?.discount_pct || 0
                 });
+                if (matchedSku !== p.suffixed) {
+                  results.steps.push(`Resolved ${p.suffixed} → ${matchedSku} (Cisco '=' spare variant, live catalog)`);
+                }
               } else {
                 console.log(`[COMPOUND] API lookup returned no match for ${p.suffixed}`);
                 missingProducts.push(p.suffixed);
@@ -17000,10 +17026,14 @@ const TOOL_SUBSETS = Object.freeze({
   // agent then claimed "the draft is saved in Gmail". Drafts now render inline
   // in chat (see EMAIL RULES in the system prompt); the executor case returns a
   // redirect for any tier that still tries it.
+  // Product lookups included (2026-07-09): compound asks ("reply to them with
+  // pricing for 3 MX67s") land here and previously had no way to validate SKUs
+  // or prices — inviting invented pricing in the drafted body.
   email: [
     'gmail_search_messages', 'gmail_read_message', 'gmail_read_thread',
     'gmail_send_email',
-    'zoho_search_records', 'zoho_create_record', 'find_customer_license_claim_key'
+    'zoho_search_records', 'zoho_create_record', 'find_customer_license_claim_key',
+    'batch_product_lookup', 'find_product_candidates', 'parse_quote_url'
   ],
   // Stratus URL ecomm-link generation only.
   quote_url: ['parse_quote_url', 'batch_product_lookup', 'find_product_candidates', 'web_search_sku'],
@@ -17065,6 +17095,14 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'general', confidence: 0.5 };
   }
   const t = text.toLowerCase();
+
+  // 00. Drafting-banner override (2026-07-09, corp error_reports #4): the extension
+  // marks draft asks deterministically. Without this, words inside the injected
+  // thread block (contract / esign / "create a quote") hijack the class and strip
+  // the gmail tools — the exact follow-up failure from the incident.
+  if (text.includes('[User asked to draft a reply')) {
+    return { class: 'email', confidence: 0.98 };
+  }
 
   // 0. Quote/Deal creation guard (2026-05-15 Codex defense-in-depth):
   // If user is creating/building/making a quote/deal/PO/order, route to crm_write
@@ -17148,11 +17186,12 @@ function classifyCrmIntent(text, ctx = {}) {
 
   // 4b. Draft follow-ups (2026-07-09): "show/edit/shorten the draft" on the turn
   // AFTER a draft was rendered has no compose-verb bigram and was landing in
-  // crm_write (no gmail reads → the agent denied the draft existed). A bare
-  // draft/reply-noun reference stays in the email class. Excludes draft
-  // quote/deal/PO ("revise the draft quote"), which are CRM mutations.
-  if (/\b(show|display|view|see|render|edit|revise|reword|rewrite|shorten|lengthen|tweak|redo)\b[^.!?]{0,25}\b(draft|reply|response)\b(?!\s*(quote|deal|po|order|invoice))/.test(t)
-    || /\b(the|that|this|my)\s+draft\b(?!\s*(quote|deal|po|order|invoice))/.test(t)) {
+  // crm_write (no gmail reads → the agent denied the draft existed). The verb must
+  // bind DIRECTLY to the draft/reply noun (a loose 25-char gap stole "edit the
+  // quote per their reply" from crm_write), and draft-as-adjective CRM nouns are
+  // excluded ("revise the draft quote", "delete the draft note").
+  if (/\b(show|display|view|see|render|edit|revise|reword|rewrite|shorten|lengthen|tweak|redo)\s+(me\s+)?(the\s+|that\s+|this\s+|my\s+)?(draft|reply|response)\b(?!\s*(quote|deal|po|order|invoice|note|task|proposal))/.test(t)
+    || /\b(the|that|this|my)\s+draft\b(?!\s*(quote|deal|po|order|invoice|note|task|proposal))/.test(t)) {
     return { class: 'email', confidence: 0.8 };
   }
 
