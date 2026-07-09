@@ -7464,6 +7464,45 @@ async function getZohoUserName(env, userId) {
   }
 }
 
+// 2026-07-09 (Hematogenix / Jesse Cervantes): Meraki_ISR is a lookup into the
+// Meraki_ISRs CUSTOM module, whose reps carry their own `Inactive` checkbox —
+// they are NOT Zoho org users, so the Users-module status check above always
+// returned 'unknown' for a real rep and the guardrail misreported an inactive
+// rep as a "profile/sharing-rule constraint". Read the actual record instead.
+async function getMerakiIsrRecord(env, isrId) {
+  if (!isrId) return null;
+  try {
+    const resp = await zohoApiCall('GET', `Meraki_ISRs/${isrId}?fields=id,Name,Email,Inactive`, env);
+    const row = resp?.data?.[0];
+    if (!row?.id) return null;
+    return { id: row.id, name: row.Name || null, email: row.Email || null, inactive: row.Inactive === true };
+  } catch (_) {
+    return null;
+  }
+}
+
+// The message every inactive-ISR detection path returns. One source of truth so
+// the agent gets the identical reactivation offer no matter which tool hit it.
+function buildInactiveIsrInstruction(name, retryHint) {
+  return `❌ Meraki ISR "${name}" exists in the Meraki_ISRs roster but is flagged INACTIVE — Zoho's lookup filter blocks assigning inactive reps to deals. ` +
+    `ASK THE USER: "${name} is marked Inactive in the ISR roster — would you like me to uncheck the Inactive flag so the rep can be properly assigned?" ` +
+    `If the user approves, ${retryHint}. ` +
+    `Do NOT swap to a different ISR, do NOT fall back to Stratus Sales, and do NOT change the Lead_Source to work around this.`;
+}
+
+// Uncheck Inactive on a Meraki_ISRs record after explicit user approval.
+// Returns { success, error? }.
+async function reactivateMerakiIsr(env, isrId) {
+  try {
+    const resp = await zohoApiCall('PUT', `Meraki_ISRs/${isrId}`, env, { data: [{ Inactive: false }] });
+    const row = resp?.data?.[0];
+    if (row?.code === 'SUCCESS') return { success: true };
+    return { success: false, error: row?.message || JSON.stringify(row || resp) };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
 /**
  * Inspect a parsed Zoho write response for the FILTER_CRITERIA_NOT_SATISFIED
  * error specifically targeting Meraki_ISR.id. If hit, returns a structured
@@ -7488,6 +7527,34 @@ async function detectInactiveMerakiIsrError(parsedResponse, payloadData, env) {
   const targetsMerakiIsr = jsonPath.includes('Meraki_ISR.id')
     || (apiName === 'id' && jsonPath.includes('Meraki_ISR'));
   if (!targetsMerakiIsr) return null;
+  // Meraki_ISRs is a custom module — check the record's own Inactive checkbox
+  // FIRST. The Users-module check below only applies if the id is not an ISR
+  // record at all (legacy safety net).
+  const isrRecord = await getMerakiIsrRecord(env, isrId);
+  if (isrRecord) {
+    const recName = isrRecord.name || isrId;
+    if (isrRecord.inactive) {
+      return {
+        validation_error: true,
+        action: 'meraki_isr_inactive',
+        meraki_isr_inactive: true,
+        isr_id: isrId,
+        isr_name: recName,
+        message: buildInactiveIsrInstruction(recName,
+          'retry the SAME tool call with reactivate_inactive_isr: true (create_deal_and_quote and assign_cisco_rep_to_deal both accept it)')
+      };
+    }
+    return {
+      validation_error: true,
+      action: 'meraki_isr_filter_rejected',
+      meraki_isr_filter_rejected: true,
+      isr_id: isrId,
+      isr_name: recName,
+      message: `❌ Zoho rejected Meraki_ISR "${recName}" (${isrId}) via the lookup-field filter even though the Meraki_ISRs record is NOT flagged Inactive. ` +
+        `Don't retry the same id and don't fall back to Stratus Sales — surface this to the user. The Meraki_ISR lookup field's ` +
+        `filter criteria in Zoho excludes this record for another reason (field-level filter or layout rule) that needs admin review.`
+    };
+  }
   const status = await getZohoUserStatus(env, isrId);
   const name = (await getZohoUserName(env, isrId)) || isrId;
   if (status === 'inactive') {
@@ -12831,7 +12898,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id, meraki_isr_email, force_new_deal } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id, meraki_isr_email, force_new_deal, reactivate_inactive_isr } = toolInput;
         let { lead_source } = toolInput;
         const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         let _eolRefreshUnits = [];
@@ -13325,9 +13392,43 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             } else {
               try {
                 const isrSearch = await zohoApiCall('GET',
-                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(_isrEmail)})&fields=id,Name,Email`, env);
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(_isrEmail)})&fields=id,Name,Email,Inactive`, env);
                 const isrRec = isrSearch?.data?.[0];
                 if (isrRec?.id) {
+                  // 2026-07-09 (Hematogenix / Jesse Cervantes): an Inactive rep resolves
+                  // fine here but Zoho's lookup filter rejects the Deal write later with
+                  // an opaque FILTER_CRITERIA_NOT_SATISFIED. Catch it BEFORE any records
+                  // are written and offer the user the reactivation path instead.
+                  if (isrRec.Inactive === true) {
+                    const _isrName = isrRec.Name || _isrEmail;
+                    if (reactivate_inactive_isr === true) {
+                      const react = await reactivateMerakiIsr(env, isrRec.id);
+                      if (!react.success) {
+                        return {
+                          success: false,
+                          error: 'meraki_isr_reactivation_failed',
+                          isr_id: isrRec.id,
+                          isr_name: _isrName,
+                          instruction: `Tried to uncheck the Inactive flag on Meraki ISR "${_isrName}" (user-approved) but the Zoho update failed: ${react.error}. Surface this to the user — they may need to uncheck it manually in the Meraki_ISRs module.`,
+                          ...results,
+                          wall_ms: Date.now() - _startMs
+                        };
+                      }
+                      results.steps.push(`Reactivated Meraki ISR ${_isrName} (unchecked Inactive, user-approved)`);
+                    } else {
+                      return {
+                        success: false,
+                        error: 'meraki_isr_inactive',
+                        meraki_isr_inactive: true,
+                        isr_id: isrRec.id,
+                        isr_name: _isrName,
+                        instruction: buildInactiveIsrInstruction(_isrName,
+                          'retry this SAME create_deal_and_quote call with reactivate_inactive_isr: true'),
+                        ...results,
+                        wall_ms: Date.now() - _startMs
+                      };
+                    }
+                  }
                   merakiIsrId = isrRec.id;
                   merakiIsrName = isrRec.Name;
                   results.steps.push(`Resolved Meraki ISR: ${merakiIsrName} (${_isrEmail})`);
@@ -13782,6 +13883,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             const dealResult = await zohoApiCall('POST', 'Deals', env, { data: [dealData] });
             dealId = dealResult?.data?.[0]?.details?.id;
             if (!dealId) {
+              // 2026-07-09: backstop for ids that skipped the proactive email-lookup
+              // check (e.g. reused/kv-cached ISR ids) — classify an inactive-ISR
+              // lookup-filter rejection instead of dumping the raw Zoho row.
+              const isrGuard = await detectInactiveMerakiIsrError(dealResult, dealData, env);
+              if (isrGuard) {
+                return { success: false, ...isrGuard, ...results, wall_ms: Date.now() - _startMs };
+              }
               results.errors.push('Failed to create Deal: ' + JSON.stringify(dealResult?.data?.[0]));
               return { success: false, ...results, wall_ms: Date.now() - _startMs };
             }
@@ -15884,23 +15992,60 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       case 'assign_cisco_rep_to_deal': {
-        const { deal_id, rep_email, rep_id } = toolInput;
+        const { deal_id, rep_email, rep_id, reactivate_inactive_isr } = toolInput;
         if (!deal_id) return { error: 'deal_id is required' };
         if (!rep_id && !rep_email) return { error: 'rep_email or rep_id is required' };
         try {
           let finalRepId = rep_id || '';
           let finalRepName = rep_email || '';
+          let repInactive = null; // null = unknown
 
           // If no rep_id provided, look up via Meraki_ISRs module by email
           if (!finalRepId && rep_email) {
             const isrSearch = await zohoApiCall('GET',
-              `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(rep_email)})&fields=id,Name,Email,Title`, env
+              `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(rep_email)})&fields=id,Name,Email,Title,Inactive`, env
             ).catch(() => null);
             if (isrSearch?.data && isrSearch.data.length > 0) {
               finalRepId = isrSearch.data[0].id;
               finalRepName = isrSearch.data[0].Name || rep_email;
+              repInactive = isrSearch.data[0].Inactive === true;
             } else {
               return { success: false, error: `Rep ${rep_email} not found in Meraki_ISRs module. Verify the email is correct.` };
+            }
+          } else if (finalRepId) {
+            // Direct rep_id path — read the record so an inactive rep is caught
+            // BEFORE the Deal write bounces off Zoho's lookup filter.
+            const rec = await getMerakiIsrRecord(env, finalRepId);
+            if (rec) {
+              finalRepName = rec.name || finalRepName;
+              repInactive = rec.inactive;
+            }
+          }
+
+          // 2026-07-09 (Hematogenix / Jesse Cervantes): inactive rep → offer the
+          // reactivation path instead of a raw lookup-filter rejection.
+          if (repInactive === true) {
+            if (reactivate_inactive_isr === true) {
+              const react = await reactivateMerakiIsr(env, finalRepId);
+              if (!react.success) {
+                return {
+                  success: false,
+                  error: 'meraki_isr_reactivation_failed',
+                  isr_id: finalRepId,
+                  isr_name: finalRepName,
+                  instruction: `Tried to uncheck the Inactive flag on Meraki ISR "${finalRepName}" (user-approved) but the Zoho update failed: ${react.error}. Surface this to the user — they may need to uncheck it manually in the Meraki_ISRs module.`
+                };
+              }
+            } else {
+              return {
+                success: false,
+                error: 'meraki_isr_inactive',
+                meraki_isr_inactive: true,
+                isr_id: finalRepId,
+                isr_name: finalRepName,
+                instruction: buildInactiveIsrInstruction(finalRepName,
+                  'retry this SAME assign_cisco_rep_to_deal call with reactivate_inactive_isr: true')
+              };
             }
           }
 
@@ -16144,6 +16289,7 @@ const CRM_EMAIL_TOOLS = [
         license_only: { type: 'boolean', description: '(2026-05-20) Set true for a license-only quote (no hardware). Triggers the same model-agnostic family collapse as renewal. Leave unset/false for hardware purchases.' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal" (Stratus found/introduced the deal). Use "Meraki ISR Referal" ONLY when a Cisco rep referred the deal — and then meraki_isr_email is REQUIRED (the server refuses a Meraki ISR Referal without a real rep; it will NEVER default to Stratus Sales).' },
         meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal". OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        reactivate_inactive_isr: { type: 'boolean', description: 'Set true ONLY after the user has EXPLICITLY approved unchecking the Inactive flag on the referred rep (the tool returns meraki_isr_inactive:true with the question to ask). Unchecks Inactive on the Meraki_ISRs record, then proceeds with the assignment. Never set this without the user\'s approval in this conversation.' },
         force_new_deal: { type: 'boolean', description: 'Set true ONLY when the user explicitly wants a separate NEW deal. By default, quotes created in the same conversation for the same account reuse one master deal (e.g. 3-year and 5-year option quotes share a single deal).' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
         confirm_new_deal: { type: 'boolean', description: '(2026-05-13) Default false. Set true ONLY after the user has explicitly confirmed they want a brand-new Deal even though the resolved Account already has open Deals. Bypasses the account_has_open_deals refusal. Never set without explicit user consent on the same turn.' },
@@ -16275,6 +16421,7 @@ const CRM_EMAIL_TOOLS = [
         deal_id: { type: 'string', description: 'Zoho Deal record ID' },
         rep_email: { type: 'string', description: 'Cisco rep email (e.g. jacporti@cisco.com). Always @cisco.com.' },
         rep_id: { type: 'string', description: 'Optional: Meraki_ISRs record ID if already known. If omitted, email is used to look up.' },
+        reactivate_inactive_isr: { type: 'boolean', description: 'Set true ONLY after the user has EXPLICITLY approved unchecking the Inactive flag on the rep (the tool returns meraki_isr_inactive:true with the question to ask). Unchecks Inactive on the Meraki_ISRs record, then assigns. Never set this without the user\'s approval in this conversation.' },
       },
       required: ['deal_id']
     }
@@ -27625,7 +27772,16 @@ CRITICAL URL RULES:
               });
               const updateRecord = updateResp?.data?.[0];
               const success = updateRecord?.code === 'SUCCESS';
-              const zohoError = !success ? (updateRecord?.message || updateRecord?.code || JSON.stringify(updateRecord || updateResp).substring(0, 200)) : '';
+              let zohoError = !success ? (updateRecord?.message || updateRecord?.code || JSON.stringify(updateRecord || updateResp).substring(0, 200)) : '';
+              // 2026-07-09: translate an inactive-ISR lookup-filter rejection into a
+              // human-readable message (the raw FILTER_CRITERIA_NOT_SATISFIED row is
+              // meaningless in the extension UI).
+              if (!success) {
+                const isrGuard = await detectInactiveMerakiIsrError(updateResp, { Meraki_ISR: { id: finalRepId } }, env);
+                if (isrGuard?.meraki_isr_inactive) {
+                  zohoError = `${isrGuard.isr_name} is flagged Inactive in the Meraki_ISRs roster, so Zoho blocks the assignment. Uncheck Inactive on their ISR record (or ask the chat assistant to reactivate and assign), then retry.`;
+                }
+              }
               console.log(`[ASSIGN-REP] dealId=${arDealId} repId=${finalRepId} repName=${finalRepName} success=${success} zohoError=${zohoError}`);
               apiResult = {
                 success,
