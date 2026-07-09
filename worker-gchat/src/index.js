@@ -17079,9 +17079,13 @@ const TOOL_SUBSETS = Object.freeze({
     'velocity_hub_submit'
   ],
   // Cisco rep assignment paths. Reads + the dedicated assignment tool.
+  // create_deal_and_quote added 2026-07-09: the inactive-ISR reactivation
+  // approval turn ("yes, uncheck it and assign Jesse") classifies here, and the
+  // retry may need to CREATE the deal (the proactive gate fires before any
+  // records are written).
   cisco_rep: [
     'assign_cisco_rep_to_deal', 'zoho_search_records',
-    'zoho_get_record', 'zoho_update_record'
+    'zoho_get_record', 'zoho_update_record', 'create_deal_and_quote'
   ],
   // Fallback superset — most-used tools across all classes. Covers
   // any ambiguous request without removing the model's options.
@@ -17195,8 +17199,13 @@ function classifyCrmIntent(text, ctx = {}) {
   // 2026-05-15: removed bare @cisco.com clause that mis-routed quote creates when
   // chat context included a Cisco rep email. Now requires assign/set/change/update/
   // reassign verb + cisco rep keyword, OR an explicit "ping rep" phrase.
+  // 2026-07-09: reactivation-approval turns ("yes, uncheck the inactive flag")
+  // route here too — the subset carries assign_cisco_rep_to_deal AND
+  // create_deal_and_quote, both of which accept reactivate_inactive_isr.
   if (/\b(assign|set|change|update|reassign)\b.{0,40}\b(cisco\s+rep|meraki\s+isr|isr|rep)\b/.test(t)
-      || /\bping\s+(the\s+)?(cisco\s+)?rep\b/.test(t)) {
+      || /\bping\s+(the\s+)?(cisco\s+)?rep\b/.test(t)
+      || /\b(uncheck|reactivate|re-activate|clear)\b[^.!?]{0,30}\b(inactive|isr\s+flag)\b/.test(t)
+      || /\binactive\s+flag\b/.test(t)) {
     return { class: 'cisco_rep', confidence: 0.85 };
   }
 
