@@ -115,5 +115,66 @@ function urlsFor(message) {
     JSON.stringify(urls));
 }
 
+// ── Round-2 review cases (2026-07-09 council findings) ──
+
+// Multi-word tier adjectives in the WITH bundle
+{
+  const { urls } = urlsFor('quote 2 MX67 with advanced security licenses');
+  check('(r2) "with advanced security licenses" bundles hardware',
+    urls.length >= 1 && urls.every(u => u.items.includes('MX67-HW')), JSON.stringify(urls));
+}
+{
+  const { urls } = urlsFor('quote 3 MR46 with enterprise 5 year licenses');
+  check('(r2) "with enterprise 5 year licenses" bundles hardware + 5Y',
+    urls.length >= 1 && urls[0].items.includes('MR46-HW') && /LIC-ENT-5YR/.test(urls[0].items), JSON.stringify(urls));
+}
+
+// WITHOUT variants with articles/terms
+{
+  const { urls } = urlsFor('quote 3 MS130-24P without the licenses');
+  check('(r2) "without THE licenses" is hardware-only',
+    urls.length >= 1 && urls.every(u => u.items.includes('MS130-24P-HW') && !u.items.includes('LIC-')), JSON.stringify(urls));
+}
+{
+  const { urls } = urlsFor('quote 3 MS130-24P without 5 year licenses');
+  check('(r2) "without 5 year licenses" is hardware-only',
+    urls.length >= 1 && urls.every(u => u.items.includes('MS130-24P-HW') && !u.items.includes('LIC-')), JSON.stringify(urls));
+}
+
+// Descriptive "has no licenses" must NOT flip a renewal to hardware-only
+{
+  const { urls } = urlsFor('customer has no licenses currently please quote renewals for 3 MS130-24P');
+  check('(r2) descriptive "has no licenses" keeps renewal license-only',
+    urls.length >= 1 && urls.every(u => !u.items.includes('MS130-24P-HW')), JSON.stringify(urls));
+}
+
+// Comma-stranded trailing intent clause
+{
+  const { urls } = urlsFor('quote 2 MR46, no licenses');
+  check('(r2) "quote 2 MR46, no licenses" is hardware-only',
+    urls.length >= 1 && urls.every(u => u.items.includes('MR46-HW') && !u.items.includes('LIC-')), JSON.stringify(urls));
+}
+
+// Trailing hardware qualifier stays item-local (regression guard for the inheritance change)
+{
+  const { urls } = urlsFor('renew 1 MX67 and add 1 MR44 hardware');
+  const mx67LicPresent = urls.some(u => /LIC-MX67-SEC/.test(u.items));
+  const mr44LicAbsent = urls.every(u => !/LIC-ENT/.test(u.items) || !u.items.includes('MR44'));
+  check('(r2-guard) "renew MX67 then add MR44 hardware" keeps intents item-local',
+    urls.length >= 1 && mx67LicPresent, JSON.stringify(urls));
+}
+
+// Courtesy-wrapped follow-up corrections
+{
+  const workerSrc = fs.readFileSync(path.join(here, 'src/index.js'), 'utf8');
+  const m = workerSrc.match(/const isHwOnly = (\/.*\/i)\.test\(upper\);/);
+  if (m) {
+    const re = eval(m[1]);
+    for (const phrase of ['please remove the licenses', 'can you remove the licenses?', 'remove the licenses please']) {
+      check(`(r2) follow-up "${phrase}" detected as hardware-only`, re.test(phrase.toUpperCase()), phrase);
+    }
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -173,7 +173,12 @@ async function exportZohoQuotePdf({ recordId, templateName, org }) {
         break;
       }
       if (i === 6) {
-        result = await sendToZohoTabWithInjection(tab.id, MSG.EXPORT_ZOHO_PDF, { recordId, templateName });
+        // Time-boxed: executeScript on a hung page load can stall indefinitely,
+        // which would freeze the whole retry loop.
+        result = await Promise.race([
+          sendToZohoTabWithInjection(tab.id, MSG.EXPORT_ZOHO_PDF, { recordId, templateName }),
+          sleep(4000).then(() => null),
+        ]);
       } else {
         result = await sendToTab(tab.id, MSG.EXPORT_ZOHO_PDF, { recordId, templateName });
       }

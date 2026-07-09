@@ -1380,8 +1380,22 @@ export default function ChatPanel({
   function handleSend(overrideText) {
     const text = overrideText || input.trim();
     if (!text || loading) return;
-    const hasPriorQuote = (messages || []).some((m) => m.kind === 'quote');
-    if (isEcommQuoteRequest(text) || (hasPriorQuote && isQuoteFollowUp(text))) {
+    const msgs = messages || [];
+    let lastQuoteIdx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].kind === 'quote') { lastQuoteIdx = i; break; }
+    }
+    const hasPriorQuote = lastQuoteIdx !== -1;
+    // 2026-07-09: once the quote moved to Zoho (Send-to-Zoho handoff, or a created
+    // Zoho quote link appearing after the ecomm card), follow-ups like "remove the
+    // licenses" mean the ZOHO quote — routing them to the stale ecomm session
+    // would mutate the wrong quote. Let the CRM agent handle them instead.
+    const zohoTookOver = hasPriorQuote && msgs.slice(lastQuoteIdx + 1).some((m) => {
+      const body = typeof m.content === 'string' ? m.content : '';
+      return /create a zoho crm quote from this stratus quote/i.test(body)
+        || /crm\.zoho\.com\/crm\/[^\s)]*\/tab\/Quotes\//i.test(body);
+    });
+    if (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text))) {
       if (!overrideText) setInput('');
       runAndPushQuote(text);
     } else {
