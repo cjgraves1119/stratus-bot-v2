@@ -16122,6 +16122,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           });
           const updateRecord = updateResp?.data?.[0];
           const success = updateRecord?.code === 'SUCCESS';
+          if (!success) {
+            // Backstop: the proactive check above can only miss when the record
+            // fetch failed transiently — still classify a lookup-filter rejection
+            // instead of relaying the raw Zoho row.
+            const isrGuard = await detectInactiveMerakiIsrError(updateResp, { Meraki_ISR: { id: finalRepId } }, env);
+            if (isrGuard) return { success: false, ...isrGuard };
+          }
           return {
             success,
             deal_id,
