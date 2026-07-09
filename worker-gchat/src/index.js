@@ -6897,6 +6897,19 @@ Here is the email to analyze:
 ${emailText}`;
 }
 
+// 2026-07-09 (blank Reply-To-Email drafts): the corp AI Gateway's serving config
+// makes claude-sonnet-5 prepend a thinking block on longer prompts even when the
+// request doesn't ask for one — content[0] is then NOT the text block, and every
+// one-shot `content[0].text` reader returned '' (or threw). Concatenate ALL text
+// blocks instead of trusting position. Live-verified 2026-07-09: same request via
+// gateway → [thinking, text]; direct API → [text].
+function extractClaudeText(data) {
+  return (data?.content || [])
+    .filter(b => b && b.type === 'text' && typeof b.text === 'string')
+    .map(b => b.text)
+    .join('');
+}
+
 /**
  * Process an email thread: detect products via Claude, then run through deterministic engine
  */
@@ -6916,6 +6929,9 @@ async function processEmailThread(text, personId, env, kv) {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 512,
+        // Deterministic JSON task — no thinking (the corp AI Gateway otherwise
+        // injects a thinking block that displaces content[0]).
+        thinking: { type: 'disabled' },
         system: 'You are a JSON extraction tool. Return ONLY valid JSON with no markdown or extra text.',
         messages: [{ role: 'user', content: prompt }]
       })
@@ -6928,7 +6944,7 @@ async function processEmailThread(text, personId, env, kv) {
 
     const data = await response.json();
     trackUsage(env, 'claude-sonnet-4-6', data.usage, 'email-parse').catch(() => {});
-    const rawJson = data.content[0].text.trim();
+    const rawJson = extractClaudeText(data).trim();
 
     // Parse JSON response
     let parsed;
@@ -23852,6 +23868,7 @@ async function enrichCompanyV2(rawDomain, opts) {
                 body: JSON.stringify({
                   model: 'claude-sonnet-4-6',
                   max_tokens: 500,
+                  thinking: { type: 'disabled' },
                   system: `You are a concise email analyzer for a Stratus Information Systems sales rep (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
 {
   "summary": "2-3 sentence summary of the email",
@@ -23867,7 +23884,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
               if (summaryResp.ok) {
                 const summaryData = await summaryResp.json();
                 ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', summaryData.usage, 'addon-analyze'));
-                const text = summaryData.content?.[0]?.text || '';
+                const text = extractClaudeText(summaryData);
                 try {
                   const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
                   summary = parsed.summary;
@@ -24121,6 +24138,10 @@ Return ONLY the JSON object, no markdown or extra text.`,
               body: JSON.stringify({
                 model: 'claude-sonnet-4-6',
                 max_tokens: 1500,
+                // 2026-07-09 (blank drafts): sonnet-5 runs adaptive thinking when the
+                // param is omitted — the thinking block displaced content[0] AND its
+                // spend ate the max_tokens budget. Deterministic JSON task: disable.
+                thinking: { type: 'disabled' },
                 system: (String(env.CF_REPLY_VOICE_ENABLED) === 'true' ? (voiceSkillData.prompt || '') + '\n\n' : '') + `You are drafting email replies for a Stratus Information Systems sales rep (Cisco/Meraki exclusive reseller specializing in Meraki). Write in a friendly, consultative voice:
 
 ADDRESSING (critical):
@@ -24174,7 +24195,7 @@ CRITICAL URL RULES:
 
             const draftData = await draftResp.json();
             ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', draftData.usage, 'addon-draft'));
-            const draftText = draftData.content?.[0]?.text || '';
+            const draftText = extractClaudeText(draftData);
             var parsedDraft;
             try {
               // Try direct parse first (clean JSON response)
@@ -24192,7 +24213,12 @@ CRITICAL URL RULES:
                 parsedDraft = { drafts: [draftText.substring(0, 2000)] };
               }
             }
-            // Validate drafts array exists and has content
+            // Validate drafts array exists and has content. 2026-07-09: also drop
+            // empty/non-string entries — {drafts:['']} previously sailed through the
+            // length check and shipped a blank draft bubble to the extension.
+            if (Array.isArray(parsedDraft.drafts)) {
+              parsedDraft.drafts = parsedDraft.drafts.filter(d => typeof d === 'string' && d.trim());
+            }
             if (!parsedDraft.drafts || !Array.isArray(parsedDraft.drafts) || parsedDraft.drafts.length === 0) {
               parsedDraft = { drafts: [draftText.replace(/```json\n?|\n?```/g, '').trim().substring(0, 2000)] };
             }
