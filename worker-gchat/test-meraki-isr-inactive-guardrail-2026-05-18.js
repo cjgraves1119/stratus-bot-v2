@@ -87,9 +87,16 @@ t('System prompt added to both MASTER and GEMMA prompts', () => {
 });
 
 t('Existing Stratus-Sales auto-default in validateCrmWrite is preserved', () => {
+  // 2026-07-09: the one-line default became an else-branch behind the ISR-Referal
+  // hard gate (feat/crm-quote-fixes) — non-referral creates still default to
+  // Stratus Sales, and "Meraki ISR Referal" now BLOCKS instead of defaulting.
   assert.ok(
-    /if \(!data\.Meraki_ISR && isCreate\) data\.Meraki_ISR = \{ id: '2570562000027286729' \};/.test(source),
-    'existing Meraki_ISR missing-field default must remain'
+    /else if \(!data\.Meraki_ISR && isCreate\) \{\s*\n\s*data\.Meraki_ISR = \{ id: '2570562000027286729' \};/.test(source),
+    'non-referral Meraki_ISR missing-field default must remain'
+  );
+  assert.ok(
+    /isCreate && data\.Lead_Source === 'Meraki ISR Referal'/.test(source),
+    'ISR-Referal creates must hit the no-default hard gate'
   );
 });
 

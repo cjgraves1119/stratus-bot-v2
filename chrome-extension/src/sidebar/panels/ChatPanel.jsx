@@ -145,13 +145,37 @@ function CopyButton({ text }) {
   );
 }
 
-// Extract a Zoho Quotes record reference from assistant text — the CRM agent
-// returns a crm.zoho.com/.../tab/Quotes/{id} link whenever it creates or finds
-// a quote, which is exactly where the "Download Zoho PDF" affordance belongs.
-function extractZohoQuoteRef(text) {
-  if (!text) return null;
-  const m = String(text).match(/crm\.zoho\.com\/crm\/(org\d+)\/tab\/Quotes\/(\d{10,19})/i);
-  return m ? { org: m[1], recordId: m[2] } : null;
+// Extract ALL Zoho Quotes record references from assistant text — the CRM
+// agent returns a crm.zoho.com/.../tab/Quotes/{id} link whenever it creates or
+// finds a quote, which is exactly where the "Download Zoho PDF" affordance
+// belongs. When one message creates MULTIPLE quotes (e.g. a 3-year and a
+// 5-year option), the old first-match-only version bound the button to an
+// arbitrary quote — now every quote gets its own labeled button. Each ref
+// carries a best-effort term label pulled from the text just before the link
+// ("3-Year" / "5YR" / "1 yr" → "3-Year" etc.), used to caption the buttons.
+function extractZohoQuoteRefs(text) {
+  if (!text) return [];
+  const s = String(text);
+  const re = /crm\.zoho\.com\/crm\/(org\d+)\/tab\/Quotes\/(\d{10,19})/gi;
+  const refs = [];
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (seen.has(m[2])) continue;
+    seen.add(m[2]);
+    // Look backward a short window for the nearest term mention (the quote's
+    // heading, e.g. "*Quote 1 — 3-Year (...)*" precedes its URL).
+    const windowText = s.slice(Math.max(0, m.index - 250), m.index);
+    const termMatches = [...windowText.matchAll(/(\d+)\s*[-–]?\s*(?:year|yr)s?\b/gi)];
+    const label = termMatches.length ? `${termMatches[termMatches.length - 1][1]}-Year` : null;
+    refs.push({ org: m[1], recordId: m[2], label });
+  }
+  // Labels only help when they disambiguate — drop them if duplicated (e.g.
+  // two quotes both preceded by "3-Year" text would mislabel; fall back to
+  // positional labels at the render site instead).
+  const labels = refs.map((r) => r.label).filter(Boolean);
+  if (new Set(labels).size !== labels.length) refs.forEach((r) => { r.label = null; });
+  return refs;
 }
 
 function downloadBase64Pdf(base64, filename) {
@@ -172,7 +196,7 @@ const DEFAULT_PDF_TEMPLATES = ['Hardware Quote', 'Professional Services Quote'];
 // background (which drives a hidden crm.zoho.com tab on the live session).
 // Defaults to Hardware Quote, remembers the last pick, and on any non-PDF
 // response shows a graceful error + an "open in Zoho" link.
-function QuotePdfButton({ recordId, org }) {
+function QuotePdfButton({ recordId, org, label }) {
   const [state, setState] = useState('idle'); // idle | working | done | error
   const [err, setErr] = useState('');
   const [template, setTemplate] = useState('Hardware Quote');
@@ -217,7 +241,7 @@ function QuotePdfButton({ recordId, org }) {
     err === 'not_pdf' ? 'Zoho didn’t return a PDF'
       : err === 'not_logged_in' ? 'Log into Zoho, then retry'
       : err === 'no_templates' ? 'No print template found'
-      : 'Export failed';
+      : `Export failed${err && err !== 'failed' ? ` (${String(err).slice(0, 60)})` : ''}`;
 
   return (
     <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -231,7 +255,7 @@ function QuotePdfButton({ recordId, org }) {
           cursor: state === 'working' ? 'default' : 'pointer', opacity: state === 'working' ? 0.7 : 1,
         }}
       >
-        {state === 'working' ? '⏳ Downloading…' : state === 'done' ? '✓ Downloaded' : '⬇ Download Zoho PDF'}
+        {state === 'working' ? '⏳ Downloading…' : state === 'done' ? '✓ Downloaded' : (label ? `⬇ ${label} PDF` : '⬇ Download Zoho PDF')}
       </button>
       <select
         value={template}
@@ -399,6 +423,28 @@ function isQuoteFromEmailRequest(text) {
     || /\bwhat (needs|need) to be quoted\b/.test(value);
 }
 
+// 2026-07-09 (corp bug report #4): drafting asks ("generate a response", "draft a
+// reply") previously only got the full thread when they HAPPENED to trip the
+// quote-extraction detector above — and then with a quote-extraction banner that
+// biased the agent toward quoting. Detect drafting intent in its own right so the
+// reply is grounded in the whole thread with drafting framing.
+function isDraftReplyRequest(text) {
+  const value = (text || '').toLowerCase();
+  // The compose verb must bind DIRECTLY to the reply noun — a loose gap made
+  // "create a quote from this email in response to their request" a draft ask.
+  return /\b(generate|draft|write|compose|create)\s+(an?\s+|the\s+|a\s+(?:quick|short|brief)\s+)?(response|reply|follow[\s-]?up)\b/.test(value)
+    || /\b(draft|write|compose)\s+(an?\s+|the\s+)?email\b/.test(value)
+    || /\breply\s+to\s+(this|the|him|her|them)\b/.test(value)
+    || /\brespond\s+to\s+(this|the)\s+(email|thread|message)\b/.test(value);
+}
+
+function newQuotePersonId() {
+  const suffix = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `chrome-ext-chat-quote-${suffix}`;
+}
+
 // Detect a deterministic ecommerce/URL quote request (the Webex-bot path: SKUs
 // in → 1/3/5-year order links out). Deliberately conservative: anything that
 // targets Zoho/CRM, references "this quote/deal", asks to modify a record, or
@@ -466,6 +512,33 @@ function buildRequestedQuoteEmailContext(emailContext) {
     threadText.substring(0, 18000),
     '',
     'Use this thread text only because the user asked for it. Identify the requested items and quantities from the email before creating or preparing a quote. If the thread is ambiguous, ask one concise clarification instead of guessing.'
+  );
+  return lines.join('\n');
+}
+
+// Neutral drafting framing — same thread payload as the quote-extraction builder,
+// but instructs the agent to mine the WHOLE thread for the reply instead of
+// treating it as a line-item source.
+function buildDraftReplyEmailContext(emailContext) {
+  if (!emailContext) return '';
+  const threadText = (emailContext.fullThreadBody || emailContext.body || '').trim();
+  if (!threadText) return '';
+  const lines = [
+    '[User asked to draft a reply in the current Gmail thread.]',
+    `Subject: ${emailContext.subject || ''}`,
+  ];
+  if (emailContext.senderName || emailContext.senderEmail) {
+    lines.push(`From: ${emailContext.senderName || ''} <${emailContext.senderEmail || ''}>`);
+  }
+  if (emailContext.customerEmail) {
+    lines.push(`Customer: ${emailContext.customerName || ''} <${emailContext.customerEmail}>`);
+  }
+  lines.push(
+    '',
+    'Full visible Gmail thread text for grounding the reply:',
+    threadText.substring(0, 18000),
+    '',
+    'Ground the reply in this ENTIRE thread: prior asks, commitments, and topics other participants raised. Render the complete email body inline in your chat response (body only). Do not invent facts that are not in the thread.'
   );
   return lines.join('\n');
 }
@@ -567,7 +640,7 @@ export default function ChatPanel({
   const progressIntervalRef = useRef(null);
   // Persistent personId for deterministic quotes (lets the worker keep a quote
   // session for pricing follow-ups / revisions, mirroring the old Quote tab).
-  const personIdRef = useRef('chrome-ext-chat-quote-' + (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now()));
+  const personIdRef = useRef(newQuotePersonId());
   // Hidden <input type=file> for the "Upload image" action (attachments / pasted images).
   const fileInputRef = useRef(null);
 
@@ -816,7 +889,8 @@ export default function ChatPanel({
           ? { ...gatedEmailContext, customerEmail: selectedContextEmail, customerName: participantOptions.find(p => p.email === selectedContextEmail)?.name || '' }
           : gatedEmailContext || null;
 
-      const shouldReadFullEmailForQuote = isQuoteFromEmailRequest(messageText);
+      const isDraftAsk = isDraftReplyRequest(messageText);
+      const shouldReadFullEmailForQuote = isQuoteFromEmailRequest(messageText) || isDraftAsk;
       if (shouldReadFullEmailForQuote) {
         try {
           const fullEmailContext = await sendToBackground(MSG.GET_FULL_EMAIL_CONTEXT, {});
@@ -911,9 +985,18 @@ export default function ChatPanel({
       }
 
       if (shouldReadFullEmailForQuote) {
-        const quoteEmailContext = buildRequestedQuoteEmailContext(effectiveContext);
-        if (quoteEmailContext) {
-          textToSend = `${quoteEmailContext}\n\n${textToSend}`;
+        // Drafting asks take drafting framing; quote asks keep the quote-extraction
+        // banner. A message that is both (rare) is treated as a draft — the reply
+        // body is the deliverable and the agent can still reference quote items.
+        const fullEmailBlock = isDraftAsk
+          ? buildDraftReplyEmailContext(effectiveContext)
+          : buildRequestedQuoteEmailContext(effectiveContext);
+        if (fullEmailBlock) {
+          textToSend = `${fullEmailBlock}\n\n${textToSend}`;
+        } else if (isDraftAsk) {
+          // Same '[User asked to draft a reply' marker prefix as the full banner —
+          // the worker classifier keys on it to force the email toolset.
+          textToSend = `[User asked to draft a reply, but the extension could not read the visible thread text. Fetch the thread with gmail_search_messages / gmail_read_thread before drafting, and tell the user if there is context you could not see.]\n\n${textToSend}`;
         } else {
           textToSend = `[User explicitly asked to generate a quote from the current email, but the extension could not read visible thread body text. Ask the user to open/expand the Gmail thread or paste the requested items before creating the quote.]\n\n${textToSend}`;
         }
@@ -1393,6 +1476,7 @@ export default function ChatPanel({
 
   const handleNewConversation = useCallback(() => {
     if (abortRef.current) abortRef.current.aborted = true;
+    personIdRef.current = newQuotePersonId();
     setLoading(false);
     setError(null);
     setInput('');
@@ -1526,8 +1610,19 @@ export default function ChatPanel({
               )}
               {msg.role === 'assistant' && msg.content && <CopyButton text={msg.content} />}
               {msg.role === 'assistant' && (() => {
-                const ref = extractZohoQuoteRef(msg.content);
-                return ref ? <QuotePdfButton recordId={ref.recordId} org={ref.org} /> : null;
+                const refs = extractZohoQuoteRefs(msg.content);
+                if (!refs.length) return null;
+                // One labeled button per quote — a 2-quote message (3yr + 5yr
+                // options) renders "⬇ 3-Year PDF" and "⬇ 5-Year PDF" instead of
+                // a single ambiguous button bound to the first link.
+                return refs.map((ref, i) => (
+                  <QuotePdfButton
+                    key={ref.recordId}
+                    recordId={ref.recordId}
+                    org={ref.org}
+                    label={ref.label || (refs.length > 1 ? `Quote ${i + 1}` : null)}
+                  />
+                ));
               })()}
               {msg.role === 'assistant' && msg.suggestions && (
                 <SuggestionChips

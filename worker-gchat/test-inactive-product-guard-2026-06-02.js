@@ -28,6 +28,7 @@ function buildShim() {
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${escPath('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${escPath('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const edIdx = src.indexOf('export default');
@@ -54,7 +55,8 @@ function t(name, fn) {
 }
 
 const SME5_ID = '2570562000001277655'; // LIC-SME-5YR — inactive in Zoho
-const SME3_ID = '2570562000001277654'; // LIC-SME-3YR — active in Zoho
+const SME3_ID = '2570562000001277654'; // LIC-SME-3YR — deactivated in Zoho 2026-06-26 (SME discontinued)
+const IVANTI3_ID = '2570562000414875795'; // LIC-MI-EMSC-D-1YMC-A-3YR — active replacement
 
 console.log('── parseZohoResponse: inactive-product terminal handling ──');
 
@@ -106,12 +108,21 @@ t('NEW line item with inactive SME-5YR is blocked with INACTIVE guidance', () =>
   assert.ok(res.errors.some(e => /INACTIVE in Zoho/i.test(e)), 'error should name it inactive in Zoho');
 });
 
-t('NEW line item with ACTIVE SME-3YR is NOT blocked as inactive', () => {
+t('NEW line item with discontinued SME-3YR is blocked and points at the replacement', () => {
   const res = preflightQuotedItemsProductActive([
     { Product_Name: { id: SME3_ID }, Quantity: 84 }
   ]);
+  const inactiveErr = (res.errors || []).find(e => /INACTIVE in Zoho/i.test(e));
+  assert.ok(inactiveErr, 'discontinued SME-3YR must trip the inactive guard');
+  assert.ok(/LIC-MI-EMSC-D-1YMC-A-3YR/.test(inactiveErr), `guidance must name the replacement: ${inactiveErr}`);
+});
+
+t('NEW line item with the ACTIVE Ivanti replacement is NOT blocked as inactive', () => {
+  const res = preflightQuotedItemsProductActive([
+    { Product_Name: { id: IVANTI3_ID }, Quantity: 84 }
+  ]);
   const inactiveErr = (res.errors || []).some(e => /INACTIVE in Zoho/i.test(e));
-  assert.ok(!inactiveErr, 'active product must not trip the inactive guard');
+  assert.ok(!inactiveErr, 'active replacement must not trip the inactive guard');
 });
 
 t('in-place modify (item has id) is left to the terminal-error net (not pre-blocked)', () => {

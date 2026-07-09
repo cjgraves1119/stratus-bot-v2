@@ -973,7 +973,10 @@
     "MA-SIMTRAY-5C",
     "LIC-SME-1YR",
     "LIC-SME-3YR",
-    "LIC-SME-5YR"
+    "LIC-SME-5YR",
+    "LIC-MI-EMSC-D-1YMC-A-1YR",
+    "LIC-MI-EMSC-D-1YMC-A-3YR",
+    "LIC-MI-EMSC-D-1YMC-A-5YR"
   ],
   "C9200L": [
     "C9200L-24P-4G-M",

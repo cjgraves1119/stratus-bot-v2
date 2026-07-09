@@ -100,12 +100,12 @@ const qtys = (r, sku) => { const m = (r || '').match(new RegExp('item=([^&\\s]*)
   r = await W.handleFollowUpModifier('add 2 MX67', 'p', kvWith(MR44Q));
   ok(r && qtys(r, 'MX67-HW')[0] === 2 && qtys(r, 'LIC-MX67-SEC-3YR')[0] === 2, '"add 2 MX67" → hardware + paired co-term license (was hardware only)');
 
-  console.log('── SME 5-year cap (business rule — was BYPASSED) ──');
+  console.log('── SME discontinued → replacement substitution (was: 5-year cap) ──');
   r = await W.handleFollowUpModifier('5 year', 'p', kvWith(SMEQ));
-  ok(r && /LIC-SME-3YR/.test(r) && !/LIC-SME-5YR/.test(r), '"5 year" after SME quote → LIC-SME-3YR, NEVER LIC-SME-5YR');
-  ok(r && /only in 1-year and 3-year/.test(r), '   …with the standard cap note');
-  ok(r && qtys(r, 'LIC-SME-3YR').every(q => q === 100), '   …at qty 100, NOT 200 (codex round-3: collapsed term-alternatives must dedupe, not sum)');
-  ok(r && /\*\*3-Year Co-Term:\*\*/.test(r) && !/5-Year Co-Term/.test(r), '   …labeled 3-Year, never a 3YR SKU under a 5-Year heading (codex round-4)');
+  ok(r && /LIC-MI-EMSC-D-1YMC-A-5YR/.test(r) && !/LIC-SME-\d/.test(r), '"5 year" after legacy SME quote → replacement 5YR, never a legacy LIC-SME SKU');
+  ok(r && /licenses are discontinued/.test(r), '   …with the substitution note');
+  ok(r && qtys(r, 'LIC-MI-EMSC-D-1YMC-A-5YR').every(q => q === 100), '   …at qty 100, NOT 200 (codex round-3: collapsed term-alternatives must dedupe, not sum)');
+  ok(r && /\*\*5-Year Co-Term:\*\*/.test(r) && !/3-Year Co-Term/.test(r), '   …labeled 5-Year (replacement genuinely supports the requested term)');
 
   console.log('── codex round-3: add intent + na-bucket term safety ──');
   r = await W.handleFollowUpModifier('add 2 MR44 hardware only', 'p', kvWith(MR44Q));

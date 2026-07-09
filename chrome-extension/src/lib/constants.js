@@ -13,6 +13,12 @@ export const API_BASE = (typeof STRATUS_API_BASE !== 'undefined' && STRATUS_API_
   || (typeof globalThis !== 'undefined' && globalThis.STRATUS_API_BASE)
   || 'https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev';
 
+// Build environment. 'dev' for a locally-loaded unpacked TEST build (set STRATUS_ENV=dev at
+// build time); 'prod' otherwise. Drives the DEV header color/label so you can visually tell a
+// test build apart from the published one. Production/Web-Store builds leave this unset -> 'prod'.
+export const STRATUS_ENV_NAME = (typeof STRATUS_ENV !== 'undefined' && STRATUS_ENV) || 'prod';
+export const IS_DEV_BUILD = STRATUS_ENV_NAME === 'dev';
+
 export const ZOHO = {
   ORG_URL: 'https://crm.zoho.com/crm/org647122552',
   AUTH_URL: 'https://accounts.zoho.com/oauth/v2/auth',
@@ -41,6 +47,7 @@ export const COLORS = {
   BG_PRIMARY: '#ffffff',
   BG_SECONDARY: '#f8f9fa',
   BG_HOVER: '#f1f3f4',
+  DEV_HEADER: '#c2410c', // DEV-build header (orange) — only shown in STRATUS_ENV=dev unpacked builds
 };
 
 export const CACHE_TTL = {
@@ -165,6 +172,10 @@ export const MSG = {
   // forwards this to the content script, which runs the 2-step export
   // (preview page → ExportPDF.do) and returns the PDF as base64.
   EXPORT_ZOHO_PDF: 'EXPORT_ZOHO_PDF',
+  EXPORT_ZOHO_PDF_DIRECT: 'EXPORT_ZOHO_PDF_DIRECT',
+
+  // Report Issue — sidebar → background → POST /api/report-issue with a snapshot
+  REPORT_ISSUE: 'REPORT_ISSUE',
 };
 
 // Keyboard shortcut command names (match manifest.json)

@@ -2307,7 +2307,9 @@
       "discount": 0.3,
       "zoho_product_id": "2570562000001277653",
       "discount_per_unit": 12.0,
-      "discount_pct": 30
+      "discount_pct": 30,
+      "zoho_active": false,
+      "replaced_by": "LIC-MI-EMSC-D-1YMC-A-1YR"
     },
     "LIC-SME-3YR": {
       "list": 80,
@@ -2315,7 +2317,9 @@
       "discount": 0.325,
       "zoho_product_id": "2570562000001277654",
       "discount_per_unit": 26,
-      "discount_pct": 32
+      "discount_pct": 32,
+      "zoho_active": false,
+      "replaced_by": "LIC-MI-EMSC-D-1YMC-A-3YR"
     },
     "LIC-SME-5YR": {
       "list": 120,
@@ -2324,7 +2328,8 @@
       "zoho_product_id": "2570562000001277655",
       "zoho_active": false,
       "discount_per_unit": 38,
-      "discount_pct": 32
+      "discount_pct": 32,
+      "replaced_by": "LIC-MI-EMSC-D-1YMC-A-5YR"
     },
     "LIC-MS210-24P-1YR": {
       "list": 248,
@@ -8449,6 +8454,30 @@
       "zoho_product_id": "2570562000152273117",
       "discount_per_unit": 1,
       "discount_pct": 3
+    },
+    "LIC-MI-EMSC-D-1YMC-A-1YR": {
+      "list": 24,
+      "price": 24,
+      "discount": 0,
+      "zoho_product_id": "2570562000414875794",
+      "discount_per_unit": 0,
+      "discount_pct": 0
+    },
+    "LIC-MI-EMSC-D-1YMC-A-3YR": {
+      "list": 72,
+      "price": 72,
+      "discount": 0,
+      "zoho_product_id": "2570562000414875795",
+      "discount_per_unit": 0,
+      "discount_pct": 0
+    },
+    "LIC-MI-EMSC-D-1YMC-A-5YR": {
+      "list": 120,
+      "price": 120,
+      "discount": 0,
+      "zoho_product_id": "2570562000414875796",
+      "discount_per_unit": 0,
+      "discount_pct": 0
     }
   },
   "_meta": {

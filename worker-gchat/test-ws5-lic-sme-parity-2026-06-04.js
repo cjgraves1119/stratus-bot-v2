@@ -21,6 +21,7 @@ function buildShim() {
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${escPath('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${escPath('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const edIdx = src.indexOf('export default');
@@ -40,7 +41,7 @@ function buildShim() {
 
 const { parseMessage, buildQuoteResponse, licenseTermLabel } = buildShim();
 const quote = (text) => buildQuoteResponse(parseMessage(text));
-const SME_CAP_NOTE_RE = /Systems Manager is offered only in 1-year and 3-year terms/;
+const SME_CAP_NOTE_RE = /Systems Manager \(LIC-SME\) licenses are discontinued/;
 
 let pass = 0, fail = 0;
 function t(name, fn) {
@@ -49,78 +50,82 @@ function t(name, fn) {
 }
 
 console.log('── Part 1: typed LIC-SME directLicense path (the headline bug) ──');
-t('parseMessage("10 lic-sme-3yr") → directLicense LIC-SME-3YR qty 10', () => {
+t('parseMessage("10 lic-sme-3yr") → replacement quoted at qty 10 (direct or all-term list)', () => {
   const p = parseMessage('10 lic-sme-3yr');
-  assert.ok(p && p.directLicense, 'directLicense not set');
-  assert.strictEqual(p.directLicense.sku, 'LIC-SME-3YR');
-  assert.strictEqual(p.directLicense.qty, 10);
+  const skus = [
+    ...(p.directLicense ? [p.directLicense] : []),
+    ...(p.directLicenseList || []),
+    ...(p.items || []).map(i => ({ sku: i.baseSku, qty: i.qty }))
+  ];
+  assert.ok(skus.some(e => /^LIC-MI-EMSC-D-1YMC-A-3YR$/.test(e.sku) && e.qty === 10), `replacement@10 missing: ${JSON.stringify(skus)}`);
+  assert.ok(skus.every(e => !/^LIC-SME/.test(String(e.sku))), `legacy SME SKU present: ${JSON.stringify(skus)}`);
 });
 t('quote("10 lic-sme-3yr") → URL item=LIC-SME-3YR&qty=10 (not LLM)', () => {
   const r = quote('10 lic-sme-3yr');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/item=LIC-SME-3YR&qty=10/.test(r.message), `got: ${r.message}`);
+  assert.ok(/item=LIC-MI-EMSC-D-1YMC-A-3YR&qty=10/.test(r.message), `got: ${r.message}`);
 });
-t('quote("LIC-SME-1YR") → URL with LIC-SME-1YR', () => {
+t('quote("LIC-SME-1YR") → URL with replacement 1YR', () => {
   const r = quote('LIC-SME-1YR');
-  assert.ok(/LIC-SME-1YR/.test(r.message) && r.needsLlm === false, `got: ${r.message}`);
+  assert.ok(/LIC-MI-EMSC-D-1YMC-A-1YR/.test(r.message) && r.needsLlm === false, `got: ${r.message}`);
 });
-t('quote("LIC-SME-5Y") → capped LIC-SME-3YR + flag, no invalid SKU', () => {
+t('quote("LIC-SME-5Y") → replacement 5YR + substitution flag', () => {
   const r = quote('LIC-SME-5Y');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(/item=LIC-MI-EMSC-D-1YMC-A-5YR&qty=1/.test(r.message), `got: ${r.message}`);
   assert.ok(!/item=LIC-SME-5Y\b/.test(r.message), `invalid SKU emitted: ${r.message}`);
-  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing cap flag: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing substitution flag: ${r.message}`);
 });
-t('quote("LIC-SME-4YR") → capped LIC-SME-3YR + flag, no invalid SKU', () => {
+t('quote("LIC-SME-4YR") → replacement 3YR (invalid-term fallback) + flag, no invalid SKU', () => {
   const r = quote('LIC-SME-4YR');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(/item=LIC-MI-EMSC-D-1YMC-A-3YR&qty=1/.test(r.message), `got: ${r.message}`);
   assert.ok(!/item=LIC-SME-4YR\b/.test(r.message), `invalid SKU emitted: ${r.message}`);
-  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing cap flag: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing substitution flag: ${r.message}`);
 });
 
 console.log('── Part 2: SME natural-language handler (context, plurals, qty vs term) ──');
-t('"10 systems manager licenses" → qty 10, 1YR+3YR ONLY (5YR deprecated) + flag, not LLM', () => {
+t('"10 systems manager licenses" → qty 10, replacement 1/3/5YR + flag, not LLM', () => {
   const r = quote('10 systems manager licenses');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/LIC-SME-1YR/.test(r.message) && /LIC-SME-3YR/.test(r.message), `1/3yr missing: ${r.message}`);
-  assert.ok(!/LIC-SME-5YR/.test(r.message), `5YR must NOT be quoted (deprecated): ${r.message}`);
-  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing SME cap flag: ${r.message}`);
+  assert.ok(/LIC-MI-EMSC-D-1YMC-A-1YR/.test(r.message) && /LIC-MI-EMSC-D-1YMC-A-3YR/.test(r.message) && /LIC-MI-EMSC-D-1YMC-A-5YR/.test(r.message), `1/3/5yr replacement missing: ${r.message}`);
+  assert.ok(!/LIC-SME-/.test(r.message), `legacy SME SKU must NOT be quoted (discontinued): ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing substitution flag: ${r.message}`);
   assert.ok(/qty=10/.test(r.message), `qty missing: ${r.message}`);
 });
-t('"5 SME licenses" → qty 5, 1YR+3YR only (no 5YR)', () => {
+t('"5 SME licenses" → qty 5, replacement 1/3/5YR', () => {
   const p = parseMessage('5 SME licenses');
   const skus = (p.items || []).map(i => i.baseSku);
-  assert.deepStrictEqual(skus, ['LIC-SME-1YR', 'LIC-SME-3YR'], `expected 1/3yr only, got: ${JSON.stringify(skus)}`);
+  assert.deepStrictEqual(skus, ['LIC-MI-EMSC-D-1YMC-A-1YR', 'LIC-MI-EMSC-D-1YMC-A-3YR', 'LIC-MI-EMSC-D-1YMC-A-5YR'], `expected replacement 1/3/5yr, got: ${JSON.stringify(skus)}`);
   assert.ok(p.items.every(i => i.qty === 5), `qty: ${JSON.stringify(p.items)}`);
 });
-t('"SME 3 year license" → directLicense LIC-SME-3YR qty 1, single URL (term≠qty)', () => {
+t('"SME 3 year license" → directLicense replacement 3YR qty 1, single URL (term≠qty)', () => {
   const p = parseMessage('SME 3 year license');
   assert.ok(p.directLicense, `expected directLicense, got: ${JSON.stringify(p).slice(0,160)}`);
-  assert.strictEqual(p.directLicense.sku, 'LIC-SME-3YR');
+  assert.strictEqual(p.directLicense.sku, 'LIC-MI-EMSC-D-1YMC-A-3YR');
   assert.strictEqual(p.directLicense.qty, 1, `qty should be 1 (not 3 from "3 year")`);
   const r = buildQuoteResponse(p);
   const urls = (r.message || '').match(/order\/\?item=[^\s]+/g) || [];
   assert.strictEqual(urls.length, 1, `single named term must render ONE URL, got ${urls.length}: ${r.message}`);
-  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(/item=LIC-MI-EMSC-D-1YMC-A-3YR&qty=1/.test(r.message), `got: ${r.message}`);
 });
-t('"10 SME 3 year licenses" → directLicense LIC-SME-3YR qty 10', () => {
+t('"10 SME 3 year licenses" → directLicense replacement 3YR qty 10', () => {
   const p = parseMessage('10 SME 3 year licenses');
-  assert.ok(p.directLicense && p.directLicense.sku === 'LIC-SME-3YR' && p.directLicense.qty === 10, `got: ${JSON.stringify(p).slice(0,160)}`);
+  assert.ok(p.directLicense && p.directLicense.sku === 'LIC-MI-EMSC-D-1YMC-A-3YR' && p.directLicense.qty === 10, `got: ${JSON.stringify(p).slice(0,160)}`);
 });
-t('"systems manager 4 year" → capped LIC-SME-3YR + flag, no throw', () => {
+t('"systems manager 4 year" → replacement 3YR (invalid-term fallback) + flag, no throw', () => {
   const r = quote('systems manager 4 year');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(/item=LIC-MI-EMSC-D-1YMC-A-3YR&qty=1/.test(r.message), `got: ${r.message}`);
   assert.ok(!/LIC-SME-4YR/.test(r.message), `invalid SKU emitted: ${r.message}`);
-  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing cap flag: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing substitution flag: ${r.message}`);
 });
-t('"systems manager 2 year license" → capped LIC-SME-3YR + generalized flag, no throw', () => {
+t('"systems manager 2 year license" → replacement 3YR (invalid-term fallback) + generalized flag, no throw', () => {
   const r = quote('systems manager 2 year license');
   assert.strictEqual(r.needsLlm, false, 'fell through to LLM');
-  assert.ok(/item=LIC-SME-3YR&qty=1/.test(r.message), `got: ${r.message}`);
+  assert.ok(/item=LIC-MI-EMSC-D-1YMC-A-3YR&qty=1/.test(r.message), `got: ${r.message}`);
   assert.ok(!/LIC-SME-2YR/.test(r.message), `invalid SKU emitted: ${r.message}`);
-  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing generalized cap flag: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message), `missing substitution flag: ${r.message}`);
 });
 t('over-match guard: "what is Systems Manager" (no quote context) → NOT a quote', () => {
   const p = parseMessage('what is Systems Manager');
@@ -142,9 +147,9 @@ t('polite-prefix info questions → NOT a quote', () => {
     assert.ok(!/LIC-SME/.test(JSON.stringify(parseMessage(q) || {})), `quoted info question: "${q}"`);
   }
 });
-t('plural years: "SME 3 years license" → single LIC-SME-3YR (not all terms)', () => {
+t('plural years: "SME 3 years license" → single replacement 3YR (not all terms)', () => {
   const p = parseMessage('SME 3 years license');
-  assert.ok(p.directLicense && p.directLicense.sku === 'LIC-SME-3YR', `plural "years" missed single-term: ${JSON.stringify(p).slice(0,160)}`);
+  assert.ok(p.directLicense && p.directLicense.sku === 'LIC-MI-EMSC-D-1YMC-A-3YR', `plural "years" missed single-term: ${JSON.stringify(p).slice(0,160)}`);
 });
 
 console.log('── Part 4 helper: directLicense URL term label ──');
@@ -172,14 +177,14 @@ t('mixed "4 mr44, 2 sme, 5 MS130-12X" injects SME-AGN and keeps hardware', () =>
   assert.strictEqual(bySku.get('SME-AGN'), 2, `SME-AGN missing/wrong qty: ${JSON.stringify(p.items)}`);
   assert.strictEqual(bySku.get('MS130-12X'), 5, `MS130-12X missing/wrong qty: ${JSON.stringify(p.items)}`);
 });
-t('mixed bare SME 5-year output caps only SME and leaves other items at 5-year', () => {
+t('mixed bare SME 5-year output quotes the replacement at 5-year alongside other items', () => {
   const r = quote('4 mr44, 2 sme, 1 mx67');
   const fiveLine = ((r.message || '').match(/\*\*5-Year Co-Term:\*\*[^\n]+/) || [''])[0];
-  assert.ok(/LIC-SME-3YR/.test(fiveLine), `SME was not capped to 3YR in 5-year line: ${fiveLine}`);
-  assert.ok(!/LIC-SME-5YR/.test(r.message || ''), `deprecated SME 5YR emitted: ${r.message}`);
+  assert.ok(/LIC-MI-EMSC-D-1YMC-A-5YR/.test(fiveLine), `SME replacement missing from 5-year line: ${fiveLine}`);
+  assert.ok(!/LIC-SME-/.test(r.message || ''), `legacy SME SKU emitted: ${r.message}`);
   assert.ok(/LIC-ENT-5YR/.test(fiveLine), `MR 5-year license missing from 5-year line: ${fiveLine}`);
   assert.ok(/LIC-MX67-SEC-5YR/.test(fiveLine), `MX67 5-year license missing from 5-year line: ${fiveLine}`);
-  assert.ok(SME_CAP_NOTE_RE.test(r.message || ''), `missing SME cap note: ${r.message}`);
+  assert.ok(SME_CAP_NOTE_RE.test(r.message || ''), `missing substitution note: ${r.message}`);
 });
 
 console.log('── Regression + over-match guards ──');

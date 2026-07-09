@@ -13,12 +13,11 @@
 const fs = require('fs'), path = require('path'), os = require('os');
 const here = path.resolve(__dirname);
 let src = fs.readFileSync(path.join(here, 'src/index.js'), 'utf8');
-const escPath = p => path.join(here, p).replace(/\\/g, '\\\\');
-src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
-src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${escPath('src/data/prices.json')}');`);
-src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
-src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${escPath('src/data/specs.json')}');`);
-src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+const escPath = rel => path.join(here, 'src', rel).replace(/\\/g, '\\\\');
+src = src.replace(/^import\s+(\w+)\s+from\s+'(\.\/[^']+\.json)';?$/mg,
+  (_, name, rel) => `const ${name} = require('${escPath(rel)}');`);
+src = src.replace(/^import\s+\{[^}]*\}\s+from\s+'cloudflare:workers';?$/m,
+  'const WorkflowEntrypoint = class {};');
 src = src.replace(/^export\s+(class|function|const|let|var)\s+/gm, '$1 ');
 const edIdx = src.indexOf('export default');
 if (edIdx > -1) {
@@ -138,10 +137,10 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   const msg = (q && q.message) || '';
 
   // BUG 1 — Systems Manager is now in the renewal cart, but 5-year SME is deprecated.
-  check('quote includes LIC-SME-1YR', /\bLIC-SME-1YR\b/.test(msg));
-  check('quote includes LIC-SME-3YR', /\bLIC-SME-3YR\b/.test(msg));
-  check('quote does NOT include deprecated LIC-SME-5YR', !/\bLIC-SME-5YR\b/.test(msg));
-  check('quote flags the SME term cap', /Systems Manager is offered only in 1-year and 3-year terms/.test(msg));
+  check('quote includes replacement 1YR', /\bLIC-MI-EMSC-D-1YMC-A-1YR\b/.test(msg));
+  check('quote includes replacement 3YR', /\bLIC-MI-EMSC-D-1YMC-A-3YR\b/.test(msg));
+  check('quote does NOT include any legacy LIC-SME SKU', !/\bLIC-SME-\d/.test(msg));
+  check('quote flags the SME replacement', /Systems Manager \(LIC-SME\) licenses are discontinued/.test(msg));
 
   // MR-ENT regression — still maps to LIC-ENT.
   check('quote still includes LIC-ENT-1YR (MR-ENT)', /\bLIC-ENT-1YR\b/.test(msg));
@@ -158,12 +157,12 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
 
   // SM-ENT quantity rides through at 84 in the Option 1 1-Year URL.
   const opt1Items = decodeUrl(opt1, '1-Year');
-  const smLine = opt1Items && opt1Items.find(i => i.sku === 'LIC-SME-1YR');
-  check('Option 1 1-Year URL carries LIC-SME-1YR × 84', !!smLine && smLine.qty === 84,
+  const smLine = opt1Items && opt1Items.find(i => i.sku === 'LIC-MI-EMSC-D-1YMC-A-1YR');
+  check('Option 1 1-Year URL carries LIC-MI-EMSC-D-1YMC-A-1YR × 84', !!smLine && smLine.qty === 84,
     `decoded SME line: ${JSON.stringify(smLine)}`);
   const opt1Items5 = decodeUrl(opt1, '5-Year');
-  const sm5Line = opt1Items5 && opt1Items5.find(i => i.sku === 'LIC-SME-3YR');
-  check('Option 1 5-Year URL carries capped LIC-SME-3YR × 84', !!sm5Line && sm5Line.qty === 84,
+  const sm5Line = opt1Items5 && opt1Items5.find(i => i.sku === 'LIC-MI-EMSC-D-1YMC-A-5YR');
+  check('Option 1 5-Year URL carries replacement 5YR × 84', !!sm5Line && sm5Line.qty === 84,
     `decoded SME 5-year line: ${JSON.stringify(sm5Line)}`);
 
   // Dashboard top-to-bottom order: MR Enterprise is row 1 (→ LIC-ENT first),
@@ -171,8 +170,8 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
   check('Option 1 is in dashboard order — MR (LIC-ENT-1YR) is first',
     !!opt1Items && opt1Items[0] && opt1Items[0].sku === 'LIC-ENT-1YR',
     `first item: ${opt1Items && JSON.stringify(opt1Items[0])}`);
-  check('Option 1 is in dashboard order — Systems Manager (LIC-SME-1YR) is last',
-    !!opt1Items && opt1Items[opt1Items.length - 1] && opt1Items[opt1Items.length - 1].sku === 'LIC-SME-1YR',
+  check('Option 1 is in dashboard order — Systems Manager replacement is last',
+    !!opt1Items && opt1Items[opt1Items.length - 1] && opt1Items[opt1Items.length - 1].sku === 'LIC-MI-EMSC-D-1YMC-A-1YR',
     `last item: ${opt1Items && JSON.stringify(opt1Items[opt1Items.length - 1])}`);
 
   // Paragraph spacing so it pastes into Gmail without looking cramped.
@@ -188,8 +187,8 @@ Note from caption: Systems Manager LIMIT: 99 ACTIVE: 99 (ignore me)`;
 {
   const q = buildDashboardRenewalQuote([{ sku: 'SM-ENT', qty: 84 }], { mxEdition: 'Advanced Security' });
   const msg = (q && q.message) || '';
-  check('SM-only renewal includes LIC-SME', /\bLIC-SME-1YR\b/.test(msg));
-  check('SM-only renewal does NOT include LIC-SME-5YR', !/\bLIC-SME-5YR\b/.test(msg));
+  check('SM-only renewal includes the replacement', /\bLIC-MI-EMSC-D-1YMC-A-1YR\b/.test(msg));
+  check('SM-only renewal does NOT include any legacy LIC-SME SKU', !/\bLIC-SME-\d/.test(msg));
   check('SM-only renewal has no "-HW" SKU', !/-HW\b/.test(msg));
 }
 

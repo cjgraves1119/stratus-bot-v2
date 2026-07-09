@@ -10,7 +10,7 @@
  * - Context menus
  */
 
-import { MSG } from '../lib/constants.js';
+import { MSG, IS_DEV_BUILD, API_BASE } from '../lib/constants.js';
 import { registerMessageHandlers, sendToTab } from '../lib/messaging.js';
 import { getSettings } from '../lib/storage.js';
 import {
@@ -49,9 +49,67 @@ function waitForTabComplete(tabId, timeoutMs = 20000) {
   });
 }
 
+// Org-stable inventory-template ids (seed values for org647122552 — the org
+// both instances share). Extended/refreshed at runtime from the preview
+// flow's harvested templateIds, cached in chrome.storage.local.
+const SEED_PDF_TEMPLATE_IDS = {
+  org647122552: {
+    'Hardware Quote': '2570562000000129141',
+    'Professional Services Quote': '2570562000001580284',
+  },
+};
+
+async function resolvePdfTemplateId(orgId, templateName) {
+  try {
+    const s = await chrome.storage.local.get(['zohoPdfTemplateIds']);
+    const cached = (s.zohoPdfTemplateIds || {})[orgId] || {};
+    if (templateName && cached[templateName]) return cached[templateName];
+  } catch { /* storage unavailable — fall through to seeds */ }
+  const seeded = SEED_PDF_TEMPLATE_IDS[orgId] || {};
+  return (templateName && seeded[templateName]) || null;
+}
+
+async function cachePdfTemplateIds(orgId, ids) {
+  if (!ids || typeof ids !== 'object' || !Object.keys(ids).length) return;
+  try {
+    const s = await chrome.storage.local.get(['zohoPdfTemplateIds']);
+    const all = s.zohoPdfTemplateIds || {};
+    all[orgId] = { ...(all[orgId] || {}), ...ids };
+    await chrome.storage.local.set({ zohoPdfTemplateIds: all });
+  } catch { /* non-fatal */ }
+}
+
 async function exportZohoQuotePdf({ recordId, templateName, org }) {
   if (!recordId) return { success: false, error: 'missing_recordId' };
   const orgId = org || 'org647122552';
+
+  // ── Fast path (2026-07-08): export from an ALREADY-OPEN Zoho tab. The
+  // ExportPDF.do POST needs only the CSRF cookie + record id + numeric
+  // template id (verified live against a real quote), so any crm.zoho.com
+  // tab can run it same-origin — no hidden preview tab, whose in-field
+  // flakiness (preview tab dying before its content script answered →
+  // generic "Export failed") motivated this. Falls back to the preview flow
+  // when no matching Zoho tab is open, the template id is unknown, or the
+  // direct POST fails for any reason.
+  try {
+    const directTemplateId = await resolvePdfTemplateId(orgId, templateName || 'Hardware Quote');
+    if (directTemplateId) {
+      const zohoTabs = await chrome.tabs.query({ url: 'https://crm.zoho.com/*' });
+      const candidates = zohoTabs.filter((t) => (t.url || '').includes(`/crm/${orgId}/`));
+      const target = candidates.find((t) => t.active) || candidates[0];
+      if (target) {
+        const direct = await sendToTab(target.id, MSG.EXPORT_ZOHO_PDF_DIRECT, {
+          recordId, org: orgId, templateId: directTemplateId, templateName,
+        });
+        if (direct && direct.success) return direct;
+        console.warn('[Stratus AI] Direct PDF export unavailable (' +
+          ((direct && direct.error) || 'no_response') + ') — falling back to preview-tab flow.');
+      }
+    }
+  } catch (e) {
+    console.warn('[Stratus AI] Direct PDF export threw — falling back.', e);
+  }
+
   const previewUrl =
     `https://crm.zoho.com/crm/${orgId}/tab/Quotes/${recordId}/export-pdf?flag=false&module=Quotes`;
 
@@ -80,6 +138,8 @@ async function exportZohoQuotePdf({ recordId, templateName, org }) {
       if (result) break;
       await sleep(600);
     }
+    // Harvest name→id template map for the direct-export fast path.
+    if (result && result.templateIds) await cachePdfTemplateIds(orgId, result.templateIds);
     return result || { success: false, error: 'content_script_unreachable' };
   } finally {
     try { await chrome.tabs.remove(tab.id); } catch { /* non-fatal */ }
@@ -107,8 +167,24 @@ self.addEventListener('unhandledrejection', (event) => {
   );
 });
 
+// DEV-build toolbar marker: an orange "DEV" badge so the unpacked test build's icon is
+// visually distinct from the Web Store build even with the side panel closed. No-op in
+// production — IS_DEV_BUILD is false unless the bundle was built with STRATUS_ENV=dev.
+function applyDevBadge() {
+  if (!IS_DEV_BUILD) return;
+  try {
+    chrome.action.setBadgeText({ text: 'DEV' });
+    chrome.action.setBadgeBackgroundColor({ color: '#c2410c' });
+    if (chrome.action.setBadgeTextColor) chrome.action.setBadgeTextColor({ color: '#ffffff' });
+    chrome.action.setTitle({ title: 'Stratus AI (DEV) -> ' + API_BASE });
+  } catch (e) { /* action API not ready yet */ }
+}
+applyDevBadge();
+
 chrome.runtime.onInstalled.addListener((details) => {
   console.log('[Stratus AI] Extension installed/updated:', details.reason);
+
+  applyDevBadge();
 
   // Set up context menus
   setupContextMenus();
@@ -127,6 +203,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 chrome.runtime.onStartup.addListener(() => {
   console.log('[Stratus AI] Extension started.');
+  applyDevBadge();
   setupCacheAlarms();
 });
 
@@ -337,6 +414,11 @@ registerMessageHandlers({
   // ── Draft Reply ──
   [MSG.DRAFT_REPLY]: async ({ subject, body, senderEmail, senderName, tone, instructions }) => {
     return api.draftReply(subject, body, senderEmail, senderName, tone, instructions);
+  },
+
+  // ── Report Issue ── forwards the sidebar's snapshot to /api/report-issue.
+  [MSG.REPORT_ISSUE]: async (report) => {
+    return api.reportIssue(report);
   },
 
   // ── SKU Detection ──

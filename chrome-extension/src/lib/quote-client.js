@@ -242,6 +242,15 @@ export async function analyzeImage(imageUrl, imageBase64) {
       if (hwItems.length === 0 && mrQty > 0) {
         return { kind: 'result', result: mrOnlyResult(mrQty), note: `Detected MR Enterprise × ${mrQty} from the screenshot.`, detectedSkus };
       }
+      // F8: every detected row is a fully-formed license SKU. After the worker's
+      // LIC- passthrough fix a license dashboard returns ready quote URLs above
+      // (the res.quoteUrls branch). Reaching here with ONLY license rows means
+      // the worker couldn't build a quote — re-POSTing them as raw SKU text
+      // mis-routes license rows through the hardware parser and produces phantom
+      // "did you mean MX67?" chips. Show a re-capture prompt instead of garbage.
+      if (deduped.every(d => String(d.sku).toUpperCase().startsWith('LIC-'))) {
+        return { kind: 'message', note: `Detected these license SKUs but couldn't auto-build a quote: ${detectedSkus.join(', ')}. Try a cleaner screenshot, or type the SKUs (e.g. 10 MR44).`, detectedSkus };
+      }
       // Hardware (and maybe MR-ENT) → quote the formatted list (runQuote strips MR-ENT).
       return { kind: 'skus', skuText: formatted, note: `Detected ${deduped.length} SKU${deduped.length > 1 ? 's' : ''} from the screenshot.`, detectedSkus, eolMapping };
     }

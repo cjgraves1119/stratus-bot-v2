@@ -74,7 +74,7 @@ const prices = new Proxy(staticPrices, {
       // feed doesn't carry this flag, so without this merge a live-priced SKU would be
       // reported active and slip past the inactive-product guard (LIC-SME-5YR, 2026-06-02).
       if (target[prop] && target[prop].zoho_active === false && live.zoho_active === undefined) {
-        return { ...live, zoho_active: false };
+        return { ...live, zoho_active: false, replaced_by: target[prop].replaced_by };
       }
       return live;
     }
@@ -128,12 +128,10 @@ function hasKnownMsLicenseModelInput(modelToken) {
 // quotes.
 function normalizeDirectLicenseSku(sku) {
   const upper = String(sku || '').trim().toUpperCase();
-  const smeDirect = upper.match(/^LIC-SME-(\d+)Y(R)?$/i);
+  const smeDirect = upper.match(/^LIC-SME(?:-(\d+)Y(R)?)?$/i);
   if (smeDirect) {
-    const sme = smeCapTerm(smeDirect[1]);
-    return sme.capped
-      ? { sku: 'LIC-SME-3YR', note: SME_5YR_FLAG }
-      : { sku: `LIC-SME-${sme.term}YR` };
+    // Bare "LIC-SME" (no term) falls back to 3-year, like the old cap default.
+    return { sku: smeReplacementSku(smeDirect[1] || 3), note: SME_EOL_FLAG };
   }
   if (prices[upper]) return { sku: upper };
 
@@ -296,20 +294,22 @@ function buildQuoteFromV3(v3, rawText) {
     else if (p.isTermOptionQuote && Array.isArray(p.items)) licEntries = p.items.map(e => ({ sku: e.baseSku, qty: e.qty }));
 
     if (licEntries) {
+      // Legacy Systems Manager SKUs: SME is discontinued — substitute the
+      // replacement (Ivanti MDM) SKU at the same term before grouping.
+      licEntries = licEntries.map(e => {
+        const sm = String(e.sku || '').match(/^LIC-SME-([135])Y(R)?$/i);
+        return sm ? { ...e, sku: smeReplacementSku(sm[1]) } : e;
+      });
       const byBase = new Map();
       for (const e of licEntries) {
         const m = String(e.sku || '').match(/^(LIC-.+?)-([135])Y(?:R)?(?:-S\d+)?$/i);
         if (!m) { combinedItems.push({ baseSku: e.sku, qty: e.qty || qty, hardwareOnly: false, licenseOnly: true }); continue; }
         const base = m[1].toUpperCase();
-        if (!byBase.has(base)) byBase.set(base, { qty: e.qty || qty, licenseSkus: [], sme: /^LIC-SME/i.test(base) });
+        if (!byBase.has(base)) byBase.set(base, { qty: e.qty || qty, licenseSkus: [], sme: base === SME_REPLACEMENT_BASE });
         byBase.get(base).licenseSkus.push({ term: `${m[2]}Y`, sku: e.sku });
       }
       for (const [base, info] of byBase) {
-        if (info.sme && requestedTerm === 5) {
-          const three = info.licenseSkus.find(l => l.term === '3Y');
-          if (three && !info.licenseSkus.some(l => l.term === '5Y')) info.licenseSkus.push({ term: '5Y', sku: three.sku });
-        }
-        combinedItems.push({ baseSku: base, qty: info.qty, _v3PreLicense: info.licenseSkus, smeCapped: info.sme, hardwareOnly: false, licenseOnly: true });
+        combinedItems.push({ baseSku: base, qty: info.qty, _v3PreLicense: info.licenseSkus, smeReplaced: info.sme, hardwareOnly: false, licenseOnly: true });
       }
       continue;
     }
@@ -335,6 +335,58 @@ function buildQuoteFromV3(v3, rawText) {
     unresolvedCategories: [],
     _fromV3: true
   };
+}
+
+function parseExplicitDirectLicenseListBeforeClassifier(rawText) {
+  const upper = String(rawText || '').toUpperCase();
+  const explicitLicTerms = upper.match(/\bLIC-[A-Z0-9-]+-[135]YR?\b/g) || [];
+  if (new Set(explicitLicTerms).size < 2) return null;
+  try {
+    const parsed = parseMessage(rawText);
+    return parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length >= 2
+      ? parsed
+      : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseExplicitSkuRequestBeforeClassifier(rawText) {
+  let text = String(rawText || '').trim();
+  if (!text) return null;
+  const skuTokenPattern = '(LIC-[A-Z0-9-]+|(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\\d[\\w-]*)';
+  text = text
+    .replace(new RegExp(`\\b(\\d+)\\s*[x×]\\s*${skuTokenPattern}\\b`, 'gi'), (_m, qty, sku) => `${qty} ${sku}`)
+    .replace(new RegExp(`\\b${skuTokenPattern}\\s*(?:=|qty\\.?|quantity)\\s*(\\d+)\\b`, 'gi'), (_m, sku, qty) => `${qty} ${sku}`)
+    .replace(new RegExp(`\\b${skuTokenPattern}\\s+[x×]\\s*(\\d+)\\b`, 'gi'), (_m, sku, qty) => `${qty} ${sku}`);
+  const upper = text.toUpperCase().replace(/https?:\/\/\S+/g, ' ');
+
+  const skuTokens = upper.match(/\b(?:LIC-[A-Z0-9-]+|(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/g) || [];
+  if (skuTokens.length === 0) return null;
+
+  // Keep product-info / pricing questions on the classifier path. This bypass is
+  // only for SKU-list syntax where the deterministic parser is the source of truth.
+  if (/\b(WHAT|WHICH|DIFFERENCE|COMPARE|RECOMMEND|SUPPORT|COMPATIBLE|SPEC|SPECS|DATASHEET|EOL|END\s+OF\s+LIFE|WHEN\s+DOES|HOW\s+MUCH|COST|PRICE|PRICING)\b/.test(upper)) {
+    return null;
+  }
+
+  const residue = upper
+    .replace(/\bLIC-[A-Z0-9-]+\b/g, ' ')
+    .replace(/\b(?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*\b/g, ' ')
+    .replace(/\b\d+\b/g, ' ')
+    .replace(/\b(QUOTE|QUOTING|CREATE|SEND|GIVE|SHOW|NEED|I|ME|PLEASE|JUST|A|AN|THE|FOR|OF|AND|OR|WITH|WITHOUT|NO|X|YEAR|YEARS|YR|YRS|Y|TERM|TERMS|ALL|HARDWARE|HW|ONLY|LICENSE|LICENCE|LICENSING|LICENSES|LICENCES|LIC|RENEWAL|RENEWALS|RENEW|SEC|SECURITY|ENT|ENTERPRISE|SDW|SD-WAN|SD|WAN|PLUS|COMMA)\b/g, ' ')
+    .replace(/[,\s+*×;:(){}[\]"'`./\\-]+/g, '');
+  if (residue) return null;
+
+  try {
+    const parsed = parseMessage(text);
+    const hasParsedItems = parsed && Array.isArray(parsed.items) && parsed.items.length > 0;
+    const hasDirectLicenseList = parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length > 0;
+    const hasDirectLicense = parsed && parsed.directLicense;
+    return (hasParsedItems || hasDirectLicenseList || hasDirectLicense || parsed?.isClarification) ? parsed : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
@@ -661,6 +713,20 @@ function getReasoningControl(modelId, requestedPolicy = REASONING_POLICY_DISABLE
       reasoningDisableSupported: true,
       requestOptions: { chat_template_kwargs: { thinking: { type: 'disabled' } } },
       reasoningControl: 'cf_chat_template_thinking_disabled'
+    };
+  }
+
+  // GLM (zai-org) reasons by DEFAULT (reasoning_content in every reply).
+  // Empirically verified 2026-07-02 on @cf/zai-org/glm-5.2: enable_thinking:false
+  // drops completion 139→3 tokens and 17s→9s on a trivial prompt. The other
+  // candidates were traps: thinking:{type:'disabled'} is silently IGNORED
+  // (still reasons) and reasoning_effort:'low' still reasons at 3× latency.
+  if (/glm|zai-org/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { chat_template_kwargs: { enable_thinking: false } },
+      reasoningControl: 'cf_chat_template_enable_thinking_false'
     };
   }
 
@@ -2028,6 +2094,35 @@ function applySuffix(sku) {
 }
 
 // ─── License SKU Rules ───────────────────────────────────────────────────────
+// ── Dashboard license-row passthrough ──────────────────────────────────────
+// A Cisco Meraki license-dashboard "License information" row is ALREADY a
+// fully-formed license SKU (e.g. LIC-ENT-3YR, LIC-MV-3YR, LIC-MX67W-SEC-3YR,
+// LIC-MX85-SEC-3Y). getLicenseSkus only maps *hardware* models → licenses, so
+// routing such a row through it returns null and the dashboard line is silently
+// dropped (the screenshot→empty-quote bug, Arch Technology 2026-06-25). Given a
+// termed LIC- SKU, return a { '1Y'|'3Y'|'5Y' → sku } map of its term siblings
+// limited to SKUs that exist in prices.json (deprecated siblings are omitted),
+// or null when `sku` is not a termed LIC- SKU (hardware
+// rows then fall through to getLicenseSkus untouched).
+function licenseTermSiblings(sku) {
+  const upper = String(sku || '').toUpperCase();
+  // Family stem + term suffix style: -1YR/-3YR/-5YR (legacy) or -1Y/-3Y/-5Y
+  // (MX75/85/95/105, SDW). Non-greedy stem so the trailing term anchors the match.
+  const m = upper.match(/^(LIC-.+?)-([135])(YR?)$/);
+  if (!m) return null;
+  let stem = m[1];
+  let yr = m[3]; // 'YR' or 'Y'
+  // Systems Manager (LIC-SME) is discontinued — a dashboard LIC-SME row renews
+  // on the replacement family (Ivanti MDM, all three terms valid) instead.
+  if (stem === 'LIC-SME') { stem = SME_REPLACEMENT_BASE; yr = 'YR'; }
+  const map = {};
+  for (const [term, n] of [['1Y', '1'], ['3Y', '3'], ['5Y', '5']]) {
+    const candidate = `${stem}-${n}${yr}`;
+    if (candidate in prices) map[term] = candidate;
+  }
+  return Object.keys(map).length ? map : null;
+}
+
 function getLicenseSkus(baseSku, requestedTier) {
   if (requiresMsLicenseModelInputValidation(baseSku) && !hasKnownMsLicenseModelInput(baseSku)) {
     console.warn(`[LICENSE] Invalid switch model token for license generation: ${baseSku}`);
@@ -2059,6 +2154,10 @@ function isHardwareOnlyQuoteIntent(text) {
 function collectQuotePreResolveSkuTokens(text, options = {}) {
   const preSkuTokens = [];
   const hardwareOnly = options.hardwareOnly === true || isHardwareOnlyQuoteIntent(text);
+  // NOTE (2026-07-09): the trailing '=' on Cisco spare SKUs is deliberately NOT
+  // captured here — resolveCachedProduct is '='-insensitive on the cache side, and
+  // capturing '=' would defeat applySuffix promotions (C9200L-24T-4G= would no
+  // longer promote to the catalog's -M form).
   const skuRegex = /\b(?:MR|MV|MT|MG|MX|CW9|MS|C8|C9|Z)\d[A-Z0-9-]*/gi;
   let m;
   while ((m = skuRegex.exec((text || '').toUpperCase())) !== null) {
@@ -2416,6 +2515,28 @@ function dedupeSkus(skus) {
   return Array.from(map.entries()).map(([sku, qty]) => ({ sku, qty }));
 }
 
+// OCR sanity filter. When a vision pass emits BOTH a fully-termed license SKU
+// (LIC-ENT-3YR) and a term-stripped fragment of it (LIC-ENT), the bare row is an
+// OCR artifact — drop it so it can't inject a phantom quote line or a bogus qty
+// (e.g. the "67" that bled out of "MX67W" in the Arch Technology screenshot).
+// Keep the termed row; leave non-license rows and standalone term-less LIC rows
+// (no termed sibling) untouched. 2026-06-25.
+function collapseLicenseTermlessDuplicates(skus) {
+  if (!Array.isArray(skus) || skus.length < 2) return skus;
+  const termedStems = new Set();
+  for (const s of skus) {
+    const m = String(s?.sku || '').toUpperCase().match(/^(LIC-.+?)-[135]YR?$/);
+    if (m) termedStems.add(m[1]);
+  }
+  if (termedStems.size === 0) return skus;
+  return skus.filter(s => {
+    const up = String(s?.sku || '').toUpperCase();
+    if (!up.startsWith('LIC-')) return true;     // non-license: keep
+    if (/-[135]YR?$/.test(up)) return true;      // termed license: keep
+    return !termedStems.has(up);                 // term-less: drop iff a termed sibling exists
+  });
+}
+
 function extractSkusFromVisionText(text) {
   const skus = [];
   if (!text) return skus;
@@ -2456,7 +2577,7 @@ function extractSkusFromVisionText(text) {
         if (smActive > 0 && smQty > 0 && smQty <= 500) skus.push({ sku: 'SM-ENT', qty: smQty });
       }
     }
-    if (skus.length > 0) return dedupeSkus(skus);
+    if (skus.length > 0) return collapseLicenseTermlessDuplicates(dedupeSkus(skus));
   }
 
   const mrEntRe = /MR\s+Enterprise[^\n\d]{0,40}?(\d+)/gi;
@@ -2493,13 +2614,107 @@ function extractSkusFromVisionText(text) {
       }
     }
   }
-  return dedupeSkus(skus);
+  return collapseLicenseTermlessDuplicates(dedupeSkus(skus));
 }
 
 // ─── Dashboard vision prompt + audit pass ───────────────────────────────────
 // Pulled out of the fetch handler so the prompt is testable and the audit pass
 // (second-shot vision call when the first pass looks suspicious) can re-use
 // the same parsing rules.
+// ── Workers AI (Llama 4 Scout) dashboard vision + audit pass ────────────────
+// Ported from the webex worker (worker/src/index.js) for cross-surface parity:
+// the extension's /api/parse-dashboard used Claude Sonnet vision, which
+// free-formed noisy multi-row output on some screenshots. This is the SAME free
+// Llama-4-Scout vision path the webex bot uses, including the second-shot audit
+// pass that recovers rows hidden behind colored annotations. (F5, 2026-06-25.)
+async function askCFVision(prompt, imageData, env) {
+  if (!env.AI) return null;
+  const startMs = Date.now();
+  try {
+    const result = await Promise.race([
+      env.AI.run(CF_MODEL, {
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: `data:${imageData.mediaType};base64,${imageData.base64}` } }
+          ]
+        }],
+        max_tokens: 1500
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('CF_VISION_TIMEOUT')), 15000))
+    ]);
+    const elapsed = Date.now() - startMs;
+    const response = extractAIResponse(result);
+    if (response.length < 20) return null;
+    const cantSee = /(can'?t see|cannot see|don'?t see|unable to (see|view)|no image|text-based|upload)/i;
+    if (cantSee.test(response)) {
+      console.log(`[CF-Vision] Model can't see image (${elapsed}ms), falling back to Claude`);
+      return null;
+    }
+    console.log(`[CF-Vision] Success (${elapsed}ms, ${response.length} chars)`);
+    return { response, elapsed };
+  } catch (err) {
+    console.error(`[CF-Vision] Error: ${err.message} (${Date.now() - startMs}ms)`);
+    return null;
+  }
+}
+
+function getDashboardVisionAuditPrompt(firstResponse) {
+  const safeFirst = String(firstResponse || '').slice(0, 2000);
+  return `You already produced this LICENSE_DASHBOARD_PARSE_V1 output for the screenshot:
+
+---FIRST PASS---
+${safeFirst}
+---END FIRST PASS---
+
+Now re-scan the SAME image. Your job is to catch rows the first pass may have missed — especially rows whose ACTIVE >= 1 that sit just below or above a colored annotation (red/yellow/blue underline, cross, circle, highlighter stroke). Annotations are user markup, NOT table boundaries; the License information table continues below them.
+
+Focus checks:
+- For every MX, MR Enterprise, Systems Manager, MS, MT, MV, MG, Z, CW, or C9 row visible in the License information table with ACTIVE >= 1, confirm it is present in the first pass. (Systems Manager → SM-ENT.)
+- If you see an MX65 row, also look immediately above and below it for an MX85, MX67, MX68, MX75, MX95, MX105, MX250, or MX450 row that the first pass may have skipped.
+- Do not invent SKUs. Only confirm or add rows that are literally visible in the top License information table.
+
+Respond with ONLY a fresh LICENSE_DASHBOARD_PARSE_V1 block in the same format as before, listing every row with ACTIVE >= 1 you can see. The caller will merge this with the first pass by taking the MAX qty per SKU (not the sum), so it is safe to repeat rows the first pass already had.`;
+}
+
+// Trigger heuristic for the audit pass. Returns true when the first response
+// looks suspicious in a way the audit prompt is good at catching.
+function shouldAuditDashboardVision(firstResponse) {
+  if (!firstResponse) return false;
+  const skus = extractSkusFromVisionText(firstResponse);
+  if (skus.length === 0) return false;
+  const upper = (s) => String(s.sku || '').toUpperCase();
+  const hasMrEnt = skus.some(s => upper(s) === 'MR-ENT' || upper(s) === 'MR_ENT');
+  const hasDeviceFamily = skus.some(s => /^(MX|MS|MV|MG|Z|CW|C9)\d/i.test(upper(s)));
+  // Pattern A: MR-only (no device family) — common when annotations hide MX rows.
+  if (hasMrEnt && !hasDeviceFamily) return true;
+  // Pattern B: MX65 present but MX85/MX95/MX105/MX67/MX68/MX75/MX250/MX450 absent.
+  const hasMx65 = skus.some(s => /^MX65\b/i.test(upper(s)));
+  const hasOtherMx = skus.some(s => /^MX(?:67|68|75|85|95|105|250|450)\b/i.test(upper(s)));
+  if (hasMx65 && !hasOtherMx) return true;
+  return false;
+}
+
+// Merge two SKU lists by taking MAX qty per SKU (not sum). Used for first +
+// audit pass merging where re-emitted rows would otherwise double-count.
+function mergeVisionSkusMax(first, audit) {
+  const out = new Map();
+  const ingest = (list) => {
+    for (const it of (list || [])) {
+      if (!it || !it.sku) continue;
+      const sku = String(it.sku).toUpperCase();
+      const qty = Number(it.qty) || 0;
+      if (qty <= 0) continue;
+      const prev = out.get(sku);
+      if (!prev || qty > prev.qty) out.set(sku, { sku, qty });
+    }
+  };
+  ingest(first);
+  ingest(audit);
+  return Array.from(out.values());
+}
+
 function getDashboardVisionPrompt() {
   return `You are analyzing a Cisco Meraki license dashboard screenshot.
 
@@ -2594,6 +2809,20 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
       ordered.push({ kind: 'sm', qty });
       continue;
     }
+    // Dashboard "License information" rows are already fully-formed license SKUs.
+    // Carry them forward directly at every term — getLicenseSkus has no LIC-
+    // branch and would drop them (the screenshot→empty-quote bug). Gate strictly
+    // on a termed LIC- SKU present in prices so hardware rows are untouched.
+    const licSiblings = licenseTermSiblings(upper);
+    if (licSiblings) {
+      ordered.push({ kind: 'lic', siblings: licSiblings, qty });
+      continue;
+    }
+    // Meraki dashboards may show subscription-license SKUs (for example
+    // LIC-MR-E, LIC-MX-M-E, LIC-MS-100-L-E). Stratus ecomm quotes only catalog
+    // co-term SKUs, so any dashboard LIC-* row that did not pass the
+    // catalog-backed term-sibling gate above is intentionally ignored.
+    if (upper.startsWith('LIC-')) continue;
     if (isEol(upper)) {
       const row = { model: upper, qty, replacement: checkEol(upper) };
       eolDevices.push(row);
@@ -2623,8 +2852,11 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   const renewItem = (row, term) => {
     if (row.kind === 'mr') return { sku: `LIC-ENT-${termYr[term]}`, qty: row.qty };
     if (row.kind === 'sm') {
-      const sme = smeCapTerm(parseInt(term, 10));
-      return { sku: `LIC-SME-${sme.term}YR`, qty: row.qty, smeCapped: sme.capped };
+      return { sku: smeReplacementSku(parseInt(term, 10)), qty: row.qty };
+    }
+    if (row.kind === 'lic') {
+      const sku = row.siblings[term];
+      return sku ? { sku, qty: row.qty } : null;
     }
     const lic = licFor(row.model, term);
     return lic ? { sku: lic.sku, qty: row.qty } : null;
@@ -2686,13 +2918,15 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   // Render helpers
   const renderTerms = (groups) => {
     const lines = [];
+    let smeReplacedRow = false;
     for (const term of TERMS) {
       if (groups[term].length === 0) continue;
       const url = buildStratusUrl(groups[term]);
       const label = term === '1Y' ? '1-Year' : term === '3Y' ? '3-Year' : '5-Year';
-      const note = term === '5Y' && groups[term].some(i => i.smeCapped) ? `\n_${SME_5YR_FLAG}_` : '';
-      lines.push(`${label} Co-Term: ${url}${note}`);
+      if (groups[term].some(i => String(i.sku || '').toUpperCase().startsWith(SME_REPLACEMENT_BASE))) smeReplacedRow = true;
+      lines.push(`${label} Co-Term: ${url}`);
     }
+    if (smeReplacedRow) lines.push(`_${SME_EOL_FLAG}_`);
     // Blank line between each co-term option so the quote pastes into Gmail
     // with paragraph spacing instead of a cramped block.
     return lines.join('\n\n');
@@ -2960,11 +3194,14 @@ function detectFamily(sku) {
 // lookup miss, match the input against catalog keys with ALL dashes stripped; return the single
 // canonical (dashed) key, or null if none/ambiguous. Only fires on a miss → cannot override a valid
 // match. 0 dash-strip collisions across the 1058-key catalog (verified), so the mapping is unambiguous.
+// 2026-07-09 (SFP-H25G-CU5M, corp error_reports #3): Cisco spare SKUs carry a trailing '='
+// (SFP-H25G-CU5M=, AIR-AP-BRACKET-1=) that users almost never type — strip '=' in the bare
+// comparison too so both directions match ('=' typed vs catalog bare, and vice versa).
 function dashInsensitiveCatalogKey(upper) {
-  const bare = upper.replace(/-/g, '');
+  const bare = upper.replace(/[-=]/g, '');
   let hit = null;
   for (const k of Object.keys(prices)) {
-    if (k.toUpperCase().replace(/-/g, '') === bare) { if (hit) return null; hit = k; }
+    if (k.toUpperCase().replace(/[-=]/g, '') === bare) { if (hit) return null; hit = k; }
   }
   return hit;
 }
@@ -3177,7 +3414,10 @@ function checkSkuDescriptionMismatch(entries) {
 function parseStratusUrl(url) {
   try {
     const u = new URL(url);
-    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean);
+    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean)
+      // Legacy Systems Manager tokens in pasted/old URLs: substitute the
+      // replacement (SME is discontinued) before re-pricing or re-rendering.
+      .map(s => { const sm = s.match(/^LIC-SME-([135])Y(R?)$/i); return sm ? smeReplacementSku(sm[1]) : s; });
     const qtyStr = (u.searchParams.get('qty') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
     if (items.length === 0) return null;
     // If qtys missing or mismatched, default all to 1
@@ -3652,6 +3892,14 @@ function getRelevantPriceContext(text, history) {
   }
 
   if (skusToLookup.size === 0) return null;
+
+  // Legacy Systems Manager tokens (typed or from history URLs): price the
+  // replacement instead — SME is discontinued and pricing context must never
+  // re-seed a dead SKU into the conversation.
+  for (const sku of [...skusToLookup]) {
+    const sm = sku.match(/^LIC-SME-([135])Y(R?)$/);
+    if (sm) { skusToLookup.delete(sku); skusToLookup.add(smeReplacementSku(sm[1])); }
+  }
 
   // Look up prices for all detected SKUs
   const priceLines = [];
@@ -4359,18 +4607,21 @@ function licenseTermLabel(sku) {
   return m ? `${m[1]}-Year` : 'Quote';
 }
 
-// Systems Manager (LIC-SME) max term. The 5-year option was deprecated in 2026
-// (Systems Manager itself sunsets in under 5 years), so only 1YR and 3YR are
-// quotable. Any non-1YR/non-3YR SME request is capped to 3YR and flagged.
-// Applies across the typed, NL, model-agnostic, and dashboard paths.
-const SME_MAX_TERM = 3;
-const SME_5YR_FLAG = 'Systems Manager is offered only in 1-year and 3-year terms (5-year is no longer available) — quoted at 3-year.';
-// Cap a requested SME term; only 1YR and 3YR are valid.
-function smeCapTerm(term) {
+// Systems Manager (LIC-SME) is fully discontinued — as of 2026-07 every term
+// is inactive in Zoho and none may be quoted. The replacement product is
+// Ivanti Neurons for MDM per device (MI-EMSC-D-1YMC-A), catalogued per term as
+// LIC-MI-EMSC-D-1YMC-A-{1,3,5}YR. Every SME entry path (typed SKU, bare
+// "SME"/"Systems Manager", model-agnostic, dashboard SM-ENT rows, legacy
+// LIC-SME tokens in prior-quote URLs) substitutes the replacement at the
+// requested term and surfaces SME_EOL_FLAG so the user sees the SKU changed.
+const SME_REPLACEMENT_BASE = 'LIC-MI-EMSC-D-1YMC-A';
+const SME_EOL_FLAG = 'Cisco Meraki Systems Manager (LIC-SME) licenses are discontinued — quoted the replacement, Ivanti Neurons for MDM per device (MI-EMSC-D-1YMC-A), at the requested term.';
+// Map a requested SME term to the replacement SKU. 1/3/5 are all valid on the
+// replacement; anything else falls back to 3-year (mirrors the old cap).
+function smeReplacementSku(term) {
   const t = parseInt(term, 10);
-  return (t === 1 || t === SME_MAX_TERM)
-    ? { term: t, capped: false }
-    : { term: SME_MAX_TERM, capped: true };
+  const valid = (t === 1 || t === 3 || t === 5) ? t : 3;
+  return `${SME_REPLACEMENT_BASE}-${valid}YR`;
 }
 function findBareSmeMention(upper) {
   const smeRe = /(?:(\d+)\s*[X×]?\s*)?(?:LIC-SME\b(?!-\d+YR?\b)|(?<![-A-Za-z0-9])SME\b|SYSTEMS?\s+MANAGER\b)/gi;
@@ -4380,6 +4631,54 @@ function findBareSmeMention(upper) {
 }
 function hasOtherQuoteSkuForSme(upper) {
   return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
+}
+
+function extractEmbeddedDirectLicenseList(rawText) {
+  const text = String(rawText || '');
+  if (/stratusinfosystems\.com\/order\/|stratus\.supply\/|[?&]item=/i.test(text)) return null;
+
+  const explicitQuoteIntent = /\b(?:QUOTE|PRICE|PRICING|CART|ORDER|RENEW|RENEWAL|CO-?TERM|COTERM)\b/i.test(text);
+  const advisoryContext = /\b(?:COMPARE|COMPARISON|DIFFEREN(?:CE|CES|T)|VERSUS|VS\.?|WHICH|EXPLAIN|DESCRIBE|RECOMMEND(?:ED|ATION)?|BEST|BETTER|WORSE)\b/i.test(text)
+    || /\bLIC-[A-Z0-9-]+\b\s+OR\s+\bLIC-[A-Z0-9-]+\b/i.test(text)
+    || (/\?/.test(text) && /\b(?:WHAT(?:'S| IS)|HOW (?:DO|DOES|WOULD|SHOULD)|IS|ARE|CAN YOU|COULD YOU|SHOULD I|DO I NEED)\b/i.test(text));
+  if (!explicitQuoteIntent && advisoryContext) return null;
+  if (/\b(?:CHANGE|UPDATE|SWAP|REPLACE|MOVE|INCREASE|DECREASE|UPGRADE|DOWNGRADE)\b/i.test(text) &&
+      /\b(?:FROM|TO)\s+(?:LIC-[A-Z0-9-]+|\d{1,5})\b/i.test(text)) return null;
+
+  const matches = [...text.matchAll(/\bLIC-[A-Z0-9-]+\b/gi)];
+  if (matches.length < 2) return null;
+  const textWithoutLicenseSkus = text.replace(/\bLIC-[A-Z0-9-]+\b/gi, ' ');
+  if (/\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*)\b/i.test(textWithoutLicenseSkus)) return null;
+
+  const items = [];
+  for (const match of matches) {
+    const sku = match[0].toUpperCase();
+    const before = text.slice(Math.max(0, match.index - 48), match.index);
+    const after = text.slice(match.index + match[0].length, match.index + match[0].length + 48);
+    // A quantity AFTER the SKU must carry an explicit marker (x12, qty 12,
+    // : 12, - 12, or a parenthesized (12)). A bare trailing number is rejected
+    // so a stray token / year like "...LIC-MV-3YR 2024" is never read as qty.
+    const afterQty = after.match(/^\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*|[:=]\s*|[-–—]\s*)(\d{1,5})(?:\s*\)|\s*\]|\b)/i)
+      || after.match(/^\s*[\(\[]\s*(\d{1,5})\s*[\)\]]/);
+    // A quantity BEFORE the SKU is accepted only as a clean standalone token
+    // (list/prose rhythm like "1 LIC-ENT-3YR" or ", 12 LIC-MV-3YR"). A number
+    // glued to a currency symbol ("$500 LIC-...") is a price, not a quantity.
+    const beforeRaw = before.match(/(^|[^A-Z0-9-])(\d{1,5})\s*(?:[xX×]\s*)?$/i);
+    const beforeQty = beforeRaw && !/[$€£¥]/.test(beforeRaw[1]) ? beforeRaw : null;
+    let qty = 1;
+    if (afterQty) qty = parseInt(afterQty[1], 10);
+    else if (beforeQty) qty = parseInt(beforeQty[2], 10);
+    items.push({ sku, qty: Number.isFinite(qty) && qty > 0 ? qty : 1 });
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const item of items) {
+    if (seen.has(item.sku)) continue;
+    seen.add(item.sku);
+    deduped.push(item);
+  }
+  return deduped.length >= 2 ? deduped : null;
 }
 
 // ─── Per-item (per-clause) intent ─────────────────────────────────────────────
@@ -4607,6 +4906,20 @@ function parseMessage(text) {
     }
   }
 
+  const embeddedLicItems = extractEmbeddedDirectLicenseList(text);
+  if (embeddedLicItems) {
+    return {
+      items: [],
+      directLicenseList: embeddedLicItems,
+      requestedTerm: null,
+      modifiers: { hardwareOnly: false, licenseOnly: true },
+      requestedTier: null,
+      isAdvisory: false,
+      isRevision: false,
+      showPricing: false
+    };
+  }
+
   // Multi-line bare model list (one device per line, no quantities)
   // Detects patterns like: MR36\nMR36\nMS250-24P\nMR44\n...
   // Counts occurrences of each model to derive quantities
@@ -4653,13 +4966,20 @@ function parseMessage(text) {
     // phrases like "price for", "get me", "can you quote" all collapse away.
     // Order the alternation from longest to shortest to avoid "PRICE" eating
     // half of "PRICE FOR" and leaving "FOR" behind.
-    const PREAMBLE_RE = /^\s*(?:PLEASE\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE)\s+/i;
-    const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
+    const PREAMBLE_RE = /^\s*(?:PLEASE\s+|JUST\s+|ONLY\s+)?(?:CAN\s+YOU\s+|COULD\s+YOU\s+)?(?:PRICING\s+(?:ON|FOR)|PRICE\s+(?:OF|FOR)|COST\s+(?:OF|FOR)|HOW\s+MUCH\s+(?:IS|ARE|FOR)|I\s+(?:NEED|WANT)|GIVE\s+ME|SEND\s+ME|GET\s+ME|QUOTE\s+ME|QUOTE|PRICING|PRICE|COST|GET|NEED|WANT|FOR|ON|PLEASE|JUST|ONLY)\s+/i;
+    const TRAILER_RE = /\s+(?:LICENSES?|LICENCES?|LISCENSES?|LISCENCES?|LIC|RENEWALS?|OF\s+(?:THEM|THESE|THOSE)|ONLY|PLEASE|THANKS?|THANK\s+YOU)\s*$/i;
+    const TERM_PREFIX_RE = /^\s*(?:(?:JUST|ONLY)\s+(?:THE\s+)?)?(?:A\s+)?[135]\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)(?:\s+(?:TERM\s+)?ONLY)?\s+/i;
+    const TERM_TRAILER_RE = /\s+(?:(?:JUST|ONLY)\s+(?:THE\s+)?)?(?:A\s+)?[135]\s*-?\s*(?:Y|YR|YRS|YEAR|YEARS)(?:\s+(?:TERM\s+)?ONLY)?\s*$/i;
     let stripped = upper.replace(/\s+(?:QTY|QUANTITY)\s+(\d+)\s*$/i, ' $1').trim();  // "qty 30" -> " 30"
     // Apply preamble + trailer strips repeatedly until stable (handles stacked modifiers)
     for (let i = 0; i < 4; i++) {
       const before = stripped;
-      stripped = stripped.replace(PREAMBLE_RE, '').replace(TRAILER_RE, '').trim();
+      stripped = stripped
+        .replace(PREAMBLE_RE, '')
+        .replace(TRAILER_RE, '')
+        .replace(TERM_PREFIX_RE, '')
+        .replace(TERM_TRAILER_RE, '')
+        .trim();
       if (stripped === before) break;
     }
 
@@ -4676,17 +4996,31 @@ function parseMessage(text) {
     else if (skuOnly) { licSku = skuOnly[1]; qty = 1; }
 
     if (licSku && licSku.startsWith('LIC-')) {
-      // SME is only sold in 1-year and 3-year terms; cap any other typed term.
+      // SME is discontinued; substitute the replacement SKU at the typed term.
       let _smeNote = null;
       const _smeDirect = licSku.match(/^LIC-SME-(\d+)Y(R)?$/i);
       if (_smeDirect) {
-        const _sme = smeCapTerm(_smeDirect[1]);
-        licSku = `LIC-SME-${_sme.term}YR`;
-        if (_sme.capped) _smeNote = SME_5YR_FLAG;
+        licSku = smeReplacementSku(_smeDirect[1]);
+        _smeNote = SME_EOL_FLAG;
+      }
+      const _directLicenseItem = { sku: licSku, qty };
+      if (!shouldPreserveTypedDirectLicenseTerm(text, licSku) &&
+          canRewriteDirectLicenseListForAllTerms([_directLicenseItem])) {
+        return {
+          items: [],
+          directLicenseList: [_directLicenseItem],
+          note: _smeNote,
+          requestedTerm: null,
+          modifiers: { hardwareOnly: false, licenseOnly: true },
+          requestedTier: null,
+          isAdvisory: false,
+          isRevision: false,
+          showPricing: false
+        };
       }
       return {
         items: [],
-        directLicense: { sku: licSku, qty },
+        directLicense: _directLicenseItem,
         note: _smeNote,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
@@ -5012,8 +5346,8 @@ function parseMessage(text) {
   //    with bare SME fall through and inject SME-AGN alongside the hardware.
   //  - quantity is read ONLY from a number immediately before the SME mention, never
   //    from a term like "3 year"; a single named term yields a single-term quote.
-  // The inactive LIC-SME-5YR is never emitted; invalid SME terms are capped to
-  // LIC-SME-3YR and flagged. The Zoho-WRITE inactive guard remains separate.
+  // SME is discontinued: every path emits the replacement SKU
+  // (LIC-MI-EMSC-D-1YMC-A-{term}YR) and flags the substitution.
   const smeBareMention = findBareSmeMention(upper);
   const smeMentioned = Boolean(smeBareMention);
   const smeNamedTermIntent = /\b\d+\s*-?\s*(?:YRS?|YEARS?|Y)\b/i.test(upper);
@@ -5029,13 +5363,12 @@ function parseMessage(text) {
     const smeQty = smeBareMention.qty;
     const smeTermMatch = upper.match(/\b(\d+)\s*-?\s*(?:YRS?|YEARS?|Y)\b/);
     if (smeTermMatch) {
-      // A single named term → ONE specific SKU. Invalid SME terms are capped to
-      // 3-year. Route through directLicense for one correctly-labelled URL.
-      const sme = smeCapTerm(smeTermMatch[1]);
+      // A single named term → ONE specific SKU (the Ivanti MDM replacement —
+      // SME is discontinued). Route through directLicense for one labelled URL.
       return {
         items: [],
-        directLicense: { sku: `LIC-SME-${sme.term}YR`, qty: smeQty },
-        note: sme.capped ? SME_5YR_FLAG : null,
+        directLicense: { sku: smeReplacementSku(smeTermMatch[1]), qty: smeQty },
+        note: SME_EOL_FLAG,
         requestedTerm: null,
         modifiers: { hardwareOnly: false, licenseOnly: true },
         requestedTier: null,
@@ -5044,9 +5377,9 @@ function parseMessage(text) {
         showPricing: false
       };
     }
-    // No named term → all quotable SME terms (1YR + 3YR only; 5YR deprecated), w/ note.
-    const smeItems = ['1', '3'].map(t => ({ baseSku: `LIC-SME-${t}YR`, qty: smeQty, isLicenseOnly: true }));
-    return { items: smeItems, isQuote: true, isTermOptionQuote: true, clarificationNote: SME_5YR_FLAG };
+    // No named term → all replacement terms (1/3/5 year), w/ substitution note.
+    const smeItems = ['1', '3', '5'].map(t => ({ baseSku: `${SME_REPLACEMENT_BASE}-${t}YR`, qty: smeQty, isLicenseOnly: true }));
+    return { items: smeItems, isQuote: true, isTermOptionQuote: true, clarificationNote: SME_EOL_FLAG };
   }
 
   // ── Model-agnostic license handler (MR, MV, MT) ──
@@ -5433,7 +5766,17 @@ function buildQuoteResponse(parsed) {
       const termMatch = sku.match(/(\d+)\s*Y(?:R|EA|-S\d+)?$/i);
       if (termMatch) { detectedTerm = parseInt(termMatch[1]); break; }
     }
-    const terms = detectedTerm ? [detectedTerm] : [1, 3, 5];
+    const requestedTerm = parsed.requestedTerm ? Number(parsed.requestedTerm) : null;
+    const canRenderAllTerms = canRewriteDirectLicenseListForAllTerms(parsed.directLicenseList);
+    const canRenderRequestedTerm = requestedTerm
+      ? canRewriteDirectLicenseListForTerm(parsed.directLicenseList, requestedTerm)
+      : false;
+    const shouldRewriteDirectLicenseTerms = canRenderAllTerms || canRenderRequestedTerm;
+    const terms = requestedTerm
+      ? (canRenderRequestedTerm ? [requestedTerm] : detectedTerm ? [detectedTerm] : [requestedTerm])
+      : canRenderAllTerms
+        ? [1, 3, 5]
+        : detectedTerm ? [detectedTerm] : [1, 3, 5];
     const requestedTier = parsed.requestedTier || null;
 
     // Extract base hardware model from each license SKU and check EOL
@@ -5471,7 +5814,10 @@ function buildQuoteResponse(parsed) {
     lines.push(`**Option 1 - Renew As-Is:**`);
     lines.push('');
     for (const term of terms) {
-      const url = buildStratusUrl(parsed.directLicenseList);
+      const termItems = shouldRewriteDirectLicenseTerms
+        ? rewriteDirectLicenseListForTerm(parsed.directLicenseList, term)
+        : parsed.directLicenseList;
+      const url = buildStratusUrl(termItems);
       const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
       lines.push(`${termLabel}: ${url}`);
       lines.push('');
@@ -5500,8 +5846,10 @@ function buildQuoteResponse(parsed) {
               if (licSku) urlItems.push({ sku: licSku, qty });
             }
           } else if (!eolEntry) {
-            // Non-EOL license — pass through as-is
-            urlItems.push({ sku, qty });
+            // Non-EOL license - carry the same term as the refresh option when
+            // the SKU supports safe term rewriting.
+            const rewritten = shouldRewriteDirectLicenseTerms ? directLicenseSkuForTerm(sku, term) : null;
+            urlItems.push({ sku: rewritten || sku, qty });
           }
         }
         return urlItems;
@@ -5579,7 +5927,8 @@ function buildQuoteResponse(parsed) {
     }
 
     let _msg = lines.join('\n').trim();
-    if (parsed.clarificationNote) _msg = `_${parsed.clarificationNote}_\n\n${_msg}`;
+    const _dlNote = [parsed.note, parsed.clarificationNote].filter(Boolean).join(' ');
+    if (_dlNote) _msg = `_${_dlNote}_\n\n${_msg}`;
     return { message: _msg, needsLlm: false };
   }
 
@@ -5599,8 +5948,10 @@ function buildQuoteResponse(parsed) {
   const terms = parsed.requestedTerm ? [parsed.requestedTerm] : [1, 3, 5];
   const modifiers = parsed.modifiers || { hardwareOnly: false, licenseOnly: false };
   const requestedTier = parsed.requestedTier || null;
-  const sme5yrNote = (term, urlItems) => (parseInt(term, 10) === 5 && (urlItems || []).some(i => i.smeCapped))
-    ? `\n_${SME_5YR_FLAG}_`
+  // Systems Manager replacement note — appended once, on the last rendered
+  // term line, whenever the quote contains substituted (ex-SME) items.
+  const sme5yrNote = (term, urlItems) => ((urlItems || []).some(i => i.smeReplaced) && String(term) === String(terms[terms.length - 1]))
+    ? `\n_${SME_EOL_FLAG}_`
     : '';
   const eolItems = [];
   const errors = [];
@@ -5615,14 +5966,14 @@ function buildQuoteResponse(parsed) {
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
 
-  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeCapped: itemSmeCapped } of parsed.items) {
+  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeReplaced: itemSmeReplaced } of parsed.items) {
     // ── V3 collapsed named/multi-term license (Phase 4 — identical to worker/) ──
     // buildQuoteFromV3 collapses a named license (Duo/Umbrella/SME/AnyConnect/…) into ONE item
     // carrying its already-resolved per-term SKUs in _v3PreLicense. Emit it as a single agnostic
     // license-only item so the term loop places one SKU per term, separate_quotes gives it one
     // group, buildStratusUrl sums shared SKUs, and the SME 5yr-cap note can fire.
     if (Array.isArray(_v3PreLicense) && _v3PreLicense.length) {
-      const preItem = { baseSku, hwSku: null, qty, licenseSkus: _v3PreLicense, eol: false, isAgnosticLicense: true, hardwareOnly: false, licenseOnly: true, smeCapped: Boolean(itemSmeCapped) };
+      const preItem = { baseSku, hwSku: null, qty, licenseSkus: _v3PreLicense, eol: false, isAgnosticLicense: true, hardwareOnly: false, licenseOnly: true, smeReplaced: Boolean(itemSmeReplaced) };
       resolvedItems.push(preItem);
       ordered.push({ kind: 'resolved', ref: preItem });
       continue;
@@ -5654,12 +6005,14 @@ function buildQuoteResponse(parsed) {
         ];
       } else if (family === 'SME') {
         licSkus = [
-          { term: '1Y', sku: 'LIC-SME-1YR' },
-          { term: '3Y', sku: 'LIC-SME-3YR' },
-          { term: '5Y', sku: 'LIC-SME-3YR' }
+          // SME is discontinued — the agnostic family quotes the replacement
+          // (Ivanti MDM) at every term; the smeReplaced flag surfaces the note.
+          { term: '1Y', sku: `${SME_REPLACEMENT_BASE}-1YR` },
+          { term: '3Y', sku: `${SME_REPLACEMENT_BASE}-3YR` },
+          { term: '5Y', sku: `${SME_REPLACEMENT_BASE}-5YR` }
         ];
       }
-      const agnItem = { baseSku: family === 'SME' ? 'Systems Manager' : `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true, smeCapped: family === 'SME', hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
+      const agnItem = { baseSku: family === 'SME' ? 'Systems Manager' : `${family} Enterprise`, hwSku: null, qty, licenseSkus: licSkus, eol: false, isAgnosticLicense: true, smeReplaced: family === 'SME', hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
       resolvedItems.push(agnItem);
       ordered.push({ kind: 'resolved', ref: agnItem });
       continue;
@@ -5812,11 +6165,11 @@ function buildQuoteResponse(parsed) {
               if (licSku) urlItems.push({ sku: licSku, qty });
             }
           } else {
-            const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
+            const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = entry.ref;
             if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
             if (licenseSkus && !itHw) {
               const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-              if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+              if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
             }
           }
         }
@@ -5859,11 +6212,11 @@ function buildQuoteResponse(parsed) {
             if (licSku) urlItems.push({ sku: licSku, qty });
           }
         } else {
-          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = entry.ref;
+          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = entry.ref;
           if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itHw) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
         }
       }
@@ -6074,7 +6427,7 @@ function buildQuoteResponse(parsed) {
       // within each block. Each item carries its own license so each quote is
       // self-contained. Added for family-expansion output (expandFamily).
       for (const item of resolvedItems) {
-        const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = item;
+        const { baseSku, hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = item;
         // Per-item intent with global fallback (Bug #2).
         const itemHardwareOnly = item.hardwareOnly ?? modifiers.hardwareOnly;
         const itemLicenseOnly = item.licenseOnly ?? modifiers.licenseOnly;
@@ -6085,7 +6438,7 @@ function buildQuoteResponse(parsed) {
           if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itemHardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
           if (urlItems.length > 0) {
             const url = buildStratusUrl(urlItems);
@@ -6100,7 +6453,7 @@ function buildQuoteResponse(parsed) {
       for (const term of terms) {
         const urlItems = [];
         for (const it of resolvedItems) {
-          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeCapped } = it;
+          const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = it;
           // Per-item intent with global fallback (Bug #2). The license push gains a
           // !itemHardwareOnly gate so a per-item hardware-only item among licensed
           // items emits its hardware with no license.
@@ -6109,7 +6462,7 @@ function buildQuoteResponse(parsed) {
           if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itemHardwareOnly) {
             const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty, smeCapped });
+            if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
         }
         if (urlItems.length > 0) {
@@ -6207,7 +6560,7 @@ EXACT license SKU mappings by product family:
 - CW9800 wireless controllers → NO license association
 
 ### Systems Manager (SME) — generic, model-agnostic, 3-YEAR MAX
-- "Systems Manager", "SME", "SME license" → LIC-SME-1YR, LIC-SME-3YR ONLY (note: -YR suffix). The 5-year option is DEPRECATED/no longer offered. Cap any non-1-year/non-3-year SME request to 3-year (LIC-SME-3YR) and flag the capped term; leave non-SME items at their requested term. Model-agnostic like MR/MV/MT — quote 1-year and 3-year unless a single term is named.
+- "Systems Manager", "SME", "SME license" → LIC-MI-EMSC-D-1YMC-A-1YR, LIC-MI-EMSC-D-1YMC-A-3YR, LIC-MI-EMSC-D-1YMC-A-5YR (note: -YR suffix). Cisco Meraki Systems Manager (LIC-SME) is DISCONTINUED in every term — never emit any LIC-SME SKU; always quote the replacement (Ivanti Neurons for MDM per device) and flag the substitution. Model-agnostic like MR/MV/MT — quote all three terms unless a single term is named.
 
 ### MX Security Appliances — term suffix depends on model number
 - MX67, MX67W, MX67C, MX68, MX68W, MX68CW, MX250, MX450 (older) → -YR suffix
@@ -7118,6 +7471,45 @@ async function getZohoUserName(env, userId) {
   }
 }
 
+// 2026-07-09 (Hematogenix / Jesse Cervantes): Meraki_ISR is a lookup into the
+// Meraki_ISRs CUSTOM module, whose reps carry their own `Inactive` checkbox —
+// they are NOT Zoho org users, so the Users-module status check above always
+// returned 'unknown' for a real rep and the guardrail misreported an inactive
+// rep as a "profile/sharing-rule constraint". Read the actual record instead.
+async function getMerakiIsrRecord(env, isrId) {
+  if (!isrId) return null;
+  try {
+    const resp = await zohoApiCall('GET', `Meraki_ISRs/${isrId}?fields=id,Name,Email,Inactive`, env);
+    const row = resp?.data?.[0];
+    if (!row?.id) return null;
+    return { id: row.id, name: row.Name || null, email: row.Email || null, inactive: row.Inactive === true };
+  } catch (_) {
+    return null;
+  }
+}
+
+// The message every inactive-ISR detection path returns. One source of truth so
+// the agent gets the identical reactivation offer no matter which tool hit it.
+function buildInactiveIsrInstruction(name, retryHint) {
+  return `❌ Meraki ISR "${name}" exists in the Meraki_ISRs roster but is flagged INACTIVE — Zoho's lookup filter blocks assigning inactive reps to deals. ` +
+    `ASK THE USER: "${name} is marked Inactive in the ISR roster — would you like me to uncheck the Inactive flag so the rep can be properly assigned?" ` +
+    `If the user approves, ${retryHint}. ` +
+    `Do NOT swap to a different ISR, do NOT fall back to Stratus Sales, and do NOT change the Lead_Source to work around this.`;
+}
+
+// Uncheck Inactive on a Meraki_ISRs record after explicit user approval.
+// Returns { success, error? }.
+async function reactivateMerakiIsr(env, isrId) {
+  try {
+    const resp = await zohoApiCall('PUT', `Meraki_ISRs/${isrId}`, env, { data: [{ Inactive: false }] });
+    const row = resp?.data?.[0];
+    if (row?.code === 'SUCCESS') return { success: true };
+    return { success: false, error: row?.message || JSON.stringify(row || resp) };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
 /**
  * Inspect a parsed Zoho write response for the FILTER_CRITERIA_NOT_SATISFIED
  * error specifically targeting Meraki_ISR.id. If hit, returns a structured
@@ -7142,6 +7534,34 @@ async function detectInactiveMerakiIsrError(parsedResponse, payloadData, env) {
   const targetsMerakiIsr = jsonPath.includes('Meraki_ISR.id')
     || (apiName === 'id' && jsonPath.includes('Meraki_ISR'));
   if (!targetsMerakiIsr) return null;
+  // Meraki_ISRs is a custom module — check the record's own Inactive checkbox
+  // FIRST. The Users-module check below only applies if the id is not an ISR
+  // record at all (legacy safety net).
+  const isrRecord = await getMerakiIsrRecord(env, isrId);
+  if (isrRecord) {
+    const recName = isrRecord.name || isrId;
+    if (isrRecord.inactive) {
+      return {
+        validation_error: true,
+        action: 'meraki_isr_inactive',
+        meraki_isr_inactive: true,
+        isr_id: isrId,
+        isr_name: recName,
+        message: buildInactiveIsrInstruction(recName,
+          'retry via create_deal_and_quote or assign_cisco_rep_to_deal with reactivate_inactive_isr: true — ONLY those two tools accept the flag. NEVER retry zoho_create_record/zoho_update_record unchanged (the same rejection recurs) and never pass the flag to them')
+      };
+    }
+    return {
+      validation_error: true,
+      action: 'meraki_isr_filter_rejected',
+      meraki_isr_filter_rejected: true,
+      isr_id: isrId,
+      isr_name: recName,
+      message: `❌ Zoho rejected Meraki_ISR "${recName}" (${isrId}) via the lookup-field filter even though the Meraki_ISRs record is NOT flagged Inactive. ` +
+        `Don't retry the same id and don't fall back to Stratus Sales — surface this to the user. The Meraki_ISR lookup field's ` +
+        `filter criteria in Zoho excludes this record for another reason (field-level filter or layout rule) that needs admin review.`
+    };
+  }
   const status = await getZohoUserStatus(env, isrId);
   const name = (await getZohoUserName(env, isrId)) || isrId;
   if (status === 'inactive') {
@@ -8007,8 +8427,11 @@ function preflightQuotedItemsProductActive(quotedItems) {
     // letting the agent loop on the dead id (LIC-SME-5YR / MX67W-HW, 2026-06-02).
     const priceEntry = (typeof prices !== 'undefined' && prices) ? prices[sku] : null;
     if (priceEntry && priceEntry.zoho_active === false) {
-      blocked.push({ sku, product_id: productId, inactive_in_zoho: true });
-      errors.push(`❌ ${sku} is INACTIVE in Zoho's inventory and cannot be added to a quote (it is discontinued). Remove it and ask the user for an active alternative — e.g. a different license term.`);
+      blocked.push({ sku, product_id: productId, inactive_in_zoho: true, replaced_by: priceEntry.replaced_by || null });
+      const alt = priceEntry.replaced_by
+        ? ` Quote its replacement instead: ${priceEntry.replaced_by}.`
+        : ' Remove it and ask the user for an active alternative — e.g. a different license term.';
+      errors.push(`❌ ${sku} is INACTIVE in Zoho's inventory and cannot be added to a quote (it is discontinued).${alt}`);
       continue;
     }
     if (typeof isEol === 'function' && isEol(sku)) {
@@ -8220,8 +8643,18 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
         data.Closing_Date = corrected;
       }
     }
-    // Auto-fill defaults for commonly skipped fields
-    if (!data.Meraki_ISR && isCreate) data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
+    // Auto-fill defaults for commonly skipped fields.
+    // 2026-07-02 consistency rule (Chris): a "Meraki ISR Referal" deal must
+    // NEVER carry the Stratus Sales placeholder — block instead of defaulting.
+    // Stratus Referal (and everything else) still defaults to Stratus Sales.
+    if (isCreate && data.Lead_Source === 'Meraki ISR Referal') {
+      const _isrIdOnCreate = data.Meraki_ISR?.id || (typeof data.Meraki_ISR === 'string' ? data.Meraki_ISR : null);
+      if (!_isrIdOnCreate || String(_isrIdOnCreate) === '2570562000027286729') {
+        errors.push('Lead_Source "Meraki ISR Referal" requires the referring Cisco rep in Meraki_ISR — Stratus Sales (or a missing ISR) is never valid on an ISR referral. Resolve the rep via the Meraki_ISRs module (or use create_deal_and_quote with meraki_isr_email / assign_cisco_rep_to_deal). If no Cisco rep is involved, use Lead_Source "Stratus Referal" instead.');
+      }
+    } else if (!data.Meraki_ISR && isCreate) {
+      data.Meraki_ISR = { id: '2570562000027286729' }; // Stratus Sales
+    }
     if (!data.Owner) data.Owner = { id: await getOwnerForCaller(env) };
   }
 
@@ -8924,6 +9357,31 @@ async function fetchLiveSkuPricing(sku, productId, env) {
     }
   }
   if (!(ecommPrice > 0)) {
+    // 2026-07-09 (SFP-H25G-CU5M=, corp error_reports #3): live-Products-only parts
+    // (no WooProducts row, absent from the embedded cache — one-off Cisco spares)
+    // have no ecomm price at all; the hard fail here blocked the whole quote even
+    // after the SKU live-validated. Quote them at LIST (Products.Unit_Price) with
+    // ZERO discount — conservative (highest price, no invented discount) and how
+    // the desk actually sells these. Only when the Woo query itself SUCCEEDED —
+    // a real outage still fails loud.
+    if (wooResult.status === 'fulfilled') {
+      const productData0 = productResult.status === 'fulfilled' ? productResult.value?.data || [] : [];
+      // productId fetch is id-authoritative; code-based search must still match.
+      const rec0 = productId ? productData0[0] : productData0.find(r => r.Product_Code === suffixed);
+      const listOnly = moneyValue(rec0?.Unit_Price);
+      if (listOnly > 0) {
+        console.warn(`[LIVE-PRICING] No WooProducts/cache ecomm price for ${suffixed}; quoting at LIST $${listOnly} (no discount). Backfill WooProducts.`);
+        return {
+          success: true,
+          sku: suffixed,
+          ecomm_price: roundMoney(listOnly),
+          list_price: roundMoney(listOnly),
+          product_id: rec0?.id || productId || null,
+          pricing_source: 'live_zoho_products_list_only',
+          note: 'No ecomm price on file — quoted at list price with no discount.'
+        };
+      }
+    }
     return {
       success: false,
       sku: suffixed,
@@ -8937,7 +9395,9 @@ async function fetchLiveSkuPricing(sku, productId, env) {
   let productRecord = productId
     ? productData[0]
     : productData.find(record => record.Product_Code === suffixed);
-  if (productRecord?.Product_Code && productRecord.Product_Code !== suffixed) {
+  // '='-insensitive (2026-07-09): an id-fetched spare record legitimately carries
+  // the '='-suffixed code while the staged key may not.
+  if (productRecord?.Product_Code && productRecord.Product_Code.replace(/=+$/, '') !== suffixed.replace(/=+$/, '')) {
     productRecord = null;
   }
   if (!productRecord || !(moneyValue(productRecord.Unit_Price) > 0)) {
@@ -10379,7 +10839,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
         'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
-        'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
+        'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
         'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
         'webex_send_message': { success: true, message_id: mockId, dry_run: true },
       };
@@ -11859,7 +12319,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 // could have been regenerated and we'd still catch it here.
                 // Per Codex round-7: row-fingerprint match alone is sufficient
                 // to refuse success — totals are downstream of items.
-                if (triedQuotedItems && itemFingerprintMatches) {
+                // 2026-07-08 fix: only when a fingerprint-VISIBLE change was
+                // requested. The fingerprint is (product_id, qty, discount) —
+                // a Description/List_Price-only modification legitimately
+                // leaves it unchanged and false-alarmed here (Greenlight
+                // Family Services quote); for those the per-row modification
+                // verifier above is authoritative.
+                const FP_KEYS = ['Quantity', 'Discount', 'Product_Name'];
+                const fingerprintChangeIntended =
+                  requested.some(r => r.delete || r.add) ||
+                  requestedModifications.some(r => r.raw && FP_KEYS.some(k => Object.prototype.hasOwnProperty.call(r.raw, k)));
+                verification.verification.fingerprint_change_intended = fingerprintChangeIntended;
+                if (triedQuotedItems && itemFingerprintMatches && fingerprintChangeIntended) {
                   warnings.push(
                     `ZOHO_DROPPED_QUOTED_ITEMS: Zoho returned SUCCESS but your Quoted_Items payload had NO effect on the quote. The live row fingerprint (product_id, quantity, discount per row) is identical to pre-update state. Pre Grand_Total=$${preTotal}, post Grand_Total=$${postTotal}. The line-item changes you intended were silently rejected. Possible causes: payload shape mismatch, _delete on the only remaining item (Zoho refuses to leave a Quote with zero items), stale subform ids, or Do_Not_Auto_Update_Prices conflict. Do NOT claim the line items were changed — surface the failure to the user and offer to retry.`
                   );
@@ -12052,6 +12523,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               discount_per_unit: cachedPrice.discount_per_unit || 0,
               discount_pct: cachedPrice.discount_pct || 0,
               product_active: cachedPrice.zoho_active === false ? false : true,
+              replaced_by: cachedPrice.zoho_active === false ? (cachedPrice.replaced_by || null) : undefined,
               found: true
             };
             if (resolved !== suffixed) {
@@ -12078,9 +12550,28 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               env
             );
             const records = prodResult?.data || [];
-            const match = records.find(r => r.Product_Code === resolved);
+            let match = records.find(r => r.Product_Code === resolved);
+            let matchedCode = match ? resolved : null;
+            // 2026-07-09 (SFP-H25G-CU5M, corp error_reports #3): Cisco spare SKUs live
+            // in the catalog with a trailing '=' (SFP-H25G-CU5M=) that users rarely
+            // type — and the live catalog holds Cisco parts absent from prices.json,
+            // so the cache-side '=' normalization can't help. On an exact miss, retry
+            // the '='-toggled variant before reporting not-found. LIC-* SKUs never
+            // carry the spare suffix — skip the wasted call.
+            if (!match && !resolved.startsWith('LIC-')) {
+              const eqVariant = resolved.endsWith('=') ? resolved.slice(0, -1) : `${resolved}=`;
+              const eqResult = await zohoApiCall('GET',
+                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+                env
+              ).catch(() => null);
+              const eqMatch = (eqResult?.data || []).find(r => r.Product_Code === eqVariant);
+              if (eqMatch) {
+                match = eqMatch;
+                matchedCode = eqVariant;
+              }
+            }
             const apiResult = {
-              suffixed_sku: resolved,
+              suffixed_sku: matchedCode || resolved,
               qty,
               product_id: match?.id || null,
               product_name: match?.Product_Name || resolved,
@@ -12090,7 +12581,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               discount_pct: cachedPrice?.discount_pct || 0,
               found: !!match
             };
-            if (resolved !== suffixed) {
+            if (matchedCode && matchedCode !== resolved) {
+              apiResult.normalized_from = resolved;
+              apiResult.note = `Resolved spare-variant: "${resolved}" → "${matchedCode}" (Cisco '=' spare suffix). Use "${matchedCode}" as the catalog SKU.`;
+            } else if (resolved !== suffixed) {
               apiResult.normalized_from = suffixed;
             }
             if (!rawSku.startsWith('LIC-')) {
@@ -12105,7 +12599,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // "inactive" when the real reason is "SKU string mismatch" AND we
             // surface actual live alternatives rather than guesses.
             if (!match) {
-              apiResult.not_found_reason = `SKU "${resolved}" was not found via Product_Code:equals search. This does NOT mean the product is inactive — it means this exact SKU string is not in the catalog.`;
+              apiResult.not_found_reason = `SKU "${resolved}" was not found via Product_Code:equals search (also tried the '='-spare variant). This does NOT mean the product is inactive — it means this exact SKU string is not in the catalog. Do NOT tell the user it is unavailable until you have checked live_alternatives below (when present) and, if the SKU came from the web or free text, retried with the exact catalog spelling.`;
               if (rawSku.startsWith('LIC-')) {
                 try {
                   // Derive the license family prefix: LIC-MV-7YR → LIC-MV-
@@ -12130,6 +12624,30 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 } catch (altErr) {
                   apiResult.hint = `Could not query live alternatives (${altErr.message}). Tell the user the exact SKU was not found and ask them to clarify the term.`;
                 }
+              } else {
+                // 2026-07-09: non-LIC misses got a bare found:false with no leads,
+                // which is what sent the agent off to the web and back (SFP thrash).
+                // One bounded family probe: drop the last dash segment and
+                // starts_with-search it (SFP-H25G-CU5M → SFP-H25G- → all 4 lengths).
+                try {
+                  const famSegs = resolved.replace(/=+$/, '').split('-');
+                  if (famSegs.length >= 3) {
+                    const famPrefix = famSegs.slice(0, -1).join('-') + '-';
+                    const famResult = await zohoApiCall('GET',
+                      `Products/search?criteria=(Product_Code:starts_with:${encodeURIComponent(famPrefix)})&fields=id,Product_Code,Product_Name,Product_Active`,
+                      env
+                    );
+                    const famAlternatives = (famResult?.data || [])
+                      .filter(r => r.Product_Active !== false)
+                      .map(r => r.Product_Code)
+                      .sort()
+                      .slice(0, 15);
+                    if (famAlternatives.length > 0) {
+                      apiResult.live_alternatives = famAlternatives;
+                      apiResult.hint = `Live Zoho catalog has these active SKUs starting with "${famPrefix}": ${famAlternatives.join(', ')}. If one matches the user's request (watch for trailing '=' spare variants and length/size suffixes), re-run batch_product_lookup with that exact SKU — do NOT declare the product unavailable or resort to web search while an alternative here fits.`;
+                    }
+                  }
+                } catch (_) { /* alternatives probe is best-effort */ }
               }
             }
             batchResults[rawSku] = apiResult;
@@ -12186,7 +12704,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         };
 
         // Stage 1 — zero-API local scan over the price cache keys.
-        let fpcPool = Object.keys(prices);
+        // Skip catalog entries whose Zoho product is deactivated (e.g. the
+        // discontinued LIC-SME family) — candidates must be quotable.
+        let fpcPool = Object.keys(prices).filter(k => (prices[k] || {}).zoho_active !== false);
         if (fpcPrefix) {
           const barePrefix = fpcSquash(fpcPrefix);
           fpcPool = fpcPool.filter(k => k.toUpperCase().startsWith(fpcPrefix) || fpcSquash(k).startsWith(barePrefix));
@@ -12216,15 +12736,28 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (fpcTokens.length > 0) {
           try {
             const likeTokens = fpcTokens.slice(0, 4).map(t => t.replace(/'/g, ''));
-            const where = likeTokens.map(t => `Product_Code like '%${t}%'`).join(' or ');
             const prefixClause = fpcPrefix ? ` and Product_Code like '${fpcPrefix.replace(/'/g, '')}%'` : '';
-            const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where (${where})${prefixClause} limit 10`;
+            // Stage 2a — code-only LIKE (pre-existing behavior, kept first so code
+            // matches can never be crowded out of the server-side limit-10).
+            const whereCode = likeTokens.map(t => `Product_Code like '%${t}%'`).join(' or ');
+            const coql = `select id, Product_Code, Product_Name, Unit_Price from Products where ((${whereCode})${prefixClause}) and Product_Active = true limit 10`;
             const r = await zohoApiCall('POST', 'coql', env, { select_query: coql });
-            const rows = Array.isArray(r?.data) ? r.data : [];
+            let rows = Array.isArray(r?.data) ? r.data : [];
+            // Stage 2b (2026-07-09, SFP-H25G-CU5M): marketing-description tokens
+            // (25GBASE, SFP28) appear only in Product_Name ("5M CBL 25GBASE-CU
+            // SFP28"), never in Product_Code — when the code query returns NOTHING,
+            // retry matching both columns so a description-worded ask can still
+            // find a part whose code the user doesn't know.
+            if (rows.length === 0) {
+              const whereBoth = likeTokens.map(t => `Product_Code like '%${t}%' or Product_Name like '%${t}%'`).join(' or ');
+              const coqlBoth = `select id, Product_Code, Product_Name, Unit_Price from Products where ((${whereBoth})${prefixClause}) and Product_Active = true limit 10`;
+              const rBoth = await zohoApiCall('POST', 'coql', env, { select_query: coqlBoth }).catch(() => null);
+              rows = Array.isArray(rBoth?.data) ? rBoth.data : [];
+            }
             const fpcCoql = rows
               .map(row => ({
                 sku: row.Product_Code,
-                score: fpcRank(row.Product_Code),
+                score: fpcRank(row.Product_Code) + fpcRank(row.Product_Name || ''),
                 product_id: row.id,
                 product_name: row.Product_Name,
                 list_price: prices[row.Product_Code]?.list || row.Unit_Price || null,
@@ -12285,7 +12818,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const wssRaw = Array.isArray(wssParsed.candidates) ? wssParsed.candidates : [];
         const wssCandidates = wssRaw.map(c => {
           const sku = String(c?.sku || '').trim().toUpperCase();
-          return { sku, name: c?.name || null, source_url: c?.source_url || null, in_catalog: !!(sku && prices[sku]?.zoho_product_id) };
+          // 2026-07-09: normalize before the cache probe ('=' spare suffix, dashes,
+          // -Y/-YR) — a bare in_catalog:false on a normalizable variant sent the
+          // agent into declare-unavailable territory (SFP-H25G-CU5M incident).
+          const catalogEntry = sku ? resolveCachedProduct(sku) : { key: null, entry: null };
+          return { sku, name: c?.name || null, source_url: c?.source_url || null, in_catalog: !!catalogEntry?.entry?.zoho_product_id, catalog_sku: catalogEntry?.entry ? catalogEntry.key : null };
         }).filter(c => c.sku);
         console.log(`[WEB-SEARCH-SKU] ${wssCandidates.length} candidate(s) for "${wssDesc.slice(0, 60)}"`);
         return {
@@ -12305,7 +12842,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const urlObj = new URL(url);
           const itemParam = urlObj.searchParams.get('item') || '';
           const qtyParam = urlObj.searchParams.get('qty') || '';
-          const rawSkus = itemParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+          const rawSkus = itemParam.split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+            // Legacy Systems Manager tokens in old URLs: substitute the
+            // replacement (SME is discontinued) so downstream product-id
+            // resolution and quote staging use a writable, active product.
+            .map(s => { const sm = s.match(/^LIC-SME-([135])Y(R?)$/); return sm ? smeReplacementSku(sm[1]) : s; });
           const rawQtys = qtyParam.split(',').map(s => parseInt(s) || 1);
 
           if (rawSkus.length === 0) {
@@ -12454,7 +12995,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id, meraki_isr_email, force_new_deal, reactivate_inactive_isr } = toolInput;
         let { lead_source } = toolInput;
         const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         let _eolRefreshUnits = [];
@@ -12732,6 +13273,44 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
           results.records.account = { id: accountId, name: accountData.Account_Name || account_name, url: `https://crm.zoho.com/crm/org647122552/tab/Accounts/${accountId}` };
 
+          // ── Master-deal reuse (2026-07-02) ── when the SAME conversation
+          // creates multiple quotes for the SAME account (e.g. a 3-year and a
+          // 5-year option in one message), every quote must hang off ONE deal.
+          // Previously this depended on the model passing existing_deal_id (or
+          // bouncing off HARD GATE #3b's hints) — this makes it deterministic.
+          // MUST run BEFORE gate #3b: the just-created deal IS an open deal, so
+          // the gate would otherwise refuse the second call instead of reusing.
+          // The KV hit is verified live (deal still exists AND belongs to this
+          // account) before trusting it; stale entries are deleted. 30-min TTL
+          // bounds cross-conversation reuse; force_new_deal opts out.
+          const dealReuseKey = (personId && accountId && env.CONVERSATION_KV)
+            ? `recent_deal:${personId}:${accountId}` : null;
+          let reusedDealFromKv = false;
+          if (!existingDealId && !force_new_deal && dealReuseKey) {
+            try {
+              const recent = await env.CONVERSATION_KV.get(dealReuseKey, 'json');
+              if (recent?.dealId) {
+                const candidateId = String(recent.dealId);
+                let verified = null;
+                try {
+                  // Same field set as the explicit existing_deal_id fetch above —
+                  // downstream steps read Contact_Name/Lead_Source off existingDealData.
+                  const dealCheck = await zohoApiCall('GET', `Deals/${candidateId}?fields=id,Deal_Name,Account_Name,Contact_Name,Lead_Source,Owner,Closing_Date`, env);
+                  verified = dealCheck?.data?.[0] || null;
+                } catch (_) { verified = null; }
+                if (verified?.id && String(verified?.Account_Name?.id || '') === String(accountId)) {
+                  existingDealId = candidateId;
+                  existingDealData = verified;
+                  reusedDealFromKv = true;
+                  results.steps.push(`Reusing Deal "${verified.Deal_Name}" (${candidateId}) created earlier in this conversation — multi-option quotes share one master deal (pass force_new_deal:true for a separate deal)`);
+                } else {
+                  // Deal deleted or belongs to a different account — drop it.
+                  try { await env.CONVERSATION_KV.delete(dealReuseKey); } catch (_) { }
+                }
+              }
+            } catch (_) { /* reuse is best-effort; fall through to normal flow */ }
+          }
+
           // ── HARD GATE #3b: Account has existing open Deals — refuse silent new-Deal creation ──
           // 2026-05-13: prior behavior auto-created a new Deal under the Account whenever
           // create_deal_and_quote was called without existing_deal_id, even if the Account
@@ -12874,11 +13453,95 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // Coerce unknown / invalid values to "Stratus Referal". Explicitly
           // rejects "Website" as a default when caller didn't mean it (the
           // Skty bug where Llama guessed "Website" from email context).
+          // 2026-07-02: normalize the correctly-spelled "Referral" (two Rs) to
+          // Zoho's picklist spelling BEFORE validation — previously a model
+          // that spelled "Meraki ISR Referral" correctly got silently coerced
+          // to "Stratus Referal", flipping the referral type entirely.
+          if (typeof lead_source === 'string') {
+            lead_source = lead_source.trim()
+              .replace(/^Meraki ISR Referral$/i, 'Meraki ISR Referal')
+              .replace(/^Meraki ADR Referral$/i, 'Meraki ADR Referal')
+              .replace(/^Stratus Referral$/i, 'Stratus Referal');
+          }
           const VALID_LS = ['Stratus Referal', 'Meraki ISR Referal', 'Meraki ADR Referal', 'VDC', 'Website', '-None-', 'PharosIQ', 'Stratus ADR Referral', 'Stratus ISM'];
           if (!lead_source || !VALID_LS.includes(lead_source)) {
             const before = lead_source;
             lead_source = 'Stratus Referal';
             if (before) results.steps.push(`Lead_Source "${before}" invalid — coerced to "Stratus Referal"`);
+          }
+
+          // ── Meraki ISR resolution (2026-07-02, Jackie Portillo / David Jones fix) ──
+          // BUSINESS RULE (Chris): a "Meraki ISR Referal" deal must NEVER carry
+          // Stratus Sales as the ISR — no exceptions. "Stratus Referal" defaults
+          // to Stratus Sales but MAY name a Cisco rep. Previously Meraki_ISR was
+          // hardcoded to Stratus Sales with no way to pass the rep, so every
+          // referral deal was created wrong and hand-fixed by the team.
+          const STRATUS_SALES_ISR_ID = '2570562000027286729';
+          let merakiIsrId = null;
+          let merakiIsrName = null;
+          if (meraki_isr_email) {
+            // Strict email shape gate BEFORE it reaches the Zoho criteria
+            // string — encodeURIComponent leaves ) ' ! * unescaped, so a
+            // malformed value could break the (Email:equals:...) expression.
+            const _isrEmail = String(meraki_isr_email).trim().toLowerCase();
+            if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(_isrEmail)) {
+              results.steps.push(`Meraki ISR lookup skipped: "${String(meraki_isr_email).slice(0, 80)}" is not a valid email`);
+            } else {
+              try {
+                const isrSearch = await zohoApiCall('GET',
+                  `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(_isrEmail)})&fields=id,Name,Email,Inactive`, env);
+                const isrRec = isrSearch?.data?.[0];
+                if (isrRec?.id) {
+                  // 2026-07-09 (Hematogenix / Jesse Cervantes): an Inactive rep resolves
+                  // fine here but Zoho's lookup filter rejects the Deal write later with
+                  // an opaque FILTER_CRITERIA_NOT_SATISFIED. Catch it BEFORE any records
+                  // are written and offer the user the reactivation path instead.
+                  if (isrRec.Inactive === true) {
+                    const _isrName = isrRec.Name || _isrEmail;
+                    if (reactivate_inactive_isr === true) {
+                      const react = await reactivateMerakiIsr(env, isrRec.id);
+                      if (!react.success) {
+                        return {
+                          success: false,
+                          error: 'meraki_isr_reactivation_failed',
+                          isr_id: isrRec.id,
+                          isr_name: _isrName,
+                          instruction: `Tried to uncheck the Inactive flag on Meraki ISR "${_isrName}" (user-approved) but the Zoho update failed: ${react.error}. Surface this to the user — they may need to uncheck it manually in the Meraki_ISRs module.`,
+                          ...results,
+                          wall_ms: Date.now() - _startMs
+                        };
+                      }
+                      results.steps.push(`Reactivated Meraki ISR ${_isrName} (unchecked Inactive, user-approved)`);
+                    } else {
+                      // On a non-ISR-referral lead source the rep attachment is
+                      // optional — offer proceeding without the rep as well, so
+                      // an inactive rep doesn't dead-end a Stratus Referal deal.
+                      const _declinePath = (lead_source === 'Meraki ISR Referal')
+                        ? ''
+                        : ` If the user would rather NOT reactivate, retry WITHOUT meraki_isr_email to proceed with the default rep — allowed here because Lead_Source "${lead_source || 'Stratus Referal'}" does not require the referring rep.`;
+                      return {
+                        success: false,
+                        error: 'meraki_isr_inactive',
+                        meraki_isr_inactive: true,
+                        isr_id: isrRec.id,
+                        isr_name: _isrName,
+                        instruction: buildInactiveIsrInstruction(_isrName,
+                          'retry this SAME create_deal_and_quote call with reactivate_inactive_isr: true') + _declinePath,
+                        ...results,
+                        wall_ms: Date.now() - _startMs
+                      };
+                    }
+                  }
+                  merakiIsrId = isrRec.id;
+                  merakiIsrName = isrRec.Name;
+                  results.steps.push(`Resolved Meraki ISR: ${merakiIsrName} (${_isrEmail})`);
+                } else {
+                  results.steps.push(`Meraki ISR lookup: no Meraki_ISRs record for ${_isrEmail}`);
+                }
+              } catch (isrErr) {
+                results.steps.push(`Meraki ISR lookup failed for ${_isrEmail}: ${isrErr.message}`);
+              }
+            }
           }
           const VALID_BILLING_TERMS = ['Prepaid Term', 'Prepaid'];
           let quoteBillingTerm = cisco_billing_term || 'Prepaid Term';
@@ -12910,13 +13573,34 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const pendingProducts = []; // {suffixed, qty, cached} waiting for product ID
 
           function stageProduct(sku, qty) {
-            const { key: suffixed, entry: cached } = resolveCachedProduct(sku);
+            let { key: suffixed, entry: cached } = resolveCachedProduct(sku);
+            // Discontinued products (zoho_active:false — e.g. the LIC-SME
+            // family): stage the replacement instead. Writing the dead
+            // product id would fail Zoho's NOT_ALLOWED inactive check.
+            if (cached && cached.zoho_active === false) {
+              const alt = cached.replaced_by ? resolveCachedProduct(cached.replaced_by) : null;
+              if (alt && alt.entry && alt.entry.zoho_active !== false) {
+                results.steps.push(`${suffixed} is discontinued — substituted its replacement ${alt.key}`);
+                suffixed = alt.key;
+                cached = alt.entry;
+              } else {
+                results.steps.push(`${suffixed} is INACTIVE in Zoho with no active replacement — line skipped, ask the user for an alternative`);
+                return false;
+              }
+            }
             console.log(`[COMPOUND] stageProduct: sku=${sku} suffixed=${suffixed} hasPid=${!!cached?.zoho_product_id} hasPrice=${!!cached?.price}`);
             if (cached) {
               pendingProducts.push({ suffixed, qty, cached, hasPid: !!cached.zoho_product_id });
               return true;
             }
-            return false;
+            // 2026-07-09 (SFP-H25G-CU5M=): live-Zoho-only SKUs (Cisco parts absent
+            // from prices.json) were unstageable — stageProduct returned false and
+            // HARD GATE #6 refused the quote even after batch_product_lookup had
+            // just live-validated the SKU. Stage them for the API lookup below
+            // (live-verified, with the '='-spare retry); a real miss still lands
+            // in missingProducts and the gates still fire.
+            pendingProducts.push({ suffixed, qty, cached: null, hasPid: false });
+            return true;
           }
 
           // Build ordered pairs: hardware → license, hardware → license
@@ -13106,17 +13790,35 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             console.log(`[COMPOUND] API lookup for ${p.suffixed} (no cached product ID)`);
             try {
               const prodResult = await zohoApiCall('GET',
-                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(p.suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price`, env);
-              const match = prodResult?.data?.find(r => r.Product_Code === p.suffixed);
+                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(p.suffixed)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`, env);
+              let match = prodResult?.data?.find(r => r.Product_Code === p.suffixed && r.Product_Active !== false);
+              let matchedSku = match ? p.suffixed : null;
+              // 2026-07-09: '='-spare-variant retry — mirrors batch_product_lookup so a
+              // SKU passed directly to create_deal_and_quote resolves the same way.
+              // LIC-* SKUs never carry the spare suffix — skip the wasted call.
+              if (!match && !p.suffixed.startsWith('LIC-')) {
+                const eqVariant = p.suffixed.endsWith('=') ? p.suffixed.slice(0, -1) : `${p.suffixed}=`;
+                const eqResult = await zohoApiCall('GET',
+                  `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`, env
+                ).catch(() => null);
+                const eqMatch = (eqResult?.data || []).find(r => r.Product_Code === eqVariant && r.Product_Active !== false);
+                if (eqMatch) { match = eqMatch; matchedSku = eqVariant; }
+              }
               if (match) {
                 resolvedProducts.push({
+                  // sku keeps the STAGED key — orderedPairs/licenseQtyMap join on it;
+                  // catalog_sku carries the real live Product_Code when it differs.
                   sku: p.suffixed, qty: p.qty,
+                  catalog_sku: matchedSku,
                   product_id: match.id,
-                  list_price: p.cached.list || match.Unit_Price || null,
-                  ecomm_price: p.cached.price || null,
-                  discount_per_unit: p.cached.discount_per_unit || 0,
-                  discount_pct: p.cached.discount_pct || 0
+                  list_price: p.cached?.list || match.Unit_Price || null,
+                  ecomm_price: p.cached?.price || null,
+                  discount_per_unit: p.cached?.discount_per_unit || 0,
+                  discount_pct: p.cached?.discount_pct || 0
                 });
+                if (matchedSku !== p.suffixed) {
+                  results.steps.push(`Resolved ${p.suffixed} → ${matchedSku} (Cisco '=' spare variant, live catalog)`);
+                }
               } else {
                 console.log(`[COMPOUND] API lookup returned no match for ${p.suffixed}`);
                 missingProducts.push(p.suffixed);
@@ -13279,23 +13981,51 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             Account_Name: { id: accountId },
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
-            Meraki_ISR: { id: '2570562000027286729' },
+            // 2026-07-02: resolved Cisco rep when provided; Stratus Sales is
+            // ONLY the default for non-ISR-referral lead sources (gate below).
+            Meraki_ISR: { id: merakiIsrId || STRATUS_SALES_ISR_ID },
             Owner: { id: await getOwnerForCaller(env) },
             Closing_Date: closingDate
           };
           if (contactId) dealData.Contact_Name = { id: contactId };
 
           let dealId = existingDealId || null;
-          if (existingDealId) {
-            results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
+
+          if (dealId) {
+            if (!reusedDealFromKv) results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
           } else {
+            // ── HARD GATE (2026-07-02): "Meraki ISR Referal" REQUIRES a real
+            // Cisco rep — creating it with the Stratus Sales placeholder is
+            // forbidden (business rule, no exceptions). Applies only to NEW
+            // deal creation; reused deals already carry their ISR.
+            if (lead_source === 'Meraki ISR Referal' && !merakiIsrId) {
+              return {
+                success: false,
+                error: 'meraki_isr_required',
+                needs_meraki_isr: true,
+                instruction: `STOP — do NOT create this Deal yet, and do NOT fall back to Stratus Sales. Lead_Source "Meraki ISR Referal" requires the referring Cisco rep. ${meraki_isr_email ? `The email "${meraki_isr_email}" did not match any Meraki_ISRs record — confirm the exact @cisco.com email with the user.` : `Ask the user which Cisco rep (@cisco.com email) referred this deal.`} Then retry create_deal_and_quote with meraki_isr_email set. If NO Cisco rep is actually involved, use lead_source "Stratus Referal" instead.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
             const dealResult = await zohoApiCall('POST', 'Deals', env, { data: [dealData] });
             dealId = dealResult?.data?.[0]?.details?.id;
             if (!dealId) {
+              // 2026-07-09: backstop for ids that skipped the proactive email-lookup
+              // check (e.g. reused/kv-cached ISR ids) — classify an inactive-ISR
+              // lookup-filter rejection instead of dumping the raw Zoho row.
+              const isrGuard = await detectInactiveMerakiIsrError(dealResult, dealData, env);
+              if (isrGuard) {
+                return { success: false, ...isrGuard, ...results, wall_ms: Date.now() - _startMs };
+              }
               results.errors.push('Failed to create Deal: ' + JSON.stringify(dealResult?.data?.[0]));
               return { success: false, ...results, wall_ms: Date.now() - _startMs };
             }
-            results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})`);
+            results.steps.push(`Created Deal: ${dealData.Deal_Name} (${dealId})${merakiIsrName ? ` — Meraki ISR: ${merakiIsrName}` : ''}`);
+            // Remember this deal for same-conversation multi-quote reuse.
+            if (dealReuseKey) {
+              try { await env.CONVERSATION_KV.put(dealReuseKey, JSON.stringify({ dealId }), { expirationTtl: 1800 }); } catch (_) { }
+            }
           }
           results.records.deal = { id: dealId, name: dealData.Deal_Name, url: `https://crm.zoho.com/crm/org647122552/tab/Deals/${dealId}` };
 
@@ -15351,21 +16081,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       case 'gmail_create_draft': {
-        const { to, subject, body, cc, bcc, in_reply_to, thread_id } = toolInput;
-        // Build RFC 2822 message
-        let raw = `To: ${to}\r\n`;
-        if (cc) raw += `Cc: ${cc}\r\n`;
-        if (bcc) raw += `Bcc: ${bcc}\r\n`;
-        raw += `Subject: ${subject}\r\n`;
-        if (in_reply_to) raw += `In-Reply-To: ${in_reply_to}\r\nReferences: ${in_reply_to}\r\n`;
-        raw += `Content-Type: text/plain; charset=UTF-8\r\n\r\n`;
-        raw += body;
-        // Base64url encode
-        const encoded = btoa(unescape(encodeURIComponent(raw)))
-          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        const draftBody = { message: { raw: encoded } };
-        if (thread_id) draftBody.message.threadId = thread_id;
-        return await gmailApiCall('POST', 'drafts', env, draftBody);
+        // 2026-07-09 (corp error_reports #4): DISABLED. Drafts were created via the
+        // worker's shared-mailbox OAuth (gmailApiCall users/me), so they landed in a
+        // mailbox the requesting user can't see — the agent then told the user "the
+        // draft is saved in Gmail" while their Drafts folder stayed empty. The tool
+        // is removed from the email subset; this redirect covers tiers that pass the
+        // full tool list (Llama waterfall) or stale cached toolsets.
+        return {
+          success: false,
+          draft_disabled: true,
+          instruction: 'Gmail draft creation is disabled. Render the COMPLETE email body inline in your chat reply (body only — no To/Cc/Subject headers) so the user can copy it into Gmail. Do NOT claim a draft was saved anywhere.'
+        };
       }
 
       case 'find_customer_license_claim_key': {
@@ -15390,23 +16116,60 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       case 'assign_cisco_rep_to_deal': {
-        const { deal_id, rep_email, rep_id } = toolInput;
+        const { deal_id, rep_email, rep_id, reactivate_inactive_isr } = toolInput;
         if (!deal_id) return { error: 'deal_id is required' };
         if (!rep_id && !rep_email) return { error: 'rep_email or rep_id is required' };
         try {
           let finalRepId = rep_id || '';
           let finalRepName = rep_email || '';
+          let repInactive = null; // null = unknown
 
           // If no rep_id provided, look up via Meraki_ISRs module by email
           if (!finalRepId && rep_email) {
             const isrSearch = await zohoApiCall('GET',
-              `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(rep_email)})&fields=id,Name,Email,Title`, env
+              `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(rep_email)})&fields=id,Name,Email,Title,Inactive`, env
             ).catch(() => null);
             if (isrSearch?.data && isrSearch.data.length > 0) {
               finalRepId = isrSearch.data[0].id;
               finalRepName = isrSearch.data[0].Name || rep_email;
+              repInactive = isrSearch.data[0].Inactive === true;
             } else {
               return { success: false, error: `Rep ${rep_email} not found in Meraki_ISRs module. Verify the email is correct.` };
+            }
+          } else if (finalRepId) {
+            // Direct rep_id path — read the record so an inactive rep is caught
+            // BEFORE the Deal write bounces off Zoho's lookup filter.
+            const rec = await getMerakiIsrRecord(env, finalRepId);
+            if (rec) {
+              finalRepName = rec.name || finalRepName;
+              repInactive = rec.inactive;
+            }
+          }
+
+          // 2026-07-09 (Hematogenix / Jesse Cervantes): inactive rep → offer the
+          // reactivation path instead of a raw lookup-filter rejection.
+          if (repInactive === true) {
+            if (reactivate_inactive_isr === true) {
+              const react = await reactivateMerakiIsr(env, finalRepId);
+              if (!react.success) {
+                return {
+                  success: false,
+                  error: 'meraki_isr_reactivation_failed',
+                  isr_id: finalRepId,
+                  isr_name: finalRepName,
+                  instruction: `Tried to uncheck the Inactive flag on Meraki ISR "${finalRepName}" (user-approved) but the Zoho update failed: ${react.error}. Surface this to the user — they may need to uncheck it manually in the Meraki_ISRs module.`
+                };
+              }
+            } else {
+              return {
+                success: false,
+                error: 'meraki_isr_inactive',
+                meraki_isr_inactive: true,
+                isr_id: finalRepId,
+                isr_name: finalRepName,
+                instruction: buildInactiveIsrInstruction(finalRepName,
+                  'retry this SAME assign_cisco_rep_to_deal call with reactivate_inactive_isr: true')
+              };
             }
           }
 
@@ -15418,6 +16181,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           });
           const updateRecord = updateResp?.data?.[0];
           const success = updateRecord?.code === 'SUCCESS';
+          if (!success) {
+            // Backstop: the proactive check above can only miss when the record
+            // fetch failed transiently — still classify a lookup-filter rejection
+            // instead of relaying the raw Zoho row.
+            const isrGuard = await detectInactiveMerakiIsrError(updateResp, { Meraki_ISR: { id: finalRepId } }, env);
+            if (isrGuard) return { success: false, ...isrGuard };
+          }
           return {
             success,
             deal_id,
@@ -15572,7 +16342,7 @@ const CRM_EMAIL_TOOLS = [
   // Batch Product Lookup (parallel, with KV pricing)
   {
     name: 'batch_product_lookup',
-    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically. Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU. IMPORTANT: Use quote_unit_price (ecomm price) for Quoted_Items.unit_price when creating quotes — this is the Stratus default. Use this for ALL product lookups — never search Products/WooProducts individually.',
+    description: 'Look up multiple product SKUs in parallel. Applies SKU suffix rules automatically, including dash variants, -Y/-YR license terms, and the Cisco \'=\' spare suffix (SFP-H25G-CU5M finds SFP-H25G-CU5M= and vice versa). Uses embedded Zoho product IDs from the local price cache (zero API calls for 98% of SKUs), with API fallback for the rare SKUs without cached IDs. Returns product_id, list_price, ecomm_price, and quote_unit_price for each SKU; on a miss it returns live_alternatives (near-miss catalog SKUs from the same family) — check those BEFORE declaring a product unavailable or searching the web. IMPORTANT: Use quote_unit_price (ecomm price) for Quoted_Items.unit_price when creating quotes — this is the Stratus default. Use this for ALL product lookups — never search Products/WooProducts individually.',
     input_schema: {
       type: 'object',
       properties: {
@@ -15648,7 +16418,10 @@ const CRM_EMAIL_TOOLS = [
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
         license_only: { type: 'boolean', description: '(2026-05-20) Set true for a license-only quote (no hardware). Triggers the same model-agnostic family collapse as renewal. Leave unset/false for hardware purchases.' },
-        lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal". Use "Meraki ISR Referal" if Cisco rep involved.' },
+        lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal" (Stratus found/introduced the deal). Use "Meraki ISR Referal" ONLY when a Cisco rep referred the deal — and then meraki_isr_email is REQUIRED (the server refuses a Meraki ISR Referal without a real rep; it will NEVER default to Stratus Sales).' },
+        meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal". OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        reactivate_inactive_isr: { type: 'boolean', description: 'Set true ONLY after the user has EXPLICITLY approved unchecking the Inactive flag on the referred rep (the tool returns meraki_isr_inactive:true with the question to ask). Unchecks Inactive on the Meraki_ISRs record, then proceeds with the assignment. Never set this without the user\'s approval in this conversation.' },
+        force_new_deal: { type: 'boolean', description: 'Set true ONLY when the user explicitly wants a separate NEW deal. By default, quotes created in the same conversation for the same account reuse one master deal (e.g. 3-year and 5-year option quotes share a single deal).' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
         confirm_new_deal: { type: 'boolean', description: '(2026-05-13) Default false. Set true ONLY after the user has explicitly confirmed they want a brand-new Deal even though the resolved Account already has open Deals. Bypasses the account_has_open_deals refusal. Never set without explicit user consent on the same turn.' },
         billing_address: {
@@ -15779,6 +16552,7 @@ const CRM_EMAIL_TOOLS = [
         deal_id: { type: 'string', description: 'Zoho Deal record ID' },
         rep_email: { type: 'string', description: 'Cisco rep email (e.g. jacporti@cisco.com). Always @cisco.com.' },
         rep_id: { type: 'string', description: 'Optional: Meraki_ISRs record ID if already known. If omitted, email is used to look up.' },
+        reactivate_inactive_isr: { type: 'boolean', description: 'Set true ONLY after the user has EXPLICITLY approved unchecking the Inactive flag on the rep (the tool returns meraki_isr_inactive:true with the question to ask). Unchecks Inactive on the Meraki_ISRs record, then assigns. Never set this without the user\'s approval in this conversation.' },
       },
       required: ['deal_id']
     }
@@ -15821,7 +16595,10 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'gmail_create_draft',
-    description: 'Create a Gmail draft reply or new email. The draft will appear in the user\'s Drafts folder for review before sending. Use this for composing email responses.',
+    // 2026-07-09: DISABLED (kept in the registry only so stale references resolve;
+    // no tool subset includes it and the executor returns a redirect). Drafts via
+    // the shared-mailbox OAuth were invisible to the requesting user.
+    description: 'DISABLED — do not call. Render the complete email body inline in your chat reply instead (body only, no To/Cc/Subject). Drafts cannot be saved to Gmail from here.',
     input_schema: {
       type: 'object',
       properties: {
@@ -15849,7 +16626,7 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'gmail_send_email',
-    description: 'Send an email directly via Gmail. WARNING: Only use after explicit user approval. Prefer gmail_create_draft for composing responses, then send only after review.',
+    description: 'Send an email directly via Gmail. WARNING: Only use after the user has EXPLICITLY approved the exact body you rendered inline in chat. Never send a body the user has not seen and approved in this conversation.',
     input_schema: {
       type: 'object',
       properties: {
@@ -16158,8 +16935,8 @@ function ensureTermSuggestionGroup(suggestions, replyText, agentMsg, history) {
   if (!licMatch) return suggestions; // hardware-only / no license → no term row
   const termMatch = licMatch[0].match(/-(\d)Y(?:R)?\b/i);
   const curTerm = termMatch ? parseInt(termMatch[1], 10) : 3;
-  const isSme = /\bLIC-SME\b|\bSME\b|systems?\s+manager/i.test(haystack); // SME: 1/3yr only ([[stratus-sme-3yr-cap]])
-  const years = isSme ? [1, 3] : [1, 3, 5];
+  const years = [1, 3, 5]; // all families incl. the SME replacement (Ivanti MDM) quote 1/3/5
+
   const options = years.map(y => ({ label: `${y}-year`, send: `${y} year`, recommended: y === curTerm }));
   if (!options.some(o => o.recommended)) (options.find(o => o.send === '3 year') || options[0]).recommended = true;
   const groups = suggestions.groups.slice();
@@ -16277,24 +17054,44 @@ const TOOL_SUBSETS = Object.freeze({
   ],
   // Email-centric flows. Includes zoho_create_record so tasks can be made
   // from an email context without re-classifying.
+  // 2026-07-09 (corp error_reports #4): gmail_create_draft REMOVED — the worker's
+  // shared-mailbox OAuth saved drafts into a mailbox the user can't see, and the
+  // agent then claimed "the draft is saved in Gmail". Drafts now render inline
+  // in chat (see EMAIL RULES in the system prompt); the executor case returns a
+  // redirect for any tier that still tries it.
+  // Product lookups included (2026-07-09): compound asks ("reply to them with
+  // pricing for 3 MX67s") land here and previously had no way to validate SKUs
+  // or prices — inviting invented pricing in the drafted body.
   email: [
     'gmail_search_messages', 'gmail_read_message', 'gmail_read_thread',
-    'gmail_create_draft', 'gmail_send_email',
-    'zoho_search_records', 'zoho_create_record', 'find_customer_license_claim_key'
+    'gmail_send_email',
+    'zoho_search_records', 'zoho_create_record', 'find_customer_license_claim_key',
+    'batch_product_lookup', 'find_product_candidates', 'parse_quote_url'
   ],
   // Stratus URL ecomm-link generation only.
   quote_url: ['parse_quote_url', 'batch_product_lookup', 'find_product_candidates', 'web_search_sku'],
   // Subscription / renewal admin work — DID generation, PO conversion,
   // e-sign — quote_to_po_and_esign is the workflow wrapper.
+  // 2026-07-08 (Blue Grass Energy bug report): the subset had NO search
+  // tools, so "update the PO created today" / "list the POs for this
+  // account" dead-ended with "I don't have a search tool" — the whole
+  // class is about acting on records the user references by description,
+  // not by id. Search + related-records reads added (read-only, no new
+  // mutation surface).
   subscription: [
     'quote_to_po_and_esign', 'quote_to_po_status',
-    'zoho_get_record', 'zoho_update_record',
+    'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
+    'zoho_update_record',
     'velocity_hub_submit'
   ],
   // Cisco rep assignment paths. Reads + the dedicated assignment tool.
+  // create_deal_and_quote added 2026-07-09: the inactive-ISR reactivation
+  // approval turn ("yes, uncheck it and assign Jesse") classifies here, and the
+  // retry may need to CREATE the deal (the proactive gate fires before any
+  // records are written).
   cisco_rep: [
     'assign_cisco_rep_to_deal', 'zoho_search_records',
-    'zoho_get_record', 'zoho_update_record'
+    'zoho_get_record', 'zoho_update_record', 'create_deal_and_quote'
   ],
   // Fallback superset — most-used tools across all classes. Covers
   // any ambiguous request without removing the model's options.
@@ -16335,6 +17132,14 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'general', confidence: 0.5 };
   }
   const t = text.toLowerCase();
+
+  // 00. Drafting-banner override (2026-07-09, corp error_reports #4): the extension
+  // marks draft asks deterministically. Without this, words inside the injected
+  // thread block (contract / esign / "create a quote") hijack the class and strip
+  // the gmail tools — the exact follow-up failure from the incident.
+  if (text.includes('[User asked to draft a reply')) {
+    return { class: 'email', confidence: 0.98 };
+  }
 
   // 0. Quote/Deal creation guard (2026-05-15 Codex defense-in-depth):
   // If user is creating/building/making a quote/deal/PO/order, route to crm_write
@@ -16400,18 +17205,36 @@ function classifyCrmIntent(text, ctx = {}) {
   // 2026-05-15: removed bare @cisco.com clause that mis-routed quote creates when
   // chat context included a Cisco rep email. Now requires assign/set/change/update/
   // reassign verb + cisco rep keyword, OR an explicit "ping rep" phrase.
+  // 2026-07-09: reactivation-approval turns ("yes, uncheck the inactive flag")
+  // route here too — the subset carries assign_cisco_rep_to_deal AND
+  // create_deal_and_quote, both of which accept reactivate_inactive_isr.
   if (/\b(assign|set|change|update|reassign)\b.{0,40}\b(cisco\s+rep|meraki\s+isr|isr|rep)\b/.test(t)
-      || /\bping\s+(the\s+)?(cisco\s+)?rep\b/.test(t)) {
+      || /\bping\s+(the\s+)?(cisco\s+)?rep\b/.test(t)
+      || /\b(uncheck|reactivate|re-activate|clear)\b[^.!?]{0,30}\b(inactive|isr\s+flag)\b/.test(t)
+      || /\binactive\s+flag\b/.test(t)) {
     return { class: 'cisco_rep', confidence: 0.85 };
   }
 
   // 4. Email composition / inbox
-  if (/\b(draft|compose|write|send|reply)\s+(an?\s+)?(email|message|response|follow[\s-]?up|reply)/.test(t)
+  // 2026-07-09 (corp error_reports #4): 'generate' added — "generate a response"
+  // is the extension's most common drafting phrasing and previously fell through.
+  if (/\b(draft|compose|write|send|reply|generate)\s+(an?\s+)?(email|message|response|follow[\s-]?up|reply)/.test(t)
       || /\b(check|read|search|scan|summarize|review)\s+.{0,30}(email|inbox|gmail|thread)/.test(t)
       || /\bgmail\b/.test(t)
       || /\binbox\b/.test(t)
       || /\bdraft\s+a\s+reply\b/.test(t)) {
     return { class: 'email', confidence: 0.85 };
+  }
+
+  // 4b. Draft follow-ups (2026-07-09): "show/edit/shorten the draft" on the turn
+  // AFTER a draft was rendered has no compose-verb bigram and was landing in
+  // crm_write (no gmail reads → the agent denied the draft existed). The verb must
+  // bind DIRECTLY to the draft/reply noun (a loose 25-char gap stole "edit the
+  // quote per their reply" from crm_write), and draft-as-adjective CRM nouns are
+  // excluded ("revise the draft quote", "delete the draft note").
+  if (/\b(show|display|view|see|render|edit|revise|reword|rewrite|shorten|lengthen|tweak|redo)\s+(me\s+)?(the\s+|that\s+|this\s+|my\s+)?(draft|reply|response)\b(?!\s*(quote|deal|po|order|invoice|note|task|proposal))/.test(t)
+    || /\b(the|that|this|my)\s+draft\b(?!\s*(quote|deal|po|order|invoice|note|task|proposal))/.test(t)) {
+    return { class: 'email', confidence: 0.8 };
   }
 
   // 5. CRM mutation verbs on Zoho records. `update` excludes the read idiom
@@ -16589,7 +17412,9 @@ Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / ema
 
 **Lead_Source valid values** (ONE R, intentional): "Stratus Referal" (DEFAULT, 99%), "Meraki ISR Referal" (Cisco rep referred), "Meraki ADR Referal" (prompt for ADR name), "VDC", "Website". NEVER "-None-" or invented values.
 
-**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729). Meraki ISR Referal → Meraki_ISR REQUIRED (ask rep name), Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
+**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729) UNLESS a Cisco rep is involved — then pass meraki_isr_email to list them. Meraki ISR Referal → the referring rep is MANDATORY: pass their @cisco.com email as \`meraki_isr_email\` on create_deal_and_quote (the server resolves it against Meraki_ISRs and REFUSES to create a Meraki ISR Referal deal without it — Stratus Sales is never valid on an ISR referral). Don't know the rep? ASK the user before creating. Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
+
+**Multi-option quotes (e.g. 3-year AND 5-year):** all option quotes for the same account in one conversation share ONE master deal — the server enforces this automatically (second create_deal_and_quote call reuses the deal). Only pass force_new_deal:true if the user explicitly asks for a separate deal.
 
 **CRITICAL — Cisco reps live in the Meraki_ISRs module (NOT Contacts).** Any @cisco.com email is a Meraki ISR. Assign/update a deal's Meraki ISR / Cisco rep via \`assign_cisco_rep_to_deal\` — never search Contacts for @cisco.com.
 
@@ -16599,12 +17424,14 @@ Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / ema
 
 Tools handle suffixes + hardware→license pairing automatically: batch_product_lookup / parse_quote_url apply suffixes (MR44 → MR44-HW, CW9172I → CW9172I-RTG); create_deal_and_quote auto-adds a license per hardware SKU (license qty = hardware qty, 1:1). "hardware only" / "no license" / "just the hardware" → \`hardware_only:true\` + \`include_licenses:false\`, no LIC-* rows. Explicit LIC SKU named → pass as-is. License-only request → never convert to hardware; use the explicit LIC SKU or model-agnostic alias (MR-ENT/MR-AGN, MV-AGN, MT-AGN).
 
+**PRODUCT NOT FOUND — EXHAUST THE CATALOG FIRST.** Ladder: (1) batch_product_lookup (auto-normalizes dashes, -Y/-YR, and the '=' spare suffix); (2) on found:false check live_alternatives — a near-miss (trailing '=', length/size suffix) is usually the right part: confirm, then re-run with that exact spelling; (3) find_product_candidates with the user's wording; (4) web_search_sku ONLY after 1–3 miss — a web SKU is a LEAD, re-validate via batch_product_lookup. NEVER claim a part "isn't in our catalog" before steps 1–3 miss; finish resolving the product before any account/contact work.
+
 **MR Enterprise License — UNIVERSAL across all MR APs.** Only valid: LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR. NEVER invent (not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
 "5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1 year, 3 year, or 5 year?" — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
 
 **Family licenses:** MV → LIC-MV-{term}YR; MT → LIC-MT-{term}YR; MG → LIC-MG-{term}YR; MS and MX → MODEL-SPECIFIC (e.g. LIC-MX{model}-SEC-{term}YR), use batch_product_lookup.
 
-**Systems Manager (LIC-SME): 1YR/3YR terms only — 5YR is deprecated. Never quote LIC-SME-5YR; cap to 3YR and flag the change to the user.**
+**Systems Manager (LIC-SME) is DISCONTINUED — every LIC-SME term is inactive in Zoho and must never be quoted. Quote the replacement instead: LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM per device) at the requested term, and tell the user about the substitution.**
 
 **Catalyst switch power supplies (C9200/C9300 class) follow a strict grammar: \`PWR-C{config}-{wattage}{AC|DC}-M[-O]\`.** Decode the customer's words: "CONFIG 5" / "config-5" → \`C5\`; the wattage + AC/DC squashed with no space ("125W AC" → \`125WAC\`, "1KW AC" → \`1KWAC\`); "W/Meraki" / "for Meraki" / Meraki-managed → the \`-M\` suffix. Prefer the base \`-M\` key as canonical; only use \`-M-O\` if the user explicitly typed \`-O\`. Real catalog keys (do NOT invent others): PWR-C5-125WAC-M, PWR-C5-600WAC-M, PWR-C5-1KWAC-M, PWR-C1-350WAC-P-M, PWR-C1-715WAC-P-M, PWR-C1-1100WAC-P-M, PWR-C1-1900WAC-P-M. So "125W AC CONFIG 5 POWER SUPPLY W/MERAKI" → **PWR-C5-125WAC-M**. (C5 keys are \`PWR-C5-{w}-M\`; **C1 keys carry an extra \`-P-\` segment: \`PWR-C1-{w}WAC-P-M\`** — don't drop it. Always map the words to ONE of the exact keys listed above; never emit a key that isn't on that list.)
 ❌ NEVER derive a power-supply SKU from the SWITCH family — the PSU for a C9200L is NOT \`C9200L-PWR-125WAC\` (not a real SKU). A switch PSU starts with \`PWR-C*\`, never \`C9200L-PWR-*\`. When the user asks for "a PSU / power supply for a {switch}", the requested item is the POWER SUPPLY, not the switch — resolve the PSU via \`find_product_candidates\` (ask wattage if unspecified: 125W / 600W / 1KW AC) and quote ONLY the PSU. Do NOT add the {switch} or a license unless the user also asks for them. Meraki AP / sensor / adapter power is the separate \`MA-PWR-*\` family (e.g. MA-PWR-30W-US) — never use an MA-PWR AP adapter for a switch power-supply line. **If you are unsure of ANY SKU, call \`find_product_candidates\` with the customer's wording instead of guessing — do not fabricate an exact SKU string.**
@@ -16626,7 +17453,7 @@ Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT
 1. zoho_get_record → current Quoted_Items with List_Price + Quantity.
 2. Per line: \`new_discount_dollars = List_Price * Quantity * (new_pct / 100)\` — MUST differ from the current Discount dollar, else you have the wrong number.
 3. Update \`Quoted_Items: [{ "id": "<existing_line_id>", "Discount": new_discount_dollars, "Description": "NN% Discount" }]\`. Discount is the ONLY lever — never touch Product_Name or unit_price for pricing. Server auto-injects \`Do_Not_Auto_Update_Prices:true\`.
-4. **MANDATORY response check:** \`verification.WARNING\` present or \`verification.success: false\` → update did NOT land; tell the user, retry corrected. \`verification.any_item_changed: false\` → no-op (wrong numbers); recompute and retry. Claim success ONLY when \`verification.success === true\` AND \`verification.any_item_changed === true\` AND \`actual_line_items\` show the new Discounts — never from Zoho's top-level "code: SUCCESS" alone (fires even on no-ops).
+4. **MANDATORY response check:** \`verification.WARNING\` present or \`verification.success: false\` → update did NOT land; tell the user, retry corrected. \`verification.any_item_changed: false\` while you changed Quantity/Discount/Product → no-op (wrong numbers); recompute and retry. If you ONLY changed non-pricing line fields (e.g. Description), \`any_item_changed\` stays false by design — judge by \`requested_operations.modifications_applied\` and \`actual_line_items\` instead. Claim success ONLY when \`verification.success === true\` AND the change is visible in \`actual_line_items\` (new Discounts for pricing edits, new field values for non-pricing edits) — never from Zoho's top-level "code: SUCCESS" alone (fires even on no-ops).
 
 ### Margin-Target Pricing (apply_margin_to_quote)
 "apply 20% margin" / "price at X% margin" / "set discounts to reflect a 20% margin" → call \`apply_margin_to_quote({quote_id, target_margin})\` (accepts 0.20 or 20). Do NOT compute the discounts yourself or via zoho_update_record: a flat % off list is NOT a margin — margin is measured against Stratus's distributor cost, which only this tool can pull (LIVE_GetQuoteData, CCW-approved cost). Errors: \`no_ccw_deal_number\` → quote must be Cisco-approved (DID) first, don't estimate; \`cost_data_unavailable\` / \`cost_match_failed\` → relay verbatim, quote NOT changed, don't guess. Claim success only on \`verification.success === true\`; report per-line evidence + undo token from \`message\`.
@@ -16670,10 +17497,11 @@ NEVER create new dropdown values — Zoho silently accepts invalid values and cr
 - Before closing a task on an active deal, check for successor tasks.
 - Every new Deal MUST have a follow-up task created as the FINAL step before reporting done.
 
-## EMAIL RULES
-- Always create a Gmail draft first (gmail_create_draft) — NEVER send without approval.
-- Blank line between paragraphs. Sign as: {{OWNER_DISPLAY_NAME}}, Stratus Information Systems.
-- Voice: friendly, consultative, concise. End every customer email with a question or CTA.
+## EMAIL RULES — DRAFTS RENDER IN CHAT
+- Draft/compose asks: output the COMPLETE email body directly in your chat response — body ONLY (no To/Cc/Subject), ready to copy.
+- You CANNOT save Gmail drafts. NEVER claim a draft was saved anywhere. NEVER send without explicit approval of the exact rendered body.
+- Ground the draft in the FULL thread (context block + gmail_read_thread / gmail_search_messages): when another participant raised a topic Stratus can help with (licensing, upgrades, renewals), add ONE short paragraph offering specific help on it, naming the specifics — never a generic "anything else we can help with?".
+- Voice: warm, confident, consultative. Warm intro → thank the referrer FIRST by name, greet the customer by first name, then "We are Cisco/Meraki specialists, and look forward to making your experience even better through our involvement." Default lean; at most one value-add. NO em dashes, no filler openers, contractions fine, blank line between paragraphs, end on a question or ONE CTA. Never invent SKUs/prices/URLs; never mention margin. Sign off: "Best," then {{OWNER_DISPLAY_NAME}}, Stratus Information Systems.
 
 ## GMAIL SEARCH
 Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:2026/01/01\`.
@@ -16762,7 +17590,7 @@ Present complete summary before creating records: Email Thread, Account (NEW/EXI
 After confirmation, call **create_deal_and_quote** with ALL details (one tool call). Do NOT manually create records. Report results with Zoho links.
 
 ### PHASE 7 — OPTIONAL: DRAFT REPLY
-Offer to draft a reply (gmail_create_draft, never auto-send).
+Offer to draft a reply — render the full body inline in chat for the user to copy (per EMAIL RULES; drafts can NOT be saved to Gmail, never claim otherwise).
 `;
 
 const CRM_PROMPT_ADMIN_ACTION = `
@@ -16965,7 +17793,7 @@ function toolProgressMessage(toolName, toolInput) {
     case 'gmail_read_thread':
       return `📧 Loading email thread...`;
     case 'gmail_create_draft':
-      return `✍️ Creating draft email to ${toolInput.to || ''}...`;
+      return `✍️ Composing email...`;
     case 'gmail_send_email':
       return `📤 Sending email to ${toolInput.to || ''}...`;
     case 'find_customer_license_claim_key':
@@ -17326,6 +18154,40 @@ function rewriteSkuTerm(sku, newTerm) {
   return s.replace(/-([135])(YR|Y-S\d+|Y)$/, `-${newTerm}$2`);
 }
 
+function canRewriteDirectLicenseListForAllTerms(list) {
+  if (!Array.isArray(list) || list.length === 0) return false;
+  return [1, 3, 5].every(term => canRewriteDirectLicenseListForTerm(list, term));
+}
+
+function directLicenseSkuForTerm(sku, term) {
+  if (!sku || !String(sku).toUpperCase().startsWith('LIC-')) return null;
+  const key = `${Number(term)}Y`;
+  const siblings = licenseTermSiblings(sku);
+  if (siblings) return siblings[key] || null;
+  const rewritten = rewriteSkuTerm(sku, term);
+  return rewritten && prices[rewritten] ? rewritten : null;
+}
+
+function canRewriteDirectLicenseListForTerm(list, term) {
+  if (!Array.isArray(list) || list.length === 0 || ![1, 3, 5].includes(Number(term))) return false;
+  return list.every(({ sku }) => !!directLicenseSkuForTerm(sku, term));
+}
+
+function rewriteDirectLicenseListForTerm(list, term) {
+  return list.map(({ sku, qty }) => {
+    const rewritten = directLicenseSkuForTerm(sku, term);
+    return { sku: rewritten || sku, qty };
+  });
+}
+
+function shouldPreserveTypedDirectLicenseTerm(rawText, sku) {
+  void rawText;
+  void sku;
+  // Direct typed license SKUs always render the available term set. Term-only
+  // narrowing still belongs to quote-revision flows, not initial LIC-* quotes.
+  return false;
+}
+
 // Strip lines containing an empty Stratus order URL (?item=&qty=) from a Claude
 // reply — Sonnet has templated these on the revise path (webex #129; same guard
 // here for gchat/extension parity). Deterministic handlers never produce them.
@@ -17467,12 +18329,21 @@ async function handleFollowUpModifier(text, personId, kv) {
       const qtys = m[2].split(',').map(q => parseInt(decodeURIComponent(q.trim()), 10));
       if (skus.length !== qtys.length) return null;
       if (skus.some(s => !s) || qtys.some(q => !Number.isFinite(q) || q <= 0)) return null;
-      return skus.map((sku, i) => ({ sku, qty: qtys[i] }));
+      return skus.map((sku, i) => {
+        // Legacy Systems Manager tokens from prior-quote history: substitute
+        // the replacement (SME is discontinued) at ingestion so EVERY
+        // follow-up branch (labeled-term filter, qty change, add/remove,
+        // hardware/license-only, pricing) inherits the live catalog SKU.
+        const sm = String(sku).match(/^LIC-SME-([135])Y(R?)$/i);
+        if (sm) smeIngestSubstituted = true;
+        return { sku: sm ? smeReplacementSku(sm[1]) : sku, qty: qtys[i] };
+      });
     } catch { return null; }
   };
 
   // For mutations, we apply to all terms (hw only, license only, term reduction) OR a specific one.
   // Build a map of term → items.
+  let smeIngestSubstituted = false; // set by urlToItems when a legacy LIC-SME token was substituted
   const termItems = {};
   for (const entry of lastTermLabels) {
     const items = urlToItems(entry.url);
@@ -17652,7 +18523,7 @@ async function handleFollowUpModifier(text, personId, kv) {
   };
 
   let filteredTerms = Object.entries(termItems);
-  let smeCapApplied = false; // set when a 5-year request on SME is capped to 3-year (note appended in render)
+  let smeReplacedApplied = false; // set when a legacy LIC-SME token is substituted with the replacement SKU (note appended in render)
 
   // Apply term filter — single-intent ("just 3 year") or the compound pass's term
   // component ("price for the 3 year"); identical machinery either way (F2).
@@ -17673,7 +18544,7 @@ async function handleFollowUpModifier(text, personId, kv) {
       let anyTermBearing = false;
       let anyFailed = false;
       for (const [, items] of filteredTerms) {
-        for (const it of items) {
+        for (let it of items) {
           const tm = String(it.sku).match(/-([135])(YR|Y-S\d+|Y)$/i);
           if (!tm) {
             // Non-term-bearing SKU (rare in this branch — keep as-is).
@@ -17682,22 +18553,19 @@ async function handleFollowUpModifier(text, personId, kv) {
           }
           anyTermBearing = true;
           const currentTerm = parseInt(tm[1], 10);
+          // Legacy Systems Manager tokens (from prior-quote URLs in history):
+          // SME is discontinued — substitute the replacement SKU at the same
+          // term before the term rewrite. The replacement supports 1/3/5.
+          if (/^LIC-SME/i.test(String(it.sku))) {
+            it = { sku: smeReplacementSku(currentTerm), qty: it.qty };
+            smeReplacedApplied = true;
+          }
           if (currentTerm === wantTerm) {
             // Already at requested term, no rewrite needed.
             rewrittenItems.push(it);
             continue;
           }
-          // SME business rule: 5-year is deprecated — LIC-SME-5YR must NEVER be emitted even
-          // though it still exists in the price catalog (sweep 2026-06-09: "5 year" after an SME
-          // quote produced LIC-SME-5YR). Cap to the 3-year SKU and surface the standard note.
-          const _isSme = /^LIC-SME/i.test(String(it.sku));
-          const effectiveTerm = (_isSme && wantTerm === 5) ? 3 : wantTerm;
-          if (_isSme && wantTerm === 5) smeCapApplied = true;
-          if (effectiveTerm === currentTerm) {
-            rewrittenItems.push(it); // already at the capped term (e.g. LIC-SME-3YR asked for 5yr)
-            continue;
-          }
-          const newSku = rewriteSkuTerm(it.sku, effectiveTerm);
+          const newSku = rewriteSkuTerm(it.sku, wantTerm);
           if (newSku && newSku !== it.sku && (newSku in prices)) {
             rewrittenItems.push({ sku: newSku, qty: it.qty });
           } else {
@@ -17716,11 +18584,7 @@ async function handleFollowUpModifier(text, personId, kv) {
           if (!_seen.has(k) || _seen.get(k).qty < it.qty) _seen.set(k, it);
         }
         const _deduped = [..._seen.values()];
-        // Label honesty: if EVERYTHING in the bucket is SME capped to 3-year, label it 3-Year —
-        // never present a 3YR SKU under a "5-Year Co-Term" heading. Mixed quotes keep the
-        // requested-term label (non-SME items really are 5-year) and the cap note explains SME.
-        const _allCappedSme = smeCapApplied && _deduped.every(it => /^LIC-SME/i.test(String(it.sku)));
-        filteredTerms = [[String(_allCappedSme ? 3 : wantTerm), _deduped]];
+        filteredTerms = [[String(wantTerm), _deduped]];
       }
       // else (no term-bearing items at all): leave filteredTerms unchanged.
     }
@@ -17730,29 +18594,28 @@ async function handleFollowUpModifier(text, personId, kv) {
   // Source bucket: the first prior term bucket (term buckets are ALTERNATIVES of the same
   // line set, so any one of them seeds the expansion). Term-bearing SKUs are rewritten per
   // bucket via rewriteSkuTerm (catalog-validated, fail-closed); non-term items (hardware,
-  // accessories) pass through unchanged into every bucket. SME: 5-year is deprecated — a
-  // pure-SME quote expands to [1,3] only, a mixed quote keeps non-SME items at 5-year and
-  // caps the SME line to 3YR with the standard note. NEVER emits LIC-SME-5YR.
+  // accessories) pass through unchanged into every bucket. Legacy LIC-SME tokens are
+  // substituted with the replacement SKU (SME is discontinued; the replacement
+  // supports all three terms, so the expansion is always [1,3,5]).
   if (isAllTerms) {
     const srcItems = filteredTerms.length > 0 ? filteredTerms[0][1] : null;
     if (!srcItems || srcItems.length === 0) return null;
     const TERM_SUFFIX_RE = /-([135])(YR|Y-S\d+|Y)$/i;
     const termBearing = srcItems.filter(it => TERM_SUFFIX_RE.test(String(it.sku)));
     if (termBearing.length === 0) return null; // nothing to expand across terms — fail closed
-    const allSme = termBearing.every(it => /^LIC-SME/i.test(String(it.sku)));
-    const targetTerms = allSme ? [1, 3] : [1, 3, 5];
-    if (allSme) smeCapApplied = true; // surface the standard note for the omitted 5-year
+    const targetTerms = [1, 3, 5];
     const buckets = [];
     for (const t of targetTerms) {
       const bucket = [];
-      for (const it of srcItems) {
+      for (let it of srcItems) {
         const tm = String(it.sku).match(TERM_SUFFIX_RE);
         if (!tm) { bucket.push(it); continue; }
-        const _isSme = /^LIC-SME/i.test(String(it.sku));
-        const effectiveTerm = (_isSme && t === 5) ? 3 : t;
-        if (_isSme && t === 5) smeCapApplied = true;
-        if (parseInt(tm[1], 10) === effectiveTerm) { bucket.push(it); continue; }
-        const newSku = rewriteSkuTerm(it.sku, effectiveTerm);
+        if (/^LIC-SME/i.test(String(it.sku))) {
+          it = { sku: smeReplacementSku(parseInt(tm[1], 10)), qty: it.qty };
+          smeReplacedApplied = true;
+        }
+        if (parseInt(tm[1], 10) === t) { bucket.push(it); continue; }
+        const newSku = rewriteSkuTerm(it.sku, t);
         if (newSku && newSku !== it.sku && (newSku in prices)) bucket.push({ sku: newSku, qty: it.qty });
         else return null; // any unrewritable term-bearing SKU → fail closed
       }
@@ -17801,7 +18664,7 @@ async function handleFollowUpModifier(text, personId, kv) {
     }
     lines.push('');
   }
-  if (smeCapApplied) lines.push(`_${SME_5YR_FLAG}_`, '');
+  if (smeReplacedApplied || smeIngestSubstituted) lines.push(`_${SME_EOL_FLAG}_`, '');
   return lines.join('\n').trim();
 }
 
@@ -18402,7 +19265,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
     // GChat CRM path (ctx.waitUntil 30s limit): only 2 messages to fit agentic flow in ~15-20s.
     // Chrome extension chat (120s timeout): 10 messages for multi-turn context retention.
     // Non-CRM quoting path: full history (default 10 from KV).
-    const isExtensionChat = personId && personId.startsWith('ext:');
+    // 2026-07-09 (corp error_reports #4): the extension now arrives via the gateway
+    // with personId `gw:<email>` — only the legacy direct path used `ext:`. The gw:
+    // prefix was falling into the 2-message GChat branch, so follow-up turns lost
+    // the thread/draft context from two turns back.
+    const isExtensionChat = personId && (personId.startsWith('ext:') || personId.startsWith('gw:'));
     const effectiveHistory = useTools
       ? (isExtensionChat ? history.slice(-10) : history.slice(-2))
       : history;
@@ -19868,7 +20735,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
       'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
-      'gmail_create_draft': { success: true, draft_id: mockId, dry_run: true },
+      'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
       'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
       'webex_send_message': { success: true, message_id: mockId, dry_run: true },
       'zoho_create_note': { data: [{ code: 'SUCCESS', details: { id: mockId } }] },
@@ -19901,7 +20768,9 @@ function anthropicToolsToCfFormat(anthropicTools, modelId = '') {
   // Llama 4 Scout, Gemma 4, Mistral, and newer CF OpenAI-compatible models
   // reject flat tools — require OpenAI-wrapped format.
   // Llama 3.3 70B and Hermes accept flat.
-  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi|moonshot|qwen|gpt-oss|openai|nemotron|nvidia/i.test(modelId);
+  // GLM (zai-org) is OpenAI-Chat-Completions style: it 400s on flat tools with
+  // "body.tools.0.function: Field required" — must be OpenAI-wrapped too.
+  const needsOpenAiWrap = /gemma|mistral|llama-4|kimi|moonshot|qwen|gpt-oss|openai|nemotron|nvidia|glm|zai/i.test(modelId);
   if (needsOpenAiWrap) {
     return flat.map(t => ({ type: 'function', function: t }));
   }
@@ -20103,6 +20972,30 @@ function parseCfToolCalls(cfResponse) {
 
 // CF Workers AI agentic loop — mirrors askClaude but uses CF models.
 // Returns { reply, toolCalls, iterations, elapsedMs, errors }.
+// Workers AI throws transient capacity errors (code 3040 "Capacity temporarily
+// exceeded") under load — GLM-5.2 hits these routinely. Without a retry, one
+// 3040 mid-agent-loop kills the entire run (observed: benchmark task_03 died on
+// iteration 2 after a correct tool call). Retry ONLY transient errors, with
+// short backoff; permanent errors (schema 400s etc.) rethrow immediately.
+const CF_TRANSIENT_ERROR = /(capacity temporarily exceeded|\b3040\b|overloaded|too many requests|\b429\b|rate.?limit|service unavailable|\b503\b)/i;
+async function runCfWithRetry(env, modelId, requestBody, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await env.AI.run(modelId, requestBody);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts && CF_TRANSIENT_ERROR.test(String(err?.message || err))) {
+        console.log(`[CF-RETRY] ${modelId} transient error (attempt ${attempt}/${maxAttempts}): ${String(err?.message || err).substring(0, 120)}`);
+        await new Promise(r => setTimeout(r, attempt * 1500));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, env, personId, dryRun, maxIterations = 15, reasoningPolicy = REASONING_POLICY_DISABLED) {
   const startMs = Date.now();
   const cfTools = anthropicToolsToCfFormat(anthropicTools, modelId);
@@ -20193,7 +21086,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
 
       let cfResponse;
       try {
-        cfResponse = await env.AI.run(modelId, requestBody);
+        cfResponse = await runCfWithRetry(env, modelId, requestBody);
       } catch (apiErr) {
         const optionKeys = Object.keys(reasoningControl?.requestOptions || {});
         if (optionKeys.length > 0 && isReasoningControlRejection(apiErr)) {
@@ -20211,7 +21104,7 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
             requestOptions: {},
             reasoningControl: `${reasoningControl.reasoningControl}_rejected`
           };
-          cfResponse = await env.AI.run(modelId, requestBody);
+          cfResponse = await runCfWithRetry(env, modelId, requestBody);
         } else {
           throw apiErr;
         }
@@ -20903,6 +21796,11 @@ const BENCHMARK_MODELS = [
   { id: SEA_LION_MODEL_ID, label: 'SEA-LION V4 27B (CF)', type: 'cf' },
   { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (CF)', type: 'cf' },
   { id: '@cf/moonshotai/kimi-k2.6', label: 'Kimi K2.6 (CF)', type: 'cf' },
+  // GLM-5.2 — Z.ai flagship agentic model on Workers AI (added 2026-07-01).
+  // Candidate to replace Sonnet 4.6 on the CRM agent for cost savings: runs via
+  // the CF path (askCfModel) with dry-run write-stubbing like every other 'cf'
+  // entry, so benchmarking it never touches live Zoho.
+  { id: '@cf/zai-org/glm-5.2', label: 'GLM-5.2 (CF)', type: 'cf' },
   { id: '@cf/openai/gpt-oss-120b', label: 'GPT-OSS 120B (CF)', type: 'cf' },
   { id: '@cf/nvidia/nemotron-3-120b-a12b', label: 'Nemotron 3 Super 120B A12B (CF)', type: 'cf' },
   { id: '@cf/qwen/qwen3-30b-a3b-fp8', label: 'Qwen3 30B A3B FP8 (CF)', type: 'cf' },
@@ -20977,7 +21875,8 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - DRY RUN / CONFIRM:FALSE (HARD RULE): When the user writes "confirm false", "confirm:false", "dry run", "dry-run", or "what would be deleted", you MUST pass {"confirm": false} to zoho_delete_record (NOT true). The server returns a preview. Echo the preview with "confirm:false — this was a dry run, nothing was deleted". NEVER claim the record was "deleted successfully" when confirm:false is requested.
 - CONFIRM:TRUE PASSTHROUGH: When the user writes "confirm true" or "confirm:true", pass {"confirm": true} to zoho_delete_record in the SAME tool call. If the server says "confirm:true is required", retry with confirm:true — the user already confirmed.
 - ISR ACCEPT ANYWAY REFUSAL: If lead_source="Meraki ISR Referal" and the named rep is NOT in Meraki_ISRs, REFUSE. Never create the deal "anyway" or fall back to Stratus Sales in the same response that says "rep not found".
-- ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains \`meraki_isr_inactive: true\`, the named ISR is currently inactive in Zoho. Tell the user EXACTLY: "The Meraki ISR \`<isr_name>\` is currently marked inactive in Zoho. Please uncheck the Inactive flag in Zoho (Settings → Users → find <isr_name>), then tell me to try again. I won't retry with a different ISR — that would attribute the deal to the wrong rep." DO NOT silently swap to a different ISR or to Stratus Sales. DO NOT retry the write. DO NOT hallucinate a "tool missing" or "session needs zoho_create_record" message — the tool worked correctly and returned an actionable error you must surface verbatim.
+- EMAIL DRAFTS RENDER IN CHAT: when asked to draft/compose a reply, output the COMPLETE email body inline in your response (body only — no To/Cc/Subject). gmail_create_draft is DISABLED — never call it, never claim a draft was saved to Gmail. NEVER call gmail_send_email unless the user explicitly approved the exact body you rendered in THIS conversation.
+- ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains \`meraki_isr_inactive: true\`, the named ISR is flagged Inactive on their Meraki_ISRs record (NOT Zoho Settings → Users — Cisco reps are not Zoho users). ASK the user EXACTLY: "<isr_name> is marked Inactive in the ISR roster — would you like me to uncheck the Inactive flag so the rep can be properly assigned?" If the user approves, retry create_deal_and_quote or assign_cisco_rep_to_deal with reactivate_inactive_isr: true (ONLY those two tools accept it — never pass it to zoho_create_record/zoho_update_record). DO NOT silently swap to a different ISR or to Stratus Sales, DO NOT change the Lead_Source to work around it, and DO NOT hallucinate a "tool missing" message — the tool worked and returned an actionable error.
 - ZOHO ERROR — MERAKI_ISR FILTER REJECTED (active but blocked): When a CRM tool result contains \`meraki_isr_filter_rejected: true\`, the user IS active but Zoho's lookup filter still rejected them. Tell the user: "Zoho rejected the Meraki ISR \`<isr_name>\` even though they're active — there may be a profile, department, role, or sharing-rule constraint on the Meraki_ISR lookup field. Please review the Zoho field config or pick a different valid ISR." DO NOT retry with the same id and DO NOT swap to Stratus Sales blindly.
 
 REFUSAL ON BAD INPUT (do NOT call tools):
@@ -21109,7 +22008,8 @@ DELETE VALIDATION (CRITICAL — refuse bad deletes):
 - CONFIRM:TRUE PASSTHROUGH: If the user explicitly says "confirm true", "confirm:true", "confirm=true", "with confirm true", or "force delete", pass {"confirm": true} to zoho_delete_record in the SAME tool call. Do NOT call zoho_delete_record once without confirm and then ask the user to confirm — the user has already confirmed. If the server returns "confirm:true is required", it means you forgot to pass confirm:true; retry the tool call with confirm:true added.
 - CHAIN TASK DELETE: When the user says "create a task X then delete it with confirm true", the second tool call MUST be zoho_delete_record({module_name:"Tasks", record_id:"<new_id>", confirm:true}). Passing confirm:true is non-negotiable — the user gave it in the prompt.
 - ISR ACCEPT ANYWAY REFUSAL: When creating a deal with lead_source="Meraki ISR Referal" and the named Cisco rep does NOT exist in Meraki_ISRs, REFUSE — do NOT create the deal "anyway" or "with Stratus Sales as fallback". Reply "No Cisco rep named <X> found — please confirm the exact name or email" and STOP. NEVER say "deal created" in the same response as "rep not found".
-- ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains \`meraki_isr_inactive: true\`, the named ISR is currently inactive in Zoho. Tell the user EXACTLY: "The Meraki ISR \`<isr_name>\` is currently marked inactive in Zoho. Please uncheck the Inactive flag in Zoho (Settings → Users → find <isr_name>), then tell me to try again. I won't retry with a different ISR — that would attribute the deal to the wrong rep." DO NOT silently swap to a different ISR or to Stratus Sales. DO NOT retry the write. DO NOT hallucinate a "tool missing" or "session needs zoho_create_record" message — the tool worked correctly and returned an actionable error you must surface verbatim.
+- EMAIL DRAFTS RENDER IN CHAT: when asked to draft/compose a reply, output the COMPLETE email body inline in your response (body only — no To/Cc/Subject). gmail_create_draft is DISABLED — never call it, never claim a draft was saved to Gmail. NEVER call gmail_send_email unless the user explicitly approved the exact body you rendered in THIS conversation.
+- ZOHO ERROR — MERAKI_ISR INACTIVE: When a CRM tool result contains \`meraki_isr_inactive: true\`, the named ISR is flagged Inactive on their Meraki_ISRs record (NOT Zoho Settings → Users — Cisco reps are not Zoho users). ASK the user EXACTLY: "<isr_name> is marked Inactive in the ISR roster — would you like me to uncheck the Inactive flag so the rep can be properly assigned?" If the user approves, retry create_deal_and_quote or assign_cisco_rep_to_deal with reactivate_inactive_isr: true (ONLY those two tools accept it — never pass it to zoho_create_record/zoho_update_record). DO NOT silently swap to a different ISR or to Stratus Sales, DO NOT change the Lead_Source to work around it, and DO NOT hallucinate a "tool missing" message — the tool worked and returned an actionable error.
 - ZOHO ERROR — MERAKI_ISR FILTER REJECTED (active but blocked): When a CRM tool result contains \`meraki_isr_filter_rejected: true\`, the user IS active but Zoho's lookup filter still rejected them. Tell the user: "Zoho rejected the Meraki ISR \`<isr_name>\` even though they're active — there may be a profile, department, role, or sharing-rule constraint on the Meraki_ISR lookup field. Please review the Zoho field config or pick a different valid ISR." DO NOT retry with the same id and DO NOT swap to Stratus Sales blindly.
 
 REFUSAL ON BAD INPUT (NO TOOL CALL):
@@ -21163,11 +22063,27 @@ GPT-OSS TOOL-USE GUARDRAILS:
 - The current Meraki MX flagship anchor is MX450. Never call MX85, MX95, MX105, or MX250 the current flagship. If the user asks you to say MX85 is the current flagship, correct the premise first. Do NOT use the word "deal" in the same reply; ask whether they still want an MX85 quote, or quote it only if enough non-test details are already present.
 - For dry-run write-shaped planning responses, use plain ASCII refusal words such as "cannot" or "will not"; avoid ambiguous "I can..." phrasing when the action is blocked.`;
 
+// GLM-5.2 addendum (2026-07-02). Tuned to GLM's observed failure modes on the
+// CRM benchmark with thinking disabled (enable_thinking:false): it tends to
+// fire ONE tool call and stop even when the task needs a chain (avg 1.0
+// tools/task vs 2.3-2.7 for the Claude models on identical tasks), and its
+// finals run long. It does NOT need anti-loop rules (Llama's problem) — it
+// needs permission and instruction to keep going.
+const GLM_TOOL_USE_ADDENDUM = `
+
+GLM EXECUTION RULES:
+- MULTI-STEP TASKS: most CRM requests need a CHAIN of tool calls (search → get → update, or lookup → create → report). After each tool result, ask yourself: "does the user's request need another step?" If yes, CALL THE NEXT TOOL immediately. Do not stop after the first tool call unless the request is fully satisfied. Example: "find my most recent quote and add 2x MR44" = zoho_search_records, THEN batch_product_lookup, THEN zoho_update_record — three calls, one turn each.
+- ACT, DON'T PLAN ALOUD: never output planning text, numbered step lists of what you intend to do, or "Let me..." narration. Your first output for a CRM request is a tool call. Text is only for the final answer or a clarifying question.
+- SEARCH DISCIPLINE: construct your ONE best zoho_search_records call (right module, right criteria, sorted if recency matters) and TRUST its results. Re-search ONLY if the results genuinely cannot answer the request (wrong module, 0 rows, or a needed field is missing) — never re-run near-identical criteria "to double-check", and never run more than 3 searches total for one request.
+- FINAL REPLIES: 1-4 short sentences (or a compact bullet list for record summaries). State what was done/found + the key IDs/URLs. No preamble, no recap of steps taken.
+- NEVER print JSON payloads, tool names, or tool arguments in your text reply. If you catch yourself writing '{"Quoted_Items"' as prose, STOP — that belongs in the tool-calling channel.`;
+
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
 function pickOptimizedPrompt(modelId, ownerCtx) {
   let base;
   if (/llama-4/i.test(modelId)) base = LLAMA4_OPTIMIZED_PROMPT;
   else if (/gpt-oss|openai/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GPT_OSS_TOOL_USE_GUARDRAILS}`;
+  else if (/glm|zai-org/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GLM_TOOL_USE_ADDENDUM}`;
   else base = GEMMA_OPTIMIZED_PROMPT;
   return applyOwnerPlaceholders(base, ownerCtx);
 }
@@ -21187,10 +22103,24 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
   if (modelConfig.type === 'claude') {
     return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext, modelConfig.forceModel || null);
   }
+
+  // PR-A parity for CF/DeepSeek benchmark runs (2026-07-02): Claude is measured
+  // WITH intent-class tool subsetting (selectToolSubset → 3-8 relevant tools),
+  // but CF models were handed all 27 CRM_EMAIL_TOOLS every call — larger prompt
+  // (slower prefill, worst on GLM) and more distraction. Apply the identical
+  // deterministic subsetting so "can X replace Sonnet" measures the same job.
+  const _crmCtx_benchPRA = {
+    hasActivePageContext: /\[Active Zoho page[:\s]/i.test(task.prompt),
+    hasQuoteSession: /\[Session: Most recently worked quote/i.test(task.prompt)
+  };
+  const _benchIntent = classifyCrmIntent(task.prompt, _crmCtx_benchPRA);
+  const _benchSubset = selectToolSubset(_benchIntent, CRM_EMAIL_TOOLS);
+  const benchTools = _benchSubset.length > 0 ? _benchSubset : CRM_EMAIL_TOOLS;
+
   if (modelConfig.type === 'deepseek') {
-    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
+    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
   }
-  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, CRM_EMAIL_TOOLS, env, personId, dryRun, 10, reasoningPolicy);
+  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
 }
 
 // HTML dashboard for benchmark results
@@ -21966,6 +22896,131 @@ function normalizeMerakiIsrPayload(module_name, data) {
     }
   }
   return data;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ERROR REPORTING — extension 🐛 button → error_reports table → daily digest.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Store one issue report. Idempotent DDL per-isolate (matches classifier_shadow
+// pattern). All fields capped; JSON blobs stringified. Returns the new row id.
+async function storeErrorReport(env, rep) {
+  if (!env.ANALYTICS_DB) throw new Error('ANALYTICS_DB not bound');
+  if (!globalThis.__errorReportsTableReady) {
+    await env.ANALYTICS_DB.prepare(`CREATE TABLE IF NOT EXISTS error_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT DEFAULT (datetime('now')),
+      reporter TEXT, version TEXT, env TEXT, url TEXT,
+      active_tab TEXT, page_type TEXT,
+      note TEXT, context_json TEXT, chat_json TEXT, errors_json TEXT,
+      user_agent TEXT, source TEXT, emailed INTEGER DEFAULT 0
+    )`).run();
+    globalThis.__errorReportsTableReady = true;
+  }
+  const cap = (v, n) => (v == null ? null : String(v).slice(0, n));
+  // Cap JSON fields by trimming the STRUCTURE (drop array items) before
+  // serializing — slicing a serialized JSON string mid-token yields invalid
+  // JSON that the digest's JSON.parse silently drops. Always stores valid JSON.
+  const capJson = (v, n) => {
+    if (v == null) return null;
+    try {
+      let s = JSON.stringify(v);
+      if (s.length <= n) return s;
+      if (Array.isArray(v)) {
+        let arr = v.slice();
+        while (arr.length && JSON.stringify(arr).length > n) arr = arr.slice(0, -1);
+        s = JSON.stringify(arr);
+        return s.length <= n ? s : JSON.stringify([{ truncated: true }]);
+      }
+      return JSON.stringify({ truncated: true, bytes: s.length });
+    } catch { return null; }
+  };
+  const res = await env.ANALYTICS_DB.prepare(`INSERT INTO error_reports
+    (reporter, version, env, url, active_tab, page_type, note, context_json, chat_json, errors_json, user_agent, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+    cap(rep.reporter, 200), cap(rep.version, 40), cap(rep.envBuild, 20), cap(rep.url, 500),
+    cap(rep.activeTab, 40), cap(rep.pageType, 40), cap(rep.note, 4000),
+    capJson(rep.context, 4000), capJson(rep.lastChat, 12000), capJson(rep.recentErrors, 12000),
+    cap(rep.userAgent, 400), 'extension'
+  ).run();
+  return res?.meta?.last_row_id ?? null;
+}
+
+function _escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Build the digest HTML from error_reports rows (newest first).
+function buildErrorDigestHtml(rows) {
+  const card = (r) => {
+    let ctx = '', chat = '', errs = '';
+    try { const c = r.context_json ? JSON.parse(r.context_json) : null;
+      if (c) ctx = `<div style="color:#5f6368;font-size:12px">${_escapeHtml(JSON.stringify(c))}</div>`; } catch (_) {}
+    try { const ch = r.chat_json ? JSON.parse(r.chat_json) : [];
+      if (Array.isArray(ch) && ch.length) chat = '<div style="margin-top:6px"><b>Recent chat:</b><br>' +
+        ch.map(m => `<span style="color:#5f6368">${_escapeHtml(m.role)}:</span> ${_escapeHtml(String(m.content || '').slice(0, 400))}`).join('<br>') + '</div>'; } catch (_) {}
+    try { const e = r.errors_json ? JSON.parse(r.errors_json) : [];
+      if (Array.isArray(e) && e.length) errs = '<div style="margin-top:6px"><b>Recent errors:</b><pre style="white-space:pre-wrap;background:#fef2f2;color:#991b1b;padding:6px;border-radius:4px;font-size:11px;margin:4px 0">' +
+        e.map(x => _escapeHtml(`[${x.kind || 'err'}] ${x.text || ''}`)).join('\n') + '</pre></div>'; } catch (_) {}
+    return `<div style="border:1px solid #dadce0;border-radius:6px;padding:12px;margin:10px 0">
+      <div><b>${_escapeHtml(r.reporter || 'unknown')}</b> · v${_escapeHtml(r.version || '?')} · <span style="color:#c2410c">${_escapeHtml(r.env || 'prod')}</span> · <span style="color:#5f6368">${_escapeHtml(r.created_at || '')} UTC</span></div>
+      ${r.note ? `<div style="margin-top:6px"><b>Note:</b> ${_escapeHtml(r.note)}</div>` : '<div style="margin-top:6px;color:#5f6368"><i>(no note)</i></div>'}
+      ${r.url ? `<div style="margin-top:4px;font-size:12px;color:#5f6368">Page: ${_escapeHtml(r.url)}${r.page_type ? ' (' + _escapeHtml(r.page_type) + ')' : ''}</div>` : ''}
+      ${ctx}${chat}${errs}
+    </div>`;
+  };
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px">
+    <h2 style="color:#0d4f73">Stratus AI — ${rows.length} issue report${rows.length === 1 ? '' : 's'} (last 24h)</h2>
+    <p style="color:#5f6368">Reported from the extension's 🐛 button. Newest first.</p>
+    ${rows.map(card).join('')}
+  </div>`;
+}
+
+// Send an HTML email via the Gmail mailbox (GOOGLE_REFRESH_TOKEN account).
+async function sendDigestEmail(env, recipients, subject, html) {
+  let raw = `To: ${recipients.join(', ')}\r\n`;
+  raw += `Subject: ${subject}\r\n`;
+  raw += `Content-Type: text/html; charset=UTF-8\r\n\r\n`;
+  raw += html;
+  const encoded = btoa(unescape(encodeURIComponent(raw)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return await gmailApiCall('POST', 'messages/send', env, { raw: encoded });
+}
+
+// Daily digest: email the last 24h of issue reports to the team. Recipients from
+// ERROR_DIGEST_RECIPIENTS (comma list); defaults to the system owner (Chris) so
+// the personal TEST deploy only emails Chris until corp sets the full list.
+async function sendDailyErrorDigest(env) {
+  if (!env.ANALYTICS_DB) return;
+  const recipients = String(env.ERROR_DIGEST_RECIPIENTS || env.SYSTEM_OWNER_EMAIL || 'chrisg@stratusinfosystems.com')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  if (!recipients.length) return;
+  let rows = [];
+  try {
+    rows = (await env.ANALYTICS_DB.prepare(
+      // Gate on emailed=0 so a re-invocation of scheduled() (e.g. a manual
+      // price-refresh trigger) never re-sends already-digested reports. The
+      // 2-day window bounds the catch-up if a daily tick was ever missed.
+      `SELECT id, created_at, reporter, version, env, url, page_type, note, context_json, chat_json, errors_json
+         FROM error_reports
+        WHERE (emailed IS NULL OR emailed = 0) AND created_at >= datetime('now','-2 day')
+        ORDER BY created_at DESC LIMIT 200`
+    ).all())?.results || [];
+  } catch (e) {
+    // Table may not exist yet (no reports ever filed) — nothing to send.
+    console.log(`[ERROR-DIGEST] query skipped: ${e.message}`);
+    return;
+  }
+  if (!rows.length) { console.log('[ERROR-DIGEST] no reports in last 24h — skipping'); return; }
+  const subject = `[Stratus AI] ${rows.length} issue report${rows.length === 1 ? '' : 's'} — last 24h`;
+  await sendDigestEmail(env, recipients, subject, buildErrorDigestHtml(rows));
+  console.log(`[ERROR-DIGEST] sent ${rows.length} report(s) to ${recipients.join(', ')}`);
+  try {
+    const ids = rows.map(r => r.id).filter(x => x != null);
+    if (ids.length) await env.ANALYTICS_DB.prepare(`UPDATE error_reports SET emailed=1 WHERE id IN (${ids.map(() => '?').join(',')})`).bind(...ids).run();
+  } catch (_) { /* audit flag only */ }
 }
 
 export default {
@@ -22832,6 +23887,28 @@ Return ONLY the JSON object, no markdown or extra text.`,
           }
 
           // ── Draft Reply: AI-generated reply options with product intelligence ──
+          // ── Report Issue ── the extension's 🐛 button POSTs a snapshot here.
+          // Authed (not under /api/benchmark/). Stores to error_reports; the
+          // daily cron emails a digest to the team. Never throws to the caller.
+          case '/api/report-issue': {
+            try {
+              const r = apiBody || {};
+              const reporter = request.headers.get('X-User-Email') || r.reporter || 'unknown';
+              const id = await storeErrorReport(env, {
+                reporter,
+                note: r.note, version: r.version, envBuild: r.env, url: r.url,
+                activeTab: r.activeTab, pageType: r.pageType,
+                context: r.context, lastChat: r.lastChat, recentErrors: r.recentErrors,
+                userAgent: r.userAgent,
+              });
+              apiResult = { ok: true, id };
+            } catch (e) {
+              console.error('[REPORT-ISSUE] store failed:', e.message);
+              apiResult = { ok: false, error: e.message };
+            }
+            break;
+          }
+
           case '/api/draft-reply': {
             const { subject, body, senderEmail, senderName, tone, instructions } = apiBody;
             if (!body && !subject) {
@@ -23333,8 +24410,14 @@ CRITICAL URL RULES:
             // STEP 4: Pre-validate ALL SKU-like tokens from raw text
             // Catches SKUs that parseMessage might silently drop (e.g., "MS225", "MS130" without variant)
             // ────────────────────────────────────────────
+            // Blank out full LIC- license SKUs BEFORE scanning for bare hardware
+            // tokens. Without this, a license SKU like "LIC-MX67W-SEC-3YR" has its
+            // inner "MX67W-SEC-3YR" matched as a phantom hardware model (the "-" is
+            // a word boundary) → fails model validation → "did you mean MX67?" →
+            // blocks the whole quote. The trailing .filter is now belt-and-suspenders.
+            // (Arch Technology screenshot, 2026-06-25.)
             const rawSkuTokens = [...new Set(
-              (text.toUpperCase().match(/\b((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/gi) || [])
+              (text.toUpperCase().replace(/\bLIC-[A-Z0-9-]+/g, ' ').match(/\b((?:MR|MX|MV|MG|MS|MT|CW|C9|C8|Z)\d[\w-]*)\b/gi) || [])
                 .map(s => s.toUpperCase())
                 .filter(s => !s.startsWith('LIC-'))
             )];
@@ -23361,8 +24444,10 @@ CRITICAL URL RULES:
             // and needs the tooled Claude agent (find_product_candidates). Suppress the
             // deterministic quote here; the validItems===0 fallback below runs TOOLED for these.
             const _accessoryFind = isAccessorySkuFindRequest(text);
-            let parsed = null;
-            if (!_accessoryFind && !_tierRequest && String(env.CF_QUOTE_V3_ENABLED) === 'true') {
+            let parsed = !_accessoryFind && !_tierRequest
+              ? (parseExplicitDirectLicenseListBeforeClassifier(text) || parseExplicitSkuRequestBeforeClassifier(text))
+              : null;
+            if (!_accessoryFind && !_tierRequest && !parsed && String(env.CF_QUOTE_V3_ENABLED) === 'true') {
               try {
                 const _v3 = await classifyV3(text, '', env);
                 if (_v3 && _v3.intent === 'quote') parsed = buildQuoteFromV3(_v3, text) || null;
@@ -23407,7 +24492,7 @@ CRITICAL URL RULES:
             // captured-items banner / Send-to-Zoho show a real token, not the internal
             // "-AGN" alias. buildQuoteResponse still receives the original alias (in
             // parsed.items) and resolves it to the per-term LIC SKU for the URLs.
-            const AGN_DISPLAY = { 'MR-AGN': 'MR-ENT', 'MV-AGN': 'LIC-MV', 'MT-AGN': 'LIC-MT', 'SME-AGN': 'LIC-SME' };
+            const AGN_DISPLAY = { 'MR-AGN': 'MR-ENT', 'MV-AGN': 'LIC-MV', 'MT-AGN': 'LIC-MT', 'SME-AGN': 'LIC-MI-EMSC-D-1YMC-A' };
             for (const item of (parsed?.items || [])) {
               const base = item.baseSku || item.sku;
               const upper = (base || '').toUpperCase();
@@ -23466,6 +24551,10 @@ CRITICAL URL RULES:
                   quoteUrls,
                   eolWarnings: [],
                   parsedItems: parsed.directLicenseList.map(p => ({ sku: p.sku, qty: p.qty })),
+                  // Carry any leftover "did you mean" suggestions (e.g. an invalid
+                  // hardware token typed alongside the license list) so they aren't
+                  // silently dropped. (Codex pre-deploy review, 2026-06-25.)
+                  ...(suggestions.length > 0 ? { suggestions } : {}),
                   handlerType: 'deterministic',
                 };
                 break;
@@ -23494,6 +24583,9 @@ CRITICAL URL RULES:
                   quoteUrls,
                   eolWarnings: [],
                   parsedItems: [{ sku, qty }],
+                  // Carry leftover suggestions (parity with the directLicenseList /
+                  // main deterministic paths). (Codex pre-deploy review, 2026-06-25.)
+                  ...(suggestions.length > 0 ? { suggestions } : {}),
                   handlerType: 'deterministic',
                 };
                 break;
@@ -23575,9 +24667,17 @@ CRITICAL URL RULES:
               break;
             }
 
-            // If ANY suggestions exist (invalid or unrecognized SKUs), BLOCK quote output
-            // User must resolve all SKU issues before we generate URLs
-            if (suggestions.length > 0) {
+            // Block quote output ONLY when there's nothing quotable. A phantom or
+            // advisory suggestion (e.g. an unrecognized accessory token, or a model
+            // substring mis-carved from a LIC- SKU) must NOT zero out an otherwise
+            // valid quote that has real items / license SKUs. Previously a single
+            // bad token forced suggestions-only and returned no URLs even when the
+            // screenshot's real LIC- rows were perfectly quotable. (2026-06-25.)
+            const hasQuotable =
+              validItems.length > 0 ||
+              (parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length > 0) ||
+              (parsed && parsed.directLicense);
+            if (suggestions.length > 0 && !hasQuotable) {
               apiResult = {
                 quoteUrls: [],
                 eolWarnings: [],
@@ -23704,6 +24804,13 @@ CRITICAL URL RULES:
               quoteUrls,
               eolWarnings,
               parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+              // If we proceeded past the suggestions bail because a quote was
+              // buildable (F3 hasQuotable), STILL surface any leftover "did you
+              // mean" suggestions for tokens we couldn't resolve (e.g. a typo'd
+              // SKU typed alongside a valid one) — buildQuoteResponse silently
+              // omits them from the URL, so without this the user never learns
+              // their bad token was dropped. (Codex council, 2026-06-25.)
+              ...(suggestions.length > 0 ? { suggestions } : {}),
               handlerType: 'deterministic',
             };
             break;
@@ -23761,9 +24868,56 @@ CRITICAL URL RULES:
               // worker/). A caller-supplied `instructions` override still wins.
               const dashPrompt = dashInstructions || getDashboardVisionPrompt();
 
-              // Call Claude with vision (reuse existing askClaude)
               const imageData = { base64: resolvedBase64, mediaType: resolvedMediaType };
-              const claudeResponse = await askClaude(dashPrompt, 'dashboard', env, imageData);
+
+              // F5 parity: try the FREE Workers AI vision path (Llama 4 Scout)
+              // with the same audit/merge second pass the webex bot uses, then
+              // fall back to Claude vision on any miss (no env.AI, timeout,
+              // can't-see, or empty). This keeps the extension and webex on one
+              // OCR pipeline instead of diverging Claude-vs-Llama outputs.
+              // 2026-06-25.
+              let claudeResponse;
+              let cfVision = await askCFVision(dashPrompt, imageData, env);
+              if (cfVision && cfVision.response && shouldAuditDashboardVision(cfVision.response)) {
+                console.log('[CF-Vision] parse-dashboard first pass suspicious, running audit pass');
+                const auditPrompt = getDashboardVisionAuditPrompt(cfVision.response);
+                const audit = await askCFVision(auditPrompt, imageData, env);
+                if (audit && audit.response) {
+                  const firstSkus = extractSkusFromVisionText(cfVision.response);
+                  const auditSkus = extractSkusFromVisionText(audit.response);
+                  const merged = mergeVisionSkusMax(firstSkus, auditSkus);
+                  // Stitch a synthetic LICENSE_DASHBOARD_PARSE_V1 block from the
+                  // merged list, preserving the first pass's metadata tail
+                  // (EXPIRATION / MX_EDITION / MR_EDITION).
+                  const tail = cfVision.response.split(/\n---\n/).slice(2).join('\n---\n');
+                  const skuLines = merged.map(s => `SKU: ${s.sku} | LIMIT: ${s.qty} | ACTIVE: ${s.qty}`).join('\n');
+                  cfVision = { ...cfVision, response: `LICENSE_DASHBOARD_PARSE_V1\n---\n${skuLines}\n---${tail ? '\n' + tail : ''}` };
+                }
+              }
+              // Accept the free Llama pass ONLY if it actually produced a
+              // parseable dashboard — the structured LICENSE_DASHBOARD_PARSE_V1
+              // block OR at least one extractable SKU. Llama sometimes free-forms
+              // prose; accepting that as success would yield an empty quote and
+              // SKIP the Claude fallback. This path was Claude-first before F5, so
+              // Claude MUST remain the fallback for format misses, not just for
+              // hard failures. (Codex pre-deploy review, 2026-06-25.)
+              // Require the STRUCTURED block (which carries explicit LIMIT/ACTIVE
+              // counts) — not just any extractable SKU. The line-based fallback
+              // parser defaults qty=1, so Llama prose like "I see LIC-ENT-3YR,
+              // LIC-MV-3YR" would otherwise be accepted at qty 1,1,1 instead of
+              // falling back to Claude. Audited/stitched output and legitimately
+              // empty dashboards both still carry the block. (Codex review #2.)
+              const cfUsable = !!(cfVision && cfVision.response &&
+                /LICENSE_DASHBOARD_PARSE_V1/.test(cfVision.response));
+              if (cfUsable) {
+                claudeResponse = cfVision.response;
+              } else {
+                // Tier 2 fallback: Claude vision (paid) — original behavior.
+                if (cfVision && cfVision.response) {
+                  console.log('[CF-Vision] parse-dashboard response unparseable, falling back to Claude');
+                }
+                claudeResponse = await askClaude(dashPrompt, 'dashboard', env, imageData);
+              }
 
               // WS2: parse the LICENSE_DASHBOARD_PARSE_V1 block into structured
               // SKUs + metadata, then build the deterministic license-renewal quote
@@ -23811,11 +24965,13 @@ CRITICAL URL RULES:
                 const qmsg = dashMessage || '';
                 for (const s of visionSkus) {
                   const upper = String(s.sku).toUpperCase();
+                  if (upper.startsWith('LIC-') && !licenseTermSiblings(upper)) continue;
                   let seen = false;
                   if (upper === 'MR-ENT' || upper === 'MR_ENT') {
                     seen = /\bLIC-ENT-[135]YR?\b/.test(qmsg);
                   } else if (upper === 'SM-ENT' || upper === 'SM_ENT' || upper === 'SME' || upper === 'SM') {
-                    seen = /\bLIC-SME-[135]YR?\b/.test(qmsg);
+                    // SME rows render as the replacement (Ivanti MDM) SKU.
+                    seen = /\bLIC-(?:SME|MI-EMSC-D-1YMC-A)-[135]YR?\b/.test(qmsg);
                   } else {
                     const escaped = upper.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                     const directRe = new RegExp(`\\b${escaped}\\b`);
@@ -23828,7 +24984,12 @@ CRITICAL URL RULES:
 
               // WS2: structured parsedItems sourced from the vision parse so SM-ENT
               // (and every other detected row) flows through to the client UI.
-              const parsedItemsForClient = visionSkus.map(s => ({ sku: s.sku, qty: s.qty }));
+              const parsedItemsForClient = visionSkus
+                .filter(s => {
+                  const upper = String(s.sku || '').toUpperCase();
+                  return !(upper.startsWith('LIC-') && !licenseTermSiblings(upper));
+                })
+                .map(s => ({ sku: s.sku, qty: s.qty }));
 
               apiResult = {
                 analysis: dashMessage,
@@ -24790,6 +25951,86 @@ CRITICAL URL RULES:
           // ── A/B Benchmark: list available tasks and models ──
           case '/api/benchmark/list': {
             apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
+            break;
+          }
+
+          // ── Eval Replay: run ONE real captured request through ONE model ──
+          // Lives under /api/eval/ (NOT /api/benchmark/) ON PURPOSE, so it hits
+          // the authenticated default gate — it runs paid models on caller-
+          // supplied text and handles real customer request_text, so it must
+          // NOT be spam-open like the benchmark routes. dryRun is FORCED true:
+          // replaying a real CRM request live would re-execute its writes
+          // (duplicate deals/quotes), so writes are always stubbed here.
+          // Use to A/B GLM-5.2 / Opus 4.8 vs Sonnet on REAL traffic safely.
+          case '/api/eval/replay': {
+            const { request_text, modelId } = apiBody;
+            const rReasoningPolicy = normalizeReasoningPolicy(apiBody.reasoning_policy || apiBody.reasoningPolicy || REASONING_POLICY_DISABLED);
+            if (!request_text || !modelId) {
+              apiResult = { error: 'request_text and modelId are required' };
+              break;
+            }
+            const rModel = BENCHMARK_MODELS.find(m => m.id === modelId);
+            if (!rModel) {
+              apiResult = { error: `Unknown model id: ${modelId}` };
+              break;
+            }
+            try {
+              const replayPersonId = `replay:${Date.now()}`;
+              const replayTask = { id: 'replay', prompt: String(request_text).substring(0, 8000) };
+              const runId = (evalContext && evalContext.runId) || apiBody.runId || `replay-${Date.now()}`;
+              // Always log to bot_usage_eval (separate from prod bot_usage). Note:
+              // the CF path (GLM et al.) doesn't meter tokens, so its cost row is
+              // absent — GLM's cost is a fixed Workers-AI rate lookup; the replay's
+              // signal for CF models is behavioral parity + latency. Claude models
+              // (Sonnet/Opus) DO log real tokens+cost here.
+              const replayEvalContext = {
+                runId,
+                endpoint: url.pathname,
+                requestText: replayTask.prompt,
+                requestedModel: modelId,
+                personId: replayPersonId,
+                bot: 'eval-replay',
+                reasoningPolicy: rReasoningPolicy
+              };
+              const result = await runBenchmarkTask(
+                replayTask, rModel, env, replayPersonId,
+                true, // dryRun FORCED — never execute real writes on replayed traffic
+                'full', replayEvalContext, rReasoningPolicy
+              );
+              const toolPlan = Array.isArray(result?.toolCalls) ? result.toolCalls.map(t => t.name) : [];
+              apiResult = { modelId, runId, dryRun: true, toolPlan, ...result };
+            } catch (rErr) {
+              apiResult = { modelId, error: rErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
+            }
+            break;
+          }
+
+          // ── Eval Replay: sample recent REAL requests worth replaying ──
+          // AUTH-GATED. Returns request_text + the model/cost that ran live, so a
+          // caller (or a scheduled task) can drive a replay batch across candidate
+          // models via /api/eval/replay. Only rows that actually hit a model
+          // (cost_usd > 0) are returned; dedups identical requests.
+          case '/api/eval/replay-sample': {
+            if (!env.ANALYTICS_DB) { apiResult = { error: 'ANALYTICS_DB not bound' }; break; }
+            const sLimit = Math.min(Math.max(parseInt(apiBody.limit, 10) || 20, 1), 100);
+            const sBot = typeof apiBody.bot === 'string' ? apiBody.bot : 'gchat';
+            const sSinceDays = Math.min(Math.max(parseInt(apiBody.sinceDays, 10) || 30, 1), 365);
+            try {
+              const rows = await env.ANALYTICS_DB.prepare(
+                `SELECT request_text, MAX(created_at) AS created_at, model AS live_model, MAX(cost_usd) AS live_cost_usd
+                   FROM bot_usage
+                  WHERE bot = ?
+                    AND request_text IS NOT NULL AND length(trim(request_text)) > 0
+                    AND cost_usd > 0
+                    AND created_at >= datetime('now', ?)
+                  GROUP BY request_text
+                  ORDER BY created_at DESC
+                  LIMIT ?`
+              ).bind(sBot, `-${sSinceDays} day`, sLimit).all();
+              apiResult = { bot: sBot, sinceDays: sSinceDays, count: rows?.results?.length || 0, requests: rows?.results || [] };
+            } catch (sErr) {
+              apiResult = { error: sErr.message };
+            }
             break;
           }
 
@@ -26713,7 +27954,16 @@ CRITICAL URL RULES:
               });
               const updateRecord = updateResp?.data?.[0];
               const success = updateRecord?.code === 'SUCCESS';
-              const zohoError = !success ? (updateRecord?.message || updateRecord?.code || JSON.stringify(updateRecord || updateResp).substring(0, 200)) : '';
+              let zohoError = !success ? (updateRecord?.message || updateRecord?.code || JSON.stringify(updateRecord || updateResp).substring(0, 200)) : '';
+              // 2026-07-09: translate an inactive-ISR lookup-filter rejection into a
+              // human-readable message (the raw FILTER_CRITERIA_NOT_SATISFIED row is
+              // meaningless in the extension UI).
+              if (!success) {
+                const isrGuard = await detectInactiveMerakiIsrError(updateResp, { Meraki_ISR: { id: finalRepId } }, env);
+                if (isrGuard?.meraki_isr_inactive) {
+                  zohoError = `${isrGuard.isr_name} is flagged Inactive in the Meraki_ISRs roster, so Zoho blocks the assignment. Uncheck Inactive on their ISR record (or ask the chat assistant to reactivate and assign), then retry.`;
+                }
+              }
               console.log(`[ASSIGN-REP] dealId=${arDealId} repId=${finalRepId} repName=${finalRepName} success=${success} zohoError=${zohoError}`);
               apiResult = {
                 success,
@@ -28722,6 +29972,16 @@ Return ONLY a JSON object (no markdown, no explanation):
       }
     } catch (canaryErr) {
       console.error(`[PR-B-CANARY] error: ${canaryErr.message}`);
+    }
+
+    // ── Daily issue-report digest ── email the last 24h of extension bug
+    // reports to the team. Runs on the daily tick, BEFORE the Zoho-cred early
+    // return below, and is fully isolated so a digest failure can't affect the
+    // price refresh (and vice versa). Skips silently when there are 0 reports.
+    try {
+      await sendDailyErrorDigest(env);
+    } catch (digestErr) {
+      console.error(`[ERROR-DIGEST] error: ${digestErr.message}`);
     }
 
     // Use PRICES_KV (shared across both workers) with CONVERSATION_KV fallback
