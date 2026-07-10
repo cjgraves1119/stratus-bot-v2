@@ -24379,6 +24379,22 @@ CRITICAL URL RULES:
               return result;
             }
 
+            // Helper: lift the EOL section buildQuoteResponse already computed out of
+            // the rendered message ("• MS220-24 (EOL) → Replacement: MS130-24") into
+            // the eolWarnings strings the extension's QuoteResult renders. Parsing the
+            // message keeps ONE source of truth for EOL logic — this can't drift from
+            // what the Webex/GChat bots show. (2026-07-10: the license-list branches
+            // hardcoded eolWarnings: [], so the extension showed refresh-option links
+            // with no EOL/replacement details.)
+            function extractEolWarningsFromMessage(responseText) {
+              const warnings = [];
+              for (const line of String(responseText || '').split('\n')) {
+                const m = line.match(/^\s*•\s*(.+?)\s*\(EOL\)\s*(?:→|->)\s*Replacements?:\s*(.+?)\s*$/);
+                if (m) warnings.push(`${m[1]} is End-of-Life → replaced by ${m[2]}`);
+              }
+              return warnings;
+            }
+
             // ────────────────────────────────────────────
             // STEP 1: EOL Date Lookup (deterministic)
             // Same as Webex bot: "when does MR44 go EOL?"
@@ -24605,7 +24621,7 @@ CRITICAL URL RULES:
                 await addToHistory(kv, quotePersonId, 'assistant', responseText);
                 apiResult = {
                   quoteUrls,
-                  eolWarnings: [],
+                  eolWarnings: extractEolWarningsFromMessage(responseText),
                   parsedItems: parsed.directLicenseList.map(p => ({ sku: p.sku, qty: p.qty })),
                   // Carry any leftover "did you mean" suggestions (e.g. an invalid
                   // hardware token typed alongside the license list) so they aren't
@@ -24637,7 +24653,7 @@ CRITICAL URL RULES:
                 await addToHistory(kv, quotePersonId, 'assistant', responseText);
                 apiResult = {
                   quoteUrls,
-                  eolWarnings: [],
+                  eolWarnings: extractEolWarningsFromMessage(responseText),
                   parsedItems: [{ sku, qty }],
                   // Carry leftover suggestions (parity with the directLicenseList /
                   // main deterministic paths). (Codex pre-deploy review, 2026-06-25.)
