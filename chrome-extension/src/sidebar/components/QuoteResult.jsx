@@ -207,8 +207,11 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
                 background: COLORS.BG_SECONDARY, borderRadius: 6, padding: '7px 9px',
                 fontSize: 11, wordBreak: 'break-all', color: COLORS.STRATUS_BLUE, marginBottom: 8,
               }}>
+                {/* Full URL, no truncation (2026-07-10): the container's
+                    wordBreak:'break-all' wraps long order URLs; reps need to
+                    see/verify the whole SKU list encoded in the link. */}
                 <a href={urlObj.url} target="_blank" rel="noopener" style={{ color: 'inherit', textDecoration: 'none' }}>
-                  {urlObj.url.length > 110 ? urlObj.url.substring(0, 110) + '...' : urlObj.url}
+                  {urlObj.url}
                 </a>
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
