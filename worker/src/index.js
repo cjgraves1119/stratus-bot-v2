@@ -9678,6 +9678,57 @@ export default {
           }
           T.step('wx-pricing', 'exit', { result: 'no_match' });
 
+          // ── Deterministic pre-parse door (2026-07-10) ──
+          // Pure SKU-list messages (explicit LIC-* term lists, bare qty×SKU lines) skip
+          // the classifier waterfall entirely. Mirrors the gchat /api/quote wiring, which
+          // runs these SAME detectors before any AI call — that asymmetry is why the
+          // extension quoted a 13-item renewal list during the 2026-07-10 Workers AI
+          // latency spike while this handler burned 13s of classifier timeouts and got
+          // cancelled at the invocation cap before replying. The detectors are strict
+          // (no free-text residue beyond quote vocabulary), so conversational and
+          // product-info messages still route through the classifier.
+          T.step('wx-preparse', 'enter');
+          try {
+            let preParsed = parseExplicitDirectLicenseListBeforeClassifier(text) || parseExplicitSkuRequestBeforeClassifier(text);
+            preParsed = preserveMsAdvancedTier(preParsed, text);
+            if (preParsed && !preParsed.isRevision && !preParsed.isAdvisory) {
+              if (preParsed.isClarification && preParsed.clarificationMessage) {
+                T.step('wx-preparse', 'exit', { result: 'clarify' });
+                await addToHistory(kv, personId, 'user', text);
+                await addToHistory(kv, personId, 'assistant', preParsed.clarificationMessage);
+                T.step('wx-send', 'enter');
+                await sendMessage(roomId, preParsed.clarificationMessage, token);
+                T.step('wx-send', 'exit');
+                T.step('wx-d1', 'enter');
+                ctx.waitUntil(logBotUsageToD1(env, { personId, requestText: text, responsePath: 'clarify-question', durationMs: Date.now() - _wxStartMs, responseText: preParsed.clarificationMessage }).catch(() => {}));
+                writeMetric(env, { path: 'clarify-question', durationMs: Date.now() - _wxStartMs, personId });
+                T.step('wx-d1', 'exit');
+                ctx.waitUntil(T.flush());
+                return;
+              }
+              if (!preParsed.isClarification) {
+                const preResult = buildQuoteResponse(preParsed);
+                if (preResult && preResult.message && !preResult.needsLlm && !(preResult.errors && preResult.errors.length)) {
+                  T.step('wx-preparse', 'exit', { result: 'quoted', items: preParsed.items?.length || preParsed.directLicenseList?.length || 0 });
+                  await addToHistory(kv, personId, 'user', text);
+                  await addToHistory(kv, personId, 'assistant', preResult.message);
+                  T.step('wx-send', 'enter');
+                  await sendMessage(roomId, `${preResult.message}\n\n_⚡ Deterministic (pre-parse, free)_`, token);
+                  T.step('wx-send', 'exit');
+                  T.step('wx-d1', 'enter');
+                  logBotUsageToD1(env, { personId, requestText: text, responsePath: 'preparse-deterministic', durationMs: Date.now() - _wxStartMs, responseText: preResult.message }).catch(() => {});
+                  writeMetric(env, { path: 'preparse-deterministic', durationMs: Date.now() - _wxStartMs, personId });
+                  T.step('wx-d1', 'exit');
+                  ctx.waitUntil(T.flush());
+                  return;
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[PreParse] error:', e.message);
+          }
+          T.step('wx-preparse', 'exit', { result: 'no_match' });
+
           // ── CF-FIRST WATERFALL: CF classifies intent, deterministic executes quotes ──
           // Architecture: CF decides WHAT to do, deterministic engine does the QUOTING.
           // This eliminates false-positive quoting on product-info/advisory questions
@@ -9764,8 +9815,16 @@ export default {
             // second opinion. Both are cheap: Llama resolves clarify in ~2s, so an
             // extra Gemma call is only ~3s added budget.
             const weakHit = !deterministicHandled && ((v2Intent === 'price_lookup' && hasPriorCtx) || v2Intent === 'clarify');
-            const escalate = v2Broken || v2Conf < LOW_CONF_THRESHOLD || weakHit || structuralEscalate;
+            // 2026-07-10: when V2 TIMED OUT (vs mis-parsed), skip the Gemma escalation —
+            // Gemma runs on the same Workers AI backend, so under a platform latency
+            // spike it will also time out and only adds 5s of dead air to every message.
+            // A structurally-broken-but-fast V2 still escalates (Gemma can rescue those).
+            const v2TimedOut = /TIMEOUT/i.test(String(v2Classification?.error || v2Classification?.parseError || ''));
+            const escalate = (v2Broken || v2Conf < LOW_CONF_THRESHOLD || weakHit || structuralEscalate) && !v2TimedOut;
 
+            if (v2TimedOut) {
+              console.log('[Waterfall] V2 timed out — skipping Gemma escalation (same backend would also time out), routing on legacy');
+            }
             if (escalate) {
               const reason = v2Broken ? 'broken'
                 : v2Conf < LOW_CONF_THRESHOLD ? `low-conf(${v2Conf})`
@@ -9845,6 +9904,27 @@ export default {
             console.log(`[V2-Active] intent=${activeClassification.intent} (V2 ${v2RoutingClassification.elapsed}ms / legacy ${classification?.elapsed}ms)`);
           } else if (USE_V2_CLASSIFIER) {
             console.log(`[V2-Fallback] V2 failed (${v2Classification?.error || v2Classification?.parseError || 'null'}), using legacy classifier`);
+          }
+
+          // ── Classifier-dead rescue (2026-07-10) ──
+          // When EVERY classifier fails (V2 + legacy + Gemma all timed out — seen live
+          // during the 2026-07-10 Workers AI latency spike), activeClassification is null
+          // and the whole CF-First block below gets skipped, dumping even a plain SKU list
+          // into the Claude fallback — which then dies at the ~30s invocation cap with no
+          // reply and no D1 row. Before surrendering to Claude, try the deterministic
+          // parser: if the message parses to quotable items, synthesize a quote intent so
+          // the existing quote branch executes it. Messages with no parseable SKUs still
+          // fall to Claude exactly as before.
+          if (!activeClassification) {
+            try {
+              const rescued = parseMessage(text);
+              if (rescued && (rescued.items?.length || rescued.directLicenseList?.length || rescued.directLicense || rescued.isClarification)) {
+                activeClassification = { intent: 'quote', reply: '', extracted: '', elapsed: Date.now() - _wxStartMs, _parseRescue: true };
+                console.log('[CF-Rescue] All classifiers failed; deterministic parse rescued quote routing');
+              }
+            } catch (e) {
+              console.warn('[CF-Rescue] parse failed:', e?.message);
+            }
           }
 
           // ── Waterfall merge: Gemma overrides V2 on high-conf disagreement ──
@@ -10424,15 +10504,34 @@ export default {
           // Pass activeClassification so product_info intent triggers the datasheet path
           // even when the narrow wantsLiveDatasheet regex doesn't match (e.g., followups like
           // "get specifics from datasheet" or "what does the datasheet say about ports").
+          //
+          // Budget guard (2026-07-10): the post-ack invocation lifetime is ~30s. A
+          // classifier-timeout cascade can eat 13s+ before this point; an unbounded
+          // Claude call then gets cancelled at the cap and the user sees SILENCE (no
+          // reply, no D1 row — exactly the 2026-07-10 outage signature). Race Claude
+          // against the remaining budget and fail VISIBLY with a retry hint instead.
           T.step('wx-claude', 'enter');
-          const claudeReply = await askClaude(text, personId, env, null, activeClassification, ctx);
-          T.step('wx-claude', 'exit');
+          const _claudeBudgetMs = 24000 - (Date.now() - _wxStartMs);
+          let claudeReply = null;
+          if (_claudeBudgetMs > 3000) {
+            claudeReply = await Promise.race([
+              askClaude(text, personId, env, null, activeClassification, ctx),
+              new Promise(resolve => setTimeout(() => resolve(null), _claudeBudgetMs))
+            ]);
+          } else {
+            console.warn(`[Claude-Budget] Only ${_claudeBudgetMs}ms left after classifier burn — skipping Claude call`);
+          }
+          const _claudeTimedOut = claudeReply == null;
+          if (_claudeTimedOut) {
+            claudeReply = `⚠️ I'm running slow right now and couldn't finish that request in time. Please try again in a moment — or for quotes, send a plain SKU list like "2 x LIC-ENT-3YR".`;
+          }
+          T.step('wx-claude', 'exit', { timedOut: _claudeTimedOut });
           T.step('wx-send', 'enter');
           await sendMessage(roomId, claudeReply, token);
           T.step('wx-send', 'exit');
           T.step('wx-d1', 'enter');
-          logBotUsageToD1(env, { personId, requestText: text, responsePath: 'claude', durationMs: Date.now() - _wxStartMs, responseText: claudeReply }).catch(() => {});
-          writeMetric(env, { path: 'claude', durationMs: Date.now() - _wxStartMs, personId });
+          logBotUsageToD1(env, { personId, requestText: text, responsePath: _claudeTimedOut ? 'claude-timeout' : 'claude', durationMs: Date.now() - _wxStartMs, responseText: claudeReply, errorMessage: _claudeTimedOut ? 'CLAUDE_BUDGET_TIMEOUT' : undefined }).catch(() => {});
+          writeMetric(env, { path: _claudeTimedOut ? 'claude-timeout' : 'claude', durationMs: Date.now() - _wxStartMs, personId });
           T.step('wx-d1', 'exit');
           T.step('wx-history', 'enter'); T.step('wx-history', 'exit');
           ctx.waitUntil(T.flush());
