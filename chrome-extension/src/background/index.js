@@ -373,8 +373,16 @@ registerMessageHandlers({
       // context is only ever written by Gmail content scripts.
       return { success: false, error: 'EMAIL_CHANGED requires a tab id (only Gmail content scripts may set it)' };
     }
+    // Participant-growth re-sends for the SAME thread (progressive Gmail
+    // hydration, print-view enrichment) must not wipe the CRM context — the
+    // content script dedupes its CRM lookup per thread, so a wipe here would
+    // never be repopulated and the sidebar's warm-context read would go empty.
+    const prev = await getEmailContextForTab(tabId);
+    const sameThread = !!prev
+      && prev.subject === payload?.subject
+      && prev.senderEmail === payload?.senderEmail;
     await setEmailContextForTab(tabId, payload);
-    currentCrmContext = null; // Reset CRM context on new email
+    if (!sameThread) currentCrmContext = null; // Reset CRM context on new email
     return { success: true };
   },
 
@@ -388,6 +396,19 @@ registerMessageHandlers({
     // against any future regression.
     if (!tab.url || !tab.url.startsWith('https://mail.google.com/')) {
       return { empty: true };
+    }
+    // Prefer a live extraction: the cached snapshot may predate Gmail's
+    // progressive thread hydration and be missing late-rendered participants
+    // (the "sidebar only shows the Cisco rep" bug). Fall back to the cache
+    // when the content script is unreachable (e.g. pre-reload tab).
+    try {
+      const live = await chrome.tabs.sendMessage(tab.id, { type: MSG.GET_EMAIL_CONTEXT });
+      if (live && !live.empty) {
+        await setEmailContextForTab(tab.id, live);
+        return live;
+      }
+    } catch (err) {
+      console.warn('[Stratus] Live email context extraction failed:', err?.message);
     }
     const ctx = await getEmailContextForTab(tab.id);
     return ctx || { empty: true };

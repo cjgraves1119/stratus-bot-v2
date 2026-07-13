@@ -36,6 +36,13 @@ window.addEventListener('unhandledrejection', (event) => {
 console.log('[Stratus AI] Content script loaded on Gmail.');
 
 let lastEmailHash = '';
+let lastCrmLookupEmail = '';
+// Set on every Gmail SPA navigation. During a thread switch there is a brief
+// window where the subject h2 still carries the PREVIOUS thread's perm id
+// while the new thread's messages are already rendering — cache reads/writes
+// keyed by perm id are suppressed until the view settles (see Pass 4).
+let lastThreadNavAt = Date.now();
+const THREAD_NAV_SETTLE_MS = 600;
 
 // Bot/notification emails — exclude from contact extraction (module-scoped for reuse)
 const BOT_EMAILS = new Set([
@@ -50,6 +57,171 @@ const BOT_EMAILS = new Set([
   'no-reply@cisco.com',
   'donotreply@cisco.com',
 ]);
+
+// ── Per-thread participant memory + print-view header fetch ──
+//
+// 2026-07: Gmail virtualizes the thread view — middle messages collapse into
+// an "N older" pill with no per-message DOM, and recipient chips in expanded
+// headers no longer carry email attributes until hovered. Any single DOM pass
+// can therefore miss participants entirely (intro threads often expose ONLY
+// the Cisco rep's address). Two defenses:
+//   1. threadContactsCache accumulates every participant ever seen for a
+//      thread (grow-only — real thread participants never shrink), so a
+//      later sparse re-render can't lose people found earlier.
+//   2. fetchThreadHeaderParticipants pulls the thread's print view
+//      (?view=pt&permthid=...), whose From/To/Cc header lines list every
+//      participant regardless of DOM virtualization.
+const threadContactsCache = new Map(); // permId -> Map<lowerEmail, {email,name,role}>
+const printFetchState = new Map();     // permId -> 'pending' | 'done' | <failedAt ms>
+const THREAD_CACHE_MAX = 50;
+const PRINT_RETRY_MS = 120000;
+
+function getThreadPermId() {
+  const el = document.querySelector('[data-thread-perm-id]');
+  return el ? el.getAttribute('data-thread-perm-id') : null;
+}
+
+function threadCacheFor(permId) {
+  let cache = threadContactsCache.get(permId);
+  if (!cache) {
+    cache = new Map();
+    threadContactsCache.set(permId, cache);
+    if (threadContactsCache.size > THREAD_CACHE_MAX) {
+      const oldest = threadContactsCache.keys().next().value;
+      if (oldest !== permId) {
+        threadContactsCache.delete(oldest);
+        printFetchState.delete(oldest);
+      }
+    }
+  }
+  return cache;
+}
+
+/**
+ * Convert a fragment of Gmail print-view HTML to plain text. Pure string
+ * transforms only — Gmail's page enforces Trusted Types, which makes
+ * DOMParser.parseFromString throw, and textContent would drop the line
+ * structure the header parser needs anyway.
+ */
+function printHtmlToText(html) {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br[^>]*>/gi, '\n')
+    .replace(/<\/(?:tr|td|th|div|p|font|h\d|blockquote)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Parse participants out of a Gmail print view (?view=pt). Each message is a
+ * class="message" block laid out as: sender line + class="recipient" To:/Cc:
+ * lines, THEN a <table> wrapping the message body. Only the pre-table header
+ * region is scanned, so body content (quoted reply headers, signatures,
+ * attacker-crafted "To: x <y@z>" lines) can never inject participants, and
+ * Bcc lines are deliberately never harvested (blind-copied addresses must
+ * not surface as thread participants). Returns most-mentioned participants
+ * first so downstream "pick the customer" defaults favor real counterparties
+ * over one-off Cc's.
+ */
+function parsePrintHeaderParticipants(html) {
+  const found = new Map(); // lowerEmail -> {email, name, role, count}
+  const collectPairs = (segment, role) => {
+    // Quoted display name first (may contain commas: "Goosic, Kevin"),
+    // then unquoted name, then bare address.
+    const pairRe = /"([^"<>]{1,80})"\s*<([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>|([^"<>@,;\n]{1,80}?)\s*<([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>|([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
+    let pair;
+    while ((pair = pairRe.exec(segment)) !== null) {
+      const email = (pair[2] || pair[4] || pair[5] || '').trim();
+      if (!email) continue;
+      const lower = email.toLowerCase();
+      if (lower.includes('@stratusinfosystems.com')) continue;
+      if (BOT_EMAILS.has(lower)) continue;
+      const name = (pair[1] || pair[3] || '').trim();
+      const cur = found.get(lower);
+      if (cur) {
+        cur.count += 1;
+        if (name && name.length > cur.name.length) cur.name = name;
+      } else {
+        found.set(lower, { email, name, role, count: 1 });
+      }
+    }
+  };
+  const chunks = html.split(/class="message"/).slice(1);
+  for (const chunk of chunks) {
+    let end = chunk.indexOf('<table');
+    if (end === -1) {
+      const quote = chunk.search(/class="gmail_(?:quote|attr)"/);
+      end = quote !== -1 ? quote : Math.min(chunk.length, 1200);
+    }
+    const headerText = printHtmlToText(chunk.slice(0, end));
+    for (const rawLine of headerText.split('\n')) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const labeled = line.match(/^(To|Cc):\s*(.*)$/i);
+      if (labeled) {
+        collectPairs(labeled[2], labeled[1].toLowerCase() === 'to' ? 'to' : 'cc');
+      } else if (/^(?:Bcc|Reply-To|Date|Subject|Sent):/i.test(line)) {
+        continue;
+      } else if (/<[A-Za-z0-9._%+-]+@/.test(line)) {
+        collectPairs(line, 'sender'); // unlabeled sender line: "Name <email>"
+      }
+    }
+  }
+  return [...found.values()].sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Fetch the thread's print view and fold its header participants into the
+ * per-thread cache. Fire-and-forget: on success it re-triggers detection so
+ * the enriched context is re-broadcast (the participant-aware hash in
+ * onEmailChanged lets it through).
+ */
+async function fetchThreadHeaderParticipants(permId) {
+  if (!permId) return;
+  const state = printFetchState.get(permId);
+  if (state === 'pending' || state === 'done') return;
+  if (typeof state === 'number' && Date.now() - state < PRINT_RETRY_MS) return;
+  printFetchState.set(permId, 'pending');
+  try {
+    const acct = (window.location.pathname.match(/^\/mail\/u\/(\d+)/) || [])[1] || '0';
+    const res = await fetch(
+      `/mail/u/${acct}/?view=pt&search=all&permthid=${encodeURIComponent(permId)}`,
+      { credentials: 'include' }
+    );
+    if (!res.ok) {
+      printFetchState.set(permId, Date.now());
+      return;
+    }
+    const participants = parsePrintHeaderParticipants(await res.text());
+    if (!participants.length) {
+      // A 200 with zero parsed participants is a soft failure (interstitial,
+      // truncated body, layout change) — schedule a retry instead of latching
+      // 'done' and silently disabling this source for the thread.
+      printFetchState.set(permId, Date.now());
+      return;
+    }
+    const cache = threadCacheFor(permId);
+    for (const p of participants) {
+      const lower = p.email.toLowerCase();
+      const existing = cache.get(lower);
+      if (existing) {
+        if (p.name && p.name.length > (existing.name || '').length) existing.name = p.name;
+      } else {
+        cache.set(lower, { email: p.email, name: p.name, role: p.role || 'cc' });
+      }
+    }
+    printFetchState.set(permId, 'done');
+    checkForEmailView();
+  } catch {
+    printFetchState.set(permId, Date.now());
+  }
+}
 
 // ─────────────────────────────────────────────
 // Email Detection
@@ -199,9 +371,17 @@ function extractEmailData(options = {}) {
   // Gmail wraps the active thread view in a container. We MUST scope all
   // contact queries to this container, otherwise we pick up email addresses
   // from the inbox list, other collapsed threads, and workspace notifications.
+  //
+  // 2026-07: Gmail moved data-thread-perm-id onto the <h2 class="hP"> subject
+  // heading itself — it no longer marks a wrapper around the messages, so a
+  // bare [data-thread-perm-id] match scopes to the headline and finds zero
+  // contacts. Only trust a candidate that actually contains message contacts;
+  // the conversation is now reliably wrapped by [role="main"] [role="list"].
+  const permIdEl = document.querySelector('div[data-thread-perm-id]');
   const threadContainer =
-    document.querySelector('[data-thread-perm-id]') ||     // Best: explicit thread wrapper
-    document.querySelector('.nH.if') ||                     // Thread view container
+    (permIdEl && permIdEl.querySelector('[email], [data-hovercard-id]') ? permIdEl : null) ||
+    document.querySelector('[role="main"] [role="list"]') || // Conversation message list (2026 Gmail)
+    document.querySelector('.nH.if') ||                     // Thread view container (legacy)
     document.querySelector('.AO') ||                        // Fallback: main content area
     document.querySelector('[role="main"]');                 // Last resort
 
@@ -273,13 +453,15 @@ function extractEmailData(options = {}) {
     const email = el.getAttribute('email') || el.getAttribute('data-hovercard-id') || '';
     if (!email || !email.includes('@')) return;
     const lower = email.toLowerCase();
-    // Skip if already captured
-    if (allEmails.has(lower)) return;
     if (lower.includes('@stratusinfosystems.com')) return;
     if (BOT_EMAILS.has(lower)) return;
     // Only include if inside a message view or email header (not inbox row)
     const isInboxRow = el.closest('.zA') || el.closest('.xT') || el.closest('.yX') || el.closest('.aDP');
     if (isInboxRow) return;
+    // No already-captured skip here: collectFromEl dedupes by email and merges
+    // in a longer name — the first DOM hit for a participant is often the
+    // avatar element (data-hovercard-id, empty text), so skipping seen emails
+    // left contacts permanently nameless.
     collectFromEl(el, 'cc');
   });
 
@@ -305,6 +487,45 @@ function extractEmailData(options = {}) {
       if (domain === 'cisco.com' && !ciscoEmails.includes(email)) ciscoEmails.push(email);
     }
   });
+
+  // ── Pass 4: per-thread memory + print-view header participants ──
+  // Fold this extraction's finds into the grow-only thread cache, fold the
+  // cache (DOM finds from earlier renders + print-view header participants)
+  // back into this result, and kick off the print-view fetch on first sight.
+  // Suppressed while a thread switch is settling: the perm id and the message
+  // list can transiently belong to DIFFERENT threads, and one mismatched merge
+  // would poison the grow-only cache (wrong customer into CRM/quoting). The
+  // debounced observer path and the 2s recheck re-run this after settling.
+  const navSettled = Date.now() - lastThreadNavAt > THREAD_NAV_SETTLE_MS;
+  const threadPermId = navSettled ? getThreadPermId() : null;
+  if (threadPermId) {
+    const cache = threadCacheFor(threadPermId);
+    const roleMap = { sender: 3, cc: 2, to: 1 };
+    for (const [lower, contact] of contactsByEmail) {
+      const cached = cache.get(lower);
+      if (!cached) {
+        cache.set(lower, { ...contact });
+      } else {
+        if (contact.name && contact.name.length > (cached.name || '').length) cached.name = contact.name;
+        if ((roleMap[contact.role] || 0) > (roleMap[cached.role] || 0)) cached.role = contact.role;
+      }
+    }
+    for (const [lower, cached] of cache) {
+      if (!contactsByEmail.has(lower)) {
+        // DOM finds stay first in insertion order, so visible participants
+        // keep priority when the customer default is picked below.
+        contactsByEmail.set(lower, { ...cached });
+        allEmails.add(lower);
+        const domain = lower.split('@')[1];
+        if (domain) allDomains.add(domain);
+        if (domain === 'cisco.com' && !ciscoEmails.includes(lower)) ciscoEmails.push(lower);
+      } else {
+        const contact = contactsByEmail.get(lower);
+        if (cached.name && cached.name.length > (contact.name || '').length) contact.name = cached.name;
+      }
+    }
+    fetchThreadHeaderParticipants(threadPermId);
+  }
 
   // Populate threadContacts — filter consumer domains for CRM lookup
   for (const contact of contactsByEmail.values()) {
@@ -378,17 +599,38 @@ async function onEmailChanged() {
   const data = extractEmailData();
   if (!data) return;
 
-  // Deduplicate — don't re-process the same email
-  const emailHash = `${data.subject}_${data.senderEmail}`;
+  // Deduplicate — don't re-process the same extraction result. The hash MUST
+  // include the participant set: Gmail hydrates a thread progressively, so an
+  // early extraction can see only the first message's sender (often a Cisco
+  // rep). A subject+sender-only hash froze that partial snapshot — richer
+  // re-extractions were discarded, and the sidebar never saw the customer.
+  // Name lengths are included so late-hydrating display names (hover chips,
+  // print-view headers) also re-broadcast, not just new addresses.
+  const participantDigest = (data.threadContacts || [])
+    .map((c) => `${(c.email || '').toLowerCase()}:${(c.name || '').length}`)
+    .sort()
+    .join(',');
+  const emailHash = `${data.subject}_${data.senderEmail}_${participantDigest}`;
   if (emailHash === lastEmailHash) return;
   lastEmailHash = emailHash;
 
   // Notify background service worker
   await sendToBackground(MSG.EMAIL_CHANGED, data).catch(() => {});
 
+  // Re-check after Gmail finishes hydrating collapsed messages. If nothing
+  // changed, the hash gate above makes this a no-op; if late-rendered
+  // participants appeared, this re-sends the richer context. Only scheduled
+  // on a successful send, so it converges instead of looping.
+  setTimeout(() => checkForEmailView(), 2000);
+
   // Auto-CRM lookup for non-consumer domains
   const primaryEmail = (data.isOutbound && data.customerEmail) ? data.customerEmail : data.senderEmail;
   const primaryDomain = primaryEmail ? primaryEmail.split('@')[1] || '' : '';
+
+  // Participant-growth re-sends shouldn't re-fire an identical CRM lookup —
+  // but only skip the lookup itself, never the rest of this function.
+  if (primaryEmail && primaryEmail === lastCrmLookupEmail) return;
+  lastCrmLookupEmail = primaryEmail;
 
   if (primaryDomain && !CONSUMER_DOMAINS.has(primaryDomain)) {
     try {
@@ -1407,6 +1649,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case MSG.GET_FULL_EMAIL_CONTEXT:
       sendResponse(extractEmailData({ includeFullThread: true }) || { empty: true });
       break;
+
+    case MSG.GET_EMAIL_CONTEXT:
+      // Live extraction on demand — lets the background serve the sidebar
+      // current participants instead of a possibly-partial cached snapshot.
+      sendResponse(extractEmailData() || { empty: true });
+      break;
   }
 });
 
@@ -1418,6 +1666,8 @@ function onHashChange() {
   if (currentHash !== lastHash) {
     lastHash = currentHash;
     lastEmailHash = ''; // Reset to trigger re-detection
+    lastCrmLookupEmail = ''; // Allow a fresh CRM lookup on the new thread
+    lastThreadNavAt = Date.now(); // Suppress perm-id cache merges until settled
     // Clean up stale per-thread processing markers
     document.querySelectorAll('[data-stratus-deals-processed]').forEach(el => {
       el.removeAttribute('data-stratus-deals-processed');
