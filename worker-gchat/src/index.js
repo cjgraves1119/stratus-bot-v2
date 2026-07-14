@@ -8853,6 +8853,93 @@ function earliestAcceptedUserDate(now = new Date()) {
   return new Date(t.getTime() - 86400000).toISOString().split('T')[0];
 }
 
+// Guard Quote line discounts before a create/update write (Eric report 2026-07-09:
+// a clone+qty-adjust produced >100%-off / negative-net lines). Two jobs:
+//  (1) AUTO-SCALE a discount when ONLY Quantity changes and Discount is omitted —
+//      Do_Not_Auto_Update_Prices:true stops Zoho from doing it, so a stale absolute
+//      discount would otherwise survive onto a smaller line. Mutates the row.
+//  (2) FAIL-CLOSED reject any resolved line where Discount is outside $0..list total
+//      (an impossible >100% or negative discount). Integer-cents compare; rejects
+//      ambiguous/unresolvable rows rather than guessing. Prevents negative NET (not
+//      sub-cost profit — that needs authoritative distributor cost, out of scope).
+// snapshotItems = current Quoted_Items (update path); null on create (ADD rows are
+// self-contained). Returns { errors: string[], scaled: string[] }.
+function guardQuoteWriteDiscounts(quotedItems, snapshotItems) {
+  const errors = [];
+  const scaled = [];
+  if (!Array.isArray(quotedItems)) return { errors, scaled };
+  const snapById = new Map(); const dupIds = new Set();
+  for (const s of (Array.isArray(snapshotItems) ? snapshotItems : [])) {
+    if (!s || s.id == null) continue;
+    const k = String(s.id);
+    if (snapById.has(k)) dupIds.add(k); else snapById.set(k, s);
+  }
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  const cents = (v) => { // dollars -> integer cents; NaN on malformed/boolean/empty
+    if (typeof v === 'boolean' || v == null || v === '') return NaN;
+    const n = Number(v); if (!Number.isFinite(n)) return NaN;
+    const c = Math.round(n * 100); return Number.isSafeInteger(c) ? c : NaN;
+  };
+  const posInt = (v) => {
+    if (typeof v === 'boolean' || v == null || v === '') return NaN;
+    const n = Number(v); return Number.isInteger(n) && n > 0 ? n : NaN;
+  };
+  const grossOf = (listRaw, qtyRaw) => { const l = cents(listRaw), q = posInt(qtyRaw); return (Number.isFinite(l) && l >= 0 && Number.isFinite(q)) ? l * q : NaN; };
+  const label = (row, snap) => (row.Product_Name && (row.Product_Name.Product_Code || row.Product_Name.name))
+    || (snap && snap.Product_Name && (snap.Product_Name.Product_Code || snap.Product_Name.name)) || row.id || 'line';
+
+  for (const row of quotedItems) {
+    if (!row || typeof row !== 'object') continue;
+    if (has(row, '_delete')) { // clean delete only; mixed with pricing = malformed
+      if (['Discount', 'List_Price', 'Quantity', 'Product_Name'].some(k => has(row, k)))
+        errors.push(`${label(row, null)}: a delete row must be {id,_delete:null} with no pricing fields.`);
+      continue;
+    }
+    const hasProduct = has(row, 'Product_Name');
+    const isAdd = hasProduct && row.id == null;
+    const isModify = row.id != null && !hasProduct;
+    const productChange = hasProduct && row.id != null;
+    const key = row.id != null ? String(row.id) : null;
+    if ((isModify || productChange) && key && dupIds.has(key)) { errors.push(`${label(row, null)}: duplicate current rows for id ${key} — refetch the quote.`); continue; }
+    const snap = (key && snapById.get(key)) || null;
+    if ((isModify || productChange) && !snap) { errors.push(`${label(row, null)}: no current line for id ${row.id} (snapshot missing) — refetch the quote and resend.`); continue; }
+
+    let listRaw, qtyRaw;
+    if (productChange) {
+      if (!has(row, 'List_Price')) { errors.push(`${label(row, snap)}: product changed — send an explicit List_Price (never reuse the old product's price).`); continue; }
+      listRaw = row.List_Price; qtyRaw = has(row, 'Quantity') ? row.Quantity : snap.Quantity;
+    } else if (isAdd) {
+      if (!has(row, 'List_Price') || !has(row, 'Quantity')) continue; // malformed ADD handled elsewhere
+      listRaw = row.List_Price; qtyRaw = row.Quantity;
+    } else { // pure MODIFY
+      listRaw = has(row, 'List_Price') ? row.List_Price : snap.List_Price;
+      qtyRaw = has(row, 'Quantity') ? row.Quantity : snap.Quantity;
+    }
+    const grossCents = grossOf(listRaw, qtyRaw);
+    if (!Number.isFinite(grossCents)) { errors.push(`${label(row, snap)}: invalid/unresolved List_Price or Quantity — cannot validate discount.`); continue; }
+
+    let discCents;
+    if (has(row, 'Discount')) {
+      discCents = cents(row.Discount);
+      if (!Number.isFinite(discCents)) { errors.push(`${label(row, snap)}: Discount is not a valid dollar amount.`); continue; }
+    } else if (isModify && snap && has(row, 'Quantity') && !has(row, 'List_Price')) {
+      const oldGross = grossOf(snap.List_Price, snap.Quantity); const oldDisc = cents(snap.Discount);
+      if (!Number.isFinite(oldGross) || oldGross <= 0 || !Number.isFinite(oldDisc) || oldDisc < 0 || oldDisc > oldGross) {
+        errors.push(`${label(row, snap)}: cannot auto-scale on the quantity change (prior line pricing missing/invalid). Send explicit Discount = List_Price × Quantity × (percent/100).`); continue;
+      }
+      discCents = Math.round(grossCents * (oldDisc / oldGross));
+      row.Discount = discCents / 100; scaled.push(label(row, snap)); // inject scaled discount
+    } else if (isModify && snap) {
+      discCents = cents(snap.Discount); if (!Number.isFinite(discCents)) continue; // leave unreadable old line alone
+    } else { discCents = 0; } // ADD w/o discount = full price
+
+    if (discCents < 0 || discCents > grossCents) {
+      errors.push(`${label(row, snap)}: Discount $${(discCents / 100).toFixed(2)} is outside $0–$${(grossCents / 100).toFixed(2)} — an impossible ${discCents > grossCents ? '>100%' : 'negative'} discount. Recompute Discount = List_Price × Quantity × (percent/100).`);
+    }
+  }
+  return { errors, scaled };
+}
+
 async function validateCrmWrite(module_name, data, isCreate = false, env = null) {
   const errors = [];
 
@@ -12241,6 +12328,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
         }
 
+        // ── Discount ceiling guard (Eric 2026-07-09): reject >100% (negative-net)
+        //    lines on create; ADD rows carry full List_Price/Quantity/Discount. ──
+        if (module_name === 'Quotes' && Array.isArray(recordData.Quoted_Items)) {
+          const dg = guardQuoteWriteDiscounts(recordData.Quoted_Items, null);
+          if (dg.errors.length) {
+            return { validation_error: true, action: 'create_blocked', error: 'discount_out_of_range', message: `DISCOUNT_OUT_OF_RANGE: ${dg.errors.join(' ')}` };
+          }
+        }
+
         const createStart = Date.now();
         const createResult = await zohoApiCall('POST', module_name, env, { data: [recordData] });
         // ── 2026-05-18 Meraki_ISR inactive guardrail ──
@@ -12746,6 +12842,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           }
           // else: all rows have explicit ops (delete/modify/add) — pass through unchanged.
           } // end "if (data.Quoted_Items.length > 0)"
+        }
+
+        // ── Discount ceiling guard (Eric 2026-07-09): fail-closed on >100%
+        //    (negative-net) lines, and auto-scale a discount when ONLY Quantity
+        //    changes (Do_Not_Auto_Update_Prices stops Zoho from doing it). ──
+        if (module_name === 'Quotes' && Array.isArray(data.Quoted_Items)) {
+          const dg = guardQuoteWriteDiscounts(data.Quoted_Items, preUpdateSnapshot?.Quoted_Items);
+          if (dg.errors.length) {
+            return {
+              validation_error: true,
+              action: 'update_blocked',
+              error: 'discount_out_of_range',
+              message: `DISCOUNT_OUT_OF_RANGE: ${dg.errors.join(' ')}`,
+            };
+          }
+          if (dg.scaled.length) console.log(`[GCHAT] Auto-scaled discount on qty change: ${dg.scaled.join(', ')}`);
         }
 
         const updateStart = Date.now();
@@ -18640,7 +18752,7 @@ Clone + modification in the SAME message → (1) \`clone_quote\`; (2) \`zoho_get
 **Customer-facing Description safety:** NEVER put Stratus margin or a margin percentage in a Quote line Description — margin is internal-only. Discount labels ("15% Discount") and subscription add-on / change descriptions are fine.
 
 ### DISCOUNTS — DOLLARS ON THE FIELD, PERCENTAGES IN YOUR HEAD
-The Discount field is dollars per line; THINK in percentages. "10% off" → \`Discount = List_Price * Quantity * 0.10\`. On a Quantity change do NOT keep the old Discount dollar — the server auto-scales to preserve the percentage (when in doubt, omit Discount on a qty change).
+The Discount field is dollars per line; THINK in percentages. "10% off" → \`Discount = List_Price * Quantity * 0.10\`. On a PURE Quantity change (product + List_Price unchanged) do NOT keep the old Discount dollar — omit Discount and the worker auto-scales it to preserve the percentage. Any line whose Discount would exceed its list total (List_Price × Quantity) is REJECTED as an impossible >100% discount — recompute, never guess.
 
 ## PICKLIST PROTECTION
 
@@ -23281,7 +23393,7 @@ BLANK ACCOUNT PROTECTION:
 
 QUOTE DISCOUNT / LINE-ITEM UPDATES (CRITICAL — do NOT narrate, CALL the tool):
 - When the user asks to change a discount to N%, change a quantity, remove a line, or swap a license — CALL zoho_update_record directly with the Quoted_Items payload. Do NOT write the JSON payload in your text response. Do NOT emit '{"Quoted_Items": [...]}' as prose — that is a raw_json_args_leak failure.
-- Discount is stored as a dollar amount. Compute: Discount = List_Price × Quantity × (pct / 100). The server also auto-scales discount on qty change, so if you ONLY change Quantity and leave Discount out, the server preserves the original percentage.
+- Discount is stored as a dollar amount. Compute: Discount = List_Price × Quantity × (pct / 100). On a PURE quantity change (product + List_Price unchanged), omit Discount and the worker auto-scales it to preserve the percentage. Any line whose Discount would exceed List_Price × Quantity (a >100% discount) is REJECTED — recompute.
 - Quoted_Items updates are ADDITIVE. To change an existing line: {id: "<line_id>", Quantity: <n>, Discount: <dollar_amount>}. To delete: {id: "<line_id>", _delete: null}. To add: {Product_Name: {id: "<product_id>"}, Quantity: <n>, Discount: <dollar_amount>}.
 - Do NOT send items you want to leave unchanged. Omission keeps them.
 
