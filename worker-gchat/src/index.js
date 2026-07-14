@@ -429,6 +429,15 @@ function resolveForcedCrmModel(env) {
   return raw.startsWith('claude-') ? raw : null;
 }
 
+// Env-configurable output-token ceiling for the CRM/tool agent path. Both the
+// personal (Sonnet 4.6) and corp (Sonnet 5) builds run this identical line; corp
+// overrides via CRM_MAX_OUTPUT_TOKENS (e.g. 16384) ONLY if its gateway won't honor
+// thinking:{type:'disabled'} and an injected thinking preamble needs the headroom.
+function getCrmMaxOutputTokens(env) {
+  const n = Number(env?.CRM_MAX_OUTPUT_TOKENS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 8192;
+}
+
 // Whether the advisor TOOL will actually be injected for a given run — the
 // single source of truth shared by tool injection AND prompt guidance, so the
 // prompt never instructs calling advisor() unless the tool is present.
@@ -10625,7 +10634,7 @@ async function retermQuoteLicenses(quoteId, targetTerm, env, personId = null) {
   try {
     opId = await logCrmOpToD1(env, {
       personId: personId || null, bot: botFromPersonId(personId),
-      operation: 'update', module: 'Quotes', recordId: quoteId,
+      operation: 'reterm_quote_licenses', module: 'Quotes', recordId: quoteId,
       recordName: quote.Subject || quote.Quote_Number || null,
       status: verification.success ? 'success' : 'error',
       durationMs: Date.now() - startedMs,
@@ -16010,15 +16019,21 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // Fetch the single most-recent un-reversed mutation REGARDLESS of token,
             // so we never silently skip a non-reversible recent op (a license
             // re-term is logged with a null token) and revert an OLDER op instead.
+            // Most recent op that is either token-reversible OR a re-term. Ordinary
+            // null-token side effects (e.g. the auto follow-up Task, logged as
+            // create/undoToken:null) are EXCLUDED, so they neither block undo nor get
+            // mistaken for a re-term; a re-term (logged operation='reterm_quote_licenses',
+            // null token) IS included so we can refuse it instead of reverting an older op.
             const latest = await env.ANALYTICS_DB.prepare(
               `SELECT undo_token, operation FROM crm_operations
                 WHERE person_id = ?
                   AND undone_at IS NULL
-                  AND operation IN ('create','update','clone','delete')
+                  AND operation IN ('create','update','clone','delete','reterm_quote_licenses')
+                  AND (undo_token IS NOT NULL OR operation = 'reterm_quote_licenses')
                 ORDER BY id DESC LIMIT 1`
             ).bind(personId).first();
-            if (latest && !latest.undo_token) {
-              const msg = 'The most recent change can\'t be reversed with "undo" — a license re-term replaces the quote\'s line items. To change it back, ask to re-term the quote to its previous year length.';
+            if (latest && latest.operation === 'reterm_quote_licenses') {
+              const msg = 'The most recent change was a license re-term, which "undo" can\'t reverse (it replaces the quote\'s line items). To change it back, ask to re-term the quote to its previous year length.';
               return { success: false, error: msg, _user_visible_summary: msg };
             }
             if (!latest?.undo_token) {
@@ -19120,7 +19135,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     // (re-terming ~30 Quoted_Items) is a ~3k-token tool_use INPUT and the write
     // tail executes in pure-exec mode — the old 1024/2048 taper truncated it
     // mid-tool_use → dangling tool_use → 400. 8192 is far under Haiku 4.5's cap.
-    const contMaxTok = 8192;
+    const contMaxTok = getCrmMaxOutputTokens(env);
     // Advisor tool injection — OPT-IN via env.ENABLE_ADVISOR_TOOL (default off).
     // 2026-05-14: disabled by default after API 400 traced to invalid
     // server_tool_use.name in conversation history. The advisor tool type
@@ -20778,7 +20793,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // executes in pure-exec mode (formerly 1024) — producing a dangling
       // tool_use → Anthropic 400. 8192 clears it in one turn (Haiku cap is 64K).
       // Non-CRM (vision/quote) path keeps the cheaper taper.
-      const maxTok = useTools ? 8192 : (iteration <= 1 ? 4096 : (iteration <= 3 ? 1536 : 1024));
+      const maxTok = useTools ? getCrmMaxOutputTokens(env) : (iteration <= 1 ? 4096 : (iteration <= 3 ? 1536 : 1024));
 
       // ── Build tools array with advisor when in CRM mode ──────────
       // The advisor tool lets Sonnet consult Opus for strategic guidance
