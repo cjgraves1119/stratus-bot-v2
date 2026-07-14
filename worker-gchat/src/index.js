@@ -435,7 +435,9 @@ function resolveForcedCrmModel(env) {
 // thinking:{type:'disabled'} and an injected thinking preamble needs the headroom.
 function getCrmMaxOutputTokens(env) {
   const n = Number(env?.CRM_MAX_OUTPUT_TOKENS);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 8192;
+  // Positive SAFE INTEGER only — a fractional env value like '0.5' must fall back
+  // to the default, not floor to an invalid max_tokens of 0.
+  return Number.isSafeInteger(n) && n > 0 ? n : 8192;
 }
 
 // Whether the advisor TOOL will actually be injected for a given run — the
@@ -16025,14 +16027,24 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // mistaken for a re-term; a re-term (logged operation='reterm_quote_licenses',
             // null token) IS included so we can refuse it instead of reverting an older op.
             const latest = await env.ANALYTICS_DB.prepare(
-              `SELECT undo_token, operation FROM crm_operations
+              // A re-term is detected by operation='reterm_quote_licenses' (new rows)
+              // OR request_payload.tool (legacy rows the first deploy logged as
+              // 'update'/null-token before the label existed). Null-token non-reterm
+              // side effects (the auto follow-up Task) are excluded so they neither
+              // block undo nor look like a re-term; token-reversible ops resolve normally.
+              `SELECT undo_token, operation,
+                      (operation = 'reterm_quote_licenses'
+                       OR json_extract(request_payload, '$.tool') = 'reterm_quote_licenses') AS is_reterm
+                 FROM crm_operations
                 WHERE person_id = ?
                   AND undone_at IS NULL
                   AND operation IN ('create','update','clone','delete','reterm_quote_licenses')
-                  AND (undo_token IS NOT NULL OR operation = 'reterm_quote_licenses')
+                  AND (undo_token IS NOT NULL
+                       OR operation = 'reterm_quote_licenses'
+                       OR json_extract(request_payload, '$.tool') = 'reterm_quote_licenses')
                 ORDER BY id DESC LIMIT 1`
             ).bind(personId).first();
-            if (latest && latest.operation === 'reterm_quote_licenses') {
+            if (latest && latest.is_reterm) {
               const msg = 'The most recent change was a license re-term, which "undo" can\'t reverse (it replaces the quote\'s line items). To change it back, ask to re-term the quote to its previous year length.';
               return { success: false, error: msg, _user_visible_summary: msg };
             }

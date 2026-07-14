@@ -86,12 +86,13 @@ t('already-valid + text-only assistant turns are left unchanged', () => {
 // ───────────────────── env-configurable output-token ceiling ────────────────
 const getCrmMaxOutputTokens = load('getCrmMaxOutputTokens');
 console.log('getCrmMaxOutputTokens (extracted from source):');
-t('defaults to 8192; positive int env overrides; junk/zero/negative -> default', () => {
+t('defaults to 8192; positive int env overrides; junk/zero/negative/fractional -> default', () => {
   assert.strictEqual(getCrmMaxOutputTokens({}), 8192);
   assert.strictEqual(getCrmMaxOutputTokens({ CRM_MAX_OUTPUT_TOKENS: '16384' }), 16384);
   assert.strictEqual(getCrmMaxOutputTokens({ CRM_MAX_OUTPUT_TOKENS: '0' }), 8192);
   assert.strictEqual(getCrmMaxOutputTokens({ CRM_MAX_OUTPUT_TOKENS: 'abc' }), 8192);
   assert.strictEqual(getCrmMaxOutputTokens({ CRM_MAX_OUTPUT_TOKENS: '-5' }), 8192);
+  assert.strictEqual(getCrmMaxOutputTokens({ CRM_MAX_OUTPUT_TOKENS: '0.5' }), 8192); // fractional -> default, not floor(0.5)=0
 });
 
 // ─────────── reterm inline logic (mirrors retermQuoteLicenses ~10073) ────────
@@ -169,8 +170,8 @@ t('re-terms are logged with a distinct operation, and the bare-undo query exclud
   assert.match(src, /undoToken: null,.*re-term is not undo-token reversible/, 're-term stores no undo token');
   // query keeps null-token side-effects (e.g. follow-up Tasks) out, but includes re-terms
   assert.match(src, /operation IN \('create','update','clone','delete','reterm_quote_licenses'\)/, 'query set includes reterm');
-  assert.match(src, /\(undo_token IS NOT NULL OR operation = 'reterm_quote_licenses'\)/, 'query excludes null-token non-reterm ops');
-  assert.match(src, /latest\.operation === 'reterm_quote_licenses'/, 'refuse only when the latest resolved op is a re-term');
+  assert.match(src, /json_extract\(request_payload, '\$\.tool'\) = 'reterm_quote_licenses'/, 'legacy reterms (logged as update) detected via request_payload.tool');
+  assert.match(src, /if \(latest && latest\.is_reterm\)/, 'refuse when the latest resolved op is a re-term (new or legacy)');
 });
 
 console.log(`\nALL ${pass} ASSERTIONS PASSED`);
