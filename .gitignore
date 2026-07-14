@@ -12,7 +12,8 @@ node_modules/
 **/.wrangler/
 
 # Claude Code local scratch (agent worktrees, session files) — never commit
-.claude/
+.claude/*
+!.claude/skills/
 
 # Secrets file — lives in parent Bots/ directory, but add here as
 # belt-and-suspenders in case someone ever copies it into the repo tree.
