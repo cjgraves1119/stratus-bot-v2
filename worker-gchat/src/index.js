@@ -1454,6 +1454,32 @@ async function logBotUsageToD1(env, {
   }
 }
 
+// Record a server-side validation BLOCK (a fabricated/inactive/EOL product id rejected
+// before a Zoho write) into bot_usage.error_message so the daily monitor + digest can
+// see it. Before 2026-07-14 (error_reports #1) these blocks hit only console.log and
+// were invisible in D1 — a real failure went unnoticed. AWAITED at the block sites so
+// the D1 insert is durable (the Worker won't kill it mid-request); swallows its own
+// errors so it never affects the block response.
+async function logValidationBlockToD1(env, personId, toolName, activeCheck) {
+  try {
+    if (!env?.ANALYTICS_DB || !activeCheck) return;
+    const reason = Array.isArray(activeCheck.errors) ? activeCheck.errors.join(' | ') : 'validation block';
+    const kind = (activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length) ? 'invalid_product_id' : 'inactive_or_eol_product';
+    await logBotUsageToD1(env, {
+      bot: botFromPersonId(personId),
+      personId: personId || null,
+      requestText: `[VALIDATION BLOCK] ${toolName}`,
+      responsePath: 'crm_agent',
+      model: null,
+      errorMessage: `preflight_block:${kind}: ${reason}`.substring(0, 2000),
+      responseText: null,
+      toolCallsJson: activeCheck.blocked_items || activeCheck.hallucinated_ids || null
+    });
+  } catch (e) {
+    console.log(`[VALIDATION-BLOCK-LOG] threw: ${e.message}`);
+  }
+}
+
 /**
  * Infer the bot channel from a person_id.
  * Chrome extension uses 'chrome-ext-chat-*' and 'chrome-ext-quote-*' prefixes
@@ -6648,8 +6674,10 @@ Three license tiers exist for MX/Z:
 
 EXACT license SKU mappings by product family:
 
+**License TERMS — 1/3/5 standard; 7/10 are real co-term Zoho-quote-only terms.** The SKUs below list 1YR/3YR/5YR because those are the standard terms you quote as instant URLs. **7-year and 10-year licenses ALSO exist and are real, active products (e.g. LIC-ENT-7YR, LIC-ENT-10YR) — never tell a customer a 7- or 10-year term "doesn't exist" or "isn't valid."** They are co-term licenses that CANNOT be produced as an ecomm/URL quote; they are set up on a Zoho quote instead. If a customer asks for a 7- or 10-year term, do NOT deny it — explain it's a co-term term handled on a Zoho quote (in the CRM extension), and offer to proceed there or quote the standard 1/3/5-year URL options.
+
 ### APs (MR + CW) — all use generic ENT license
-- All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
+- All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix); 7/10-year co-term = LIC-ENT-7YR / LIC-ENT-10YR (Zoho quote only, not a URL)
 - CW9800 wireless controllers → NO license association
 
 ### Systems Manager (SME) — generic, model-agnostic, 3-YEAR MAX
@@ -8499,17 +8527,27 @@ function enrichInactiveProductMessage(parsed, recordData) {
 // "2570562000271100009" when real MR44-HW id is "2570562000045149737"). Zoho
 // returns "NOT_ALLOWED — can't add inactive product in the inventory" which
 // the model paraphrases as "the product is not active", leading to confusing
-// failures. We detect these by checking the product_id against our reverse
-// cache map AND the live KV prices — if neither has it, it's almost certainly
-// fabricated and we block with an actionable error.
+// failures.
+//
+// VERIFY-THEN-DECIDE (2026-07-14 fix, error_reports #1): an id absent from the
+// static prices.json reverse map is NOT automatically fabricated. The cache
+// deliberately EXCLUDES legitimate Zoho-quote-only SKUs (e.g. 7YR/10YR co-term
+// licenses — 0 of 1061 cached), so a live-looked-up id for a real product was
+// being branded "FABRICATED" and the model was falsely told it invented the id.
+// Now: for an unknown id we do ONE live Zoho Products/{id} GET (live path only)
+// and allow iff the record exists AND Product_Active !== false; we block ONLY
+// when Zoho actually says not-found (truly fabricated) or inactive — with the
+// REAL reason. In dry-run/benchmark (no live Zoho) we keep the fail-fast block
+// so benchmark fabrication-catching is unchanged.
 //
 // Strategy:
 //   - Only checks NEW line items (items without an existing `id`).
 //   - Uses product_id → SKU reverse map, then isEol(sku) + EOL_REPLACEMENTS.
-//   - Unknown product_ids: fail-fast with guidance to call batch_product_lookup.
+//   - Unknown product_ids: live-verify (live path) or fail-fast (dry-run).
 //   - Returns { valid: true } or { valid: false, errors: [...], blocked_items: [...] }.
-function preflightQuotedItemsProductActive(quotedItems) {
+async function preflightQuotedItemsProductActive(quotedItems, env = null, opts = {}) {
   if (!Array.isArray(quotedItems)) return { valid: true };
+  const dryRun = !!(opts.dryRun || (env && env.__BENCHMARK_DRY_RUN));
   const idMap = getProductIdToSkuMap();
   const errors = [];
   const blocked = [];
@@ -8520,14 +8558,45 @@ function preflightQuotedItemsProductActive(quotedItems) {
     if (item.id) continue;
     const productId = item.Product_Name?.id;
     if (!productId) continue;
-    const sku = idMap[productId];
+    let sku = idMap[productId];
     if (!sku) {
-      // Unknown product_id — not in our reverse cache. This is almost always
-      // a hallucinated/fabricated 19-digit id. The prices.json cache covers
-      // every active SKU we sell, so if the id isn't here, Zoho will reject
-      // it with "NOT_ALLOWED can't add inactive product in the inventory".
-      // Block pre-flight with actionable guidance instead of letting it round-trip.
-      hallucinated.push({ product_id: productId });
+      // Unknown product_id — not in the static prices.json reverse cache.
+      // Do NOT assume fabricated: the cache excludes Zoho-quote-only SKUs
+      // (7YR/10YR co-term licenses, legacy parts). Verify-then-decide.
+      if (dryRun || !env) {
+        // No live Zoho available (benchmark/dry-run): preserve the original
+        // fail-fast so benchmarks still catch fabricated ids.
+        hallucinated.push({ product_id: productId });
+        continue;
+      }
+      let liveRec = null;
+      try {
+        const res = await zohoApiCall('GET',
+          `Products/${encodeURIComponent(productId)}?fields=id,Product_Code,Product_Name,Product_Active`,
+          env
+        );
+        liveRec = res?.data?.[0] || null;
+      } catch (verifyErr) {
+        console.log(`[PREFLIGHT-VERIFY] live Products/${productId} lookup threw: ${verifyErr.message}`);
+        // Fail OPEN on a transient Zoho error — do not block a possibly-real id
+        // on infrastructure flakiness. A genuinely bad id will be rejected by
+        // Zoho on the actual write with its own error.
+        continue;
+      }
+      if (!liveRec) {
+        // Zoho has no product with this id → genuinely fabricated/wrong id.
+        hallucinated.push({ product_id: productId });
+        continue;
+      }
+      if (liveRec.Product_Active === false) {
+        const liveSku = liveRec.Product_Code || productId;
+        blocked.push({ sku: liveSku, product_id: productId, inactive_in_zoho: true, replaced_by: null });
+        errors.push(`❌ ${liveSku} is INACTIVE in Zoho's inventory and cannot be added to a quote (it is discontinued). Ask the user for an active alternative — e.g. a different license term.`);
+        continue;
+      }
+      // Real, active Zoho product that simply isn't in the local price cache
+      // (e.g. a 7YR/10YR co-term license). ALLOW it.
+      console.log(`[PREFLIGHT-VERIFY] Allowed live-verified product ${liveRec.Product_Code || ''} (${productId}) — active in Zoho, absent from static cache.`);
       continue;
     }
     // Inactive-in-Zoho guard: the SKU is in our catalog but its Zoho product record is
@@ -8555,14 +8624,12 @@ function preflightQuotedItemsProductActive(quotedItems) {
   }
   if (hallucinated.length > 0) {
     const idsList = hallucinated.map(h => h.product_id).join(', ');
-    // Observability — surfaces in CF Worker logs so we can track hallucination frequency by model/session.
-    console.log(`[PREFLIGHT-HALLUCINATION] Blocked ${hallucinated.length} fabricated product_id(s): ${idsList}`);
+    // Observability — surfaces in CF Worker logs so we can track fabrication frequency by model/session.
+    console.log(`[PREFLIGHT-HALLUCINATION] Blocked ${hallucinated.length} non-existent product_id(s): ${idsList}`);
     errors.unshift(
-      `❌ FABRICATED PRODUCT ID(S): ${idsList}. These product_ids were not returned by batch_product_lookup in this conversation. ` +
-      `Do NOT invent 19-digit Zoho product IDs and do NOT reuse ids from memory. ` +
-      `Call batch_product_lookup({skus: ["<sku-you-want-to-add>"]}) FIRST to get the real product_id, ` +
-      `then retry zoho_update_record with the returned product_id. ` +
-      `If you didn't call batch_product_lookup for this SKU in THIS conversation, the id is fake.`
+      `❌ INVALID PRODUCT ID(S): ${idsList}. Zoho has no product with ${hallucinated.length > 1 ? 'these ids' : 'this id'} (verified by live lookup), so ${hallucinated.length > 1 ? 'they are' : 'it is'} not usable. ` +
+      `Do NOT invent 19-digit Zoho product IDs or reuse ids from memory. ` +
+      `Call batch_product_lookup({skus: ["<sku-you-want-to-add>"]}) to get the real product_id, then retry with the returned id.`
     );
   }
   if (errors.length > 0) {
@@ -8594,7 +8661,41 @@ async function correctQuotedItemDiscounts(quotedItems, env) {
     const productId = item.Product_Name.id;
     // Reverse lookup: product_id → SKU, then fetch current live pricing.
     const sku = idMap[productId];
-    if (!sku) continue;
+    if (!sku) {
+      // Live-only id (absent from the static price cache) — e.g. a 7YR/10YR co-term
+      // license the validator now allows through on the GENERIC create/update path.
+      // The static map can't price it, so resolve it live and ENFORCE the fixed
+      // co-term discount (7YR 50%, 10YR 60%) regardless of what the model set — the
+      // same policy reterm_quote_licenses applies. Closes the generic-path pricing
+      // hole for co-term SKUs (Codex review, 2026-07-14). Non-co-term live-only ids
+      // (rare legacy-uncached SKUs) keep the model's discount and are logged.
+      try {
+        const res = await zohoApiCall('GET',
+          `Products/${encodeURIComponent(productId)}?fields=id,Product_Code,Unit_Price,Product_Active`, env);
+        const rec = res?.data?.[0] || null;
+        const liveSku = rec && rec.Product_Code ? String(rec.Product_Code).toUpperCase() : null;
+        const cm = liveSku ? liveSku.match(/-(10|7)(?:YR|Y-S\d+|Y)$/) : null;
+        const coPct = cm ? COTERM_DEFAULT_DISCOUNT[Number(cm[1])] : undefined;
+        const liveList = rec ? moneyValue(rec.Unit_Price) : 0;
+        if (coPct !== undefined) {
+          if (!(liveList > 0)) {
+            failures.push({ sku: liveSku || productId, product_id: productId, error: 'co-term SKU has no live list price — cannot enforce fixed discount' });
+          } else {
+            const coDiscount = roundMoney(liveList * qty * coPct);
+            if (item.Discount === undefined || Math.abs((item.Discount || 0) - coDiscount) > 1) {
+              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): co-term ${coPct * 100}% — setting Discount=${coDiscount} (list=${liveList}, qty=${qty})`);
+              item.Discount = coDiscount;
+              corrected++;
+            }
+          }
+        } else if (liveSku) {
+          console.log(`[DISCOUNT-FIX] live-only non-co-term SKU ${liveSku} (${productId}) — leaving model discount uncorrected (no cache/ecomm price)`);
+        }
+      } catch (e) {
+        console.log(`[DISCOUNT-FIX] live-only id ${productId} lookup threw: ${e.message}`);
+      }
+      continue;
+    }
     const liveData = await fetchLiveSkuPricing(sku, productId, env);
     if (!liveData.success) {
       failures.push({ sku, product_id: productId, error: liveData.error });
@@ -10166,27 +10267,78 @@ async function applyMarginToQuote(quoteId, targetMargin, env, personId = null) {
   return result;
 }
 
+// Co-term (Zoho-quote-only) license terms. 7YR/10YR exist as active Zoho products
+// but are deliberately ABSENT from the ecomm price cache (prices.json) — they are
+// co-term licenses valid on Zoho quotes only, never ecomm/URL quotes. reterm
+// resolves their product_id + list price LIVE from Zoho and applies a FIXED default
+// term discount (Chris 2026-07-14: 7YR = 50% off list, 10YR = 60% off list).
+const COTERM_DEFAULT_DISCOUNT = { 7: 0.50, 10: 0.60 };
+const RETERM_ALLOWED_TERMS = [1, 3, 5, 7, 10];
+
+// Rewrite a termed-license SKU to a target term. Bidirectional across 1/3/5/7/10 so a
+// 7/10 re-term can be reverted (7YR→5YR) as well as applied (3YR→7YR). For standard
+// 1/3/5 targets from a standard source we first try the shared, cache-gated
+// directLicenseSkuForTerm (SME-aware siblings); otherwise (co-term 7/10 target, OR a
+// 7/10 SOURCE the shared helper doesn't recognize) we rewrite the -{term}{unit} suffix
+// directly WITHOUT cache-gating — existence is validated by the live Zoho lookup that
+// follows. This is reterm-local on purpose so the deterministic URL engine (which uses
+// the shared 1/3/5-only helpers) never emits 7/10YR SKUs.
+const RETERM_TERM_SUFFIX_RE = /-(10|[1357])(YR|Y-S\d+|Y)$/;
+function retermTargetLicenseSku(sku, termNum) {
+  if (!sku || !RETERM_ALLOWED_TERMS.includes(termNum)) return null;
+  const s = String(sku).toUpperCase();
+  if ([1, 3, 5].includes(termNum)) {
+    const std = directLicenseSkuForTerm(s, termNum); // SME-aware, cache-validated (standard sources)
+    if (std) return std;
+  }
+  const m = s.match(RETERM_TERM_SUFFIX_RE);
+  if (!m) return null;
+  return s.replace(RETERM_TERM_SUFFIX_RE, `-${termNum}$2`);
+}
+
+// Resolve a target license SKU's economics: cache first (1/3/5), then LIVE Zoho
+// (co-term 7/10, absent from cache by design). Returns { product_id, list, active }
+// or null if the SKU exists in neither.
+async function resolveTargetLicenseEconomics(targetSku, env) {
+  const cat = prices[targetSku];
+  if (cat && cat.zoho_product_id) {
+    return { product_id: String(cat.zoho_product_id), list: moneyValue(cat.list), active: cat.zoho_active !== false };
+  }
+  try {
+    const res = await zohoApiCall('GET',
+      `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(targetSku)})&fields=id,Product_Code,Unit_Price,Product_Active`,
+      env);
+    const rec = (res?.data || []).find(r => String(r.Product_Code || '').toUpperCase() === String(targetSku).toUpperCase());
+    if (!rec || !rec.id) return null;
+    return { product_id: String(rec.id), list: moneyValue(rec.Unit_Price), active: rec.Product_Active !== false };
+  } catch (e) {
+    console.log(`[RETERM] live target lookup for ${targetSku} threw: ${e.message}`);
+    return null;
+  }
+}
+
 // reterm_quote_licenses(quote_id, target_term) — deterministic license re-terming.
-// Maps every TERMED license line (LIC-*-{1,3,5}{YR|Y}) to its target-term catalog
-// sibling via directLicenseSkuForTerm (delete old row + add new row in ONE atomic
-// PUT), preserves each line's discount PERCENTAGE onto the new list price, and
-// leaves hardware / SFP / cable / sensor / non-termed-subscription lines untouched
-// (Quoted_Items PUT is additive → omitted rows are preserved). Fail-closed: if ANY
-// termed license line has no catalog sibling at the target term, NOTHING is written.
-// Zero model arithmetic — the agent calls this ONCE instead of hand-assembling a
-// ~30-line delete/add payload (the path that truncated → API 400 and thrashed).
+// Maps every TERMED license line (LIC-*-{1,3,5}{YR|Y}) to its target-term SKU
+// (1/3/5 via catalog sibling, 7/10 via co-term suffix rewrite + live Zoho lookup),
+// delete old row + add new row in ONE atomic PUT. 1/3/5 preserve each line's discount
+// PERCENTAGE; 7/10 co-term apply the FIXED default term discount (50%/60%). Hardware /
+// SFP / cable / sensor / non-termed-subscription lines are left untouched (Quoted_Items
+// PUT is additive → omitted rows preserved). Fail-closed: if ANY termed license line has
+// no target-term SKU, NOTHING is written. Zero model arithmetic — the agent calls this
+// ONCE instead of hand-assembling a ~30-line delete/add payload (the truncate→400 path).
 async function retermQuoteLicenses(quoteId, targetTerm, env, personId = null) {
   const startedMs = Date.now();
   const fail = (error, message, extra = {}) => ({ success: false, error, message, ...extra });
 
   // ── 1. Normalize target term. ANCHORED so destructive typos are rejected, not
-  //       silently coerced ("15"→1, "35"→3, "10 years"→1). Accept 1|3|5 alone or
-  //       with a year unit: "1", "1y", "1yr", "1 year". ──
+  //       silently coerced ("15"→1, "35"→3, "100"→10). Accept 1|3|5|7|10 alone or
+  //       with a year unit: "1", "1y", "1yr", "1 year", "7yr", "10 year". 7/10 are
+  //       co-term (Zoho-quote-only) terms. ──
   const termStr = String(targetTerm).trim().toLowerCase();
-  const termMatch = termStr.match(/^([135])\s*(?:y|yr|year|years)?$/);
+  const termMatch = termStr.match(/^(10|[1357])\s*(?:y|yr|year|years)?$/);
   const termNum = termMatch ? Number(termMatch[1]) : NaN;
-  if (![1, 3, 5].includes(termNum)) {
-    return fail('invalid_term', `target_term "${targetTerm}" is not 1, 3, or 5. Meraki/Cisco licenses only come in 1YR, 3YR, or 5YR terms.`);
+  if (!RETERM_ALLOWED_TERMS.includes(termNum)) {
+    return fail('invalid_term', `target_term "${targetTerm}" is not one of 1, 3, 5, 7, or 10. (1/3/5 are standard; 7/10 are co-term Zoho-quote terms.)`);
   }
 
   // ── 2. Fetch the quote + its line items ──
@@ -10217,32 +10369,35 @@ async function retermQuoteLicenses(quoteId, targetTerm, env, personId = null) {
     const sku = codeOf(item);
     const qty = Number(item.Quantity) || 0;
     const isLicense = /^LIC-/i.test(sku);
-    const isTermed = isLicense && rewriteSkuTerm(sku, termNum) !== null; // suffix -{1,3,5}(YR|Y|Y-S\d+)
+    const isTermed = isLicense && /-(10|[1357])(?:YR|Y-S\d+|Y)$/i.test(sku); // source has a 1/3/5/7/10 term suffix
     if (!isLicense || !isTermed) { untouched.push({ sku: sku || item.id, reason: isLicense ? 'non_termed_license' : 'not_a_license' }); continue; }
-    const target = directLicenseSkuForTerm(sku, termNum); // siblings (SME-aware) → rewrite + catalog-gate
+    const target = retermTargetLicenseSku(sku, termNum); // 1/3/5 catalog sibling; 7/10 co-term suffix rewrite
     if (!target) { unmapped.push(sku); continue; }
     if (target.toUpperCase() === sku) { untouched.push({ sku, reason: 'already_at_target_term' }); continue; }
-    const cat = prices[target];
-    const newProductId = cat && cat.zoho_product_id;
-    const newList = moneyValue(cat && cat.list);
-    if (!newProductId) { unmapped.push(`${sku} → ${target} (no product id in catalog)`); continue; }
-    // Fail closed on a sibling with no usable list price — otherwise we'd add a
+    // Resolve target economics: cache (1/3/5) or LIVE Zoho (co-term 7/10, not cached).
+    const econ = await resolveTargetLicenseEconomics(target, env);
+    if (!econ || !econ.product_id) { unmapped.push(`${sku} → ${target} (not found in catalog or live Zoho)`); continue; }
+    if (econ.active === false) { unmapped.push(`${sku} → ${target} (target product is INACTIVE in Zoho)`); continue; }
+    const newProductId = econ.product_id;
+    const newList = econ.list;
+    // Fail closed on a target with no usable list price — otherwise we'd add a
     // $0 line that silently drops Grand_Total and passes verification (mirrors
     // applyMarginToQuote's `listTotal > 0` guard).
-    if (!(newList > 0)) { unmapped.push(`${sku} → ${target} (sibling has no list price in catalog)`); continue; }
+    if (!(newList > 0)) { unmapped.push(`${sku} → ${target} (target has no list price)`); continue; }
     // Fail closed on malformed source economics: without a positive qty AND a
-    // positive old list total we cannot preserve a discount PERCENTAGE — a
-    // $0/negative list carrying a discount would silently become a full-price
-    // line that still claims "% preserved" (and would pass verification).
+    // positive old list total we cannot compute a correct discount — a $0/negative
+    // list would silently become a full-price line that still passes verification.
     const oldListTotal = roundMoney(moneyValue(item.List_Price) * qty);
     if (!(qty > 0) || !(oldListTotal > 0)) {
-      unmapped.push(`${sku} → ${target} (source line has non-positive qty/list price — cannot preserve discount)`);
+      unmapped.push(`${sku} → ${target} (source line has non-positive qty/list price — cannot compute discount)`);
       continue;
     }
-    // Preserve the line's discount PERCENTAGE onto the new list total.
-    const oldPct = moneyValue(item.Discount) / oldListTotal;
+    // Discount: co-term 7/10 apply a FIXED default term discount (7YR=50%, 10YR=60%
+    // off list, Chris 2026-07-14); standard 1/3/5 PRESERVE the source line's discount %.
+    const fixedPct = COTERM_DEFAULT_DISCOUNT[termNum];
+    const effPct = (fixedPct !== undefined) ? fixedPct : (moneyValue(item.Discount) / oldListTotal);
     const newListTotal = roundMoney(newList * qty);
-    const newDiscount = roundMoney(newListTotal * oldPct);
+    const newDiscount = roundMoney(newListTotal * effPct);
     // Carry a custom line Description forward, but DROP it if it embeds a term
     // string (a stale "3 Year" label would contradict the new term).
     const carryDesc = (typeof item.Description === 'string' && item.Description.trim()
@@ -10251,7 +10406,7 @@ async function retermQuoteLicenses(quoteId, targetTerm, env, personId = null) {
       old_id: item.id, sku, target_sku: target.toUpperCase(), new_product_id: String(newProductId),
       quantity: qty, sequence: item.Sequence_Number, description: carryDesc,
       new_list: newList, new_list_total: newListTotal,
-      discount_pct: Number((oldPct * 100).toFixed(2)), new_discount: newDiscount,
+      discount_pct: Number((effPct * 100).toFixed(2)), new_discount: newDiscount,
       new_net_total: roundMoney(newListTotal - newDiscount),
     });
   }
@@ -11168,10 +11323,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
       const isQuotesModule = toolInput?.module_name === 'Quotes';
       if (isQuotesModule && Array.isArray(items)) {
-        const activeCheck = preflightQuotedItemsProductActive(items);
+        const activeCheck = await preflightQuotedItemsProductActive(items, env);
         if (!activeCheck.valid) {
           const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
           const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';
+          // Observability (2026-07-14): surface the block in bot_usage.error_message
+          // so the daily monitor + digest see it. Before this, blocks hit only
+          // console.log and were invisible in D1 (error_reports #1 root cause).
+          await logValidationBlockToD1(env, personId, toolName, activeCheck);
           return {
             validation_error: true,
             action: blockAction,
@@ -11668,9 +11827,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids before writing
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
-          const activeCheck = preflightQuotedItemsProductActive(recordData.Quoted_Items);
+          const activeCheck = await preflightQuotedItemsProductActive(recordData.Quoted_Items, env);
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            await logValidationBlockToD1(env, personId, 'zoho_create_record', activeCheck);
             return {
               validation_error: true,
               action: 'create_blocked',
@@ -12004,9 +12164,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids in Quoted_Items appends
         if (module_name === 'Quotes' && data.Quoted_Items) {
-          const activeCheck = preflightQuotedItemsProductActive(data.Quoted_Items);
+          const activeCheck = await preflightQuotedItemsProductActive(data.Quoted_Items, env);
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            await logValidationBlockToD1(env, personId, 'zoho_update_record', activeCheck);
             return {
               validation_error: true,
               action: 'update_blocked',
@@ -12955,7 +13116,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           apiLookups++;
           try {
             const prodResult = await zohoApiCall('GET',
-              `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(resolved)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+              `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(resolved)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`,
               env
             );
             const records = prodResult?.data || [];
@@ -12970,7 +13131,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (!match && !resolved.startsWith('LIC-')) {
               const eqVariant = resolved.endsWith('=') ? resolved.slice(0, -1) : `${resolved}=`;
               const eqResult = await zohoApiCall('GET',
-                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`,
                 env
               ).catch(() => null);
               const eqMatch = (eqResult?.data || []).find(r => r.Product_Code === eqVariant);
@@ -12988,6 +13149,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               ecomm_price: cachedPrice?.price || null,
               discount_per_unit: cachedPrice?.discount_per_unit || 0,
               discount_pct: cachedPrice?.discount_pct || 0,
+              product_active: match ? (match.Product_Active === false ? false : true) : undefined,
               found: !!match
             };
             if (matchedCode && matchedCode !== resolved) {
@@ -14875,7 +15037,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const { quote_id, target_term } = toolInput;
         if (!quote_id) return { success: false, error: 'quote_id is required' };
         if (target_term === undefined || target_term === null || target_term === '') {
-          return { success: false, error: 'target_term is required (1, 3, or 5 — the number of years)' };
+          return { success: false, error: 'target_term is required (1, 3, 5, 7, or 10 — the number of years)' };
         }
         return await retermQuoteLicenses(quote_id, target_term, env, personId);
       }
@@ -16764,12 +16926,12 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'reterm_quote_licenses',
-    description: 'Change a Zoho Quote\'s LICENSE terms to 1, 3, or 5 years, deterministically. Use this for ANY request to re-term / convert / switch a quote\'s licenses to a different year length — "change to 1 year licenses", "make this a 3-year option", "1yr version of this quote", "convert the licenses to 5 year". It maps every termed license line (LIC-*-1YR/3YR/5YR and -1Y/-3Y/-5Y) to the target-term SKU, preserves each line\'s discount PERCENTAGE, and leaves all hardware / SFP / cable / antenna / sensor lines untouched — in ONE atomic write. NEVER hand-assemble zoho_update_record delete+add rows to re-term a quote: that is slow, error-prone, and this tool is the only correct path (it fails closed if any license has no target-term SKU rather than half-re-terming). target_term is the number of years: 1, 3, or 5. Claim success only when verification.success === true; report the from→to per line and the Grand Total change. To change a quote\'s term again (including reverting), call this tool again with the desired term — do NOT use undo_crm_action for a re-term.',
+    description: 'Change a Zoho Quote\'s LICENSE terms to 1, 3, 5, 7, or 10 years, deterministically. Use this for ANY request to re-term / convert / switch a quote\'s licenses to a different year length — "change to 1 year licenses", "make this a 3-year option", "1yr version of this quote", "convert the licenses to 5 year", "re-term to 7 year", "make it a 10 year co-term". It maps every termed license line (LIC-*-1YR/3YR/5YR and -1Y/-3Y/-5Y) to the target-term SKU and writes in ONE atomic delete+add. Standard terms 1/3/5 PRESERVE each line\'s discount PERCENTAGE; co-term 7/10 (Zoho-quote-only) resolve the target SKU live from Zoho and apply a FIXED default discount (7YR 50%, 10YR 60% off list). Hardware / SFP / cable / antenna / sensor lines are left untouched. NEVER hand-assemble zoho_update_record delete+add rows to re-term a quote: that is slow, error-prone, and this tool is the only correct path (it fails closed if any license has no target-term SKU rather than half-re-terming). target_term is the number of years: 1, 3, 5, 7, or 10. Claim success only when verification.success === true; report the from→to per line and the Grand Total change. To change a quote\'s term again (including reverting), call this tool again with the desired term — do NOT use undo_crm_action for a re-term.',
     input_schema: {
       type: 'object',
       properties: {
         quote_id: { type: 'string', description: 'Zoho Quote record ID to re-term (NOT the Quote_Number)' },
-        target_term: { type: 'number', enum: [1, 3, 5], description: 'Target license term in YEARS: exactly 1, 3, or 5 (no other value)' }
+        target_term: { type: 'number', enum: [1, 3, 5, 7, 10], description: 'Target license term in YEARS: 1, 3, 5, 7, or 10. 1/3/5 are standard; 7 and 10 are co-term (Zoho-quote-only) terms priced at a fixed default discount (7YR 50%, 10YR 60% off list).' }
       },
       required: ['quote_id', 'target_term']
     }
@@ -17938,8 +18100,8 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 
 **PRODUCT NOT FOUND — EXHAUST THE CATALOG FIRST.** Ladder: (1) batch_product_lookup (auto-normalizes dashes, -Y/-YR, and the '=' spare suffix); (2) on found:false check live_alternatives — a near-miss (trailing '=', length/size suffix) is usually the right part: confirm, then re-run with that exact spelling; (3) find_product_candidates with the user's wording; (4) web_search_sku ONLY after 1–3 miss — a web SKU is a LEAD, re-validate via batch_product_lookup. NEVER claim a part "isn't in our catalog" before steps 1–3 miss; finish resolving the product before any account/contact work.
 
-**MR Enterprise License — UNIVERSAL across all MR APs.** Only valid: LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR. NEVER invent (not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
-"5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1 year, 3 year, or 5 year?" — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
+**MR Enterprise License — UNIVERSAL across all MR APs.** The SKU form is **LIC-ENT-{term}YR**. 1YR / 3YR / 5YR are the standard ecomm-quotable terms; **7YR and 10YR are ALSO real, active Zoho products — but they are co-term licenses valid for ZOHO QUOTES ONLY (never ecomm/URL quotes).** So a term being absent from the local price cache does NOT mean it is invalid — before telling anyone a term "doesn't exist" or is "not real," verify with batch_product_lookup, which live-checks Zoho. NEVER invent MALFORMED forms (these specific patterns are not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
+"5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1, 3, or 5 year?" (7- and 10-year co-term licenses are also available on a Zoho quote if the customer wants them) — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
 
 **Family licenses:** MV → LIC-MV-{term}YR; MT → LIC-MT-{term}YR; MG → LIC-MG-{term}YR; MS and MX → MODEL-SPECIFIC (e.g. LIC-MX{model}-SEC-{term}YR), use batch_product_lookup.
 
@@ -17962,6 +18124,8 @@ Accounts FIRST, then Contacts (can run parallel). Quote lookups → search Quote
 
 **found: false ≠ invalid/inactive** — it means the SKU string matched no Product_Code. For a LIC-* SKU, the tool returns \`live_alternatives\` on the family prefix. For a HARDWARE / accessory SKU (e.g. a power supply) that misses, do NOT tell the user it "isn't in the catalog" — call \`find_product_candidates\` with the customer's wording to surface the real SKU (and \`web_search_sku\` only if that also misses AND the user asked you to find it; then re-validate any web SKU via batch_product_lookup before quoting). Report "not available" only after those finders fail. NEVER claim "inactive" / "discontinued" unless Zoho returned \`Product_Active: false\` on that specific record — non-standard terms (7YR, 10YR) may exist even if 1/3/5 are the defaults. The tool returns \`live_alternatives\` / \`hint\` (live query on the family prefix): propose the closest match from that list (it confirms the SKU exists → retry exact; only 1/3/5/10 exist → ask which). Never invent a reason.
 
+**INTEGRITY — trust live evidence over stale guardrails, and never claim unverified results.** (1) If a server guardrail rejects a product/id that you JUST confirmed real via a live lookup in THIS conversation (e.g. batch_product_lookup returned it with found:true / an active Zoho record), treat that as a probable BUG in the guardrail, not proof the product is fake — say so plainly and surface it, do NOT tell the customer the product "isn't legitimate." (2) NEVER report that you created, cloned, or modified a Zoho record (quote/deal/task) unless the write tool returned success with a real record id — do not state or imply a record id you did not receive back. If a write failed or was blocked, say exactly that and what remains undone.
+
 ### Ecomm Pricing (DEFAULT)
 Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT set unit_price (Zoho uses stored list) or Description. List pricing only if the user explicitly asks "list price" / "no discount".
 
@@ -17975,7 +18139,7 @@ Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT
 "apply 20% margin" / "price at X% margin" / "set discounts to reflect a 20% margin" → call \`apply_margin_to_quote({quote_id, target_margin})\` (accepts 0.20 or 20). Do NOT compute the discounts yourself or via zoho_update_record: a flat % off list is NOT a margin — margin is measured against Stratus's distributor cost, which only this tool can pull (LIVE_GetQuoteData, CCW-approved cost). Errors: \`no_ccw_deal_number\` → quote must be Cisco-approved (DID) first, don't estimate; \`cost_data_unavailable\` / \`cost_match_failed\` → relay verbatim, quote NOT changed, don't guess. Claim success only on \`verification.success === true\`; report per-line evidence + undo token from \`message\`.
 
 ### License Re-terming (reterm_quote_licenses)
-"change to 1 year licenses" / "make this a 3-year quote" / "1yr version of this quote" / "convert the licenses to 5 year" — ANY change of a quote's license TERM → call \`reterm_quote_licenses({quote_id, target_term})\` where target_term is the number of YEARS (1, 3, or 5). This is the ONLY correct way to re-term a quote. Do NOT hand-assemble zoho_update_record delete+add rows for a term change — that is slow, truncates on large quotes, and thrashes. The tool maps every termed license line to its target-term SKU, preserves each line's discount %, leaves hardware/SFP/cable/antenna/sensor lines untouched, and writes atomically — fail-closed if any license has no target-term variant. Errors: \`unmapped_licenses\` → relay the SKUs with no N-year variant and ask how to proceed (quote NOT changed); \`nothing_to_reterm\` → already at that term. Claim success only on \`verification.success === true\`; report from→to per line + the Grand Total change (echo \`_user_visible_summary\`). A re-term is NOT undoable — to revert or re-change the term, call \`reterm_quote_licenses\` again with the desired year; NEVER \`undo_crm_action\` for a re-term.
+"change to 1 year licenses" / "make this a 3-year quote" / "1yr version of this quote" / "convert the licenses to 5 year" / "re-term to 7 year" / "10-year co-term" — ANY change of a quote's license TERM → call \`reterm_quote_licenses({quote_id, target_term})\` where target_term is the number of YEARS (1, 3, 5, 7, or 10; 7/10 are co-term Zoho-quote terms auto-priced at a fixed 50%/60% discount). This is the ONLY correct way to re-term a quote. Do NOT hand-assemble zoho_update_record delete+add rows for a term change — that is slow, truncates on large quotes, and thrashes. The tool maps every termed license line to its target-term SKU, preserves each line's discount %, leaves hardware/SFP/cable/antenna/sensor lines untouched, and writes atomically — fail-closed if any license has no target-term variant. Errors: \`unmapped_licenses\` → relay the SKUs with no N-year variant and ask how to proceed (quote NOT changed); \`nothing_to_reterm\` → already at that term. Claim success only on \`verification.success === true\`; report from→to per line + the Grand Total change (echo \`_user_visible_summary\`). A re-term is NOT undoable — to revert or re-change the term, call \`reterm_quote_licenses\` again with the desired year; NEVER \`undo_crm_action\` for a re-term.
 
 ### Quote Update Workflow (minimize tool calls)
 1. URL provided → parse_quote_url. Else → batch_product_lookup for ALL SKUs in ONE call.
@@ -21318,7 +21482,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
         const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
         const isQuotesModule = toolInput?.module_name === 'Quotes';
         if (isQuotesModule && Array.isArray(items)) {
-          const activeCheck = preflightQuotedItemsProductActive(items);
+          const activeCheck = await preflightQuotedItemsProductActive(items, env, { dryRun: true });
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
             const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';

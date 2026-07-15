@@ -49,8 +49,8 @@ function buildShim() {
 const { parseZohoResponse, preflightQuotedItemsProductActive, prices } = buildShim();
 
 let pass = 0, fail = 0;
-function t(name, fn) {
-  try { fn(); console.log(`  ✅ ${name}`); pass++; }
+async function t(name, fn) {
+  try { await fn(); console.log(`  ✅ ${name}`); pass++; }
   catch (e) { console.log(`  ❌ ${name}\n     ${e.message}`); fail++; }
 }
 
@@ -58,9 +58,10 @@ const SME5_ID = '2570562000001277655'; // LIC-SME-5YR — inactive in Zoho
 const SME3_ID = '2570562000001277654'; // LIC-SME-3YR — deactivated in Zoho 2026-06-26 (SME discontinued)
 const IVANTI3_ID = '2570562000414875795'; // LIC-MI-EMSC-D-1YMC-A-3YR — active replacement
 
+(async () => {
 console.log('── parseZohoResponse: inactive-product terminal handling ──');
 
-t('inactive-product error is terminal (_no_retry) with stop guidance', () => {
+await t('inactive-product error is terminal (_no_retry) with stop guidance', () => {
   const r = parseZohoResponse({
     data: [{ code: 'NOT_ALLOWED', message: "can't add inactive product in the inventory",
              details: { api_name: 'id', json_path: '$.data[0].Quoted_Items[0].Product_Name.id' } }]
@@ -70,7 +71,7 @@ t('inactive-product error is terminal (_no_retry) with stop guidance', () => {
   assert.ok(/TERMINAL/i.test(r.message) && /do NOT retry/i.test(r.message), 'message must tell the agent to stop');
 });
 
-t('a NON-inactive NOT_ALLOWED stays a normal (retryable) failure', () => {
+await t('a NON-inactive NOT_ALLOWED stays a normal (retryable) failure', () => {
   const r = parseZohoResponse({ data: [{ code: 'NOT_ALLOWED', message: 'permission denied' }] }, 'Quotes record update');
   assert.strictEqual(r.success, false);
   assert.ok(!r._no_retry, 'should NOT be marked terminal');
@@ -78,38 +79,38 @@ t('a NON-inactive NOT_ALLOWED stays a normal (retryable) failure', () => {
 
 console.log('── parseZohoResponse: stop masking errors as success ──');
 
-t('top-level error shape (INVALID_URL_PATTERN, no data[]) → failure', () => {
+await t('top-level error shape (INVALID_URL_PATTERN, no data[]) → failure', () => {
   const r = parseZohoResponse({ code: 'INVALID_URL_PATTERN', status: 'error', message: 'invalid url' }, 'Deals record update');
   assert.strictEqual(r.success, false, 'must NOT report a Zoho error as ✅ completed');
 });
 
-t('genuine non-standard success (no code/error) still succeeds', () => {
+await t('genuine non-standard success (no code/error) still succeeds', () => {
   const r = parseZohoResponse({ ok: true, foo: 'bar' }, 'operation');
   assert.strictEqual(r.success, true);
 });
 
-t('standard SUCCESS still succeeds', () => {
+await t('standard SUCCESS still succeeds', () => {
   const r = parseZohoResponse({ data: [{ code: 'SUCCESS', details: { id: '123' } }] }, 'Quotes record create');
   assert.strictEqual(r.success, true);
   assert.strictEqual(r.record_id, '123');
 });
 
-console.log('── preflightQuotedItemsProductActive: zoho_active guard ──');
+console.log('── preflightQuotedItemsProductActive: zoho_active guard (static-map path, no env) ──');
 
-t('catalog confirms LIC-SME-5YR is flagged zoho_active:false', () => {
+await t('catalog confirms LIC-SME-5YR is flagged zoho_active:false', () => {
   assert.strictEqual(prices['LIC-SME-5YR'].zoho_active, false);
 });
 
-t('NEW line item with inactive SME-5YR is blocked with INACTIVE guidance', () => {
-  const res = preflightQuotedItemsProductActive([
+await t('NEW line item with inactive SME-5YR is blocked with INACTIVE guidance', async () => {
+  const res = await preflightQuotedItemsProductActive([
     { Product_Name: { id: SME5_ID }, Quantity: 84, Discount: 3192 }
   ]);
   assert.strictEqual(res.valid, false, 'should block');
   assert.ok(res.errors.some(e => /INACTIVE in Zoho/i.test(e)), 'error should name it inactive in Zoho');
 });
 
-t('NEW line item with discontinued SME-3YR is blocked and points at the replacement', () => {
-  const res = preflightQuotedItemsProductActive([
+await t('NEW line item with discontinued SME-3YR is blocked and points at the replacement', async () => {
+  const res = await preflightQuotedItemsProductActive([
     { Product_Name: { id: SME3_ID }, Quantity: 84 }
   ]);
   const inactiveErr = (res.errors || []).find(e => /INACTIVE in Zoho/i.test(e));
@@ -117,22 +118,33 @@ t('NEW line item with discontinued SME-3YR is blocked and points at the replacem
   assert.ok(/LIC-MI-EMSC-D-1YMC-A-3YR/.test(inactiveErr), `guidance must name the replacement: ${inactiveErr}`);
 });
 
-t('NEW line item with the ACTIVE Ivanti replacement is NOT blocked as inactive', () => {
-  const res = preflightQuotedItemsProductActive([
+await t('NEW line item with the ACTIVE Ivanti replacement is NOT blocked as inactive', async () => {
+  const res = await preflightQuotedItemsProductActive([
     { Product_Name: { id: IVANTI3_ID }, Quantity: 84 }
   ]);
   const inactiveErr = (res.errors || []).some(e => /INACTIVE in Zoho/i.test(e));
   assert.ok(!inactiveErr, 'active replacement must not trip the inactive guard');
 });
 
-t('in-place modify (item has id) is left to the terminal-error net (not pre-blocked)', () => {
+await t('in-place modify (item has id) is left to the terminal-error net (not pre-blocked)', async () => {
   // Existing line items (with an id) are intentionally skipped by preflight; the
   // parseZohoResponse terminal handler is the safety net for those.
-  const res = preflightQuotedItemsProductActive([
+  const res = await preflightQuotedItemsProductActive([
     { id: '999', Product_Name: { id: SME5_ID }, Quantity: 84 }
   ]);
   assert.strictEqual(res.valid, true);
 });
 
+await t('unknown id with NO env falls back to fail-fast INVALID block (benchmark-safe)', async () => {
+  // No env → cannot live-verify; an id absent from the static map is treated as
+  // invalid/fabricated, preserving benchmark fabrication-catching.
+  const res = await preflightQuotedItemsProductActive([
+    { Product_Name: { id: '2570562000999999999' }, Quantity: 1 }
+  ]);
+  assert.strictEqual(res.valid, false, 'unknown id with no env must block');
+  assert.ok((res.errors || []).some(e => /INVALID PRODUCT ID/i.test(e)), 'should use the corrected INVALID (not FABRICATED) wording');
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
+})();
