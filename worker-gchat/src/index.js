@@ -396,7 +396,7 @@ const MODEL_PRICING = {
   'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
   'claude-sonnet-4-20250514': { input: 3.00, output: 15.00 },
   'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
-  'claude-opus-4-6': { input: 15.00, output: 75.00 },
+  'claude-opus-4-6': { input: 5.00, output: 25.00 },
   // Opus 4.8 (2026): $5 / $25 per 1M tokens — ~1.67x Sonnet 4.6, NOT the
   // legacy $15/$75 Opus rate. Used when CRM_AGENT_FORCE_MODEL routes here.
   'claude-opus-4-8': { input: 5.00, output: 25.00 },
@@ -23010,11 +23010,13 @@ const BENCHMARK_TASKS = [
 ];
 
 const BENCHMARK_MODELS = [
-  { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
+  { id: 'claude', label: 'Claude (default tier)', type: 'claude' },
   // Explicit model-pinned entries for a clean Sonnet-vs-Opus A/B — each forces
   // its own model per-request via the benchmark env proxy, so the result does
   // NOT depend on the live CRM_AGENT_FORCE_MODEL flag's current value.
-  { id: 'claude-sonnet', label: 'Claude Sonnet 4.6 (pinned)', type: 'claude', forceModel: 'claude-sonnet-5' },
+  { id: 'claude-sonnet', label: 'Claude Sonnet 5 (pinned)', type: 'claude', forceModel: 'claude-sonnet-5' },
+  { id: 'claude-sonnet-46', label: 'Claude Sonnet 4.6 (pinned)', type: 'claude', forceModel: 'claude-sonnet-4-6' },
+  { id: 'claude-opus-46', label: 'Claude Opus 4.6 (pinned)', type: 'claude', forceModel: 'claude-opus-4-6' },
   { id: 'claude-opus', label: 'Claude Opus 4.8 (pinned)', type: 'claude', forceModel: 'claude-opus-4-8' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', type: 'deepseek' },
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', type: 'deepseek' },
