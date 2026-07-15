@@ -392,6 +392,7 @@ function parseExplicitSkuRequestBeforeClassifier(rawText) {
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
 // Pricing per 1M tokens (USD) by model
 const MODEL_PRICING = {
+  'claude-sonnet-5': { input: 3.00, output: 15.00 },
   'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
   'claude-sonnet-4-20250514': { input: 3.00, output: 15.00 },
   'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
@@ -409,7 +410,7 @@ const MODEL_PRICING = {
 // [vars] entry or `wrangler secret put CRM_AGENT_FORCE_MODEL` (secret = flip
 // with no redeploy):
 //   off | '' | false → default behavior (Sonnet executor + Haiku dispatch)
-//   sonnet           → claude-sonnet-4-6
+//   sonnet           → claude-sonnet-5
 //   opus             → claude-opus-4-8
 //   haiku            → claude-haiku-4-5-20251001
 //   <full model id>  → used verbatim (must start with 'claude-')
@@ -418,7 +419,7 @@ const MODEL_PRICING = {
 // Haiku dispatch downshift and the (disabled) advisor injection.
 const CRM_FORCE_MODEL_ALIASES = {
   opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-4-6',
+  sonnet: 'claude-sonnet-5',
   haiku: 'claude-haiku-4-5-20251001',
 };
 function resolveForcedCrmModel(env) {
@@ -436,7 +437,7 @@ function resolveForcedCrmModel(env) {
 // injection sites). Non-Anthropic models (DeepSeek/CF) never carry it, so pass
 // effectiveModel='' for those.
 function advisorToolActive(env, effectiveModel) {
-  return env?.ENABLE_ADVISOR_TOOL === 'true' && effectiveModel === 'claude-sonnet-4-6';
+  return env?.ENABLE_ADVISOR_TOOL === 'true' && effectiveModel === 'claude-sonnet-5';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -864,7 +865,7 @@ function estimateDeepSeekCostUsd(model, usage = {}) {
 async function trackUsage(env, model, usage, source, evalContext = null, extras = null, personId = null) {
   if (!usage || !env?.CONVERSATION_KV) return;
   try {
-    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-5'];
     const inputCost = (usage.input_tokens / 1_000_000) * pricing.input;
     const outputCost = (usage.output_tokens / 1_000_000) * pricing.output;
     const totalCost = inputCost + outputCost;
@@ -1591,7 +1592,7 @@ function createTracer(env, bot) {
 // Schema:
 //   blobs[0] = bot ('webex'|'gchat'|'addon')
 //   blobs[1] = response_path ('deterministic'|'claude'|'crm_agent'|'pricing'|'error')
-//   blobs[2] = model (e.g. 'claude-sonnet-4-6' or 'none')
+//   blobs[2] = model (e.g. 'claude-sonnet-5' or 'none')
 //   doubles[0] = duration_ms
 //   doubles[1] = input_tokens
 //   doubles[2] = output_tokens
@@ -7072,7 +7073,7 @@ async function processEmailThread(text, personId, env, kv) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         max_tokens: 512,
         // Deterministic JSON task — no thinking (the corp AI Gateway otherwise
         // injects a thinking block that displaces content[0]).
@@ -7088,7 +7089,7 @@ async function processEmailThread(text, personId, env, kv) {
     }
 
     const data = await response.json();
-    trackUsage(env, 'claude-sonnet-4-6', data.usage, 'email-parse').catch(() => {});
+    trackUsage(env, 'claude-sonnet-5', data.usage, 'email-parse').catch(() => {});
     const rawJson = extractClaudeText(data).trim();
 
     // Parse JSON response
@@ -19067,7 +19068,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     const contModel = _forcedCrmModelCont
       || ((iteration > 3 && _isPureExec && _contHaikuDispatchOK)
         ? 'claude-haiku-4-5-20251001'
-        : 'claude-sonnet-4-6');
+        : 'claude-sonnet-5');
     console.log(`[GCHAT-CONTINUE] Model: ${contModel}${_forcedCrmModelCont ? ' (FORCED)' : ''} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
     // max_tokens: flat 8192 for the CRM tool path. A bulk zoho_update_record
@@ -19082,7 +19083,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     // enum, so Claude calls to it produce blocks that fail schema validation
     // on subsequent iterations. Re-enable only when the beta is verified live.
     let contTools = tools;
-    if (contModel === 'claude-sonnet-4-6' && tools.length > 0 && env.ENABLE_ADVISOR_TOOL === 'true') {
+    if (contModel === 'claude-sonnet-5' && tools.length > 0 && env.ENABLE_ADVISOR_TOOL === 'true') {
       contTools = [
         ...tools,
         { type: 'advisor_20260301', name: 'advisor', model: 'claude-opus-4-6' }
@@ -20494,7 +20495,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // Build system prompt dynamically — conditionally loads EMAIL INTAKE and ADMIN ACTION
       // sections only when relevant intent is detected, saving ~2K tokens on standard requests.
       const _ownerCtx_crm = await getOwnerContext(env, env && env.__CALLER_EMAIL);
-      systemPrompt = buildCrmSystemPrompt(userMessage, _ownerCtx_crm, advisorToolActive(env, resolveForcedCrmModel(env) || 'claude-sonnet-4-6'));
+      systemPrompt = buildCrmSystemPrompt(userMessage, _ownerCtx_crm, advisorToolActive(env, resolveForcedCrmModel(env) || 'claude-sonnet-5'));
 
       // CRM context injection: if a previous CRM turn saved context (quote ID, account,
       // line items), inject it so the agent can skip re-searching on follow-up messages.
@@ -20711,7 +20712,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const activeModel = _forcedCrmModel
         || ((useTools && iteration > 2 && _inPureExecMode && _askHaikuDispatchOK)
           ? 'claude-haiku-4-5-20251001'
-          : 'claude-sonnet-4-6');
+          : 'claude-sonnet-5');
       if (useTools) {
         console.log(`[GCHAT-AGENT] Model: ${activeModel}${_forcedCrmModel ? ' (FORCED)' : ''} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
@@ -20730,7 +20731,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // OPT-IN via env.ENABLE_ADVISOR_TOOL (default off as of 2026-05-14 —
       // see continuation-path comment for rationale).
       let activeTools = tools;
-      if (useTools && activeModel === 'claude-sonnet-4-6' && env.ENABLE_ADVISOR_TOOL === 'true') {
+      if (useTools && activeModel === 'claude-sonnet-5' && env.ENABLE_ADVISOR_TOOL === 'true') {
         activeTools = [
           ...tools,
           {
@@ -23013,7 +23014,7 @@ const BENCHMARK_MODELS = [
   // Explicit model-pinned entries for a clean Sonnet-vs-Opus A/B — each forces
   // its own model per-request via the benchmark env proxy, so the result does
   // NOT depend on the live CRM_AGENT_FORCE_MODEL flag's current value.
-  { id: 'claude-sonnet', label: 'Claude Sonnet 4.6 (pinned)', type: 'claude', forceModel: 'claude-sonnet-4-6' },
+  { id: 'claude-sonnet', label: 'Claude Sonnet 4.6 (pinned)', type: 'claude', forceModel: 'claude-sonnet-5' },
   { id: 'claude-opus', label: 'Claude Opus 4.8 (pinned)', type: 'claude', forceModel: 'claude-opus-4-8' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', type: 'deepseek' },
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', type: 'deepseek' },
@@ -23320,7 +23321,7 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
     systemPrompt = pickOptimizedPrompt(modelConfig.id, _ownerCtx_bench);
   } else {
     systemPrompt = typeof buildCrmSystemPrompt === 'function'
-      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench, advisorToolActive(env, modelConfig.type === 'claude' ? (modelConfig.forceModel || 'claude-sonnet-4-6') : ''))
+      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench, advisorToolActive(env, modelConfig.type === 'claude' ? (modelConfig.forceModel || 'claude-sonnet-5') : ''))
       : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
   }
 
@@ -23726,7 +23727,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // Force-Claude mode
   if (useClaudeOnly) {
     const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
-    return { ...r, model: 'claude-sonnet-4-6', tierUsed: 'claude', totalMs: Date.now() - startMs };
+    return { ...r, model: 'claude-sonnet-5', tierUsed: 'claude', totalMs: Date.now() - startMs };
   }
 
   // Force-Llama mode
@@ -23821,7 +23822,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       if (claudeResultLooksUsable(autoClaudeResult)) {
         return {
           ...autoClaudeResult,
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           tierUsed: 'claude-write-intent',
           llamaResult: null,
           gemmaResult: null,
@@ -23882,7 +23883,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
       return {
         reply: claudeResult.reply,
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         tierUsed: 'claude-fallback',
         llamaResult: llamaT.result,
         gemmaResult: null,
@@ -23900,7 +23901,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
     const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
     return {
       reply: claudeResult.reply,
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       tierUsed: 'claude-advisory-fallback',
       llamaResult: llamaT.result,
       gemmaResult: null,
@@ -23942,7 +23943,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
   return {
     reply: claudeResult.reply,
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     tierUsed: 'claude-fallback',
     llamaResult: llamaT.result,
     gemmaResult: gemmaT.result,
@@ -24897,7 +24898,7 @@ async function enrichCompanyV2(rawDomain, opts) {
       try {
         const abortSonnet = new AbortController();
         const sonnetTimeout = setTimeout(() => abortSonnet.abort(), 40000);
-        const sonnet = await callWebSearchEnrichment(env, domain, 'claude-sonnet-4-6', abortSonnet.signal);
+        const sonnet = await callWebSearchEnrichment(env, domain, 'claude-sonnet-5', abortSonnet.signal);
         clearTimeout(sonnetTimeout);
         trace.attempts.push({ tier: 'sonnet-web', has_source: !!sonnet.source_url, has_name: !!sonnet.name });
         if (sonnet.source_url && sonnet.name) {
@@ -25071,7 +25072,7 @@ async function enrichCompanyV2(rawDomain, opts) {
                   'anthropic-version': '2023-06-01'
                 },
                 body: JSON.stringify({
-                  model: 'claude-sonnet-4-6',
+                  model: 'claude-sonnet-5',
                   max_tokens: 500,
                   thinking: { type: 'disabled' },
                   system: `You are a concise email analyzer for a Stratus Information Systems sales rep (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
@@ -25088,7 +25089,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
 
               if (summaryResp.ok) {
                 const summaryData = await summaryResp.json();
-                ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', summaryData.usage, 'addon-analyze'));
+                ctx.waitUntil(trackUsage(env, 'claude-sonnet-5', summaryData.usage, 'addon-analyze'));
                 const text = extractClaudeText(summaryData);
                 try {
                   const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
@@ -25341,7 +25342,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
                 'anthropic-version': '2023-06-01'
               },
               body: JSON.stringify({
-                model: 'claude-sonnet-4-6',
+                model: 'claude-sonnet-5',
                 max_tokens: 1500,
                 // 2026-07-09 (blank drafts): sonnet-5 runs adaptive thinking when the
                 // param is omitted — the thinking block displaced content[0] AND its
@@ -25399,7 +25400,7 @@ CRITICAL URL RULES:
             }
 
             const draftData = await draftResp.json();
-            ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', draftData.usage, 'addon-draft'));
+            ctx.waitUntil(trackUsage(env, 'claude-sonnet-5', draftData.usage, 'addon-draft'));
             const draftText = extractClaudeText(draftData);
             var parsedDraft;
             try {
@@ -30209,7 +30210,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         // Step 2: Test Anthropic API with tools
         const testBody = {
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           max_tokens: 256,
           system: 'You are a test assistant. Respond with "API working" and use the test_tool to confirm tool use works.',
           messages: [{ role: 'user', content: 'test' }],

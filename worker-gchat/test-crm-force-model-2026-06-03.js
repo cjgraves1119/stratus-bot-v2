@@ -53,7 +53,7 @@ function t(name, fn) {
 
 console.log('── resolveForcedCrmModel: aliases + passthrough ──');
 t('opus → claude-opus-4-8', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'opus' }), 'claude-opus-4-8'));
-t('sonnet → claude-sonnet-4-6', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'sonnet' }), 'claude-sonnet-4-6'));
+t('sonnet → claude-sonnet-5', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'sonnet' }), 'claude-sonnet-5'));
 t('haiku → claude-haiku-4-5-20251001', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'haiku' }), 'claude-haiku-4-5-20251001'));
 t('case-insensitive (OPUS)', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'OPUS' }), 'claude-opus-4-8'));
 t('full claude-* id passthrough', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'claude-opus-4-8' }), 'claude-opus-4-8'));
