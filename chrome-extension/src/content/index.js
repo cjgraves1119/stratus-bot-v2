@@ -280,7 +280,7 @@ function extractThreadOrderUrls() {
     const textMatches = (el.innerText || '').match(new RegExp(ORDER_URL_RE.source, 'gi')) || [];
     for (let raw of [...hrefs, ...textMatches]) {
       if (!raw || !/stratusinfosystems\.com/i.test(raw)) continue;
-      const gm = raw.match(/^https?:\/\/www\.google\.com\/url\?.*?[?&]q=([^&]+)/i);
+      const gm = raw.match(/^https?:\/\/www\.google\.com\/url\?(?:[^&]*&)*q=([^&]+)/i);
       if (gm) { try { raw = decodeURIComponent(gm[1]); } catch { /* keep raw */ } }
       const m = raw.match(ORDER_URL_RE);
       if (!m) continue;

@@ -1138,11 +1138,25 @@ async function updateCrmOpVerdict(env, opId, { status, errorMessage, details }) 
  *   - retried: true if we exhausted a single 5xx/network retry
  *   - http_classified: 'transient' | 'validation' | 'unknown' — drives retry decision and telemetry
  */
+function normalizeCallerEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+$/.test(email) ? email : null;
+}
+
+// Cloudflare reuses the bindings object across concurrent isolate requests.
+// Never write request identity onto that shared object: a prototype-scoped
+// wrapper keeps every deep env.__CALLER_EMAIL read request/work-item local.
+function callerScopedEnv(env, callerEmail = null) {
+  const scoped = Object.create(env || null);
+  scoped.__CALLER_EMAIL = normalizeCallerEmail(callerEmail);
+  return scoped;
+}
+
 // Extract the caller email from a gateway/extension personId ('gw:<email>' /
 // 'ext:<email>'). Returns null for cron/system/legacy ids. (R6 owner fix.)
 function callerEmailFromPersonId(personId) {
   const m = /^(?:gw|ext):([^\s@]+@[^\s@]+)$/i.exec(String(personId || '').trim());
-  return m ? m[1].toLowerCase() : null;
+  return m ? normalizeCallerEmail(m[1]) : null;
 }
 
 async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, ownerId }) {
@@ -1158,7 +1172,8 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
   // ("IT Stratus" on corp) because callers never passed ownerId. Resolution
   // order: explicit ownerId arg (caller knows best — e.g. the Deal Owner the
   // user set on a direct zoho_create_record) → the REQUESTING USER (caller
-  // email from env.__CALLER_EMAIL or the gw:/ext: personId, resolved via the
+  // email carried by the gw:/ext: work-item personId first, then the request-
+  // scoped env.__CALLER_EMAIL, resolved via the
   // D1 users roster; roster hits only — the roster's own system fallback is
   // NOT accepted here so we can fall through) → the parent Deal's Owner →
   // SYSTEM_OWNER_ID (cron/system paths only).
@@ -1166,7 +1181,8 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
   let _taskOwnerSource = _taskOwnerId ? 'caller_arg' : '';
   if (!_taskOwnerId) {
     try {
-      const _callerEmail = (env && env.__CALLER_EMAIL) || callerEmailFromPersonId(personId);
+      const _callerEmail = callerEmailFromPersonId(personId)
+        || normalizeCallerEmail(env && env.__CALLER_EMAIL);
       if (_callerEmail) {
         const _octx = await getOwnerContext(env, _callerEmail);
         if (_octx && _octx.zoho_user_id && (_octx._source === 'd1' || _octx._source === 'seed')) {
@@ -2037,7 +2053,11 @@ function looksLikeZohoQuoteIntent(text) {
 // 2 Z3 ENT licenses" sent while ON a Zoho Quote page returned an /order/ URL.)
 function isExplicitEcommUrlAsk(text) {
   if (!text || typeof text !== 'string') return false;
-  return /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b/i.test(text);
+  // Same guards as classifier rule 1 (adversarial review 2026-07-15): a link TO
+  // a CRM record, or a zoho/crm-marked ask, is not an ecomm ask and must not
+  // unpin Tier-0 routing away from the CRM agent.
+  if (/\b(zoho|crm)\b/i.test(text)) return false;
+  return /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b(?!\s+(?:to|for)\s+(?:the\s+|that\s+|this\s+|my\s+)?(?:deal|account|contact|record|task|invoice|sales\s*order|so\b|po\b))/i.test(text);
 }
 
 function hasActiveZohoPageContext(text) {
@@ -7985,7 +8005,7 @@ const ZOHO_QUOTE_ITEMS_ALLOWED_MODULES = Object.keys(ZOHO_QUOTE_ITEMS_SUBFORM_FI
 
 // Cisco/Meraki SKU token extractor — used when a subform row has no
 // Product_Code and we must recover a SKU from the free-text product name.
-const ZOHO_QUOTE_ITEMS_SKU_REGEX = /\b(MR\d{2,3}[A-Z0-9-]*|MS\d{3}[A-Z0-9-]*|MX\d{2,3}[A-Z0-9-]*|CW\d{4}[A-Z0-9-]*|MV\d{2,3}[A-Z0-9-]*|MT\d{2,3}[A-Z0-9-]*|MG\d{2,3}[A-Z0-9-]*|C9\d{3}[A-Z0-9-]*|Z\d[A-Z0-9-]*|LIC-[A-Z0-9-]+|SUB-[A-Z0-9-]+|PWR-[A-Z0-9-]+|MA-[A-Z0-9-]+)\b/i;
+const ZOHO_QUOTE_ITEMS_SKU_REGEX = /\b(FED-[A-Z0-9-]+|MR\d{2,3}[A-Z0-9-]*|MS\d{3}[A-Z0-9-]*|MX\d{2,3}[A-Z0-9-]*|CW\d{4}[A-Z0-9-]*|MV\d{2,3}[A-Z0-9-]*|MT\d{2,3}[A-Z0-9-]*|MG\d{2,3}[A-Z0-9-]*|C9\d{3}[A-Z0-9-]*|Z\d[A-Z0-9-]*|LIC-[A-Z0-9-]+|SUB-[A-Z0-9-]+|PWR-[A-Z0-9-]+|MA-[A-Z0-9-]+)\b/i;
 
 /**
  * Map Zoho v8 subform rows → minimal { sku, qty } line items.
@@ -8680,19 +8700,36 @@ async function correctQuotedItemDiscounts(quotedItems, env) {
         const liveSku = rec && rec.Product_Code ? String(rec.Product_Code).toUpperCase() : null;
         const cm = liveSku ? liveSku.match(/-(10|7)(?:YR|Y-S\d+|Y)$/) : null;
         // R2 (2026-07-15): FED- (FedRAMP) SKUs are live-only too and carry a
-        // FIXED 35% default discount regardless of term — enforced here on the
-        // generic create/update path, same double-enforcement pattern as the
-        // 7/10YR co-term fix (the conversion tool applies it on its own path).
+        // 35% DEFAULT discount regardless of term. Unlike co-term pricing,
+        // FedRAMP explicitly supports a user-approved override, so the generic
+        // path may default an omitted Discount but must preserve a supplied one.
         const isFedRamp = liveSku && /^FED-/.test(liveSku);
-        const coPct = isFedRamp ? FEDRAMP_DEFAULT_DISCOUNT : (cm ? COTERM_DEFAULT_DISCOUNT[Number(cm[1])] : undefined);
+        const coPct = cm ? COTERM_DEFAULT_DISCOUNT[Number(cm[1])] : undefined;
         const liveList = rec ? moneyValue(rec.Unit_Price) : 0;
-        if (coPct !== undefined) {
+        if (isFedRamp) {
           if (!(liveList > 0)) {
-            failures.push({ sku: liveSku || productId, product_id: productId, error: `${isFedRamp ? 'FedRAMP' : 'co-term'} SKU has no live list price — cannot enforce fixed discount` });
+            failures.push({ sku: liveSku || productId, product_id: productId, error: 'FedRAMP SKU has no live list price — cannot apply or validate its discount' });
+          } else if (item.Discount == null || item.Discount === '') {
+            const fedDiscount = roundMoney(liveList * qty * FEDRAMP_DEFAULT_DISCOUNT);
+            console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): fedramp default ${FEDRAMP_DEFAULT_DISCOUNT * 100}% — setting omitted Discount=${fedDiscount} (list=${liveList}, qty=${qty})`);
+            item.Discount = fedDiscount;
+            corrected++;
+          } else {
+            const suppliedDiscount = Number(item.Discount);
+            const lineList = liveList * qty;
+            if (!Number.isFinite(suppliedDiscount) || suppliedDiscount < 0 || suppliedDiscount >= lineList) {
+              failures.push({ sku: liveSku, product_id: productId, error: `FedRAMP Discount ${item.Discount} is not a valid flat-dollar discount for line list ${roundMoney(lineList)}` });
+            } else {
+              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): preserving supplied FedRAMP Discount=${item.Discount}; explicit user overrides beat the 35% default`);
+            }
+          }
+        } else if (coPct !== undefined) {
+          if (!(liveList > 0)) {
+            failures.push({ sku: liveSku || productId, product_id: productId, error: 'co-term SKU has no live list price — cannot enforce fixed discount' });
           } else {
             const coDiscount = roundMoney(liveList * qty * coPct);
             if (item.Discount === undefined || Math.abs((item.Discount || 0) - coDiscount) > 1) {
-              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): ${isFedRamp ? 'fedramp' : 'co-term'} ${coPct * 100}% — setting Discount=${coDiscount} (list=${liveList}, qty=${qty})`);
+              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): co-term ${coPct * 100}% — setting Discount=${coDiscount} (list=${liveList}, qty=${qty})`);
               item.Discount = coDiscount;
               corrected++;
             }
@@ -8783,6 +8820,14 @@ function defaultQuoteDealDate(created = new Date()) {
   const lastDay = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
   const daysToMonthEnd = lastDay - t.getUTCDate();
   return { date, needsConfirmation: daysToMonthEnd < 7, daysToMonthEnd };
+}
+
+// A user's local "today" can be the previous UTC calendar day during US
+// evenings. Accept a one-day UTC grace at user-facing date gates so a confirmed
+// local-today value is not rejected merely because Workers has crossed midnight.
+function earliestAcceptedUserDate(now = new Date()) {
+  const t = now instanceof Date ? now : new Date(now);
+  return new Date(t.getTime() - 86400000).toISOString().split('T')[0];
 }
 
 async function validateCrmWrite(module_name, data, isCreate = false, env = null) {
@@ -8876,10 +8921,15 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
       const parsedDate = new Date(data.Closing_Date + 'T00:00:00');
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      if (isNaN(parsedDate.getTime()) || parsedDate < today) {
+      const invalidDate = isNaN(parsedDate.getTime());
+      const pastDate = !invalidDate && parsedDate < today;
+      // A valid past date on UPDATE is an intentional backfill and must remain
+      // writable after the user confirms it. Fresh creates still fail closed,
+      // so the model cannot hallucinate a past date onto a new Deal.
+      if (invalidDate || (isCreate && pastDate)) {
         const dd = defaultQuoteDealDate();
-        if (dd.needsConfirmation) {
-          errors.push(`❌ closing_date_needs_confirmation: Closing_Date "${data.Closing_Date}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm the close date (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Quote's Valid_Till.`);
+        if (dd.needsConfirmation && isCreate) {
+          errors.push(`❌ closing_date_needs_confirmation: Closing_Date "${data.Closing_Date}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm a valid close date of today or later (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Quote's Valid_Till.`);
         } else {
           console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${dd.date}`);
           data.Closing_Date = dd.date;
@@ -10669,9 +10719,15 @@ async function convertQuoteLicensesFedramp(quoteId, opts, env, personId = null) 
     if (!(qty > 0)) { unmapped.push(`${sku} → ${target} (source line has non-positive quantity)`); continue; }
     const newListTotal = roundMoney(econ.list * qty);
     const newDiscount = roundMoney(newListTotal * pct);
+    // FedRAMP conversion changes the product family, not the license term, so
+    // every nonblank customer-facing line note remains valid and must survive
+    // the delete+add replacement (reterm uses the same carry-forward pattern,
+    // with an extra stale-term filter because reterm actually changes term).
+    const carryDesc = (typeof item.Description === 'string' && item.Description.trim())
+      ? item.Description : undefined;
     convertLines.push({
       old_id: item.id, sku, target_sku: target, new_product_id: String(econ.product_id),
-      quantity: qty, sequence: item.Sequence_Number,
+      quantity: qty, sequence: item.Sequence_Number, description: carryDesc,
       new_list: econ.list, new_list_total: newListTotal,
       discount_pct: Number((pct * 100).toFixed(2)), new_discount: newDiscount,
       new_net_total: roundMoney(newListTotal - newDiscount),
@@ -10708,7 +10764,7 @@ async function convertQuoteLicensesFedramp(quoteId, opts, env, personId = null) 
   //       in the SAME PUT (additive PUT preserves omitted hardware rows). ──
   const quotedItemsPayload = convertLines.flatMap(l => ([
     { id: l.old_id, _delete: null },
-    { Product_Name: { id: l.new_product_id }, Quantity: l.quantity, List_Price: l.new_list, Discount: l.new_discount, Sequence_Number: l.sequence },
+    { Product_Name: { id: l.new_product_id }, Quantity: l.quantity, List_Price: l.new_list, Discount: l.new_discount, Sequence_Number: l.sequence, ...(l.description ? { Description: l.description } : {}) },
   ]));
   let putResult;
   try {
@@ -14780,8 +14836,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const _rawClosing = typeof toolInput.closing_date === 'string' ? toolInput.closing_date.trim() : '';
           if (_rawClosing) {
             const _cd = new Date(_rawClosing + 'T00:00:00Z');
-            const _todayStr = new Date().toISOString().split('T')[0];
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(_rawClosing) || isNaN(_cd.getTime()) || _rawClosing < _todayStr) {
+            const _earliestClosing = earliestAcceptedUserDate();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(_rawClosing) || isNaN(_cd.getTime()) || _rawClosing < _earliestClosing) {
               return {
                 success: false,
                 error: 'invalid_closing_date',
@@ -14793,7 +14849,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             closingDate = _rawClosing;
             results.steps.push(`Using user-confirmed close date ${closingDate} for Deal Closing_Date and Quote Valid_Till`);
           } else if (existingDealData?.Closing_Date
-              && existingDealData.Closing_Date >= new Date().toISOString().split('T')[0]) {
+              && existingDealData.Closing_Date >= earliestAcceptedUserDate()) {
             closingDate = existingDealData.Closing_Date;
             results.steps.push(`Quote Valid_Till matched to the existing Deal's Closing_Date ${closingDate}`);
           } else {
@@ -14858,6 +14914,55 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           if (dealId) {
             if (!reusedDealFromKv) results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
+
+            // Attach mode must preserve the R4 invariant: the parent Deal's
+            // Closing_Date and the new Quote's Valid_Till always match. A stale
+            // Deal used to be left untouched while the tool claimed both dates
+            // were updated. Write and re-fetch before creating the Quote so a
+            // rejected/non-durable Deal update fails closed.
+            const _existingClosing = String(existingDealData?.Closing_Date || '').slice(0, 10);
+            if (_existingClosing !== closingDate) {
+              let _dealDatePut;
+              try {
+                _dealDatePut = await zohoApiCall('PUT', `Deals/${dealId}`, env, {
+                  data: [{ Closing_Date: closingDate }]
+                });
+              } catch (e) {
+                return {
+                  success: false,
+                  error: 'deal_closing_date_sync_failed',
+                  instruction: `STOP. The existing Deal ${dealId} Closing_Date could not be updated to ${closingDate} (${e.message}). No Quote was created. Retry only after the Deal date can be written.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              const _dealDateRow = _dealDatePut?.data?.[0];
+              if (_dealDateRow?.code !== 'SUCCESS') {
+                return {
+                  success: false,
+                  error: 'deal_closing_date_sync_failed',
+                  instruction: `STOP. Zoho rejected Closing_Date ${closingDate} on existing Deal ${dealId}: ${_dealDateRow?.message || _dealDateRow?.code || 'unknown error'}. No Quote was created.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              let _verifiedDealDate = null;
+              try {
+                const _dealDateCheck = await zohoApiCall('GET', `Deals/${dealId}?fields=id,Closing_Date`, env);
+                _verifiedDealDate = String(_dealDateCheck?.data?.[0]?.Closing_Date || '').slice(0, 10);
+              } catch (_) { /* handled by the fail-closed comparison below */ }
+              if (_verifiedDealDate !== closingDate) {
+                return {
+                  success: false,
+                  error: 'deal_closing_date_sync_unverified',
+                  instruction: `STOP. Zoho accepted the Closing_Date update for existing Deal ${dealId}, but a verification read did not return ${closingDate}. No Quote was created; verify the Deal before retrying.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              existingDealData.Closing_Date = closingDate;
+              results.steps.push(`Updated and verified existing Deal Closing_Date ${_existingClosing || '(blank)'} → ${closingDate}; Quote Valid_Till will match`);
+            }
           } else {
             // ── HARD GATE (2026-07-02): "Meraki ISR Referal" REQUIRES a real
             // Cisco rep — creating it with the Stratus Sales placeholder is
@@ -15136,7 +15241,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             subjectLabel: _taskAccountLabel,
             env,
             personId,
-            ownerId: null
+            // A new Deal already has its resolved Owner in memory. Reused Deals
+            // intentionally fall through to their persisted Owner instead.
+            ownerId: existingDealId ? null : (dealData.Owner?.id || null)
           });
           if (_taskRes.success) {
             results.steps.push(`Created follow-up Task due ${_taskRes.dueDate} (${_taskRes.taskId})${_taskRes.retried ? ' [after 1 retry]' : ''}`);
@@ -17955,7 +18062,12 @@ const TOOL_SUBSETS = Object.freeze({
     'zoho_create_record', 'zoho_update_record',
     'clone_quote', 'apply_margin_to_quote', 'reterm_quote_licenses', 'convert_quote_licenses_fedramp', 'undo_crm_action', 'zoho_delete_record',
     'batch_product_lookup', 'find_product_candidates', 'web_search_sku', 'parse_quote_url',
-    'zoho_search_records', 'zoho_get_record',
+    // Full crm_read superset (2026-07-15): the escalation net + rule 6 err
+    // toward crm_write on the premise that no read capability is lost — these
+    // three were missing, degrading escalated reads (related-record traversal,
+    // picklist/field reads, license-key recovery).
+    'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
+    'zoho_get_field', 'find_customer_license_claim_key',
     // 2026-06-09 SEDA postmortem: "create a quote based off this email" classifies as
     // crm_write, but without the Gmail READ tools the agent cannot recover a missing
     // email body and is forced to ask the user to paste it. Read-only — no draft/send.
@@ -18060,7 +18172,9 @@ function classifyCrmIntent(text, ctx = {}) {
   // even if Cisco rep keywords appear elsewhere (e.g. in CRM context preamble).
   // This prevents the prior misclassification where create_deal_and_quote got
   // stripped because @cisco.com was in context.
-  if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote|deal|po|order|sales\s*order)\b/.test(t)) {
+  // quote/order followed by link|url is an ECOMM ask ("create a quote link") —
+  // excluded here so rule 1 below can classify it (adversarial review 2026-07-15).
+  if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote(?!\s*(?:link|url))|deal|po|order(?!\s*(?:link|url))|sales\s*order)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.95 };
   }
 
@@ -18089,19 +18203,15 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'crm_write', confidence: 0.9 };
   }
 
-  // 0d. FedRAMP / government license conversion (R2, 2026-07-15): FED- SKUs are
-  // Zoho-quote-only (never ecomm), so any fedramp/government licensing ask is a
-  // CRM write — convert_quote_licenses_fedramp lives in the crm_write subset.
-  if (/\b(fed-?ramp|government)\b/.test(t)
-      && /\b(licen[sc]\w*|quote|convert|conversion|switch|skus?)\b/.test(t)) {
-    return { class: 'crm_write', confidence: 0.9 };
-  }
-
   // 1. URL/ecomm quote link — the EXPLICIT ecomm phrases (Chris, 2026-07-15 R11):
   // "url quote", "ecomm quote/link/url", "quote link/url", "order link/url",
   // "stratus url", "send me a link". An explicit ecomm ask ALWAYS wins — it runs
   // before (and therefore beats) the active-page context rules below.
-  if (/\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b/.test(t)) {
+  // Guards (adversarial review 2026-07-15): a link TO a CRM record ("send me a
+  // link to the deal") and zoho/crm-marked asks are record-link requests, not
+  // ecomm asks — the quote_url subset has zero Zoho tools and would dead-end.
+  if (!/\b(zoho|crm)\b/.test(t)
+      && /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b(?!\s+(?:to|for)\s+(?:the\s+|that\s+|this\s+|my\s+)?(?:deal|account|contact|record|task|invoice|sales\s*order|so\b|po\b))/.test(t)) {
     return { class: 'quote_url', confidence: 0.9 };
   }
 
@@ -18160,6 +18270,19 @@ function classifyCrmIntent(text, ctx = {}) {
   if (/\b(show|display|view|see|render|edit|revise|reword|rewrite|shorten|lengthen|tweak|redo)\s+(me\s+)?(the\s+|that\s+|this\s+|my\s+)?(draft|reply|response)\b(?!\s*(quote|deal|po|order|invoice|note|task|proposal))/.test(t)
     || /\b(the|that|this|my)\s+draft\b(?!\s*(quote|deal|po|order|invoice|note|task|proposal))/.test(t)) {
     return { class: 'email', confidence: 0.8 };
+  }
+
+  // 4c. FedRAMP / government license conversion (R2, 2026-07-15): FED- SKUs are
+  // Zoho-quote-only (never ecomm), so a fedramp/government licensing ask is a
+  // CRM write — convert_quote_licenses_fedramp lives in the crm_write subset.
+  // Placed AFTER rules 1-4b deliberately (adversarial review 2026-07-15): it
+  // only needs to beat the mutation/read fall-through below. Ahead of rule 2/4
+  // it stole "submit the government quote to velocity hub" (needs
+  // velocity_hub_submit) and "send an email to the county government contact
+  // about their license renewal" (needs gmail_send_email) into crm_write.
+  if (/\b(fed-?ramp|government)\b/.test(t)
+      && /\b(licen[sc]\w*|quote|convert|conversion|switch|skus?)\b/.test(t)) {
+    return { class: 'crm_write', confidence: 0.9 };
   }
 
   // 5. CRM mutation verbs on Zoho records. `update` excludes the read idiom
@@ -19048,7 +19171,10 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
         // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
         // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
         const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
-        const truncLimit = (block.name === 'zoho_get_record' || block.name === 'reterm_quote_licenses' || isQuoteData || isCompoundCreate) ? 8000 : 2000;
+        const truncLimit = (block.name === 'zoho_get_record'
+          || block.name === 'reterm_quote_licenses'
+          || block.name === 'convert_quote_licenses_fedramp'
+          || isQuoteData || isCompoundCreate) ? 8000 : 2000;
         return {
           type: 'tool_result',
           tool_use_id: block.id,
@@ -20850,7 +20976,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
           // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
           const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
-          const truncLimit = (isQuoteData || isCompoundCreate || block.name === 'reterm_quote_licenses') ? 8000 : 2000;
+          const truncLimit = (isQuoteData || isCompoundCreate
+            || block.name === 'reterm_quote_licenses'
+            || block.name === 'convert_quote_licenses_fedramp') ? 8000 : 2000;
           return {
             type: 'tool_result',
             tool_use_id: block.id,
@@ -21239,13 +21367,13 @@ function buildMostRecentQuoteSessionHeader(history) {
 // ═══════════════════════════════════════════════════════════════════════════════
 export class CrmWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
-    const { text, personId, spaceName, threadName, imageDataKey } = event.payload;
+    const { text, personId, spaceName, threadName, imageDataKey, callerEmail } = event.payload;
 
     if (!spaceName) {
       throw new Error('[WORKFLOW] No spaceName in payload — cannot deliver response');
     }
 
-    const env = this.env;
+    const env = callerScopedEnv(this.env, callerEmail || callerEmailFromPersonId(personId));
     if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL; // 1:1 corp port: route Claude through the deploy's gateway
     const workflowStart = Date.now();
     console.log(`[WORKFLOW] Starting CRM workflow for: "${(text || '').substring(0, 80)}..."`);
@@ -21717,6 +21845,7 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'velocity_hub_submit',
   'apply_margin_to_quote',
   'reterm_quote_licenses',
+  'convert_quote_licenses_fedramp',
   'assign_cisco_rep_to_deal',
   'gmail_create_draft',
   'gmail_send_email',
@@ -24120,22 +24249,19 @@ async function sendDailyErrorDigest(env) {
 
 export default {
   async fetch(request, env, ctx) {
+    // Bind caller identity to this invocation. The platform bindings object can
+    // be reused by concurrent requests, so mutating it directly leaks one
+    // user's email into another user's CRM ownership decisions.
+    let _requestCallerEmail = null;
+    try { _requestCallerEmail = request.headers.get('x-user-email'); } catch (_) {}
+    env = callerScopedEnv(env, _requestCallerEmail);
+
     if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL;
     // Load KV-cached live prices (if available from daily cron refresh)
     // This is fast: reads KV once, then cached in-memory for 5 minutes per isolate
     if (env.CONVERSATION_KV) {
       await loadLivePrices(env);
     }
-
-    // Stash caller email globally on env so deep call sites (e.g. payload
-    // builders) can resolve the Zoho owner via getOwnerForCaller(env) without
-    // every signature being plumbed. X-User-Email is the canonical header
-    // (gateway + chrome ext + Gmail add-on all forward it). Endpoint-specific
-    // handlers may overwrite this later with a more specific value.
-    try {
-      const _hdrCaller = request.headers.get('x-user-email');
-      if (_hdrCaller && _hdrCaller.includes('@')) env.__CALLER_EMAIL = _hdrCaller;
-    } catch (_) {}
 
     const url = new URL(request.url);
     // ── Dashboard Manifest: auto-written to KV on first request after deploy ──

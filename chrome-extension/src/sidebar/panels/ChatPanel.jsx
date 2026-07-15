@@ -638,6 +638,10 @@ export default function ChatPanel({
   // Active Zoho page context — lifted into App.jsx so the header pill and
   // the chat panel share a single source of truth. URL-validated there.
   zohoPageContext: zohoPageContextProp,
+  // R7 conversation pin — owned by App.jsx alongside chatMessages so it
+  // survives ChatPanel unmount/remount during automatic sidebar tab changes.
+  autoPinnedRecord,
+  onAutoPinnedRecordChange: setAutoPinnedRecord,
 }) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -656,13 +660,8 @@ export default function ChatPanel({
   // message that resolves an active Zoho record SNAPSHOTS it for the rest of
   // the conversation — browsing other tabs mid-thought no longer swaps the
   // context under the conversation. "Use current tab" in the context dropdown
-  // re-pins deliberately; an explicit manual pin still beats it; an empty
-  // thread (new conversation, or panel reload) clears it so the next first
-  // message re-pins. Shape matches the resolved active record.
-  const [autoPinnedRecord, setAutoPinnedRecord] = useState(null);
-  useEffect(() => {
-    if (!messages || messages.length === 0) setAutoPinnedRecord(null);
-  }, [messages && messages.length]);
+  // re-pins deliberately; an explicit manual pin still beats it. Shape
+  // matches the resolved active record. App.jsx clears it with an empty thread.
   // Manual CRM search state (rendered inside the context dropdown)
   const [searchMode, setSearchMode] = useState(false);
   const [searchModule, setSearchModule] = useState('Accounts');
@@ -905,17 +904,28 @@ export default function ChatPanel({
       }
 
       // ── R7: conversation context pin ───────────────────────────────────
-      // An existing conversation pin REPLACES the live-tab record for this
-      // send (a manual pin from search still beats both, below). The first
-      // send that resolves an active Zoho record establishes the pin, so a
+      // An existing conversation pin replaces a DIFFERENT live-tab record for
+      // this send (a manual pin from search still beats both, below). Live
+      // enrichment for the SAME record refreshes the snapshot. The first send
+      // that resolves an active Zoho record establishes the pin, so a
       // mid-conversation tab switch can no longer swap the record under the
-      // conversation. Deliberate switches go through "Use current tab" in
-      // the context dropdown (or a new conversation, which re-pins).
+      // conversation. Deliberate switches go through "Use current tab" in the
+      // context dropdown (or a new conversation, which re-pins).
       const liveZohoRecord = activeZohoRecord;
       if (autoPinnedRecord && autoPinnedRecord.recordId) {
-        activeZohoRecord = autoPinnedRecord;
+        if (liveZohoRecord && liveZohoRecord.recordId === autoPinnedRecord.recordId) {
+          // Same authoritative record: prefer the current enriched context and
+          // refresh the lifted snapshot. This avoids freezing a URL-minimal
+          // first-send context (no name/account id) for the whole conversation.
+          activeZohoRecord = liveZohoRecord;
+          setAutoPinnedRecord({ ...liveZohoRecord });
+        } else {
+          // Different/no live record: retain the conversation's original
+          // subject while the user browses elsewhere.
+          activeZohoRecord = autoPinnedRecord;
+        }
       } else if (activeZohoRecord && activeZohoRecord.recordId) {
-        setAutoPinnedRecord(activeZohoRecord);
+        setAutoPinnedRecord({ ...activeZohoRecord });
       }
 
       // ── Page-type gating for email context injection ──────────────────
@@ -1464,7 +1474,9 @@ export default function ChatPanel({
     // a link"). This fixes the corp R3 misroute where "create a quote for 2
     // MX84 SEC licenses..." sent ON a Zoho Quote page returned an /order/ URL.
     // Off Zoho pages the existing heuristics stand unchanged.
-    const onZohoRecord = !!((zohoPageContext && zohoPageContext.recordId) || (manualRecord && manualRecord.recordId));
+    const onZohoRecord = !!((zohoPageContext && zohoPageContext.recordId)
+      || (manualRecord && manualRecord.recordId)
+      || (autoPinnedRecord && autoPinnedRecord.recordId));
     const ecommAllowed = !onZohoRecord || isExplicitEcommUrlAsk(text);
     if (ecommAllowed && (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text)))) {
       if (!overrideText) setInput('');
@@ -1569,8 +1581,9 @@ export default function ChatPanel({
     setLoading(false);
     setError(null);
     setInput('');
+    setAutoPinnedRecord(null);
     onMessagesChange([]);
-  }, [onMessagesChange]);
+  }, [onMessagesChange, setAutoPinnedRecord]);
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1824,12 +1837,19 @@ export default function ChatPanel({
                   const m = MOD[pinnedOther.module] || pinnedOther.module;
                   return `${m}: ${pinnedOther.recordName || pinnedOther.recordId}`;
                 }
-                // R7: conversation pin differs from the tab the user is on —
-                // show BOTH so it's obvious which record the chat will act on.
+                // R7: when a conversation pin differs from the live tab, show
+                // both. A supplemental manual Account must never hide the
+                // conversation pin because deictic actions still target it.
                 const convPin = (autoPinnedRecord && autoPinnedRecord.recordId) ? autoPinnedRecord : null;
-                if (convPin && (!active || active.recordId !== convPin.recordId) && !pinnedAccount) {
+                if (convPin && (pinnedAccount || !active || active.recordId !== convPin.recordId)) {
                   const m = MOD[convPin.module] || convPin.module;
-                  return `📌 Pinned ${m}: ${convPin.recordName || convPin.recordId}${active ? `  •  Viewing: ${active.recordName || active.recordId}` : ''}`;
+                  const viewing = active && active.recordId !== convPin.recordId
+                    ? `  •  Viewing: ${active.recordName || active.recordId}`
+                    : '';
+                  const account = pinnedAccount
+                    ? `  •  Acct: ${pinnedAccount.recordName || pinnedAccount.recordId}`
+                    : '';
+                  return `📌 Pinned ${m}: ${convPin.recordName || convPin.recordId}${viewing}${account}`;
                 }
                 // Active non-Account record + pinned Account supplement — show BOTH so the
                 // user never sees their active Quote get hidden by a pinned Account.
@@ -1850,13 +1870,22 @@ export default function ChatPanel({
                 return 'No CRM context — click to pick a record';
               })()}
             </span>
+            {autoPinnedRecord && autoPinnedRecord.recordId && (
+              <span
+                onClick={(e) => { e.stopPropagation(); setAutoPinnedRecord(null); }}
+                style={{ fontSize: 10, opacity: 0.7, padding: '0 3px', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                title="Clear the conversation's pinned record"
+              >
+                Pin ✕
+              </span>
+            )}
             {manualRecord && (
               <span
                 onClick={(e) => { e.stopPropagation(); handleClearPinned(); }}
-                style={{ fontSize: 11, opacity: 0.7, padding: '0 4px', cursor: 'pointer' }}
-                title="Unpin this record"
+                style={{ fontSize: 10, opacity: 0.7, padding: '0 3px', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                title="Unpin the manually selected record"
               >
-                ✕
+                {manualRecord.module === 'Accounts' && autoPinnedRecord && autoPinnedRecord.recordId ? 'Acct ✕' : '✕'}
               </span>
             )}
             <span style={{ opacity: 0.6, fontSize: 9 }}>▼</span>

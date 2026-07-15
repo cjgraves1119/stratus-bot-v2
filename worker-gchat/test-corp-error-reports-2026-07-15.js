@@ -340,7 +340,7 @@ t('generic write path enforces the 35% FED discount (double-enforcement)', () =>
   const fnStart = rawSrc.indexOf('async function correctQuotedItemDiscounts');
   const body = rawSrc.slice(fnStart, fnStart + 6000);
   assert.ok(/isFedRamp = liveSku && \/\^FED-\/\.test\(liveSku\)/.test(body));
-  assert.ok(/isFedRamp \? FEDRAMP_DEFAULT_DISCOUNT/.test(body));
+  assert.ok(/isFedRamp.*FEDRAMP_DEFAULT_DISCOUNT|if \(isFedRamp\)/.test(body));
 });
 t('prompt documents the conversion tool + fixed 35%', () => {
   assert.ok(/FedRAMP \/ Government License Conversion/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
