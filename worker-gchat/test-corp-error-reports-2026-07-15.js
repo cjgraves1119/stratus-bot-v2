@@ -21,35 +21,30 @@ const path = require('path');
 const os = require('os');
 const assert = require('assert');
 
-function buildShim() {
+async function buildShim() {
   const here = __dirname;
   let src = fs.readFileSync(path.join(here, 'src/index.js'), 'utf8');
   const escPath = p => path.join(here, p).replace(/\\/g, '\\\\');
+  // Keep the module in ESM form (the file is authored as ESM; converting to CJS
+  // trips the brace-walking export-default strip other suites use on template
+  // literals in the corp tree). Data imports become inline JSON reads; the
+  // workflow base class is stubbed; symbols are re-exported and loaded via
+  // dynamic import of a .mjs temp file.
+  src = `import { readFileSync as __rfs } from 'node:fs';\n` + src;
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m,
     'class WorkflowEntrypoint {}');
-  src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m,
-    `const pricesData = require('${escPath('src/data/prices.json')}');`);
-  src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m,
-    `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
-  src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m,
-    `const specsData = require('${escPath('src/data/specs.json')}');`);
-  src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m,
-    `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
-  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m,
-    `const voiceSkillData = require('${escPath('src/email-reply-voice-skill.json')}');`);
-  src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
-  src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
-  const edIdx = src.indexOf('export default');
-  if (edIdx > -1) {
-    let depth = 0, started = false, end = edIdx;
-    for (let i = edIdx; i < src.length; i++) {
-      if (src[i] === '{') { depth++; started = true; }
-      if (src[i] === '}') { depth--; if (started && depth === 0) { end = i + 1; break; } }
-    }
-    src = src.slice(0, edIdx) + src.slice(end + 1);
+  for (const [name, rel] of [
+    ['pricesData', 'src/data/prices.json'],
+    ['catalogData', 'src/data/auto-catalog.json'],
+    ['specsData', 'src/data/specs.json'],
+    ['accessoriesData', 'src/data/accessories.json'],
+    ['voiceSkillData', 'src/email-reply-voice-skill.json'],
+  ]) {
+    const re = new RegExp(`^import ${name} from '[^']+';?$`, 'm');
+    src = src.replace(re, `const ${name} = JSON.parse(__rfs('${escPath(rel)}', 'utf8'));`);
   }
   src += `
-module.exports = {
+export {
   classifyCrmIntent,
   isExplicitEcommUrlAsk,
   hasActiveZohoPageContext,
@@ -65,27 +60,14 @@ module.exports = {
   TOOL_SUBSETS,
   BENCHMARK_TASKS
 };`;
-  const tmp = path.join(os.tmpdir(), `stratus-gchat-corp-err-${process.pid}.cjs`);
+  const tmp = path.join(os.tmpdir(), `stratus-gchat-corp-err-${process.pid}.mjs`);
   fs.writeFileSync(tmp, src);
-  return { mod: require(tmp), rawSrc: fs.readFileSync(path.join(here, 'src/index.js'), 'utf8') };
+  const mod = await import('file://' + tmp);
+  return { mod, rawSrc: fs.readFileSync(path.join(here, 'src/index.js'), 'utf8') };
 }
 
-const { mod, rawSrc } = buildShim();
-const {
-  classifyCrmIntent,
-  isExplicitEcommUrlAsk,
-  hasActiveZohoPageContext,
-  defaultQuoteDealDate,
-  validateCrmWrite,
-  callerEmailFromPersonId,
-  checkEol,
-  fedrampCandidateSkus,
-  FEDRAMP_DEFAULT_DISCOUNT,
-  CRM_AGENT_SYSTEM_PROMPT_BASE,
-  CRM_EMAIL_TOOLS,
-  TOOL_SUBSETS,
-  BENCHMARK_TASKS
-} = mod;
+let mod, rawSrc;
+let classifyCrmIntent, isExplicitEcommUrlAsk, hasActiveZohoPageContext, defaultQuoteDealDate, validateCrmWrite, callerEmailFromPersonId, checkEol, looksLikeZohoQuoteIntent, fedrampCandidateSkus, FEDRAMP_DEFAULT_DISCOUNT, CRM_AGENT_SYSTEM_PROMPT_BASE, CRM_EMAIL_TOOLS, TOOL_SUBSETS, BENCHMARK_TASKS;
 
 let pass = 0, fail = 0;
 function t(name, fn) {
@@ -98,6 +80,9 @@ async function ta(name, fn) {
 }
 
 (async () => {
+
+({ mod, rawSrc } = await buildShim());
+({ classifyCrmIntent, isExplicitEcommUrlAsk, hasActiveZohoPageContext, defaultQuoteDealDate, validateCrmWrite, callerEmailFromPersonId, checkEol, looksLikeZohoQuoteIntent, fedrampCandidateSkus, FEDRAMP_DEFAULT_DISCOUNT, CRM_AGENT_SYSTEM_PROMPT_BASE, CRM_EMAIL_TOOLS, TOOL_SUBSETS, BENCHMARK_TASKS } = mod);
 
 console.log('\nR1 — classifier write-rule articles + escalation net');
 console.log('────────────────────────────────────────────────────────────────');
