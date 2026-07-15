@@ -20,8 +20,9 @@ function buildShim() {
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m,
     `const specsData = require('${escPath('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m,
-  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m,
     `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m,
+    `const voiceSkillData = require('${escPath('src/email-reply-voice-skill.json')}');`);
 
   // Strip any other `export class|function|const|let|var ...` declarations.
   src = src.replace(/^export\s+(class|function|const|let|var)\s+/gm, '$1 ');

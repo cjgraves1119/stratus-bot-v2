@@ -610,7 +610,11 @@ async function verifyCachingActive(env) {
       return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
                action: 'kill', reason: '1h hit rate below 5% hard floor' };
     }
-    if (enoughData6h && hitRate6h < 0.20) {
+    // Same zero-cache-traffic guard as the 1h floor (2026-07-15): a window can
+    // have ≥30 pr_b rows with NO cache tokens at all (caching disabled, or an
+    // eval flood before markers engage) — that's absence of caching, not
+    // unhealthy caching, and killing on it created a re-kill loop (07-02 kill).
+    if (enoughData6h && (Number(r6h?.creations || 0) + Number(r6h?.reads || 0)) > 0 && hitRate6h < 0.20) {
       return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
                action: 'kill', reason: '6h hit rate below 20% soft floor' };
     }
