@@ -510,7 +510,9 @@ function isQuoteFollowUp(text) {
 function buildRequestedQuoteEmailContext(emailContext) {
   if (!emailContext) return '';
   const threadText = (emailContext.fullThreadBody || emailContext.body || '').trim();
-  if (!threadText) return '';
+  // R8b: an order URL found in the thread DOM is enough to proceed even when
+  // the visible thread text extraction came back empty.
+  if (!threadText && !(Array.isArray(emailContext.threadOrderUrls) && emailContext.threadOrderUrls.length)) return '';
   const lines = [
     '[User explicitly requested quote extraction from the current Gmail thread.]',
     `Subject: ${emailContext.subject || ''}`,
@@ -520,6 +522,18 @@ function buildRequestedQuoteEmailContext(emailContext) {
   }
   if (emailContext.customerEmail) {
     lines.push(`Customer: ${emailContext.customerName || ''} <${emailContext.customerEmail}>`);
+  }
+  // R8b (corp error_reports 2026-07-14): surface Stratus /order/ links found in
+  // the thread DOM. Gmail renders them as anchors whose visible text may be
+  // truncated/friendly, so the thread TEXT below often lacks the actual URL —
+  // and the worker's parse_quote_url / line-item lock machinery keys on the URL.
+  const orderUrls = Array.isArray(emailContext.threadOrderUrls) ? emailContext.threadOrderUrls : [];
+  if (orderUrls.length) {
+    lines.push(
+      '',
+      `Stratus ecomm order URL(s) found in this thread — these ARE the requested line items. Resolve exact items and quantities with parse_quote_url on the most recent URL; do NOT re-ask what to quote:`,
+      ...orderUrls.map((u) => `- ${u}`)
+    );
   }
   lines.push(
     '',
@@ -638,6 +652,17 @@ export default function ChatPanel({
   // Manually-pinned CRM record from search (overrides zohoPageContext when set)
   // Shape: { module, recordId, recordName, accountName, email }
   const [manualRecord, setManualRecord] = useState(null);
+  // R7 conversation context pin (corp error_reports 2026-07-14): the first
+  // message that resolves an active Zoho record SNAPSHOTS it for the rest of
+  // the conversation — browsing other tabs mid-thought no longer swaps the
+  // context under the conversation. "Use current tab" in the context dropdown
+  // re-pins deliberately; an explicit manual pin still beats it; an empty
+  // thread (new conversation, or panel reload) clears it so the next first
+  // message re-pins. Shape matches the resolved active record.
+  const [autoPinnedRecord, setAutoPinnedRecord] = useState(null);
+  useEffect(() => {
+    if (!messages || messages.length === 0) setAutoPinnedRecord(null);
+  }, [messages && messages.length]);
   // Manual CRM search state (rendered inside the context dropdown)
   const [searchMode, setSearchMode] = useState(false);
   const [searchModule, setSearchModule] = useState('Accounts');
@@ -879,6 +904,20 @@ export default function ChatPanel({
         console.warn('[Stratus Chat] Pre-send page context refresh failed:', err?.message);
       }
 
+      // ── R7: conversation context pin ───────────────────────────────────
+      // An existing conversation pin REPLACES the live-tab record for this
+      // send (a manual pin from search still beats both, below). The first
+      // send that resolves an active Zoho record establishes the pin, so a
+      // mid-conversation tab switch can no longer swap the record under the
+      // conversation. Deliberate switches go through "Use current tab" in
+      // the context dropdown (or a new conversation, which re-pins).
+      const liveZohoRecord = activeZohoRecord;
+      if (autoPinnedRecord && autoPinnedRecord.recordId) {
+        activeZohoRecord = autoPinnedRecord;
+      } else if (activeZohoRecord && activeZohoRecord.recordId) {
+        setAutoPinnedRecord(activeZohoRecord);
+      }
+
       // ── Page-type gating for email context injection ──────────────────
       //
       // (Fix A, Wave B 2026-06-03.) Only attach email context to the
@@ -981,8 +1020,15 @@ export default function ChatPanel({
       const primaryHint = buildZohoPageContextHint(primaryRecord);
       let sourceLabel = null;
       if (primaryRecord) {
-        if (primaryRecord === activeZohoRecord) sourceLabel = 'currently viewing';
-        else if (primaryRecord === manualRecord) sourceLabel = 'pinned by user';
+        if (primaryRecord === manualRecord) sourceLabel = 'pinned by user';
+        else if (primaryRecord === autoPinnedRecord
+            && (!liveZohoRecord || liveZohoRecord.recordId !== autoPinnedRecord.recordId)) {
+          // R7: pinned at the conversation's first message; the user is now on
+          // a different tab — say so, so the model knows the record is the
+          // conversation's subject, not the current screen.
+          sourceLabel = 'pinned to this conversation at its first message';
+        }
+        else if (primaryRecord === activeZohoRecord) sourceLabel = 'currently viewing';
         else sourceLabel = 'context';
       }
 
@@ -1028,7 +1074,10 @@ export default function ChatPanel({
           // Only enforce when no user-pinned non-Account record is the
           // explicit winner — the user can deliberately target a
           // different record by pinning it.
-          && !(manualRecord && !pinnedIsAccount)) {
+          && !(manualRecord && !pinnedIsAccount)
+          // R7: a conversation-pinned record is a deliberate target too — do
+          // not refuse just because the user is browsing a different record.
+          && !(autoPinnedRecord && autoPinnedRecord.recordId && textToSend.includes(autoPinnedRecord.recordId))) {
         setError(
           `Active Zoho page (${activeUrlInfo.module} ${activeUrlInfo.recordId}) did not reach the outgoing request. Refusing to send to avoid targeting a stale record. Please retry — the extension will re-read the active page.`
         );
@@ -1152,11 +1201,13 @@ export default function ChatPanel({
 
       if (thisAbort.aborted) return; // Stopped by user
 
-      if (response && response.success && response.reply) {
+      // R8b: accept suggestions-only replies too — chips must render even when
+      // the reply text came back empty (the bubble shows a visible fallback).
+      if (response && response.success && (response.reply || response.suggestions)) {
         const assistantMsg = {
           id: Date.now() + 1,
           role: 'assistant',
-          content: response.reply,
+          content: response.reply || '',
           usedTools: response.usedTools || false,
           // Clickable confirmation chips emitted by the worker (license term,
           // SKU fix, which-deal, …). Absent on older replies => no chips.
@@ -1186,7 +1237,7 @@ export default function ChatPanel({
         setTimeout(() => setProgressSteps([]), 1500);
       }
     }
-  }, [input, loading, messages, emailContext, onMessagesChange, zohoPageContext, manualRecord, selectedContextEmail, participantOptions]);
+  }, [input, loading, messages, emailContext, onMessagesChange, zohoPageContext, manualRecord, autoPinnedRecord, selectedContextEmail, participantOptions]);
 
   // ─────────────────────────────────────────────
   // Consolidated quoting + email actions (from the former Quote / Email tabs)
@@ -1640,7 +1691,18 @@ export default function ChatPanel({
               color: msg.role === 'user' ? 'white' : COLORS.TEXT_PRIMARY,
               fontSize: 13, lineHeight: 1.5, wordWrap: 'break-word',
             }}>
-              {msg.role === 'assistant' ? renderMarkdown(msg.content) : msg.content}
+              {msg.role === 'assistant'
+                // R8b (corp error_reports 2026-07-14): NEVER render an empty
+                // assistant bubble — the corp misroute returned a quote-URL
+                // reply that displayed as a blank message. Empty/whitespace
+                // content gets a visible fallback so the user can recover
+                // instead of staring at a blank bubble.
+                ? (String(msg.content || '').trim()
+                  ? renderMarkdown(msg.content)
+                  : <em style={{ color: COLORS.TEXT_SECONDARY }}>
+                    ⚠️ Empty reply received. If you asked for a quote, say "resend that quote link" or rephrase the request.
+                  </em>)
+                : msg.content}
               {msg.usedTools && (
                 <div style={{ fontSize: 10, color: msg.role === 'user' ? '#ffffff99' : '#7b1fa2', marginTop: 4 }}>
                   Used CRM tools
@@ -1749,7 +1811,7 @@ export default function ChatPanel({
             title="Change which record or contact is attached as CRM context for this chat"
           >
             <span style={{ opacity: 0.75 }}>
-              {manualRecord ? '📌' : (zohoPageContext && zohoPageContext.recordId ? '📄' : '📎')}
+              {manualRecord ? '📌' : ((autoPinnedRecord && autoPinnedRecord.recordId) ? '📌' : (zohoPageContext && zohoPageContext.recordId ? '📄' : '📎'))}
             </span>
             <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
               {(() => {
@@ -1761,6 +1823,13 @@ export default function ChatPanel({
                 if (pinnedOther) {
                   const m = MOD[pinnedOther.module] || pinnedOther.module;
                   return `${m}: ${pinnedOther.recordName || pinnedOther.recordId}`;
+                }
+                // R7: conversation pin differs from the tab the user is on —
+                // show BOTH so it's obvious which record the chat will act on.
+                const convPin = (autoPinnedRecord && autoPinnedRecord.recordId) ? autoPinnedRecord : null;
+                if (convPin && (!active || active.recordId !== convPin.recordId) && !pinnedAccount) {
+                  const m = MOD[convPin.module] || convPin.module;
+                  return `📌 Pinned ${m}: ${convPin.recordName || convPin.recordId}${active ? `  •  Viewing: ${active.recordName || active.recordId}` : ''}`;
                 }
                 // Active non-Account record + pinned Account supplement — show BOTH so the
                 // user never sees their active Quote get hidden by a pinned Account.
@@ -1814,6 +1883,30 @@ export default function ChatPanel({
                   >
                     No context (general chat)
                   </button>
+
+                  {/* R7: conversation pin controls — visible when the pinned
+                      record differs from the tab the user is on. "Use current
+                      tab" re-pins deliberately; the model then targets the
+                      record the user is actually looking at. */}
+                  {autoPinnedRecord && autoPinnedRecord.recordId
+                    && (!zohoPageContext || zohoPageContext.recordId !== autoPinnedRecord.recordId) && (
+                    <button
+                      onClick={() => {
+                        setAutoPinnedRecord(zohoPageContext && zohoPageContext.recordId ? { ...zohoPageContext } : null);
+                        setContextDropdownOpen(false);
+                      }}
+                      style={{
+                        display: 'block', width: '100%', textAlign: 'left',
+                        padding: '6px 12px', background: 'transparent',
+                        border: 'none', cursor: 'pointer', fontSize: 11, color: COLORS.STRATUS_BLUE, fontWeight: 600,
+                      }}
+                      title="Replace the conversation's pinned record with the tab you are viewing now"
+                    >
+                      🔄 Use current tab{zohoPageContext && zohoPageContext.recordId
+                        ? ` (${zohoPageContext.recordName || zohoPageContext.recordId})`
+                        : ' (no Zoho record open — unpins)'}
+                    </button>
+                  )}
 
                   {/* Current Zoho page record — click to pin it explicitly */}
                   {zohoPageContext && zohoPageContext.recordId && (

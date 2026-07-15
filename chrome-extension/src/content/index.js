@@ -257,6 +257,43 @@ function extractVisibleThreadBody() {
   return parts.join('\n\n--- message ---\n\n').substring(0, 20000);
 }
 
+/**
+ * R8b (corp error_reports 2026-07-14): scan the visible thread DOM for Stratus
+ * ecomm order links (stratusinfosystems.com/order/?item=…). Gmail usually
+ * renders these as anchors whose VISIBLE text is truncated or friendly, so the
+ * innerText-based thread extraction above never sees the actual URL — the href
+ * is DOM-only, which left the quote quick-action blind to a quote link sitting
+ * right in the email. Collects hrefs (unwrapping Google's google.com/url?q=
+ * redirect) plus literal in-text URLs, dedupes, and caps at 5. The worker's
+ * STRATUS URL ECHOBACK / parse_quote_url machinery resolves exact items+qtys.
+ */
+function extractThreadOrderUrls() {
+  const containers = Array.from(document.querySelectorAll('.a3s.aiL, .gs .a3s, [data-message-id] .a3s'));
+  const urls = [];
+  const seen = new Set();
+  const ORDER_URL_RE = /https?:\/\/[^\s)\]>"']*stratusinfosystems\.com\/order\/\?[^\s)\]>"']+/i;
+  for (const el of containers) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0) continue;
+    const hrefs = Array.from(el.querySelectorAll('a[href]')).map((a) => a.getAttribute('href') || '');
+    const textMatches = (el.innerText || '').match(new RegExp(ORDER_URL_RE.source, 'gi')) || [];
+    for (let raw of [...hrefs, ...textMatches]) {
+      if (!raw || !/stratusinfosystems\.com/i.test(raw)) continue;
+      const gm = raw.match(/^https?:\/\/www\.google\.com\/url\?.*?[?&]q=([^&]+)/i);
+      if (gm) { try { raw = decodeURIComponent(gm[1]); } catch { /* keep raw */ } }
+      const m = raw.match(ORDER_URL_RE);
+      if (!m) continue;
+      const url = m[0];
+      if (seen.has(url)) continue;
+      seen.add(url);
+      urls.push(url);
+      if (urls.length >= 5) return urls;
+    }
+  }
+  return urls;
+}
+
 function normalizeVisibleMessageText(el, maxLength = 8000) {
   const rect = el.getBoundingClientRect();
   const style = window.getComputedStyle(el);
@@ -574,6 +611,10 @@ function extractEmailData(options = {}) {
     subject,
     body,
     ...(options.includeFullThread ? { fullThreadBody } : {}),
+    // R8b: Stratus /order/ links found in the thread DOM (href-only links are
+    // invisible to the innerText extraction above). Always included — cheap,
+    // and the quote quick-action needs it even without the full thread body.
+    threadOrderUrls: extractThreadOrderUrls(),
     senderEmail,
     senderName,
     customerEmail,
