@@ -27218,6 +27218,46 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── A/B Benchmark: ad-hoc prompt (reusable model comparison) ──
+          // Accepts { prompt, pageContext?, seedHistory?, modelId } and runs an
+          // arbitrary prompt through the full agent for ONE pinned model. DRY-RUN
+          // FORCED (writes always stubbed) so this stays spam-safe and auth-free,
+          // consistent with the rest of /api/benchmark/*. seedHistory[] threads a
+          // multi-turn conversation (each entry {role, content}); the caller drives
+          // sequential turns and passes the captured prior turns back in.
+          // Returns { reply, toolCalls:[{name,arguments}], iterations, elapsedMs }.
+          // For LIVE writes (winner only), bake the task and use /api/benchmark/run
+          // with dryRun:false — never live here.
+          case '/api/benchmark/adhoc': {
+            const { prompt: aPrompt, pageContext: aPage, seedHistory: aHist, modelId: aModelId } = apiBody;
+            const aReasoning = normalizeReasoningPolicy(apiBody.reasoning_policy || apiBody.reasoningPolicy || REASONING_POLICY_DISABLED);
+            if (!aPrompt || !aModelId) { apiResult = { error: 'prompt and modelId are required' }; break; }
+            const aModel = BENCHMARK_MODELS.find(m => m.id === aModelId);
+            if (!aModel) { apiResult = { error: `Unknown model id: ${aModelId}` }; break; }
+            try {
+              const aPersonId = `adhoc:${aModelId}:${Date.now()}:${Math.floor(Math.random() * 1e4)}`;
+              const aText = aPage ? `${aPage}\n${aPrompt}` : aPrompt;
+              const aTask = {
+                id: 'adhoc',
+                prompt: String(aText).substring(0, 8000),
+                seedHistory: Array.isArray(aHist) ? aHist : undefined
+              };
+              const aEvalCtx = evalContext ? {
+                ...evalContext, requestText: aText, requestedModel: aModelId,
+                personId: aPersonId, bot: 'adhoc-bench', reasoningPolicy: aReasoning
+              } : null;
+              const result = await runBenchmarkTask(
+                aTask, aModel, env, aPersonId,
+                true, // dryRun FORCED — adhoc never writes
+                'full', aEvalCtx, aReasoning
+              );
+              apiResult = { modelId: aModelId, dryRun: true, ...result };
+            } catch (aErr) {
+              apiResult = { modelId: aModelId, error: aErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
+            }
+            break;
+          }
+
           // ── A/B Benchmark: list available tasks and models ──
           case '/api/benchmark/list': {
             apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
