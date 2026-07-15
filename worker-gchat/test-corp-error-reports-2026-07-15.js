@@ -58,7 +58,11 @@ module.exports = {
   callerEmailFromPersonId,
   checkEol,
   looksLikeZohoQuoteIntent,
+  fedrampCandidateSkus,
+  FEDRAMP_DEFAULT_DISCOUNT,
   CRM_AGENT_SYSTEM_PROMPT_BASE,
+  CRM_EMAIL_TOOLS,
+  TOOL_SUBSETS,
   BENCHMARK_TASKS
 };`;
   const tmp = path.join(os.tmpdir(), `stratus-gchat-corp-err-${process.pid}.cjs`);
@@ -75,7 +79,11 @@ const {
   validateCrmWrite,
   callerEmailFromPersonId,
   checkEol,
+  fedrampCandidateSkus,
+  FEDRAMP_DEFAULT_DISCOUNT,
   CRM_AGENT_SYSTEM_PROMPT_BASE,
+  CRM_EMAIL_TOOLS,
+  TOOL_SUBSETS,
   BENCHMARK_TASKS
 } = mod;
 
@@ -297,6 +305,61 @@ t('batch_product_lookup wires eol/replaced_by/eol_note in BOTH paths (static evi
 t('prompt: EOL upgrade mapping is default behavior', () => {
   assert.ok(/EOL \/ UPGRADE MAPPING IS DEFAULT BEHAVIOR/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
   assert.ok(/quote the returned replacement by default/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+});
+
+console.log('\nR2 — FedRAMP license conversion (fixed 35% off list)');
+console.log('────────────────────────────────────────────────────────────────');
+
+t('FEDRAMP_DEFAULT_DISCOUNT is the decided fixed 35%', () => {
+  assert.strictEqual(FEDRAMP_DEFAULT_DISCOUNT, 0.35);
+});
+t('fedrampCandidateSkus: LIC→FED with Y↔YR suffix twins (live catalog is inconsistent)', () => {
+  assert.deepStrictEqual(fedrampCandidateSkus('LIC-ENT-3YR'), ['FED-ENT-3YR', 'FED-ENT-3Y']);
+  assert.deepStrictEqual(fedrampCandidateSkus('LIC-MX85-SEC-1Y'), ['FED-MX85-SEC-1Y', 'FED-MX85-SEC-1YR']);
+  assert.deepStrictEqual(fedrampCandidateSkus('LIC-MS150-24-3YR'), ['FED-MS150-24-3YR', 'FED-MS150-24-3Y']);
+  assert.deepStrictEqual(fedrampCandidateSkus('lic-ms120-48-5yr'), ['FED-MS120-48-5YR', 'FED-MS120-48-5Y']);
+  // 10Y co-term (two-digit term) keeps both spellings too
+  assert.deepStrictEqual(fedrampCandidateSkus('LIC-C8121-SEC-10Y'), ['FED-C8121-SEC-10Y', 'FED-C8121-SEC-10YR']);
+});
+t('fedrampCandidateSkus: hardware and already-FED SKUs yield no candidates', () => {
+  assert.deepStrictEqual(fedrampCandidateSkus('MX85-HW'), []);
+  assert.deepStrictEqual(fedrampCandidateSkus('FED-ENT-3Y'), []);
+  assert.deepStrictEqual(fedrampCandidateSkus(''), []);
+});
+t('classifier: fedramp/government license asks → crm_write', () => {
+  for (const s of ['convert this quote to fedramp licenses', 'convert to FedRAMP', 'make these government licenses',
+    'switch the licenses to fed-ramp']) {
+    assert.strictEqual(classifyCrmIntent(s).class, 'crm_write', `"${s}"`);
+  }
+});
+t('tool is registered: schema + crm_write/general subsets + executor + dry-run mocks', () => {
+  const tool = CRM_EMAIL_TOOLS.find(x => x.name === 'convert_quote_licenses_fedramp');
+  assert.ok(tool, 'tool schema present');
+  assert.ok(/35% off the FED list price/.test(tool.description), 'description states fixed 35%');
+  assert.ok(TOOL_SUBSETS.crm_write.includes('convert_quote_licenses_fedramp'), 'in crm_write subset');
+  assert.ok(TOOL_SUBSETS.general.includes('convert_quote_licenses_fedramp'), 'in general subset');
+  assert.ok(/case 'convert_quote_licenses_fedramp':/.test(rawSrc), 'executor case wired');
+  const mocks = (rawSrc.match(/'convert_quote_licenses_fedramp': \{ success: true/g) || []).length;
+  assert.strictEqual(mocks, 2, `expected 2 dry-run mock sites, found ${mocks}`);
+});
+t('atomic fail-closed implementation markers', () => {
+  const fnStart = rawSrc.indexOf('async function convertQuoteLicensesFedramp');
+  assert.ok(fnStart > -1, 'function exists');
+  const body = rawSrc.slice(fnStart, fnStart + 12000);
+  assert.ok(/unmapped_licenses/.test(body), 'fail-closed unmapped error');
+  assert.ok(/Do_Not_Auto_Update_Prices: true/.test(body), 'price-lock on the PUT');
+  assert.ok(/resolveTargetLicenseEconomics/.test(body), 'live economics resolution');
+  assert.ok(/verification\.success = mismatches\.length === 0/.test(body), 'verification gate');
+});
+t('generic write path enforces the 35% FED discount (double-enforcement)', () => {
+  const fnStart = rawSrc.indexOf('async function correctQuotedItemDiscounts');
+  const body = rawSrc.slice(fnStart, fnStart + 6000);
+  assert.ok(/isFedRamp = liveSku && \/\^FED-\/\.test\(liveSku\)/.test(body));
+  assert.ok(/isFedRamp \? FEDRAMP_DEFAULT_DISCOUNT/.test(body));
+});
+t('prompt documents the conversion tool + fixed 35%', () => {
+  assert.ok(/FedRAMP \/ Government License Conversion/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/FIXED 35% off the FED list price/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
 });
 
 console.log('\n────────────────────────────────────────────────────────────────');

@@ -8675,15 +8675,20 @@ async function correctQuotedItemDiscounts(quotedItems, env) {
         const rec = res?.data?.[0] || null;
         const liveSku = rec && rec.Product_Code ? String(rec.Product_Code).toUpperCase() : null;
         const cm = liveSku ? liveSku.match(/-(10|7)(?:YR|Y-S\d+|Y)$/) : null;
-        const coPct = cm ? COTERM_DEFAULT_DISCOUNT[Number(cm[1])] : undefined;
+        // R2 (2026-07-15): FED- (FedRAMP) SKUs are live-only too and carry a
+        // FIXED 35% default discount regardless of term — enforced here on the
+        // generic create/update path, same double-enforcement pattern as the
+        // 7/10YR co-term fix (the conversion tool applies it on its own path).
+        const isFedRamp = liveSku && /^FED-/.test(liveSku);
+        const coPct = isFedRamp ? FEDRAMP_DEFAULT_DISCOUNT : (cm ? COTERM_DEFAULT_DISCOUNT[Number(cm[1])] : undefined);
         const liveList = rec ? moneyValue(rec.Unit_Price) : 0;
         if (coPct !== undefined) {
           if (!(liveList > 0)) {
-            failures.push({ sku: liveSku || productId, product_id: productId, error: 'co-term SKU has no live list price — cannot enforce fixed discount' });
+            failures.push({ sku: liveSku || productId, product_id: productId, error: `${isFedRamp ? 'FedRAMP' : 'co-term'} SKU has no live list price — cannot enforce fixed discount` });
           } else {
             const coDiscount = roundMoney(liveList * qty * coPct);
             if (item.Discount === undefined || Math.abs((item.Discount || 0) - coDiscount) > 1) {
-              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): co-term ${coPct * 100}% — setting Discount=${coDiscount} (list=${liveList}, qty=${qty})`);
+              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): ${isFedRamp ? 'fedramp' : 'co-term'} ${coPct * 100}% — setting Discount=${coDiscount} (list=${liveList}, qty=${qty})`);
               item.Discount = coDiscount;
               corrected++;
             }
@@ -10576,6 +10581,241 @@ async function retermQuoteLicenses(quoteId, targetTerm, env, personId = null) {
   return result;
 }
 
+// ── R2: FedRAMP license conversion (corp error_reports 2026-07-14) ───────────
+// Converts a quote's commercial LIC-* license lines to their FED- (FedRAMP /
+// government) equivalents. FED- SKUs are live-Zoho-only (deliberately absent
+// from prices.json, same as the 7/10YR co-term lesson) and their term-suffix
+// spelling is INCONSISTENT in the catalog (FED-ENT-3Y but FED-MS150-24-3YR),
+// so every line is resolved by LIVE lookup on both suffix spellings —
+// fail-closed: if ANY LIC-* line has no active FED- equivalent, NOTHING is
+// written. Pricing (Chris, 2026-07-15): fixed 35% off the FED list price
+// regardless of term by default; an explicit user-specified discount_pct
+// overrides. Hardware / SFP / cable / sensor lines are untouched.
+const FEDRAMP_DEFAULT_DISCOUNT = 0.35;
+
+// Candidate FED- Product_Codes for a commercial license SKU: LIC-<stem> →
+// FED-<stem>, plus the Y↔YR term-suffix twin when the stem is termed.
+// Returns [] for non-LIC SKUs (hardware, and lines already FED-).
+function fedrampCandidateSkus(sku) {
+  const upper = String(sku || '').trim().toUpperCase();
+  if (!/^LIC-/.test(upper)) return [];
+  const stem = upper.replace(/^LIC-/, '');
+  const candidates = [`FED-${stem}`];
+  const m = stem.match(/^(.*-)(\d{1,2})(YR|Y)$/);
+  if (m) candidates.push(`FED-${m[1]}${m[2]}${m[3] === 'YR' ? 'Y' : 'YR'}`);
+  return candidates;
+}
+
+async function convertQuoteLicensesFedramp(quoteId, opts, env, personId = null) {
+  const startedMs = Date.now();
+  const fail = (error, message, extra = {}) => ({ success: false, error, message, ...extra });
+
+  // ── 1. Normalize the discount. Default = fixed 35% off list regardless of
+  //       term (Chris, 2026-07-15); an explicit user-stated discount overrides. ──
+  let pct = FEDRAMP_DEFAULT_DISCOUNT;
+  if (opts && opts.discountPct !== undefined && opts.discountPct !== null && opts.discountPct !== '') {
+    const p = Number(opts.discountPct);
+    if (!Number.isFinite(p) || p < 0 || p >= 100) {
+      return fail('invalid_discount', `discount_pct "${opts.discountPct}" is not a percentage between 0 and 99. Omit it for the default 35% FedRAMP discount.`);
+    }
+    pct = p / 100;
+  }
+
+  // ── 2. Fetch the quote + line items ──
+  let quote;
+  try { quote = await fetchRecordFull('Quotes', quoteId, env); }
+  catch (err) { return fail('quote_fetch_failed', `Could not fetch Quote ${quoteId}: ${err.message}`); }
+  if (!quote) return fail('quote_not_found', `Quote ${quoteId} was not found.`);
+  const quotedItems = Array.isArray(quote.Quoted_Items) ? quote.Quoted_Items : [];
+  if (quotedItems.length === 0) return fail('no_line_items', `Quote ${quoteId} has no line items.`);
+
+  // ── 3. Classify lines. Same authoritative SKU resolution as reterm. ──
+  const codeOf = (i) => {
+    let s = i?.Product_Code || i?.Product_Name?.Product_Code || null;
+    if (!s && typeof i?.Product_Name?.name === 'string') {
+      const m = i.Product_Name.name.match(ZOHO_QUOTE_ITEMS_SKU_REGEX);
+      if (m) s = m[1];
+    }
+    return String(s || '').trim().toUpperCase();
+  };
+  const convertLines = []; // delete commercial row + add FED- row
+  const untouched = [];    // hardware / already-FED lines
+  const unmapped = [];     // LIC-* with no active FED- equivalent → abort
+  const econCache = new Map(); // candidate SKU → economics (dedupe live lookups)
+  for (const item of quotedItems) {
+    const sku = codeOf(item);
+    const qty = Number(item.Quantity) || 0;
+    if (/^FED-/i.test(sku)) { untouched.push({ sku, reason: 'already_fedramp' }); continue; }
+    const candidates = fedrampCandidateSkus(sku);
+    if (!candidates.length) { untouched.push({ sku: sku || item.id, reason: 'not_a_license' }); continue; }
+    // Resolve the FED- equivalent LIVE (cache-first helper falls through to a
+    // live Products search — FED- SKUs are never in prices.json).
+    let target = null, econ = null;
+    for (const cand of candidates) {
+      let e = econCache.get(cand);
+      if (e === undefined) {
+        e = await resolveTargetLicenseEconomics(cand, env);
+        econCache.set(cand, e);
+      }
+      if (e && e.product_id && e.active !== false) { target = cand; econ = e; break; }
+    }
+    if (!target || !econ) { unmapped.push(`${sku} (no active FED- equivalent: tried ${candidates.join(', ')})`); continue; }
+    // Fail closed on unusable economics (mirrors reterm's guards).
+    if (!(econ.list > 0)) { unmapped.push(`${sku} → ${target} (FED product has no list price)`); continue; }
+    if (!(qty > 0)) { unmapped.push(`${sku} → ${target} (source line has non-positive quantity)`); continue; }
+    const newListTotal = roundMoney(econ.list * qty);
+    const newDiscount = roundMoney(newListTotal * pct);
+    convertLines.push({
+      old_id: item.id, sku, target_sku: target, new_product_id: String(econ.product_id),
+      quantity: qty, sequence: item.Sequence_Number,
+      new_list: econ.list, new_list_total: newListTotal,
+      discount_pct: Number((pct * 100).toFixed(2)), new_discount: newDiscount,
+      new_net_total: roundMoney(newListTotal - newDiscount),
+    });
+  }
+
+  if (unmapped.length > 0) {
+    return fail('unmapped_licenses',
+      `Cannot convert ${unmapped.length} license line(s) to FedRAMP — ${unmapped.join('; ')}. NOTHING was written (fail-closed, so the quote is not left half-converted). Tell the user which SKUs have no FedRAMP equivalent in the live catalog and ask how to proceed.`,
+      { unmapped });
+  }
+  if (convertLines.length === 0) {
+    const allFed = untouched.some(u => u.reason === 'already_fedramp');
+    return fail('nothing_to_convert',
+      allFed
+        ? `Every license line on Quote ${quoteId} is already a FED- (FedRAMP) SKU — nothing to convert.`
+        : `Quote ${quoteId} has no commercial LIC-* license lines to convert (hardware/non-license lines are never converted).`,
+      { untouched });
+  }
+
+  // ── 4. Pre-state snapshot (full rows — audit trail; see reterm note) ──
+  const preState = {
+    id: quoteId, Quote_Number: quote.Quote_Number,
+    Grand_Total: quote.Grand_Total, Sub_Total: quote.Sub_Total,
+    Quoted_Items: quotedItems.map(i => ({
+      id: i.id,
+      Product_Name: i.Product_Name?.id ? { id: i.Product_Name.id } : undefined,
+      Quantity: i.Quantity, List_Price: i.List_Price, Discount: i.Discount,
+      Description: i.Description, Sequence_Number: i.Sequence_Number,
+    })),
+  };
+
+  // ── 5. Atomic write: delete each commercial license row + add its FED- row
+  //       in the SAME PUT (additive PUT preserves omitted hardware rows). ──
+  const quotedItemsPayload = convertLines.flatMap(l => ([
+    { id: l.old_id, _delete: null },
+    { Product_Name: { id: l.new_product_id }, Quantity: l.quantity, List_Price: l.new_list, Discount: l.new_discount, Sequence_Number: l.sequence },
+  ]));
+  let putResult;
+  try {
+    putResult = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, {
+      data: [{ id: quoteId, Quoted_Items: quotedItemsPayload, Do_Not_Auto_Update_Prices: true }],
+    });
+  } catch (err) { return fail('write_failed', `The FedRAMP conversion write to Quote ${quoteId} threw: ${err.message}`); }
+  const putParsed = parseZohoResponse(putResult, 'Quote FedRAMP conversion');
+  if (putParsed?.success === false) {
+    return fail('write_rejected', `Zoho rejected the FedRAMP conversion write: ${putParsed.message || 'unknown error'}. The quote may be partially changed — re-check it.`);
+  }
+
+  // ── 6. Verify: old rows gone, no LIC-* license line remains, line count
+  //       unchanged, untouched rows preserved, every new FED- row carries the
+  //       right list + discount (two-pass exact→±$0.5 match, as in reterm). ──
+  let verifyQuote = null;
+  try { verifyQuote = await fetchRecordFull('Quotes', quoteId, env); } catch (_) { verifyQuote = null; }
+  const verification = { verified: false, success: false };
+  if (!verifyQuote || !Array.isArray(verifyQuote.Quoted_Items)) {
+    verification.WARNING = `FedRAMP conversion was written but the verification re-fetch of Quote ${quoteId} failed — UNVERIFIED. Do NOT claim success; re-check the quote.`;
+  } else {
+    const after = verifyQuote.Quoted_Items;
+    const afterIds = new Set(after.map(i => i.id));
+    const mismatches = [];
+    const oldStillThere = convertLines.filter(l => afterIds.has(l.old_id)).map(l => l.sku);
+    if (oldStillThere.length) mismatches.push(`old rows not deleted: ${[...new Set(oldStillThere)].join(', ')}`);
+    const stillCommercial = [...new Set(after.map(codeOf).filter(s => /^LIC-/.test(s)))];
+    if (stillCommercial.length) mismatches.push(`commercial license lines remain: ${stillCommercial.join(', ')}`);
+    const countOk = after.length === quotedItems.length;
+    if (!countOk) mismatches.push(`line count changed: ${quotedItems.length} → ${after.length}`);
+    const convertedOldIds = new Set(convertLines.map(l => l.old_id));
+    const droppedUntouched = quotedItems.filter(i => !convertedOldIds.has(i.id) && !afterIds.has(i.id)).map(i => i.id);
+    if (droppedUntouched.length) mismatches.push(`untouched rows disappeared: ${droppedUntouched.length} (ids ${droppedUntouched.slice(0, 5).join(', ')})`);
+    const originalIds = new Set(quotedItems.map(i => i.id));
+    const newRows = after.filter(i => !originalIds.has(i.id));
+    if (newRows.length !== convertLines.length) {
+      mismatches.push(`expected ${convertLines.length} new FED- row(s), found ${newRows.length}`);
+    }
+    const afterPool = newRows.map(i => ({ sku: codeOf(i), qty: Number(i.Quantity), disc: moneyValue(i.Discount), list: moneyValue(i.List_Price), used: false }));
+    const discFailures = [];
+    const matchPass = (tol) => {
+      for (const l of convertLines) {
+        if (l._matched) continue;
+        const c = afterPool.find(a => !a.used && a.sku === l.target_sku && a.qty === l.quantity
+          && Math.abs(a.disc - l.new_discount) <= tol && Math.abs(a.list - l.new_list) <= tol);
+        if (c) { c.used = true; l._matched = true; }
+      }
+    };
+    matchPass(0.02);
+    matchPass(0.5);
+    for (const l of convertLines) {
+      if (l._matched) continue;
+      const wrong = afterPool.find(a => !a.used && a.sku === l.target_sku && a.qty === l.quantity);
+      if (wrong) { wrong.used = true; discFailures.push(`${l.target_sku} qty${l.quantity}: got list $${wrong.list}/disc $${wrong.disc}, expected list $${l.new_list}/disc $${l.new_discount}`); }
+      else discFailures.push(`${l.target_sku} qty${l.quantity}: converted line not found after write`);
+    }
+    if (discFailures.length) mismatches.push(`line mismatches — ${discFailures.join('; ')}`);
+    verification.verified = true;
+    verification.line_count_unchanged = countOk;
+    verification.success = mismatches.length === 0;
+    verification.grand_total_before = moneyValue(quote.Grand_Total);
+    verification.grand_total_after = moneyValue(verifyQuote.Grand_Total);
+    if (mismatches.length > 0) verification.WARNING = `FedRAMP conversion verification FAILED: ${mismatches.join('; ')}. Do NOT claim success.`;
+  }
+
+  // ── 7. Audit log. Delete+add mints new subform ids → no undo token; to
+  //       revert, rebuild the commercial lines from the D1 preState snapshot. ──
+  const recordUrl = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}`;
+  const summaryLine = verification.success
+    ? `Converted Quote ${quote.Quote_Number || quoteId} to FedRAMP licenses — ${convertLines.length} line(s) mapped to FED- SKUs at ${Number((pct * 100).toFixed(2))}% off list (live-catalog pricing), ${untouched.length} other line(s) untouched. Grand Total $${moneyValue(quote.Grand_Total)} → $${verification.grand_total_after}. [Open in Zoho](${recordUrl}). This is not undoable via "undo" — to revert, ask to re-quote the original commercial SKUs.`
+    : `⚠️ FedRAMP conversion of Quote ${quoteId} did NOT fully verify. ${verification.WARNING || ''}`;
+  let opId = null;
+  try {
+    opId = await logCrmOpToD1(env, {
+      personId: personId || null, bot: botFromPersonId(personId),
+      operation: 'update', module: 'Quotes', recordId: quoteId,
+      recordName: quote.Subject || quote.Quote_Number || null,
+      status: verification.success ? 'success' : 'error',
+      durationMs: Date.now() - startedMs,
+      errorMessage: verification.success ? null : (verification.WARNING || 'fedramp conversion verification failed'),
+      details: { discount_pct: Number((pct * 100).toFixed(2)), converted: convertLines, untouched, verification },
+      preState,
+      postState: { id: quoteId, Quoted_Items: quotedItemsPayload },
+      requestPayload: { tool: 'convert_quote_licenses_fedramp', quote_id: quoteId, discount_pct: opts?.discountPct ?? null },
+      responsePayload: putParsed,
+      undoToken: null,
+      userVisibleSummary: summaryLine,
+    });
+  } catch (_) { opId = null; }
+
+  // ── 8. Result — verdict-bearing fields first (see reterm note). ──
+  const result = {
+    success: verification.success,
+    verification,
+    message: summaryLine,
+    quote_id: quoteId,
+    quote_number: quote.Quote_Number || null,
+    discount_pct: Number((pct * 100).toFixed(2)),
+    untouched_count: untouched.length,
+    grand_total_before: moneyValue(quote.Grand_Total),
+    grand_total_after: verifyQuote ? moneyValue(verifyQuote.Grand_Total) : null,
+    converted: convertLines.map(l => ({ from: l.sku, to: l.target_sku, qty: l.quantity, discount_pct: l.discount_pct, new_net_total: l.new_net_total })),
+  };
+  if (verification.success) {
+    result._record_url = recordUrl;
+    result._operation_id = opId;
+    result._user_visible_summary = summaryLine;
+  }
+  return result;
+}
+
 async function ensureQuoteDidAndVelocity(quote, env, personId = null) {
   const quoteId = quote?.id;
   if (isCiscoDid(quote?.CCW_Deal_Number)) {
@@ -11395,6 +11635,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
         'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
         'reterm_quote_licenses': { success: true, quote_id: toolInput.quote_id, target_term: toolInput.target_term, message: 'Licenses re-termed (dry run)', dry_run: true },
+        'convert_quote_licenses_fedramp': { success: true, quote_id: toolInput.quote_id, discount_pct: toolInput.discount_pct ?? 35, message: 'Licenses converted to FedRAMP (dry run)', dry_run: true },
         'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
         'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
         'webex_send_message': { success: true, message_id: mockId, dry_run: true },
@@ -15042,6 +15283,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         return await retermQuoteLicenses(quote_id, target_term, env, personId);
       }
 
+      // ── R2: FedRAMP license conversion (deterministic, atomic, fail-closed) ──
+      case 'convert_quote_licenses_fedramp': {
+        const { quote_id, discount_pct } = toolInput;
+        if (!quote_id) return { success: false, error: 'quote_id is required' };
+        return await convertQuoteLicensesFedramp(String(quote_id), { discountPct: discount_pct }, env, personId);
+      }
+
       // ── Clone Quote (native Zoho clone endpoint — preserves per-line Discount verbatim) ──
       case 'clone_quote': {
         const { quote_id, new_subject } = toolInput;
@@ -16937,6 +17185,18 @@ const CRM_EMAIL_TOOLS = [
     }
   },
   {
+    name: 'convert_quote_licenses_fedramp',
+    description: 'Convert a Zoho Quote\'s commercial LIC-* license lines to their FED- (FedRAMP / government) equivalents, deterministically. Use this for ANY request like "convert to FedRAMP licenses", "make these government licenses", "switch the quote to FedRAMP", "FED versions of these licenses". FED- SKUs exist ONLY in the live Zoho catalog (never in the ecomm cache and never on ecomm URL quotes) — each line is resolved by live lookup (both -NY and -NYR suffix spellings) and the write is ONE atomic delete+add; it fails closed if ANY license line has no active FED- equivalent, rather than half-converting. Pricing: fixed 35% off the FED list price regardless of term BY DEFAULT (company policy); pass discount_pct ONLY when the user explicitly stated a different discount. Hardware / SFP / cable / antenna / sensor lines are untouched. NEVER hand-assemble zoho_update_record delete+add rows for a FedRAMP conversion. Claim success only when verification.success === true; report the from→to per line and the Grand Total change. NOT undoable via undo_crm_action — to revert, re-quote the original commercial SKUs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string', description: 'Zoho Quote record ID to convert (NOT the Quote_Number)' },
+        discount_pct: { type: 'number', description: 'OPTIONAL explicit discount percentage (0-99) — ONLY when the user explicitly stated a discount. Omit for the default fixed 35% off list.' }
+      },
+      required: ['quote_id']
+    }
+  },
+  {
     name: 'undo_crm_action',
     description: 'REVERT a previous CRM mutation to its exact prior state. Use this ONLY when the user asks to undo, revert, roll back, or "change it back". Pass the _undo_token that was returned by the earlier tool call (looks like "u_a3f9b2c1"). For updates, this restores the exact field values as they were before the change. For creates, this deletes the record. For clones, this deletes the cloned quote. For deletes, this re-creates the record from its pre-delete snapshot. The original (source) record of a clone is never touched. If the user says "undo" or "undo last" without a specific token, you MAY omit undo_token and the server will resolve to the most recent un-reversed mutation in this session. Always confirm the restoration with a fresh GET and report back the actual restored state.',
     input_schema: {
@@ -17689,7 +17949,7 @@ const TOOL_SUBSETS = Object.freeze({
   crm_write: [
     'create_deal_and_quote', 'create_quote_on_deal',
     'zoho_create_record', 'zoho_update_record',
-    'clone_quote', 'apply_margin_to_quote', 'reterm_quote_licenses', 'undo_crm_action', 'zoho_delete_record',
+    'clone_quote', 'apply_margin_to_quote', 'reterm_quote_licenses', 'convert_quote_licenses_fedramp', 'undo_crm_action', 'zoho_delete_record',
     'batch_product_lookup', 'find_product_candidates', 'web_search_sku', 'parse_quote_url',
     'zoho_search_records', 'zoho_get_record',
     // 2026-06-09 SEDA postmortem: "create a quote based off this email" classifies as
@@ -17749,7 +18009,7 @@ const TOOL_SUBSETS = Object.freeze({
     'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
     'zoho_create_record', 'zoho_update_record',
     'batch_product_lookup', 'find_product_candidates', 'create_deal_and_quote', 'clone_quote',
-    'apply_margin_to_quote', 'reterm_quote_licenses', 'find_customer_license_claim_key'
+    'apply_margin_to_quote', 'reterm_quote_licenses', 'convert_quote_licenses_fedramp', 'find_customer_license_claim_key'
   ]
 });
 
@@ -17822,6 +18082,14 @@ function classifyCrmIntent(text, ctx = {}) {
       && (/\d\s*%?\s*margin\b/.test(t)
           || /\bmargin\b[^.!?]{0,25}\d/.test(t)
           || /\b(apply|set|update|adjust|change|reflect)\b[^.!?]{0,40}\bmargin\b/.test(t))) {
+    return { class: 'crm_write', confidence: 0.9 };
+  }
+
+  // 0d. FedRAMP / government license conversion (R2, 2026-07-15): FED- SKUs are
+  // Zoho-quote-only (never ecomm), so any fedramp/government licensing ask is a
+  // CRM write — convert_quote_licenses_fedramp lives in the crm_write subset.
+  if (/\b(fed-?ramp|government)\b/.test(t)
+      && /\b(licen[sc]\w*|quote|convert|conversion|switch|skus?)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.9 };
   }
 
@@ -18140,6 +18408,9 @@ Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT
 
 ### License Re-terming (reterm_quote_licenses)
 "change to 1 year licenses" / "make this a 3-year quote" / "1yr version of this quote" / "convert the licenses to 5 year" / "re-term to 7 year" / "10-year co-term" — ANY change of a quote's license TERM → call \`reterm_quote_licenses({quote_id, target_term})\` where target_term is the number of YEARS (1, 3, 5, 7, or 10; 7/10 are co-term Zoho-quote terms auto-priced at a fixed 50%/60% discount). This is the ONLY correct way to re-term a quote. Do NOT hand-assemble zoho_update_record delete+add rows for a term change — that is slow, truncates on large quotes, and thrashes. The tool maps every termed license line to its target-term SKU, preserves each line's discount %, leaves hardware/SFP/cable/antenna/sensor lines untouched, and writes atomically — fail-closed if any license has no target-term variant. Errors: \`unmapped_licenses\` → relay the SKUs with no N-year variant and ask how to proceed (quote NOT changed); \`nothing_to_reterm\` → already at that term. Claim success only on \`verification.success === true\`; report from→to per line + the Grand Total change (echo \`_user_visible_summary\`). A re-term is NOT undoable — to revert or re-change the term, call \`reterm_quote_licenses\` again with the desired year; NEVER \`undo_crm_action\` for a re-term.
+
+### FedRAMP / Government License Conversion (convert_quote_licenses_fedramp)
+"convert to FedRAMP licenses" / "government licenses" / "make this a FedRAMP quote" → call \`convert_quote_licenses_fedramp({quote_id})\`. It maps every commercial LIC-* line to its FED- equivalent via LIVE catalog lookup and writes atomically — fail-closed on any unmapped line (quote NOT changed; relay the unmapped SKUs and ask). **Pricing is a FIXED 35% off the FED list price regardless of term (company default)** — pass \`discount_pct\` ONLY when the user explicitly stated a different discount. FED- SKUs are Zoho-quote-only: never on ecomm URLs, never hand-assembled via zoho_update_record. Errors: \`unmapped_licenses\` → relay + ask; \`nothing_to_convert\` → already FedRAMP (or no license lines). Claim success only on \`verification.success === true\`; report from→to per line + Grand Total change. NOT undoable — to revert, re-quote the original commercial SKUs.
 
 ### Quote Update Workflow (minimize tool calls)
 1. URL provided → parse_quote_url. Else → batch_product_lookup for ALL SKUs in ONE call.
@@ -21544,6 +21815,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
       'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
       'reterm_quote_licenses': { success: true, quote_id: toolInput.quote_id, target_term: toolInput.target_term, message: 'Licenses re-termed (dry run)', dry_run: true },
+        'convert_quote_licenses_fedramp': { success: true, quote_id: toolInput.quote_id, discount_pct: toolInput.discount_pct ?? 35, message: 'Licenses converted to FedRAMP (dry run)', dry_run: true },
       'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
       'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
       'webex_send_message': { success: true, message_id: mockId, dry_run: true },
