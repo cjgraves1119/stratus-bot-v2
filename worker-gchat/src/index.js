@@ -23318,6 +23318,19 @@ function pickOptimizedPrompt(modelId, ownerCtx) {
 // Run a single benchmark task against a single model.
 async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full', evalContext = null, reasoningPolicy = REASONING_POLICY_DISABLED) {
   let systemPrompt;
+  // Multi-turn support (2026-07-15 model-comparison rework): a task may carry a
+  // seedHistory array of prior conversation turns. Seed conv:<personId> in KV so
+  // the agent threads the follow-up turn against real prior context — the same
+  // mechanism /api/chat-waterfall uses. Bounded to the last 10 turns.
+  if (task && Array.isArray(task.seedHistory) && task.seedHistory.length && env && env.CONVERSATION_KV) {
+    try {
+      const _seed = task.seedHistory.slice(-10).map(m => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+      }));
+      await env.CONVERSATION_KV.put(`conv:${personId}`, JSON.stringify({ messages: _seed }), { expirationTtl: 1800 });
+    } catch (_) { /* seed best-effort; a KV miss just makes it single-turn */ }
+  }
   const _ownerCtx_bench = await getOwnerContext(env, env && env.__CALLER_EMAIL);
   if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
     systemPrompt = pickOptimizedPrompt(modelConfig.id, _ownerCtx_bench);
