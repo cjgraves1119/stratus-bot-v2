@@ -49,6 +49,7 @@ function buildShim() {
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m,
     `const specsData = require('${escPath('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m,
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m,
     `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');

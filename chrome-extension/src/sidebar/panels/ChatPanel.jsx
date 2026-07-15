@@ -461,6 +461,16 @@ function isAccessoryRequest(text) {
   return /\b(power\s*supply|psu|power\s*adapter|power\s*injector|stack(?:ing)?\s*(?:cable|kit|module)|transceiver|sfp\+?|qsfp\+?|gbic|patch\s*cable|mounting\s*(?:kit|bracket)|rack\s*(?:kit|mount)|rail\s*kit|antenna|wall\s*(?:mount|adapter))\b/i.test(t);
 }
 
+// R11 (Chris directive, 2026-07-15): the EXPLICIT ecomm-URL phrasings — the
+// ONLY thing that routes to the deterministic ecomm engine while the user has
+// an active Zoho record page open. Explicit-ecomm ask beats page context; page
+// context beats every other lexical quote heuristic; off-Zoho routing unchanged.
+// Mirrors the worker's isExplicitEcommUrlAsk.
+function isExplicitEcommUrlAsk(text) {
+  const v = (text || '').toLowerCase();
+  return /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b/.test(v);
+}
+
 function isEcommQuoteRequest(text) {
   const v = (text || '').toLowerCase().trim();
   if (!v) return false;
@@ -1396,7 +1406,16 @@ export default function ChatPanel({
       return /create a zoho crm quote from this stratus quote/i.test(body)
         || /crm\.zoho\.com\/crm\/[^\s)]*\/tab\/Quotes\//i.test(body);
     });
-    if (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text))) {
+    // R11 routing rule (Chris, 2026-07-15): with an active Zoho record page
+    // (or a pinned record), NEVER route to the deterministic ecomm engine
+    // unless the user EXPLICITLY asked for an ecomm quote/link ("url quote",
+    // "ecomm quote", "quote link/url", "order link", "stratus url", "send me
+    // a link"). This fixes the corp R3 misroute where "create a quote for 2
+    // MX84 SEC licenses..." sent ON a Zoho Quote page returned an /order/ URL.
+    // Off Zoho pages the existing heuristics stand unchanged.
+    const onZohoRecord = !!((zohoPageContext && zohoPageContext.recordId) || (manualRecord && manualRecord.recordId));
+    const ecommAllowed = !onZohoRecord || isExplicitEcommUrlAsk(text);
+    if (ecommAllowed && (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text)))) {
       if (!overrideText) setInput('');
       runAndPushQuote(text);
     } else {

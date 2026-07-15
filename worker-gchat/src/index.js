@@ -1134,6 +1134,13 @@ async function updateCrmOpVerdict(env, opId, { status, errorMessage, details }) 
  *   - retried: true if we exhausted a single 5xx/network retry
  *   - http_classified: 'transient' | 'validation' | 'unknown' — drives retry decision and telemetry
  */
+// Extract the caller email from a gateway/extension personId ('gw:<email>' /
+// 'ext:<email>'). Returns null for cron/system/legacy ids. (R6 owner fix.)
+function callerEmailFromPersonId(personId) {
+  const m = /^(?:gw|ext):([^\s@]+@[^\s@]+)$/i.exec(String(personId || '').trim());
+  return m ? m[1].toLowerCase() : null;
+}
+
 async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, ownerId }) {
   const taskDueDate = new Date();
   let daysAdded = 0;
@@ -1142,12 +1149,50 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
   }
   const dueDateStr = taskDueDate.toISOString().split('T')[0];
+  // ── R6 owner resolution (corp error_reports, 2026-07-15) ──────────────────
+  // Every auto-created follow-up Task used to land on env.SYSTEM_OWNER_ID
+  // ("IT Stratus" on corp) because callers never passed ownerId. Resolution
+  // order: explicit ownerId arg (caller knows best — e.g. the Deal Owner the
+  // user set on a direct zoho_create_record) → the REQUESTING USER (caller
+  // email from env.__CALLER_EMAIL or the gw:/ext: personId, resolved via the
+  // D1 users roster; roster hits only — the roster's own system fallback is
+  // NOT accepted here so we can fall through) → the parent Deal's Owner →
+  // SYSTEM_OWNER_ID (cron/system paths only).
+  let _taskOwnerId = ownerId || '';
+  let _taskOwnerSource = _taskOwnerId ? 'caller_arg' : '';
+  if (!_taskOwnerId) {
+    try {
+      const _callerEmail = (env && env.__CALLER_EMAIL) || callerEmailFromPersonId(personId);
+      if (_callerEmail) {
+        const _octx = await getOwnerContext(env, _callerEmail);
+        if (_octx && _octx.zoho_user_id && (_octx._source === 'd1' || _octx._source === 'seed')) {
+          _taskOwnerId = _octx.zoho_user_id;
+          _taskOwnerSource = 'requesting_user';
+        }
+      }
+    } catch (e) { console.log(`[TASK-OWNER] caller resolve skipped: ${e && e.message}`); }
+  }
+  if (!_taskOwnerId && dealId) {
+    try {
+      const _dealResp = await zohoApiCall('GET', `Deals/${dealId}?fields=Owner`, env);
+      const _dOwner = _dealResp?.data?.[0]?.Owner;
+      const _dOwnerId = _dOwner && (_dOwner.id || _dOwner);
+      if (_dOwnerId) {
+        _taskOwnerId = String(_dOwnerId);
+        _taskOwnerSource = 'deal_owner';
+      }
+    } catch (e) { console.log(`[TASK-OWNER] deal-owner resolve skipped: ${e && e.message}`); }
+  }
+  if (!_taskOwnerId) {
+    _taskOwnerId = (env && env.SYSTEM_OWNER_ID) || '';
+    _taskOwnerSource = 'system_fallback';
+  }
   // Fail closed: never POST Owner.id='' — Zoho would silently attribute the task to the API-token
   // user. Personal/corp both set SYSTEM_OWNER_ID, so this only trips on a misconfigured deploy.
-  const _taskOwnerId = ownerId || (env && env.SYSTEM_OWNER_ID) || '';
   if (!_taskOwnerId) {
     return { success: false, taskId: null, taskUrl: null, dueDate: dueDateStr, error: 'No owner id resolved (SYSTEM_OWNER_ID unset) — refused to avoid API-token attribution', retried: false, http_classified: 'validation' };
   }
+  console.log(`[TASK-OWNER] Follow-up task owner ${_taskOwnerId} (source: ${_taskOwnerSource})`);
   const taskData = {
     Subject: `Follow up - ${subjectLabel || `Deal ${dealId}`}`,
     Due_Date: dueDateStr,
@@ -1224,7 +1269,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
       status: 'success',
       durationMs: attempt.ms || null,
       errorMessage: null,
-      details: { dealId, dueDate: dueDateStr, retried, source: 'createFollowUpTaskForDeal' },
+      details: { dealId, dueDate: dueDateStr, retried, source: 'createFollowUpTaskForDeal', ownerSource: _taskOwnerSource },
       preState: null,
       postState: { id: attempt.taskId, ...taskData },
       requestPayload: { module: 'Tasks', data: taskData },
@@ -1254,7 +1299,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     status: 'error',
     durationMs: attempt.ms || null,
     errorMessage: attempt.error,
-    details: { dealId, dueDate: dueDateStr, retried, classification: attempt.classification, source: 'createFollowUpTaskForDeal' },
+    details: { dealId, dueDate: dueDateStr, retried, classification: attempt.classification, source: 'createFollowUpTaskForDeal', ownerSource: _taskOwnerSource },
     preState: null,
     postState: null,
     requestPayload: { module: 'Tasks', data: taskData },
@@ -1949,6 +1994,24 @@ function looksLikeZohoQuoteIntent(text) {
       || /\bon\s+the\s+(?:zoho\s+)?quote\b/i.test(text)
       || /\bcreate\s+(?:a\s+|the\s+)?(?:zoho\s+)?(?:quote|deal|opportunity)\s+(?:for|in)\b/i.test(text)
       || /\b(?:billing|shipping)\s+(?:address|street|city|state|zip|country)\b/i.test(text);
+}
+
+// ── R11 active-record routing rule (Chris directive, 2026-07-15) ────────────
+// With an active Zoho record page in context, a request is NEVER routed to the
+// deterministic ecomm URL engine unless the user EXPLICITLY asked for an ecomm
+// quote/link — these exact phrasings: "url quote", "ecomm quote/link/url",
+// "quote link/url", "order link/url", "stratus url", "send me a link".
+// Precedence: explicit-ecomm ask > active Zoho page context > every other
+// lexical quote heuristic. Off Zoho pages, routing is unchanged.
+// (Corp error_reports R3 misroute: "create a quote for 2 MX84 SEC licenses and
+// 2 Z3 ENT licenses" sent while ON a Zoho Quote page returned an /order/ URL.)
+function isExplicitEcommUrlAsk(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b/i.test(text);
+}
+
+function hasActiveZohoPageContext(text) {
+  return /\[Active Zoho page[:\s]/i.test(String(text || ''));
 }
 
 // ── 2026-05-05 council: ambiguous license-term gate ────────────────────
@@ -8595,6 +8658,23 @@ function scrubMarginFromQuotedItems(quotedItems, context = 'Quoted_Items') {
   return { scrubbed };
 }
 
+// ── R4: default Quote/Deal dates (Chris policy, 2026-07-15) ──────────────────
+// Default Quote Valid_Till AND Deal Closing_Date = creation date + 14 days
+// (down from +30), and the two fields always MATCH on a deal/quote pair.
+// Month-end window: when the creation date falls within 7 days of the end of
+// the month (the close-critical week — a +14 default would spill past the
+// month boundary), callers get needsConfirmation:true and must ASK the user to
+// confirm the date (suggesting `date`) instead of silently defaulting. An
+// explicit user-supplied date always bypasses the window. UTC throughout —
+// matches the existing toISOString() date idiom used by the create paths.
+function defaultQuoteDealDate(created = new Date()) {
+  const t = created instanceof Date ? created : new Date(created);
+  const date = new Date(t.getTime() + 14 * 86400000).toISOString().split('T')[0];
+  const lastDay = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+  const daysToMonthEnd = lastDay - t.getUTCDate();
+  return { date, needsConfirmation: daysToMonthEnd < 7, daysToMonthEnd };
+}
+
 async function validateCrmWrite(module_name, data, isCreate = false, env = null) {
   const errors = [];
 
@@ -8678,15 +8758,22 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
         errors.push(`__AUTO_RESOLVE_ACCOUNT_NAME__${data.Account_Name.name}`);
       }
     }
-    // Server-side Closing_Date enforcement: correct past/invalid dates
+    // Server-side Closing_Date enforcement: correct past/invalid dates.
+    // R4 (2026-07-15): default is now +14 days (must MATCH the Quote's
+    // Valid_Till); inside the month-end window we refuse instead of silently
+    // defaulting so the agent asks the user to confirm the date.
     if (data.Closing_Date) {
       const parsedDate = new Date(data.Closing_Date + 'T00:00:00');
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       if (isNaN(parsedDate.getTime()) || parsedDate < today) {
-        const corrected = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
-        console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${corrected}`);
-        data.Closing_Date = corrected;
+        const dd = defaultQuoteDealDate();
+        if (dd.needsConfirmation) {
+          errors.push(`❌ closing_date_needs_confirmation: Closing_Date "${data.Closing_Date}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm the close date (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Quote's Valid_Till.`);
+        } else {
+          console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${dd.date}`);
+          data.Closing_Date = dd.date;
+        }
       }
     }
     // Auto-fill defaults for commonly skipped fields.
@@ -8764,19 +8851,27 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
       }
     }
     // Server-side Valid_Till enforcement: if Claude passes a past date or invalid date,
-    // override with today + 30 days. LLMs frequently miscalculate dates.
+    // override with the default. LLMs frequently miscalculate dates.
+    // R4 (2026-07-15): default is now +14 days and must MATCH the Deal's
+    // Closing_Date; inside the month-end window we refuse instead of silently
+    // defaulting so the agent asks the user to confirm the date.
     if (data.Valid_Till) {
       const parsedDate = new Date(data.Valid_Till + 'T00:00:00');
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       if (isNaN(parsedDate.getTime()) || parsedDate < today) {
-        const corrected = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
-        console.log(`[VALIDATE] Valid_Till "${data.Valid_Till}" is past/invalid, correcting to ${corrected}`);
-        data.Valid_Till = corrected;
+        const dd = defaultQuoteDealDate();
+        if (dd.needsConfirmation) {
+          errors.push(`❌ valid_till_needs_confirmation: Valid_Till "${data.Valid_Till}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm the date (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Deal's Closing_Date.`);
+        } else {
+          console.log(`[VALIDATE] Valid_Till "${data.Valid_Till}" is past/invalid, correcting to ${dd.date}`);
+          data.Valid_Till = dd.date;
+        }
       }
     } else {
-      // Missing Valid_Till — set default
-      data.Valid_Till = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+      // Missing Valid_Till — set default (+14d; the required-field error above
+      // still fails the create, this just keeps the mutated payload consistent)
+      data.Valid_Till = defaultQuoteDealDate().date;
     }
     // Auto-fill commonly skipped fields with safe defaults
     if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
@@ -11459,8 +11554,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'zoho_create_record': {
         const { module_name, data } = toolInput;
         const recordData = Array.isArray(data) ? data[0] : data;
-        // Default Owner injection for Accounts/Deals — bot acts on behalf of human user
-        if ((module_name === 'Accounts' || module_name === 'Deals') && !recordData.Owner) {
+        // Default Owner injection for Accounts/Deals/Tasks — bot acts on behalf of
+        // the human user. Tasks added 2026-07-15 (R6): an agent-created Task with
+        // no Owner would otherwise attribute to the API-token user in Zoho.
+        if ((module_name === 'Accounts' || module_name === 'Deals' || module_name === 'Tasks') && !recordData.Owner) {
           recordData.Owner = { id: env.BOT_DEFAULT_OWNER_ID || await getOwnerForCaller(env) };
         }
         // Normalize state/country to 2-letter codes if caller passed full names
@@ -12840,6 +12937,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (licOptions?.length) {
                 result.suggested_licenses = licOptions.map(l => l.sku);
               }
+              // R8a (2026-07-15): ALWAYS surface the EOL replacement map — the
+              // ecomm engine had it, the CRM agent only learned it when the user
+              // said "use the ecomm bot's logic". Upgrade/refresh intents map EOL
+              // models via replaced_by by default (confirm with the user first).
+              const eolRepl = checkEol(rawSku);
+              if (eolRepl) {
+                result.eol = true;
+                if (!result.replaced_by) result.replaced_by = eolRepl;
+                result.eol_note = `${rawSku} is END-OF-LIFE. For upgrade/refresh/replace intents quote the replacement (${Array.isArray(eolRepl) ? eolRepl.join(' or ') : eolRepl}) by default — confirm the mapping with the user before writing. License renewals on the agnostic family alias are still fine.`;
+              }
             }
             batchResults[rawSku] = result;
             return;
@@ -12893,6 +13000,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const licOptions = getLicenseSkus(rawSku);
               if (licOptions?.length) {
                 apiResult.suggested_licenses = licOptions.map(l => l.sku);
+              }
+              // R8a (2026-07-15): EOL replacement surfaced on the API path too.
+              const eolRepl = checkEol(rawSku);
+              if (eolRepl) {
+                apiResult.eol = true;
+                if (!apiResult.replaced_by) apiResult.replaced_by = eolRepl;
+                apiResult.eol_note = `${rawSku} is END-OF-LIFE. For upgrade/refresh/replace intents quote the replacement (${Array.isArray(eolRepl) ? eolRepl.join(' or ') : eolRepl}) by default — confirm the mapping with the user before writing. License renewals on the agnostic family alias are still fine.`;
               }
             }
             // SKU NOT FOUND — query Zoho Products directly to find real alternatives
@@ -14246,7 +14360,49 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           // STEP 4: Build SKU description for deal name (hardware only for cleaner name)
           const skuSummary = orderedPairs.map(p => `${p.hwQty > 1 ? p.hwQty + 'x ' : ''}${p.hw}`).join(', ');
-          const closingDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+
+          // ── R4 date policy (Chris, 2026-07-15): Deal Closing_Date and Quote
+          // Valid_Till default to creation + 14 days and ALWAYS MATCH each other.
+          // Precedence: explicit closing_date param (user-confirmed) → existing
+          // Deal's future Closing_Date (attach mode: the quote's Valid_Till stays
+          // matched to the deal) → +14d default. Inside the month-end window
+          // (creation within 7 days of month end) the default is REFUSED with
+          // closing_date_needs_confirmation so the agent asks the user instead
+          // of silently writing. ──
+          let closingDate;
+          const _rawClosing = typeof toolInput.closing_date === 'string' ? toolInput.closing_date.trim() : '';
+          if (_rawClosing) {
+            const _cd = new Date(_rawClosing + 'T00:00:00Z');
+            const _todayStr = new Date().toISOString().split('T')[0];
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(_rawClosing) || isNaN(_cd.getTime()) || _rawClosing < _todayStr) {
+              return {
+                success: false,
+                error: 'invalid_closing_date',
+                instruction: `closing_date "${_rawClosing}" is not a valid future date. Pass YYYY-MM-DD (today or later), or omit it to use the default. Ask the user for the intended close date if unsure.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            closingDate = _rawClosing;
+            results.steps.push(`Using user-confirmed close date ${closingDate} for Deal Closing_Date and Quote Valid_Till`);
+          } else if (existingDealData?.Closing_Date
+              && existingDealData.Closing_Date >= new Date().toISOString().split('T')[0]) {
+            closingDate = existingDealData.Closing_Date;
+            results.steps.push(`Quote Valid_Till matched to the existing Deal's Closing_Date ${closingDate}`);
+          } else {
+            const _dd = defaultQuoteDealDate();
+            if (_dd.needsConfirmation) {
+              return {
+                success: false,
+                error: 'closing_date_needs_confirmation',
+                suggested_date: _dd.date,
+                instruction: `Today is within 7 days of month-end, so the Close/Valid-Till date must be CONFIRMED by the user instead of defaulted. Ask the user to confirm the close date — offer "${_dd.date}" (today + 14 days) as the recommended chip plus a free-form option — then re-call this tool with closing_date:"<confirmed YYYY-MM-DD>". The same date is applied to BOTH the Deal's Closing_Date and the Quote's Valid_Till. Any Account/Contact already resolved will be reused on the retry.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            closingDate = _dd.date;
+          }
 
           // ── HARD GATE #5: Zero products resolved ──
           // Added 2026-04-21 (Skty Trading LLC forensic fix).
@@ -16743,6 +16899,7 @@ const CRM_EMAIL_TOOLS = [
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses. License-only requests must stay license-only.'
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) the lines flagged by error:"resolved_items_need_confirmation". Never set on the first attempt.' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (creation + 14 days). REQUIRED on the retry after error:"closing_date_needs_confirmation" (month-end window) — pass the date the user confirmed.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
@@ -16791,6 +16948,7 @@ const CRM_EMAIL_TOOLS = [
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses unless hardware_only/include_licenses=false.'
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) lines flagged by error:"resolved_items_need_confirmation".' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default creation + 14 days. REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses.' },
@@ -17505,8 +17663,11 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'crm_write', confidence: 0.9 };
   }
 
-  // 1. URL/ecomm quote link
-  if (/\b(url\s+quote|ecomm\s+link|order\s+link|shopping\s+cart\s+link|stratus\s+url)\b/.test(t)) {
+  // 1. URL/ecomm quote link — the EXPLICIT ecomm phrases (Chris, 2026-07-15 R11):
+  // "url quote", "ecomm quote/link/url", "quote link/url", "order link/url",
+  // "stratus url", "send me a link". An explicit ecomm ask ALWAYS wins — it runs
+  // before (and therefore beats) the active-page context rules below.
+  if (/\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b/.test(t)) {
     return { class: 'quote_url', confidence: 0.9 };
   }
 
@@ -17570,7 +17731,12 @@ function classifyCrmIntent(text, ctx = {}) {
   // 5. CRM mutation verbs on Zoho records. `update` excludes the read idiom
   // "update me on ..." (a status request). license/term/product/sku added
   // 2026-05-21 — "update the licenses" was misrouting to crm_read and looping.
-  if (/\b(create|new|add|build|make|set\s*up|build\s*out)\s+(a\s+)?(deal|quote|task|contact|account|note)\b/.test(t)
+  // 2026-07-15 (corp error_reports R1): the article group only allowed "a", so
+  // "add THE contact Michael Gray" fell through to the crm_read rule (whose
+  // "(my|the|latest|…) contact" branch matched) → read-only toolset → the agent
+  // truthfully had no create tool and narrated its toolset. Widened to cover
+  // a/the/this/that/another/new (optionally stacked: "add another new contact").
+  if (/\b(create|new|add|build|make|set\s*up|build\s*out)\s+((?:a|the|this|that|another|new)\s+){0,2}(deal|quote|task|contact|account|note)\b/.test(t)
       || /\b(update(?!\s+me\s+(?:on|about))|edit|change|modify|rename|set|fix|adjust|move|extend)\s+.{0,50}\b(deals?|quotes?|tasks?|contacts?|accounts?|stage|amount|valid_till|closing_date|due\s*date|address|line\s*items?|quoted\s*items?|discount|licenses?|terms?|products?|skus?)\b/.test(t)
       || /\b(close|complete|finish|mark)\s+(the\s+)?(task|deal)\b/.test(t)
       || /\b(delete|remove)\s+.{0,30}\b(quote|deal|task|note|line\s*item)/.test(t)
@@ -17585,9 +17751,12 @@ function classifyCrmIntent(text, ctx = {}) {
   // headers ([Active Zoho page...], [Session: ...quote...]) contain read-looking
   // phrases. On an active page / quote session, a mutation verb is a write
   // regardless of the object noun. Erring toward crm_write is safe — that subset
-  // still includes the read tools.
+  // still includes the read tools. `quote`/`build`/`generate` added 2026-07-15
+  // (R11 active-record binding): on a Zoho record page, create-quote wording
+  // binds CRM-side — never the ecomm URL toolset (rule 1 above already caught
+  // any EXPLICIT ecomm-link ask, which is the only thing that beats page context).
   if ((ctx.hasActivePageContext || ctx.hasQuoteSession)
-      && /\b(update(?!\s+me\s+(?:on|about))|change|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)\b/.test(t)) {
+      && /\b(update(?!\s+me\s+(?:on|about))|change|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove|quote|requote|re-quote|build|generate)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.8 };
   }
 
@@ -17601,6 +17770,15 @@ function classifyCrmIntent(text, ctx = {}) {
   // 7. Pure read operations
   if (/\b(search|find|look\s*up|pull\s*up|get|show|list|what'?s|who'?s|when|how\s+many|how\s+much)\b.{0,60}\b(deal|quote|task|contact|account|customer|client|order|invoice|line\s*items?|pipeline|forecast|revenue|stage|product|rep)\b/.test(t)
       || /\b(my|the|latest|last|recent|newest|most\s+recent|open|active|overdue)\s+(deal|quote|task|email|contact|account)/.test(t)) {
+    // 7b. Write-verb escalation net (2026-07-15, corp error_reports R1): a message
+    // that read-matches but ALSO carries a bare write verb is a mutation the rules
+    // above failed to bind (e.g. "add the contact Michael Gray to this account").
+    // Escalate to crm_write — that subset still includes every read tool, so
+    // erring toward crm_write is safe; landing a write in crm_read is not.
+    // "update me on/about ..." stays a read (status-request idiom).
+    if (/\b(add|create|update(?!\s+me\s+(?:on|about))|edit|change|delete|remove|set)\b/.test(t)) {
+      return { class: 'crm_write', confidence: 0.75 };
+    }
     return { class: 'crm_read', confidence: 0.8 };
   }
 
@@ -17676,6 +17854,8 @@ User mentions a quote number → \`zoho_search_records(Quotes, criteria=(Quote_N
 **URL rule:** \`https://crm.zoho.com/crm/org647122552/tab/Quotes/{RECORD_ID}\` — always the \`id\` (or returned \`quote_id\`), never the Quote_Number. Display "Quote #<quote_number>" in text; ✗ never label a record id as "Quote ID <record_id>".
 **[Session: Most recently worked quote] header** → that IS "the quote" / "that quote" / "same quote" — use it immediately without asking.
 **[Active Zoho page:...] header** → the user is VIEWING that record now; "this quote", "this deal", "modify this", "the current one" all mean it. Use its recordId directly via zoho_get_record / zoho_update_record — do not search.
+**ACTIVE RECORD BINDING (unqualified requests).** With an [Active Zoho page:...] header, ANY modification or creation request that does not explicitly name a different record targets the active record: on a Quote page → that quote; else → its Deal; else → its Account. "add 2 licenses" on a Quote page = add to THAT quote; "update the close date" on a Deal page = THAT deal. NEVER call zoho_search_records to re-find the active record — its id is in the header. Quote-create wording on a Zoho record page is ALWAYS a Zoho CRM quote (never a stratusinfosystems.com/order URL) unless the user explicitly asks for a "url quote"/"ecomm quote"/"quote link"/"order link"/"stratus url".
+**FAST-PATH — quote on the active/known Deal:** on a Deal page (or with a deal id from this conversation), "create/add a quote" → \`create_quote_on_deal\` with that deal_id in ONE call — it resolves products, addresses, creates and verifies server-side. On a Quote page, a NEW quote goes on that quote's Deal (one zoho_get_record on the quote gives Deal_Name.id). Never re-search the account or deal first.
 
 ## QUOTE PDF / EXPORT
 **Download/export the PDF of a quote** (user says "download/export/save the pdf of quote X", pastes a Quotes URL, or refers to "the quote"): RESOLVE the quote first — a pasted \`.../tab/Quotes/{id}\` URL or a record id → \`zoho_get_record(Quotes, {id})\`; a customer-facing Quote # → the Quote_Number rule above. Then REPLY with \`[View in Zoho CRM](https://crm.zoho.com/crm/org647122552/tab/Quotes/{record_id})\` followed by exactly: "Click the **Download Zoho PDF** button below to download it." You CANNOT trigger the download yourself — it is a client-side button that appears on any reply containing a Quotes link. NEVER claim you downloaded, exported, or attached the PDF, and NEVER reply "No records found" for a valid id/URL.
@@ -17722,8 +17902,10 @@ For a raw \`zoho_create_record\` Deal/Quote: show a table (Field | Value | Statu
 
 Every Deal Create MUST include:
 \`\`\`json
-{"Deal_Name": "{Account} - {Description}", "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id}"}, "Stage": "Qualification", "Lead_Source": "Stratus Referal", "Closing_Date": "{today + 30 days, YYYY-MM-DD}", "Amount": 0, "Meraki_ISR": {"id": "2570562000027286729"}, "Owner": {"id": "{{OWNER_ZOHO_ID}}"}}
+{"Deal_Name": "{Account} - {Description}", "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id}"}, "Stage": "Qualification", "Lead_Source": "Stratus Referal", "Closing_Date": "{today + 14 days, YYYY-MM-DD}", "Amount": 0, "Meraki_ISR": {"id": "2570562000027286729"}, "Owner": {"id": "{{OWNER_ZOHO_ID}}"}}
 \`\`\`
+
+**DATE RULE (Chris, 2026-07-15):** default Deal Closing_Date AND Quote Valid_Till = creation date + 14 days, and the two ALWAYS MATCH on a deal/quote pair. **Month-end window:** if today is within 7 days of the end of the month, do NOT silently default — ask the user to confirm the Close/Valid-Till date (offer today+14 as the recommended chip), then apply the SAME confirmed date to both fields. An explicit user-provided date always wins (still set both fields to it).
 
 **VALID DEAL STAGES — ONLY these 5 exist:** Qualification (default for new deals); Proposal/Negotiation; Verbal Commit/Invoicing; Closed (Lost); Closed (Won) — BLOCKED, auto-set by PO automation only. Never invent stages ("Needs Analysis", "Closed-Lost to Competition", etc.) — server auto-corrects known wrong values but rejects anything else. Unsure → "Qualification".
 
@@ -17733,7 +17915,7 @@ Every Quote MUST have a Contact_Name: search Contacts by Account_Name; none foun
 
 Every Quote Create MUST include:
 \`\`\`json
-{"Subject": "{Account} - {Description}", "Quote_Stage": "Qualification", "Deal_Name": {"id": "{deal_id}"}, "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id_or_placeholder}"}, "Valid_Till": "{today + 30 days, YYYY-MM-DD}", "Cisco_Billing_Term": "Prepaid Term", "Billing_Street": "{from Account or lookup}", "Billing_City": "{...}", "Billing_State": "{2-LETTER CODE}", "Billing_Code": "{zip}", "Billing_Country": "US", "Shipping_Country": "US", "Owner": {"id": "{{OWNER_ZOHO_ID}}"}, "Quoted_Items": [{"Product_Name": {"id": "{zoho_product_id}"}, "Quantity": 1, "Discount": discount_per_unit * qty}]}
+{"Subject": "{Account} - {Description}", "Quote_Stage": "Qualification", "Deal_Name": {"id": "{deal_id}"}, "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id_or_placeholder}"}, "Valid_Till": "{today + 14 days, YYYY-MM-DD — MUST equal the Deal's Closing_Date; month-end window → confirm with user first (see DATE RULE)}", "Cisco_Billing_Term": "Prepaid Term", "Billing_Street": "{from Account or lookup}", "Billing_City": "{...}", "Billing_State": "{2-LETTER CODE}", "Billing_Code": "{zip}", "Billing_Country": "US", "Shipping_Country": "US", "Owner": {"id": "{{OWNER_ZOHO_ID}}"}, "Quoted_Items": [{"Product_Name": {"id": "{zoho_product_id}"}, "Quantity": 1, "Discount": discount_per_unit * qty}]}
 \`\`\`
 
 Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / email signature → (3) ask user. Never create a Quote with blank address fields.
@@ -17760,6 +17942,10 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 "5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1 year, 3 year, or 5 year?" — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
 
 **Family licenses:** MV → LIC-MV-{term}YR; MT → LIC-MT-{term}YR; MG → LIC-MG-{term}YR; MS and MX → MODEL-SPECIFIC (e.g. LIC-MX{model}-SEC-{term}YR), use batch_product_lookup.
+
+**MX / Catalyst-firewall (C81xx) LICENSE TIER — NEVER default to ENT.** Tier unspecified → assume **SEC** (Advanced Security — the standard for these families), STATE the assumption in your reply, and offer ENT and SDW as chip alternatives (SEC recommended). Pick ENT/SDW only when the user explicitly says so.
+
+**EOL / UPGRADE MAPPING IS DEFAULT BEHAVIOR.** When the intent is upgrade / refresh / replace ("upgrade these MR33s", "refresh the EOL gear"), batch_product_lookup returns \`eol: true\` + \`replaced_by\` per EOL model — quote the returned replacement by default (never the EOL model), echo each mapping (old → new) in your confirmation, and get one user confirmation before writing. For a pure RENEWAL of EOL hardware, licenses still renew on the agnostic family alias; offer the hardware refresh separately.
 
 **Systems Manager (LIC-SME) is DISCONTINUED — every LIC-SME term is inactive in Zoho and must never be quoted. Quote the replacement instead: LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM per device) at the requested term, and tell the user about the substitution.**
 
@@ -17844,7 +18030,7 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 
 ## CRITICAL RULES
 
-1. **QUOTE OUTPUT DEFAULTS TO ECOMM ORDER LINKS.** A plain "quote X" / "pricing for X" / any quote inside an email reply → build Stratus ecomm order URL(s): https://stratusinfosystems.com/order/?item=<comma-joined suffixed_sku values from batch_product_lookup>&qty=<matching quantities> — 1/3/5-year options when no term given, exact SKU spellings from the lookup result only. Create a ZOHO CRM quote when the user explicitly says Zoho/CRM ("zoho quote", "in zoho"), asks to create a deal/record, names a customer ACCOUNT for the quote ("create a quote for Hudson Lake" — a CRM record ask), or is working an existing Deal/Quote record. In EMAIL REPLIES, quotes are ALWAYS ecomm links unless the user says zoho — never start account/contact lookups or ask for billing info to put a quote in an email.
+1. **QUOTE OUTPUT DEFAULTS TO ECOMM ORDER LINKS.** A plain "quote X" / "pricing for X" / any quote inside an email reply → build Stratus ecomm order URL(s): https://stratusinfosystems.com/order/?item=<comma-joined suffixed_sku values from batch_product_lookup>&qty=<matching quantities> — 1/3/5-year options when no term given, exact SKU spellings from the lookup result only. Create a ZOHO CRM quote when the user explicitly says Zoho/CRM ("zoho quote", "in zoho"), asks to create a deal/record, names a customer ACCOUNT for the quote ("create a quote for Hudson Lake" — a CRM record ask), or is working an existing Deal/Quote record. **EXCEPTION — [Active Zoho page] present: every quote ask is a ZOHO CRM quote; emit an ecomm /order/ URL ONLY if the user explicitly asks for a url/ecomm/order link.** In EMAIL REPLIES, quotes are ALWAYS ecomm links unless the user says zoho — never start account/contact lookups or ask for billing info to put a quote in an email.
 2. Parse for intent, not literal strings. Do not re-ask for already-provided info.
 3. **CRM-FIRST for record lookups:** Search Zoho before web. web_search_domain only for NEW accounts not in CRM.
 4. **create_quote_on_deal vs create_deal_and_quote:** Existing Deal context or user-supplied Deal ID → \`create_quote_on_deal\`. Brand-new Deal → \`create_deal_and_quote\`. Pass ONLY requested SKUs; hardware auto-adds licenses unless hardware_only/include_licenses=false. If it refuses with error "account_has_open_deals", ask which existing Deal to attach to → create_quote_on_deal with that deal_id; create a separate new Deal (confirm_new_deal:true) only after explicit user confirmation. If the same request mentions contract/PO/signature/DocuSign/"send PO," continue immediately with \`quote_to_po_and_esign\` on the created Quote ID.
@@ -17855,7 +18041,7 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 ## ADMIN ACTION WORKFLOW
 (Full workflow loaded conditionally when admin action intent is detected.) For Quote → DID → PO → e-sig requests, prefer \`quote_to_po_and_esign\` over hand-chaining zoho_update_record calls. "Contract" means PO/Sales Order sent for e-signature unless the user says otherwise.
 
-**Self-report discipline:** Before saying you lack a tool, check your tool list (zoho_update_record = Admin Actions; assign_cisco_rep_to_deal; batch_product_lookup). NEVER report "I don't have a tool" when one can accomplish the task. State plainly what you did.
+**Self-report discipline:** Before saying you lack a tool, check your tool list (zoho_update_record = Admin Actions; assign_cisco_rep_to_deal; batch_product_lookup). NEVER report "I don't have a tool" when one can accomplish the task. State plainly what you did. **NEVER enumerate internal tool names to the user.** If a request seems outside your current toolset, say what you WILL do (or ask one clarifying question) — never list which tools you have or lack; the user re-phrasing one word can change your toolset, so "I don't have a create-contact tool" is both unhelpful and usually false.
 
 ## URL / ECOMM QUOTE LINK (rare)
 For "URL quote" / "ecomm link", build \`https://stratusinfosystems.com/order/?item={SKUs}&qty={Qs}\`. If term-agnostic, generate 3 links (1/3/5yr) by swapping license term suffix: LIC-ENT-{N}YR (APs), LIC-MX{model}-SEC-{N}YR (MX), LIC-{model}-{N}Y (switches — Y not YR). Hardware SKUs stay the same.
@@ -22240,7 +22426,17 @@ const BENCHMARK_TASKS = [
   { id: 'task_72', tier: 'qa_complex', name: 'Co-term math explanation', prompt: 'Explain how co-term licensing math works on a Meraki dashboard when I add new hardware mid-term. Walk me through the pro-rate calculation.' },
   { id: 'task_73', tier: 'qa_complex', name: 'MX95 vs MX105 multi-site', prompt: 'For a 10-site enterprise with a 1Gbps WAN at HQ and 300Mbps at branches, compare MX95 at HQ vs MX105 at HQ, with MX75 at branches. What\'s the trade-off?' },
   { id: 'task_74', tier: 'qa_complex', name: 'What if MS license lapses', prompt: 'What happens to an MS switch if its Meraki license lapses — does the hardware stop forwarding, lose features, or keep working?' },
-  { id: 'task_75', tier: 'qa_complex', name: 'DIDs hypothetical (design question)', prompt: 'Hypothetically, if I were proposing 5,000 APs across a multi-state K-12 district, how many Cisco Deal IDs (DIDs) would that typically require, and why?' }
+  { id: 'task_75', tier: 'qa_complex', name: 'DIDs hypothetical (design question)', prompt: 'Hypothetically, if I were proposing 5,000 APs across a multi-state K-12 district, how many Cisco Deal IDs (DIDs) would that typically require, and why?' },
+  // ── R11 active-record binding fixtures (corp error_reports 2026-07-14) ──
+  // The R3 incident phrasing: a quote-create sent while ON a Zoho Quote page
+  // must bind CRM-side (that quote's Deal) — never the ecomm URL engine, and
+  // never a re-search for the account/deal the header already identifies.
+  { id: 'task_76', tier: 'complex', name: 'R11: quote-create on active Quote page binds to its deal', prompt: '[Active Zoho page: user is currently viewing Quote 2570562000399909180]\nURL: https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000399909180\ncreate a quote for 2 MX84 SEC licenses and 2 Z3 ENT licenses', expected: ['create_quote_on_deal'], forbidden: ['zoho_search_records'] },
+  { id: 'task_77', tier: 'complex', name: 'R11/R3: quote-create on active Deal page is one create_quote_on_deal call', prompt: '[Active Zoho page: user is currently viewing Deal 2570562000400000001]\nURL: https://crm.zoho.com/crm/org647122552/tab/Potentials/2570562000400000001\nAccount: Acme Corp\nadd a quote for 5x MR46 with 3 year licenses', expected: ['create_quote_on_deal'], forbidden: ['zoho_search_records', 'create_deal_and_quote'] },
+  { id: 'task_78', tier: 'complex', name: 'R11: unqualified add binds to the active quote', prompt: '[Active Zoho page: user is currently viewing Quote 2570562000399909180]\nURL: https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000399909180\nadd 2 LIC-ENT-3YR licenses', expected: ['zoho_update_record'], forbidden: ['zoho_search_records'] },
+  // R5: MX license tier must never silently default to ENT (SEC is the family
+  // default; the reply should state the SEC assumption and offer ENT/SDW).
+  { id: 'task_79', tier: 'complex', name: 'R5: MX licenses default SEC, never ENT', prompt: 'Create a zoho quote for Acme Corp: 2 MX84 licenses, 3 year term. I did not specify a tier — pick the correct default.', expected: ['create_deal_and_quote'] }
 ];
 
 const BENCHMARK_MODELS = [
@@ -26769,7 +26965,12 @@ CRITICAL URL RULES:
               // Chrome Extension Chat tab always wants Zoho quotes, never URL quotes —
               // URL quoting lives in the dedicated Quote tab instead.
               let deterministicResult = null;
-              const skipDeterministic = wSource === 'chat-tab' || (wEc && wEc.source === 'chat-tab');
+              // R11 routing rule (Chris, 2026-07-15): an active Zoho record page in
+              // the message context pins the request to the CRM agent — the Tier-0
+              // ecomm URL engine is reachable ONLY via an explicit ecomm-link ask
+              // (isExplicitEcommUrlAsk). Off-Zoho requests are unaffected.
+              const wZohoPagePinned = hasActiveZohoPageContext(wText) && !isExplicitEcommUrlAsk(wText);
+              const skipDeterministic = wSource === 'chat-tab' || (wEc && wEc.source === 'chat-tab') || wZohoPagePinned;
               const shouldPreResolveWaterfallProducts = /\b(quote|create.*quote|quote.*for)\b/i.test(wText)
                 || (skipDeterministic && hasQuotePreResolveSkuToken(wText));
               if (shouldPreResolveWaterfallProducts) {
