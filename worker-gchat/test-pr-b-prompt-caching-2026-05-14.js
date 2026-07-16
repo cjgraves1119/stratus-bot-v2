@@ -129,7 +129,7 @@ function t(name, fn) {
     assert.strictEqual(out.length, 2);
     assert.strictEqual(out[0].type, 'text');
     assert.strictEqual(out[0].text, 'STATIC');
-    assert.deepStrictEqual(out[0].cache_control, { type: 'ephemeral' });
+    assert.deepStrictEqual(out[0].cache_control, { type: 'ephemeral', ttl: '1h' });
     assert.strictEqual(out[1].type, 'text');
     assert.strictEqual(out[1].text, 'DYNAMIC');
     assert.strictEqual(out[1].cache_control, undefined);
@@ -141,7 +141,7 @@ function t(name, fn) {
     assert.ok(Array.isArray(out));
     assert.strictEqual(out.length, 1);
     assert.strictEqual(out[0].text, 'ALL STATIC');
-    assert.deepStrictEqual(out[0].cache_control, { type: 'ephemeral' });
+    assert.deepStrictEqual(out[0].cache_control, { type: 'ephemeral', ttl: '1h' });
   });
 
   // 3. Caching disabled → plain string with boundary stripped
@@ -166,7 +166,7 @@ function t(name, fn) {
     assert.strictEqual(out.length, 3);
     assert.strictEqual(out[0].cache_control, undefined);
     assert.strictEqual(out[1].cache_control, undefined);
-    assert.deepStrictEqual(out[2].cache_control, { type: 'ephemeral' });
+    assert.deepStrictEqual(out[2].cache_control, { type: 'ephemeral', ttl: '1h' });
     // Input must not be mutated
     assert.strictEqual(tools[2].cache_control, undefined);
   });
@@ -320,7 +320,7 @@ function t(name, fn) {
     const blocks = buildAnthropicSystemBlocks(ds, true);
     assert.ok(Array.isArray(blocks));
     assert.strictEqual(blocks.length, 2, 'advisor prompt should split into 2 blocks');
-    assert.deepStrictEqual(blocks[0].cache_control, { type: 'ephemeral' });
+    assert.deepStrictEqual(blocks[0].cache_control, { type: 'ephemeral', ttl: '1h' });
     assert.ok(blocks[0].text.length > 5000, 'static block should be the big CRM base');
     assert.ok(blocks[1].text.includes('DEEPSEEK PRODUCTION GUARDRAILS'),
       'dynamic block should contain the appended guardrails');
@@ -353,7 +353,7 @@ function t(name, fn) {
         input_schema: { type: 'object', properties: { image: { type: 'string' } } } }
     ];
     const cached = attachToolCacheControl(toolsWithVisionShape, true);
-    assert.deepStrictEqual(cached[0].cache_control, { type: 'ephemeral' });
+    assert.deepStrictEqual(cached[0].cache_control, { type: 'ephemeral', ttl: '1h' });
     // Original tool def is not mutated
     assert.strictEqual(toolsWithVisionShape[0].cache_control, undefined);
   });

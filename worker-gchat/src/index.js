@@ -454,10 +454,21 @@ function advisorToolActive(env, effectiveModel) {
 // sent as a plain string with no cache markers (uncached fallback).
 const PROMPT_CACHE_BOUNDARY = '\n\n___PR_B_DYNAMIC_APPENDIX_BOUNDARY___\n\n';
 
+// Prompt-cache TTL (2026-07-15). Measured real-user (gw:) request gaps show 25%
+// of consecutive requests land in the 5-60min band that a 5-minute cache expires
+// but a 1-hour cache keeps warm (reps work a quote, step away ~20min, return) —
+// only ~12% are >1h (next-day, cold either way). At 1h, ~88% of requests hit the
+// cache vs ~63% at 5m; the 2× write premium (vs 1.25×) applies only to that ~12%,
+// so 1h is ~38% cheaper on cached input for genuine usage. Single knob: set to
+// '5m' to revert. NOTE: 1h TTL is GA on the Messages API (no beta header); if a
+// deploy ever 400s on this, the only fix needed is the extended-cache-ttl beta
+// header OR reverting this constant to '5m'.
+const PROMPT_CACHE_TTL = '1h';
+
 /**
  * Splits a systemPrompt string into an array of typed blocks suitable for
  * Anthropic's `system` field. When the boundary sentinel is present, the
- * static prefix gets `cache_control: { type: 'ephemeral' }` and the dynamic
+ * static prefix gets `cache_control: { type: 'ephemeral', ttl: PROMPT_CACHE_TTL }` and the dynamic
  * suffix is left uncached.
  *
  * Until the kill-switch lands in a later commit, `cachingEnabled` defaults
@@ -473,11 +484,11 @@ function buildAnthropicSystemBlocks(systemPrompt, cachingEnabled) {
   }
   const idx = systemPrompt.indexOf(PROMPT_CACHE_BOUNDARY);
   if (idx === -1) {
-    return [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+    return [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: PROMPT_CACHE_TTL } }];
   }
   const staticBase = systemPrompt.slice(0, idx);
   const dynamicAppendix = systemPrompt.slice(idx + PROMPT_CACHE_BOUNDARY.length);
-  const blocks = [{ type: 'text', text: staticBase, cache_control: { type: 'ephemeral' } }];
+  const blocks = [{ type: 'text', text: staticBase, cache_control: { type: 'ephemeral', ttl: PROMPT_CACHE_TTL } }];
   if (dynamicAppendix.length > 0) {
     blocks.push({ type: 'text', text: dynamicAppendix });
   }
@@ -494,7 +505,7 @@ function attachToolCacheControl(tools, cachingEnabled) {
   if (!cachingEnabled) return tools;
   if (!Array.isArray(tools) || tools.length === 0) return tools;
   const last = tools[tools.length - 1];
-  const cachedLast = { ...last, cache_control: { type: 'ephemeral' } };
+  const cachedLast = { ...last, cache_control: { type: 'ephemeral', ttl: PROMPT_CACHE_TTL } };
   return [...tools.slice(0, -1), cachedLast];
 }
 
