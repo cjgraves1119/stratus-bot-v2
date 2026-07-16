@@ -8585,6 +8585,32 @@ function scrubMarginFromQuotedItems(quotedItems, context = 'Quoted_Items') {
   return { scrubbed };
 }
 
+// ── R4: default Quote/Deal dates (Chris policy, 2026-07-15; ported from the
+// corp-fixes branch 2026-07-16 after Llama's first live deal missed it) ──────
+// Default Quote Valid_Till AND Deal Closing_Date = creation date + 14 days
+// (down from +30), and the two fields always MATCH on a deal/quote pair.
+// Month-end window: when the creation date falls within 7 days of the end of
+// the month (the close-critical week — a +14 default would spill past the
+// month boundary), callers get needsConfirmation:true and must ASK the user to
+// confirm the date (suggesting `date`) instead of silently defaulting. An
+// explicit user-supplied date always bypasses the window. UTC throughout —
+// matches the existing toISOString() date idiom used by the create paths.
+function defaultQuoteDealDate(created = new Date()) {
+  const t = created instanceof Date ? created : new Date(created);
+  const date = new Date(t.getTime() + 14 * 86400000).toISOString().split('T')[0];
+  const lastDay = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
+  const daysToMonthEnd = lastDay - t.getUTCDate();
+  return { date, needsConfirmation: daysToMonthEnd < 7, daysToMonthEnd };
+}
+
+// A user's local "today" can be the previous UTC calendar day during US
+// evenings. Accept a one-day UTC grace at user-facing date gates so a confirmed
+// local-today value is not rejected merely because Workers has crossed midnight.
+function earliestAcceptedUserDate(now = new Date()) {
+  const t = now instanceof Date ? now : new Date(now);
+  return new Date(t.getTime() - 86400000).toISOString().split('T')[0];
+}
+
 async function validateCrmWrite(module_name, data, isCreate = false, env = null) {
   const errors = [];
 
@@ -8668,15 +8694,43 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
         errors.push(`__AUTO_RESOLVE_ACCOUNT_NAME__${data.Account_Name.name}`);
       }
     }
-    // Server-side Closing_Date enforcement: correct past/invalid dates
+    // Server-side Closing_Date enforcement — R4 (2026-07-15): default is +14
+    // days and must MATCH the paired Quote's Valid_Till; inside the month-end
+    // window we refuse instead of silently defaulting so the agent asks the
+    // user to confirm the date.
     if (data.Closing_Date) {
       const parsedDate = new Date(data.Closing_Date + 'T00:00:00');
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      if (isNaN(parsedDate.getTime()) || parsedDate < today) {
-        const corrected = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
-        console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${corrected}`);
-        data.Closing_Date = corrected;
+      const invalidDate = isNaN(parsedDate.getTime());
+      const pastDate = !invalidDate && parsedDate < today;
+      // A valid past date on UPDATE is an intentional backfill and must remain
+      // writable after the user confirms it. Fresh creates still fail closed,
+      // so the model cannot hallucinate a past date onto a new Deal.
+      if (invalidDate || (isCreate && pastDate)) {
+        const dd = defaultQuoteDealDate();
+        if (dd.needsConfirmation && isCreate) {
+          errors.push(`❌ closing_date_needs_confirmation: Closing_Date "${data.Closing_Date}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm a valid close date of today or later (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Quote's Valid_Till.`);
+        } else {
+          console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${dd.date}`);
+          data.Closing_Date = dd.date;
+        }
+      }
+    }
+    // Lead_Source "Website" is reserved for actual weborders (the weborder
+    // automation sets it deliberately). A pasted stratusinfosystems.com order
+    // URL in chat is NOT a website lead — Llama inferred exactly that on its
+    // first live failover deal (Delta Tau Delta, 2026-07-16). When the chat
+    // agent is the caller (raw prompt available) and the user never said the
+    // lead came from the website, override to the Stratus Referal default.
+    // URLs are stripped BEFORE the keyword test so the order link itself can't
+    // satisfy the "user said website" condition.
+    if (isCreate && data.Lead_Source === 'Website'
+        && env && typeof env.__USER_PROMPT_RAW === 'string' && env.__USER_PROMPT_RAW) {
+      const _rawNoUrls = env.__USER_PROMPT_RAW.replace(/https?:\/\/\S+/gi, ' ');
+      if (!/\bweb\s*-?\s*order|\bwebsite\b|\bweb\s+lead\b/i.test(_rawNoUrls)) {
+        console.log(`[VALIDATE] Lead_Source "Website" overridden to "Stratus Referal" — reserved for weborders; user text never mentions the website`);
+        data.Lead_Source = 'Stratus Referal';
       }
     }
     // Auto-fill defaults for commonly skipped fields.
@@ -8754,19 +8808,27 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
       }
     }
     // Server-side Valid_Till enforcement: if Claude passes a past date or invalid date,
-    // override with today + 30 days. LLMs frequently miscalculate dates.
+    // override with the default. LLMs frequently miscalculate dates.
+    // R4 (2026-07-15): default is now +14 days and must MATCH the Deal's
+    // Closing_Date; inside the month-end window we refuse instead of silently
+    // defaulting so the agent asks the user to confirm the date.
     if (data.Valid_Till) {
       const parsedDate = new Date(data.Valid_Till + 'T00:00:00');
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       if (isNaN(parsedDate.getTime()) || parsedDate < today) {
-        const corrected = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
-        console.log(`[VALIDATE] Valid_Till "${data.Valid_Till}" is past/invalid, correcting to ${corrected}`);
-        data.Valid_Till = corrected;
+        const dd = defaultQuoteDealDate();
+        if (dd.needsConfirmation) {
+          errors.push(`❌ valid_till_needs_confirmation: Valid_Till "${data.Valid_Till}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm the date (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Deal's Closing_Date.`);
+        } else {
+          console.log(`[VALIDATE] Valid_Till "${data.Valid_Till}" is past/invalid, correcting to ${dd.date}`);
+          data.Valid_Till = dd.date;
+        }
       }
     } else {
-      // Missing Valid_Till — set default
-      data.Valid_Till = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+      // Missing Valid_Till — set default (+14d; the required-field error above
+      // still fails the create, this just keeps the mutated payload consistent)
+      data.Valid_Till = defaultQuoteDealDate().date;
     }
     // Auto-fill commonly skipped fields with safe defaults
     if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
@@ -13505,6 +13567,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             lead_source = 'Stratus Referal';
             if (before) results.steps.push(`Lead_Source "${before}" invalid — coerced to "Stratus Referal"`);
           }
+          // Lead_Source "Website" is reserved for actual weborders (the weborder
+          // automation sets it deliberately). A pasted stratusinfosystems.com
+          // order URL in chat is NOT a website lead — Llama inferred exactly
+          // that on its first live failover deal (Delta Tau Delta, 2026-07-16).
+          // When the chat agent is the caller (raw prompt available) and the
+          // user never said the lead came from the website, override to the
+          // default. URLs are stripped BEFORE the keyword test so the order
+          // link itself can't satisfy the "user said website" condition.
+          if (lead_source === 'Website'
+              && env && typeof env.__USER_PROMPT_RAW === 'string' && env.__USER_PROMPT_RAW) {
+            const _rawNoUrls = env.__USER_PROMPT_RAW.replace(/https?:\/\/\S+/gi, ' ');
+            if (!/\bweb\s*-?\s*order|\bwebsite\b|\bweb\s+lead\b/i.test(_rawNoUrls)) {
+              lead_source = 'Stratus Referal';
+              results.steps.push('Lead_Source "Website" overridden to "Stratus Referal" — reserved for weborders; a pasted order URL is not a website lead');
+            }
+          }
 
           // ── Meraki ISR resolution (2026-07-02, Jackie Portillo / David Jones fix) ──
           // BUSINESS RULE (Chris): a "Meraki ISR Referal" deal must NEVER carry
@@ -13980,7 +14058,48 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           // STEP 4: Build SKU description for deal name (hardware only for cleaner name)
           const skuSummary = orderedPairs.map(p => `${p.hwQty > 1 ? p.hwQty + 'x ' : ''}${p.hw}`).join(', ');
-          const closingDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+          // ── R4 date policy (2026-07-15): Deal Closing_Date and Quote
+          // Valid_Till default to creation + 14 days and ALWAYS MATCH each other.
+          // Precedence: explicit closing_date param (user-confirmed) → existing
+          // Deal's future Closing_Date (attach mode: the quote's Valid_Till stays
+          // matched to the deal) → +14d default. Inside the month-end window
+          // (creation within 7 days of month end) the default is REFUSED with
+          // closing_date_needs_confirmation so the agent asks the user instead
+          // of silently writing. ──
+          let closingDate;
+          const _rawClosing = typeof toolInput.closing_date === 'string' ? toolInput.closing_date.trim() : '';
+          if (_rawClosing) {
+            const _cd = new Date(_rawClosing + 'T00:00:00Z');
+            const _earliestClosing = earliestAcceptedUserDate();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(_rawClosing) || isNaN(_cd.getTime()) || _rawClosing < _earliestClosing) {
+              return {
+                success: false,
+                error: 'invalid_closing_date',
+                instruction: `closing_date "${_rawClosing}" is not a valid future date. Pass YYYY-MM-DD (today or later), or omit it to use the default. Ask the user for the intended close date if unsure.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            closingDate = _rawClosing;
+            results.steps.push(`Using user-confirmed close date ${closingDate} for Deal Closing_Date and Quote Valid_Till`);
+          } else if (existingDealData?.Closing_Date
+              && existingDealData.Closing_Date >= earliestAcceptedUserDate()) {
+            closingDate = existingDealData.Closing_Date;
+            results.steps.push(`Quote Valid_Till matched to the existing Deal's Closing_Date ${closingDate}`);
+          } else {
+            const _dd = defaultQuoteDealDate();
+            if (_dd.needsConfirmation) {
+              return {
+                success: false,
+                error: 'closing_date_needs_confirmation',
+                suggested_date: _dd.date,
+                instruction: `Today is within 7 days of month-end, so the Close/Valid-Till date must be CONFIRMED by the user instead of defaulted. Ask the user to confirm the close date — offer "${_dd.date}" (today + 14 days) as the recommended chip plus a free-form option — then re-call this tool with closing_date:"<confirmed YYYY-MM-DD>". The same date is applied to BOTH the Deal's Closing_Date and the Quote's Valid_Till. Any Account/Contact already resolved will be reused on the retry.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            closingDate = _dd.date;
+          }
 
           // ── HARD GATE #5: Zero products resolved ──
           // Added 2026-04-21 (Skty Trading LLC forensic fix).
@@ -16450,6 +16569,7 @@ const CRM_EMAIL_TOOLS = [
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) the lines flagged by error:"resolved_items_need_confirmation". Never set on the first attempt.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (creation + 14 days). REQUIRED on the retry after error:"closing_date_needs_confirmation" (month-end window) — pass the date the user confirmed.' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
@@ -16498,6 +16618,7 @@ const CRM_EMAIL_TOOLS = [
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) lines flagged by error:"resolved_items_need_confirmation".' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default creation + 14 days. REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses.' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
@@ -22140,8 +22261,10 @@ ACTIVE ZOHO PAGE:
 
 DEAL DEFAULTS:
 - Lead_Source: "Stratus Referal"
+- Lead_Source "Website" is ONLY for actual weborders. A pasted stratusinfosystems.com order URL, a quote link, or account context like "matched by website domain" is NOT a website lead — leave lead_source unset (server defaults to "Stratus Referal") unless the user explicitly says the lead came from the website.
 - Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729) — non-ISR-referral lead sources ONLY
 - Lead_Source "Meraki ISR Referal" REQUIRES meraki_isr_email (the referring rep's @cisco.com email) on create_deal_and_quote — the server refuses without it and NEVER falls back to Stratus Sales. Don't know the rep? ASK the user before calling the tool.
+- Closing_Date / Valid_Till: DO NOT set unless the user gave a date — the server defaults BOTH to creation + 14 days and keeps them matched. If a tool result returns error "closing_date_needs_confirmation" (month-end window), ASK the user to confirm the close date using the suggested_date as the recommended chip, then re-call the SAME tool with closing_date:"<confirmed YYYY-MM-DD>".
 - Caller owner ID: {{OWNER_ZOHO_ID}}
 
 TOOL RESULT TRUTH (HARD RULE — violating this is the worst failure mode):
@@ -22865,7 +22988,19 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // (fabricated SKUs, no chips, punts) were the root of most inconsistency. Reversible: set
   // the var to false to restore the Llama-first waterfall. The deterministic engine still
   // handles explicit SKU quotes upstream, so this only affects conversational/CRM/SKU-find.
-  const claudeDefault = String(env.CRM_AGENT_CLAUDE_DEFAULT) === 'true';
+  // Manual model preference (2026-07-16, Chris): '/model llama|claude|auto' chat
+  // command stores a per-user preference (KV, 24h) that the endpoint passes in
+  // as options.modelPreference. 'claude' pins Claude-first regardless of the
+  // env flag; 'llama' restores the Llama-first waterfall for THIS user — but
+  // the complexity gates below (write-intent, accessory SKU-find, CRM
+  // follow-ups) STILL defer those categories to Claude first, and Claude
+  // remains the stall fallback. That is deliberately the "Llama for most
+  // tasks, Claude for what Llama can't match" split.
+  const _modelPref = options.modelPreference === 'llama' || options.modelPreference === 'claude'
+    ? options.modelPreference : null;
+  const claudeDefault = _modelPref
+    ? _modelPref === 'claude'
+    : String(env.CRM_AGENT_CLAUDE_DEFAULT) === 'true';
   const autoForceClaudeForWrite = claudeDefault || shouldForceClaudeForWrite(userMessage) || options.crmFollowUp === true || isAccessorySkuFindRequest(userMessage);
   let autoClaudeResult = null;
   let autoClaudeFailure = null;
