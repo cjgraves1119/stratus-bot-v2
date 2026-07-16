@@ -26815,8 +26815,8 @@ CRITICAL URL RULES:
                 'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`,
                 'claude-write-intent': `🔶 Claude Sonnet 4.6 · ${outcome.elapsedMs}ms`,
                 'claude-partial-write': `🔶 Claude Sonnet 4.6 (API error mid-operation — verify record before retrying)`,
-                'llama-failover': `🟡 Llama 4 Scout 17B (failover — Claude API unavailable: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
-                'all-tiers-down': `🔴 AI service unavailable (${outcome.stallReason})`,
+                'llama-failover': `🟡 Llama 4 Scout 17B (failover — Claude API unavailable: ${String(outcome.stallReason || '').replace(/_/g, '-')}) · ${outcome.elapsedMs}ms`,
+                'all-tiers-down': `🔴 AI service unavailable (${String(outcome.stallReason || '').replace(/_/g, '-')})`,
                 'sea-lion': `🟣 SEA-LION V4 27B (forced eval) · ${outcome.elapsedMs}ms`,
                 'deepseek-v4-pro': `🟧 DeepSeek V4 Pro (forced eval) · ${outcome.elapsedMs}ms`,
                 'deepseek-v4-flash': `🟧 DeepSeek V4 Flash (forced eval) · ${outcome.elapsedMs}ms`,
@@ -27167,7 +27167,7 @@ CRITICAL URL RULES:
                   const _llamaFo = await tryCfTier('@cf/meta/llama-4-scout-17b-16e-instruct', enrichedMessage, env, chatPersonId, false, true);
                   if (_llamaFo.winner && _llamaFo.result?.reply) {
                     replyText = _llamaFo.result.reply;
-                    _directFailoverBadge = `🟡 Llama 4 Scout (failover — Claude API unavailable: ${_directApiFail}) — double-check SKU/product claims`;
+                    _directFailoverBadge = `🟡 Llama 4 Scout (failover — Claude API unavailable: ${String(_directApiFail).replace(/_/g, '-')}) — double-check SKU/product claims`;
                   } else {
                     replyText = `⚠️ The AI service is temporarily unavailable (Claude API: ${_directApiFail}) and the fallback model could not complete this request (${_llamaFo.reason || 'stalled'}). Please try again in a few minutes.`;
                   }
