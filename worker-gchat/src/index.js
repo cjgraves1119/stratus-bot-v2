@@ -19066,6 +19066,30 @@ async function askCFConversation(userMessage, env) {
 // out of a turn's tool_result blocks so follow-up messages can skip re-searching.
 // Module-scope so the SEDA-postmortem regression tests can drive it directly.
 // env is only used for the fire-and-forget DID sync write-back.
+// Render a saved crm_context_<personId> KV object as the system-prompt hint
+// block. Shared by askClaude and askCfModel (2026-07-16 Claude-outage failover
+// parity) so a follow-up turn keeps its record ids regardless of which engine
+// answers it — losing these ids on the CF tier is what caused the d9ba364
+// hallucinated-account incident.
+function buildCrmContextHint(savedCtx) {
+  if (!savedCtx || typeof savedCtx !== 'object') return '';
+  let ctxHint = '\n\n## PREVIOUS CRM CONTEXT (from your last turn)\n';
+  if (savedCtx.account_name) ctxHint += `Account: ${savedCtx.account_name} (ID: ${savedCtx.account_id})\n`;
+  if (savedCtx.quote_id) ctxHint += `Quote ID: ${savedCtx.quote_id}`;
+  if (savedCtx.quote_number) ctxHint += ` (Quote#: ${savedCtx.quote_number})`;
+  ctxHint += '\n';
+  if (savedCtx.deal_id) ctxHint += `Deal ID: ${savedCtx.deal_id}\n`;
+  if (savedCtx.ccw_deal_number) ctxHint += `CCW Deal Number (DID): ${savedCtx.ccw_deal_number}\n`;
+  if (savedCtx.line_items?.length) {
+    ctxHint += `Line items (${savedCtx.line_items.length} total):\n`;
+    for (const li of savedCtx.line_items) {
+      ctxHint += `  - ${li.qty}x ${li.sku} (line_item_id: ${li.id}, product_id: ${li.product_id})\n`;
+    }
+  }
+  ctxHint += '\n⚡ SPEED DIRECTIVE: You already have all record IDs. DO NOT call zoho_search_records — go directly to zoho_get_record using the IDs above. For quote updates, call zoho_get_record on the Quote ID to get fresh Quoted_Items, then immediately call zoho_update_record. For Admin Actions (DID, ConvertToSO, SendToEsign), use the Quote ID or Deal ID directly. For URL quote generation, use the line items listed above. Target: 1-2 tool calls max for follow-up requests.\n';
+  return ctxHint;
+}
+
 function extractCrmContextFromMessages(messages, env) {
   const crmCtx = {};
   for (const msg of messages) {
@@ -19352,21 +19376,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         try {
           const savedCtx = await kv.get(`crm_context_${personId}`, 'json');
           if (savedCtx) {
-            let ctxHint = '\n\n## PREVIOUS CRM CONTEXT (from your last turn)\n';
-            if (savedCtx.account_name) ctxHint += `Account: ${savedCtx.account_name} (ID: ${savedCtx.account_id})\n`;
-            if (savedCtx.quote_id) ctxHint += `Quote ID: ${savedCtx.quote_id}`;
-            if (savedCtx.quote_number) ctxHint += ` (Quote#: ${savedCtx.quote_number})`;
-            ctxHint += '\n';
-            if (savedCtx.deal_id) ctxHint += `Deal ID: ${savedCtx.deal_id}\n`;
-            if (savedCtx.ccw_deal_number) ctxHint += `CCW Deal Number (DID): ${savedCtx.ccw_deal_number}\n`;
-            if (savedCtx.line_items?.length) {
-              ctxHint += `Line items (${savedCtx.line_items.length} total):\n`;
-              for (const li of savedCtx.line_items) {
-                ctxHint += `  - ${li.qty}x ${li.sku} (line_item_id: ${li.id}, product_id: ${li.product_id})\n`;
-              }
-            }
-            ctxHint += '\n⚡ SPEED DIRECTIVE: You already have all record IDs. DO NOT call zoho_search_records — go directly to zoho_get_record using the IDs above. For quote updates, call zoho_get_record on the Quote ID to get fresh Quoted_Items, then immediately call zoho_update_record. For Admin Actions (DID, ConvertToSO, SendToEsign), use the Quote ID or Deal ID directly. For URL quote generation, use the line items listed above. Target: 1-2 tool calls max for follow-up requests.\n';
-            systemPrompt += ctxHint;
+            systemPrompt += buildCrmContextHint(savedCtx);
             console.log(`[GCHAT] Injected CRM context: quote=${savedCtx.quote_id}, acct=${savedCtx.account_name}`);
           }
         } catch (ctxErr) {
@@ -19641,8 +19651,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         if (response.status === 429) {
           return `I'm being rate-limited right now. Please wait 30 seconds and try again.`;
         }
-        if (response.status === 400 && errMsg.includes('credit balance')) {
-          return `⚠️ The AI service account is out of credits. Please top up the Anthropic API balance at console.anthropic.com, then try again.`;
+        if (response.status === 400 && (errMsg.includes('credit balance') || errMsg.includes('usage limits'))) {
+          // 'usage limits' = monthly spend cap ("You have reached your specified
+          // API usage limits") — same operational meaning as out-of-credits.
+          return `⚠️ The AI service account is out of credits or has reached its API usage limit. Please raise the limit or top up at console.anthropic.com, then try again.`;
         }
         return useTools
           ? `Sorry, I couldn't process that CRM/email request (API ${response.status}). Please try again shortly.`
@@ -21054,10 +21066,17 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   //    request. Drop assistant turns that look like hard failures from
   //    the injected window — keep the user turns for context, keep the
   //    successful assistant turns (zoho URLs, quote numbers, confirmations).
-  const FAILURE_PATTERN = /(product issues|not active|could not be created|failed to create|product resolution failed|inactive product|not found.*product catalog|no records found)/i;
+  // 2026-07-16: degraded-service strings added — the failover work can store
+  // outage apologies as assistant turns; without the filter they prime Llama
+  // to parrot "service unavailable" on healthy follow-up turns.
+  const FAILURE_PATTERN = /(product issues|not active|could not be created|failed to create|product resolution failed|inactive product|not found.*product catalog|no records found|temporarily unavailable|hit an API error|being rate-limited|out of credits|temporarily overloaded|couldn'?t (?:process|complete) that [^.]{0,30}\(API \d+\))/i;
   const priorHistory = personId && env && env.CONVERSATION_KV
     ? await getHistory(env.CONVERSATION_KV, personId).catch(() => [])
     : [];
+  // Window parity with askClaude (2026-07-16 failover work): the gateway /
+  // extension paths (gw:/ext:) get the same 10-turn window Claude uses there;
+  // other callers keep the tighter 4-turn CF context budget.
+  const _cfHistWindow = /^(gw|ext):/.test(String(personId || '')) ? -10 : -4;
   const historyWindow = priorHistory
     .filter(h => h && h.role && h.content && (h.role === 'user' || h.role === 'assistant'))
     .filter(h => {
@@ -21065,14 +21084,35 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
       const txt = typeof h.content === 'string' ? h.content : JSON.stringify(h.content);
       return !FAILURE_PATTERN.test(txt);
     })
-    .slice(-4)
+    .slice(_cfHistWindow)
     .map(h => ({
       role: h.role,
       content: typeof h.content === 'string' ? h.content : JSON.stringify(h.content)
     }));
 
+  // CRM-context parity with askClaude (2026-07-16 failover work): inject the
+  // PREVIOUS CRM CONTEXT + SPEED DIRECTIVE saved by the last turn (either
+  // engine), so a follow-up landing on the CF tier during a Claude outage
+  // keeps its record/line-item ids instead of re-searching or hallucinating
+  // accounts (the d9ba364 incident class). Read-only here; save happens after
+  // the run below.
+  // dryRun-gated like the save below: injecting live production record IDs +
+  // the anti-search SPEED DIRECTIVE into dry-run eval runs contaminates
+  // benchmark behavior (review round 2).
+  let cfSystemPrompt = systemPrompt;
+  if (personId && env && env.CONVERSATION_KV && !dryRun) {
+    try {
+      const _savedCrmCtx = await env.CONVERSATION_KV.get(`crm_context_${personId}`, 'json');
+      const _ctxHint = _savedCrmCtx ? buildCrmContextHint(_savedCrmCtx) : '';
+      if (_ctxHint) {
+        cfSystemPrompt = systemPrompt + _ctxHint;
+        console.log(`[CF-AGENT] Injected CRM context: quote=${_savedCrmCtx.quote_id}, acct=${_savedCrmCtx.account_name}`);
+      }
+    } catch (_) { /* context injection is best-effort */ }
+  }
+
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: cfSystemPrompt },
     ...historyWindow,
     { role: 'user', content: userMessage }
   ];
@@ -21267,11 +21307,20 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
             }
           }
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+          // Truncation parity with askClaude (2026-07-16): quote get/search/update
+          // and compound-create payloads carry Quoted_Items + verification objects
+          // the crm_context extractor must parse intact — a 4000-char cut breaks
+          // JSON.parse mid-string and the context save silently no-ops (SEDA
+          // postmortem 2026-06-09 failure class).
+          const _cfIsQuoteData = call.arguments?.module_name === 'Quotes'
+            && ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(call.name);
+          const _cfIsCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal', 'clone_quote'].includes(call.name);
+          const _cfTruncLimit = (call.name === 'zoho_get_record' || _cfIsQuoteData || _cfIsCompoundCreate) ? 8000 : 4000;
           messages.push({
             role: 'tool',
             tool_call_id: callId,
             name: call.name,
-            content: resultStr.substring(0, 4000) + (mocked ? ' [DRY_RUN_MOCKED]' : '')
+            content: resultStr.substring(0, _cfTruncLimit) + (mocked ? ' [DRY_RUN_MOCKED]' : '')
           });
         } catch (toolErr) {
           errors.push({ iteration, tool: call.name, error: toolErr.message });
@@ -21383,6 +21432,13 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
       /^\s*I\s+(?:should|will|need to|am going to)\s+call\s+(?:the\s+)?\w+(?:_\w+)*\s+(?:tool|function)[^.\n]*\.?\s*$/gim,
     ];
     for (const pat of LEAK_PATTERNS) finalReply = finalReply.replace(pat, '');
+    // Half-emitted chip block: Llama truncation can open [[SUGGESTIONS]]
+    // without the closing tag; extractSuggestionsBlock only strips complete
+    // blocks, so the raw JSON would leak to the user and into history
+    // (review round 2). Cut from the dangling opener to end-of-reply.
+    if (finalReply.includes('[[SUGGESTIONS]]') && !finalReply.includes('[[/SUGGESTIONS]]')) {
+      finalReply = finalReply.replace(/\[\[SUGGESTIONS\]\][\s\S]*$/, '');
+    }
     finalReply = finalReply.replace(/\n{3,}/g, '\n\n').trim();
   }
 
@@ -21439,6 +21495,74 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     if (claimsSuccess && !successfulMutation) {
       console.warn(`[TRUTH-GUARD] Response claims creation/update but no mutation tool succeeded this turn`);
       finalReply = `⚠️ The assistant claimed a record was created or updated, but no verified CRM write tool ran successfully this turn. Any record references above have been stripped. Please retry — if the problem persists, the model may be hallucinating success.\n\n${finalReply}`;
+    }
+
+    // ── SKU truth guard (2026-07-16 failover hardening) ──
+    // Llama's documented fabrication class is SKU-shaped strings in free text
+    // (PSU incident: fabricated PWR-C1-S2-90). Softly flag any SKU-looking
+    // token not present in the user's message, a tool result this turn, or
+    // the ecomm catalog. Business-doc prefixes (PO-/SO-/INV-/Q-/DID-/CCW-)
+    // are exempt — they're record numbers, not part numbers.
+    try {
+      const _skuTokens = finalReply.match(/\b[A-Z]{2,4}[0-9]?-[A-Z0-9][A-Z0-9-]{2,}\b/g) || [];
+      if (_skuTokens.length) {
+        const _docPrefix = /^(PO|SO|INV|Q|DID|CCW|DRY|FU30)-/i;
+        const _toolTextUp = messages.filter(m => m.role === 'tool' && typeof m.content === 'string').map(m => m.content).join('\n').toUpperCase();
+        const _userUp = String(userMessage).toUpperCase();
+        const _skuNorm = s => s.toUpperCase().replace(/=/g, '');
+        const _catalog = (typeof pricesData !== 'undefined' && pricesData.prices) ? pricesData.prices : {};
+        const _flagged = [...new Set(_skuTokens)].filter(tok =>
+          !_docPrefix.test(tok)
+          && !(_skuNorm(tok) in _catalog)
+          && !_userUp.includes(tok.toUpperCase())
+          && !_toolTextUp.includes(tok.toUpperCase()));
+        for (const tok of _flagged.slice(0, 6)) {
+          const tokEsc = tok.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          finalReply = finalReply.replace(new RegExp(`\\b${tokEsc}\\b`), `${tok} *(unverified SKU — confirm before ordering)*`);
+        }
+        if (_flagged.length) console.warn(`[SKU-GUARD] Flagged ${_flagged.length} unverified SKU token(s): ${_flagged.join(', ')}`);
+      }
+    } catch (_) { /* guard is best-effort; never break the reply */ }
+  }
+
+  // ── CRM-context persistence parity with askClaude (2026-07-16 failover
+  //    work): adapt the CF-format tool messages into the Anthropic shape the
+  //    shared extractor expects, then save crm_context_<personId> so the NEXT
+  //    turn (on either engine) keeps record/line-item ids. Live runs only —
+  //    dry-run results are mocked and would poison the context. ──
+  // Never persist context from a stalled/failed run — clobbering the previous
+  // turn's GOOD context with ids from a broken run pins follow-ups to wrong
+  // records (review round 2, major).
+  const _cfRunStalled = !finalReply
+    || finalReply.includes('(empty response)')
+    || finalReply.includes('max iterations reached')
+    || /^API error:/.test(finalReply);
+  if (!dryRun && !_cfRunStalled && personId && env && env.CONVERSATION_KV && toolCallsLog.length > 0) {
+    try {
+      const _argsById = new Map();
+      for (const m of messages) {
+        if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+          for (const tc of m.tool_calls) {
+            let parsed = {};
+            try { parsed = typeof tc.function?.arguments === 'string' ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}); } catch (_) {}
+            _argsById.set(tc.id, { name: tc.function?.name, input: parsed });
+          }
+        }
+      }
+      const _anthropicShaped = [];
+      for (const m of messages) {
+        if (m.role !== 'tool' || typeof m.content !== 'string') continue;
+        const _call = _argsById.get(m.tool_call_id) || { name: m.name, input: {} };
+        _anthropicShaped.push({ role: 'assistant', content: [{ type: 'tool_use', id: m.tool_call_id, name: _call.name || m.name, input: _call.input }] });
+        _anthropicShaped.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content }] });
+      }
+      const _cfCrmCtx = extractCrmContextFromMessages(_anthropicShaped, env);
+      if (Object.keys(_cfCrmCtx).length > 0) {
+        await env.CONVERSATION_KV.put(`crm_context_${personId}`, JSON.stringify(_cfCrmCtx), { expirationTtl: 900 });
+        console.log(`[CF-AGENT] Saved CRM context for ${personId}: quote=${_cfCrmCtx.quote_id}, acct=${_cfCrmCtx.account_name}`);
+      }
+    } catch (ctxErr) {
+      console.error(`[CF-AGENT] CRM context save error:`, ctxErr.message);
     }
   }
 
@@ -21993,12 +22117,18 @@ ANSWER FROM KNOWLEDGE (NO TOOL CALL) for these patterns:
 - SKU suffix rules (why -HW, when -RTG, MR-ENT vs LIC-ENT)
 - Hypothetical design questions (warehouse sizing, AP density, camera counts, DID counts)
 - License-to-hardware pairing rules
+- Systems Manager / SME / LIC-SME is DISCONTINUED — the replacement is LIC-MI-EMSC-D-1YMC-A-{1|3|5}YR (Ivanti Neurons for MDM, per device). NEVER recommend any LIC-SME SKU; always name the replacement and flag the substitution.
 - APPROXIMATE / ROUGH / BALLPARK pricing — answer from list-price knowledge, do NOT call batch_product_lookup.
 
 ZOHO TOOL IS FOR CUSTOMER DATA ONLY:
 - Use zoho_search_records only when looking up a SPECIFIC customer, account, deal, contact, or quote by name/email/ID.
 - batch_product_lookup is ONLY for resolving product IDs when building a Zoho quote payload — NOT for answering pricing, spec, or comparison questions.
 - zoho_get_field is a CRM METADATA tool for validating picklist values during a real CRM update. NEVER call it for product Q&A, licensing math, or design questions. If the user is just asking how something works, answer from knowledge.
+
+ACCESSORY SKU FIND (PSU / power supply / injector / stack cable / transceiver / mount):
+- "PSU for a C9200L" means the requested item is the ACCESSORY, not the switch. NEVER derive the SKU from the host family — C9200L-PWR-* is NOT a real SKU; switch PSUs are PWR-C*, Meraki AP/sensor adapters are MA-PWR-*. Do NOT quote the host switch.
+- If no exact accessory SKU is named, call find_product_candidates with the user's wording (ask wattage first if unspecified: 125W / 600W / 1KW AC). If it returns nothing AND the user asked you to find the SKU, call web_search_sku — then re-validate the chosen SKU via batch_product_lookup before quoting.
+- Present the candidate SKUs and confirm with the user. NEVER guess or fabricate an accessory SKU string.
 
 QUOTE NUMBER vs RECORD ID:
 - Quote_Number is a FIELD on the quote record. id is Zoho's internal key used in URLs. Different values.
@@ -22010,7 +22140,8 @@ ACTIVE ZOHO PAGE:
 
 DEAL DEFAULTS:
 - Lead_Source: "Stratus Referal"
-- Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729)
+- Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729) — non-ISR-referral lead sources ONLY
+- Lead_Source "Meraki ISR Referal" REQUIRES meraki_isr_email (the referring rep's @cisco.com email) on create_deal_and_quote — the server refuses without it and NEVER falls back to Stratus Sales. Don't know the rep? ASK the user before calling the tool.
 - Caller owner ID: {{OWNER_ZOHO_ID}}
 
 TOOL RESULT TRUTH (HARD RULE — violating this is the worst failure mode):
@@ -22057,6 +22188,12 @@ REFUSAL ON BAD INPUT (NO TOOL CALL):
 - Cisco rep validation: If Lead_Source = "Meraki ISR Referal", the rep MUST exist in the Meraki_ISRs module. Search Meraki_ISRs first with zoho_search_records; if zero hits (e.g. "Joe Schmoe" → no match), REFUSE with "No Cisco rep named <X> found — please confirm the exact name or email" and do NOT call zoho_create_record.
 - Stage value "Closed Lost" (no parens) is INVALID. The valid value is "Closed (Lost)" with parentheses. If the user writes "Closed Lost", ASK "Did you mean 'Closed (Lost)' with parentheses?" and do NOT call zoho_update_record.
 
+QUOTE OUTPUT — ECOMM LINK DEFAULT (HARD RULE):
+- A plain "quote X" / "pricing for X" / any quote inside an email reply → do NOT create Zoho records and do NOT ask for account/billing info. Call batch_product_lookup, then reply with Stratus order URL(s): https://stratusinfosystems.com/order/?item=<comma-joined suffixed_sku values from the tool result>&qty=<matching quantities>. No term given → give three links (1/3/5-year license SKUs). Use exact suffixed_sku spellings from the lookup result only — never invent SKUs.
+- Create a ZOHO quote (create_deal_and_quote / create_quote_on_deal) ONLY when the user explicitly says zoho/CRM ("zoho quote", "in zoho"), asks to create a deal/record, names a customer account for the quote ("create a quote for Hudson Lake"), or is working an existing Deal/Quote record.
+- In email replies, quotes are ALWAYS ecomm links unless the user says zoho.
+- BALLPARK exception stands: approximate/rough pricing questions are still answered from knowledge with no tool call.
+
 TOOL CHOICE — EXISTING DEAL vs NEW DEAL (HARD RULE):
 - User gives an explicit deal id (e.g. "on deal 2570562000...") → CALL create_quote_on_deal with that deal_id. Do NOT call create_deal_and_quote — that creates a NEW deal and you'll end up with a duplicate.
 - Current CRM context/page is a Deal/Potentials record and the user asks for a quote, contract, PO, signature, or e-signature → CALL create_quote_on_deal with the current Deal ID. Do NOT create a new Deal.
@@ -22066,6 +22203,7 @@ TOOL CHOICE — EXISTING DEAL vs NEW DEAL (HARD RULE):
 LICENSE TERM VARIANTS (DO NOT FLAG AS INACTIVE):
 - Catalog uses -Y on newer families (MS125, MX75/85/95/105, C8111, C8455) and -YR on legacy MS (210/220/225/250/350/410/425) and MX55/64/65/67. batch_product_lookup now auto-flips these, returning the catalog-correct SKU in suffixed_sku. If you see a "normalized_from" field in the result, use the suffixed_sku value going forward — the product IS active.
 - If batch_product_lookup returns found:false for a single SKU, quote the user the other lines and ask which replacement they want — do NOT abort the whole quote, do NOT say the product is "inactive" or "discontinued" unless the tool explicitly returns Product_Active:false.
+- SKU MISS LADDER: on found:false, first check the result's live_alternatives/hint and re-run batch_product_lookup with the closest matching SKU; if none fit, call find_product_candidates with the user's wording, and call web_search_sku ONLY if that also misses AND the user asked you to find the SKU — then re-validate any web SKU via batch_product_lookup before quoting. NEVER tell the user a part isn't in our catalog until live_alternatives and find_product_candidates have both missed.
 
 ENDING THE REPLY — ALWAYS INCLUDE CRM URLs:
 - After any successful create (quote, deal, account, contact, task), end the reply with a clickable link in the format [View Quote](https://crm.zoho.com/crm/org647122552/tab/Quotes/<record_id>) — substitute the correct module for deals/accounts/contacts/tasks.
@@ -22089,6 +22227,17 @@ SKU DISPLAY IN REPLIES (CRITICAL):
 
 CAPABILITY SUMMARY FORMAT:
 - When the user asks "what can you do", "your capabilities", "list your features", respond with markdown BULLET points (lines beginning with "- "), NOT numbered items ("1. ", "2. "). The chat renderer converts "- " into proper HTML <ul><li> lists.
+
+SESSION QUOTE HEADER:
+- A "[Session: Most recently worked quote ...]" header at the top of the user message names the quote the user means by "the quote", "that quote", "same quote". Use its record id directly — do NOT search for it.
+
+CLICKABLE OPTION CHIPS:
+- When your reply asks the user to pick between 2-6 discrete options (license term, tier, which record, yes/no confirm), append ONE block in EXACTLY this format at the very end of the reply:
+[[SUGGESTIONS]]{"groups":[{"label":"License term","options":[{"label":"3-year","send":"3 year","recommended":true},{"label":"1-year","send":"1 year"},{"label":"5-year","send":"5 year"}]}]}[[/SUGGESTIONS]]
+- One group per question; "send" is the literal text submitted when clicked; mark at most one option per group "recommended". Never emit the block when there is no question.
+
+UNDO REQUESTS:
+- "undo" / "revert" / "roll back" / "change it back" → call the undo_crm_action tool with the most recent undo token from this conversation (no token visible → call undo_crm_action with {}). NEVER call undo_crm_action unless the user explicitly asked to undo in their most recent message.
 
 Respond in 1-3 short paragraphs. End with a direct answer (plus the CRM URL when a record was touched), not a clarifying question.`;
 
@@ -22412,13 +22561,51 @@ function isAccessorySkuFindRequest(userMessage) {
   return accessory.test(t) || skufind.test(t);
 }
 
+// Detect the deterministic apology strings askClaude converts EVERY Anthropic
+// API failure into (it never throws — see the non-ok mapping at the response
+// handler in askClaude). Returns a short reason tag or null. This is the ONLY
+// reliable "Claude API is down" signal available post-call: errors[] stays
+// empty for HTTP failures, and toolCalls may be non-empty when the API died
+// mid-run. 2026-07-16: added because a 400 usage-limit outage was sailing
+// through claudeResultLooksUsable as a successful reply, so the Llama failover
+// tier never ran and extension chat dead-ended on the apology text.
+function claudeApiFailureReason(result) {
+  const raw = typeof result === 'string' ? result
+    : (result && typeof result.reply === 'string' ? result.reply : '');
+  if (!raw) return null;
+  // The apologies are deterministic FULL replies — anchor every check to the
+  // start of the reply and cap the length, so a healthy Claude reply that
+  // merely QUOTES or relays an error string (e.g. explaining a Zoho 400 to
+  // the user, or drafting an email that mentions being rate-limited) can
+  // never classify as an API outage (review round 2, major false-positive).
+  const r = raw.trim();
+  if (r.length > 300) return null;
+  if (r.startsWith('The AI service is temporarily overloaded')) return 'overloaded_529';
+  // Prefix covers both variants: askClaude says "rate-limited right now",
+  // askClaudeContinue omits "right now".
+  if (r.startsWith("I'm being rate-limited")) return 'rate_limited_429';
+  if (r.startsWith('⚠️ The AI service account is out of credits')) return 'credits_or_usage_limit_400';
+  if (r.startsWith('Claude API not configured')) return 'not_configured';
+  if (/^Sorry, I couldn'?t (?:process|complete) that (?:CRM\/email request|request|CRM request)\s*\(API \d+\)/i.test(r)) return 'api_error';
+  // askClaude's OUTER catch converts every thrown error (fetch rejection when
+  // Anthropic/the AI gateway is unreachable, body-read failures) into this
+  // SKU-suggestion apology with no "(API n)" marker — a connection-level
+  // outage class the failover must catch.
+  if (/^Sorry, I couldn'?t process that request\. Try a specific SKU/i.test(r)) return 'api_exception';
+  return null;
+}
+
 function claudeResultLooksUsable(result) {
   if (!result || typeof result !== 'object') return false;
   if (Array.isArray(result.errors) && result.errors.length > 0) return false;
   if (result.error) return false;
+  // API-failure apology strings are never usable — even when tool calls ran
+  // before the API died (the toolCalls>0 short-circuit below used to mask
+  // mid-run 400/429 failures as success).
+  if (claudeApiFailureReason(result)) return false;
   if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) return true;
   if (typeof result.reply === 'string' && result.reply.trim().length > 0) {
-    return !/\b(api\s*error|rate\s*limit|timeout|timed\s*out|failed\s+to\s+call|overloaded)\b/i.test(result.reply);
+    return !/\b(api\s*error|rate.?limit|timeout|timed\s*out|failed\s+to\s+call|overloaded)\b/i.test(result.reply);
   }
   return false;
 }
@@ -22458,22 +22645,75 @@ DEEPSEEK PRODUCTION GUARDRAILS:
 // Legacy callers still reference `gemmaStallDetected` — keep it working.
 const cfStallDetected = gemmaStallDetected;
 
+// Irreversible / customer-visible tools that are DISABLED while a CF model is
+// serving as the Claude-outage failover (2026-07-16 guardrail): e-sign email,
+// PO creation, Velocity Hub submission, outbound mail, and deletes are
+// unrecoverable, and every documented Llama failure class (fabrication,
+// success-rationalization, confirm-flag slips) is worst on exactly these.
+// Reads and preflight-guarded reversible writes stay available.
+const FAILOVER_BLOCKED_TOOLS = new Set([
+  'zoho_delete_record', 'quote_to_po_and_esign', 'velocity_hub_submit', 'gmail_send_email'
+]);
+
+// Tools the LLAMA4_OPTIMIZED_PROMPT hard-references — always unioned into the
+// classified subset so the prompt never commands a tool that is missing from
+// the schema list (review round 2, major: 'revert the last update' classified
+// general → no undo_crm_action while the prompt orders it; email lookups
+// classified crm_read → zero gmail tools). gmail_send_email stays in the
+// union for the healthy CF tier but is stripped by FAILOVER_BLOCKED_TOOLS
+// in failover mode.
+const CF_TIER_PROMPT_TOOLS = new Set([
+  'undo_crm_action', 'gmail_search_messages', 'gmail_read_message', 'gmail_read_thread', 'gmail_send_email'
+]);
+
 // Try a CF model tier inside the waterfall. Returns either a winning result
 // ({ winner: true, payload }) or a failure reason ({ winner: false, reason, result }).
-async function tryCfTier(modelId, userMessage, env, personId, dryRun) {
+// failoverMode=true means this CF model is standing in for a DOWN Claude:
+// irreversible tools are stripped, iterations tightened, and the model is told
+// to defer destructive actions until Claude is back.
+// applySubset=false preserves the pre-2026-07-16 all-27-tools behavior for the
+// forced eval modes (forceLlama/forceGemma/forceCfModelId — Stream A3 series
+// comparability must not silently change mid-series).
+async function tryCfTier(modelId, userMessage, env, personId, dryRun, failoverMode = false, applySubset = true) {
   let result = null;
   let callError = null;
   try {
     const _ownerCtx_cf = await getOwnerContext(env, env && env.__CALLER_EMAIL);
+    // PR-A parity (2026-07-16, Claude-outage failover work): production Claude
+    // and the benchmark CF path both run intent-class tool subsetting (3-15
+    // tools); the live CF tier was still handed all 27 schemas — slower
+    // prefill and the documented Llama distraction failure (over-calling
+    // lookups on knowledge Q&A). Same deterministic classifier, same
+    // empty-subset fallback to the full set, plus the prompt-commanded union.
+    let cfTierTools;
+    if (applySubset) {
+      const _crmCtx_cfPRA = {
+        hasActivePageContext: /\[Active Zoho page[:\s]/i.test(userMessage),
+        hasQuoteSession: /\[Session: Most recently worked quote/i.test(userMessage)
+      };
+      const _cfIntent = classifyCrmIntent(userMessage, _crmCtx_cfPRA);
+      const _cfSubset = selectToolSubset(_cfIntent, CRM_EMAIL_TOOLS);
+      const _cfBase = _cfSubset.length > 0 ? _cfSubset : CRM_EMAIL_TOOLS;
+      const _cfHave = new Set(_cfBase.map(t => t.name));
+      cfTierTools = _cfBase.concat(CRM_EMAIL_TOOLS.filter(t => CF_TIER_PROMPT_TOOLS.has(t.name) && !_cfHave.has(t.name)));
+    } else {
+      cfTierTools = CRM_EMAIL_TOOLS;
+    }
+    let cfTierPrompt = pickOptimizedPrompt(modelId, _ownerCtx_cf);
+    if (failoverMode) {
+      cfTierTools = cfTierTools.filter(t => !FAILOVER_BLOCKED_TOOLS.has(t.name));
+      cfTierPrompt += `\n\nFAILOVER MODE (Claude is down — you are the backup model):
+- Deletes, PO/e-sign conversion, Velocity Hub submission, and outbound email sending are DISABLED right now. If asked, tell the user those actions will be available again once the primary AI service recovers — do not attempt a workaround.`;
+    }
     result = await askCfModel(
       modelId,
       userMessage,
-      pickOptimizedPrompt(modelId, _ownerCtx_cf),
-      CRM_EMAIL_TOOLS,
+      cfTierPrompt,
+      cfTierTools,
       env,
       personId,
       dryRun,
-      15
+      failoverMode ? 8 : 15
     );
   } catch (err) {
     callError = err.message;
@@ -22546,7 +22786,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
 
   // Force-Llama mode
   if (useLlamaOnly) {
-    const t = await tryCfTier(LLAMA, userMessage, env, personId, dryRun);
+    const t = await tryCfTier(LLAMA, userMessage, env, personId, dryRun, false, false);
     return {
       reply: t.result?.reply || `Llama failed: ${t.reason || 'unknown'}`,
       model: LLAMA,
@@ -22565,7 +22805,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // Force an arbitrary CF model for eval harness runs outside the production
   // Llama/Gemma waterfall. Used by Stream A3 for SEA-LION tool-use tests.
   if (forceCfModelId) {
-    const t = await tryCfTier(forceCfModelId, userMessage, env, personId, dryRun);
+    const t = await tryCfTier(forceCfModelId, userMessage, env, personId, dryRun, false, false);
     return {
       reply: t.result?.reply || `${forceCfModelId} failed: ${t.reason || 'unknown'}`,
       model: forceCfModelId,
@@ -22600,7 +22840,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
 
   // Force-Gemma mode
   if (useGemmaOnly) {
-    const t = await tryCfTier(GEMMA, userMessage, env, personId, dryRun);
+    const t = await tryCfTier(GEMMA, userMessage, env, personId, dryRun, false, false);
     return {
       reply: t.result?.reply || `Gemma failed: ${t.reason || 'unknown'}`,
       model: GEMMA,
@@ -22629,6 +22869,11 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const autoForceClaudeForWrite = claudeDefault || shouldForceClaudeForWrite(userMessage) || options.crmFollowUp === true || isAccessorySkuFindRequest(userMessage);
   let autoClaudeResult = null;
   let autoClaudeFailure = null;
+  // Claude-API-outage flag (2026-07-16): set when the Claude-first attempt died
+  // on a deterministic API-failure apology (400 usage-limit/credits, 429, 529,
+  // missing key). Downstream: tier-3 must NOT call the same dead Claude again,
+  // and the Llama tier's outcome is labeled 'llama-failover' for telemetry.
+  let claudeApiDown = false;
   if (autoForceClaudeForWrite) {
     try {
       console.log(`[WATERFALL] Write/admin-action intent detected; trying Claude first for personId=${personId}`);
@@ -22646,30 +22891,107 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
           totalMs: Date.now() - startMs
         };
       }
-      autoClaudeFailure = autoClaudeResult?.errors?.length ? autoClaudeResult.errors.map(e => e.error || e.phase).join('|') : 'unusable_response';
+      const _apiFail = claudeApiFailureReason(autoClaudeResult);
+      claudeApiDown = !!_apiFail;
+      // Write-safety gate: if Claude already EXECUTED a Zoho write this turn
+      // before the API died, re-running the request on a fallback model would
+      // duplicate the write. Surface the partial state honestly instead.
+      const _wroteAlready = !dryRun && _apiFail
+        && (autoClaudeResult?.toolCalls || []).some(tc => BENCHMARK_WRITE_TOOLS.has(tc.name));
+      if (_wroteAlready) {
+        const _wrote = (autoClaudeResult.toolCalls || []).filter(tc => BENCHMARK_WRITE_TOOLS.has(tc.name)).map(tc => tc.name);
+        return {
+          ...autoClaudeResult,
+          reply: `⚠️ The AI service hit an API error (${_apiFail}) partway through this request — AFTER executing: ${_wrote.join(', ')}. To avoid duplicating that write, I did not retry on a fallback model. Please verify the record in Zoho before re-asking.`,
+          model: 'claude-sonnet-4-6',
+          tierUsed: 'claude-partial-write',
+          llamaResult: null,
+          gemmaResult: null,
+          deepSeekResult: null,
+          claudeResult: autoClaudeResult,
+          stallReason: `claude:${_apiFail}|write_executed_no_failover`,
+          totalMs: Date.now() - startMs
+        };
+      }
+      autoClaudeFailure = _apiFail
+        || (autoClaudeResult?.errors?.length ? autoClaudeResult.errors.map(e => e.error || e.phase).join('|') : 'unusable_response');
     } catch (err) {
       autoClaudeFailure = err.message || 'exception';
+      claudeApiDown = true;
     }
     console.warn(`[WATERFALL] Claude write-intent attempt failed (${autoClaudeFailure}); cascading to normal waterfall for personId=${personId}`);
   }
 
-  // ── Tier 1: Llama 4 Scout (primary) ──
-  const llamaT = await tryCfTier(LLAMA, userMessage, env, personId, dryRun);
+  // Degraded-service banner + write audit for failover wins (2026-07-16
+  // guardrails): the user must know the reliability tier dropped, and writes
+  // made by the backup model during an outage window get queued for review.
+  // Banner wording deliberately avoids every FAILURE_PATTERN term so a GOOD
+  // failover answer isn't stripped from future CF history windows.
+  const failoverBanner = (reply) => {
+    let note = 'ℹ️ Claude is offline right now, so this answer came from the backup model — double-check any SKU or product recommendation before acting on it.';
+    if (isAccessorySkuFindRequest(userMessage)) {
+      note += ' ⚠️ Part-number finding is less reliable on the backup model — verify the part number before ordering.';
+    }
+    return `${note}\n\n${reply}`;
+  };
+  const auditFailoverWrites = async (tierResult) => {
+    try {
+      const sums = (tierResult?.mutationSummaries || []).filter(s => !s.isError);
+      if (!sums.length || !env.CONVERSATION_KV || dryRun) return;
+      const day = new Date().toISOString().slice(0, 10);
+      const key = `failover_writes_${day}`;
+      const existing = (await env.CONVERSATION_KV.get(key, 'json')) || [];
+      existing.push(...sums.map(s => ({ at: new Date().toISOString(), personId, tool: s.toolName, summary: s.summary })));
+      await env.CONVERSATION_KV.put(key, JSON.stringify(existing), { expirationTtl: 604800 });
+      console.log(`[WATERFALL] Audited ${sums.length} failover write(s) to ${key}`);
+    } catch (_) { /* audit is best-effort */ }
+  };
+
+  // ── Tier 1: Llama 4 Scout (primary; 'llama-failover' when it caught a
+  //    Claude API outage from the claude-default attempt above) ──
+  const llamaT = await tryCfTier(LLAMA, userMessage, env, personId, dryRun, claudeApiDown);
   if (llamaT.winner) {
+    if (claudeApiDown) await auditFailoverWrites(llamaT.result);
     return {
-      reply: llamaT.result.reply,
+      reply: claudeApiDown ? failoverBanner(llamaT.result.reply) : llamaT.result.reply,
       model: LLAMA,
-      tierUsed: 'llama',
+      tierUsed: claudeApiDown ? 'llama-failover' : 'llama',
       llamaResult: llamaT.result,
       gemmaResult: null,
-      claudeResult: null,
-      stallReason: null,
+      claudeResult: autoClaudeResult,
+      stallReason: autoClaudeFailure ? `claude:${autoClaudeFailure}` : null,
       toolCalls: llamaT.result.toolCalls,
       iterations: llamaT.result.iterations,
       elapsedMs: llamaT.result.elapsedMs,
       totalMs: Date.now() - startMs
     };
   }
+
+  // During a Claude API outage the tier-3 'escalate to Claude' calls below
+  // would re-hit the same dead API (3 retries each) and return another apology
+  // — burning wall-clock the extension's 130s client budget can't afford.
+  // Short-circuit with an honest degraded-service reply instead.
+  // Preserve the class-specific recovery guidance from Claude's own apology
+  // (credits/usage-cap says "raise the limit / top up at console.anthropic.com"
+  // — 'try again in a few minutes' is WRONG advice for a monthly cap; review
+  // round 2, major). Fall back to the generic message when no apology exists.
+  const allTiersDownOutcome = (stallReason, extra = {}) => ({
+    reply: (claudeApiDown && autoClaudeResult && typeof autoClaudeResult.reply === 'string' && autoClaudeResult.reply.trim())
+      ? `${autoClaudeResult.reply.trim()}\n\n(The backup models also could not complete this request — please try again once the issue above is resolved.)`
+      : `⚠️ The AI service is temporarily unavailable (Claude API: ${autoClaudeFailure}) and the fallback models could not complete this request. Please try again in a few minutes.`,
+    model: 'none',
+    tierUsed: 'all-tiers-down',
+    llamaResult: llamaT.result,
+    gemmaResult: null,
+    deepSeekResult: null,
+    claudeResult: autoClaudeResult,
+    stallReason,
+    toolCalls: [],
+    iterations: 0,
+    elapsedMs: 0,
+    totalMs: Date.now() - startMs,
+    ...extra
+  });
 
   // ── Tier 2: DeepSeek V4 Pro (flag-gated Gemma replacement) ──
   if (deepSeekTier3Enabled) {
@@ -22693,6 +23015,10 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
         };
       }
 
+      if (claudeApiDown) {
+        console.warn(`[WATERFALL] Llama + DeepSeek stalled and Claude API is down (${autoClaudeFailure}) — degrading gracefully, no tier-3 re-call`);
+        return allTiersDownOutcome(`claude:${autoClaudeFailure}|llama:${llamaT.reason}|deepseek:${deepSeekT.reason}`, { deepSeekResult: deepSeekT.result });
+      }
       console.log(`[WATERFALL] Llama + DeepSeek stalled (${llamaT.reason}/${deepSeekT.reason}), escalating to Claude for personId=${personId}`);
       const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
       return {
@@ -22711,6 +23037,10 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       };
     }
 
+    if (claudeApiDown) {
+      console.warn(`[WATERFALL] Llama stalled, advisory DeepSeek disabled, and Claude API is down (${autoClaudeFailure}) — degrading gracefully, no tier-3 re-call`);
+      return allTiersDownOutcome(`claude:${autoClaudeFailure}|llama:${llamaT.reason}|deepseek:advisory_disabled`);
+    }
     console.log(`[WATERFALL] Llama stalled (${llamaT.reason}); advisory DeepSeek disabled, escalating directly to Claude for personId=${personId}`);
     const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
     return {
@@ -22735,16 +23065,17 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
 
   // ── Legacy Tier 2: Gemma 4 (fallback while DeepSeek flag is off) ──
   console.log(`[WATERFALL] Llama stalled (${llamaT.reason}), trying Gemma for personId=${personId}`);
-  const gemmaT = await tryCfTier(GEMMA, userMessage, env, personId, dryRun);
+  const gemmaT = await tryCfTier(GEMMA, userMessage, env, personId, dryRun, claudeApiDown);
   if (gemmaT.winner) {
+    if (claudeApiDown) await auditFailoverWrites(gemmaT.result);
     return {
-      reply: gemmaT.result.reply,
+      reply: claudeApiDown ? failoverBanner(gemmaT.result.reply) : gemmaT.result.reply,
       model: GEMMA,
       tierUsed: 'gemma-fallback',
       llamaResult: llamaT.result,
       gemmaResult: gemmaT.result,
-      claudeResult: null,
-      stallReason: llamaT.reason,
+      claudeResult: autoClaudeResult,
+      stallReason: autoClaudeFailure ? `claude:${autoClaudeFailure}|llama:${llamaT.reason}` : llamaT.reason,
       toolCalls: gemmaT.result.toolCalls,
       iterations: gemmaT.result.iterations,
       elapsedMs: gemmaT.result.elapsedMs,
@@ -22753,6 +23084,10 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   }
 
   // ── Tier 3: Claude (final fallback) ──
+  if (claudeApiDown) {
+    console.warn(`[WATERFALL] Llama + Gemma stalled and Claude API is down (${autoClaudeFailure}) — degrading gracefully, no tier-3 re-call`);
+    return allTiersDownOutcome(`claude:${autoClaudeFailure}|llama:${llamaT.reason}|gemma:${gemmaT.reason}`, { gemmaResult: gemmaT.result });
+  }
   console.log(`[WATERFALL] Llama + Gemma both stalled (${llamaT.reason}/${gemmaT.reason}), escalating to Claude for personId=${personId}`);
   const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
   return {
@@ -26478,6 +26813,10 @@ CRITICAL URL RULES:
                 'gemma-forced': `🔷 Gemma 4 26B (forced, stalled: ${outcome.stallReason || 'none'})`,
                 'claude-fallback': `🔶 Claude Sonnet 4.6 (fell back — reason: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
                 'claude': `🔶 Claude Sonnet 4.6 (forced) · ${outcome.elapsedMs}ms`,
+                'claude-write-intent': `🔶 Claude Sonnet 4.6 · ${outcome.elapsedMs}ms`,
+                'claude-partial-write': `🔶 Claude Sonnet 4.6 (API error mid-operation — verify record before retrying)`,
+                'llama-failover': `🟡 Llama 4 Scout 17B (failover — Claude API unavailable: ${outcome.stallReason}) · ${outcome.elapsedMs}ms`,
+                'all-tiers-down': `🔴 AI service unavailable (${outcome.stallReason})`,
                 'sea-lion': `🟣 SEA-LION V4 27B (forced eval) · ${outcome.elapsedMs}ms`,
                 'deepseek-v4-pro': `🟧 DeepSeek V4 Pro (forced eval) · ${outcome.elapsedMs}ms`,
                 'deepseek-v4-flash': `🟧 DeepSeek V4 Flash (forced eval) · ${outcome.elapsedMs}ms`,
@@ -26765,28 +27104,87 @@ CRITICAL URL RULES:
               }
 
               // Use the same askClaude function as the GChat bot
-              // This gives the extension chat full CRM tool-use capabilities
+              // This gives the extension chat full CRM tool-use capabilities.
+              // 2026-07-16: wrapped with a tool tracker so a Claude API outage
+              // can fail over to Llama 4 (this /api/chat direct case is the
+              // documented API_BASE rollback path — without this it dead-ends
+              // on the apology string while the gateway waterfall path has a
+              // real failover).
+              const _directToolLog = [];
+              const _directEnv = new Proxy(env, {
+                get(target, prop) {
+                  if (prop === '__BENCHMARK_TRACKER') return _directToolLog;
+                  return target[prop];
+                }
+              });
               let reply = await askClaude(
                 enrichedMessage,
                 chatPersonId,
-                env,
+                _directEnv,
                 null,       // no image data
                 useTools,   // enable CRM tools if CRM intent detected
                 null,       // no progress callback for direct HTTP response
                 120000      // 2-minute timeout for CRM operations
               );
 
-              // Handle continuation objects (for very long CRM workflows)
-              while (reply && reply.__continuation) {
-                reply = await askClaudeContinue(
-                  reply.messages, reply.tools, reply.systemPrompt,
-                  reply.iteration, env, null, 120000, chatPersonId
-                );
+              // Handle continuation objects (for very long CRM workflows).
+              // _directEnv (not env) so tools executed during continuation
+              // segments land in _directToolLog — otherwise a mid-continuation
+              // write is invisible to the write-safety gate below and the
+              // Llama failover would duplicate it (review 2026-07-16, critical).
+              // askClaudeContinue has no outer catch — a thrown Anthropic
+              // failure mid-chain must route through the same failover
+              // detection instead of surfacing a raw 'Chat failed' error
+              // (review round 2): map the throw to the outer-catch apology
+              // that claudeApiFailureReason tags as api_exception.
+              try {
+                while (reply && reply.__continuation) {
+                  reply = await askClaudeContinue(
+                    reply.messages, reply.tools, reply.systemPrompt,
+                    reply.iteration, _directEnv, null, 120000, chatPersonId
+                  );
+                }
+              } catch (contErr) {
+                console.warn(`[API/CHAT] continuation threw (${contErr.message}) — routing to failover detection`);
+                reply = 'Sorry, I couldn\'t process that request. Try a specific SKU like "quote 10 MR44" or "5 MS150-48LP-4G".';
               }
 
-              const replyText = typeof reply === 'string' ? reply : (reply?.reply || 'No response generated.');
+              let replyText = typeof reply === 'string' ? reply : (reply?.reply || 'No response generated.');
+              let _directFailoverBadge = null;
 
-              // Save to history
+              // ── Llama-4 failover on Claude API outage (2026-07-16) ──
+              // Only when the reply is a deterministic API-failure apology AND no
+              // Zoho write executed this turn (re-running after a write would
+              // duplicate it — same write-safety gate as askWithWaterfall).
+              const _directApiFail = claudeApiFailureReason(replyText);
+              if (_directApiFail) {
+                const _directWrote = _directToolLog.some(tc => BENCHMARK_WRITE_TOOLS.has(tc.name));
+                if (_directWrote) {
+                  const _wroteNames = _directToolLog.filter(tc => BENCHMARK_WRITE_TOOLS.has(tc.name)).map(tc => tc.name);
+                  replyText = `⚠️ The AI service hit an API error (${_directApiFail}) partway through this request — AFTER executing: ${_wroteNames.join(', ')}. To avoid duplicating that write, I did not retry on a fallback model. Please verify the record in Zoho before re-asking.`;
+                } else {
+                  console.warn(`[API/CHAT] Claude API failure (${_directApiFail}); failing over to Llama 4 for ${chatPersonId}`);
+                  const _llamaFo = await tryCfTier('@cf/meta/llama-4-scout-17b-16e-instruct', enrichedMessage, env, chatPersonId, false, true);
+                  if (_llamaFo.winner && _llamaFo.result?.reply) {
+                    replyText = _llamaFo.result.reply;
+                    _directFailoverBadge = `🟡 Llama 4 Scout (failover — Claude API unavailable: ${_directApiFail}) — double-check SKU/product claims`;
+                  } else {
+                    replyText = `⚠️ The AI service is temporarily unavailable (Claude API: ${_directApiFail}) and the fallback model could not complete this request (${_llamaFo.reason || 'stalled'}). Please try again in a few minutes.`;
+                  }
+                }
+              }
+
+              // Strip any [[SUGGESTIONS]] chip block server-side and ship it as
+              // the structured `suggestions` field — waterfall convention; chips
+              // and badges are UI-only, never stored or rendered as raw JSON
+              // (review 2026-07-16: the Llama prompt now instructs chip blocks,
+              // and this direct path had no strip).
+              const { reply: _directCleanReply, suggestions: _directSuggestions } = extractSuggestionsBlock(replyText);
+              replyText = _directCleanReply;
+
+              // Save to history — the CLEAN reply only: badge and chips are
+              // UI-only (waterfall convention), storing them poisons future
+              // turns' context windows.
               await addToHistory(env.CONVERSATION_KV, chatPersonId, 'user', enrichedMessage);
               await addToHistory(env.CONVERSATION_KV, chatPersonId, 'assistant', replyText);
 
@@ -26795,7 +27193,12 @@ CRITICAL URL RULES:
                 await env.CONVERSATION_KV.put(`crm_session_${chatPersonId}`, 'active', { expirationTtl: 900 });
               }
 
-              apiResult = { success: true, reply: replyText, usedTools: useTools };
+              apiResult = {
+                success: true,
+                reply: _directFailoverBadge ? `${replyText}\n\n---\n_${_directFailoverBadge}_` : replyText,
+                suggestions: _directSuggestions || undefined,
+                usedTools: useTools
+              };
             } catch (chatErr) {
               console.error(`[API/CHAT] Error: ${chatErr.message}`);
               apiResult = { success: false, error: 'Chat failed: ' + chatErr.message };
