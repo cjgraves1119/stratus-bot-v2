@@ -13,6 +13,10 @@ node_modules/
 
 # Claude Code local scratch (agent worktrees, session files) — never commit
 .claude/
+# ...but keep shared skills tracked
+!.claude/
+!.claude/skills/
+!.claude/skills/**
 
 # Secrets file — lives in parent Bots/ directory, but add here as
 # belt-and-suspenders in case someone ever copies it into the repo tree.
