@@ -112,11 +112,39 @@ export default function App() {
   const [crmContext, setCrmContext] = useState(null);
   const [navData, setNavData] = useState(null);
   const [authStatus, setAuthStatus] = useState(null);
-  // Lift chat state here so it persists when switching tabs
+  // Lift conversation state here so it persists when switching tabs. The
+  // Zoho record pin must survive ChatPanel's conditional unmount when an SPA
+  // navigation auto-switches the sidebar to the CRM tab.
   const [chatMessages, setChatMessages] = useState([]);
+  const [chatAutoPinnedRecord, setChatAutoPinnedRecord] = useState(null);
+
+  // An empty thread is a new conversation, so its record snapshot must not
+  // leak into the next first message.
+  useEffect(() => {
+    if (!chatMessages || chatMessages.length === 0) {
+      setChatAutoPinnedRecord(null);
+    }
+  }, [chatMessages && chatMessages.length]);
 
   const [pageType, setPageType] = useState(null); // 'gmail' | 'zoho' | 'other'
   const [zohoPageContext, setZohoPageContext] = useState(null);
+
+  // If DOM enrichment arrives for the record already pinned to the
+  // conversation, fold those non-empty fields into the snapshot even when
+  // ChatPanel has been auto-unmounted. Never update a different-record pin.
+  useEffect(() => {
+    if (!zohoPageContext || !zohoPageContext.recordId) return;
+    setChatAutoPinnedRecord((snapshot) => {
+      if (!snapshot || snapshot.recordId !== zohoPageContext.recordId) return snapshot;
+      let enriched = snapshot;
+      for (const [key, value] of Object.entries(zohoPageContext)) {
+        if (value == null || value === '' || snapshot[key] === value) continue;
+        if (enriched === snapshot) enriched = { ...snapshot };
+        enriched[key] = value;
+      }
+      return enriched;
+    });
+  }, [zohoPageContext]);
 
   // ── Report Issue ── one-click bug/glitch reporting for the team.
   const [reportOpen, setReportOpen] = useState(false);
@@ -651,7 +679,15 @@ export default function App() {
         <PanelErrorBoundary activeTab={activeTab}>
           <Suspense fallback={<PanelLoader />}>
             {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
-            {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} zohoPageContext={zohoPageContext} />}
+            {activeTab === 'chat' && <ChatPanel
+              emailContext={emailContext}
+              navData={navData}
+              messages={chatMessages}
+              onMessagesChange={setChatMessages}
+              zohoPageContext={zohoPageContext}
+              autoPinnedRecord={chatAutoPinnedRecord}
+              onAutoPinnedRecordChange={setChatAutoPinnedRecord}
+            />}
             {activeTab === 'search' && <SearchPanel navData={navData} />}
           </Suspense>
         </PanelErrorBoundary>

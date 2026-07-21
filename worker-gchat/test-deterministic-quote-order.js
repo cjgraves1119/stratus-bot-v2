@@ -12,6 +12,7 @@ src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const
 src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
 src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${escPath('src/data/specs.json')}');`);
 src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${escPath('src/email-reply-voice-skill.json')}');`);
 src = src.replace(/^export\s+(class|function|const|let|var)\s+/gm, '$1 ');
 const edIdx = src.indexOf('export default');
 if (edIdx > -1) {

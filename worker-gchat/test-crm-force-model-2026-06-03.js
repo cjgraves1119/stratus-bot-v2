@@ -25,6 +25,7 @@ function buildShim() {
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${escPath('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${escPath('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${escPath('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${escPath('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const edIdx = src.indexOf('export default');
@@ -52,7 +53,7 @@ function t(name, fn) {
 
 console.log('── resolveForcedCrmModel: aliases + passthrough ──');
 t('opus → claude-opus-4-8', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'opus' }), 'claude-opus-4-8'));
-t('sonnet → claude-sonnet-4-6', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'sonnet' }), 'claude-sonnet-4-6'));
+t('sonnet → claude-sonnet-5', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'sonnet' }), 'claude-sonnet-5'));
 t('haiku → claude-haiku-4-5-20251001', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'haiku' }), 'claude-haiku-4-5-20251001'));
 t('case-insensitive (OPUS)', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'OPUS' }), 'claude-opus-4-8'));
 t('full claude-* id passthrough', () => assert.strictEqual(resolveForcedCrmModel({ CRM_AGENT_FORCE_MODEL: 'claude-opus-4-8' }), 'claude-opus-4-8'));

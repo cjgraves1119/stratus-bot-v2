@@ -392,10 +392,11 @@ function parseExplicitSkuRequestBeforeClassifier(rawText) {
 // ─── API Usage Tracking ─────────────────────────────────────────────────────
 // Pricing per 1M tokens (USD) by model
 const MODEL_PRICING = {
+  'claude-sonnet-5': { input: 3.00, output: 15.00 },
   'claude-sonnet-4-6': { input: 3.00, output: 15.00 },
   'claude-sonnet-4-20250514': { input: 3.00, output: 15.00 },
   'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00 },
-  'claude-opus-4-6': { input: 15.00, output: 75.00 },
+  'claude-opus-4-6': { input: 5.00, output: 25.00 },
   // Opus 4.8 (2026): $5 / $25 per 1M tokens — ~1.67x Sonnet 4.6, NOT the
   // legacy $15/$75 Opus rate. Used when CRM_AGENT_FORCE_MODEL routes here.
   'claude-opus-4-8': { input: 5.00, output: 25.00 },
@@ -409,7 +410,7 @@ const MODEL_PRICING = {
 // [vars] entry or `wrangler secret put CRM_AGENT_FORCE_MODEL` (secret = flip
 // with no redeploy):
 //   off | '' | false → default behavior (Sonnet executor + Haiku dispatch)
-//   sonnet           → claude-sonnet-4-6
+//   sonnet           → claude-sonnet-5
 //   opus             → claude-opus-4-8
 //   haiku            → claude-haiku-4-5-20251001
 //   <full model id>  → used verbatim (must start with 'claude-')
@@ -418,7 +419,7 @@ const MODEL_PRICING = {
 // Haiku dispatch downshift and the (disabled) advisor injection.
 const CRM_FORCE_MODEL_ALIASES = {
   opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-4-6',
+  sonnet: 'claude-sonnet-5',
   haiku: 'claude-haiku-4-5-20251001',
 };
 function resolveForcedCrmModel(env) {
@@ -436,7 +437,7 @@ function resolveForcedCrmModel(env) {
 // injection sites). Non-Anthropic models (DeepSeek/CF) never carry it, so pass
 // effectiveModel='' for those.
 function advisorToolActive(env, effectiveModel) {
-  return env?.ENABLE_ADVISOR_TOOL === 'true' && effectiveModel === 'claude-sonnet-4-6';
+  return env?.ENABLE_ADVISOR_TOOL === 'true' && effectiveModel === 'claude-sonnet-5';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -581,12 +582,22 @@ async function verifyCachingActive(env) {
       WHERE response_path IN ('crm_agent','claude')
         AND created_at >= datetime('now', '-${windowMinutes} minutes')
         AND response_text LIKE '%pr_b%'`;
+    // PR-B (2026-07-13): baseline MUST sample the SAME population as the current
+    // window — i.e. pr_b rows only. Without the `LIKE '%pr_b%'` filter the
+    // baseline averaged ALL crm_agent/claude rows (incl. cheap quote-URL calls),
+    // while the current window averaged only the expensive pr_b CRM tool-loop
+    // rows (~$0.13 ea). That apples-to-oranges gap made cur24hAvg structurally
+    // exceed baseAvg, firing the +5% cost-delta auto-kill on every tick
+    // regardless of caching (root cause of 5 of the 6 historical auto-kills).
+    // With matched populations the delta reflects real cost movement: caching
+    // shrinks usage.input_tokens → cost_usd drops → negative delta → no kill.
     const baselineQuery = `
       SELECT COALESCE(AVG(cost_usd), 0) AS avg_cost, COUNT(*) AS rows
       FROM bot_usage
       WHERE response_path IN ('crm_agent','claude')
         AND created_at >= datetime('now', '-10 days')
-        AND created_at <= datetime('now', '-3 days')`;
+        AND created_at <= datetime('now', '-3 days')
+        AND response_text LIKE '%pr_b%'`;
     const [r1h, r6h, r24h, baseline] = await Promise.all([
       env.ANALYTICS_DB.prepare(query(60)).first(),
       env.ANALYTICS_DB.prepare(query(360)).first(),
@@ -611,7 +622,11 @@ async function verifyCachingActive(env) {
       return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
                action: 'kill', reason: '1h hit rate below 5% hard floor' };
     }
-    if (enoughData6h && hitRate6h < 0.20) {
+    // Same zero-cache-traffic guard as the 1h floor (2026-07-15): a window can
+    // have ≥30 pr_b rows with NO cache tokens at all (caching disabled, or an
+    // eval flood before markers engage) — that's absence of caching, not
+    // unhealthy caching, and killing on it created a re-kill loop (07-02 kill).
+    if (enoughData6h && (Number(r6h?.creations || 0) + Number(r6h?.reads || 0)) > 0 && hitRate6h < 0.20) {
       return { healthy: false, hitRate1h, hitRate6h, hitRate24h, costDelta,
                action: 'kill', reason: '6h hit rate below 20% soft floor' };
     }
@@ -861,7 +876,7 @@ function estimateDeepSeekCostUsd(model, usage = {}) {
 async function trackUsage(env, model, usage, source, evalContext = null, extras = null, personId = null) {
   if (!usage || !env?.CONVERSATION_KV) return;
   try {
-    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
+    const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-5'];
     const inputCost = (usage.input_tokens / 1_000_000) * pricing.input;
     const outputCost = (usage.output_tokens / 1_000_000) * pricing.output;
     const totalCost = inputCost + outputCost;
@@ -1135,6 +1150,27 @@ async function updateCrmOpVerdict(env, opId, { status, errorMessage, details }) 
  *   - retried: true if we exhausted a single 5xx/network retry
  *   - http_classified: 'transient' | 'validation' | 'unknown' — drives retry decision and telemetry
  */
+function normalizeCallerEmail(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+$/.test(email) ? email : null;
+}
+
+// Cloudflare reuses the bindings object across concurrent isolate requests.
+// Never write request identity onto that shared object: a prototype-scoped
+// wrapper keeps every deep env.__CALLER_EMAIL read request/work-item local.
+function callerScopedEnv(env, callerEmail = null) {
+  const scoped = Object.create(env || null);
+  scoped.__CALLER_EMAIL = normalizeCallerEmail(callerEmail);
+  return scoped;
+}
+
+// Extract the caller email from a gateway/extension personId ('gw:<email>' /
+// 'ext:<email>'). Returns null for cron/system/legacy ids. (R6 owner fix.)
+function callerEmailFromPersonId(personId) {
+  const m = /^(?:gw|ext):([^\s@]+@[^\s@]+)$/i.exec(String(personId || '').trim());
+  return m ? normalizeCallerEmail(m[1]) : null;
+}
+
 async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, ownerId }) {
   const taskDueDate = new Date();
   let daysAdded = 0;
@@ -1143,12 +1179,52 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
   }
   const dueDateStr = taskDueDate.toISOString().split('T')[0];
+  // ── R6 owner resolution (corp error_reports, 2026-07-15) ──────────────────
+  // Every auto-created follow-up Task used to land on env.SYSTEM_OWNER_ID
+  // ("IT Stratus" on corp) because callers never passed ownerId. Resolution
+  // order: explicit ownerId arg (caller knows best — e.g. the Deal Owner the
+  // user set on a direct zoho_create_record) → the REQUESTING USER (caller
+  // email carried by the gw:/ext: work-item personId first, then the request-
+  // scoped env.__CALLER_EMAIL, resolved via the
+  // D1 users roster; roster hits only — the roster's own system fallback is
+  // NOT accepted here so we can fall through) → the parent Deal's Owner →
+  // SYSTEM_OWNER_ID (cron/system paths only).
+  let _taskOwnerId = ownerId || '';
+  let _taskOwnerSource = _taskOwnerId ? 'caller_arg' : '';
+  if (!_taskOwnerId) {
+    try {
+      const _callerEmail = callerEmailFromPersonId(personId)
+        || normalizeCallerEmail(env && env.__CALLER_EMAIL);
+      if (_callerEmail) {
+        const _octx = await getOwnerContext(env, _callerEmail);
+        if (_octx && _octx.zoho_user_id && (_octx._source === 'd1' || _octx._source === 'seed')) {
+          _taskOwnerId = _octx.zoho_user_id;
+          _taskOwnerSource = 'requesting_user';
+        }
+      }
+    } catch (e) { console.log(`[TASK-OWNER] caller resolve skipped: ${e && e.message}`); }
+  }
+  if (!_taskOwnerId && dealId) {
+    try {
+      const _dealResp = await zohoApiCall('GET', `Deals/${dealId}?fields=Owner`, env);
+      const _dOwner = _dealResp?.data?.[0]?.Owner;
+      const _dOwnerId = _dOwner && (_dOwner.id || _dOwner);
+      if (_dOwnerId) {
+        _taskOwnerId = String(_dOwnerId);
+        _taskOwnerSource = 'deal_owner';
+      }
+    } catch (e) { console.log(`[TASK-OWNER] deal-owner resolve skipped: ${e && e.message}`); }
+  }
+  if (!_taskOwnerId) {
+    _taskOwnerId = (env && env.SYSTEM_OWNER_ID) || '';
+    _taskOwnerSource = 'system_fallback';
+  }
   // Fail closed: never POST Owner.id='' — Zoho would silently attribute the task to the API-token
   // user. Personal/corp both set SYSTEM_OWNER_ID, so this only trips on a misconfigured deploy.
-  const _taskOwnerId = ownerId || (env && env.SYSTEM_OWNER_ID) || '';
   if (!_taskOwnerId) {
     return { success: false, taskId: null, taskUrl: null, dueDate: dueDateStr, error: 'No owner id resolved (SYSTEM_OWNER_ID unset) — refused to avoid API-token attribution', retried: false, http_classified: 'validation' };
   }
+  console.log(`[TASK-OWNER] Follow-up task owner ${_taskOwnerId} (source: ${_taskOwnerSource})`);
   const taskData = {
     Subject: `Follow up - ${subjectLabel || `Deal ${dealId}`}`,
     Due_Date: dueDateStr,
@@ -1225,7 +1301,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
       status: 'success',
       durationMs: attempt.ms || null,
       errorMessage: null,
-      details: { dealId, dueDate: dueDateStr, retried, source: 'createFollowUpTaskForDeal' },
+      details: { dealId, dueDate: dueDateStr, retried, source: 'createFollowUpTaskForDeal', ownerSource: _taskOwnerSource },
       preState: null,
       postState: { id: attempt.taskId, ...taskData },
       requestPayload: { module: 'Tasks', data: taskData },
@@ -1255,7 +1331,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     status: 'error',
     durationMs: attempt.ms || null,
     errorMessage: attempt.error,
-    details: { dealId, dueDate: dueDateStr, retried, classification: attempt.classification, source: 'createFollowUpTaskForDeal' },
+    details: { dealId, dueDate: dueDateStr, retried, classification: attempt.classification, source: 'createFollowUpTaskForDeal', ownerSource: _taskOwnerSource },
     preState: null,
     postState: null,
     requestPayload: { module: 'Tasks', data: taskData },
@@ -1410,6 +1486,32 @@ async function logBotUsageToD1(env, {
   }
 }
 
+// Record a server-side validation BLOCK (a fabricated/inactive/EOL product id rejected
+// before a Zoho write) into bot_usage.error_message so the daily monitor + digest can
+// see it. Before 2026-07-14 (error_reports #1) these blocks hit only console.log and
+// were invisible in D1 — a real failure went unnoticed. AWAITED at the block sites so
+// the D1 insert is durable (the Worker won't kill it mid-request); swallows its own
+// errors so it never affects the block response.
+async function logValidationBlockToD1(env, personId, toolName, activeCheck) {
+  try {
+    if (!env?.ANALYTICS_DB || !activeCheck) return;
+    const reason = Array.isArray(activeCheck.errors) ? activeCheck.errors.join(' | ') : 'validation block';
+    const kind = (activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length) ? 'invalid_product_id' : 'inactive_or_eol_product';
+    await logBotUsageToD1(env, {
+      bot: botFromPersonId(personId),
+      personId: personId || null,
+      requestText: `[VALIDATION BLOCK] ${toolName}`,
+      responsePath: 'crm_agent',
+      model: null,
+      errorMessage: `preflight_block:${kind}: ${reason}`.substring(0, 2000),
+      responseText: null,
+      toolCallsJson: activeCheck.blocked_items || activeCheck.hallucinated_ids || null
+    });
+  } catch (e) {
+    console.log(`[VALIDATION-BLOCK-LOG] threw: ${e.message}`);
+  }
+}
+
 /**
  * Infer the bot channel from a person_id.
  * Chrome extension uses 'chrome-ext-chat-*' and 'chrome-ext-quote-*' prefixes
@@ -1501,7 +1603,7 @@ function createTracer(env, bot) {
 // Schema:
 //   blobs[0] = bot ('webex'|'gchat'|'addon')
 //   blobs[1] = response_path ('deterministic'|'claude'|'crm_agent'|'pricing'|'error')
-//   blobs[2] = model (e.g. 'claude-sonnet-4-6' or 'none')
+//   blobs[2] = model (e.g. 'claude-sonnet-5' or 'none')
 //   doubles[0] = duration_ms
 //   doubles[1] = input_tokens
 //   doubles[2] = output_tokens
@@ -1950,6 +2052,28 @@ function looksLikeZohoQuoteIntent(text) {
       || /\bon\s+the\s+(?:zoho\s+)?quote\b/i.test(text)
       || /\bcreate\s+(?:a\s+|the\s+)?(?:zoho\s+)?(?:quote|deal|opportunity)\s+(?:for|in)\b/i.test(text)
       || /\b(?:billing|shipping)\s+(?:address|street|city|state|zip|country)\b/i.test(text);
+}
+
+// ── R11 active-record routing rule (Chris directive, 2026-07-15) ────────────
+// With an active Zoho record page in context, a request is NEVER routed to the
+// deterministic ecomm URL engine unless the user EXPLICITLY asked for an ecomm
+// quote/link — these exact phrasings: "url quote", "ecomm quote/link/url",
+// "quote link/url", "order link/url", "stratus url", "send me a link".
+// Precedence: explicit-ecomm ask > active Zoho page context > every other
+// lexical quote heuristic. Off Zoho pages, routing is unchanged.
+// (Corp error_reports R3 misroute: "create a quote for 2 MX84 SEC licenses and
+// 2 Z3 ENT licenses" sent while ON a Zoho Quote page returned an /order/ URL.)
+function isExplicitEcommUrlAsk(text) {
+  if (!text || typeof text !== 'string') return false;
+  // Same guards as classifier rule 1 (adversarial review 2026-07-15): a link TO
+  // a CRM record, or a zoho/crm-marked ask, is not an ecomm ask and must not
+  // unpin Tier-0 routing away from the CRM agent.
+  if (/\b(zoho|crm)\b/i.test(text)) return false;
+  return /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b(?!\s+(?:to|for)\s+(?:the\s+|that\s+|this\s+|my\s+)?(?:deal|account|contact|record|task|invoice|sales\s*order|so\b|po\b))/i.test(text);
+}
+
+function hasActiveZohoPageContext(text) {
+  return /\[Active Zoho page[:\s]/i.test(String(text || ''));
 }
 
 // ── 2026-05-05 council: ambiguous license-term gate ────────────────────
@@ -6586,8 +6710,10 @@ Three license tiers exist for MX/Z:
 
 EXACT license SKU mappings by product family:
 
+**License TERMS — 1/3/5 standard; 7/10 are real co-term Zoho-quote-only terms.** The SKUs below list 1YR/3YR/5YR because those are the standard terms you quote as instant URLs. **7-year and 10-year licenses ALSO exist and are real, active products (e.g. LIC-ENT-7YR, LIC-ENT-10YR) — never tell a customer a 7- or 10-year term "doesn't exist" or "isn't valid."** They are co-term licenses that CANNOT be produced as an ecomm/URL quote; they are set up on a Zoho quote instead. If a customer asks for a 7- or 10-year term, do NOT deny it — explain it's a co-term term handled on a Zoho quote (in the CRM extension), and offer to proceed there or quote the standard 1/3/5-year URL options.
+
 ### APs (MR + CW) — all use generic ENT license
-- All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
+- All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix); 7/10-year co-term = LIC-ENT-7YR / LIC-ENT-10YR (Zoho quote only, not a URL)
 - CW9800 wireless controllers → NO license association
 
 ### Systems Manager (SME) — generic, model-agnostic, 3-YEAR MAX
@@ -6958,7 +7084,7 @@ async function processEmailThread(text, personId, env, kv) {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         max_tokens: 512,
         // Deterministic JSON task — no thinking (the corp AI Gateway otherwise
         // injects a thinking block that displaces content[0]).
@@ -6974,7 +7100,7 @@ async function processEmailThread(text, personId, env, kv) {
     }
 
     const data = await response.json();
-    trackUsage(env, 'claude-sonnet-4-6', data.usage, 'email-parse').catch(() => {});
+    trackUsage(env, 'claude-sonnet-5', data.usage, 'email-parse').catch(() => {});
     const rawJson = extractClaudeText(data).trim();
 
     // Parse JSON response
@@ -7891,7 +8017,7 @@ const ZOHO_QUOTE_ITEMS_ALLOWED_MODULES = Object.keys(ZOHO_QUOTE_ITEMS_SUBFORM_FI
 
 // Cisco/Meraki SKU token extractor — used when a subform row has no
 // Product_Code and we must recover a SKU from the free-text product name.
-const ZOHO_QUOTE_ITEMS_SKU_REGEX = /\b(MR\d{2,3}[A-Z0-9-]*|MS\d{3}[A-Z0-9-]*|MX\d{2,3}[A-Z0-9-]*|CW\d{4}[A-Z0-9-]*|MV\d{2,3}[A-Z0-9-]*|MT\d{2,3}[A-Z0-9-]*|MG\d{2,3}[A-Z0-9-]*|C9\d{3}[A-Z0-9-]*|Z\d[A-Z0-9-]*|LIC-[A-Z0-9-]+|SUB-[A-Z0-9-]+|PWR-[A-Z0-9-]+|MA-[A-Z0-9-]+)\b/i;
+const ZOHO_QUOTE_ITEMS_SKU_REGEX = /\b(FED-[A-Z0-9-]+|MR\d{2,3}[A-Z0-9-]*|MS\d{3}[A-Z0-9-]*|MX\d{2,3}[A-Z0-9-]*|CW\d{4}[A-Z0-9-]*|MV\d{2,3}[A-Z0-9-]*|MT\d{2,3}[A-Z0-9-]*|MG\d{2,3}[A-Z0-9-]*|C9\d{3}[A-Z0-9-]*|Z\d[A-Z0-9-]*|LIC-[A-Z0-9-]+|SUB-[A-Z0-9-]+|PWR-[A-Z0-9-]+|MA-[A-Z0-9-]+)\b/i;
 
 /**
  * Map Zoho v8 subform rows → minimal { sku, qty } line items.
@@ -8437,17 +8563,27 @@ function enrichInactiveProductMessage(parsed, recordData) {
 // "2570562000271100009" when real MR44-HW id is "2570562000045149737"). Zoho
 // returns "NOT_ALLOWED — can't add inactive product in the inventory" which
 // the model paraphrases as "the product is not active", leading to confusing
-// failures. We detect these by checking the product_id against our reverse
-// cache map AND the live KV prices — if neither has it, it's almost certainly
-// fabricated and we block with an actionable error.
+// failures.
+//
+// VERIFY-THEN-DECIDE (2026-07-14 fix, error_reports #1): an id absent from the
+// static prices.json reverse map is NOT automatically fabricated. The cache
+// deliberately EXCLUDES legitimate Zoho-quote-only SKUs (e.g. 7YR/10YR co-term
+// licenses — 0 of 1061 cached), so a live-looked-up id for a real product was
+// being branded "FABRICATED" and the model was falsely told it invented the id.
+// Now: for an unknown id we do ONE live Zoho Products/{id} GET (live path only)
+// and allow iff the record exists AND Product_Active !== false; we block ONLY
+// when Zoho actually says not-found (truly fabricated) or inactive — with the
+// REAL reason. In dry-run/benchmark (no live Zoho) we keep the fail-fast block
+// so benchmark fabrication-catching is unchanged.
 //
 // Strategy:
 //   - Only checks NEW line items (items without an existing `id`).
 //   - Uses product_id → SKU reverse map, then isEol(sku) + EOL_REPLACEMENTS.
-//   - Unknown product_ids: fail-fast with guidance to call batch_product_lookup.
+//   - Unknown product_ids: live-verify (live path) or fail-fast (dry-run).
 //   - Returns { valid: true } or { valid: false, errors: [...], blocked_items: [...] }.
-function preflightQuotedItemsProductActive(quotedItems) {
+async function preflightQuotedItemsProductActive(quotedItems, env = null, opts = {}) {
   if (!Array.isArray(quotedItems)) return { valid: true };
+  const dryRun = !!(opts.dryRun || (env && env.__BENCHMARK_DRY_RUN));
   const idMap = getProductIdToSkuMap();
   const errors = [];
   const blocked = [];
@@ -8458,14 +8594,45 @@ function preflightQuotedItemsProductActive(quotedItems) {
     if (item.id) continue;
     const productId = item.Product_Name?.id;
     if (!productId) continue;
-    const sku = idMap[productId];
+    let sku = idMap[productId];
     if (!sku) {
-      // Unknown product_id — not in our reverse cache. This is almost always
-      // a hallucinated/fabricated 19-digit id. The prices.json cache covers
-      // every active SKU we sell, so if the id isn't here, Zoho will reject
-      // it with "NOT_ALLOWED can't add inactive product in the inventory".
-      // Block pre-flight with actionable guidance instead of letting it round-trip.
-      hallucinated.push({ product_id: productId });
+      // Unknown product_id — not in the static prices.json reverse cache.
+      // Do NOT assume fabricated: the cache excludes Zoho-quote-only SKUs
+      // (7YR/10YR co-term licenses, legacy parts). Verify-then-decide.
+      if (dryRun || !env) {
+        // No live Zoho available (benchmark/dry-run): preserve the original
+        // fail-fast so benchmarks still catch fabricated ids.
+        hallucinated.push({ product_id: productId });
+        continue;
+      }
+      let liveRec = null;
+      try {
+        const res = await zohoApiCall('GET',
+          `Products/${encodeURIComponent(productId)}?fields=id,Product_Code,Product_Name,Product_Active`,
+          env
+        );
+        liveRec = res?.data?.[0] || null;
+      } catch (verifyErr) {
+        console.log(`[PREFLIGHT-VERIFY] live Products/${productId} lookup threw: ${verifyErr.message}`);
+        // Fail OPEN on a transient Zoho error — do not block a possibly-real id
+        // on infrastructure flakiness. A genuinely bad id will be rejected by
+        // Zoho on the actual write with its own error.
+        continue;
+      }
+      if (!liveRec) {
+        // Zoho has no product with this id → genuinely fabricated/wrong id.
+        hallucinated.push({ product_id: productId });
+        continue;
+      }
+      if (liveRec.Product_Active === false) {
+        const liveSku = liveRec.Product_Code || productId;
+        blocked.push({ sku: liveSku, product_id: productId, inactive_in_zoho: true, replaced_by: null });
+        errors.push(`❌ ${liveSku} is INACTIVE in Zoho's inventory and cannot be added to a quote (it is discontinued). Ask the user for an active alternative — e.g. a different license term.`);
+        continue;
+      }
+      // Real, active Zoho product that simply isn't in the local price cache
+      // (e.g. a 7YR/10YR co-term license). ALLOW it.
+      console.log(`[PREFLIGHT-VERIFY] Allowed live-verified product ${liveRec.Product_Code || ''} (${productId}) — active in Zoho, absent from static cache.`);
       continue;
     }
     // Inactive-in-Zoho guard: the SKU is in our catalog but its Zoho product record is
@@ -8493,14 +8660,12 @@ function preflightQuotedItemsProductActive(quotedItems) {
   }
   if (hallucinated.length > 0) {
     const idsList = hallucinated.map(h => h.product_id).join(', ');
-    // Observability — surfaces in CF Worker logs so we can track hallucination frequency by model/session.
-    console.log(`[PREFLIGHT-HALLUCINATION] Blocked ${hallucinated.length} fabricated product_id(s): ${idsList}`);
+    // Observability — surfaces in CF Worker logs so we can track fabrication frequency by model/session.
+    console.log(`[PREFLIGHT-HALLUCINATION] Blocked ${hallucinated.length} non-existent product_id(s): ${idsList}`);
     errors.unshift(
-      `❌ FABRICATED PRODUCT ID(S): ${idsList}. These product_ids were not returned by batch_product_lookup in this conversation. ` +
-      `Do NOT invent 19-digit Zoho product IDs and do NOT reuse ids from memory. ` +
-      `Call batch_product_lookup({skus: ["<sku-you-want-to-add>"]}) FIRST to get the real product_id, ` +
-      `then retry zoho_update_record with the returned product_id. ` +
-      `If you didn't call batch_product_lookup for this SKU in THIS conversation, the id is fake.`
+      `❌ INVALID PRODUCT ID(S): ${idsList}. Zoho has no product with ${hallucinated.length > 1 ? 'these ids' : 'this id'} (verified by live lookup), so ${hallucinated.length > 1 ? 'they are' : 'it is'} not usable. ` +
+      `Do NOT invent 19-digit Zoho product IDs or reuse ids from memory. ` +
+      `Call batch_product_lookup({skus: ["<sku-you-want-to-add>"]}) to get the real product_id, then retry with the returned id.`
     );
   }
   if (errors.length > 0) {
@@ -8532,7 +8697,63 @@ async function correctQuotedItemDiscounts(quotedItems, env) {
     const productId = item.Product_Name.id;
     // Reverse lookup: product_id → SKU, then fetch current live pricing.
     const sku = idMap[productId];
-    if (!sku) continue;
+    if (!sku) {
+      // Live-only id (absent from the static price cache) — e.g. a 7YR/10YR co-term
+      // license the validator now allows through on the GENERIC create/update path.
+      // The static map can't price it, so resolve it live and ENFORCE the fixed
+      // co-term discount (7YR 50%, 10YR 60%) regardless of what the model set — the
+      // same policy reterm_quote_licenses applies. Closes the generic-path pricing
+      // hole for co-term SKUs (Codex review, 2026-07-14). Non-co-term live-only ids
+      // (rare legacy-uncached SKUs) keep the model's discount and are logged.
+      try {
+        const res = await zohoApiCall('GET',
+          `Products/${encodeURIComponent(productId)}?fields=id,Product_Code,Unit_Price,Product_Active`, env);
+        const rec = res?.data?.[0] || null;
+        const liveSku = rec && rec.Product_Code ? String(rec.Product_Code).toUpperCase() : null;
+        const cm = liveSku ? liveSku.match(/-(10|7)(?:YR|Y-S\d+|Y)$/) : null;
+        // R2 (2026-07-15): FED- (FedRAMP) SKUs are live-only too and carry a
+        // 35% DEFAULT discount regardless of term. Unlike co-term pricing,
+        // FedRAMP explicitly supports a user-approved override, so the generic
+        // path may default an omitted Discount but must preserve a supplied one.
+        const isFedRamp = liveSku && /^FED-/.test(liveSku);
+        const coPct = cm ? COTERM_DEFAULT_DISCOUNT[Number(cm[1])] : undefined;
+        const liveList = rec ? moneyValue(rec.Unit_Price) : 0;
+        if (isFedRamp) {
+          if (!(liveList > 0)) {
+            failures.push({ sku: liveSku || productId, product_id: productId, error: 'FedRAMP SKU has no live list price — cannot apply or validate its discount' });
+          } else if (item.Discount == null || item.Discount === '') {
+            const fedDiscount = roundMoney(liveList * qty * FEDRAMP_DEFAULT_DISCOUNT);
+            console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): fedramp default ${FEDRAMP_DEFAULT_DISCOUNT * 100}% — setting omitted Discount=${fedDiscount} (list=${liveList}, qty=${qty})`);
+            item.Discount = fedDiscount;
+            corrected++;
+          } else {
+            const suppliedDiscount = Number(item.Discount);
+            const lineList = liveList * qty;
+            if (!Number.isFinite(suppliedDiscount) || suppliedDiscount < 0 || suppliedDiscount >= lineList) {
+              failures.push({ sku: liveSku, product_id: productId, error: `FedRAMP Discount ${item.Discount} is not a valid flat-dollar discount for line list ${roundMoney(lineList)}` });
+            } else {
+              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): preserving supplied FedRAMP Discount=${item.Discount}; explicit user overrides beat the 35% default`);
+            }
+          }
+        } else if (coPct !== undefined) {
+          if (!(liveList > 0)) {
+            failures.push({ sku: liveSku || productId, product_id: productId, error: 'co-term SKU has no live list price — cannot enforce fixed discount' });
+          } else {
+            const coDiscount = roundMoney(liveList * qty * coPct);
+            if (item.Discount === undefined || Math.abs((item.Discount || 0) - coDiscount) > 1) {
+              console.log(`[DISCOUNT-FIX] ${liveSku} (${productId}): co-term ${coPct * 100}% — setting Discount=${coDiscount} (list=${liveList}, qty=${qty})`);
+              item.Discount = coDiscount;
+              corrected++;
+            }
+          }
+        } else if (liveSku) {
+          console.log(`[DISCOUNT-FIX] live-only non-co-term SKU ${liveSku} (${productId}) — leaving model discount uncorrected (no cache/ecomm price)`);
+        }
+      } catch (e) {
+        console.log(`[DISCOUNT-FIX] live-only id ${productId} lookup threw: ${e.message}`);
+      }
+      continue;
+    }
     const liveData = await fetchLiveSkuPricing(sku, productId, env);
     if (!liveData.success) {
       failures.push({ sku, product_id: productId, error: liveData.error });
@@ -8596,8 +8817,7 @@ function scrubMarginFromQuotedItems(quotedItems, context = 'Quoted_Items') {
   return { scrubbed };
 }
 
-// ── R4: default Quote/Deal dates (Chris policy, 2026-07-15; ported from the
-// corp-fixes branch 2026-07-16 after Llama's first live deal missed it) ──────
+// ── R4: default Quote/Deal dates (Chris policy, 2026-07-15) ──────────────────
 // Default Quote Valid_Till AND Deal Closing_Date = creation date + 14 days
 // (down from +30), and the two fields always MATCH on a deal/quote pair.
 // Month-end window: when the creation date falls within 7 days of the end of
@@ -8705,10 +8925,10 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
         errors.push(`__AUTO_RESOLVE_ACCOUNT_NAME__${data.Account_Name.name}`);
       }
     }
-    // Server-side Closing_Date enforcement — R4 (2026-07-15): default is +14
-    // days and must MATCH the paired Quote's Valid_Till; inside the month-end
-    // window we refuse instead of silently defaulting so the agent asks the
-    // user to confirm the date.
+    // Server-side Closing_Date enforcement: correct past/invalid dates.
+    // R4 (2026-07-15): default is now +14 days (must MATCH the Quote's
+    // Valid_Till); inside the month-end window we refuse instead of silently
+    // defaulting so the agent asks the user to confirm the date.
     if (data.Closing_Date) {
       const parsedDate = new Date(data.Closing_Date + 'T00:00:00');
       const today = new Date();
@@ -10134,6 +10354,556 @@ async function applyMarginToQuote(quoteId, targetMargin, env, personId = null) {
   return result;
 }
 
+// Co-term (Zoho-quote-only) license terms. 7YR/10YR exist as active Zoho products
+// but are deliberately ABSENT from the ecomm price cache (prices.json) — they are
+// co-term licenses valid on Zoho quotes only, never ecomm/URL quotes. reterm
+// resolves their product_id + list price LIVE from Zoho and applies a FIXED default
+// term discount (Chris 2026-07-14: 7YR = 50% off list, 10YR = 60% off list).
+const COTERM_DEFAULT_DISCOUNT = { 7: 0.50, 10: 0.60 };
+const RETERM_ALLOWED_TERMS = [1, 3, 5, 7, 10];
+
+// Rewrite a termed-license SKU to a target term. Bidirectional across 1/3/5/7/10 so a
+// 7/10 re-term can be reverted (7YR→5YR) as well as applied (3YR→7YR). For standard
+// 1/3/5 targets from a standard source we first try the shared, cache-gated
+// directLicenseSkuForTerm (SME-aware siblings); otherwise (co-term 7/10 target, OR a
+// 7/10 SOURCE the shared helper doesn't recognize) we rewrite the -{term}{unit} suffix
+// directly WITHOUT cache-gating — existence is validated by the live Zoho lookup that
+// follows. This is reterm-local on purpose so the deterministic URL engine (which uses
+// the shared 1/3/5-only helpers) never emits 7/10YR SKUs.
+const RETERM_TERM_SUFFIX_RE = /-(10|[1357])(YR|Y-S\d+|Y)$/;
+function retermTargetLicenseSku(sku, termNum) {
+  if (!sku || !RETERM_ALLOWED_TERMS.includes(termNum)) return null;
+  const s = String(sku).toUpperCase();
+  if ([1, 3, 5].includes(termNum)) {
+    const std = directLicenseSkuForTerm(s, termNum); // SME-aware, cache-validated (standard sources)
+    if (std) return std;
+  }
+  const m = s.match(RETERM_TERM_SUFFIX_RE);
+  if (!m) return null;
+  return s.replace(RETERM_TERM_SUFFIX_RE, `-${termNum}$2`);
+}
+
+// Resolve a target license SKU's economics: cache first (1/3/5), then LIVE Zoho
+// (co-term 7/10, absent from cache by design). Returns { product_id, list, active }
+// or null if the SKU exists in neither.
+async function resolveTargetLicenseEconomics(targetSku, env) {
+  const cat = prices[targetSku];
+  if (cat && cat.zoho_product_id) {
+    return { product_id: String(cat.zoho_product_id), list: moneyValue(cat.list), active: cat.zoho_active !== false };
+  }
+  try {
+    const res = await zohoApiCall('GET',
+      `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(targetSku)})&fields=id,Product_Code,Unit_Price,Product_Active`,
+      env);
+    const rec = (res?.data || []).find(r => String(r.Product_Code || '').toUpperCase() === String(targetSku).toUpperCase());
+    if (!rec || !rec.id) return null;
+    return { product_id: String(rec.id), list: moneyValue(rec.Unit_Price), active: rec.Product_Active !== false };
+  } catch (e) {
+    console.log(`[RETERM] live target lookup for ${targetSku} threw: ${e.message}`);
+    return null;
+  }
+}
+
+// reterm_quote_licenses(quote_id, target_term) — deterministic license re-terming.
+// Maps every TERMED license line (LIC-*-{1,3,5}{YR|Y}) to its target-term SKU
+// (1/3/5 via catalog sibling, 7/10 via co-term suffix rewrite + live Zoho lookup),
+// delete old row + add new row in ONE atomic PUT. 1/3/5 preserve each line's discount
+// PERCENTAGE; 7/10 co-term apply the FIXED default term discount (50%/60%). Hardware /
+// SFP / cable / sensor / non-termed-subscription lines are left untouched (Quoted_Items
+// PUT is additive → omitted rows preserved). Fail-closed: if ANY termed license line has
+// no target-term SKU, NOTHING is written. Zero model arithmetic — the agent calls this
+// ONCE instead of hand-assembling a ~30-line delete/add payload (the truncate→400 path).
+async function retermQuoteLicenses(quoteId, targetTerm, env, personId = null) {
+  const startedMs = Date.now();
+  const fail = (error, message, extra = {}) => ({ success: false, error, message, ...extra });
+
+  // ── 1. Normalize target term. ANCHORED so destructive typos are rejected, not
+  //       silently coerced ("15"→1, "35"→3, "100"→10). Accept 1|3|5|7|10 alone or
+  //       with a year unit: "1", "1y", "1yr", "1 year", "7yr", "10 year". 7/10 are
+  //       co-term (Zoho-quote-only) terms. ──
+  const termStr = String(targetTerm).trim().toLowerCase();
+  const termMatch = termStr.match(/^(10|[1357])\s*(?:y|yr|year|years)?$/);
+  const termNum = termMatch ? Number(termMatch[1]) : NaN;
+  if (!RETERM_ALLOWED_TERMS.includes(termNum)) {
+    return fail('invalid_term', `target_term "${targetTerm}" is not one of 1, 3, 5, 7, or 10. (1/3/5 are standard; 7/10 are co-term Zoho-quote terms.)`);
+  }
+
+  // ── 2. Fetch the quote + its line items ──
+  let quote;
+  try { quote = await fetchRecordFull('Quotes', quoteId, env); }
+  catch (err) { return fail('quote_fetch_failed', `Could not fetch Quote ${quoteId}: ${err.message}`); }
+  if (!quote) return fail('quote_not_found', `Quote ${quoteId} was not found.`);
+  const quotedItems = Array.isArray(quote.Quoted_Items) ? quote.Quoted_Items : [];
+  if (quotedItems.length === 0) return fail('no_line_items', `Quote ${quoteId} has no line items.`);
+
+  // ── 3. Classify every line. Fail-closed on any termed license we cannot map. ──
+  // Authoritative SKU resolution mirroring mapSubformToItems: flat Product_Code
+  // FIRST (Quotes carry the code at the top level), then the lookup object, then a
+  // SKU token recovered from the free-text name. Missing the flat field made
+  // flat-form rows classify as not_a_license and escape verification too.
+  const codeOf = (i) => {
+    let s = i?.Product_Code || i?.Product_Name?.Product_Code || null;
+    if (!s && typeof i?.Product_Name?.name === 'string') {
+      const m = i.Product_Name.name.match(ZOHO_QUOTE_ITEMS_SKU_REGEX);
+      if (m) s = m[1];
+    }
+    return String(s || '').trim().toUpperCase();
+  };
+  const retermLines = []; // delete old + add target-term row
+  const untouched = [];   // hardware / non-termed license / already-at-term
+  const unmapped = [];    // termed license with no catalog sibling → abort
+  for (const item of quotedItems) {
+    const sku = codeOf(item);
+    const qty = Number(item.Quantity) || 0;
+    const isLicense = /^LIC-/i.test(sku);
+    const isTermed = isLicense && /-(10|[1357])(?:YR|Y-S\d+|Y)$/i.test(sku); // source has a 1/3/5/7/10 term suffix
+    if (!isLicense || !isTermed) { untouched.push({ sku: sku || item.id, reason: isLicense ? 'non_termed_license' : 'not_a_license' }); continue; }
+    const target = retermTargetLicenseSku(sku, termNum); // 1/3/5 catalog sibling; 7/10 co-term suffix rewrite
+    if (!target) { unmapped.push(sku); continue; }
+    if (target.toUpperCase() === sku) { untouched.push({ sku, reason: 'already_at_target_term' }); continue; }
+    // Resolve target economics: cache (1/3/5) or LIVE Zoho (co-term 7/10, not cached).
+    const econ = await resolveTargetLicenseEconomics(target, env);
+    if (!econ || !econ.product_id) { unmapped.push(`${sku} → ${target} (not found in catalog or live Zoho)`); continue; }
+    if (econ.active === false) { unmapped.push(`${sku} → ${target} (target product is INACTIVE in Zoho)`); continue; }
+    const newProductId = econ.product_id;
+    const newList = econ.list;
+    // Fail closed on a target with no usable list price — otherwise we'd add a
+    // $0 line that silently drops Grand_Total and passes verification (mirrors
+    // applyMarginToQuote's `listTotal > 0` guard).
+    if (!(newList > 0)) { unmapped.push(`${sku} → ${target} (target has no list price)`); continue; }
+    // Fail closed on malformed source economics: without a positive qty AND a
+    // positive old list total we cannot compute a correct discount — a $0/negative
+    // list would silently become a full-price line that still passes verification.
+    const oldListTotal = roundMoney(moneyValue(item.List_Price) * qty);
+    if (!(qty > 0) || !(oldListTotal > 0)) {
+      unmapped.push(`${sku} → ${target} (source line has non-positive qty/list price — cannot compute discount)`);
+      continue;
+    }
+    // Discount: co-term 7/10 apply a FIXED default term discount (7YR=50%, 10YR=60%
+    // off list, Chris 2026-07-14); standard 1/3/5 PRESERVE the source line's discount %.
+    const fixedPct = COTERM_DEFAULT_DISCOUNT[termNum];
+    const effPct = (fixedPct !== undefined) ? fixedPct : (moneyValue(item.Discount) / oldListTotal);
+    const newListTotal = roundMoney(newList * qty);
+    const newDiscount = roundMoney(newListTotal * effPct);
+    // Carry a custom line Description forward, but DROP it if it embeds a term
+    // string (a stale "3 Year" label would contradict the new term).
+    const carryDesc = (typeof item.Description === 'string' && item.Description.trim()
+      && !/\b[135]\s*-?\s*(?:yr|yrs|year|years)\b/i.test(item.Description)) ? item.Description : undefined;
+    retermLines.push({
+      old_id: item.id, sku, target_sku: target.toUpperCase(), new_product_id: String(newProductId),
+      quantity: qty, sequence: item.Sequence_Number, description: carryDesc,
+      new_list: newList, new_list_total: newListTotal,
+      discount_pct: Number((effPct * 100).toFixed(2)), new_discount: newDiscount,
+      new_net_total: roundMoney(newListTotal - newDiscount),
+    });
+  }
+
+  if (unmapped.length > 0) {
+    return fail('unmapped_licenses',
+      `Cannot re-term ${unmapped.length} license line(s) to ${termNum}YR — no catalog sibling exists: ${unmapped.join('; ')}. NOTHING was written (fail-closed, so the quote is not left half-re-termed). Tell the user which SKUs have no ${termNum}-year variant and ask how to proceed.`,
+      { unmapped, target_term: termNum });
+  }
+  if (retermLines.length === 0) {
+    return fail('nothing_to_reterm',
+      `No license lines needed re-terming to ${termNum}YR on Quote ${quoteId} — every termed license is already at ${termNum} year (or the quote has no termed licenses). ${untouched.length} line(s) left untouched.`,
+      { untouched, target_term: termNum });
+  }
+
+  // ── 4. Snapshot pre-state (FULL rows so undo restores faithfully — a thin
+  //       {id} snapshot makes undo's itemKey() null and it deletes every line). ──
+  const preState = {
+    id: quoteId, Quote_Number: quote.Quote_Number,
+    Grand_Total: quote.Grand_Total, Sub_Total: quote.Sub_Total,
+    Quoted_Items: quotedItems.map(i => ({
+      id: i.id,
+      Product_Name: i.Product_Name?.id ? { id: i.Product_Name.id } : undefined,
+      Quantity: i.Quantity, List_Price: i.List_Price, Discount: i.Discount,
+      Description: i.Description, Sequence_Number: i.Sequence_Number,
+    })),
+  };
+
+  // ── 5. Atomic write: delete each old license row + add its target-term row in
+  //       the SAME PUT. Untouched (hardware/etc.) rows are omitted → additive PUT
+  //       preserves them. Do_Not_Auto_Update_Prices stops Zoho re-deriving price. ──
+  const quotedItemsPayload = retermLines.flatMap(l => ([
+    { id: l.old_id, _delete: null },
+    { Product_Name: { id: l.new_product_id }, Quantity: l.quantity, List_Price: l.new_list, Discount: l.new_discount, Sequence_Number: l.sequence, ...(l.description ? { Description: l.description } : {}) },
+  ]));
+  let putResult;
+  try {
+    putResult = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, {
+      data: [{ id: quoteId, Quoted_Items: quotedItemsPayload, Do_Not_Auto_Update_Prices: true }],
+    });
+  } catch (err) { return fail('write_failed', `The re-term write to Quote ${quoteId} threw: ${err.message}`); }
+  const putParsed = parseZohoResponse(putResult, 'Quote re-term');
+  if (putParsed?.success === false) {
+    return fail('write_rejected', `Zoho rejected the re-term write: ${putParsed.message || 'unknown error'}. The quote may be partially changed — re-check it.`);
+  }
+
+  // ── 6. Verify: re-fetch, assert (a) all old license rows gone, (b) NO license
+  //       line remains at a non-target term, (c) line count unchanged, (d) discount
+  //       present on every re-termed line (else Zoho would charge list price). ──
+  let verifyQuote = null;
+  try { verifyQuote = await fetchRecordFull('Quotes', quoteId, env); } catch (_) { verifyQuote = null; }
+  const verification = { verified: false, success: false };
+  if (!verifyQuote || !Array.isArray(verifyQuote.Quoted_Items)) {
+    verification.WARNING = `Re-term was written but the verification re-fetch of Quote ${quoteId} failed — UNVERIFIED. Do NOT claim success; re-check the quote.`;
+  } else {
+    const after = verifyQuote.Quoted_Items;
+    const afterIds = new Set(after.map(i => i.id));
+    const mismatches = [];
+    // (a) every old license row we deleted must be gone
+    const oldStillThere = retermLines.filter(l => afterIds.has(l.old_id)).map(l => l.sku);
+    if (oldStillThere.length) mismatches.push(`old rows not deleted: ${[...new Set(oldStillThere)].join(', ')}`);
+    // (b) NO license line may remain at a non-target term
+    const stillWrongTerm = [...new Set(after.filter(i => {
+      const s = codeOf(i); const m = s.match(/-([135])(YR|Y-S\d+|Y)$/);
+      return /^LIC-/.test(s) && m && Number(m[1]) !== termNum;
+    }).map(codeOf))];
+    if (stillWrongTerm.length) mismatches.push(`licenses still at a non-${termNum}YR term: ${stillWrongTerm.join(', ')}`);
+    // (c) total line count unchanged (delete N + add N nets to the same count)
+    const countOk = after.length === quotedItems.length;
+    if (!countOk) mismatches.push(`line count changed: ${quotedItems.length} → ${after.length}`);
+    // (d) every UNTOUCHED row (hardware/etc. we omitted from the PUT) must still be
+    //     present — additive PUT should preserve them; catch any that vanished.
+    const retermedOldIds = new Set(retermLines.map(l => l.old_id));
+    const droppedUntouched = quotedItems.filter(i => !retermedOldIds.has(i.id) && !afterIds.has(i.id)).map(i => i.id);
+    if (droppedUntouched.length) mismatches.push(`untouched rows disappeared: ${droppedUntouched.length} (ids ${droppedUntouched.slice(0, 5).join(', ')})`);
+    // (e) each re-termed line must have its OWN after-row at the target sku + qty
+    //     carrying the RIGHT list price AND discount (±$0.5). Greedy consume-on-
+    //     match so duplicate (sku,qty) twins are each verified independently, and
+    //     the list-price check catches a right-discount/wrong-list mispricing that
+    //     would leave the "% preserved" claim false.
+    // Verify ONLY the rows WE added — those carry ids Zoho minted in this PUT, i.e.
+    // ids NOT among the originals. Otherwise a pre-existing correct target-term row
+    // could absorb the match for a newly-added mis-priced row (false pass).
+    const originalIds = new Set(quotedItems.map(i => i.id));
+    const newRows = after.filter(i => !originalIds.has(i.id));
+    if (newRows.length !== retermLines.length) {
+      mismatches.push(`expected ${retermLines.length} new re-termed row(s), found ${newRows.length}`);
+    }
+    const afterPool = newRows.map(i => ({ sku: codeOf(i), qty: Number(i.Quantity), disc: moneyValue(i.Discount), list: moneyValue(i.List_Price), used: false }));
+    // Two-pass match so same-(sku,qty) twins can't be mis-assigned by first-fit:
+    // pass 1 pins EXACT values (the deterministic write means after == expected to
+    // the cent), pass 2 absorbs any Zoho cent-rounding drift within ±$0.5.
+    const discFailures = [];
+    const matchPass = (tol) => {
+      for (const l of retermLines) {
+        if (l._matched) continue;
+        const c = afterPool.find(a => !a.used && a.sku === l.target_sku && a.qty === l.quantity
+          && Math.abs(a.disc - l.new_discount) <= tol && Math.abs(a.list - l.new_list) <= tol);
+        if (c) { c.used = true; l._matched = true; }
+      }
+    };
+    matchPass(0.02);
+    matchPass(0.5);
+    for (const l of retermLines) {
+      if (l._matched) continue;
+      const wrong = afterPool.find(a => !a.used && a.sku === l.target_sku && a.qty === l.quantity);
+      if (wrong) { wrong.used = true; discFailures.push(`${l.target_sku} qty${l.quantity}: got list $${wrong.list}/disc $${wrong.disc}, expected list $${l.new_list}/disc $${l.new_discount}`); }
+      else discFailures.push(`${l.target_sku} qty${l.quantity}: re-termed line not found after write`);
+    }
+    if (discFailures.length) mismatches.push(`line mismatches — ${discFailures.join('; ')}`);
+    verification.verified = true;
+    verification.line_count_unchanged = countOk;
+    verification.success = mismatches.length === 0;
+    verification.grand_total_before = moneyValue(quote.Grand_Total);
+    verification.grand_total_after = moneyValue(verifyQuote.Grand_Total);
+    if (mismatches.length > 0) verification.WARNING = `Re-term verification FAILED: ${mismatches.join('; ')}. Do NOT claim success.`;
+  }
+
+  // ── 7. Audit log (D1). A re-term is a delete+add, so Zoho mints NEW subform ids
+  //       that undo_crm_action's exact-id restore cannot honor — we therefore do
+  //       NOT advertise an undo token (undoToken:null). The deterministic way to
+  //       change a quote's term, including reverting, is to call this tool again
+  //       with the desired term. We still snapshot pre/post state for the audit. ──
+  const recordUrl = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}`;
+  const summaryLine = verification.success
+    ? `Re-termed Quote ${quote.Quote_Number || quoteId} to ${termNum}YR — ${retermLines.length} license line(s) mapped to their ${termNum}-year SKUs (discount % preserved), ${untouched.length} non-license line(s) left untouched. Grand Total $${moneyValue(quote.Grand_Total)} → $${verification.grand_total_after}. [Open in Zoho](${recordUrl}). To change the term again (including back), ask to re-term to the desired year length — do not use "undo".`
+    : `⚠️ Re-term of Quote ${quoteId} did NOT fully verify. ${verification.WARNING || ''}`;
+  let opId = null;
+  try {
+    opId = await logCrmOpToD1(env, {
+      personId: personId || null, bot: botFromPersonId(personId),
+      operation: 'update', module: 'Quotes', recordId: quoteId,
+      recordName: quote.Subject || quote.Quote_Number || null,
+      status: verification.success ? 'success' : 'error',
+      durationMs: Date.now() - startedMs,
+      errorMessage: verification.success ? null : (verification.WARNING || 're-term verification failed'),
+      details: { target_term: termNum, retermed: retermLines, untouched, verification },
+      preState,
+      postState: { id: quoteId, Quoted_Items: quotedItemsPayload },
+      requestPayload: { tool: 'reterm_quote_licenses', quote_id: quoteId, target_term: termNum },
+      responsePayload: putParsed,
+      undoToken: null, // re-term is not undo-token reversible; re-term back instead
+      userVisibleSummary: summaryLine,
+    });
+  } catch (_) { opId = null; }
+
+  // ── 8. Result for the model. Verdict-bearing fields (success/verification/
+  //       message) come FIRST so they survive the agent-loop tool-result cap even
+  //       if the verbose per-line array is clipped. ──
+  const result = {
+    success: verification.success,
+    verification,
+    message: summaryLine,
+    quote_id: quoteId,
+    quote_number: quote.Quote_Number || null,
+    target_term: termNum,
+    untouched_count: untouched.length,
+    grand_total_before: moneyValue(quote.Grand_Total),
+    grand_total_after: verifyQuote ? moneyValue(verifyQuote.Grand_Total) : null,
+    retermed: retermLines.map(l => ({ from: l.sku, to: l.target_sku, qty: l.quantity, discount_pct: l.discount_pct, new_net_total: l.new_net_total })),
+  };
+  if (verification.success) {
+    result._record_url = recordUrl;
+    result._operation_id = opId;
+    result._user_visible_summary = summaryLine;
+  }
+  return result;
+}
+
+// ── R2: FedRAMP license conversion (corp error_reports 2026-07-14) ───────────
+// Converts a quote's commercial LIC-* license lines to their FED- (FedRAMP /
+// government) equivalents. FED- SKUs are live-Zoho-only (deliberately absent
+// from prices.json, same as the 7/10YR co-term lesson) and their term-suffix
+// spelling is INCONSISTENT in the catalog (FED-ENT-3Y but FED-MS150-24-3YR),
+// so every line is resolved by LIVE lookup on both suffix spellings —
+// fail-closed: if ANY LIC-* line has no active FED- equivalent, NOTHING is
+// written. Pricing (Chris, 2026-07-15): fixed 35% off the FED list price
+// regardless of term by default; an explicit user-specified discount_pct
+// overrides. Hardware / SFP / cable / sensor lines are untouched.
+const FEDRAMP_DEFAULT_DISCOUNT = 0.35;
+
+// Candidate FED- Product_Codes for a commercial license SKU: LIC-<stem> →
+// FED-<stem>, plus the Y↔YR term-suffix twin when the stem is termed.
+// Returns [] for non-LIC SKUs (hardware, and lines already FED-).
+function fedrampCandidateSkus(sku) {
+  const upper = String(sku || '').trim().toUpperCase();
+  if (!/^LIC-/.test(upper)) return [];
+  const stem = upper.replace(/^LIC-/, '');
+  const candidates = [`FED-${stem}`];
+  const m = stem.match(/^(.*-)(\d{1,2})(YR|Y)$/);
+  if (m) candidates.push(`FED-${m[1]}${m[2]}${m[3] === 'YR' ? 'Y' : 'YR'}`);
+  return candidates;
+}
+
+async function convertQuoteLicensesFedramp(quoteId, opts, env, personId = null) {
+  const startedMs = Date.now();
+  const fail = (error, message, extra = {}) => ({ success: false, error, message, ...extra });
+
+  // ── 1. Normalize the discount. Default = fixed 35% off list regardless of
+  //       term (Chris, 2026-07-15); an explicit user-stated discount overrides. ──
+  let pct = FEDRAMP_DEFAULT_DISCOUNT;
+  if (opts && opts.discountPct !== undefined && opts.discountPct !== null && opts.discountPct !== '') {
+    const p = Number(opts.discountPct);
+    if (!Number.isFinite(p) || p < 0 || p >= 100) {
+      return fail('invalid_discount', `discount_pct "${opts.discountPct}" is not a percentage between 0 and 99. Omit it for the default 35% FedRAMP discount.`);
+    }
+    pct = p / 100;
+  }
+
+  // ── 2. Fetch the quote + line items ──
+  let quote;
+  try { quote = await fetchRecordFull('Quotes', quoteId, env); }
+  catch (err) { return fail('quote_fetch_failed', `Could not fetch Quote ${quoteId}: ${err.message}`); }
+  if (!quote) return fail('quote_not_found', `Quote ${quoteId} was not found.`);
+  const quotedItems = Array.isArray(quote.Quoted_Items) ? quote.Quoted_Items : [];
+  if (quotedItems.length === 0) return fail('no_line_items', `Quote ${quoteId} has no line items.`);
+
+  // ── 3. Classify lines. Same authoritative SKU resolution as reterm. ──
+  const codeOf = (i) => {
+    let s = i?.Product_Code || i?.Product_Name?.Product_Code || null;
+    if (!s && typeof i?.Product_Name?.name === 'string') {
+      const m = i.Product_Name.name.match(ZOHO_QUOTE_ITEMS_SKU_REGEX);
+      if (m) s = m[1];
+    }
+    return String(s || '').trim().toUpperCase();
+  };
+  const convertLines = []; // delete commercial row + add FED- row
+  const untouched = [];    // hardware / already-FED lines
+  const unmapped = [];     // LIC-* with no active FED- equivalent → abort
+  const econCache = new Map(); // candidate SKU → economics (dedupe live lookups)
+  for (const item of quotedItems) {
+    const sku = codeOf(item);
+    const qty = Number(item.Quantity) || 0;
+    if (/^FED-/i.test(sku)) { untouched.push({ sku, reason: 'already_fedramp' }); continue; }
+    const candidates = fedrampCandidateSkus(sku);
+    if (!candidates.length) { untouched.push({ sku: sku || item.id, reason: 'not_a_license' }); continue; }
+    // Resolve the FED- equivalent LIVE (cache-first helper falls through to a
+    // live Products search — FED- SKUs are never in prices.json).
+    let target = null, econ = null;
+    for (const cand of candidates) {
+      let e = econCache.get(cand);
+      if (e === undefined) {
+        e = await resolveTargetLicenseEconomics(cand, env);
+        econCache.set(cand, e);
+      }
+      if (e && e.product_id && e.active !== false) { target = cand; econ = e; break; }
+    }
+    if (!target || !econ) { unmapped.push(`${sku} (no active FED- equivalent: tried ${candidates.join(', ')})`); continue; }
+    // Fail closed on unusable economics (mirrors reterm's guards).
+    if (!(econ.list > 0)) { unmapped.push(`${sku} → ${target} (FED product has no list price)`); continue; }
+    if (!(qty > 0)) { unmapped.push(`${sku} → ${target} (source line has non-positive quantity)`); continue; }
+    const newListTotal = roundMoney(econ.list * qty);
+    const newDiscount = roundMoney(newListTotal * pct);
+    // FedRAMP conversion changes the product family, not the license term, so
+    // every nonblank customer-facing line note remains valid and must survive
+    // the delete+add replacement (reterm uses the same carry-forward pattern,
+    // with an extra stale-term filter because reterm actually changes term).
+    const carryDesc = (typeof item.Description === 'string' && item.Description.trim())
+      ? item.Description : undefined;
+    convertLines.push({
+      old_id: item.id, sku, target_sku: target, new_product_id: String(econ.product_id),
+      quantity: qty, sequence: item.Sequence_Number, description: carryDesc,
+      new_list: econ.list, new_list_total: newListTotal,
+      discount_pct: Number((pct * 100).toFixed(2)), new_discount: newDiscount,
+      new_net_total: roundMoney(newListTotal - newDiscount),
+    });
+  }
+
+  if (unmapped.length > 0) {
+    return fail('unmapped_licenses',
+      `Cannot convert ${unmapped.length} license line(s) to FedRAMP — ${unmapped.join('; ')}. NOTHING was written (fail-closed, so the quote is not left half-converted). Tell the user which SKUs have no FedRAMP equivalent in the live catalog and ask how to proceed.`,
+      { unmapped });
+  }
+  if (convertLines.length === 0) {
+    const allFed = untouched.some(u => u.reason === 'already_fedramp');
+    return fail('nothing_to_convert',
+      allFed
+        ? `Every license line on Quote ${quoteId} is already a FED- (FedRAMP) SKU — nothing to convert.`
+        : `Quote ${quoteId} has no commercial LIC-* license lines to convert (hardware/non-license lines are never converted).`,
+      { untouched });
+  }
+
+  // ── 4. Pre-state snapshot (full rows — audit trail; see reterm note) ──
+  const preState = {
+    id: quoteId, Quote_Number: quote.Quote_Number,
+    Grand_Total: quote.Grand_Total, Sub_Total: quote.Sub_Total,
+    Quoted_Items: quotedItems.map(i => ({
+      id: i.id,
+      Product_Name: i.Product_Name?.id ? { id: i.Product_Name.id } : undefined,
+      Quantity: i.Quantity, List_Price: i.List_Price, Discount: i.Discount,
+      Description: i.Description, Sequence_Number: i.Sequence_Number,
+    })),
+  };
+
+  // ── 5. Atomic write: delete each commercial license row + add its FED- row
+  //       in the SAME PUT (additive PUT preserves omitted hardware rows). ──
+  const quotedItemsPayload = convertLines.flatMap(l => ([
+    { id: l.old_id, _delete: null },
+    { Product_Name: { id: l.new_product_id }, Quantity: l.quantity, List_Price: l.new_list, Discount: l.new_discount, Sequence_Number: l.sequence, ...(l.description ? { Description: l.description } : {}) },
+  ]));
+  let putResult;
+  try {
+    putResult = await zohoApiCall('PUT', `Quotes/${quoteId}`, env, {
+      data: [{ id: quoteId, Quoted_Items: quotedItemsPayload, Do_Not_Auto_Update_Prices: true }],
+    });
+  } catch (err) { return fail('write_failed', `The FedRAMP conversion write to Quote ${quoteId} threw: ${err.message}`); }
+  const putParsed = parseZohoResponse(putResult, 'Quote FedRAMP conversion');
+  if (putParsed?.success === false) {
+    return fail('write_rejected', `Zoho rejected the FedRAMP conversion write: ${putParsed.message || 'unknown error'}. The quote may be partially changed — re-check it.`);
+  }
+
+  // ── 6. Verify: old rows gone, no LIC-* license line remains, line count
+  //       unchanged, untouched rows preserved, every new FED- row carries the
+  //       right list + discount (two-pass exact→±$0.5 match, as in reterm). ──
+  let verifyQuote = null;
+  try { verifyQuote = await fetchRecordFull('Quotes', quoteId, env); } catch (_) { verifyQuote = null; }
+  const verification = { verified: false, success: false };
+  if (!verifyQuote || !Array.isArray(verifyQuote.Quoted_Items)) {
+    verification.WARNING = `FedRAMP conversion was written but the verification re-fetch of Quote ${quoteId} failed — UNVERIFIED. Do NOT claim success; re-check the quote.`;
+  } else {
+    const after = verifyQuote.Quoted_Items;
+    const afterIds = new Set(after.map(i => i.id));
+    const mismatches = [];
+    const oldStillThere = convertLines.filter(l => afterIds.has(l.old_id)).map(l => l.sku);
+    if (oldStillThere.length) mismatches.push(`old rows not deleted: ${[...new Set(oldStillThere)].join(', ')}`);
+    const stillCommercial = [...new Set(after.map(codeOf).filter(s => /^LIC-/.test(s)))];
+    if (stillCommercial.length) mismatches.push(`commercial license lines remain: ${stillCommercial.join(', ')}`);
+    const countOk = after.length === quotedItems.length;
+    if (!countOk) mismatches.push(`line count changed: ${quotedItems.length} → ${after.length}`);
+    const convertedOldIds = new Set(convertLines.map(l => l.old_id));
+    const droppedUntouched = quotedItems.filter(i => !convertedOldIds.has(i.id) && !afterIds.has(i.id)).map(i => i.id);
+    if (droppedUntouched.length) mismatches.push(`untouched rows disappeared: ${droppedUntouched.length} (ids ${droppedUntouched.slice(0, 5).join(', ')})`);
+    const originalIds = new Set(quotedItems.map(i => i.id));
+    const newRows = after.filter(i => !originalIds.has(i.id));
+    if (newRows.length !== convertLines.length) {
+      mismatches.push(`expected ${convertLines.length} new FED- row(s), found ${newRows.length}`);
+    }
+    const afterPool = newRows.map(i => ({ sku: codeOf(i), qty: Number(i.Quantity), disc: moneyValue(i.Discount), list: moneyValue(i.List_Price), used: false }));
+    const discFailures = [];
+    const matchPass = (tol) => {
+      for (const l of convertLines) {
+        if (l._matched) continue;
+        const c = afterPool.find(a => !a.used && a.sku === l.target_sku && a.qty === l.quantity
+          && Math.abs(a.disc - l.new_discount) <= tol && Math.abs(a.list - l.new_list) <= tol);
+        if (c) { c.used = true; l._matched = true; }
+      }
+    };
+    matchPass(0.02);
+    matchPass(0.5);
+    for (const l of convertLines) {
+      if (l._matched) continue;
+      const wrong = afterPool.find(a => !a.used && a.sku === l.target_sku && a.qty === l.quantity);
+      if (wrong) { wrong.used = true; discFailures.push(`${l.target_sku} qty${l.quantity}: got list $${wrong.list}/disc $${wrong.disc}, expected list $${l.new_list}/disc $${l.new_discount}`); }
+      else discFailures.push(`${l.target_sku} qty${l.quantity}: converted line not found after write`);
+    }
+    if (discFailures.length) mismatches.push(`line mismatches — ${discFailures.join('; ')}`);
+    verification.verified = true;
+    verification.line_count_unchanged = countOk;
+    verification.success = mismatches.length === 0;
+    verification.grand_total_before = moneyValue(quote.Grand_Total);
+    verification.grand_total_after = moneyValue(verifyQuote.Grand_Total);
+    if (mismatches.length > 0) verification.WARNING = `FedRAMP conversion verification FAILED: ${mismatches.join('; ')}. Do NOT claim success.`;
+  }
+
+  // ── 7. Audit log. Delete+add mints new subform ids → no undo token; to
+  //       revert, rebuild the commercial lines from the D1 preState snapshot. ──
+  const recordUrl = `https://crm.zoho.com/crm/org647122552/tab/Quotes/${quoteId}`;
+  const summaryLine = verification.success
+    ? `Converted Quote ${quote.Quote_Number || quoteId} to FedRAMP licenses — ${convertLines.length} line(s) mapped to FED- SKUs at ${Number((pct * 100).toFixed(2))}% off list (live-catalog pricing), ${untouched.length} other line(s) untouched. Grand Total $${moneyValue(quote.Grand_Total)} → $${verification.grand_total_after}. [Open in Zoho](${recordUrl}). This is not undoable via "undo" — to revert, ask to re-quote the original commercial SKUs.`
+    : `⚠️ FedRAMP conversion of Quote ${quoteId} did NOT fully verify. ${verification.WARNING || ''}`;
+  let opId = null;
+  try {
+    opId = await logCrmOpToD1(env, {
+      personId: personId || null, bot: botFromPersonId(personId),
+      operation: 'update', module: 'Quotes', recordId: quoteId,
+      recordName: quote.Subject || quote.Quote_Number || null,
+      status: verification.success ? 'success' : 'error',
+      durationMs: Date.now() - startedMs,
+      errorMessage: verification.success ? null : (verification.WARNING || 'fedramp conversion verification failed'),
+      details: { discount_pct: Number((pct * 100).toFixed(2)), converted: convertLines, untouched, verification },
+      preState,
+      postState: { id: quoteId, Quoted_Items: quotedItemsPayload },
+      requestPayload: { tool: 'convert_quote_licenses_fedramp', quote_id: quoteId, discount_pct: opts?.discountPct ?? null },
+      responsePayload: putParsed,
+      undoToken: null,
+      userVisibleSummary: summaryLine,
+    });
+  } catch (_) { opId = null; }
+
+  // ── 8. Result — verdict-bearing fields first (see reterm note). ──
+  const result = {
+    success: verification.success,
+    verification,
+    message: summaryLine,
+    quote_id: quoteId,
+    quote_number: quote.Quote_Number || null,
+    discount_pct: Number((pct * 100).toFixed(2)),
+    untouched_count: untouched.length,
+    grand_total_before: moneyValue(quote.Grand_Total),
+    grand_total_after: verifyQuote ? moneyValue(verifyQuote.Grand_Total) : null,
+    converted: convertLines.map(l => ({ from: l.sku, to: l.target_sku, qty: l.quantity, discount_pct: l.discount_pct, new_net_total: l.new_net_total })),
+  };
+  if (verification.success) {
+    result._record_url = recordUrl;
+    result._operation_id = opId;
+    result._user_visible_summary = summaryLine;
+  }
+  return result;
+}
+
 async function ensureQuoteDidAndVelocity(quote, env, personId = null) {
   const quoteId = quote?.id;
   if (isCiscoDid(quote?.CCW_Deal_Number)) {
@@ -10881,10 +11651,14 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
       const isQuotesModule = toolInput?.module_name === 'Quotes';
       if (isQuotesModule && Array.isArray(items)) {
-        const activeCheck = preflightQuotedItemsProductActive(items);
+        const activeCheck = await preflightQuotedItemsProductActive(items, env);
         if (!activeCheck.valid) {
           const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
           const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';
+          // Observability (2026-07-14): surface the block in bot_usage.error_message
+          // so the daily monitor + digest see it. Before this, blocks hit only
+          // console.log and were invisible in D1 (error_reports #1 root cause).
+          await logValidationBlockToD1(env, personId, toolName, activeCheck);
           return {
             validation_error: true,
             action: blockAction,
@@ -10948,6 +11722,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
         'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
         'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
+        'reterm_quote_licenses': { success: true, quote_id: toolInput.quote_id, target_term: toolInput.target_term, message: 'Licenses re-termed (dry run)', dry_run: true },
+        'convert_quote_licenses_fedramp': { success: true, quote_id: toolInput.quote_id, discount_pct: toolInput.discount_pct ?? 35, message: 'Licenses converted to FedRAMP (dry run)', dry_run: true },
         'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
         'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
         'webex_send_message': { success: true, message_id: mockId, dry_run: true },
@@ -11266,8 +12042,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'zoho_create_record': {
         const { module_name, data } = toolInput;
         const recordData = Array.isArray(data) ? data[0] : data;
-        // Default Owner injection for Accounts/Deals — bot acts on behalf of human user
-        if ((module_name === 'Accounts' || module_name === 'Deals') && !recordData.Owner) {
+        // Default Owner injection for Accounts/Deals/Tasks — bot acts on behalf of
+        // the human user. Tasks added 2026-07-15 (R6): an agent-created Task with
+        // no Owner would otherwise attribute to the API-token user in Zoho.
+        if ((module_name === 'Accounts' || module_name === 'Deals' || module_name === 'Tasks') && !recordData.Owner) {
           recordData.Owner = { id: env.BOT_DEFAULT_OWNER_ID || await getOwnerForCaller(env) };
         }
         // Normalize state/country to 2-letter codes if caller passed full names
@@ -11378,9 +12156,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids before writing
         if (module_name === 'Quotes' && recordData.Quoted_Items) {
-          const activeCheck = preflightQuotedItemsProductActive(recordData.Quoted_Items);
+          const activeCheck = await preflightQuotedItemsProductActive(recordData.Quoted_Items, env);
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            await logValidationBlockToD1(env, personId, 'zoho_create_record', activeCheck);
             return {
               validation_error: true,
               action: 'create_blocked',
@@ -11714,9 +12493,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // Product_Active preflight — reject EOL/inactive products OR fabricated product_ids in Quoted_Items appends
         if (module_name === 'Quotes' && data.Quoted_Items) {
-          const activeCheck = preflightQuotedItemsProductActive(data.Quoted_Items);
+          const activeCheck = await preflightQuotedItemsProductActive(data.Quoted_Items, env);
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
+            await logValidationBlockToD1(env, personId, 'zoho_update_record', activeCheck);
             return {
               validation_error: true,
               action: 'update_blocked',
@@ -12647,6 +13427,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (licOptions?.length) {
                 result.suggested_licenses = licOptions.map(l => l.sku);
               }
+              // R8a (2026-07-15): ALWAYS surface the EOL replacement map — the
+              // ecomm engine had it, the CRM agent only learned it when the user
+              // said "use the ecomm bot's logic". Upgrade/refresh intents map EOL
+              // models via replaced_by by default (confirm with the user first).
+              const eolRepl = checkEol(rawSku);
+              if (eolRepl) {
+                result.eol = true;
+                if (!result.replaced_by) result.replaced_by = eolRepl;
+                result.eol_note = `${rawSku} is END-OF-LIFE. For upgrade/refresh/replace intents quote the replacement (${Array.isArray(eolRepl) ? eolRepl.join(' or ') : eolRepl}) by default — confirm the mapping with the user before writing. License renewals on the agnostic family alias are still fine.`;
+              }
             }
             batchResults[rawSku] = result;
             return;
@@ -12655,7 +13445,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           apiLookups++;
           try {
             const prodResult = await zohoApiCall('GET',
-              `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(resolved)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+              `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(resolved)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`,
               env
             );
             const records = prodResult?.data || [];
@@ -12670,7 +13460,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (!match && !resolved.startsWith('LIC-')) {
               const eqVariant = resolved.endsWith('=') ? resolved.slice(0, -1) : `${resolved}=`;
               const eqResult = await zohoApiCall('GET',
-                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price`,
+                `Products/search?criteria=(Product_Code:equals:${encodeURIComponent(eqVariant)})&fields=id,Product_Code,Product_Name,Unit_Price,Product_Active`,
                 env
               ).catch(() => null);
               const eqMatch = (eqResult?.data || []).find(r => r.Product_Code === eqVariant);
@@ -12688,6 +13478,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               ecomm_price: cachedPrice?.price || null,
               discount_per_unit: cachedPrice?.discount_per_unit || 0,
               discount_pct: cachedPrice?.discount_pct || 0,
+              product_active: match ? (match.Product_Active === false ? false : true) : undefined,
               found: !!match
             };
             if (matchedCode && matchedCode !== resolved) {
@@ -12700,6 +13491,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               const licOptions = getLicenseSkus(rawSku);
               if (licOptions?.length) {
                 apiResult.suggested_licenses = licOptions.map(l => l.sku);
+              }
+              // R8a (2026-07-15): EOL replacement surfaced on the API path too.
+              const eolRepl = checkEol(rawSku);
+              if (eolRepl) {
+                apiResult.eol = true;
+                if (!apiResult.replaced_by) apiResult.replaced_by = eolRepl;
+                apiResult.eol_note = `${rawSku} is END-OF-LIFE. For upgrade/refresh/replace intents quote the replacement (${Array.isArray(eolRepl) ? eolRepl.join(' or ') : eolRepl}) by default — confirm the mapping with the user before writing. License renewals on the agnostic family alias are still fine.`;
               }
             }
             // SKU NOT FOUND — query Zoho Products directly to find real alternatives
@@ -14069,7 +14867,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           // STEP 4: Build SKU description for deal name (hardware only for cleaner name)
           const skuSummary = orderedPairs.map(p => `${p.hwQty > 1 ? p.hwQty + 'x ' : ''}${p.hw}`).join(', ');
-          // ── R4 date policy (2026-07-15): Deal Closing_Date and Quote
+
+          // ── R4 date policy (Chris, 2026-07-15): Deal Closing_Date and Quote
           // Valid_Till default to creation + 14 days and ALWAYS MATCH each other.
           // Precedence: explicit closing_date param (user-confirmed) → existing
           // Deal's future Closing_Date (attach mode: the quote's Valid_Till stays
@@ -14159,6 +14958,55 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           if (dealId) {
             if (!reusedDealFromKv) results.steps.push(`Reused existing Deal: ${dealData.Deal_Name} (${dealId})`);
+
+            // Attach mode must preserve the R4 invariant: the parent Deal's
+            // Closing_Date and the new Quote's Valid_Till always match. A stale
+            // Deal used to be left untouched while the tool claimed both dates
+            // were updated. Write and re-fetch before creating the Quote so a
+            // rejected/non-durable Deal update fails closed.
+            const _existingClosing = String(existingDealData?.Closing_Date || '').slice(0, 10);
+            if (_existingClosing !== closingDate) {
+              let _dealDatePut;
+              try {
+                _dealDatePut = await zohoApiCall('PUT', `Deals/${dealId}`, env, {
+                  data: [{ Closing_Date: closingDate }]
+                });
+              } catch (e) {
+                return {
+                  success: false,
+                  error: 'deal_closing_date_sync_failed',
+                  instruction: `STOP. The existing Deal ${dealId} Closing_Date could not be updated to ${closingDate} (${e.message}). No Quote was created. Retry only after the Deal date can be written.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              const _dealDateRow = _dealDatePut?.data?.[0];
+              if (_dealDateRow?.code !== 'SUCCESS') {
+                return {
+                  success: false,
+                  error: 'deal_closing_date_sync_failed',
+                  instruction: `STOP. Zoho rejected Closing_Date ${closingDate} on existing Deal ${dealId}: ${_dealDateRow?.message || _dealDateRow?.code || 'unknown error'}. No Quote was created.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              let _verifiedDealDate = null;
+              try {
+                const _dealDateCheck = await zohoApiCall('GET', `Deals/${dealId}?fields=id,Closing_Date`, env);
+                _verifiedDealDate = String(_dealDateCheck?.data?.[0]?.Closing_Date || '').slice(0, 10);
+              } catch (_) { /* handled by the fail-closed comparison below */ }
+              if (_verifiedDealDate !== closingDate) {
+                return {
+                  success: false,
+                  error: 'deal_closing_date_sync_unverified',
+                  instruction: `STOP. Zoho accepted the Closing_Date update for existing Deal ${dealId}, but a verification read did not return ${closingDate}. No Quote was created; verify the Deal before retrying.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              existingDealData.Closing_Date = closingDate;
+              results.steps.push(`Updated and verified existing Deal Closing_Date ${_existingClosing || '(blank)'} → ${closingDate}; Quote Valid_Till will match`);
+            }
           } else {
             // ── HARD GATE (2026-07-02): "Meraki ISR Referal" REQUIRES a real
             // Cisco rep — creating it with the Stratus Sales placeholder is
@@ -14437,7 +15285,9 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             subjectLabel: _taskAccountLabel,
             env,
             personId,
-            ownerId: null
+            // A new Deal already has its resolved Owner in memory. Reused Deals
+            // intentionally fall through to their persisted Owner instead.
+            ownerId: existingDealId ? null : (dealData.Owner?.id || null)
           });
           if (_taskRes.success) {
             results.steps.push(`Created follow-up Task due ${_taskRes.dueDate} (${_taskRes.taskId})${_taskRes.retried ? ' [after 1 retry]' : ''}`);
@@ -14576,6 +15426,23 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           return { success: false, error: 'target_margin is required (e.g. 0.20 or 20 for a 20% margin)' };
         }
         return await applyMarginToQuote(quote_id, target_margin, env, personId);
+      }
+
+      // ── Re-term quote licenses (deterministic: LIC-*-{term} sibling swap, discount % preserved) ──
+      case 'reterm_quote_licenses': {
+        const { quote_id, target_term } = toolInput;
+        if (!quote_id) return { success: false, error: 'quote_id is required' };
+        if (target_term === undefined || target_term === null || target_term === '') {
+          return { success: false, error: 'target_term is required (1, 3, 5, 7, or 10 — the number of years)' };
+        }
+        return await retermQuoteLicenses(quote_id, target_term, env, personId);
+      }
+
+      // ── R2: FedRAMP license conversion (deterministic, atomic, fail-closed) ──
+      case 'convert_quote_licenses_fedramp': {
+        const { quote_id, discount_pct } = toolInput;
+        if (!quote_id) return { success: false, error: 'quote_id is required' };
+        return await convertQuoteLicensesFedramp(String(quote_id), { discountPct: discount_pct }, env, personId);
       }
 
       // ── Clone Quote (native Zoho clone endpoint — preserves per-line Discount verbatim) ──
@@ -15140,14 +16007,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (!personId) {
               return { success: false, error: 'undo_token is required (looks like "u_xxxxxxxx") — no session personId available to look up the last mutation.' };
             }
+            // Fetch the single most-recent un-reversed mutation REGARDLESS of token,
+            // so we never silently skip a non-reversible recent op (a license
+            // re-term is logged with a null token) and revert an OLDER op instead.
             const latest = await env.ANALYTICS_DB.prepare(
-              `SELECT undo_token FROM crm_operations
+              `SELECT undo_token, operation FROM crm_operations
                 WHERE person_id = ?
-                  AND undo_token IS NOT NULL
                   AND undone_at IS NULL
                   AND operation IN ('create','update','clone','delete')
                 ORDER BY id DESC LIMIT 1`
             ).bind(personId).first();
+            if (latest && !latest.undo_token) {
+              const msg = 'The most recent change can\'t be reversed with "undo" — a license re-term replaces the quote\'s line items. To change it back, ask to re-term the quote to its previous year length.';
+              return { success: false, error: msg, _user_visible_summary: msg };
+            }
             if (!latest?.undo_token) {
               const nothingMsg = 'Nothing to undo — no un-reversed mutations found. No more undo actions available.';
               return { success: false, error: nothingMsg, _user_visible_summary: nothingMsg };
@@ -16455,6 +17328,30 @@ const CRM_EMAIL_TOOLS = [
     }
   },
   {
+    name: 'reterm_quote_licenses',
+    description: 'Change a Zoho Quote\'s LICENSE terms to 1, 3, 5, 7, or 10 years, deterministically. Use this for ANY request to re-term / convert / switch a quote\'s licenses to a different year length — "change to 1 year licenses", "make this a 3-year option", "1yr version of this quote", "convert the licenses to 5 year", "re-term to 7 year", "make it a 10 year co-term". It maps every termed license line (LIC-*-1YR/3YR/5YR and -1Y/-3Y/-5Y) to the target-term SKU and writes in ONE atomic delete+add. Standard terms 1/3/5 PRESERVE each line\'s discount PERCENTAGE; co-term 7/10 (Zoho-quote-only) resolve the target SKU live from Zoho and apply a FIXED default discount (7YR 50%, 10YR 60% off list). Hardware / SFP / cable / antenna / sensor lines are left untouched. NEVER hand-assemble zoho_update_record delete+add rows to re-term a quote: that is slow, error-prone, and this tool is the only correct path (it fails closed if any license has no target-term SKU rather than half-re-terming). target_term is the number of years: 1, 3, 5, 7, or 10. Claim success only when verification.success === true; report the from→to per line and the Grand Total change. To change a quote\'s term again (including reverting), call this tool again with the desired term — do NOT use undo_crm_action for a re-term.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string', description: 'Zoho Quote record ID to re-term (NOT the Quote_Number)' },
+        target_term: { type: 'number', enum: [1, 3, 5, 7, 10], description: 'Target license term in YEARS: 1, 3, 5, 7, or 10. 1/3/5 are standard; 7 and 10 are co-term (Zoho-quote-only) terms priced at a fixed default discount (7YR 50%, 10YR 60% off list).' }
+      },
+      required: ['quote_id', 'target_term']
+    }
+  },
+  {
+    name: 'convert_quote_licenses_fedramp',
+    description: 'Convert a Zoho Quote\'s commercial LIC-* license lines to their FED- (FedRAMP / government) equivalents, deterministically. Use this for ANY request like "convert to FedRAMP licenses", "make these government licenses", "switch the quote to FedRAMP", "FED versions of these licenses". FED- SKUs exist ONLY in the live Zoho catalog (never in the ecomm cache and never on ecomm URL quotes) — each line is resolved by live lookup (both -NY and -NYR suffix spellings) and the write is ONE atomic delete+add; it fails closed if ANY license line has no active FED- equivalent, rather than half-converting. Pricing: fixed 35% off the FED list price regardless of term BY DEFAULT (company policy); pass discount_pct ONLY when the user explicitly stated a different discount. Hardware / SFP / cable / antenna / sensor lines are untouched. NEVER hand-assemble zoho_update_record delete+add rows for a FedRAMP conversion. Claim success only when verification.success === true; report the from→to per line and the Grand Total change. NOT undoable via undo_crm_action — to revert, re-quote the original commercial SKUs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string', description: 'Zoho Quote record ID to convert (NOT the Quote_Number)' },
+        discount_pct: { type: 'number', description: 'OPTIONAL explicit discount percentage (0-99) — ONLY when the user explicitly stated a discount. Omit for the default fixed 35% off list.' }
+      },
+      required: ['quote_id']
+    }
+  },
+  {
     name: 'undo_crm_action',
     description: 'REVERT a previous CRM mutation to its exact prior state. Use this ONLY when the user asks to undo, revert, roll back, or "change it back". Pass the _undo_token that was returned by the earlier tool call (looks like "u_a3f9b2c1"). For updates, this restores the exact field values as they were before the change. For creates, this deletes the record. For clones, this deletes the cloned quote. For deletes, this re-creates the record from its pre-delete snapshot. The original (source) record of a clone is never touched. If the user says "undo" or "undo last" without a specific token, you MAY omit undo_token and the server will resolve to the most recent un-reversed mutation in this session. Always confirm the restoration with a fresh GET and report back the actual restored state.',
     input_schema: {
@@ -16579,6 +17476,7 @@ const CRM_EMAIL_TOOLS = [
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses. License-only requests must stay license-only.'
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) the lines flagged by error:"resolved_items_need_confirmation". Never set on the first attempt.' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (creation + 14 days). REQUIRED on the retry after error:"closing_date_needs_confirmation" (month-end window) — pass the date the user confirmed.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (creation + 14 days). REQUIRED on the retry after error:"closing_date_needs_confirmation" (month-end window) — pass the date the user confirmed.' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
@@ -16628,6 +17526,7 @@ const CRM_EMAIL_TOOLS = [
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses unless hardware_only/include_licenses=false.'
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) lines flagged by error:"resolved_items_need_confirmation".' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default creation + 14 days. REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
         closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default creation + 14 days. REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
@@ -17207,9 +18106,14 @@ const TOOL_SUBSETS = Object.freeze({
   crm_write: [
     'create_deal_and_quote', 'create_quote_on_deal',
     'zoho_create_record', 'zoho_update_record',
-    'clone_quote', 'apply_margin_to_quote', 'undo_crm_action', 'zoho_delete_record',
+    'clone_quote', 'apply_margin_to_quote', 'reterm_quote_licenses', 'convert_quote_licenses_fedramp', 'undo_crm_action', 'zoho_delete_record',
     'batch_product_lookup', 'find_product_candidates', 'web_search_sku', 'parse_quote_url',
-    'zoho_search_records', 'zoho_get_record',
+    // Full crm_read superset (2026-07-15): the escalation net + rule 6 err
+    // toward crm_write on the premise that no read capability is lost — these
+    // three were missing, degrading escalated reads (related-record traversal,
+    // picklist/field reads, license-key recovery).
+    'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
+    'zoho_get_field', 'find_customer_license_claim_key',
     // 2026-06-09 SEDA postmortem: "create a quote based off this email" classifies as
     // crm_write, but without the Gmail READ tools the agent cannot recover a missing
     // email body and is forced to ask the user to paste it. Read-only — no draft/send.
@@ -17249,7 +18153,7 @@ const TOOL_SUBSETS = Object.freeze({
   subscription: [
     'quote_to_po_and_esign', 'quote_to_po_status',
     'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
-    'zoho_update_record',
+    'zoho_update_record', 'reterm_quote_licenses',
     'velocity_hub_submit'
   ],
   // Cisco rep assignment paths. Reads + the dedicated assignment tool.
@@ -17267,7 +18171,7 @@ const TOOL_SUBSETS = Object.freeze({
     'zoho_search_records', 'zoho_get_record', 'zoho_get_related_records',
     'zoho_create_record', 'zoho_update_record',
     'batch_product_lookup', 'find_product_candidates', 'create_deal_and_quote', 'clone_quote',
-    'apply_margin_to_quote', 'find_customer_license_claim_key'
+    'apply_margin_to_quote', 'reterm_quote_licenses', 'convert_quote_licenses_fedramp', 'find_customer_license_claim_key'
   ]
 });
 
@@ -17314,7 +18218,9 @@ function classifyCrmIntent(text, ctx = {}) {
   // even if Cisco rep keywords appear elsewhere (e.g. in CRM context preamble).
   // This prevents the prior misclassification where create_deal_and_quote got
   // stripped because @cisco.com was in context.
-  if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote|deal|po|order|sales\s*order)\b/.test(t)) {
+  // quote/order followed by link|url is an ECOMM ask ("create a quote link") —
+  // excluded here so rule 1 below can classify it (adversarial review 2026-07-15).
+  if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote(?!\s*(?:link|url))|deal|po|order(?!\s*(?:link|url))|sales\s*order)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.95 };
   }
 
@@ -17343,8 +18249,15 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'crm_write', confidence: 0.9 };
   }
 
-  // 1. URL/ecomm quote link
-  if (/\b(url\s+quote|ecomm\s+link|order\s+link|shopping\s+cart\s+link|stratus\s+url)\b/.test(t)) {
+  // 1. URL/ecomm quote link — the EXPLICIT ecomm phrases (Chris, 2026-07-15 R11):
+  // "url quote", "ecomm quote/link/url", "quote link/url", "order link/url",
+  // "stratus url", "send me a link". An explicit ecomm ask ALWAYS wins — it runs
+  // before (and therefore beats) the active-page context rules below.
+  // Guards (adversarial review 2026-07-15): a link TO a CRM record ("send me a
+  // link to the deal") and zoho/crm-marked asks are record-link requests, not
+  // ecomm asks — the quote_url subset has zero Zoho tools and would dead-end.
+  if (!/\b(zoho|crm)\b/.test(t)
+      && /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b(?!\s+(?:to|for)\s+(?:the\s+|that\s+|this\s+|my\s+)?(?:deal|account|contact|record|task|invoice|sales\s*order|so\b|po\b))/.test(t)) {
     return { class: 'quote_url', confidence: 0.9 };
   }
 
@@ -17405,10 +18318,28 @@ function classifyCrmIntent(text, ctx = {}) {
     return { class: 'email', confidence: 0.8 };
   }
 
+  // 4c. FedRAMP / government license conversion (R2, 2026-07-15): FED- SKUs are
+  // Zoho-quote-only (never ecomm), so a fedramp/government licensing ask is a
+  // CRM write — convert_quote_licenses_fedramp lives in the crm_write subset.
+  // Placed AFTER rules 1-4b deliberately (adversarial review 2026-07-15): it
+  // only needs to beat the mutation/read fall-through below. Ahead of rule 2/4
+  // it stole "submit the government quote to velocity hub" (needs
+  // velocity_hub_submit) and "send an email to the county government contact
+  // about their license renewal" (needs gmail_send_email) into crm_write.
+  if (/\b(fed-?ramp|government)\b/.test(t)
+      && /\b(licen[sc]\w*|quote|convert|conversion|switch|skus?)\b/.test(t)) {
+    return { class: 'crm_write', confidence: 0.9 };
+  }
+
   // 5. CRM mutation verbs on Zoho records. `update` excludes the read idiom
   // "update me on ..." (a status request). license/term/product/sku added
   // 2026-05-21 — "update the licenses" was misrouting to crm_read and looping.
-  if (/\b(create|new|add|build|make|set\s*up|build\s*out)\s+(a\s+)?(deal|quote|task|contact|account|note)\b/.test(t)
+  // 2026-07-15 (corp error_reports R1): the article group only allowed "a", so
+  // "add THE contact Michael Gray" fell through to the crm_read rule (whose
+  // "(my|the|latest|…) contact" branch matched) → read-only toolset → the agent
+  // truthfully had no create tool and narrated its toolset. Widened to cover
+  // a/the/this/that/another/new (optionally stacked: "add another new contact").
+  if (/\b(create|new|add|build|make|set\s*up|build\s*out)\s+((?:a|the|this|that|another|new)\s+){0,2}(deal|quote|task|contact|account|note)\b/.test(t)
       || /\b(update(?!\s+me\s+(?:on|about))|edit|change|modify|rename|set|fix|adjust|move|extend)\s+.{0,50}\b(deals?|quotes?|tasks?|contacts?|accounts?|stage|amount|valid_till|closing_date|due\s*date|address|line\s*items?|quoted\s*items?|discount|licenses?|terms?|products?|skus?)\b/.test(t)
       || /\b(close|complete|finish|mark)\s+(the\s+)?(task|deal)\b/.test(t)
       || /\b(delete|remove)\s+.{0,30}\b(quote|deal|task|note|line\s*item)/.test(t)
@@ -17423,9 +18354,12 @@ function classifyCrmIntent(text, ctx = {}) {
   // headers ([Active Zoho page...], [Session: ...quote...]) contain read-looking
   // phrases. On an active page / quote session, a mutation verb is a write
   // regardless of the object noun. Erring toward crm_write is safe — that subset
-  // still includes the read tools.
+  // still includes the read tools. `quote`/`build`/`generate` added 2026-07-15
+  // (R11 active-record binding): on a Zoho record page, create-quote wording
+  // binds CRM-side — never the ecomm URL toolset (rule 1 above already caught
+  // any EXPLICIT ecomm-link ask, which is the only thing that beats page context).
   if ((ctx.hasActivePageContext || ctx.hasQuoteSession)
-      && /\b(update(?!\s+me\s+(?:on|about))|change|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove)\b/.test(t)) {
+      && /\b(update(?!\s+me\s+(?:on|about))|change|modify|edit|set|fix|adjust|move|extend|renew|close|complete|create|add|delete|remove|quote|requote|re-quote|build|generate)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.8 };
   }
 
@@ -17439,6 +18373,15 @@ function classifyCrmIntent(text, ctx = {}) {
   // 7. Pure read operations
   if (/\b(search|find|look\s*up|pull\s*up|get|show|list|what'?s|who'?s|when|how\s+many|how\s+much)\b.{0,60}\b(deal|quote|task|contact|account|customer|client|order|invoice|line\s*items?|pipeline|forecast|revenue|stage|product|rep)\b/.test(t)
       || /\b(my|the|latest|last|recent|newest|most\s+recent|open|active|overdue)\s+(deal|quote|task|email|contact|account)/.test(t)) {
+    // 7b. Write-verb escalation net (2026-07-15, corp error_reports R1): a message
+    // that read-matches but ALSO carries a bare write verb is a mutation the rules
+    // above failed to bind (e.g. "add the contact Michael Gray to this account").
+    // Escalate to crm_write — that subset still includes every read tool, so
+    // erring toward crm_write is safe; landing a write in crm_read is not.
+    // "update me on/about ..." stays a read (status-request idiom).
+    if (/\b(add|create|update(?!\s+me\s+(?:on|about))|edit|change|delete|remove|set)\b/.test(t)) {
+      return { class: 'crm_write', confidence: 0.75 };
+    }
     return { class: 'crm_read', confidence: 0.8 };
   }
 
@@ -17492,7 +18435,7 @@ You have full Zoho CRM access — never claim you can't access Zoho or lack the 
 
 **Rule 3 — Restate the undo token for every mutation.** zoho_create_record / zoho_update_record / zoho_delete_record / clone_quote return \`_undo_token\` inside \`message\` — echo \`message\` verbatim, never drop the token, even for single-field updates.
 
-**Rule 4 — "undo" / "revert" / "roll back" / "change it back" → \`undo_crm_action\`** with the most recent token; none surfaced → \`undo_crm_action({})\` (server resolves the most recent un-reversed mutation). Confirm via \`_user_visible_summary\`. Multiple tokens + ambiguous user → ask which, don't guess.
+**Rule 4 — "undo" / "revert" / "roll back" / "change it back" → \`undo_crm_action\`** with the most recent token; none surfaced → \`undo_crm_action({})\` (server resolves the most recent un-reversed mutation). Confirm via \`_user_visible_summary\`. Multiple tokens + ambiguous user → ask which, don't guess. EXCEPTION: a license re-term (\`reterm_quote_licenses\`) is NOT undoable — if the last change was a re-term, "change it back" → call \`reterm_quote_licenses\` with the previous year, never \`undo_crm_action\`.
 
 **Rule 4a — NEVER call undo_crm_action unless the user EXPLICITLY asked to undo/revert/rollback in their most recent message.** Never as cleanup after create/update/clone/delete; never to "complete" a chain ("clone X then change subject" = clone_quote + zoho_update_record, never undo). Spurious undo is a critical regression.
 
@@ -17514,6 +18457,8 @@ User mentions a quote number → \`zoho_search_records(Quotes, criteria=(Quote_N
 **URL rule:** \`https://crm.zoho.com/crm/org647122552/tab/Quotes/{RECORD_ID}\` — always the \`id\` (or returned \`quote_id\`), never the Quote_Number. Display "Quote #<quote_number>" in text; ✗ never label a record id as "Quote ID <record_id>".
 **[Session: Most recently worked quote] header** → that IS "the quote" / "that quote" / "same quote" — use it immediately without asking.
 **[Active Zoho page:...] header** → the user is VIEWING that record now; "this quote", "this deal", "modify this", "the current one" all mean it. Use its recordId directly via zoho_get_record / zoho_update_record — do not search.
+**ACTIVE RECORD BINDING (unqualified requests).** With an [Active Zoho page:...] header, ANY modification or creation request that does not explicitly name a different record targets the active record: on a Quote page → that quote; else → its Deal; else → its Account. "add 2 licenses" on a Quote page = add to THAT quote; "update the close date" on a Deal page = THAT deal. NEVER call zoho_search_records to re-find the active record — its id is in the header. Quote-create wording on a Zoho record page is ALWAYS a Zoho CRM quote (never a stratusinfosystems.com/order URL) unless the user explicitly asks for a "url quote"/"ecomm quote"/"quote link"/"order link"/"stratus url".
+**FAST-PATH — quote on the active/known Deal:** on a Deal page (or with a deal id from this conversation), "create/add a quote" → \`create_quote_on_deal\` with that deal_id in ONE call — it resolves products, addresses, creates and verifies server-side. On a Quote page, a NEW quote goes on that quote's Deal (one zoho_get_record on the quote gives Deal_Name.id). Never re-search the account or deal first.
 
 ## QUOTE PDF / EXPORT
 **Download/export the PDF of a quote** (user says "download/export/save the pdf of quote X", pastes a Quotes URL, or refers to "the quote"): RESOLVE the quote first — a pasted \`.../tab/Quotes/{id}\` URL or a record id → \`zoho_get_record(Quotes, {id})\`; a customer-facing Quote # → the Quote_Number rule above. Then REPLY with \`[View in Zoho CRM](https://crm.zoho.com/crm/org647122552/tab/Quotes/{record_id})\` followed by exactly: "Click the **Download Zoho PDF** button below to download it." You CANNOT trigger the download yourself — it is a client-side button that appears on any reply containing a Quotes link. NEVER claim you downloaded, exported, or attached the PDF, and NEVER reply "No records found" for a valid id/URL.
@@ -17560,8 +18505,10 @@ For a raw \`zoho_create_record\` Deal/Quote: show a table (Field | Value | Statu
 
 Every Deal Create MUST include:
 \`\`\`json
-{"Deal_Name": "{Account} - {Description}", "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id}"}, "Stage": "Qualification", "Lead_Source": "Stratus Referal", "Closing_Date": "{today + 30 days, YYYY-MM-DD}", "Amount": 0, "Meraki_ISR": {"id": "2570562000027286729"}, "Owner": {"id": "{{OWNER_ZOHO_ID}}"}}
+{"Deal_Name": "{Account} - {Description}", "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id}"}, "Stage": "Qualification", "Lead_Source": "Stratus Referal", "Closing_Date": "{today + 14 days, YYYY-MM-DD}", "Amount": 0, "Meraki_ISR": {"id": "2570562000027286729"}, "Owner": {"id": "{{OWNER_ZOHO_ID}}"}}
 \`\`\`
+
+**DATE RULE (Chris, 2026-07-15):** default Deal Closing_Date AND Quote Valid_Till = creation date + 14 days, and the two ALWAYS MATCH on a deal/quote pair. **Month-end window:** if today is within 7 days of the end of the month, do NOT silently default — ask the user to confirm the Close/Valid-Till date (offer today+14 as the recommended chip), then apply the SAME confirmed date to both fields. An explicit user-provided date always wins (still set both fields to it).
 
 **VALID DEAL STAGES — ONLY these 5 exist:** Qualification (default for new deals); Proposal/Negotiation; Verbal Commit/Invoicing; Closed (Lost); Closed (Won) — BLOCKED, auto-set by PO automation only. Never invent stages ("Needs Analysis", "Closed-Lost to Competition", etc.) — server auto-corrects known wrong values but rejects anything else. Unsure → "Qualification".
 
@@ -17571,7 +18518,7 @@ Every Quote MUST have a Contact_Name: search Contacts by Account_Name; none foun
 
 Every Quote Create MUST include:
 \`\`\`json
-{"Subject": "{Account} - {Description}", "Quote_Stage": "Qualification", "Deal_Name": {"id": "{deal_id}"}, "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id_or_placeholder}"}, "Valid_Till": "{today + 30 days, YYYY-MM-DD}", "Cisco_Billing_Term": "Prepaid Term", "Billing_Street": "{from Account or lookup}", "Billing_City": "{...}", "Billing_State": "{2-LETTER CODE}", "Billing_Code": "{zip}", "Billing_Country": "US", "Shipping_Country": "US", "Owner": {"id": "{{OWNER_ZOHO_ID}}"}, "Quoted_Items": [{"Product_Name": {"id": "{zoho_product_id}"}, "Quantity": 1, "Discount": discount_per_unit * qty}]}
+{"Subject": "{Account} - {Description}", "Quote_Stage": "Qualification", "Deal_Name": {"id": "{deal_id}"}, "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id_or_placeholder}"}, "Valid_Till": "{today + 14 days, YYYY-MM-DD — MUST equal the Deal's Closing_Date; month-end window → confirm with user first (see DATE RULE)}", "Cisco_Billing_Term": "Prepaid Term", "Billing_Street": "{from Account or lookup}", "Billing_City": "{...}", "Billing_State": "{2-LETTER CODE}", "Billing_Code": "{zip}", "Billing_Country": "US", "Shipping_Country": "US", "Owner": {"id": "{{OWNER_ZOHO_ID}}"}, "Quoted_Items": [{"Product_Name": {"id": "{zoho_product_id}"}, "Quantity": 1, "Discount": discount_per_unit * qty}]}
 \`\`\`
 
 Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / email signature → (3) ask user. Never create a Quote with blank address fields.
@@ -17594,10 +18541,14 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 
 **PRODUCT NOT FOUND — EXHAUST THE CATALOG FIRST.** Ladder: (1) batch_product_lookup (auto-normalizes dashes, -Y/-YR, and the '=' spare suffix); (2) on found:false check live_alternatives — a near-miss (trailing '=', length/size suffix) is usually the right part: confirm, then re-run with that exact spelling; (3) find_product_candidates with the user's wording; (4) web_search_sku ONLY after 1–3 miss — a web SKU is a LEAD, re-validate via batch_product_lookup. NEVER claim a part "isn't in our catalog" before steps 1–3 miss; finish resolving the product before any account/contact work.
 
-**MR Enterprise License — UNIVERSAL across all MR APs.** Only valid: LIC-ENT-1YR / LIC-ENT-3YR / LIC-ENT-5YR. NEVER invent (not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
-"5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1 year, 3 year, or 5 year?" — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
+**MR Enterprise License — UNIVERSAL across all MR APs.** The SKU form is **LIC-ENT-{term}YR**. 1YR / 3YR / 5YR are the standard ecomm-quotable terms; **7YR and 10YR are ALSO real, active Zoho products — but they are co-term licenses valid for ZOHO QUOTES ONLY (never ecomm/URL quotes).** So a term being absent from the local price cache does NOT mean it is invalid — before telling anyone a term "doesn't exist" or is "not real," verify with batch_product_lookup, which live-checks Zoho. NEVER invent MALFORMED forms (these specific patterns are not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
+"5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1, 3, or 5 year?" (7- and 10-year co-term licenses are also available on a Zoho quote if the customer wants them) — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
 
 **Family licenses:** MV → LIC-MV-{term}YR; MT → LIC-MT-{term}YR; MG → LIC-MG-{term}YR; MS and MX → MODEL-SPECIFIC (e.g. LIC-MX{model}-SEC-{term}YR), use batch_product_lookup.
+
+**MX / Catalyst-firewall (C81xx) LICENSE TIER — NEVER default to ENT.** Tier unspecified → assume **SEC** (Advanced Security — the standard for these families), STATE the assumption in your reply, and offer ENT and SDW as chip alternatives (SEC recommended). Pick ENT/SDW only when the user explicitly says so.
+
+**EOL / UPGRADE MAPPING IS DEFAULT BEHAVIOR.** When the intent is upgrade / refresh / replace ("upgrade these MR33s", "refresh the EOL gear"), batch_product_lookup returns \`eol: true\` + \`replaced_by\` per EOL model — quote the returned replacement by default (never the EOL model), echo each mapping (old → new) in your confirmation, and get one user confirmation before writing. For a pure RENEWAL of EOL hardware, licenses still renew on the agnostic family alias; offer the hardware refresh separately.
 
 **Systems Manager (LIC-SME) is DISCONTINUED — every LIC-SME term is inactive in Zoho and must never be quoted. Quote the replacement instead: LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM per device) at the requested term, and tell the user about the substitution.**
 
@@ -17614,6 +18565,8 @@ Accounts FIRST, then Contacts (can run parallel). Quote lookups → search Quote
 
 **found: false ≠ invalid/inactive** — it means the SKU string matched no Product_Code. For a LIC-* SKU, the tool returns \`live_alternatives\` on the family prefix. For a HARDWARE / accessory SKU (e.g. a power supply) that misses, do NOT tell the user it "isn't in the catalog" — call \`find_product_candidates\` with the customer's wording to surface the real SKU (and \`web_search_sku\` only if that also misses AND the user asked you to find it; then re-validate any web SKU via batch_product_lookup before quoting). Report "not available" only after those finders fail. NEVER claim "inactive" / "discontinued" unless Zoho returned \`Product_Active: false\` on that specific record — non-standard terms (7YR, 10YR) may exist even if 1/3/5 are the defaults. The tool returns \`live_alternatives\` / \`hint\` (live query on the family prefix): propose the closest match from that list (it confirms the SKU exists → retry exact; only 1/3/5/10 exist → ask which). Never invent a reason.
 
+**INTEGRITY — trust live evidence over stale guardrails, and never claim unverified results.** (1) If a server guardrail rejects a product/id that you JUST confirmed real via a live lookup in THIS conversation (e.g. batch_product_lookup returned it with found:true / an active Zoho record), treat that as a probable BUG in the guardrail, not proof the product is fake — say so plainly and surface it, do NOT tell the customer the product "isn't legitimate." (2) NEVER report that you created, cloned, or modified a Zoho record (quote/deal/task) unless the write tool returned success with a real record id — do not state or imply a record id you did not receive back. If a write failed or was blocked, say exactly that and what remains undone.
+
 ### Ecomm Pricing (DEFAULT)
 Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT set unit_price (Zoho uses stored list) or Description. List pricing only if the user explicitly asks "list price" / "no discount".
 
@@ -17625,6 +18578,12 @@ Discount is a DOLLAR AMOUNT: \`Discount = discount_per_unit * Quantity\`. Do NOT
 
 ### Margin-Target Pricing (apply_margin_to_quote)
 "apply 20% margin" / "price at X% margin" / "set discounts to reflect a 20% margin" → call \`apply_margin_to_quote({quote_id, target_margin})\` (accepts 0.20 or 20). Do NOT compute the discounts yourself or via zoho_update_record: a flat % off list is NOT a margin — margin is measured against Stratus's distributor cost, which only this tool can pull (LIVE_GetQuoteData, CCW-approved cost). Errors: \`no_ccw_deal_number\` → quote must be Cisco-approved (DID) first, don't estimate; \`cost_data_unavailable\` / \`cost_match_failed\` → relay verbatim, quote NOT changed, don't guess. Claim success only on \`verification.success === true\`; report per-line evidence + undo token from \`message\`.
+
+### License Re-terming (reterm_quote_licenses)
+"change to 1 year licenses" / "make this a 3-year quote" / "1yr version of this quote" / "convert the licenses to 5 year" / "re-term to 7 year" / "10-year co-term" — ANY change of a quote's license TERM → call \`reterm_quote_licenses({quote_id, target_term})\` where target_term is the number of YEARS (1, 3, 5, 7, or 10; 7/10 are co-term Zoho-quote terms auto-priced at a fixed 50%/60% discount). This is the ONLY correct way to re-term a quote. Do NOT hand-assemble zoho_update_record delete+add rows for a term change — that is slow, truncates on large quotes, and thrashes. The tool maps every termed license line to its target-term SKU, preserves each line's discount %, leaves hardware/SFP/cable/antenna/sensor lines untouched, and writes atomically — fail-closed if any license has no target-term variant. Errors: \`unmapped_licenses\` → relay the SKUs with no N-year variant and ask how to proceed (quote NOT changed); \`nothing_to_reterm\` → already at that term. Claim success only on \`verification.success === true\`; report from→to per line + the Grand Total change (echo \`_user_visible_summary\`). A re-term is NOT undoable — to revert or re-change the term, call \`reterm_quote_licenses\` again with the desired year; NEVER \`undo_crm_action\` for a re-term.
+
+### FedRAMP / Government License Conversion (convert_quote_licenses_fedramp)
+"convert to FedRAMP licenses" / "government licenses" / "make this a FedRAMP quote" → call \`convert_quote_licenses_fedramp({quote_id})\`. It maps every commercial LIC-* line to its FED- equivalent via LIVE catalog lookup and writes atomically — fail-closed on any unmapped line (quote NOT changed; relay the unmapped SKUs and ask). **Pricing is a FIXED 35% off the FED list price regardless of term (company default)** — pass \`discount_pct\` ONLY when the user explicitly stated a different discount. FED- SKUs are Zoho-quote-only: never on ecomm URLs, never hand-assembled via zoho_update_record. Errors: \`unmapped_licenses\` → relay + ask; \`nothing_to_convert\` → already FedRAMP (or no license lines). Claim success only on \`verification.success === true\`; report from→to per line + Grand Total change. NOT undoable — to revert, re-quote the original commercial SKUs.
 
 ### Quote Update Workflow (minimize tool calls)
 1. URL provided → parse_quote_url. Else → batch_product_lookup for ALL SKUs in ONE call.
@@ -17679,7 +18638,7 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 
 ## CRITICAL RULES
 
-1. **QUOTE OUTPUT DEFAULTS TO ECOMM ORDER LINKS.** A plain "quote X" / "pricing for X" / any quote inside an email reply → build Stratus ecomm order URL(s): https://stratusinfosystems.com/order/?item=<comma-joined suffixed_sku values from batch_product_lookup>&qty=<matching quantities> — 1/3/5-year options when no term given, exact SKU spellings from the lookup result only. Create a ZOHO CRM quote when the user explicitly says Zoho/CRM ("zoho quote", "in zoho"), asks to create a deal/record, names a customer ACCOUNT for the quote ("create a quote for Hudson Lake" — a CRM record ask), or is working an existing Deal/Quote record. In EMAIL REPLIES, quotes are ALWAYS ecomm links unless the user says zoho — never start account/contact lookups or ask for billing info to put a quote in an email.
+1. **QUOTE OUTPUT DEFAULTS TO ECOMM ORDER LINKS.** A plain "quote X" / "pricing for X" / any quote inside an email reply → build Stratus ecomm order URL(s): https://stratusinfosystems.com/order/?item=<comma-joined suffixed_sku values from batch_product_lookup>&qty=<matching quantities> — 1/3/5-year options when no term given, exact SKU spellings from the lookup result only. Create a ZOHO CRM quote when the user explicitly says Zoho/CRM ("zoho quote", "in zoho"), asks to create a deal/record, names a customer ACCOUNT for the quote ("create a quote for Hudson Lake" — a CRM record ask), or is working an existing Deal/Quote record. **EXCEPTION — [Active Zoho page] present: every quote ask is a ZOHO CRM quote; emit an ecomm /order/ URL ONLY if the user explicitly asks for a url/ecomm/order link.** In EMAIL REPLIES, quotes are ALWAYS ecomm links unless the user says zoho — never start account/contact lookups or ask for billing info to put a quote in an email.
 2. Parse for intent, not literal strings. Do not re-ask for already-provided info.
 3. **CRM-FIRST for record lookups:** Search Zoho before web. web_search_domain only for NEW accounts not in CRM.
 4. **create_quote_on_deal vs create_deal_and_quote:** Existing Deal context or user-supplied Deal ID → \`create_quote_on_deal\`. Brand-new Deal → \`create_deal_and_quote\`. Pass ONLY requested SKUs; hardware auto-adds licenses unless hardware_only/include_licenses=false. If it refuses with error "account_has_open_deals", ask which existing Deal to attach to → create_quote_on_deal with that deal_id; create a separate new Deal (confirm_new_deal:true) only after explicit user confirmation. If the same request mentions contract/PO/signature/DocuSign/"send PO," continue immediately with \`quote_to_po_and_esign\` on the created Quote ID.
@@ -17690,7 +18649,7 @@ Sender: \`from:john@acme.com\` | Subject: \`subject:"quote"\` | Date: \`after:20
 ## ADMIN ACTION WORKFLOW
 (Full workflow loaded conditionally when admin action intent is detected.) For Quote → DID → PO → e-sig requests, prefer \`quote_to_po_and_esign\` over hand-chaining zoho_update_record calls. "Contract" means PO/Sales Order sent for e-signature unless the user says otherwise.
 
-**Self-report discipline:** Before saying you lack a tool, check your tool list (zoho_update_record = Admin Actions; assign_cisco_rep_to_deal; batch_product_lookup). NEVER report "I don't have a tool" when one can accomplish the task. State plainly what you did.
+**Self-report discipline:** Before saying you lack a tool, check your tool list (zoho_update_record = Admin Actions; assign_cisco_rep_to_deal; batch_product_lookup). NEVER report "I don't have a tool" when one can accomplish the task. State plainly what you did. **NEVER enumerate internal tool names to the user.** If a request seems outside your current toolset, say what you WILL do (or ask one clarifying question) — never list which tools you have or lack; the user re-phrasing one word can change your toolset, so "I don't have a create-contact tool" is both unhelpful and usually false.
 
 ## URL / ECOMM QUOTE LINK (rare)
 For "URL quote" / "ecomm link", build \`https://stratusinfosystems.com/order/?item={SKUs}&qty={Qs}\`. If term-agnostic, generate 3 links (1/3/5yr) by swapping license term suffix: LIC-ENT-{N}YR (APs), LIC-MX{model}-SEC-{N}YR (MX), LIC-{model}-{N}Y (switches — Y not YR). Hardware SKUs stay the same.
@@ -18013,12 +18972,75 @@ async function markProgressComplete(env, progressId) {
 
 // Continuation variant of askClaude: resumes a tool loop from saved state.
 // Used by the /_continue self-invocation endpoint.
+// ── Shared message-shape sanitizers for the CRM agent loops ──────────────────
+// Both askClaude and askClaudeContinue assemble a `messages` array by hand across
+// tool iterations. Two failure modes can leave the array in a state Anthropic
+// rejects with HTTP 400 ("tool_use ids … without tool_result blocks"): a tool_use
+// truncated mid-generation by max_tokens, or a tool executor that throws (so no
+// tool_result is produced). These run right before every send as a last-resort
+// repair. repairDanglingToolUse is NON-destructive: it never drops a real block,
+// it only injects a synthetic error tool_result for any tool_use id left unmatched.
+const _VALID_SERVER_TOOL_NAMES = new Set([
+  'web_search', 'web_fetch', 'code_execution', 'bash_code_execution',
+  'text_editor_code_execution', 'tool_search_tool_regex', 'tool_search_tool_bm25'
+]);
+function scrubServerToolBlocks(msgs) {
+  if (!Array.isArray(msgs)) return msgs;
+  return msgs.map(m => {
+    if (!m || !Array.isArray(m.content)) return m;
+    const removedIds = new Set(
+      m.content.filter(b => b?.type === 'server_tool_use' && !_VALID_SERVER_TOOL_NAMES.has(b.name)).map(b => b.id)
+    );
+    const filtered = m.content.filter(block => {
+      if (block?.type === 'server_tool_use' && !_VALID_SERVER_TOOL_NAMES.has(block.name)) return false;
+      if (block?.type === 'web_search_tool_result' && removedIds.has(block.tool_use_id)) return false;
+      return true;
+    });
+    return { ...m, content: filtered.length ? filtered : [{ type: 'text', text: '' }] };
+  });
+}
+function repairDanglingToolUse(messages) {
+  if (!Array.isArray(messages)) return messages;
+  const out = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    out.push(m);
+    if (!m || m.role !== 'assistant' || !Array.isArray(m.content)) continue;
+    const useIds = m.content.filter(b => b?.type === 'tool_use').map(b => b.id);
+    if (useIds.length === 0) continue;
+    const next = messages[i + 1];
+    const matched = (next && next.role === 'user' && Array.isArray(next.content))
+      ? new Set(next.content.filter(b => b?.type === 'tool_result').map(b => b.tool_use_id))
+      : new Set();
+    const missing = useIds.filter(id => !matched.has(id));
+    if (missing.length === 0) continue;
+    const synth = missing.map(id => ({ type: 'tool_result', tool_use_id: id, content: '[error: tool result unavailable]', is_error: true }));
+    console.warn(`[GCHAT-REPAIR] dangling tool_use ids repaired: ${missing.join(',')}`);
+    if (next && next.role === 'user') {
+      // Merge into the following user turn (never create consecutive user turns).
+      // tool_result blocks must lead the turn, so prepend the synthetic results.
+      const nextArr = Array.isArray(next.content) ? next.content : [{ type: 'text', text: String(next.content) }];
+      out.push({ ...next, content: [...synth, ...nextArr] });
+      i++; // consumed messages[i+1] (merged into the pushed object)
+    } else {
+      out.push({ role: 'user', content: synth });
+    }
+  }
+  return out;
+}
+
 async function askClaudeContinue(messages, tools, systemPrompt, startIteration, env, progressCallback, maxWallMs, personId = null) {
   const MAX_TOOL_ITERATIONS = 30;
   let iteration = startIteration;
   const _loopStartMs = Date.now();
 
   async function callAnthropicWithRetry(body, maxRetries = 2) {
+    // Sanitize message shape before every send: drop invalid server_tool_use
+    // blocks and repair any tool_use left without a following tool_result
+    // (truncation or a throwing tool executor) — otherwise Anthropic 400s.
+    if (Array.isArray(body.messages)) {
+      body = { ...body, messages: repairDanglingToolUse(scrubServerToolBlocks(body.messages)) };
+    }
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const apiUrl = attempt === maxRetries ? ANTHROPIC_API_DIRECT : ANTHROPIC_API_URL;
       const headers = {
@@ -18026,7 +19048,17 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
         'x-api-key': env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
       };
-      if (apiUrl === ANTHROPIC_API_URL) headers['cf-aig-cache-ttl'] = '3600';
+      // PR-B (2026-07-13): skip the CF AI Gateway's OWN response cache on gateway
+      // calls. This gateway has response caching enabled, and an active gateway
+      // cache layer breaks Anthropic PROMPT-cache reads — every request is treated
+      // as a miss, forcing a fresh cache_creation of the ~35k system+tools prefix
+      // on every one of the ~11 loop iterations (the agent-loop latency driver).
+      // `cf-aig-skip-cache: true` is a clean passthrough, restoring prompt-cache
+      // reads (verified live: cache-ttl → creation-every-call; skip-cache → read
+      // hit). The gateway response cache was never useful here anyway — CRM loop
+      // requests grow each iteration and never repeat, so it only ever MISSed.
+      // Matches the askClaude path, which already sends this header.
+      if (apiUrl === ANTHROPIC_API_URL) headers['cf-aig-skip-cache'] = 'true';
 
       const response = await fetch(apiUrl, {
         method: 'POST',
@@ -18081,11 +19113,14 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     const contModel = _forcedCrmModelCont
       || ((iteration > 3 && _isPureExec && _contHaikuDispatchOK)
         ? 'claude-haiku-4-5-20251001'
-        : 'claude-sonnet-4-6');
+        : 'claude-sonnet-5');
     console.log(`[GCHAT-CONTINUE] Model: ${contModel}${_forcedCrmModelCont ? ' (FORCED)' : ''} (iter=${iteration}, pureExec=${_isPureExec}, lastTools=${_contLastToolNames.join(',')})`);
 
-    // Dynamic max_tokens: 2048 for most iterations, 1024 for pure exec (Haiku dispatch)
-    const contMaxTok = _isPureExec ? 1024 : 2048;
+    // max_tokens: flat 8192 for the CRM tool path. A bulk zoho_update_record
+    // (re-terming ~30 Quoted_Items) is a ~3k-token tool_use INPUT and the write
+    // tail executes in pure-exec mode — the old 1024/2048 taper truncated it
+    // mid-tool_use → dangling tool_use → 400. 8192 is far under Haiku 4.5's cap.
+    const contMaxTok = 8192;
     // Advisor tool injection — OPT-IN via env.ENABLE_ADVISOR_TOOL (default off).
     // 2026-05-14: disabled by default after API 400 traced to invalid
     // server_tool_use.name in conversation history. The advisor tool type
@@ -18093,7 +19128,7 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     // enum, so Claude calls to it produce blocks that fail schema validation
     // on subsequent iterations. Re-enable only when the beta is verified live.
     let contTools = tools;
-    if (contModel === 'claude-sonnet-4-6' && tools.length > 0 && env.ENABLE_ADVISOR_TOOL === 'true') {
+    if (contModel === 'claude-sonnet-5' && tools.length > 0 && env.ENABLE_ADVISOR_TOOL === 'true') {
       contTools = [
         ...tools,
         { type: 'advisor_20260301', name: 'advisor', model: 'claude-opus-4-6' }
@@ -18111,6 +19146,10 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
     const requestBody = {
       model: contModel,
       max_tokens: contMaxTok,
+      // Never let the (corp) gateway inject an unrequested thinking block into
+      // the tool loop — it consumes the output budget and its partial/unsigned
+      // form breaks message shape. Keeps the token math model-independent.
+      thinking: { type: 'disabled' },
       system: _prB_systemFieldCont,
       messages
     };
@@ -18178,7 +19217,10 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
         // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
         // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
         const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
-        const truncLimit = (block.name === 'zoho_get_record' || isQuoteData || isCompoundCreate) ? 8000 : 2000;
+        const truncLimit = (block.name === 'zoho_get_record'
+          || block.name === 'reterm_quote_licenses'
+          || block.name === 'convert_quote_licenses_fedramp'
+          || isQuoteData || isCompoundCreate) ? 8000 : 2000;
         return {
           type: 'tool_result',
           tool_use_id: block.id,
@@ -18186,7 +19228,13 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
         };
       });
 
-      const toolResults = await Promise.all(toolPromises);
+      // Promise.allSettled so one throwing tool executor can't reject the whole
+      // batch and leave the assistant tool_use dangling (this loop has no outer
+      // try/catch). A rejected call becomes an is_error tool_result for its id.
+      const _settled = await Promise.allSettled(toolPromises);
+      const toolResults = _settled.map((s, idx) => s.status === 'fulfilled'
+        ? s.value
+        : { type: 'tool_result', tool_use_id: toolBlocks[idx].id, content: '[error: tool execution failed]', is_error: true });
       messages.push({ role: 'user', content: toolResults });
 
       // Compact older messages
@@ -18203,6 +19251,22 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
           }
         }
       }
+      continue;
+    }
+
+    // max_tokens truncation guard (mirrors askClaude). Without this, a tool_use
+    // truncated mid-generation falls through to the final-text return below —
+    // silently returning a partial answer AND leaving a dangling tool_use. Strip
+    // the incomplete tool_use (and any injected thinking) and re-issue.
+    if (data.stop_reason === 'max_tokens' && iteration < MAX_TOOL_ITERATIONS) {
+      const hadToolUse = data.content.some(b => b.type === 'tool_use');
+      const safeContent = data.content.filter(b => b.type !== 'tool_use' && b.type !== 'thinking' && b.type !== 'redacted_thinking');
+      messages.push({ role: 'assistant', content: safeContent.length ? safeContent : [{ type: 'text', text: '(response truncated)' }] });
+      const partialText = safeContent.filter(b => b.type === 'text').map(b => b.text).join('');
+      if (partialText && progressCallback) { try { progressCallback(partialText).catch(() => {}); } catch (_) {} }
+      messages.push({ role: 'user', content: hadToolUse
+        ? '[System: Your previous tool call was cut off before it completed. Re-issue that tool call in full now.]'
+        : '[System: Your response was truncated due to length. Continue from where you left off. Do not repeat what you already said.]' });
       continue;
     }
 
@@ -19500,7 +20564,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // Build system prompt dynamically — conditionally loads EMAIL INTAKE and ADMIN ACTION
       // sections only when relevant intent is detected, saving ~2K tokens on standard requests.
       const _ownerCtx_crm = await getOwnerContext(env, env && env.__CALLER_EMAIL);
-      systemPrompt = buildCrmSystemPrompt(userMessage, _ownerCtx_crm, advisorToolActive(env, resolveForcedCrmModel(env) || 'claude-sonnet-4-6'));
+      systemPrompt = buildCrmSystemPrompt(userMessage, _ownerCtx_crm, advisorToolActive(env, resolveForcedCrmModel(env) || 'claude-sonnet-5'));
 
       // CRM context injection: if a previous CRM turn saved context (quote ID, account,
       // line items), inject it so the agent can skip re-searching on follow-up messages.
@@ -19586,9 +20650,11 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
         console.log(`[GCHAT-ADVISOR] Advisor tool active — Opus 4.6 available for strategic guidance`);
       }
 
-      // Scrub invalid server_tool_use blocks from history before sending
+      // Scrub invalid server_tool_use blocks + repair any dangling tool_use
+      // (unmatched by a following tool_result, e.g. from a truncated call or a
+      // throwing tool executor) before sending — otherwise Anthropic 400s.
       if (Array.isArray(body.messages)) {
-        body = { ...body, messages: scrubInvalidServerToolBlocks(body.messages) };
+        body = { ...body, messages: repairDanglingToolUse(scrubInvalidServerToolBlocks(body.messages)) };
       }
 
       let lastResponse = null;
@@ -19701,17 +20767,18 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const activeModel = _forcedCrmModel
         || ((useTools && iteration > 2 && _inPureExecMode && _askHaikuDispatchOK)
           ? 'claude-haiku-4-5-20251001'
-          : 'claude-sonnet-4-6');
+          : 'claude-sonnet-5');
       if (useTools) {
         console.log(`[GCHAT-AGENT] Model: ${activeModel}${_forcedCrmModel ? ' (FORCED)' : ''} (iter=${iteration}, pureExec=${_inPureExecMode}, lastTools=${_lastToolNames.join(',')})`);
       }
 
-      // Dynamic max_tokens for speed:
-      // - Iteration 0-1: 4096 (planning + first tool calls, needs room for parallel calls)
-      // - Iteration 2-3: 1536 (tool results + next tool calls, compact JSON payloads)
-      // - Iteration 4+: 1024 (finishing up, formatting response)
-      // - Haiku exec steps: 1024 (just dispatching update/send, minimal reasoning)
-      const maxTok = _inPureExecMode ? 1024 : (iteration <= 1 ? 4096 : (iteration <= 3 ? 1536 : 1024));
+      // max_tokens: flat 8192 for the CRM tool path (useTools). The old taper
+      // to 1024/1536 on later iterations truncated large tool_use INPUTs — a
+      // bulk zoho_update_record re-terming ~30 Quoted_Items is ~3k tokens and
+      // executes in pure-exec mode (formerly 1024) — producing a dangling
+      // tool_use → Anthropic 400. 8192 clears it in one turn (Haiku cap is 64K).
+      // Non-CRM (vision/quote) path keeps the cheaper taper.
+      const maxTok = useTools ? 8192 : (iteration <= 1 ? 4096 : (iteration <= 3 ? 1536 : 1024));
 
       // ── Build tools array with advisor when in CRM mode ──────────
       // The advisor tool lets Sonnet consult Opus for strategic guidance
@@ -19719,7 +20786,7 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // OPT-IN via env.ENABLE_ADVISOR_TOOL (default off as of 2026-05-14 —
       // see continuation-path comment for rationale).
       let activeTools = tools;
-      if (useTools && activeModel === 'claude-sonnet-4-6' && env.ENABLE_ADVISOR_TOOL === 'true') {
+      if (useTools && activeModel === 'claude-sonnet-5' && env.ENABLE_ADVISOR_TOOL === 'true') {
         activeTools = [
           ...tools,
           {
@@ -19742,6 +20809,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       const requestBody = {
         model: activeModel,
         max_tokens: maxTok,
+        // Never let the (corp) gateway inject an unrequested thinking block into
+        // the tool loop — it eats the output budget and its partial/unsigned form
+        // breaks message shape. Keeps the token math model-independent.
+        thinking: { type: 'disabled' },
         system: _prB_systemField,
         messages
       };
@@ -19963,7 +21034,9 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
           // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
           const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
-          const truncLimit = (isQuoteData || isCompoundCreate) ? 8000 : 2000;
+          const truncLimit = (isQuoteData || isCompoundCreate
+            || block.name === 'reterm_quote_licenses'
+            || block.name === 'convert_quote_licenses_fedramp') ? 8000 : 2000;
           return {
             type: 'tool_result',
             tool_use_id: block.id,
@@ -19971,7 +21044,13 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           };
         });
 
-        const toolResults = await Promise.all(toolPromises);
+        // Promise.allSettled so a single throwing tool executor can't reject the
+        // whole batch and leave the assistant tool_use dangling. A rejected call
+        // becomes an is_error tool_result keyed to its own tool_use id.
+        const _settled = await Promise.allSettled(toolPromises);
+        const toolResults = _settled.map((s, idx) => s.status === 'fulfilled'
+          ? s.value
+          : { type: 'tool_result', tool_use_id: toolBlocks[idx].id, content: '[error: tool execution failed]', is_error: true });
 
         // Add tool results to messages
         messages.push({ role: 'user', content: toolResults });
@@ -20008,14 +21087,20 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
       // Add what we have to messages and loop again so Claude can continue.
       if (data.stop_reason === 'max_tokens' && useTools && iteration < MAX_TOOL_ITERATIONS) {
         console.log(`[GCHAT-AGENT] max_tokens hit at iteration ${iteration}, continuing...`);
-        messages.push({ role: 'assistant', content: data.content });
-        // Send any partial text as progress
-        const partialText = data.content.filter(b => b.type === 'text').map(b => b.text).join('');
+        // Strip any incomplete tool_use (and injected thinking) before pushing —
+        // a truncated tool call is unusable and, paired with the text "continue"
+        // turn below, would be a dangling tool_use → Anthropic 400. Ask the model
+        // to re-issue the call in full (it now has the 8192 budget to finish it).
+        const hadToolUse = data.content.some(b => b.type === 'tool_use');
+        const safeContent = data.content.filter(b => b.type !== 'tool_use' && b.type !== 'thinking' && b.type !== 'redacted_thinking');
+        messages.push({ role: 'assistant', content: safeContent.length ? safeContent : [{ type: 'text', text: '(response truncated)' }] });
+        const partialText = safeContent.filter(b => b.type === 'text').map(b => b.text).join('');
         if (partialText && progressCallback) {
           try { progressCallback(partialText).catch(() => {}); } catch (_) {}
         }
-        // Ask Claude to continue from where it left off
-        messages.push({ role: 'user', content: '[System: Your response was truncated due to length. Continue from where you left off. Do not repeat what you already said.]' });
+        messages.push({ role: 'user', content: hadToolUse
+          ? '[System: Your previous tool call was cut off before it completed. Re-issue that tool call in full now.]'
+          : '[System: Your response was truncated due to length. Continue from where you left off. Do not repeat what you already said.]' });
         continue;
       }
 
@@ -20340,13 +21425,13 @@ function buildMostRecentQuoteSessionHeader(history) {
 // ═══════════════════════════════════════════════════════════════════════════════
 export class CrmWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
-    const { text, personId, spaceName, threadName, imageDataKey } = event.payload;
+    const { text, personId, spaceName, threadName, imageDataKey, callerEmail } = event.payload;
 
     if (!spaceName) {
       throw new Error('[WORKFLOW] No spaceName in payload — cannot deliver response');
     }
 
-    const env = this.env;
+    const env = callerScopedEnv(this.env, callerEmail || callerEmailFromPersonId(personId));
     if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL; // 1:1 corp port: route Claude through the deploy's gateway
     const workflowStart = Date.now();
     console.log(`[WORKFLOW] Starting CRM workflow for: "${(text || '').substring(0, 80)}..."`);
@@ -20817,6 +21902,8 @@ const BENCHMARK_WRITE_TOOLS = new Set([
   'quote_to_po_and_esign',
   'velocity_hub_submit',
   'apply_margin_to_quote',
+  'reterm_quote_licenses',
+  'convert_quote_licenses_fedramp',
   'assign_cisco_rep_to_deal',
   'gmail_create_draft',
   'gmail_send_email',
@@ -20857,7 +21944,7 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
         const items = toolInput?.data?.Quoted_Items || toolInput?.recordData?.Quoted_Items;
         const isQuotesModule = toolInput?.module_name === 'Quotes';
         if (isQuotesModule && Array.isArray(items)) {
-          const activeCheck = preflightQuotedItemsProductActive(items);
+          const activeCheck = await preflightQuotedItemsProductActive(items, env, { dryRun: true });
           if (!activeCheck.valid) {
             const hasHallucination = activeCheck.hallucinated_ids && activeCheck.hallucinated_ids.length > 0;
             const blockAction = toolName === 'zoho_update_record' ? 'update_blocked' : 'create_blocked';
@@ -20918,6 +22005,8 @@ async function executeToolCallDryRun(toolName, toolInput, env, personId, dryRun)
       'quote_to_po_and_esign': { success: true, state: 'po_created_esign_sent', quote_id: toolInput.quote_id, sales_order: { id: `DRY_SO_${mockId}`, so_number: `SO-DRY-${mockId}` }, dry_run: true },
       'velocity_hub_submit': { success: true, submission_id: mockId, dry_run: true },
       'apply_margin_to_quote': { success: true, quote_id: toolInput.quote_id, target_margin: toolInput.target_margin, message: 'Margin applied (dry run)', dry_run: true },
+      'reterm_quote_licenses': { success: true, quote_id: toolInput.quote_id, target_term: toolInput.target_term, message: 'Licenses re-termed (dry run)', dry_run: true },
+        'convert_quote_licenses_fedramp': { success: true, quote_id: toolInput.quote_id, discount_pct: toolInput.discount_pct ?? 35, message: 'Licenses converted to FedRAMP (dry run)', dry_run: true },
       'gmail_create_draft': { success: false, draft_disabled: true, dry_run: true, instruction: 'Gmail draft creation is disabled. Render the email body inline in your chat reply instead.' },
       'gmail_send_email': { success: true, message_id: mockId, thread_id: mockId, dry_run: true },
       'webex_send_message': { success: true, message_id: mockId, dry_run: true },
@@ -22076,15 +23165,27 @@ const BENCHMARK_TASKS = [
   { id: 'task_72', tier: 'qa_complex', name: 'Co-term math explanation', prompt: 'Explain how co-term licensing math works on a Meraki dashboard when I add new hardware mid-term. Walk me through the pro-rate calculation.' },
   { id: 'task_73', tier: 'qa_complex', name: 'MX95 vs MX105 multi-site', prompt: 'For a 10-site enterprise with a 1Gbps WAN at HQ and 300Mbps at branches, compare MX95 at HQ vs MX105 at HQ, with MX75 at branches. What\'s the trade-off?' },
   { id: 'task_74', tier: 'qa_complex', name: 'What if MS license lapses', prompt: 'What happens to an MS switch if its Meraki license lapses — does the hardware stop forwarding, lose features, or keep working?' },
-  { id: 'task_75', tier: 'qa_complex', name: 'DIDs hypothetical (design question)', prompt: 'Hypothetically, if I were proposing 5,000 APs across a multi-state K-12 district, how many Cisco Deal IDs (DIDs) would that typically require, and why?' }
+  { id: 'task_75', tier: 'qa_complex', name: 'DIDs hypothetical (design question)', prompt: 'Hypothetically, if I were proposing 5,000 APs across a multi-state K-12 district, how many Cisco Deal IDs (DIDs) would that typically require, and why?' },
+  // ── R11 active-record binding fixtures (corp error_reports 2026-07-14) ──
+  // The R3 incident phrasing: a quote-create sent while ON a Zoho Quote page
+  // must bind CRM-side (that quote's Deal) — never the ecomm URL engine, and
+  // never a re-search for the account/deal the header already identifies.
+  { id: 'task_76', tier: 'complex', name: 'R11: quote-create on active Quote page binds to its deal', prompt: '[Active Zoho page: user is currently viewing Quote 2570562000399909180]\nURL: https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000399909180\ncreate a quote for 2 MX84 SEC licenses and 2 Z3 ENT licenses', expected: ['create_quote_on_deal'], forbidden: ['zoho_search_records'] },
+  { id: 'task_77', tier: 'complex', name: 'R11/R3: quote-create on active Deal page is one create_quote_on_deal call', prompt: '[Active Zoho page: user is currently viewing Deal 2570562000400000001]\nURL: https://crm.zoho.com/crm/org647122552/tab/Potentials/2570562000400000001\nAccount: Acme Corp\nadd a quote for 5x MR46 with 3 year licenses', expected: ['create_quote_on_deal'], forbidden: ['zoho_search_records', 'create_deal_and_quote'] },
+  { id: 'task_78', tier: 'complex', name: 'R11: unqualified add binds to the active quote', prompt: '[Active Zoho page: user is currently viewing Quote 2570562000399909180]\nURL: https://crm.zoho.com/crm/org647122552/tab/Quotes/2570562000399909180\nadd 2 LIC-ENT-3YR licenses', expected: ['zoho_update_record'], forbidden: ['zoho_search_records'] },
+  // R5: MX license tier must never silently default to ENT (SEC is the family
+  // default; the reply should state the SEC assumption and offer ENT/SDW).
+  { id: 'task_79', tier: 'complex', name: 'R5: MX licenses default SEC, never ENT', prompt: 'Create a zoho quote for Acme Corp: 2 MX84 licenses, 3 year term. I did not specify a tier — pick the correct default.', expected: ['create_deal_and_quote'] }
 ];
 
 const BENCHMARK_MODELS = [
-  { id: 'claude', label: 'Claude Sonnet 4.6', type: 'claude' },
+  { id: 'claude', label: 'Claude (default tier)', type: 'claude' },
   // Explicit model-pinned entries for a clean Sonnet-vs-Opus A/B — each forces
   // its own model per-request via the benchmark env proxy, so the result does
   // NOT depend on the live CRM_AGENT_FORCE_MODEL flag's current value.
-  { id: 'claude-sonnet', label: 'Claude Sonnet 4.6 (pinned)', type: 'claude', forceModel: 'claude-sonnet-4-6' },
+  { id: 'claude-sonnet', label: 'Claude Sonnet 5 (pinned)', type: 'claude', forceModel: 'claude-sonnet-5' },
+  { id: 'claude-sonnet-46', label: 'Claude Sonnet 4.6 (pinned)', type: 'claude', forceModel: 'claude-sonnet-4-6' },
+  { id: 'claude-opus-46', label: 'Claude Opus 4.6 (pinned)', type: 'claude', forceModel: 'claude-opus-4-6' },
   { id: 'claude-opus', label: 'Claude Opus 4.8 (pinned)', type: 'claude', forceModel: 'claude-opus-4-8' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', type: 'deepseek' },
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', type: 'deepseek' },
@@ -22413,12 +23514,25 @@ function pickOptimizedPrompt(modelId, ownerCtx) {
 // Run a single benchmark task against a single model.
 async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, promptVariant = 'full', evalContext = null, reasoningPolicy = REASONING_POLICY_DISABLED) {
   let systemPrompt;
+  // Multi-turn support (2026-07-15 model-comparison rework): a task may carry a
+  // seedHistory array of prior conversation turns. Seed conv:<personId> in KV so
+  // the agent threads the follow-up turn against real prior context — the same
+  // mechanism /api/chat-waterfall uses. Bounded to the last 10 turns.
+  if (task && Array.isArray(task.seedHistory) && task.seedHistory.length && env && env.CONVERSATION_KV) {
+    try {
+      const _seed = task.seedHistory.slice(-10).map(m => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+      }));
+      await env.CONVERSATION_KV.put(`conv:${personId}`, JSON.stringify({ messages: _seed }), { expirationTtl: 1800 });
+    } catch (_) { /* seed best-effort; a KV miss just makes it single-turn */ }
+  }
   const _ownerCtx_bench = await getOwnerContext(env, env && env.__CALLER_EMAIL);
   if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
     systemPrompt = pickOptimizedPrompt(modelConfig.id, _ownerCtx_bench);
   } else {
     systemPrompt = typeof buildCrmSystemPrompt === 'function'
-      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench, advisorToolActive(env, modelConfig.type === 'claude' ? (modelConfig.forceModel || 'claude-sonnet-4-6') : ''))
+      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench, advisorToolActive(env, modelConfig.type === 'claude' ? (modelConfig.forceModel || 'claude-sonnet-5') : ''))
       : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
   }
 
@@ -22915,7 +24029,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   // Force-Claude mode
   if (useClaudeOnly) {
     const r = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
-    return { ...r, model: 'claude-sonnet-4-6', tierUsed: 'claude', totalMs: Date.now() - startMs };
+    return { ...r, model: 'claude-sonnet-5', tierUsed: 'claude', totalMs: Date.now() - startMs };
   }
 
   // Force-Llama mode
@@ -23027,7 +24141,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       if (claudeResultLooksUsable(autoClaudeResult)) {
         return {
           ...autoClaudeResult,
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           tierUsed: 'claude-write-intent',
           llamaResult: null,
           gemmaResult: null,
@@ -23169,7 +24283,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
       const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
       return {
         reply: claudeResult.reply,
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         tierUsed: 'claude-fallback',
         llamaResult: llamaT.result,
         gemmaResult: null,
@@ -23191,7 +24305,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
     const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
     return {
       reply: claudeResult.reply,
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       tierUsed: 'claude-advisory-fallback',
       llamaResult: llamaT.result,
       gemmaResult: null,
@@ -23238,7 +24352,7 @@ async function askWithWaterfall(userMessage, env, personId, options = {}) {
   const claudeResult = await askClaudeForBenchmark(userMessage, env, personId, dryRun, 120000, evalContext);
   return {
     reply: claudeResult.reply,
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-5',
     tierUsed: 'claude-fallback',
     llamaResult: llamaT.result,
     gemmaResult: gemmaT.result,
@@ -23545,22 +24659,19 @@ async function sendDailyErrorDigest(env) {
 
 export default {
   async fetch(request, env, ctx) {
+    // Bind caller identity to this invocation. The platform bindings object can
+    // be reused by concurrent requests, so mutating it directly leaks one
+    // user's email into another user's CRM ownership decisions.
+    let _requestCallerEmail = null;
+    try { _requestCallerEmail = request.headers.get('x-user-email'); } catch (_) {}
+    env = callerScopedEnv(env, _requestCallerEmail);
+
     if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL;
     // Load KV-cached live prices (if available from daily cron refresh)
     // This is fast: reads KV once, then cached in-memory for 5 minutes per isolate
     if (env.CONVERSATION_KV) {
       await loadLivePrices(env);
     }
-
-    // Stash caller email globally on env so deep call sites (e.g. payload
-    // builders) can resolve the Zoho owner via getOwnerForCaller(env) without
-    // every signature being plumbed. X-User-Email is the canonical header
-    // (gateway + chrome ext + Gmail add-on all forward it). Endpoint-specific
-    // handlers may overwrite this later with a more specific value.
-    try {
-      const _hdrCaller = request.headers.get('x-user-email');
-      if (_hdrCaller && _hdrCaller.includes('@')) env.__CALLER_EMAIL = _hdrCaller;
-    } catch (_) {}
 
     const url = new URL(request.url);
     // ── Dashboard Manifest: auto-written to KV on first request after deploy ──
@@ -24196,7 +25307,7 @@ async function enrichCompanyV2(rawDomain, opts) {
       try {
         const abortSonnet = new AbortController();
         const sonnetTimeout = setTimeout(() => abortSonnet.abort(), 40000);
-        const sonnet = await callWebSearchEnrichment(env, domain, 'claude-sonnet-4-6', abortSonnet.signal);
+        const sonnet = await callWebSearchEnrichment(env, domain, 'claude-sonnet-5', abortSonnet.signal);
         clearTimeout(sonnetTimeout);
         trace.attempts.push({ tier: 'sonnet-web', has_source: !!sonnet.source_url, has_name: !!sonnet.name });
         if (sonnet.source_url && sonnet.name) {
@@ -24370,7 +25481,7 @@ async function enrichCompanyV2(rawDomain, opts) {
                   'anthropic-version': '2023-06-01'
                 },
                 body: JSON.stringify({
-                  model: 'claude-sonnet-4-6',
+                  model: 'claude-sonnet-5',
                   max_tokens: 500,
                   thinking: { type: 'disabled' },
                   system: `You are a concise email analyzer for a Stratus Information Systems sales rep (Cisco/Meraki reseller). Analyze the email and return ONLY valid JSON with these fields:
@@ -24387,7 +25498,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
 
               if (summaryResp.ok) {
                 const summaryData = await summaryResp.json();
-                ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', summaryData.usage, 'addon-analyze'));
+                ctx.waitUntil(trackUsage(env, 'claude-sonnet-5', summaryData.usage, 'addon-analyze'));
                 const text = extractClaudeText(summaryData);
                 try {
                   const parsed = JSON.parse(text.replace(/```json\n?|\n?```/g, '').trim());
@@ -24640,7 +25751,7 @@ Return ONLY the JSON object, no markdown or extra text.`,
                 'anthropic-version': '2023-06-01'
               },
               body: JSON.stringify({
-                model: 'claude-sonnet-4-6',
+                model: 'claude-sonnet-5',
                 max_tokens: 1500,
                 // 2026-07-09 (blank drafts): sonnet-5 runs adaptive thinking when the
                 // param is omitted — the thinking block displaced content[0] AND its
@@ -24698,7 +25809,7 @@ CRITICAL URL RULES:
             }
 
             const draftData = await draftResp.json();
-            ctx.waitUntil(trackUsage(env, 'claude-sonnet-4-6', draftData.usage, 'addon-draft'));
+            ctx.waitUntil(trackUsage(env, 'claude-sonnet-5', draftData.usage, 'addon-draft'));
             const draftText = extractClaudeText(draftData);
             var parsedDraft;
             try {
@@ -26501,6 +27612,46 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── A/B Benchmark: ad-hoc prompt (reusable model comparison) ──
+          // Accepts { prompt, pageContext?, seedHistory?, modelId } and runs an
+          // arbitrary prompt through the full agent for ONE pinned model. DRY-RUN
+          // FORCED (writes always stubbed) so this stays spam-safe and auth-free,
+          // consistent with the rest of /api/benchmark/*. seedHistory[] threads a
+          // multi-turn conversation (each entry {role, content}); the caller drives
+          // sequential turns and passes the captured prior turns back in.
+          // Returns { reply, toolCalls:[{name,arguments}], iterations, elapsedMs }.
+          // For LIVE writes (winner only), bake the task and use /api/benchmark/run
+          // with dryRun:false — never live here.
+          case '/api/benchmark/adhoc': {
+            const { prompt: aPrompt, pageContext: aPage, seedHistory: aHist, modelId: aModelId } = apiBody;
+            const aReasoning = normalizeReasoningPolicy(apiBody.reasoning_policy || apiBody.reasoningPolicy || REASONING_POLICY_DISABLED);
+            if (!aPrompt || !aModelId) { apiResult = { error: 'prompt and modelId are required' }; break; }
+            const aModel = BENCHMARK_MODELS.find(m => m.id === aModelId);
+            if (!aModel) { apiResult = { error: `Unknown model id: ${aModelId}` }; break; }
+            try {
+              const aPersonId = `adhoc:${aModelId}:${Date.now()}:${Math.floor(Math.random() * 1e4)}`;
+              const aText = aPage ? `${aPage}\n${aPrompt}` : aPrompt;
+              const aTask = {
+                id: 'adhoc',
+                prompt: String(aText).substring(0, 8000),
+                seedHistory: Array.isArray(aHist) ? aHist : undefined
+              };
+              const aEvalCtx = evalContext ? {
+                ...evalContext, requestText: aText, requestedModel: aModelId,
+                personId: aPersonId, bot: 'adhoc-bench', reasoningPolicy: aReasoning
+              } : null;
+              const result = await runBenchmarkTask(
+                aTask, aModel, env, aPersonId,
+                true, // dryRun FORCED — adhoc never writes
+                'full', aEvalCtx, aReasoning
+              );
+              apiResult = { modelId: aModelId, dryRun: true, ...result };
+            } catch (aErr) {
+              apiResult = { modelId: aModelId, error: aErr.message, reply: '', toolCalls: [], iterations: 0, elapsedMs: 0 };
+            }
+            break;
+          }
+
           // ── A/B Benchmark: list available tasks and models ──
           case '/api/benchmark/list': {
             apiResult = { tasks: BENCHMARK_TASKS, models: BENCHMARK_MODELS };
@@ -26830,7 +27981,12 @@ CRITICAL URL RULES:
               // Chrome Extension Chat tab always wants Zoho quotes, never URL quotes —
               // URL quoting lives in the dedicated Quote tab instead.
               let deterministicResult = null;
-              const skipDeterministic = wSource === 'chat-tab' || (wEc && wEc.source === 'chat-tab');
+              // R11 routing rule (Chris, 2026-07-15): an active Zoho record page in
+              // the message context pins the request to the CRM agent — the Tier-0
+              // ecomm URL engine is reachable ONLY via an explicit ecomm-link ask
+              // (isExplicitEcommUrlAsk). Off-Zoho requests are unaffected.
+              const wZohoPagePinned = hasActiveZohoPageContext(wText) && !isExplicitEcommUrlAsk(wText);
+              const skipDeterministic = wSource === 'chat-tab' || (wEc && wEc.source === 'chat-tab') || wZohoPagePinned;
               const shouldPreResolveWaterfallProducts = /\b(quote|create.*quote|quote.*for)\b/i.test(wText)
                 || (skipDeterministic && hasQuotePreResolveSkuToken(wText));
               if (shouldPreResolveWaterfallProducts) {
@@ -28326,6 +29482,21 @@ CRITICAL URL RULES:
             break;
           }
 
+          // Diagnostic: run the deterministic reterm_quote_licenses helper directly
+          // (no model) against a quote id. Authed via the /api/ gate. Real write.
+          case '/api/_debug-reterm': {
+            const { quote_id: dbgRtId, target_term: dbgRtTerm } = apiBody;
+            if (!dbgRtId || dbgRtTerm === undefined || dbgRtTerm === null) {
+              return new Response(JSON.stringify({ error: 'quote_id and target_term required' }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              apiResult = await retermQuoteLicenses(String(dbgRtId), dbgRtTerm, env, 'debug-reterm');
+            } catch (err) {
+              apiResult = { error: `reterm failed: ${err.message}` };
+            }
+            break;
+          }
+
           case '/api/crm-quotes': {
             const { accountId: quotesAcctId, dealId: quotesDealId } = apiBody;
             if (!quotesAcctId && !quotesDealId) {
@@ -29556,7 +30727,7 @@ Return ONLY a JSON object (no markdown, no explanation):
 
         // Step 2: Test Anthropic API with tools
         const testBody = {
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           max_tokens: 256,
           system: 'You are a test assistant. Respond with "API working" and use the test_tool to confirm tool use works.',
           messages: [{ role: 'user', content: 'test' }],
