@@ -32386,7 +32386,7 @@ Return ONLY a JSON object (no markdown, no explanation):
           if (!newCommitData?.sha) throw new Error('Could not create commit');
 
           // 5. Update main to point to the new commit
-          const updateRefRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/main`, {
+          const updateRefRes = await fetch(`https://api.github.com/repos/${repo}/git/refs/heads/main`, {
             method: 'PATCH',
             headers: ghHeaders,
             body: JSON.stringify({ sha: newCommitData.sha })
