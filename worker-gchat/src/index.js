@@ -26477,9 +26477,16 @@ CRITICAL URL RULES:
             // with no EOL/replacement details.)
             function extractEolWarningsFromMessage(responseText) {
               const warnings = [];
+              // License retirement / EOL-swap note lines (SME→Ivanti, Insight→SDW,
+              // vMX edition, Ivanti 50-min). They lead the reply text as italic
+              // notes; without this the extension only ever saw hardware EOL
+              // warnings and the license swaps went unflagged (Chris, 2026-07-21).
+              const SWAP_NOTE_RE = /(licenses are discontinued|Insight is retired|retired vMX|require an edition|50-device minimum|Ivanti Neurons for MDM)/i;
               for (const line of String(responseText || '').split('\n')) {
                 const m = line.match(/^\s*•\s*(.+?)\s*\(EOL\)\s*(?:→|->)\s*Replacements?:\s*(.+?)\s*$/);
-                if (m) warnings.push(`${m[1]} is End-of-Life → replaced by ${m[2]}`);
+                if (m) { warnings.push(`${m[1]} is End-of-Life → replaced by ${m[2]}`); continue; }
+                const t = line.trim().replace(/^_+|_+$/g, '').trim();
+                if (t && SWAP_NOTE_RE.test(t) && !warnings.includes(t)) warnings.push(t);
               }
               return warnings;
             }

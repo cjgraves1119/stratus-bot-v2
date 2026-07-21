@@ -48,7 +48,7 @@ const HANDOFF_INPUT = [
   { sku: 'LIC-ENT-3YR', qty: 20 },
 ];
 
-(() => {
+(async () => {
   // ── 1. The handoff's verified regression case (MX edition Advanced Security) ──
   console.log('applyEolSwaps: handoff verified case');
   const r = G.applyEolSwaps(HANDOFF_INPUT, 'Advanced Security');
@@ -144,6 +144,51 @@ const HANDOFF_INPUT = [
   const cleanText = 'Quote: https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=5,5 — thanks!';
   ok(G.swapEolUrlsInText(cleanText) === cleanText, 'clean URLs round-trip byte-identical');
   ok(G.swapEolUrlsInText(null) === '' && G.swapEolUrlsInText('no urls here') === 'no urls here', 'null/plain-text safe');
+
+  // ── 9. /api/quote: license retirements must be FLAGGED to the extension ──
+  // (Chris, live DEV 2026-07-21: URLs were swapped but eolWarnings only carried
+  // the MX84 hardware EOL — the SME/Insight/vMX license flags never reached the
+  // extension. They must ride eolWarnings alongside the hardware warnings.)
+  console.log('/api/quote: eolWarnings carries the license retirement flags');
+  await (async () => {
+    const here = __dirname;
+    let wsrc = fs.readFileSync(path.join(here, 'src/index.js'), 'utf8');
+    const wesc = p => path.join(here, p).replace(/\\/g, '\\\\');
+    wsrc = wsrc.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
+    wsrc = wsrc.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${wesc('src/data/prices.json')}');`);
+    wsrc = wsrc.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${wesc('src/data/auto-catalog.json')}');`);
+    wsrc = wsrc.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${wesc('src/data/specs.json')}');`);
+    wsrc = wsrc.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${wesc('src/data/accessories.json')}');`);
+    wsrc = wsrc.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${wesc('src/email-reply-voice-skill.json')}');`);
+    wsrc = wsrc.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
+    wsrc = wsrc.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
+    wsrc = wsrc.replace(/^export default /m, 'module.exports.__worker = ');
+    const wtmp = path.join(os.tmpdir(), `eol-swaps-worker-${process.pid}.cjs`);
+    fs.writeFileSync(wtmp, wsrc);
+    const worker = require(wtmp).__worker;
+    const store = new Map();
+    const skv = {
+      get: async (k, t) => { const v = store.get(k); if (v == null) return null; return t === 'json' || t === undefined ? (typeof v === 'string' ? JSON.parse(v) : v) : v; },
+      put: async (k, v) => { store.set(k, v); },
+      list: async () => ({ keys: [] }),
+      getWithMetadata: async () => ({ value: null, metadata: null }),
+    };
+    const db = { prepare: () => ({ bind: () => ({ run: async () => ({ success: true }), first: async () => null, all: async () => ({ results: [] }) }), run: async () => ({ success: true }), first: async () => null, all: async () => ({ results: [] }) }) };
+    const env = { GMAIL_ADDON_API_KEY: 'test-key', CONVERSATION_KV: skv, PRICES_KV: { get: async () => null, put: async () => {} }, ANALYTICS_DB: db, BOT_METRICS: { writeDataPoint: () => {} }, BOT_STORAGE: skv };
+    const ctx = { waitUntil: (p) => { try { if (p && p.catch) p.catch(() => {}); } catch (_) {} } };
+    const req = new Request('https://x.workers.dev/api/quote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': 'test-key' },
+      body: JSON.stringify({ text: 'renewal for\nLIC-VMX-S-3YR x1\nLIC-SME-3YR x8\nLIC-MI-M-3YR x1\nLIC-MX84-SEC-3YR x2\nLIC-ENT-3YR x20', personId: 'eol-flags-1' }),
+    });
+    const j = await (await worker.fetch(req, env, ctx)).json();
+    const w = (j.eolWarnings || []).join(' | ');
+    ok(/MX84 is End-of-Life/.test(w), `hardware EOL warning still present (got: ${w.slice(0, 120)})`);
+    ok(/licenses are discontinued/.test(w), 'SME retirement flag reaches eolWarnings');
+    ok(/Insight is retired/.test(w), 'Insight retirement + SDW upgrade flag reaches eolWarnings');
+    ok(/require an edition/.test(w), 'vMX edition flag reaches eolWarnings');
+    ok(/50-device minimum/.test(w), 'Ivanti 50-min flag reaches eolWarnings');
+  })();
 
   console.log('');
   console.log(fail === 0 ? `✅ ${pass}/${pass + fail} assertions passed` : `❌ ${fail} FAILED, ${pass} passed`);
