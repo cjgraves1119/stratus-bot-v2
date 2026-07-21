@@ -1182,7 +1182,17 @@ function callerEmailFromPersonId(personId) {
   return m ? normalizeCallerEmail(m[1]) : null;
 }
 
-async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, ownerId }) {
+async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, ownerId, existingDeal = false }) {
+  // ── Dedupe (2026-07-21): both call sites can fire for the same deal in one
+  // turn (create_deal_and_quote STEP 8 + a direct zoho_create_record), and a
+  // reused deal usually already carries an open follow-up Task. ──────────────
+  // (a) Same-turn memo — second call for the same dealId returns the first
+  // call's ids instead of POSTing a duplicate Task.
+  if (env && env.__FOLLOWUP_TASK_MEMO && env.__FOLLOWUP_TASK_MEMO[dealId]) {
+    const _memo = env.__FOLLOWUP_TASK_MEMO[dealId];
+    console.log(`[TASK-DEDUPE] Same-turn memo hit for deal ${dealId} — reusing Task ${_memo.taskId}`);
+    return { success: true, deduped: true, taskId: _memo.taskId, taskUrl: _memo.taskUrl, dueDate: _memo.dueDate, retried: false, http_classified: 'deduped' };
+  }
   const taskDueDate = new Date();
   let daysAdded = 0;
   while (daysAdded < 3) {
@@ -1190,6 +1200,30 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
   }
   const dueDateStr = taskDueDate.toISOString().split('T')[0];
+  // (b) Cross-turn check — ONLY when the caller signals the deal pre-existed
+  // (existingDeal:true): an open "Follow up -" Task on the deal means skip.
+  // FAIL-CLOSED on a query error: do NOT create (the task_create_failed
+  // plumbing at both call sites surfaces a visible add-manually notice).
+  if (existingDeal && dealId) {
+    try {
+      const _dq = `select id from Tasks where What_Id = '${coqlEscape(String(dealId))}' and Status in ('Not Started','In Progress','Deferred','Waiting for input') and Subject like 'Follow up -%' limit 1`;
+      const _dr = await zohoApiCall('POST', 'coql', env, { select_query: _dq });
+      const _hitId = _dr?.data?.[0]?.id;
+      if (_hitId) {
+        console.log(`[TASK-DEDUPE] Existing open follow-up Task ${_hitId} on deal ${dealId} — skipping create`);
+        return { success: true, deduped: true, taskId: _hitId, taskUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${_hitId}`, dueDate: dueDateStr, retried: false, http_classified: 'deduped' };
+      }
+      // COQL no-rows is HTTP 204 (zohoApiCall surfaces { error:'', status:204 })
+      // or an empty data array. Anything else without a hit is a query error.
+      const _noRows = (Array.isArray(_dr?.data) && _dr.data.length === 0) || _dr?.status === 204;
+      if (!_noRows) {
+        const _emsg = (_dr && (_dr.message || _dr.error)) || 'unexpected COQL response';
+        return { success: false, deduped: false, taskId: null, taskUrl: null, dueDate: dueDateStr, error: `followup_dedupe_check_failed: ${_emsg}`, retried: false, http_classified: 'transient' };
+      }
+    } catch (e) {
+      return { success: false, deduped: false, taskId: null, taskUrl: null, dueDate: dueDateStr, error: `followup_dedupe_check_failed: ${e && e.message}`, retried: false, http_classified: 'transient' };
+    }
+  }
   // ── R6 owner resolution (corp error_reports, 2026-07-15) ──────────────────
   // Every auto-created follow-up Task used to land on env.SYSTEM_OWNER_ID
   // ("IT Stratus" on corp) because callers never passed ownerId. Resolution
@@ -1320,6 +1354,16 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
       undoToken: null,
       userVisibleSummary: null
     });
+    // Same-turn dedupe memo (2026-07-21): a second call for this dealId in the
+    // same turn returns these ids instead of creating a duplicate Task.
+    if (env) {
+      env.__FOLLOWUP_TASK_MEMO = env.__FOLLOWUP_TASK_MEMO || {};
+      env.__FOLLOWUP_TASK_MEMO[dealId] = {
+        taskId: attempt.taskId,
+        taskUrl: `https://crm.zoho.com/crm/org647122552/tab/Tasks/${attempt.taskId}`,
+        dueDate: dueDateStr
+      };
+    }
     return {
       success: true,
       taskId: attempt.taskId,
@@ -12510,7 +12554,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             subjectLabel: typeof dealLabel === 'string' ? dealLabel : String(dealLabel),
             env,
             personId,
-            ownerId: (recordData.Owner && (recordData.Owner.id || recordData.Owner)) || null
+            ownerId: (recordData.Owner && (recordData.Owner.id || recordData.Owner)) || null,
+            existingDeal: false // deal was just created — no cross-turn task can exist
           });
           if (taskRes.success) {
             parsed._followup_task = {
@@ -15488,7 +15533,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             personId,
             // A new Deal already has its resolved Owner in memory. Reused Deals
             // intentionally fall through to their persisted Owner instead.
-            ownerId: existingDealId ? null : (dealData.Owner?.id || null)
+            ownerId: existingDealId ? null : (dealData.Owner?.id || null),
+            // Reused deal (STEP 5) usually already carries an open follow-up
+            // Task — enable the cross-turn dedupe check.
+            existingDeal: !!existingDealId
           });
           if (_taskRes.success) {
             results.steps.push(`Created follow-up Task due ${_taskRes.dueDate} (${_taskRes.taskId})${_taskRes.retried ? ' [after 1 retry]' : ''}`);

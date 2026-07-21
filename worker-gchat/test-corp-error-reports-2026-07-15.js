@@ -188,7 +188,7 @@ t('callerEmailFromPersonId: gw:/ext: emails extract, others null', () => {
 });
 t('createFollowUpTaskForDeal resolves user → deal owner → system (static evidence)', () => {
   const fnStart = rawSrc.indexOf('async function createFollowUpTaskForDeal');
-  const fnBody = rawSrc.slice(fnStart, fnStart + 4000);
+  const fnBody = rawSrc.slice(fnStart, fnStart + 8000); // widened 2026-07-21: dedupe preamble precedes owner resolution
   assert.ok(/requesting_user/.test(fnBody), 'requesting-user branch');
   assert.ok(/deal_owner/.test(fnBody), 'deal-owner branch');
   assert.ok(/system_fallback/.test(fnBody), 'system fallback branch');
@@ -200,7 +200,7 @@ t('createFollowUpTaskForDeal resolves user → deal owner → system (static evi
 });
 t('roster fallback ids are NOT accepted as the requesting user', () => {
   const fnStart = rawSrc.indexOf('async function createFollowUpTaskForDeal');
-  const fnBody = rawSrc.slice(fnStart, fnStart + 4000);
+  const fnBody = rawSrc.slice(fnStart, fnStart + 8000); // widened 2026-07-21: dedupe preamble precedes owner resolution
   assert.ok(/_source === 'd1' \|\| _octx\._source === 'seed'/.test(fnBody));
 });
 t('zoho_create_record default-Owner injection covers Tasks', () => {
