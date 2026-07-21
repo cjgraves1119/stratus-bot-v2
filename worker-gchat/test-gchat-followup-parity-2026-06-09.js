@@ -160,6 +160,7 @@ const MR44_QUOTE = [
     wsrc = wsrc.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${wesc('src/data/auto-catalog.json')}');`);
     wsrc = wsrc.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${wesc('src/data/specs.json')}');`);
     wsrc = wsrc.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${wesc('src/data/accessories.json')}');`);
+    wsrc = wsrc.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${wesc('src/email-reply-voice-skill.json')}');`);
     wsrc = wsrc.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
     wsrc = wsrc.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
     wsrc = wsrc.replace(/^export default /m, 'module.exports.__worker = ');

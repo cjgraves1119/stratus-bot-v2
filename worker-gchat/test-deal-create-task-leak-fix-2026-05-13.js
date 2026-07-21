@@ -30,7 +30,8 @@ console.log('\n=== Test 1: zoho_create_record(Deals) triggers Task POST ===\n');
 
 t('createFollowUpTaskForDeal helper is defined', () => {
   assert.ok(
-    /async function createFollowUpTaskForDeal\(\{ dealId, subjectLabel, env, personId, ownerId \}\)/.test(source),
+    // existingDeal param added 2026-07-21 (follow-up task dedupe)
+    /async function createFollowUpTaskForDeal\(\{ dealId, subjectLabel, env, personId, ownerId, existingDeal = false \}\)/.test(source),
     'createFollowUpTaskForDeal signature missing'
   );
 });
