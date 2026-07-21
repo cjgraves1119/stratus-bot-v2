@@ -8087,6 +8087,16 @@ function isDomainLike(str) {
   return /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(\.[a-z]{2,})?$/.test(bare) && !bare.includes(' ');
 }
 
+// Placeholder record names (2026-07-21): the model must never write literal
+// template text ("Company Name", "{Account} - MX", "tbd") into Zoho record
+// names. Sibling gate to isDomainLike — wired at create_deal_and_quote HARD
+// GATE #1, validateCrmWrite (Deals/Quotes/Accounts create), the DEAL-ENRICH
+// auto-create-Account path, and /api/detect-account response handling.
+const PLACEHOLDER_NAME_RE = /^(company|customer|account|client|business|organization)\s*_?\s*name\b|\bplaceholder\b|\blorem ipsum\b|^(unknown|tbd|n\/?a|none|-+)$|^(test|sample|example|fake)\s+(company|account|customer|client)\b|[{}]/i;
+function isPlaceholderName(s) {
+  return !s || typeof s !== 'string' || s.trim().length < 2 || PLACEHOLDER_NAME_RE.test(s.trim());
+}
+
 function normalizeDomain(d) {
   if (!d) return null;
   return d.trim().toLowerCase()
@@ -9015,6 +9025,11 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
           errors.push(`❌ Missing required field "${field}" for Deal creation.`);
         }
       }
+      // Placeholder-name gate (2026-07-21): literal template text must never
+      // become a Deal name ("Company Name - 3x MX75").
+      if (typeof data.Deal_Name === 'string' && isPlaceholderName(data.Deal_Name)) {
+        errors.push(`❌ Deal_Name "${data.Deal_Name}" is a placeholder, not a real name. Ask the user to confirm the actual customer company before creating this Deal.`);
+      }
       // Account_Name must be {id: "..."} — string form triggers a special signal
       // so the executor can auto-resolve by lookup rather than erroring.
       if (data.Account_Name && typeof data.Account_Name === 'string') {
@@ -9129,12 +9144,24 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
     }
   }
 
+  // Placeholder-name gate (2026-07-21): an Account must never be created with
+  // literal template text as its name ("Company Name", "{Account}").
+  if (module_name === 'Accounts' && isCreate
+      && typeof data.Account_Name === 'string' && isPlaceholderName(data.Account_Name)) {
+    errors.push(`❌ Account_Name "${data.Account_Name}" is a placeholder, not a real company name. Ask the user to confirm the actual customer company before creating this Account.`);
+  }
+
   if (module_name === 'Quotes' && isCreate) {
     const required = ['Subject', 'Deal_Name', 'Valid_Till'];
     for (const field of required) {
       if (!data[field]) {
         errors.push(`❌ Missing required field "${field}" for Quote creation.`);
       }
+    }
+    // Placeholder-name gate (2026-07-21): template text must never become a
+    // Quote Subject ("Company Name - 3x MX75").
+    if (typeof data.Subject === 'string' && isPlaceholderName(data.Subject)) {
+      errors.push(`❌ Quote Subject "${data.Subject}" is a placeholder, not a real name. Ask the user to confirm the actual customer company before creating this Quote.`);
     }
     // Server-side Valid_Till enforcement: if Claude passes a past date or invalid date,
     // override with the default. LLMs frequently miscalculate dates.
@@ -12205,6 +12232,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           } else if (recordData.Account_Name?.name && !recordData.Account_Name?.id) {
             acctName = recordData.Account_Name.name;
           }
+          if (acctName && isPlaceholderName(acctName)) {
+            // Placeholder-name gate (2026-07-21): never auto-create an Account
+            // from literal template text — block BEFORE the POST.
+            return {
+              validation_error: true,
+              action: 'create_blocked',
+              error: 'placeholder_account_name',
+              message: `Account_Name "${acctName}" is a placeholder, not a real company name. Never create records with placeholder names like "Company Name". Ask the user to confirm the actual customer company, then retry with the real name.`
+            };
+          }
           if (acctName) {
             console.log(`[DEAL-ENRICH] Resolving Account_Name "${acctName}"`);
             try {
@@ -14134,6 +14171,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               needs_account_info: true,
               error: `account_name "${account_name}" looks like a domain, not a company name`,
               instruction: `Do NOT create an Account named "${account_name}". Ask the user for the real company name (e.g., "Skty Trading LLC" not "sktydev.com"), along with Billing Street, City, State, Zip, Country, Contact First+Last Name, and Contact Email. Then retry with account_name = the real company name.`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
+          // Placeholder-name gate (2026-07-21): literal template text must never
+          // become a Zoho Account/Deal name ("Company Name - 3x MX75").
+          if (!existingDealId && (isPlaceholderName(account_name) || (deal_name && isPlaceholderName(deal_name)))) {
+            const _phVal = isPlaceholderName(account_name) ? account_name : deal_name;
+            return {
+              success: false,
+              needs_account_info: true,
+              error: `account_name/deal_name "${_phVal}" is a placeholder, not a real company name`,
+              instruction: 'STOP. Never create records with placeholder names like "Company Name". No Account was resolved for this email — the sender may not be a customer at all. Ask the user to confirm the actual customer company (and billing/contact info if new); only retry once they name a real company.',
               wall_ms: Date.now() - _startMs
             };
           }
@@ -30304,7 +30353,9 @@ Return ONLY a JSON object (no markdown, no explanation):
                 if (jsonMatch) {
                   try {
                     const parsed = JSON.parse(jsonMatch[0]);
-                    if (parsed.name) accountSuggestion.name = parsed.name;
+                    // Placeholder-name gate (2026-07-21): never surface literal
+                    // template text ("Company Name") as a detected account.
+                    if (parsed.name && !isPlaceholderName(parsed.name)) accountSuggestion.name = parsed.name;
                     if (parsed.street && !accountSuggestion.street) accountSuggestion.street = parsed.street;
                     if (parsed.city && !accountSuggestion.city) accountSuggestion.city = parsed.city;
                     if (parsed.state && !accountSuggestion.state) accountSuggestion.state = parsed.state;

@@ -225,7 +225,9 @@ t('month-end window respects February + leap years', () => {
   assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2028, 1, 22))).needsConfirmation, false); // 2028-02-22 (leap): 7 days left
 });
 await ta('validateCrmWrite corrects a past Closing_Date to +14d (or asks in the window)', async () => {
-  const data = { Deal_Name: 'T', Stage: 'Qualification', Lead_Source: 'Stratus Referal', Owner: { id: '1' }, Closing_Date: '2020-01-01', Account_Name: { id: '2' } };
+  // Deal_Name must be a realistic name — the 2026-07-21 placeholder gate
+  // rejects sub-2-char / template names on create.
+  const data = { Deal_Name: 'Acme Corp - 3x MX75', Stage: 'Qualification', Lead_Source: 'Stratus Referal', Owner: { id: '1' }, Closing_Date: '2020-01-01', Account_Name: { id: '2' } };
   const res = await validateCrmWrite('Deals', data, true, null);
   const dd = defaultQuoteDealDate();
   if (dd.needsConfirmation) {
@@ -236,7 +238,7 @@ await ta('validateCrmWrite corrects a past Closing_Date to +14d (or asks in the 
   }
 });
 await ta('validateCrmWrite corrects a past Valid_Till to +14d (or asks in the window)', async () => {
-  const data = { Subject: 'T', Deal_Name: { id: '1' }, Valid_Till: '2020-01-01' };
+  const data = { Subject: 'Acme Corp - 3x MX75', Deal_Name: { id: '1' }, Valid_Till: '2020-01-01' };
   const res = await validateCrmWrite('Quotes', data, true, null);
   const dd = defaultQuoteDealDate();
   if (dd.needsConfirmation) {
