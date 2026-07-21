@@ -48,3 +48,54 @@ echo "   source=$SRC_V installed=${DEV_V:-missing}"
 [ "$SRC_V" != "${DEV_V:-}" ] && echo "   ^ STALE — run chrome-extension/build-dev.sh then reload 'Stratus AI (DEV)'"
 
 exit 0
+# ---- append to scripts/drift-check.sh (S6-S8 + S4 live-check, council-approved 2026-07-20) ----
+
+echo "== 6. corp PR audit (merged-into-branch trap — the #21/#22 failure) =="
+if command -v gh >/dev/null 2>&1; then
+  PRS="$(gh pr list -R StratusInfoSystems/stratus-bot-v2 --state all --limit 20 \
+        --json number,state,baseRefName,headRefName \
+        --template '{{range .}}{{.number}} {{.state}} base={{.baseRefName}} head={{.headRefName}}{{"\n"}}{{end}}' 2>/dev/null)"
+  if [ -n "$PRS" ]; then
+    echo "$PRS" | sed 's/^/   /'
+    echo "$PRS" | awk '$2=="MERGED" && $3!="base=main" {print "   ^ SCREAM: PR #"$1" MERGED into a BRANCH, not main — nothing reached corp prod"}'
+    echo "$PRS" | awk '$2=="OPEN" && $3!="base=main" {print "   ^ WARN: open PR #"$1" does not target main"}'
+  else
+    echo "   (gh query failed — check gh auth)"
+  fi
+else
+  echo "   (gh not installed — cannot audit corp PR state)"
+fi
+
+echo "== 7. corp PR-branch ancestry (WORKFLOW rule 4, mechanized) =="
+for B in $(git branch -r --list 'corp/fix/*' 'corp/feat/*' | tr -d ' '); do
+  ANC="ok"
+  git merge-base --is-ancestor corp/main "$B" 2>/dev/null || ANC="NOT-corp-based"
+  FOREIGN=""
+  git merge-base --is-ancestor origin/main "$B" 2>/dev/null && FOREIGN=" +CONTAINS-personal-main"
+  if [ "$ANC" != "ok" ] || [ -n "$FOREIGN" ]; then
+    echo "   SCREAM: $B  [$ANC$FOREIGN] — rebuild via worktree-split off corp/main before Amir merges"
+  fi
+done
+echo "   (silence above = all corp branches clean)"
+
+echo "== 8. extension version monotonicity vs corp Web Store line =="
+CORP_V="$(git show corp/main:chrome-extension/manifest.json 2>/dev/null | grep -o '"version"[^,]*' | grep -o '[0-9.]*' | head -1)"
+LOCAL_V="$(grep -o '"version"[^,]*' chrome-extension/manifest.json | grep -o '[0-9.]*' | head -1)"
+echo "   corp/main=$CORP_V  local=$LOCAL_V"
+if [ -n "$CORP_V" ] && [ -n "$LOCAL_V" ] && [ "$(printf '%s\n%s\n' "$CORP_V" "$LOCAL_V" | sort -V | tail -1)" = "$CORP_V" ] && [ "$CORP_V" != "$LOCAL_V" ]; then
+  echo "   ^ SCREAM: local manifest sorts BELOW corp Web Store $CORP_V — a corp port from this tree would DOWNGRADE (Web Store rejects); hand-bump above $CORP_V"
+fi
+
+echo "== 9. live worker vs deploys.log (out-of-band/bundle deploy detector) =="
+if [ -f ~/.stratus-personal-credentials ] && [ -f deploys.log ]; then
+  # shellcheck disable=SC1090
+  source ~/.stratus-personal-credentials 2>/dev/null
+  LIVE_ID="$(cd worker-gchat 2>/dev/null && npx wrangler deployments list 2>/dev/null | grep -m1 -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | cut -c1-8)"
+  LOGGED_ID="$(tail -1 deploys.log | grep -oE 'version=[0-9a-f-]+' | cut -d= -f2 | cut -c1-8)"
+  echo "   live=$LIVE_ID  last-logged=$LOGGED_ID"
+  if [ -n "$LIVE_ID" ] && [ -n "$LOGGED_ID" ] && [ "$LIVE_ID" != "$LOGGED_ID" ]; then
+    echo "   ^ SCREAM: live deployment was NOT made via deploy-dev.sh (out-of-band wrangler or bundle content-deploy) — reconcile source before ANY deploy or you will revert live code"
+  fi
+else
+  echo "   (skipped: needs ~/.stratus-personal-credentials + deploys.log)"
+fi
