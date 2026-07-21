@@ -12138,8 +12138,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       case 'zoho_create_record': {
-        const { module_name, data } = toolInput;
+        const { module_name } = toolInput;
+        let data = toolInput.data;
+        // 2026-07-16 (J.H. Larson postmortem): same string-payload guard as
+        // zoho_update_record — in strict (module) code, `recordData.Owner = ...`
+        // on a string primitive throws.
+        if (typeof data === 'string') {
+          try { data = JSON.parse(data); } catch (_) {}
+        }
         const recordData = Array.isArray(data) ? data[0] : data;
+        if (!recordData || typeof recordData !== 'object') {
+          return {
+            validation_error: true,
+            action: 'create_blocked',
+            message: `zoho_create_record requires \`data\` to be a JSON OBJECT of the record fields (got ${recordData === null ? 'null' : typeof recordData}). Re-issue the call as {"module_name":"${module_name}","data":{"Field":"value"}}.`
+          };
+        }
         // Default Owner injection for Accounts/Deals/Tasks — bot acts on behalf of
         // the human user. Tasks added 2026-07-15 (R6): an agent-created Task with
         // no Owner would otherwise attribute to the API-token user in Zoho.
@@ -12490,7 +12504,22 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       case 'zoho_update_record': {
-        const { module_name, record_id, data } = toolInput;
+        const { module_name, record_id } = toolInput;
+        let data = toolInput.data;
+        // 2026-07-16 (J.H. Larson postmortem): a schema-less call (tool invoked
+        // while outside the declared subset) can pass `data` as a JSON string —
+        // it then crashed the FIX-C guard's `f in data` with a raw TypeError.
+        // Parse if possible, otherwise reject with an instructive error.
+        if (typeof data === 'string') {
+          try { data = JSON.parse(data); } catch (_) {}
+        }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          return {
+            validation_error: true,
+            action: 'update_blocked',
+            message: `zoho_update_record requires \`data\` to be a JSON OBJECT of the fields to update (got ${Array.isArray(data) ? 'array' : data === null ? 'null' : typeof data}). Re-issue the call as {"module_name":"${module_name}","record_id":"${record_id}","data":{"Field":"value"}}.`
+          };
+        }
         // 2026-05-19 Fix E: field-name aliases at top of update path (Billing_Zip -> Billing_Code, etc.)
         applyFieldAliases(data, `zoho_update_record(${module_name})`);
         // 2026-05-19 Fix E: normalize State/Country to 2-letter codes on update path
@@ -18338,19 +18367,54 @@ const TOOL_SUBSET_CLASSES = Object.freeze([
  *   7. Search / find / list / show / pull up → crm_read (0.8)
  *   8. Otherwise → general (0.5, below the 0.7 confidence floor)
  */
+// 2026-07-16 (J.H. Larson postmortem): classify the USER'S words only. /api/chat
+// prepends [Email context:]/[Email body:<=4KB>]/[CRM context:]/[Session:] blocks and
+// appends [Pre-resolved products:]; email-thread prose inside those blocks hijacked
+// the class to `email` (a subset with no zoho_update_record) on CRM-write requests
+// made while an email was open. The model still sees the full enriched message —
+// this strip affects intent classification only. [Active Zoho page:] is deliberately
+// KEPT (load-bearing: it correctly biases toward crm_write on Zoho record pages).
+// Known ceiling (council-reviewed): lastIndexOf over-strips when the USER'S text
+// contains "]\n\n" — degrades toward `general` (which still has the write tools),
+// never toward `email`. Long-term fix: pass raw chatText to the classify call site.
+function stripInjectedClassifierContext(text) {
+  let s = String(text);
+  s = s.replace(/\n\s*\[Pre-resolved products:[\s\S]*$/, '');
+  const bodyStart = s.indexOf('[Email body:');
+  if (bodyStart !== -1) {
+    const end = s.lastIndexOf(']\n\n');
+    if (end > bodyStart) {
+      s = s.slice(0, bodyStart) + s.slice(end + 3);
+    }
+  }
+  s = s.replace(/\[Email context:[^\n]*\]/g, ' ');
+  s = s.replace(/^\s*\[(?:CRM context|Session):[^\n]*\]\s*/gm, '');
+  return s;
+}
+
 function classifyCrmIntent(text, ctx = {}) {
   if (typeof text !== 'string' || !text.trim()) {
     return { class: 'general', confidence: 0.5 };
   }
-  const t = text.toLowerCase();
 
   // 00. Drafting-banner override (2026-07-09, corp error_reports #4): the extension
   // marks draft asks deterministically. Without this, words inside the injected
   // thread block (contract / esign / "create a quote") hijack the class and strip
   // the gmail tools — the exact follow-up failure from the incident.
+  // Runs on the RAW text (the banner is itself an injected marker).
   if (text.includes('[User asked to draft a reply')) {
     return { class: 'email', confidence: 0.98 };
   }
+
+  const _userText = stripInjectedClassifierContext(text);
+
+  // 0a. Ecomm->Zoho extension button (2026-07-16): deterministic canned text,
+  // ALWAYS a CRM write — a known workflow should never ride the keyword rules.
+  if (/^create a zoho crm quote from this stratus quote:/i.test(_userText.trim())) {
+    return { class: 'crm_write', confidence: 0.98 };
+  }
+
+  const t = _userText.toLowerCase();
 
   // 0. Quote/Deal creation guard (2026-05-15 Codex defense-in-depth):
   // If user is creating/building/making a quote/deal/PO/order, route to crm_write
@@ -18359,7 +18423,13 @@ function classifyCrmIntent(text, ctx = {}) {
   // stripped because @cisco.com was in context.
   // quote/order followed by link|url is an ECOMM ask ("create a quote link") —
   // excluded here so rule 1 below can classify it (adversarial review 2026-07-15).
-  if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote(?!\s*(?:link|url))|deal|po|order(?!\s*(?:link|url))|sales\s*order)\b/.test(t)) {
+  // 2026-07-16: second alternation admits "zoho"/"crm" qualifiers ("create a
+  // Zoho CRM quote") on create-verbs ONLY — 'new'/'add' stay un-broadened so
+  // email asks like "send an email with the new zoho quote" keep routing to email.
+  // The qualifier is REQUIRED in the second alternation so it cannot re-admit
+  // the unqualified "quote link/url" ecomm phrasings the lookahead excludes.
+  if (/\b(create|build|generate|make|new|add)\s+(a\s+|the\s+|new\s+)?(quote(?!\s*(?:link|url))|deal|po|order(?!\s*(?:link|url))|sales\s*order)\b/.test(t)
+      || /\b(create|build|generate|make)\s+(a\s+|the\s+|new\s+)?(?:zoho\s+crm\s+|zoho\s+|crm\s+)(quote|deal|po|order|sales\s*order)\b/.test(t)) {
     return { class: 'crm_write', confidence: 0.95 };
   }
 
