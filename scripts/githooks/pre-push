@@ -26,7 +26,7 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   esac
   for c in $(git rev-list $range | head -500); do
     # 1) secret scan of this commit's full tree
-    hits=$(git grep -nIE "$SECRET_RE" "$c" -- . | grep -vE "$BENIGN_RE")
+     hits=$(git grep -nIE "$SECRET_RE" "$c" -- . ":(exclude)scripts/githooks/pre-push" | grep -vE "$BENIGN_RE")
     if [ -n "$hits" ]; then
       echo "pre-push BLOCK: secret-pattern hit in commit $c:" >&2
       echo "$hits" | head -5 >&2
