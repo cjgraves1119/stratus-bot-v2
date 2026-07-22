@@ -22812,6 +22812,22 @@ function anthropicToolsToOpenAiFormat(anthropicTools) {
 //   - Flat: { response, tool_calls: [{ name, arguments }] }  (Llama, Hermes)
 //   - Embedded in text: response text contains JSON tool call (fallback)
 // Returns { text, calls: [{ id, name, arguments }] } — IDs preserved from the model when available.
+// Strip reasoning-tag artifacts from CF model text. Kimi K2.7-code with
+// thinking disabled (chat_template_kwargs:{thinking:false}) emits a dangling
+// leading "</think>" on multi-turn continuations (observed 2026-07-22,
+// benchmark task_01); reasoning models that inline <think> blocks in content
+// (instead of the reasoning_content channel) leak raw reasoning to users.
+// Paired blocks go first, then dangling close/open artifacts — an unclosed
+// <think> tail (max_tokens truncation) is dropped rather than shown.
+function stripCfThinkArtifacts(text) {
+  if (!text || typeof text !== 'string' || text.indexOf('think>') === -1) return text;
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/g, '')
+    .replace(/^\s*<\/think>\s*/, '')
+    .replace(/<think>[\s\S]*$/, '')
+    .trim();
+}
+
 function extractCfResponse(cfResponse) {
   const parseArgs = (a) => {
     if (typeof a === 'object' && a !== null) return a;
@@ -22832,11 +22848,11 @@ function extractCfResponse(cfResponse) {
         }
       }
     }
-    return { text: msg.content || '', calls };
+    return { text: stripCfThinkArtifacts(msg.content || ''), calls };
   }
 
   // Variant 2/3: top-level tool_calls (Llama, Hermes, Mistral)
-  const text = cfResponse.response || '';
+  const text = stripCfThinkArtifacts(cfResponse.response || '');
   const calls = [];
   if (Array.isArray(cfResponse.tool_calls) && cfResponse.tool_calls.length > 0) {
     for (const tc of cfResponse.tool_calls) {
