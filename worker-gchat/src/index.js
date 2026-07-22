@@ -1236,7 +1236,10 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
   // plumbing at both call sites surfaces a visible add-manually notice).
   if (existingDeal && dealId) {
     try {
-      const _dq = `select id from Tasks where What_Id = '${coqlEscape(String(dealId))}' and Status in ('Not Started','In Progress','Deferred','Waiting for input') and Subject like 'Follow up -%' limit 1`;
+      // Status list matches the org's actual Tasks picklist (Not Started /
+      // In Progress / Completed) — nonexistent values in a COQL `in` list
+      // risk an INVALID_QUERY error, which would fail-close every create.
+      const _dq = `select id from Tasks where What_Id = '${coqlEscape(String(dealId))}' and Status in ('Not Started','In Progress') and Subject like 'Follow up -%' limit 1`;
       const _dr = await zohoApiCall('POST', 'coql', env, { select_query: _dq });
       const _hitId = _dr?.data?.[0]?.id;
       if (_hitId) {
@@ -14393,9 +14396,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
           // Placeholder-name gate (2026-07-21): literal template text must never
-          // become a Zoho Account/Deal name ("Company Name - 3x MX75").
-          if (!existingDealId && (isPlaceholderName(account_name) || (deal_name && isPlaceholderName(deal_name)))) {
-            const _phVal = isPlaceholderName(account_name) ? account_name : deal_name;
+          // become a Zoho Account/Deal name ("Company Name - 3x MX75"). The
+          // deal_name check is NOT gated on !existingDealId — a placeholder
+          // deal_name must be rejected on existing-deal attach too (council
+          // review 2026-07-21).
+          if ((!existingDealId && isPlaceholderName(account_name)) || (deal_name && isPlaceholderName(deal_name))) {
+            const _phVal = (!existingDealId && isPlaceholderName(account_name)) ? account_name : deal_name;
             return {
               success: false,
               needs_account_info: true,
@@ -15872,6 +15878,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         const { quote_id, new_subject } = toolInput;
         if (!quote_id) {
           return { success: false, error: 'quote_id is required' };
+        }
+        // Placeholder-name gate (council review 2026-07-21): never rename a
+        // cloned quote to literal template text ("Company Name - Renewal").
+        if (new_subject && isPlaceholderName(new_subject)) {
+          return { success: false, error: `new_subject "${new_subject}" is a placeholder, not a real quote subject. Ask the user for the actual subject, or omit new_subject to keep Zoho's default clone subject.` };
         }
         const cloneStart = Date.now();
         try {
@@ -27317,6 +27328,14 @@ CRITICAL URL RULES:
             if (!newAcctName) {
               return new Response(JSON.stringify({ error: 'name required' }), { status: 400, headers: jsonHeaders });
             }
+            // Placeholder-name gate (council review 2026-07-21): literal template
+            // text must never become a Zoho Account name via this endpoint either.
+            if (isPlaceholderName(newAcctName)) {
+              return new Response(JSON.stringify({
+                error: `name "${newAcctName}" is a placeholder, not a real company name`,
+                instruction: 'Do NOT create an Account with placeholder text like "Company Name". Ask the user for the actual customer company name, then retry with that name.'
+              }), { status: 400, headers: jsonHeaders });
+            }
             // 2026-05-19 F1 fix (OPTK postmortem): instrument with crm_operations logging.
             const _acctCreateStart = Date.now();
             const _acctCallerEmail = (env && env.__CALLER_EMAIL) || null;
@@ -32126,11 +32145,18 @@ Return ONLY a JSON object (no markdown, no explanation):
   // 15 minutes of wall-clock time — no 30s ctx.waitUntil limit.
   // The webhook handler produces a message with the work payload; this
   // consumer picks it up and runs the full agentic CRM loop.
-  async queue(batch, env) {
-    if (env && env.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = env.ANTHROPIC_GATEWAY_URL; // 1:1 corp port: route Claude through the deploy's gateway
+  async queue(batch, envBase) {
+    if (envBase && envBase.ANTHROPIC_GATEWAY_URL) ANTHROPIC_API_URL = envBase.ANTHROPIC_GATEWAY_URL; // 1:1 corp port: route Claude through the deploy's gateway
     for (const msg of batch.messages) {
       const queueStart = Date.now();
       const { text, personId, spaceName, threadName, imageData } = msg.body;
+      // Per-message env scoping (mirror of the fetch-handler idiom): the
+      // platform bindings object is shared across messages in this isolate,
+      // so per-invocation keys (__CALLER_EMAIL, __FOLLOWUP_TASK_MEMO) must
+      // land on a prototype-scoped wrapper, never the shared object —
+      // otherwise the follow-up-task memo persists isolate-globally across
+      // queue messages (council review 2026-07-21).
+      const env = callerScopedEnv(envBase, callerEmailFromPersonId(personId));
       console.log(`[GCHAT-QUEUE] Processing CRM work for: "${(text || '').substring(0, 80)}..." spaceName="${spaceName}"`);
 
       if (!spaceName) {

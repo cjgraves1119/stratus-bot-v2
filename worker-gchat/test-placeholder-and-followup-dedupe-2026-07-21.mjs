@@ -91,5 +91,56 @@ t('cross-turn: COQL error fails CLOSED (no create, followup_dedupe_check_failed)
   assert.match(failClosed.error, /followup_dedupe_check_failed/);
 });
 
+// ── 3. Council-review hardening (2026-07-21) ─────────────────────────────────
+// 3a. Placeholder deal_name must be rejected on existing-deal attach too:
+// the deal_name leg of the create_deal_and_quote gate is NOT conditioned on
+// !existingDealId (source-shape lock on the exact gate condition).
+t('gate: placeholder deal_name rejected even with existingDealId (source lock)', () => {
+  assert.ok(
+    SRC.includes('if ((!existingDealId && isPlaceholderName(account_name)) || (deal_name && isPlaceholderName(deal_name))) {'),
+    'create_deal_and_quote placeholder gate must not condition the deal_name check on !existingDealId'
+  );
+});
+
+// 3d. Cross-turn dedupe COQL check fails CLOSED on Zoho JSON error shapes.
+async function buildAndRun(dealId) {
+  const fn = new Function(...Object.keys(stubs), `${fnSrc}; return createFollowUpTaskForDeal;`)(...Object.values(stubs));
+  return fn({ dealId, subjectLabel: 'Acme', env: { SYSTEM_OWNER_ID: 'SYS-1' }, personId: null, ownerId: 'O-1', existingDeal: true });
+}
+let posts3 = 0;
+stubs.zohoApiCall = async (method, path) => {
+  if (path === 'Tasks') { posts3++; return { data: [{ status: 'success', details: { id: 'TASK-9' } }] }; }
+  return { code: 'INVALID_QUERY', details: {}, message: 'unable to process your request', status: 'error' };
+};
+const zohoErrShape = await buildAndRun('D-4');
+t('cross-turn: Zoho JSON error shape (.code / status:"error") fails CLOSED, no create', () => {
+  assert.strictEqual(zohoErrShape.success, false);
+  assert.strictEqual(zohoErrShape.deduped, false);
+  assert.match(zohoErrShape.error, /followup_dedupe_check_failed/);
+  assert.strictEqual(posts3, 0, 'no Tasks POST after failed dedupe check');
+});
+stubs.zohoApiCall = async (method, path) => {
+  if (path === 'Tasks') { posts3++; return { data: [{ status: 'success', details: { id: 'TASK-9' } }] }; }
+  return { error: 'HTTP 400: Bad Request', status: 400 };
+};
+const httpErrShape = await buildAndRun('D-5');
+t('cross-turn: non-JSON HTTP error (numeric status >= 400) fails CLOSED, no create', () => {
+  assert.strictEqual(httpErrShape.success, false);
+  assert.match(httpErrShape.error, /followup_dedupe_check_failed/);
+  assert.strictEqual(posts3, 0, 'no Tasks POST after failed dedupe check');
+});
+stubs.zohoApiCall = async (method, path) => {
+  if (path === 'Tasks') { posts3++; return { data: [{ status: 'success', details: { id: 'TASK-9' } }] }; }
+  return { error: '', status: 204 }; // COQL no-rows
+};
+const noRows204 = await buildAndRun('D-6');
+t('cross-turn: COQL no-rows ({error:"",status:204}) still falls through to CREATE', () => {
+  assert.strictEqual(noRows204.success, true);
+  assert.strictEqual(noRows204.taskId, 'TASK-9');
+  assert.ok(!noRows204.deduped, '204 no-rows must not report deduped');
+  assert.strictEqual(posts3, 1, 'exactly one Tasks POST');
+});
+stubs.zohoApiCall = savedZoho;
+
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES'} — ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
