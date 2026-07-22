@@ -1633,12 +1633,20 @@ function getReasoningControl(modelId, requestedPolicy = REASONING_POLICY_DISABLE
     };
   }
 
-  if (/kimi-k2\.6|kimi/.test(id)) {
+  // Kimi (moonshotai) reasons by DEFAULT (reasoning_content in every reply).
+  // Empirically verified 2026-07-22 on @cf/moonshotai/kimi-k2.7-code AND
+  // kimi-k2.6: chat_template_kwargs:{thinking:false} (plain boolean) zeroes
+  // reasoning_content (k2.6: 1218→240 completion tokens, 17.8s→3.8s).
+  // reasoning_effort:'none' also works. The traps: the nested
+  // chat_template_kwargs:{thinking:{type:'disabled'}} this branch used to
+  // send is silently IGNORED (still reasons), as are top-level
+  // enable_thinking:false and reasoning_effort low/high.
+  if (/kimi|moonshot/.test(id)) {
     return {
       reasoningPolicy: REASONING_POLICY_DISABLED,
       reasoningDisableSupported: true,
-      requestOptions: { chat_template_kwargs: { thinking: { type: 'disabled' } } },
-      reasoningControl: 'cf_chat_template_thinking_disabled'
+      requestOptions: { chat_template_kwargs: { thinking: false } },
+      reasoningControl: 'cf_chat_template_thinking_false'
     };
   }
 
