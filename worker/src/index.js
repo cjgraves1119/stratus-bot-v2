@@ -3121,6 +3121,15 @@ function validateSku(baseSku) {
     return eol ? { valid: true, eol: true } : { valid: true };
   }
   if (isEol(upper)) return { valid: true, eol: true };
+  // Order-form hardware tokens (-HW / -HW-NA), e.g. pasted back from our own
+  // ecomm URLs (MS130-24P-HW): the catalog lists bare model names, so
+  // validate on the stripped base — mirrors the getPrice() fallback. Without
+  // this, echoed URLs flagged their own hardware as "not a recognized model"
+  // (Chris, 2026-07-21).
+  const noHw = upper.replace(/-HW(-NA)?$/, '');
+  if (noHw !== upper && (VALID_SKUS.has(noHw) || isEol(noHw))) {
+    return isEol(noHw) ? { valid: true, eol: true } : { valid: true };
+  }
   if (/^MA-/.test(upper)) return { valid: true };
   const family = detectFamily(upper);
   if (family && catalog[family]) {
@@ -5350,7 +5359,9 @@ function buildQuoteFromV3(v3, rawText) {
 }
 
 function parseExplicitDirectLicenseListBeforeClassifier(rawText) {
-  const upper = String(rawText || '').toUpperCase();
+  // LIC- tokens INSIDE a pasted URL are not a typed license list — URL pastes
+  // carry hardware too, and this parser drops it. (Chris, 2026-07-21.)
+  const upper = String(rawText || '').toUpperCase().replace(/HTTPS?:\/\/\S+/g, ' ');
   const explicitLicTerms = upper.match(/\bLIC-[A-Z0-9-]+-[135]YR?\b/g) || [];
   if (new Set(explicitLicTerms).size < 2) return null;
   try {

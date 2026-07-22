@@ -368,7 +368,9 @@ function buildQuoteFromV3(v3, rawText) {
 }
 
 function parseExplicitDirectLicenseListBeforeClassifier(rawText) {
-  const upper = String(rawText || '').toUpperCase();
+  // LIC- tokens INSIDE a pasted URL are not a typed license list — the URL
+  // echoback path owns those (it preserves hardware; this parser drops it).
+  const upper = String(rawText || '').toUpperCase().replace(/HTTPS?:\/\/\S+/g, ' ');
   const explicitLicTerms = upper.match(/\bLIC-[A-Z0-9-]+-[135]YR?\b/g) || [];
   if (new Set(explicitLicTerms).size < 2) return null;
   try {
@@ -3362,6 +3364,15 @@ function validateSku(baseSku) {
     return eol ? { valid: true, eol: true } : { valid: true };
   }
   if (isEol(upper)) return { valid: true, eol: true };
+  // Order-form hardware tokens (-HW / -HW-NA), e.g. pasted back from our own
+  // ecomm URLs (MS130-24P-HW): the catalog lists bare model names, so
+  // validate on the stripped base — mirrors the getPrice() fallback. Without
+  // this, echoed URLs flagged their own hardware as "not a recognized model"
+  // (Chris, 2026-07-21).
+  const noHw = upper.replace(/-HW(-NA)?$/, '');
+  if (noHw !== upper && (VALID_SKUS.has(noHw) || isEol(noHw))) {
+    return isEol(noHw) ? { valid: true, eol: true } : { valid: true };
+  }
   if (/^MA-/.test(upper)) return { valid: true };
   const family = detectFamily(upper);
   if (family && catalog[family]) {
@@ -26583,6 +26594,63 @@ CRITICAL URL RULES:
                 handlerType: 'pricing',
               }, pricingReply);
               break;
+            }
+
+            // ────────────────────────────────────────────
+            // STEP 3.9: Stratus URL echoback (deterministic)
+            // A pasted /order/ URL IS the item list — re-render EVERY item
+            // (hardware + licenses, EOL swaps applied, -HW forms recognized),
+            // expanding term-bearing licenses across 1/3/5 when the whole set
+            // rewrites cleanly (catalog-validated); otherwise echo as-is.
+            // Without this branch, ≥2 LIC- tokens INSIDE the URL were hijacked
+            // by the explicit-license-list parser below: hardware silently
+            // dropped and extra licenses lost in the reparse (Chris,
+            // 2026-07-21: MX85-HW/MS130-*-HW + LIC-MS130-CMPT-3Y vanished).
+            // Fires only when the message is essentially just the URL.
+            // ────────────────────────────────────────────
+            {
+              const _urlM = text.match(/https:\/\/stratusinfosystems\.com\/order\/\?[^\s)>\]"'<]+/i);
+              const _echoResidue = _urlM
+                ? text.replace(_urlM[0], ' ').toUpperCase()
+                    .replace(/https?:\/\/\S+/gi, ' ')
+                    .replace(/\b(QUOTE|QUOTING|THIS|THESE|IT|PLEASE|CAN|YOU|ECOMM|URL|LINK|LINKS|ORDER|CART|RENDER|RERENDER|RE|CHECK|VALIDATE|VERIFY|FOR|ME|A|AN|THE|AND)\b/g, ' ')
+                    .replace(/[^A-Z0-9]+/g, '')
+                : 'skip';
+              if (_urlM && _echoResidue === '') {
+                try {
+                  const _u = new URL(_urlM[0]);
+                  const _rawSkus = (_u.searchParams.get('item') || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+                  const _rawQty = (_u.searchParams.get('qty') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+                  const _qtys = _rawQty.length === _rawSkus.length ? _rawQty : _rawSkus.map(() => 1);
+                  const _sw = applyEolSwaps(_rawSkus.map((s, i) => ({ sku: s, qty: _qtys[i] })));
+                  const _items = _sw.lines.filter(l => l.valid !== false).map(l => ({ sku: String(l.sku), qty: Number(l.qty) || 1 }));
+                  const _badHw = _items.filter(i => !i.sku.startsWith('LIC-') && !validateSku(i.sku).valid);
+                  if (_items.length > 0 && _badHw.length === 0) {
+                    const _TERM_RE = /-([135])(YR|Y-S\d+|Y)$/;
+                    const _lics = _items.filter(i => i.sku.startsWith('LIC-') && _TERM_RE.test(i.sku));
+                    const _canExpand = _lics.length > 0
+                      && [1, 3, 5].every(t => _lics.every(({ sku }) => !!directLicenseSkuForTerm(sku, t)));
+                    const _buckets = _canExpand
+                      ? [1, 3, 5].map(t => ({
+                          label: `${t}-Year`,
+                          items: _items.map(i => _lics.includes(i) ? { sku: directLicenseSkuForTerm(i.sku, t), qty: i.qty } : i),
+                        }))
+                      : [{ label: 'Quote', items: _items }];
+                    const _urls = _buckets.map(b => ({ label: b.label, url: buildStratusUrl(b.items) }));
+                    const _noteTail = _sw.notes.length ? '\n\n' + _sw.notes.map(n => `_${n}_`).join('\n') : '';
+                    const _msgTxt = _urls.map(u => `**${u.label} Co-Term:** ${u.url}`).join('\n\n') + _noteTail;
+                    apiResult = await finalizeQuoteResponse({
+                      quoteUrls: _urls,
+                      eolWarnings: extractEolWarningsFromMessage(_msgTxt),
+                      parsedItems: _items,
+                      handlerType: 'deterministic',
+                    }, _msgTxt);
+                    break;
+                  }
+                  // Invalid hardware token(s) → fall through so the normal
+                  // validation path renders its "did you mean" suggestions.
+                } catch (_) { /* malformed URL → normal parse path */ }
+              }
             }
 
             // ────────────────────────────────────────────
