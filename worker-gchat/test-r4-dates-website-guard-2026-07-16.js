@@ -57,20 +57,27 @@ const dealData = (over = {}) => ({
 });
 
 (async () => {
-  console.log('defaultQuoteDealDate — R4 policy math');
-  await t('mid-month: +14 days, no confirmation (2026-07-16 → 2026-07-30)', () => {
-    const d = defaultQuoteDealDate(new Date('2026-07-16T12:00:00Z'));
-    assert.strictEqual(d.date, '2026-07-30');
+  console.log('defaultQuoteDealDate — R4v2 policy math (EOM + Cisco fiscal cap, 2026-07-21)');
+  await t('mid-month: end of month, no confirmation (2026-08-10 → 2026-08-31)', () => {
+    const d = defaultQuoteDealDate(new Date('2026-08-10T12:00:00Z'));
+    assert.strictEqual(d.date, '2026-08-31');
+    assert.strictEqual(d.suggested, '2026-08-31');
     assert.strictEqual(d.needsConfirmation, false);
-    assert.strictEqual(d.daysToMonthEnd, 15);
+  });
+  await t('July mid-month: EOM crosses FY26 Q4 end → confirm, suggest 2026-07-25', () => {
+    const d = defaultQuoteDealDate(new Date('2026-07-16T12:00:00Z'));
+    assert.strictEqual(d.date, '2026-07-31');
+    assert.strictEqual(d.crossesFiscalQuarter, true);
+    assert.strictEqual(d.suggested, '2026-07-25');
+    assert.strictEqual(d.needsConfirmation, true);
   });
   await t('month-end window: within 7 days → needsConfirmation (2026-07-27)', () => {
     const d = defaultQuoteDealDate(new Date('2026-07-27T12:00:00Z'));
     assert.strictEqual(d.needsConfirmation, true);
     assert.strictEqual(d.daysToMonthEnd, 4);
   });
-  await t('boundary: exactly 7 days to month end → NO confirmation (2026-07-24)', () => {
-    const d = defaultQuoteDealDate(new Date('2026-07-24T12:00:00Z'));
+  await t('boundary: exactly 7 days to month end → NO confirmation (2026-08-24, fiscal-neutral month)', () => {
+    const d = defaultQuoteDealDate(new Date('2026-08-24T12:00:00Z'));
     assert.strictEqual(d.daysToMonthEnd, 7);
     assert.strictEqual(d.needsConfirmation, false);
   });
@@ -93,8 +100,8 @@ const dealData = (over = {}) => ({
       await t('past date on CREATE inside month-end window → needs_confirmation error', () =>
         assert.ok(res.valid === false && /closing_date_needs_confirmation/.test(res.error)));
     } else {
-      await t('past date on CREATE corrected to +14d default', () =>
-        assert.ok(res.valid === true && data.Closing_Date === dd.date));
+      await t('past date on CREATE corrected to the EOM/fiscal-capped default', () =>
+        assert.ok(res.valid === true && data.Closing_Date === dd.suggested));
     }
   }
   await t('valid past date on UPDATE preserved (intentional backfill)', async () => {
@@ -128,24 +135,24 @@ const dealData = (over = {}) => ({
     assert.strictEqual(data.Lead_Source, 'Website');
   });
 
-  console.log('\nvalidateCrmWrite Quotes — Valid_Till R4 default');
-  await t('missing Valid_Till → +14d default applied to payload', async () => {
+  console.log('\nvalidateCrmWrite Quotes — Valid_Till R4v2 default');
+  await t('missing Valid_Till → EOM/fiscal-capped default applied to payload', async () => {
     const data = { Subject: 'T', Deal_Name: { id: '1' }, Contact_Name: { id: '1' }, Owner: OWNER };
     await validateCrmWrite('Quotes', data, true, {});
-    assert.strictEqual(data.Valid_Till, defaultQuoteDealDate().date);
+    assert.strictEqual(data.Valid_Till, defaultQuoteDealDate().suggested);
   });
 
   console.log('\nstatic source pins');
   await t('create_deal_and_quote accepts user-confirmed closing_date (schema + destructure)', () =>
     assert.ok(RAW_SRC.includes("closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date") && RAW_SRC.includes('toolInput.closing_date')));
   await t('create_deal_and_quote month-end confirmation gate present', () =>
-    assert.ok(RAW_SRC.includes("error: 'closing_date_needs_confirmation'") && RAW_SRC.includes('suggested_date: _dd.date')));
+    assert.ok(RAW_SRC.includes("error: 'closing_date_needs_confirmation'") && RAW_SRC.includes('suggested_date: _dd.suggested') && RAW_SRC.includes('suggested_date: _fiscalEnd')));
   await t('executor-level Website guard present in create_deal_and_quote', () =>
     assert.ok(RAW_SRC.includes('reserved for weborders; a pasted order URL is not a website lead')));
   await t('no +30-day defaults remain on deal/quote create paths', () =>
     assert.ok(!/closingDate = new Date\(Date\.now\(\) \+ 30 \* 86400000\)/.test(RAW_SRC)));
   await t('Llama prompt: order URL ≠ Website lead + date-confirmation relay rules', () =>
-    assert.ok(RAW_SRC.includes('is ONLY for actual weborders') && RAW_SRC.includes('closing_date_needs_confirmation" (month-end window), ASK the user')));
+    assert.ok(RAW_SRC.includes('is ONLY for actual weborders') && RAW_SRC.includes('closing_date_needs_confirmation" (month-end window or fiscal-quarter slip), ASK the user')));
 
   console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ FAILURES'} — ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);

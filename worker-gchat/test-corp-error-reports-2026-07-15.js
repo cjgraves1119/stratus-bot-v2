@@ -207,18 +207,23 @@ t('zoho_create_record default-Owner injection covers Tasks', () => {
   assert.ok(/module_name === 'Accounts' \|\| module_name === 'Deals' \|\| module_name === 'Tasks'\) && !recordData\.Owner/.test(rawSrc));
 });
 
-console.log('\nR4 — +14d matching date defaults + month-end confirmation');
+console.log('\nR4v2 — EOM matching date defaults + month-end/fiscal confirmation');
 console.log('────────────────────────────────────────────────────────────────');
 
-t('defaultQuoteDealDate: +14 days, UTC', () => {
+t('defaultQuoteDealDate: end of month, UTC (fiscal-capped suggestion)', () => {
   const r = defaultQuoteDealDate(new Date(Date.UTC(2026, 6, 15)));
-  assert.strictEqual(r.date, '2026-07-29');
-  assert.strictEqual(r.needsConfirmation, false);
+  assert.strictEqual(r.date, '2026-07-31');
+  // July 2026: EOM sits past the FY26 Q4 end (2026-07-25) → confirm + cap.
+  assert.strictEqual(r.suggested, '2026-07-25');
+  assert.strictEqual(r.needsConfirmation, true);
+  const aug = defaultQuoteDealDate(new Date(Date.UTC(2026, 7, 10)));
+  assert.strictEqual(aug.date, '2026-08-31');
+  assert.strictEqual(aug.needsConfirmation, false);
 });
 t('month-end window: last 7 days of the month need confirmation', () => {
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 6, 24))).needsConfirmation, false); // Jul 24: 7 days left
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 6, 25))).needsConfirmation, true);  // Jul 25: 6 days left
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 6, 31))).needsConfirmation, true);  // Jul 31: month end
+  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 7, 24))).needsConfirmation, false); // Aug 24: 7 days left
+  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 7, 25))).needsConfirmation, true);  // Aug 25: 6 days left
+  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 7, 31))).needsConfirmation, true);  // Aug 31: month end
 });
 t('month-end window respects February + leap years', () => {
   assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 1, 22))).needsConfirmation, true);  // 2026-02-22: 6 days left
@@ -234,7 +239,7 @@ await ta('validateCrmWrite corrects a past Closing_Date to +14d (or asks in the 
     assert.ok(!res.valid && /closing_date_needs_confirmation/.test(res.error));
   } else {
     assert.ok(res.valid, res.error);
-    assert.strictEqual(data.Closing_Date, dd.date);
+    assert.strictEqual(data.Closing_Date, dd.suggested);
   }
 });
 await ta('validateCrmWrite corrects a past Valid_Till to +14d (or asks in the window)', async () => {
@@ -244,7 +249,7 @@ await ta('validateCrmWrite corrects a past Valid_Till to +14d (or asks in the wi
   if (dd.needsConfirmation) {
     assert.ok(!res.valid && /valid_till_needs_confirmation/.test(res.error));
   } else {
-    assert.strictEqual(data.Valid_Till, dd.date);
+    assert.strictEqual(data.Valid_Till, dd.suggested);
   }
 });
 t('create_deal_and_quote: closing_date param + month-end gate + deal matching (static evidence)', () => {
@@ -253,11 +258,13 @@ t('create_deal_and_quote: closing_date param + month-end gate + deal matching (s
   assert.ok(/existingDealData\?\.Closing_Date/.test(rawSrc));
   assert.ok(/const validTill = closingDate;/.test(rawSrc), 'Valid_Till always matches Closing_Date');
 });
-t('prompt templates: +14 days, no +30 anywhere, DATE RULE present', () => {
-  assert.strictEqual((CRM_AGENT_SYSTEM_PROMPT_BASE.match(/today \+ 14 days/g) || []).length >= 2, true);
+t('prompt templates: EOM default + fiscal cap, no +14/+30 anywhere, DATE RULE present', () => {
+  assert.ok(/END OF THE CURRENT MONTH/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(!/today \+ 14 days/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
   assert.ok(!/today \+ 30 days/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/DATE RULE \(Chris, 2026-07-15\)/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/DATE RULE \(Chris, 2026-07-21\)/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
   assert.ok(/within 7 days of the end of the month/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/Cisco fiscal quarter/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
 });
 t('server: no remaining 30-day Closing_Date/Valid_Till defaults', () => {
   assert.ok(!/30 \* 86400000\).toISOString\(\).split\('T'\)\[0\]/.test(rawSrc.replace(/taskDueDate[^]*?dueDateStr/g, '')));

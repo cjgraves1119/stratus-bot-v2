@@ -8928,7 +8928,65 @@ async function preflightQuotedItemsProductActive(quotedItems, env = null, opts =
       hallucinated_ids: hallucinated.length > 0 ? hallucinated : undefined
     };
   }
+  // Validation passed — apply the non-HW product preference before the write.
+  // (Inside preflight so every live Quoted_Items write path gets it without
+  // per-call-site wiring; dry-run/benchmark paths skip it.)
+  if (env && !dryRun) {
+    try { await preferNonHwQuotedItems(quotedItems, env); } catch (e) {
+      console.log(`[NONHW] preference pass threw (kept -HW ids): ${e.message}`);
+    }
+  }
   return { valid: true };
+}
+
+// ── Non-HW Zoho product preference for MX/MS hardware (Chris, 2026-07-21) ────
+// Zoho carries BOTH product records for many MX/MS hardware SKUs (e.g. MX85
+// id …889594 AND MX85-HW id …739444; MS130-24P AND MS130-24P-HW) and the
+// price cache's zoho_product_id points at the -HW record. Zoho quotes should
+// carry the NON-HW record for the MX and MS series. The non-HW id is resolved
+// live ONCE per base SKU and cached in PRICES_KV for 30 days; when the non-HW
+// record doesn't exist (or the lookup fails) the -HW id stays — fail open,
+// never block a quote over naming. The swapped id is registered in the
+// product_id→SKU reverse map so the downstream discount corrector still
+// resolves the line to its cached pricing.
+const NONHW_SWAP_RE = /^(MX|MS)[A-Z0-9-]*-HW(-NA)?$/;
+async function preferNonHwQuotedItems(quotedItems, env) {
+  if (!Array.isArray(quotedItems) || !env) return { swapped: 0 };
+  const kv = env.PRICES_KV || env.CONVERSATION_KV || null;
+  const idMap = getProductIdToSkuMap();
+  let swapped = 0;
+  for (const item of quotedItems) {
+    if (!item || typeof item !== 'object') continue;
+    if (item._delete !== undefined || item.id) continue; // new lines only
+    const productId = item.Product_Name?.id;
+    if (!productId) continue;
+    const sku = idMap[productId];
+    if (!sku || !NONHW_SWAP_RE.test(String(sku).toUpperCase())) continue;
+    const base = String(sku).toUpperCase().replace(/-HW(-NA)?$/, '');
+    const cacheKey = `nonhw:${base}`;
+    let resolvedId = null;
+    try { resolvedId = kv ? await kv.get(cacheKey) : null; } catch (_) { resolvedId = null; }
+    if (resolvedId == null) {
+      try {
+        const res = await zohoApiCall('GET',
+          `Products/search?criteria=${encodeURIComponent(`(Product_Code:equals:${base})`)}&fields=id,Product_Code,Product_Active`, env);
+        const rec = (res?.data || []).find(r =>
+          String(r.Product_Code || '').toUpperCase() === base && r.Product_Active !== false);
+        resolvedId = rec ? String(rec.id) : 'none';
+        try { if (kv) await kv.put(cacheKey, resolvedId, { expirationTtl: 30 * 86400 }); } catch (_) {}
+      } catch (e) {
+        console.log(`[NONHW] live lookup for ${base} threw (kept ${sku}): ${e.message}`);
+        continue;
+      }
+    }
+    if (resolvedId && resolvedId !== 'none') {
+      item.Product_Name = { ...item.Product_Name, id: resolvedId };
+      idMap[resolvedId] = sku; // keep discount correction resolvable
+      swapped++;
+      console.log(`[NONHW] Quote line ${sku} → non-HW product ${base} (${resolvedId})`);
+    }
+  }
+  return { swapped };
 }
 
 // ── Server-side discount correction for Quoted_Items ──
@@ -9069,21 +9127,51 @@ function scrubMarginFromQuotedItems(quotedItems, context = 'Quoted_Items') {
   return { scrubbed };
 }
 
-// ── R4: default Quote/Deal dates (Chris policy, 2026-07-15) ──────────────────
-// Default Quote Valid_Till AND Deal Closing_Date = creation date + 14 days
-// (down from +30), and the two fields always MATCH on a deal/quote pair.
-// Month-end window: when the creation date falls within 7 days of the end of
-// the month (the close-critical week — a +14 default would spill past the
-// month boundary), callers get needsConfirmation:true and must ASK the user to
-// confirm the date (suggesting `date`) instead of silently defaulting. An
-// explicit user-supplied date always bypasses the window. UTC throughout —
-// matches the existing toISOString() date idiom used by the create paths.
+// ── R4v2: default Quote/Deal dates (Chris policy, 2026-07-21; supersedes the
+// 2026-07-15 +14d rule) ───────────────────────────────────────────────────────
+// Default Quote Valid_Till AND Deal Closing_Date = END OF THE CURRENT MONTH,
+// and the two fields always MATCH on a deal/quote pair.
+// Month-end window: when today is within 7 days of the end of the month, the
+// EOM default is too close to be silently applied — callers get
+// needsConfirmation:true and must ASK the user for the close/valid-till date.
+// Cisco fiscal-quarter cap: a close date must NEVER land in the next Cisco
+// fiscal quarter without explicit user confirmation. Cisco quarters are
+// 13-week periods ending on Saturdays, anchored to the fiscal-year end = the
+// LAST SATURDAY OF JULY (FY26 Q4 end = 2026-07-25, verified investor.cisco.com
+// 2026-07-21; the anchor also yields 53-week years like FY27 correctly).
+// `suggested` = the recommended chip: EOM, capped to the fiscal quarter end.
+// UTC throughout — matches the existing toISOString() date idiom.
+function ciscoFiscalQuarterEnd(now = new Date()) {
+  const t = now instanceof Date ? now : new Date(now);
+  const todayStr = t.toISOString().split('T')[0];
+  const lastSatJuly = (y) => {
+    const jul31 = new Date(Date.UTC(y, 6, 31));
+    return new Date(jul31.getTime() - ((jul31.getUTCDay() + 1) % 7) * 86400000);
+  };
+  const thisYearEnd = lastSatJuly(t.getUTCFullYear());
+  const fyEnd = todayStr <= thisYearEnd.toISOString().split('T')[0] ? thisYearEnd : lastSatJuly(t.getUTCFullYear() + 1);
+  const prevFyEnd = lastSatJuly(fyEnd.getUTCFullYear() - 1);
+  for (let i = 1; i <= 3; i++) {
+    const qEnd = new Date(prevFyEnd.getTime() + i * 91 * 86400000).toISOString().split('T')[0];
+    if (todayStr <= qEnd) return qEnd;
+  }
+  return fyEnd.toISOString().split('T')[0];
+}
+
 function defaultQuoteDealDate(created = new Date()) {
   const t = created instanceof Date ? created : new Date(created);
-  const date = new Date(t.getTime() + 14 * 86400000).toISOString().split('T')[0];
-  const lastDay = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
-  const daysToMonthEnd = lastDay - t.getUTCDate();
-  return { date, needsConfirmation: daysToMonthEnd < 7, daysToMonthEnd };
+  const eom = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0));
+  const date = eom.toISOString().split('T')[0];
+  const daysToMonthEnd = eom.getUTCDate() - t.getUTCDate();
+  const fiscalQuarterEnd = ciscoFiscalQuarterEnd(t);
+  const crossesFiscalQuarter = date > fiscalQuarterEnd;
+  const todayStr = t.toISOString().split('T')[0];
+  const suggested = crossesFiscalQuarter && fiscalQuarterEnd >= todayStr ? fiscalQuarterEnd : date;
+  const nextMonthEnd = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 2, 0)).toISOString().split('T')[0];
+  return {
+    date, suggested, nextMonthEnd, fiscalQuarterEnd, crossesFiscalQuarter, daysToMonthEnd,
+    needsConfirmation: daysToMonthEnd < 7 || crossesFiscalQuarter,
+  };
 }
 
 // A user's local "today" can be the previous UTC calendar day during US
@@ -9270,9 +9358,9 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
       }
     }
     // Server-side Closing_Date enforcement: correct past/invalid dates.
-    // R4 (2026-07-15): default is now +14 days (must MATCH the Quote's
-    // Valid_Till); inside the month-end window we refuse instead of silently
-    // defaulting so the agent asks the user to confirm the date.
+    // R4v2 (2026-07-21): default is END OF THE CURRENT MONTH (must MATCH the
+    // Quote's Valid_Till); inside the month-end window we refuse instead of
+    // silently defaulting so the agent asks the user to confirm the date.
     if (data.Closing_Date) {
       const parsedDate = new Date(data.Closing_Date + 'T00:00:00');
       const today = new Date();
@@ -9285,13 +9373,22 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
       if (invalidDate || (isCreate && pastDate)) {
         const dd = defaultQuoteDealDate();
         if (dd.needsConfirmation && isCreate) {
-          errors.push(`❌ closing_date_needs_confirmation: Closing_Date "${data.Closing_Date}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm a valid close date of today or later (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Quote's Valid_Till.`);
+          errors.push(`❌ closing_date_needs_confirmation: Closing_Date "${data.Closing_Date}" is past/invalid and the end-of-month default needs confirmation right now (${dd.daysToMonthEnd} day(s) to month-end; Cisco fiscal quarter ends ${dd.fiscalQuarterEnd}). ASK the user to confirm a valid close date of today or later — offer ${dd.suggested} as the recommended chip — then retry with the confirmed date, and use the SAME date for the Quote's Valid_Till.`);
         } else {
-          console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${dd.date}`);
-          data.Closing_Date = dd.date;
+          console.log(`[VALIDATE] Closing_Date "${data.Closing_Date}" is past/invalid, correcting to ${dd.suggested}`);
+          data.Closing_Date = dd.suggested;
         }
       }
+      // Cisco fiscal-quarter cap (Chris, 2026-07-21): a close date must never
+      // slip into the NEXT fiscal quarter silently. __date_confirmed:true in
+      // the payload (set only after the user explicitly confirmed) bypasses.
+      const fiscalEnd = ciscoFiscalQuarterEnd();
+      if (!invalidDate && !data.__date_confirmed
+          && /^\d{4}-\d{2}-\d{2}$/.test(String(data.Closing_Date)) && data.Closing_Date > fiscalEnd) {
+        errors.push(`❌ closing_date_needs_confirmation: Closing_Date "${data.Closing_Date}" falls AFTER the current Cisco fiscal quarter end (${fiscalEnd}) — close dates must not slip into the next fiscal quarter without explicit approval. ASK the user: close by ${fiscalEnd} (fiscal quarter end, recommended) or keep ${data.Closing_Date}? Retry with the chosen date; if the user explicitly keeps a date beyond ${fiscalEnd}, include __date_confirmed:true in the record data. Use the SAME date for the Quote's Valid_Till.`);
+      }
     }
+    if (data.__date_confirmed !== undefined) delete data.__date_confirmed;
     // Lead_Source "Website" is reserved for actual weborders (the weborder
     // automation sets it deliberately). A pasted stratusinfosystems.com order
     // URL in chat is NOT a website lead — Llama inferred exactly that on its
@@ -9396,27 +9493,37 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
     }
     // Server-side Valid_Till enforcement: if Claude passes a past date or invalid date,
     // override with the default. LLMs frequently miscalculate dates.
-    // R4 (2026-07-15): default is now +14 days and must MATCH the Deal's
-    // Closing_Date; inside the month-end window we refuse instead of silently
-    // defaulting so the agent asks the user to confirm the date.
+    // R4v2 (2026-07-21): default is END OF THE CURRENT MONTH and must MATCH
+    // the Deal's Closing_Date; inside the month-end window we refuse instead
+    // of silently defaulting so the agent asks the user to confirm the date.
     if (data.Valid_Till) {
       const parsedDate = new Date(data.Valid_Till + 'T00:00:00');
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      if (isNaN(parsedDate.getTime()) || parsedDate < today) {
+      const invalidVt = isNaN(parsedDate.getTime());
+      if (invalidVt || parsedDate < today) {
         const dd = defaultQuoteDealDate();
         if (dd.needsConfirmation) {
-          errors.push(`❌ valid_till_needs_confirmation: Valid_Till "${data.Valid_Till}" is past/invalid and today is within 7 days of month-end, so I will not silently default it. ASK the user to confirm the date (suggest ${dd.date} = today + 14 days as the recommended chip), then retry with the confirmed date — and use the SAME date for the Deal's Closing_Date.`);
+          errors.push(`❌ valid_till_needs_confirmation: Valid_Till "${data.Valid_Till}" is past/invalid and the end-of-month default needs confirmation right now (${dd.daysToMonthEnd} day(s) to month-end; Cisco fiscal quarter ends ${dd.fiscalQuarterEnd}). ASK the user to confirm the date — offer ${dd.suggested} as the recommended chip — then retry with the confirmed date, and use the SAME date for the Deal's Closing_Date.`);
         } else {
-          console.log(`[VALIDATE] Valid_Till "${data.Valid_Till}" is past/invalid, correcting to ${dd.date}`);
-          data.Valid_Till = dd.date;
+          console.log(`[VALIDATE] Valid_Till "${data.Valid_Till}" is past/invalid, correcting to ${dd.suggested}`);
+          data.Valid_Till = dd.suggested;
         }
       }
+      // Cisco fiscal-quarter cap (Chris, 2026-07-21) — same rule as the Deal's
+      // Closing_Date: never into the next fiscal quarter without confirmation.
+      const fiscalEnd = ciscoFiscalQuarterEnd();
+      if (!invalidVt && !data.__date_confirmed
+          && /^\d{4}-\d{2}-\d{2}$/.test(String(data.Valid_Till)) && data.Valid_Till > fiscalEnd) {
+        errors.push(`❌ valid_till_needs_confirmation: Valid_Till "${data.Valid_Till}" falls AFTER the current Cisco fiscal quarter end (${fiscalEnd}) — it must not slip into the next fiscal quarter without explicit approval. ASK the user: ${fiscalEnd} (fiscal quarter end, recommended) or keep ${data.Valid_Till}? Retry with the chosen date; if the user explicitly keeps a date beyond ${fiscalEnd}, include __date_confirmed:true in the record data. Use the SAME date for the Deal's Closing_Date.`);
+      }
     } else {
-      // Missing Valid_Till — set default (+14d; the required-field error above
-      // still fails the create, this just keeps the mutated payload consistent)
-      data.Valid_Till = defaultQuoteDealDate().date;
+      // Missing Valid_Till — set default (EOM capped to the fiscal quarter;
+      // the required-field error above still fails the create, this just
+      // keeps the mutated payload consistent)
+      data.Valid_Till = defaultQuoteDealDate().suggested;
     }
+    if (data.__date_confirmed !== undefined) delete data.__date_confirmed;
     // Auto-fill commonly skipped fields with safe defaults
     if (!data.Cisco_Billing_Term) data.Cisco_Billing_Term = 'Prepaid Term';
     if (!data.Shipping_Country) data.Shipping_Country = data.Billing_Country || 'US';
@@ -15304,14 +15411,16 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // STEP 4: Build SKU description for deal name (hardware only for cleaner name)
           const skuSummary = orderedPairs.map(p => `${p.hwQty > 1 ? p.hwQty + 'x ' : ''}${p.hw}`).join(', ');
 
-          // ── R4 date policy (Chris, 2026-07-15): Deal Closing_Date and Quote
-          // Valid_Till default to creation + 14 days and ALWAYS MATCH each other.
-          // Precedence: explicit closing_date param (user-confirmed) → existing
-          // Deal's future Closing_Date (attach mode: the quote's Valid_Till stays
-          // matched to the deal) → +14d default. Inside the month-end window
-          // (creation within 7 days of month end) the default is REFUSED with
-          // closing_date_needs_confirmation so the agent asks the user instead
-          // of silently writing. ──
+          // ── R4v2 date policy (Chris, 2026-07-21): Deal Closing_Date and Quote
+          // Valid_Till default to the END OF THE CURRENT MONTH and ALWAYS MATCH
+          // each other. Precedence: explicit closing_date param (user-confirmed)
+          // → existing Deal's future Closing_Date (attach mode) → EOM default.
+          // Inside the month-end window (within 7 days of month end) the
+          // default is REFUSED with closing_date_needs_confirmation so the
+          // agent asks the user instead of silently writing. Cisco fiscal cap:
+          // a date past the current fiscal quarter end (13-week quarters,
+          // FY end = last Saturday of July) requires date_confirmed:true,
+          // set only after the user explicitly approved the slip. ──
           let closingDate;
           const _rawClosing = typeof toolInput.closing_date === 'string' ? toolInput.closing_date.trim() : '';
           if (_rawClosing) {
@@ -15322,6 +15431,17 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 success: false,
                 error: 'invalid_closing_date',
                 instruction: `closing_date "${_rawClosing}" is not a valid future date. Pass YYYY-MM-DD (today or later), or omit it to use the default. Ask the user for the intended close date if unsure.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            const _fiscalEnd = ciscoFiscalQuarterEnd();
+            if (_rawClosing > _fiscalEnd && toolInput.date_confirmed !== true) {
+              return {
+                success: false,
+                error: 'closing_date_needs_confirmation',
+                suggested_date: _fiscalEnd,
+                instruction: `closing_date "${_rawClosing}" falls AFTER the current Cisco fiscal quarter end (${_fiscalEnd}) — close dates must not slip into the next fiscal quarter without explicit approval. ASK the user: close by ${_fiscalEnd} (fiscal quarter end, recommended) or keep ${_rawClosing}? Re-call this tool with the chosen closing_date; if the user explicitly keeps the later date, also pass date_confirmed:true.`,
                 ...results,
                 wall_ms: Date.now() - _startMs
               };
@@ -15338,13 +15458,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               return {
                 success: false,
                 error: 'closing_date_needs_confirmation',
-                suggested_date: _dd.date,
-                instruction: `Today is within 7 days of month-end, so the Close/Valid-Till date must be CONFIRMED by the user instead of defaulted. Ask the user to confirm the close date — offer "${_dd.date}" (today + 14 days) as the recommended chip plus a free-form option — then re-call this tool with closing_date:"<confirmed YYYY-MM-DD>". The same date is applied to BOTH the Deal's Closing_Date and the Quote's Valid_Till. Any Account/Contact already resolved will be reused on the retry.`,
+                suggested_date: _dd.suggested,
+                instruction: `The Close/Valid-Till date must be CONFIRMED by the user right now (${_dd.daysToMonthEnd} day(s) to month-end${_dd.crossesFiscalQuarter ? `; the end-of-month default ${_dd.date} would slip past the Cisco fiscal quarter end ${_dd.fiscalQuarterEnd}` : ''}). Ask the user to confirm the close date — offer "${_dd.suggested}"${_dd.crossesFiscalQuarter ? ' (Cisco fiscal quarter end)' : ' (end of month)'} as the recommended chip plus a free-form option — then re-call this tool with closing_date:"<confirmed YYYY-MM-DD>". The same date is applied to BOTH the Deal's Closing_Date and the Quote's Valid_Till. Any Account/Contact already resolved will be reused on the retry.`,
                 ...results,
                 wall_ms: Date.now() - _startMs
               };
             }
-            closingDate = _dd.date;
+            closingDate = _dd.suggested;
           }
 
           // ── HARD GATE #5: Zero products resolved ──
@@ -17936,9 +18056,11 @@ const CRM_EMAIL_TOOLS = [
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses. License-only requests must stay license-only.'
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) the lines flagged by error:"resolved_items_need_confirmation". Never set on the first attempt.' },
-        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (creation + 14 days). REQUIRED on the retry after error:"closing_date_needs_confirmation" (month-end window) — pass the date the user confirmed.' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (end of the current month, capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation" — pass the date the user confirmed.' },
+        date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a close date that falls after the current Cisco fiscal quarter end. Never set it on your own.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
-        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (creation + 14 days). REQUIRED on the retry after error:"closing_date_needs_confirmation" (month-end window) — pass the date the user confirmed.' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (end of the current month, capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation" — pass the date the user confirmed.' },
+        date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a close date that falls after the current Cisco fiscal quarter end. Never set it on your own.' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
@@ -17986,9 +18108,11 @@ const CRM_EMAIL_TOOLS = [
           description: 'Array of requested SKUs. Hardware SKUs auto-add matching licenses unless hardware_only/include_licenses=false.'
         },
         confirm_resolved_items: { type: 'boolean', description: 'Default false. Set true ONLY after the user explicitly confirmed (or corrected) lines flagged by error:"resolved_items_need_confirmation".' },
-        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default creation + 14 days. REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default end of the current month (capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
+        date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a date after the current Cisco fiscal quarter end. Never set it on your own.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
-        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default creation + 14 days. REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
+        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default end of the current month (capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
+        date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a date after the current Cisco fiscal quarter end. Never set it on your own.' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses.' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
@@ -19006,10 +19130,10 @@ For a raw \`zoho_create_record\` Deal/Quote: show a table (Field | Value | Statu
 
 Every Deal Create MUST include:
 \`\`\`json
-{"Deal_Name": "{Account} - {Description}", "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id}"}, "Stage": "Qualification", "Lead_Source": "Stratus Referal", "Closing_Date": "{today + 14 days, YYYY-MM-DD}", "Amount": 0, "Meraki_ISR": {"id": "2570562000027286729"}, "Owner": {"id": "{{OWNER_ZOHO_ID}}"}}
+{"Deal_Name": "{Account} - {Description}", "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id}"}, "Stage": "Qualification", "Lead_Source": "Stratus Referal", "Closing_Date": "{end of current month, YYYY-MM-DD — never past the Cisco fiscal quarter end without user approval}", "Amount": 0, "Meraki_ISR": {"id": "2570562000027286729"}, "Owner": {"id": "{{OWNER_ZOHO_ID}}"}}
 \`\`\`
 
-**DATE RULE (Chris, 2026-07-15):** default Deal Closing_Date AND Quote Valid_Till = creation date + 14 days, and the two ALWAYS MATCH on a deal/quote pair. **Month-end window:** if today is within 7 days of the end of the month, do NOT silently default — ask the user to confirm the Close/Valid-Till date (offer today+14 as the recommended chip), then apply the SAME confirmed date to both fields. An explicit user-provided date always wins (still set both fields to it).
+**DATE RULE (Chris, 2026-07-21):** default Deal Closing_Date AND Quote Valid_Till = END OF THE CURRENT MONTH, and the two ALWAYS MATCH on a deal/quote pair. **Month-end window:** if today is within 7 days of the end of the month, do NOT silently default — ask the user to confirm the Close/Valid-Till date (the server's needs_confirmation error carries the recommended chip), then apply the SAME confirmed date to both fields. **Cisco fiscal cap:** the close date must NEVER slip into the next Cisco fiscal quarter (13-week quarters ending on Saturdays; FY ends the last Saturday of July — FY26 Q4 ends 2026-07-25) without the user's explicit approval; the server blocks such dates until confirmed. An explicit user-provided date within the quarter always wins (still set both fields to it).
 
 **VALID DEAL STAGES — ONLY these 5 exist:** Qualification (default for new deals); Proposal/Negotiation; Verbal Commit/Invoicing; Closed (Lost); Closed (Won) — BLOCKED, auto-set by PO automation only. Never invent stages ("Needs Analysis", "Closed-Lost to Competition", etc.) — server auto-corrects known wrong values but rejects anything else. Unsure → "Qualification".
 
@@ -19019,7 +19143,7 @@ Every Quote MUST have a Contact_Name: search Contacts by Account_Name; none foun
 
 Every Quote Create MUST include:
 \`\`\`json
-{"Subject": "{Account} - {Description}", "Quote_Stage": "Qualification", "Deal_Name": {"id": "{deal_id}"}, "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id_or_placeholder}"}, "Valid_Till": "{today + 14 days, YYYY-MM-DD — MUST equal the Deal's Closing_Date; month-end window → confirm with user first (see DATE RULE)}", "Cisco_Billing_Term": "Prepaid Term", "Billing_Street": "{from Account or lookup}", "Billing_City": "{...}", "Billing_State": "{2-LETTER CODE}", "Billing_Code": "{zip}", "Billing_Country": "US", "Shipping_Country": "US", "Owner": {"id": "{{OWNER_ZOHO_ID}}"}, "Quoted_Items": [{"Product_Name": {"id": "{zoho_product_id}"}, "Quantity": 1, "Discount": discount_per_unit * qty}]}
+{"Subject": "{Account} - {Description}", "Quote_Stage": "Qualification", "Deal_Name": {"id": "{deal_id}"}, "Account_Name": {"id": "{account_id}"}, "Contact_Name": {"id": "{contact_id_or_placeholder}"}, "Valid_Till": "{end of current month, YYYY-MM-DD — MUST equal the Deal's Closing_Date; month-end window or fiscal-quarter slip → confirm with user first (see DATE RULE)}", "Cisco_Billing_Term": "Prepaid Term", "Billing_Street": "{from Account or lookup}", "Billing_City": "{...}", "Billing_State": "{2-LETTER CODE}", "Billing_Code": "{zip}", "Billing_Country": "US", "Shipping_Country": "US", "Owner": {"id": "{{OWNER_ZOHO_ID}}"}, "Quoted_Items": [{"Product_Name": {"id": "{zoho_product_id}"}, "Quantity": 1, "Discount": discount_per_unit * qty}]}
 \`\`\`
 
 Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / email signature → (3) ask user. Never create a Quote with blank address fields.
@@ -23895,7 +24019,7 @@ DEAL DEFAULTS:
 - Lead_Source "Website" is ONLY for actual weborders. A pasted stratusinfosystems.com order URL, a quote link, or account context like "matched by website domain" is NOT a website lead — leave lead_source unset (server defaults to "Stratus Referal") unless the user explicitly says the lead came from the website.
 - Meraki_ISR: "Stratus Sales" (ID: 2570562000027286729) — non-ISR-referral lead sources ONLY
 - Lead_Source "Meraki ISR Referal" REQUIRES meraki_isr_email (the referring rep's @cisco.com email) on create_deal_and_quote — the server refuses without it and NEVER falls back to Stratus Sales. Don't know the rep? ASK the user before calling the tool.
-- Closing_Date / Valid_Till: DO NOT set unless the user gave a date — the server defaults BOTH to creation + 14 days and keeps them matched. If a tool result returns error "closing_date_needs_confirmation" (month-end window), ASK the user to confirm the close date using the suggested_date as the recommended chip, then re-call the SAME tool with closing_date:"<confirmed YYYY-MM-DD>".
+- Closing_Date / Valid_Till: DO NOT set unless the user gave a date — the server defaults BOTH to the end of the current month (capped at the Cisco fiscal quarter end) and keeps them matched. If a tool result returns error "closing_date_needs_confirmation" (month-end window or fiscal-quarter slip), ASK the user to confirm the close date using the suggested_date as the recommended chip, then re-call the SAME tool with closing_date:"<confirmed YYYY-MM-DD>" (add date_confirmed:true ONLY if the user explicitly approved a date past the fiscal quarter end).
 - Caller owner ID: {{OWNER_ZOHO_ID}}
 
 TOOL RESULT TRUTH (HARD RULE — violating this is the worst failure mode):
