@@ -363,6 +363,22 @@ function normalizeDirectLicenseSku(sku) {
     // Bare "LIC-SME" (no term) falls back to 3-year, like the old cap default.
     return { sku: smeReplacementSku(smeDirect[1] || 3), note: SME_EOL_FLAG };
   }
+  // Editionless vMX (retired form): single-SKU seam has no sibling MX lines to
+  // infer from, so default ENT per the EOL handoff and say so.
+  const vmxDirect = upper.match(/^LIC-VMX-(S|M|L|XL)-(\d+)Y(R)?$/);
+  if (vmxDirect) {
+    const swapped = eolPick(`LIC-VMX-${vmxDirect[1]}-ENT`, vmxDirect[2], 'Y');
+    return { sku: swapped, note: `vMX licenses now require an edition — quoted ${swapped} (ENT). Say "SEC" if the network runs Advanced Security.` };
+  }
+  // Model-number vMX (LIC-VMX100 …): cannot be sized automatically — flag, never guess.
+  if (/^LIC-VMX\d/.test(upper)) {
+    return { sku: upper, invalid: true, note: `${upper} is a retired vMX license and can't be sized automatically — pick a LIC-VMX-{S|M|L|XL}-{ENT|SEC} equivalent.` };
+  }
+  // Meraki Insight (LIC-MI-S/M/L) is retired: dropped, with MX SEC lines
+  // upgraded to SDW when quoted alongside — a lone Insight SKU can't be quoted.
+  if (INSIGHT_RE.test(upper)) {
+    return { sku: upper, invalid: true, note: `${upper} — Meraki Insight is retired. Its features moved to SD-WAN Plus: upgrade the MX license from -SEC- to -SDW- instead.` };
+  }
   if (prices[upper]) return { sku: upper };
 
   const msDirect = upper.match(/^LIC-(MS\d{3}-[A-Z0-9-]+)-([135])Y(?:R)?$/);
@@ -411,6 +427,12 @@ function normalizeParsedDirectLicenses(parsed) {
   };
 
   if (Array.isArray(parsed.directLicenseList)) {
+    // List-level EOL swaps run FIRST: they need cross-line context that the
+    // per-SKU normalizer can't see (Insight drop upgrades sibling MX -SEC-
+    // lines to -SDW-; vMX edition is inferred from sibling MX lines).
+    const swapped = applyEolSwaps(parsed.directLicenseList);
+    swapped.notes.forEach(addNote);
+    parsed.directLicenseList = swapped.lines;
     parsed.directLicenseList = parsed.directLicenseList.map(item => {
       const normalized = normalizeDirectLicenseSku(item.sku);
       addNote(normalized.note);
@@ -2264,6 +2286,19 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   const mxEditionRaw = String(opts.mxEdition || '').toUpperCase();
   const mxTier = /SDW|SD[-\s]*WAN/.test(mxEditionRaw) ? 'SDW' : 'SEC';
 
+  // EOL swaps on the raw dashboard rows BEFORE the LIC- catalog gate below:
+  // editionless vMX and Insight rows aren't in the price book and would be
+  // silently dropped by licenseTermSiblings. The swap (edition from the
+  // dashboard's own MX_EDITION) turns them into quotable rows — or, for
+  // Insight, drops the row and upgrades the sibling MX -SEC- rows to -SDW-.
+  // Device tokens (MR-ENT, SM-ENT, model names) pass through untouched.
+  const eolSwap = applyEolSwaps(visionSkus || [], opts.mxEdition);
+  visionSkus = eolSwap.lines.filter(l => l.valid !== false);
+  const eolSwapNotes = [
+    ...eolSwap.notes,
+    ...eolSwap.lines.filter(l => l.valid === false && l.flag).map(l => `${l.sku}: ${l.flag}.`),
+  ];
+
   // Partition vision SKUs into:
   //   - non-EOL devices (current/stocked models, license-only renewal)
   //   - EOL devices (current license still renewable AND a replacement
@@ -2458,6 +2493,12 @@ function buildDashboardRenewalQuote(visionSkus, opts = {}) {
   }
 
   if (sections.length === 0) return null;
+
+  // EOL swap notes from the entry-point pass (Insight retirement / SDW
+  // upgrade, vMX edition, Ivanti URL). SME_EOL_FLAG is excluded — renderTerms
+  // already emits it per option group when an Ivanti line is present.
+  const swapNoteLines = eolSwapNotes.filter(n => n !== SME_EOL_FLAG);
+  if (swapNoteLines.length > 0) sections.push(swapNoteLines.map(n => `_${n}_`).join('\n'));
 
   return {
     message: sections.join('\n\n'),
@@ -2896,6 +2937,13 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
 
 // ─── URL Builder ─────────────────────────────────────────────────────────────
 function buildStratusUrl(items) {
+  // EOL swap safety net: no order link may carry a retired SKU regardless of
+  // which path assembled the items (edition inferred from sibling lines here;
+  // notes surface at the assembly seams that own reply text). Idempotent.
+  // Un-sizable lines (valid:false, e.g. bare LIC-VMX100) stay in the link
+  // unchanged — fail closed, never guess a size.
+  items = applyEolSwaps(items).lines;
+
   // Consolidate duplicate SKUs by summing quantities
   const merged = new Map();
   for (const { sku, qty } of items) {
@@ -3192,15 +3240,17 @@ function getPrice(sku) {
 function parseStratusUrl(url) {
   try {
     const u = new URL(url);
-    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean)
-      // Legacy Systems Manager tokens in pasted/old URLs: substitute the
-      // replacement (SME is discontinued) before re-pricing or re-rendering.
-      .map(s => { const sm = s.match(/^LIC-SME-([135])Y(R?)$/i); return sm ? smeReplacementSku(sm[1]) : s; });
+    const items = (u.searchParams.get('item') || '').split(',').map(s => s.trim()).filter(Boolean);
     const qtyStr = (u.searchParams.get('qty') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
     if (items.length === 0) return null;
     // If qtys missing or mismatched, default all to 1
     const qtys = qtyStr.length === items.length ? qtyStr : items.map(() => 1);
-    return { skus: items, qtys };
+    // Retired tokens in pasted/old URLs (LIC-SME, editionless vMX, Insight):
+    // apply the EOL swaps before re-pricing or re-rendering. Insight lines
+    // drop here, so rebuild both arrays from the swap result.
+    const swapped = applyEolSwaps(items.map((s, i) => ({ sku: s, qty: qtys[i] }))).lines;
+    if (swapped.length === 0) return null;
+    return { skus: swapped.map(l => l.sku), qtys: swapped.map(l => Number(l.qty) || 1) };
   } catch {
     return null;
   }
@@ -4658,6 +4708,10 @@ function convertWordNumbers(text) {
 // LIC-SME tokens in prior-quote URLs) substitutes the replacement at the
 // requested term and surfaces SME_EOL_FLAG so the user sees the SKU changed.
 const SME_REPLACEMENT_BASE = 'LIC-MI-EMSC-D-1YMC-A';
+// NOTE: keep this text byte-identical to worker-gchat/src/index.js — the shared
+// handleFollowUpModifier embeds it and the seam-fixes parity test compares
+// outputs across engines. The Ivanti 50-device minimum is communicated via
+// applyEolSwaps notes instead.
 const SME_EOL_FLAG = 'Cisco Meraki Systems Manager (LIC-SME) licenses are discontinued — quoted the replacement, Ivanti Neurons for MDM per device (MI-EMSC-D-1YMC-A), at the requested term.';
 // Map a requested SME term to the replacement SKU. 1/3/5 are all valid on the
 // replacement; anything else falls back to 3-year (mirrors the old cap).
@@ -4666,6 +4720,122 @@ function smeReplacementSku(term) {
   const valid = (t === 1 || t === 3 || t === 5) ? t : 3;
   return `${SME_REPLACEMENT_BASE}-${valid}YR`;
 }
+
+// ─── EOL SKU swaps (HANDOFF-eol-sku-swaps.md, 2026-07-13) ────────────────────
+// Three end-of-sale rules applied wherever a quote/renewal line set is
+// assembled, after SKU validation and before the link builder:
+//   1. vMX requires an edition: LIC-VMX-{S,M,L,XL}-{n}(YR|Y) →
+//      LIC-VMX-{size}-{ENT|SEC}-{n}Y. Edition: dashboard MX edition first,
+//      then sibling MX license lines, default ENT. A bare model-number vMX
+//      (LIC-VMX100) is flagged, never auto-sized.
+//   2. Systems Manager retired: LIC-SME-{n}YR → LIC-MI-EMSC-D-1YMC-A-{n}YR
+//      (Ivanti Neurons for MDM). Quantity floor 50 — the floor also catches
+//      lines already substituted by smeReplacementSku upstream.
+//   3. Meraki Insight retired: LIC-MI-{S,M,L}-* is dropped and every MX -SEC-
+//      line is upgraded to -SDW- (SD-WAN Plus) to preserve the feature set.
+//      LIC-MI-EMSC-… is the Ivanti target, NOT Insight — never matched here.
+// Idempotent: already-swapped SKUs pass through unchanged, so the seam-level
+// calls and the buildStratusUrl/buildPricingBlock safety net can stack.
+const IVANTI_URL = 'https://www.stratusinfosystems.com/shop/product/ivanti-neurons-for-mdm-per-device';
+const IVANTI_MIN = 50;
+const INSIGHT_RE = /^LIC-MI-[SML]-\d+(YR|Y)?$/i;
+
+// Term-suffix form varies by family (-3Y vs -3YR) — pick the one in the catalog.
+function eolPick(base, n, unit) {
+  const order = String(unit).toUpperCase() === 'Y' ? ['Y', 'YR'] : ['YR', 'Y'];
+  for (const u of order) { const c = `${base}-${n}${u}`; if (prices[c]) return c; }
+  return `${base}-${n}${String(unit).toUpperCase()}`;
+}
+
+function eolEdition(mxEdition, lines) {
+  const e = String(mxEdition || '').toLowerCase();
+  if (e.includes('advanced security') || e === 'sec') return 'SEC';
+  if (e.includes('enterprise') || e === 'ent') return 'ENT';
+  if (lines.some(l => /^LIC-MX\w+-SEC-/i.test(String(l.sku)))) return 'SEC';
+  if (lines.some(l => /^LIC-MX\w+-ENT-/i.test(String(l.sku)))) return 'ENT';
+  return 'ENT';
+}
+
+function applyEolSwaps(lines, mxEdition) {
+  const src = Array.isArray(lines) ? lines : [];
+  const ed = eolEdition(mxEdition, src);
+  let insightNote = false;
+  const upgradeMxToSdw = src.some(l => INSIGHT_RE.test(String(l.sku || '')));
+  let out = [];
+  for (const l of src) {
+    const sku = String(l.sku || '').toUpperCase();
+    let m;
+    if (INSIGHT_RE.test(sku)) { insightNote = true; continue; }                 // Insight: drop
+    if ((m = sku.match(/^LIC-VMX-(S|M|L|XL)-(\d+)(YR|Y)$/))) {                  // vMX: add edition
+      out.push({ ...l, sku: eolPick(`LIC-VMX-${m[1]}-${ed}`, m[2], 'Y'),
+        flag: `vMX now requires an edition; set to ${ed}`, replaced_from: sku });
+      continue;
+    }
+    if (/^LIC-VMX\d/.test(sku)) {                                              // model-number vMX: flag, never size
+      out.push({ ...l, sku, valid: false,
+        flag: `retired vMX; pick a sized LIC-VMX-{S/M/L/XL}-${ed} equivalent` });
+      continue;
+    }
+    if ((m = sku.match(/^LIC-SME?-(\d+)(YR|Y)$/))) {                            // SME: Ivanti, floor 50
+      const qty0 = Number(l.qty) || 0;
+      const iqty = Math.max(qty0, IVANTI_MIN);
+      out.push({ ...l, sku: `${SME_REPLACEMENT_BASE}-${m[1]}YR`, qty: iqty,
+        flag: `Systems Manager retired; Ivanti Neurons for MDM (min ${IVANTI_MIN})${iqty > qty0 ? `, qty raised from ${qty0}` : ''}`,
+        replaced_from: sku, url: IVANTI_URL });
+      continue;
+    }
+    if (sku.startsWith(SME_REPLACEMENT_BASE) && (Number(l.qty) || 0) < IVANTI_MIN) {
+      // Already substituted upstream (smeReplacementSku) — the floor still applies.
+      out.push({ ...l, qty: IVANTI_MIN,
+        flag: `Ivanti Neurons for MDM has a ${IVANTI_MIN}-device minimum; qty raised from ${Number(l.qty) || 0}`,
+        url: IVANTI_URL });
+      continue;
+    }
+    out.push(l);
+  }
+  let upgraded = 0;
+  if (upgradeMxToSdw) out = out.map(l => {                                      // Insight side-effect: MX SEC → SDW
+    const m = String(l.sku || '').match(/^LIC-(MX\w+)-SEC-(\d+)(YR|Y)$/i);
+    if (m) {
+      upgraded++;
+      return { ...l, sku: eolPick(`LIC-${m[1].toUpperCase()}-SDW`, m[2], m[3]),
+        flag: 'Meraki Insight retired; upgraded to SD-WAN Plus (SDW)',
+        replaced_from: String(l.sku).toUpperCase() };
+    }
+    return l;
+  });
+  const notes = [];
+  if (out.some(l => /^LIC-SME?-/i.test(String(l.replaced_from || '')))) notes.push(SME_EOL_FLAG);
+  if (out.some(l => /qty raised from/.test(String(l.flag || '')))) {
+    notes.push(`Ivanti Neurons for MDM has a ${IVANTI_MIN}-device minimum — the quantity was raised to ${IVANTI_MIN}.`);
+  }
+  if (insightNote) notes.push(upgraded
+    ? `Meraki Insight is retired; upgraded ${upgraded} MX license line${upgraded === 1 ? '' : 's'} to SD-WAN Plus (SDW) to preserve the feature set.`
+    : 'Meraki Insight is retired and was removed from the quote; no MX Advanced Security line to upgrade to SD-WAN Plus — please review.');
+  for (const l of out) {
+    if (l.flag && /^vMX now requires an edition/.test(l.flag)) {
+      notes.push(`vMX licenses now require an edition — quoted ${l.sku} (${ed}).`);
+      break;
+    }
+  }
+  if (out.some(l => l.url === IVANTI_URL)) notes.push(`Ivanti Neurons for MDM: ${IVANTI_URL}`);
+  return { lines: out, notes, ivantiUrl: out.some(l => l.url === IVANTI_URL) ? IVANTI_URL : null };
+}
+
+// Rewrite any Stratus order URL inside Claude-composed reply text through the
+// EOL swap pipeline (parseStratusUrl applies applyEolSwaps; buildStratusUrl
+// re-renders). Claude writes URLs as text, bypassing the deterministic URL
+// builder — prompts steer it away from retired SKUs and the Ivanti 50-min,
+// but this seam makes it fail-closed. Clean URLs round-trip unchanged.
+const swapEolUrlsInText = (s) => String(s || '')
+  .replace(/https:\/\/stratusinfosystems\.com\/order\/\?[^\s)>\]"'<]+/g, (u) => {
+    try {
+      const parsed = parseStratusUrl(u);
+      if (!parsed || parsed.skus.length === 0) return u;
+      return buildStratusUrl(parsed.skus.map((sku, i) => ({ sku, qty: parsed.qtys[i] })));
+    } catch { return u; }
+  });
+
 function findBareSmeMention(upper) {
   const smeRe = /(?:(\d+)\s*[X×]?\s*)?(?:LIC-SME\b(?!-\d+YR?\b)|(?<![-A-Za-z0-9])SME\b|SYSTEMS?\s+MANAGER\b)/gi;
   const m = smeRe.exec(String(upper || ''));
@@ -5122,12 +5292,20 @@ function buildQuoteFromV3(v3, rawText) {
     else if (p.isTermOptionQuote && Array.isArray(p.items)) licEntries = p.items.map(e => ({ sku: e.baseSku, qty: e.qty }));
 
     if (licEntries) {
-      // Legacy Systems Manager SKUs: SME is discontinued — substitute the
-      // replacement (Ivanti MDM) SKU at the same term before grouping.
-      licEntries = licEntries.map(e => {
-        const sm = String(e.sku || '').match(/^LIC-SME-([135])Y(R)?$/i);
-        return sm ? { ...e, sku: smeReplacementSku(sm[1]) } : e;
-      });
+      // EOL swaps before grouping: SME → Ivanti (50 floor), editionless vMX
+      // gains an edition from sibling lines, Insight drops with MX SEC→SDW.
+      // Un-sizable lines (bare LIC-VMX100) are dropped here with their flag
+      // surfaced — never silently quoted, never auto-sized.
+      const _sw = applyEolSwaps(licEntries);
+      licEntries = _sw.lines.filter(l => l.valid !== false);
+      const _swNotes = [
+        ..._sw.notes,
+        ..._sw.lines.filter(l => l.valid === false && l.flag).map(l => `${l.sku}: ${l.flag}.`),
+      ];
+      if (_swNotes.length) {
+        const merged = _swNotes.join(' ');
+        capNote = capNote ? `${capNote} ${merged}` : merged;
+      }
       const byBase = new Map();
       for (const e of licEntries) {
         const m = String(e.sku || '').match(/^(LIC-.+?)-([135])Y(?:R)?(?:-S\d+)?$/i);
@@ -6987,6 +7165,9 @@ function formatPrice(num) {
 
 function buildPricingBlock(urlItems, showPricing) {
   if (!showPricing) return '';
+  // Same EOL swap as buildStratusUrl so the dollar lines always match the
+  // order link (idempotent — a pre-swapped seam passes through unchanged).
+  urlItems = applyEolSwaps(urlItems).lines;
   let lines = [];
   let cartTotal = 0;
   for (const { sku, qty } of urlItems) {
@@ -7012,8 +7193,13 @@ function buildQuoteResponse(parsed) {
   if (!parsed) return { message: null, needsLlm: true };
   const invalidDirectLicenses = normalizeParsedDirectLicenses(parsed);
   if (invalidDirectLicenses.length > 0) {
+    // clarificationNote carries the per-SKU reason (retired vMX needing a
+    // size, retired Insight, unrecognized MS license) — prefer it over the
+    // generic switch-license wording, which is wrong for the EOL cases.
     return {
-      message: `I couldn't quote ${invalidDirectLicenses.join(', ')} because it is not a recognized switch license SKU.`,
+      message: parsed.clarificationNote
+        ? `I couldn't quote ${invalidDirectLicenses.join(', ')}. ${parsed.clarificationNote}`
+        : `I couldn't quote ${invalidDirectLicenses.join(', ')} because it is not a recognized switch license SKU.`,
       needsLlm: false
     };
   }
@@ -8006,13 +8192,20 @@ Three license tiers exist for MX/Z:
 - SEC (Advanced Security): Available for MX (all models), Z4/Z4C. DEFAULT for MX and Z4/Z4C.
 - SDW (SD-WAN): Available for MX (all models) only. ALWAYS uses -Y suffix regardless of model age.
 
-**Systems Manager (LIC-SME) is DISCONTINUED — every LIC-SME term is inactive in Zoho and must never be quoted. Quote the replacement instead: LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM per device) at the requested term, and tell the user about the substitution.**
+**Systems Manager (LIC-SME) is DISCONTINUED — every LIC-SME term is inactive in Zoho and must never be quoted. Quote the replacement instead: LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM per device) at the requested term with a 50-device minimum quantity, and tell the user about the substitution.**
+
+**vMX licenses require an edition — editionless LIC-VMX-{S|M|L|XL}-{n}YR forms are retired. Quote LIC-VMX-{size}-{ENT|SEC}-{n}Y (SEC when the customer runs Advanced Security, else ENT). Never auto-size a model-number vMX like LIC-VMX100 — ask for the size. Meraki Insight (LIC-MI-S/M/L) is RETIRED: never quote it; upgrade the customer's MX license from -SEC- to -SDW- (SD-WAN Plus) instead and flag the change. LIC-MI-EMSC-… is Ivanti MDM, NOT Insight.**
 
 EXACT license SKU mappings by product family:
 
 ### APs (MR + CW) — all use generic ENT license
 - All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
 - CW9800 wireless controllers → NO license association
+
+### Systems Manager (SME) — generic, model-agnostic
+- "Systems Manager", "SME", "SME license" → LIC-MI-EMSC-D-1YMC-A-1YR, LIC-MI-EMSC-D-1YMC-A-3YR, LIC-MI-EMSC-D-1YMC-A-5YR (note: -YR suffix). Cisco Meraki Systems Manager (LIC-SME) is DISCONTINUED in every term — never emit any LIC-SME SKU; always quote the replacement (Ivanti Neurons for MDM per device) and flag the substitution. A 50-device minimum applies — quote at least qty 50. Model-agnostic like MR/MV/MT — quote all three terms unless a single term is named.
+- vMX licenses REQUIRE an edition: quote LIC-VMX-{S|M|L|XL}-{ENT|SEC}-{1|3|5}Y. Editionless forms (LIC-VMX-S-3YR) are retired — pick the edition from the customer's MX lines (SEC if they run Advanced Security, else ENT). NEVER auto-size a model-number vMX (LIC-VMX100) — ask which size.
+- Meraki Insight (LIC-MI-S/M/L) is RETIRED — never quote it. Its features moved to SD-WAN Plus: upgrade the customer's MX license from -SEC- to -SDW- instead and flag the change. LIC-MI-EMSC-… is the Ivanti MDM product, NOT Insight.
 
 ### MX Security Appliances — term suffix depends on model number
 - MX67, MX67W, MX67C, MX68, MX68W, MX68CW, MX250, MX450 (older) → -YR suffix
@@ -8111,8 +8304,10 @@ These products are End-of-Life. ALWAYS check every product in a screenshot or re
 - MS: MS120 (all), MS125 (all), MS210 (all), MS220 (all), MS225 (all), MS250 (all), MS320 (all), MS350 (all), MS355 (all), MS390 (all), MS410 (all), MS420 (all), MS425 (all)
 - MG: MG21, MG21E, MG51, MG51E
 - Z: Z1, Z3, Z3C
+- Licenses: LIC-SME (Systems Manager, all terms), LIC-MI-S/M/L (Meraki Insight), editionless LIC-VMX-{S,M,L,XL}-{n}YR (vMX without ENT/SEC)
 
 Replacements: MX60/64→MX67, MX65→MX68, MX80/84→MX85, MX100→MX95, MX400→MX250, MX600→MX450, MR20→MR28, MR30H→MR36H, MR33→MR36, MR42→MR44, MR45→MR46, MR52/53/56→MR57, MR55→MR57, MR70→MR78, MR74→MR76, MR84→MR86, MV Gen 2→Gen 3, MS120/125→MS130, MS210/220/225→MS130/MS150, MS250→C9300L, MS320→MS150, MS350→C9300, MS355→C9300X, MS390→C9300, MS410/420→C9300, MS425→C9300X, MG21→MG41, MG51→MG52, Z1/3→Z4, Z3C→Z4C
+License replacements: LIC-SME→LIC-MI-EMSC-D-1YMC-A-{term}YR (Ivanti Neurons for MDM, 50-device minimum), LIC-MI-S/M/L (Insight)→drop it and upgrade the MX license from -SEC- to -SDW- (SD-WAN Plus), editionless LIC-VMX→LIC-VMX-{size}-{ENT|SEC}-{n}Y (never auto-size a model-number vMX like LIC-VMX100)
 
 When you identify ANY EOL product, flag it using the compact format below (NO EOS dates, NO End-of-Support dates — those are only shown when explicitly requested). ALWAYS include both Option 1 (renewal, license-only) and Option 2 (hardware refresh with replacement hardware + all licenses). If any replacement switch has 1G/10G uplink variants, show Option 2 (1G Uplink) and Option 3 (10G Uplink). Flag ALL EOL products found regardless of whether they have a license overage — EOL status is based on the product family, not the license gap.
 
@@ -9070,7 +9265,9 @@ async function askClaude(userMessage, personId, env, imageData = null, classific
       .filter(line => !/stratusinfosystems\.com\/order\/\?item=&qty=/.test(line))
       .join('\n')
       .replace(/\n{3,}/g, '\n\n');
-    const sanitizedReply = sanitizeLiveFetchRetryWording(stripEmptyOrderUrls(reply));
+    // EOL swap on Claude-written URLs (retired SKUs, Ivanti 50-floor) — Claude
+    // composes order links as text, bypassing the deterministic URL builder.
+    const sanitizedReply = sanitizeLiveFetchRetryWording(swapEolUrlsInText(stripEmptyOrderUrls(reply)));
     const dedupedReply = stripEchoedSourceFooter(sanitizedReply);
     const finalReply = sourceFooter
       ? `${dedupedReply}\n\n${sourceFooter}\n\n${modelMarker}`
