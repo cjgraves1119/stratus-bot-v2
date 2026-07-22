@@ -24269,7 +24269,8 @@ GLM EXECUTION RULES:
 - ACT, DON'T PLAN ALOUD: never output planning text, numbered step lists of what you intend to do, or "Let me..." narration. Your first output for a CRM request is a tool call. Text is only for the final answer or a clarifying question.
 - SEARCH DISCIPLINE: construct your ONE best zoho_search_records call (right module, right criteria, sorted if recency matters) and TRUST its results. Re-search ONLY if the results genuinely cannot answer the request (wrong module, 0 rows, or a needed field is missing) — never re-run near-identical criteria "to double-check", and never run more than 3 searches total for one request.
 - FINAL REPLIES: 1-4 short sentences (or a compact bullet list for record summaries). State what was done/found + the key IDs/URLs. No preamble, no recap of steps taken.
-- NEVER print JSON payloads, tool names, or tool arguments in your text reply. If you catch yourself writing '{"Quoted_Items"' as prose, STOP — that belongs in the tool-calling channel.`;
+- NEVER print JSON payloads, tool names, or tool arguments in your text reply. If you catch yourself writing '{"Quoted_Items"' as prose, STOP — that belongs in the tool-calling channel.
+- DRY-RUN HONESTY: if a write tool result contains dry_run:true, [DRY_RUN_MOCKED], or DRY_-prefixed record ids, it was a TEST — report "this was a dry-run, no real record was created", and never present DRY_ ids as real created records.`;
 
 // Pick the right prompt for the model. Llama 4 has its own tuned version.
 function pickOptimizedPrompt(modelId, ownerCtx) {
@@ -24303,16 +24304,21 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
     } catch (_) { /* seed best-effort; a KV miss just makes it single-turn */ }
   }
   const _ownerCtx_bench = await getOwnerContext(env, env && env.__CALLER_EMAIL);
+  // Resolve {{OWNER_*}} placeholders in the TASK prompt too (2026-07-22): real
+  // users never type template tokens, and literal-minded models (Kimi) stop to
+  // ask "who is {{OWNER_DISPLAY_NAME}}?" while Claude silently infers — the
+  // benchmark was measuring placeholder tolerance, not CRM competence.
+  const benchPrompt = applyOwnerPlaceholders(task.prompt, _ownerCtx_bench);
   if (promptVariant === 'optimized' && modelConfig.type === 'cf') {
     systemPrompt = pickOptimizedPrompt(modelConfig.id, _ownerCtx_bench);
   } else {
     systemPrompt = typeof buildCrmSystemPrompt === 'function'
-      ? buildCrmSystemPrompt(task.prompt, _ownerCtx_bench, advisorToolActive(env, modelConfig.type === 'claude' ? (modelConfig.forceModel || 'claude-sonnet-5') : ''))
+      ? buildCrmSystemPrompt(benchPrompt, _ownerCtx_bench, advisorToolActive(env, modelConfig.type === 'claude' ? (modelConfig.forceModel || 'claude-sonnet-5') : ''))
       : (SYSTEM_PROMPT || 'You are a helpful assistant with Zoho CRM tools.');
   }
 
   if (modelConfig.type === 'claude') {
-    return await askClaudeForBenchmark(task.prompt, env, personId, dryRun, 90000, evalContext, modelConfig.forceModel || null);
+    return await askClaudeForBenchmark(benchPrompt, env, personId, dryRun, 90000, evalContext, modelConfig.forceModel || null);
   }
 
   // PR-A parity for CF/DeepSeek benchmark runs (2026-07-02): Claude is measured
@@ -24321,17 +24327,17 @@ async function runBenchmarkTask(task, modelConfig, env, personId, dryRun, prompt
   // (slower prefill, worst on GLM) and more distraction. Apply the identical
   // deterministic subsetting so "can X replace Sonnet" measures the same job.
   const _crmCtx_benchPRA = {
-    hasActivePageContext: /\[Active Zoho page[:\s]/i.test(task.prompt),
-    hasQuoteSession: /\[Session: Most recently worked quote/i.test(task.prompt)
+    hasActivePageContext: /\[Active Zoho page[:\s]/i.test(benchPrompt),
+    hasQuoteSession: /\[Session: Most recently worked quote/i.test(benchPrompt)
   };
-  const _benchIntent = classifyCrmIntent(task.prompt, _crmCtx_benchPRA);
+  const _benchIntent = classifyCrmIntent(benchPrompt, _crmCtx_benchPRA);
   const _benchSubset = selectToolSubset(_benchIntent, CRM_EMAIL_TOOLS);
   const benchTools = _benchSubset.length > 0 ? _benchSubset : CRM_EMAIL_TOOLS;
 
   if (modelConfig.type === 'deepseek') {
-    return await askDeepSeekModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
+    return await askDeepSeekModel(modelConfig.id, benchPrompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
   }
-  return await askCfModel(modelConfig.id, task.prompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
+  return await askCfModel(modelConfig.id, benchPrompt, systemPrompt, benchTools, env, personId, dryRun, 10, reasoningPolicy);
 }
 
 // HTML dashboard for benchmark results
