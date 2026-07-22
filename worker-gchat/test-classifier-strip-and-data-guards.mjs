@@ -30,7 +30,7 @@ const creFactory = new Function("toolInput", `${creGuard}; return { ok: true, re
 const CANNED = `Create a Zoho CRM quote from this Stratus quote: https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,LIC-MS120-24P-3YR,LIC-MS120-8FP-3YR&qty=68,7,3
 Line items: 68x LIC-ENT-3YR, 7x LIC-MS120-24P-3YR, 3x LIC-MS120-8FP-3YR`;
 const EMAIL_WRAP = (userText, body) =>
-  `[Email context: Subject: "Meraki License Renewal", From: Chi Obinnah (chi@jhlarson.com)]\n[Email body:\n${body}]\n\n${userText}`;
+  `[Email context: Subject: "Meraki License Renewal", From: Jane Doe (jane@acmelighting.example)]\n[Email body:\n${body}]\n\n${userText}`;
 const HIJACK_BODY = "Hi Chris, please review the email below and send over pricing when you can. Thanks!";
 
 let n = 0;
@@ -72,8 +72,8 @@ t("user's own words 'draft a reply to this email' -> email (unchanged)", () => {
   const r = classifyCrmIntent("draft a reply to this email", {});
   assert.equal(r.class, "email");
 });
-t("'create a quote for J.H. Larson' -> crm_write 0.95 (unchanged)", () => {
-  const r = classifyCrmIntent("create a quote for J.H. Larson", {});
+t("'create a quote for Acme Lighting' -> crm_write 0.95 (unchanged)", () => {
+  const r = classifyCrmIntent("create a quote for Acme Lighting", {});
   assert.equal(r.class, "crm_write"); assert.equal(r.confidence, 0.95);
 });
 t("'send me a quote link for 5 MR44' -> quote_url or general, never email/crm_write", () => {
@@ -135,7 +135,7 @@ t("create guard: array-of-object still unwraps to first record (unchanged)", () 
 // ── council FIX-FIRST round: panel-confirmed findings ──
 const BANNER_BODY = "[EXTERNAL]\n\nHi Chris, please review the email below and check your inbox for the attached PO. Thanks!";
 t("PROD LAYOUT: [Email ctx/body w/ banner] + [CRM context] + [Session] + canned -> crm_write 0.98 (anchor live)", () => {
-  const msg = `[Email context: Subject: "Meraki License Renewal", From: Chi Obinnah (chi@jhlarson.com)]\n[Email body:\n${BANNER_BODY}]\n\n[CRM context: Account "J.H. Larson Co." (id 2570562000416698177) matched for this sender.]\n[Session: Most recently worked quote 2570562000416704192]\n${CANNED}`;
+  const msg = `[Email context: Subject: "Meraki License Renewal", From: Jane Doe (jane@acmelighting.example)]\n[Email body:\n${BANNER_BODY}]\n\n[CRM context: Account "Acme Lighting Co." (id 2570562000000001111) matched for this sender.]\n[Session: Most recently worked quote 2570562000000002222]\n${CANNED}`;
   const r = classifyCrmIntent(msg, { hasQuoteSession: true });
   assert.equal(r.class, "crm_write"); assert.equal(r.confidence, 0.98);
 });
@@ -153,16 +153,16 @@ t("FINDING 3 FIX: 'send an email to Dan with the new zoho quote' stays email", (
   assert.equal(r.class, "email");
 });
 t("FINDING 5 FIX: no-account [CRM context] block no longer hijacks send-reply asks", () => {
-  const msg = `[CRM context: No existing Account found for domain jhlarson.com. If the user asks to create a quote/deal, first ask which account to use.]\n\ndraft a reply and send it to the customer`;
+  const msg = `[CRM context: No existing Account found for domain acmelighting.example. If the user asks to create a quote/deal, first ask which account to use.]\n\ndraft a reply and send it to the customer`;
   const r = classifyCrmIntent(msg, {});
   assert.equal(r.class, "email");
 });
 t("[Session:] header alone no longer self-triggers a class from its own prose", () => {
-  const r = classifyCrmIntent("[Session: Most recently worked quote 2570562000416704192]\nthanks, looks good", { hasQuoteSession: true });
+  const r = classifyCrmIntent("[Session: Most recently worked quote 2570562000000002222]\nthanks, looks good", { hasQuoteSession: true });
   assert.notEqual(r.class, "crm_write");
 });
 t("[Active Zoho page:] header intentionally KEPT for classification (load-bearing)", () => {
-  const r = classifyCrmIntent(`[Active Zoho page: user is currently viewing Quote 2570562000416704192 — "J.H. Larson Co."]\nfix the remaining lines`, { hasActivePageContext: true });
+  const r = classifyCrmIntent(`[Active Zoho page: user is currently viewing Quote 2570562000000002222 — "Acme Lighting Co."]\nfix the remaining lines`, { hasActivePageContext: true });
   assert.equal(r.class, "crm_write");
 });
 t("null data -> message says 'null' not 'object'", () => {

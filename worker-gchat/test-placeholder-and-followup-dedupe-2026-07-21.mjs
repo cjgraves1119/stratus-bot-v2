@@ -24,7 +24,7 @@ const isPlaceholderName = new Function(`${SRC.slice(phStart, phEnd)}; return isP
 for (const s of ['Company Name', 'Company Name - 3x MX75', '{Account} - MX', 'tbd']) {
   t(`placeholder TRUE: "${s}"`, () => assert.strictEqual(isPlaceholderName(s), true));
 }
-for (const s of ['Accountemps', 'Skty Trading LLC', 'West Central Association']) {
+for (const s of ['Accountemps', 'Bluewater Trading LLC', 'Prairie Valley Association']) {
   t(`placeholder FALSE: "${s}"`, () => assert.strictEqual(isPlaceholderName(s), false));
 }
 t('placeholder TRUE: empty/null/non-string/1-char', () => {
@@ -74,7 +74,7 @@ t('memo: second same-turn call returns deduped:true, no second POST', () => {
   assert.strictEqual(second.dueDate, first.dueDate);
   assert.strictEqual(zohoPosts, 1, 'no second Tasks POST');
 });
-const otherDeal = await createFollowUpTaskForDeal({ dealId: 'D-2', subjectLabel: 'Skty Trading LLC', env, personId: null, ownerId: 'O-1', existingDeal: false });
+const otherDeal = await createFollowUpTaskForDeal({ dealId: 'D-2', subjectLabel: 'Bluewater Trading LLC', env, personId: null, ownerId: 'O-1', existingDeal: false });
 t('memo: different dealId still creates', () => {
   assert.ok(!otherDeal.deduped);
   assert.strictEqual(zohoPosts, 2);

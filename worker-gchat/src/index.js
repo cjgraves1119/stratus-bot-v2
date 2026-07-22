@@ -12387,7 +12387,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'zoho_create_record': {
         const { module_name } = toolInput;
         let data = toolInput.data;
-        // 2026-07-16 (J.H. Larson postmortem): same string-payload guard as
+        // 2026-07-16 (2026-07-15 email-context injection incident): same string-payload guard as
         // zoho_update_record — in strict (module) code, `recordData.Owner = ...`
         // on a string primitive throws.
         if (typeof data === 'string') {
@@ -12764,7 +12764,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       case 'zoho_update_record': {
         const { module_name, record_id } = toolInput;
         let data = toolInput.data;
-        // 2026-07-16 (J.H. Larson postmortem): a schema-less call (tool invoked
+        // 2026-07-16 (2026-07-15 email-context injection incident): a schema-less call (tool invoked
         // while outside the declared subset) can pass `data` as a JSON string —
         // it then crashed the FIX-C guard's `f in data` with a raw TypeError.
         // Parse if possible, otherwise reject with an instructive error.
@@ -18648,7 +18648,7 @@ const TOOL_SUBSET_CLASSES = Object.freeze([
  *   7. Search / find / list / show / pull up → crm_read (0.8)
  *   8. Otherwise → general (0.5, below the 0.7 confidence floor)
  */
-// 2026-07-16 (J.H. Larson postmortem): classify the USER'S words only. /api/chat
+// 2026-07-16 (2026-07-15 email-context injection incident): classify the USER'S words only. /api/chat
 // prepends [Email context:]/[Email body:<=4KB>]/[CRM context:]/[Session:] blocks and
 // appends [Pre-resolved products:]; email-thread prose inside those blocks hijacked
 // the class to `email` (a subset with no zoho_update_record) on CRM-write requests
