@@ -220,14 +220,16 @@ t('defaultQuoteDealDate: end of month, UTC (fiscal-capped suggestion)', () => {
   assert.strictEqual(aug.date, '2026-08-31');
   assert.strictEqual(aug.needsConfirmation, false);
 });
-t('month-end window: last 7 days of the month need confirmation', () => {
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 7, 24))).needsConfirmation, false); // Aug 24: 7 days left
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 7, 25))).needsConfirmation, true);  // Aug 25: 6 days left
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 7, 31))).needsConfirmation, true);  // Aug 31: month end
+t('month-end window: last 7 days of the month need confirmation (PT business clock)', () => {
+  // Noon-UTC instants = same Pacific calendar day (the business clock is
+  // America/Los_Angeles; UTC midnights read as the PREVIOUS business day).
+  assert.strictEqual(defaultQuoteDealDate(new Date('2026-08-24T12:00:00Z')).needsConfirmation, false); // Aug 24: 7 days left
+  assert.strictEqual(defaultQuoteDealDate(new Date('2026-08-25T12:00:00Z')).needsConfirmation, true);  // Aug 25: 6 days left
+  assert.strictEqual(defaultQuoteDealDate(new Date('2026-08-31T12:00:00Z')).needsConfirmation, true);  // Aug 31: month end
 });
-t('month-end window respects February + leap years', () => {
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2026, 1, 22))).needsConfirmation, true);  // 2026-02-22: 6 days left
-  assert.strictEqual(defaultQuoteDealDate(new Date(Date.UTC(2028, 1, 22))).needsConfirmation, false); // 2028-02-22 (leap): 7 days left
+t('month-end window respects February + leap years (PT business clock)', () => {
+  assert.strictEqual(defaultQuoteDealDate(new Date('2026-02-22T12:00:00Z')).needsConfirmation, true);  // 2026-02-22: 6 days left
+  assert.strictEqual(defaultQuoteDealDate(new Date('2028-02-22T12:00:00Z')).needsConfirmation, false); // 2028-02-22 (leap): 7 days left
 });
 await ta('validateCrmWrite corrects a past Closing_Date to +14d (or asks in the window)', async () => {
   // Deal_Name must be a realistic name — the 2026-07-21 placeholder gate

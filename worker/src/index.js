@@ -2940,9 +2940,10 @@ function buildStratusUrl(items) {
   // EOL swap safety net: no order link may carry a retired SKU regardless of
   // which path assembled the items (edition inferred from sibling lines here;
   // notes surface at the assembly seams that own reply text). Idempotent.
-  // Un-sizable lines (valid:false, e.g. bare LIC-VMX100) stay in the link
-  // unchanged — fail closed, never guess a size.
-  items = applyEolSwaps(items).lines;
+  // Un-sizable retired lines (valid:false, e.g. bare LIC-VMX100) are DROPPED
+  // from the link — a purchase URL must never sell a retired SKU (codex
+  // review 2026-07-21); their flags surface at the seams that own text.
+  items = applyEolSwaps(items).lines.filter(l => l.valid !== false);
 
   // Consolidate duplicate SKUs by summing quantities
   const merged = new Map();
@@ -4769,6 +4770,8 @@ function applyEolSwaps(lines, mxEdition) {
   const src = Array.isArray(lines) ? lines : [];
   const ed = eolEdition(mxEdition, src);
   let insightNote = false;
+  let smeReplacedThisPass = false;
+  const vmxSwappedThisPass = [];
   const upgradeMxToSdw = src.some(l => INSIGHT_RE.test(String(l.sku || '')));
   let out = [];
   for (const l of src) {
@@ -4776,7 +4779,9 @@ function applyEolSwaps(lines, mxEdition) {
     let m;
     if (INSIGHT_RE.test(sku)) { insightNote = true; continue; }                 // Insight: drop
     if ((m = sku.match(/^LIC-VMX-(S|M|L|XL)-(\d+)(YR|Y)$/))) {                  // vMX: add edition
-      out.push({ ...l, sku: eolPick(`LIC-VMX-${m[1]}-${ed}`, m[2], 'Y'),
+      const swappedSku = eolPick(`LIC-VMX-${m[1]}-${ed}`, m[2], 'Y');
+      vmxSwappedThisPass.push(swappedSku);
+      out.push({ ...l, sku: swappedSku,
         flag: `vMX now requires an edition; set to ${ed}`, replaced_from: sku });
       continue;
     }
@@ -4785,19 +4790,11 @@ function applyEolSwaps(lines, mxEdition) {
         flag: `retired vMX; pick a sized LIC-VMX-{S/M/L/XL}-${ed} equivalent` });
       continue;
     }
-    if ((m = sku.match(/^LIC-SME?-(\d+)(YR|Y)$/))) {                            // SME: Ivanti, floor 50
-      const qty0 = Number(l.qty) || 0;
-      const iqty = Math.max(qty0, IVANTI_MIN);
-      out.push({ ...l, sku: `${SME_REPLACEMENT_BASE}-${m[1]}YR`, qty: iqty,
-        flag: `Systems Manager retired; Ivanti Neurons for MDM (min ${IVANTI_MIN})${iqty > qty0 ? `, qty raised from ${qty0}` : ''}`,
+    if ((m = sku.match(/^LIC-SME?-(\d+)(YR|Y)$/))) {                            // SME: Ivanti (floor applied post-consolidation)
+      smeReplacedThisPass = true;
+      out.push({ ...l, sku: `${SME_REPLACEMENT_BASE}-${m[1]}YR`, qty: Number(l.qty) || 0,
+        flag: `Systems Manager retired; Ivanti Neurons for MDM (min ${IVANTI_MIN})`,
         replaced_from: sku, url: IVANTI_URL });
-      continue;
-    }
-    if (sku.startsWith(SME_REPLACEMENT_BASE) && (Number(l.qty) || 0) < IVANTI_MIN) {
-      // Already substituted upstream (smeReplacementSku) — the floor still applies.
-      out.push({ ...l, qty: IVANTI_MIN,
-        flag: `Ivanti Neurons for MDM has a ${IVANTI_MIN}-device minimum; qty raised from ${Number(l.qty) || 0}`,
-        url: IVANTI_URL });
       continue;
     }
     out.push(l);
@@ -4813,19 +4810,56 @@ function applyEolSwaps(lines, mxEdition) {
     }
     return l;
   });
+  // Ivanti 50-floor — applied ONCE per final SKU AFTER consolidating duplicate
+  // lines (codex review 2026-07-21: flooring per input line let duplicate SME
+  // lines of 8 + 10 stack to 50 + 50 = 100 after the URL builder's merge; the
+  // correct quantity is max(8 + 10, 50) = 50). All lines of the same Ivanti
+  // SKU — swapped this pass or pre-substituted upstream — collapse into the
+  // first occurrence, sum their quantities, then floor the SUM. Caller line
+  // objects are never mutated (copies only).
+  let anyFloorRaise = false;
+  {
+    const groups = new Map(); // upper sku -> array of indexes into out
+    out.forEach((l, i) => {
+      const s = String(l.sku || '').toUpperCase();
+      if (s.startsWith(SME_REPLACEMENT_BASE)) {
+        if (!groups.has(s)) groups.set(s, []);
+        groups.get(s).push(i);
+      }
+    });
+    if (groups.size > 0) {
+      const dropIdx = new Set();
+      for (const [, idxs] of groups) {
+        const sum = idxs.reduce((a, i) => a + (Number(out[i].qty) || 0), 0);
+        const floored = Math.max(sum, IVANTI_MIN);
+        const raised = floored > sum;
+        if (raised) anyFloorRaise = true;
+        const first = out[idxs[0]];
+        out[idxs[0]] = {
+          ...first,
+          qty: floored,
+          url: IVANTI_URL,
+          flag: `${first.flag ? first.flag : `Ivanti Neurons for MDM (min ${IVANTI_MIN})`}${raised ? `, qty raised from ${sum}` : ''}`,
+        };
+        for (let k = 1; k < idxs.length; k++) dropIdx.add(idxs[k]);
+      }
+      if (dropIdx.size > 0) out = out.filter((_, i) => !dropIdx.has(i));
+    }
+  }
   const notes = [];
-  if (out.some(l => /^LIC-SME?-/i.test(String(l.replaced_from || '')))) notes.push(SME_EOL_FLAG);
-  if (out.some(l => /qty raised from/.test(String(l.flag || '')))) {
+  if (smeReplacedThisPass) notes.push(SME_EOL_FLAG);
+  if (anyFloorRaise) {
     notes.push(`Ivanti Neurons for MDM has a ${IVANTI_MIN}-device minimum — the quantity was raised to ${IVANTI_MIN}.`);
   }
   if (insightNote) notes.push(upgraded
     ? `Meraki Insight is retired; upgraded ${upgraded} MX license line${upgraded === 1 ? '' : 's'} to SD-WAN Plus (SDW) to preserve the feature set.`
     : 'Meraki Insight is retired and was removed from the quote; no MX Advanced Security line to upgrade to SD-WAN Plus — please review.');
-  for (const l of out) {
-    if (l.flag && /^vMX now requires an edition/.test(l.flag)) {
-      notes.push(`vMX licenses now require an edition — quoted ${l.sku} (${ed}).`);
-      break;
-    }
+  // vMX note only for swaps made THIS pass — reading persisted flags off
+  // already-swapped lines produced a contradictory "(ENT)" note on
+  // re-application when the sibling-edition inference no longer saw the
+  // original context (codex review 2026-07-21).
+  if (vmxSwappedThisPass.length > 0) {
+    notes.push(`vMX licenses now require an edition — quoted ${vmxSwappedThisPass[0]} (${ed}).`);
   }
   if (out.some(l => l.url === IVANTI_URL)) notes.push(`Ivanti Neurons for MDM: ${IVANTI_URL}`);
   return { lines: out, notes, ivantiUrl: out.some(l => l.url === IVANTI_URL) ? IVANTI_URL : null };
@@ -4840,7 +4874,14 @@ const swapEolUrlsInText = (s) => String(s || '')
   .replace(/https:\/\/stratusinfosystems\.com\/order\/\?[^\s)>\]"'<]+/g, (u) => {
     try {
       const parsed = parseStratusUrl(u);
-      if (!parsed || parsed.skus.length === 0) return u;
+      if (!parsed || parsed.skus.length === 0) {
+        // Every line in the URL was retired (e.g. an all-Insight link): the
+        // original URL must NOT survive into the reply (codex review
+        // 2026-07-21) — replace it with a review note instead.
+        return /[?&]item=[^&\s]/.test(u)
+          ? '[order link removed — the quoted product is retired; ask for an updated quote]'
+          : u;
+      }
       return buildStratusUrl(parsed.skus.map((sku, i) => ({ sku, qty: parsed.qtys[i] })));
     } catch { return u; }
   });
@@ -7177,8 +7218,9 @@ function formatPrice(num) {
 function buildPricingBlock(urlItems, showPricing) {
   if (!showPricing) return '';
   // Same EOL swap as buildStratusUrl so the dollar lines always match the
-  // order link (idempotent — a pre-swapped seam passes through unchanged).
-  urlItems = applyEolSwaps(urlItems).lines;
+  // order link (idempotent — a pre-swapped seam passes through unchanged;
+  // valid:false lines dropped to mirror the link).
+  urlItems = applyEolSwaps(urlItems).lines.filter(l => l.valid !== false);
   let lines = [];
   let cartTotal = 0;
   for (const { sku, qty } of urlItems) {

@@ -145,6 +145,24 @@ const HANDOFF_INPUT = [
   ok(G.swapEolUrlsInText(cleanText) === cleanText, 'clean URLs round-trip byte-identical');
   ok(G.swapEolUrlsInText(null) === '' && G.swapEolUrlsInText('no urls here') === 'no urls here', 'null/plain-text safe');
 
+  // ── 8b. Codex HOLD findings (2026-07-21 adversarial review) ──
+  console.log('codex findings: floor consolidation, valid:false containment');
+  const dup = G.buildStratusUrl([{ sku: 'LIC-SME-3YR', qty: 8 }, { sku: 'LIC-SME-3YR', qty: 10 }]);
+  ok(/qty=50$/.test(dup) && /LIC-MI-EMSC-D-1YMC-A-3YR/.test(dup),
+    `F3: duplicate SME lines 8+10 → single Ivanti line at 50, not 100 (got ${dup.split('qty=')[1]})`);
+  const mixFloor = G.applyEolSwaps([{ sku: 'LIC-SME-3YR', qty: 8 }, { sku: 'LIC-MI-EMSC-D-1YMC-A-3YR', qty: 60 }]);
+  ok(mixFloor.lines.length === 1 && mixFloor.lines[0].qty === 68,
+    'F3: SME x8 + pre-substituted Ivanti x60 consolidate to 68 (sum ≥ floor, no raise)');
+  const vmx100Url = G.buildStratusUrl([{ sku: 'LIC-VMX100', qty: 1 }, { sku: 'LIC-ENT-3YR', qty: 5 }]);
+  ok(!/LIC-VMX100/.test(vmx100Url) && /LIC-ENT-3YR&qty=5|LIC-ENT-3YR/.test(vmx100Url),
+    'F4a: un-sizable LIC-VMX100 dropped from the order link, valid lines kept');
+  const allRetired = G.swapEolUrlsInText('see https://stratusinfosystems.com/order/?item=LIC-MI-M-3YR&qty=1 ok');
+  ok(!/stratusinfosystems\.com\/order/.test(allRetired) && /retired/.test(allRetired) && /^see .* ok$/.test(allRetired),
+    'F4b: all-retired URL replaced with a review note in Claude text');
+  const reap = G.applyEolSwaps(G.applyEolSwaps(HANDOFF_INPUT, 'Advanced Security').lines);
+  ok(!reap.notes.some(n => /\(ENT\)/.test(n)),
+    'F8a: re-application emits no contradictory (ENT) vMX note from stale flags');
+
   // ── 9. /api/quote: license retirements must be FLAGGED to the extension ──
   // (Chris, live DEV 2026-07-21: URLs were swapped but eolWarnings only carried
   // the MX84 hardware EOL — the SME/Insight/vMX license flags never reached the

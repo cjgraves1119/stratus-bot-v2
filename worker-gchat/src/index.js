@@ -2679,9 +2679,10 @@ function buildStratusUrl(items) {
   // EOL swap safety net: no order link may carry a retired SKU regardless of
   // which path assembled the items (edition inferred from sibling lines here;
   // notes surface at the assembly seams that own reply text). Idempotent.
-  // Un-sizable lines (valid:false, e.g. bare LIC-VMX100) stay in the link
-  // unchanged — fail closed, never guess a size.
-  items = applyEolSwaps(items).lines;
+  // Un-sizable retired lines (valid:false, e.g. bare LIC-VMX100) are DROPPED
+  // from the link — a purchase URL must never sell a retired SKU (codex
+  // review 2026-07-21); their flags surface at the seams that own text.
+  items = applyEolSwaps(items).lines.filter(l => l.valid !== false);
 
   // Consolidate duplicate SKUs by summing quantities
   const merged = new Map();
@@ -4929,6 +4930,8 @@ function applyEolSwaps(lines, mxEdition) {
   const src = Array.isArray(lines) ? lines : [];
   const ed = eolEdition(mxEdition, src);
   let insightNote = false;
+  let smeReplacedThisPass = false;
+  const vmxSwappedThisPass = [];
   const upgradeMxToSdw = src.some(l => INSIGHT_RE.test(String(l.sku || '')));
   let out = [];
   for (const l of src) {
@@ -4936,7 +4939,9 @@ function applyEolSwaps(lines, mxEdition) {
     let m;
     if (INSIGHT_RE.test(sku)) { insightNote = true; continue; }                 // Insight: drop
     if ((m = sku.match(/^LIC-VMX-(S|M|L|XL)-(\d+)(YR|Y)$/))) {                  // vMX: add edition
-      out.push({ ...l, sku: eolPick(`LIC-VMX-${m[1]}-${ed}`, m[2], 'Y'),
+      const swappedSku = eolPick(`LIC-VMX-${m[1]}-${ed}`, m[2], 'Y');
+      vmxSwappedThisPass.push(swappedSku);
+      out.push({ ...l, sku: swappedSku,
         flag: `vMX now requires an edition; set to ${ed}`, replaced_from: sku });
       continue;
     }
@@ -4945,19 +4950,11 @@ function applyEolSwaps(lines, mxEdition) {
         flag: `retired vMX; pick a sized LIC-VMX-{S/M/L/XL}-${ed} equivalent` });
       continue;
     }
-    if ((m = sku.match(/^LIC-SME?-(\d+)(YR|Y)$/))) {                            // SME: Ivanti, floor 50
-      const qty0 = Number(l.qty) || 0;
-      const iqty = Math.max(qty0, IVANTI_MIN);
-      out.push({ ...l, sku: `${SME_REPLACEMENT_BASE}-${m[1]}YR`, qty: iqty,
-        flag: `Systems Manager retired; Ivanti Neurons for MDM (min ${IVANTI_MIN})${iqty > qty0 ? `, qty raised from ${qty0}` : ''}`,
+    if ((m = sku.match(/^LIC-SME?-(\d+)(YR|Y)$/))) {                            // SME: Ivanti (floor applied post-consolidation)
+      smeReplacedThisPass = true;
+      out.push({ ...l, sku: `${SME_REPLACEMENT_BASE}-${m[1]}YR`, qty: Number(l.qty) || 0,
+        flag: `Systems Manager retired; Ivanti Neurons for MDM (min ${IVANTI_MIN})`,
         replaced_from: sku, url: IVANTI_URL });
-      continue;
-    }
-    if (sku.startsWith(SME_REPLACEMENT_BASE) && (Number(l.qty) || 0) < IVANTI_MIN) {
-      // Already substituted upstream (smeReplacementSku) — the floor still applies.
-      out.push({ ...l, qty: IVANTI_MIN,
-        flag: `Ivanti Neurons for MDM has a ${IVANTI_MIN}-device minimum; qty raised from ${Number(l.qty) || 0}`,
-        url: IVANTI_URL });
       continue;
     }
     out.push(l);
@@ -4973,19 +4970,56 @@ function applyEolSwaps(lines, mxEdition) {
     }
     return l;
   });
+  // Ivanti 50-floor — applied ONCE per final SKU AFTER consolidating duplicate
+  // lines (codex review 2026-07-21: flooring per input line let duplicate SME
+  // lines of 8 + 10 stack to 50 + 50 = 100 after the URL builder's merge; the
+  // correct quantity is max(8 + 10, 50) = 50). All lines of the same Ivanti
+  // SKU — swapped this pass or pre-substituted upstream — collapse into the
+  // first occurrence, sum their quantities, then floor the SUM. Caller line
+  // objects are never mutated (copies only).
+  let anyFloorRaise = false;
+  {
+    const groups = new Map(); // upper sku -> array of indexes into out
+    out.forEach((l, i) => {
+      const s = String(l.sku || '').toUpperCase();
+      if (s.startsWith(SME_REPLACEMENT_BASE)) {
+        if (!groups.has(s)) groups.set(s, []);
+        groups.get(s).push(i);
+      }
+    });
+    if (groups.size > 0) {
+      const dropIdx = new Set();
+      for (const [, idxs] of groups) {
+        const sum = idxs.reduce((a, i) => a + (Number(out[i].qty) || 0), 0);
+        const floored = Math.max(sum, IVANTI_MIN);
+        const raised = floored > sum;
+        if (raised) anyFloorRaise = true;
+        const first = out[idxs[0]];
+        out[idxs[0]] = {
+          ...first,
+          qty: floored,
+          url: IVANTI_URL,
+          flag: `${first.flag ? first.flag : `Ivanti Neurons for MDM (min ${IVANTI_MIN})`}${raised ? `, qty raised from ${sum}` : ''}`,
+        };
+        for (let k = 1; k < idxs.length; k++) dropIdx.add(idxs[k]);
+      }
+      if (dropIdx.size > 0) out = out.filter((_, i) => !dropIdx.has(i));
+    }
+  }
   const notes = [];
-  if (out.some(l => /^LIC-SME?-/i.test(String(l.replaced_from || '')))) notes.push(SME_EOL_FLAG);
-  if (out.some(l => /qty raised from/.test(String(l.flag || '')))) {
+  if (smeReplacedThisPass) notes.push(SME_EOL_FLAG);
+  if (anyFloorRaise) {
     notes.push(`Ivanti Neurons for MDM has a ${IVANTI_MIN}-device minimum — the quantity was raised to ${IVANTI_MIN}.`);
   }
   if (insightNote) notes.push(upgraded
     ? `Meraki Insight is retired; upgraded ${upgraded} MX license line${upgraded === 1 ? '' : 's'} to SD-WAN Plus (SDW) to preserve the feature set.`
     : 'Meraki Insight is retired and was removed from the quote; no MX Advanced Security line to upgrade to SD-WAN Plus — please review.');
-  for (const l of out) {
-    if (l.flag && /^vMX now requires an edition/.test(l.flag)) {
-      notes.push(`vMX licenses now require an edition — quoted ${l.sku} (${ed}).`);
-      break;
-    }
+  // vMX note only for swaps made THIS pass — reading persisted flags off
+  // already-swapped lines produced a contradictory "(ENT)" note on
+  // re-application when the sibling-edition inference no longer saw the
+  // original context (codex review 2026-07-21).
+  if (vmxSwappedThisPass.length > 0) {
+    notes.push(`vMX licenses now require an edition — quoted ${vmxSwappedThisPass[0]} (${ed}).`);
   }
   if (out.some(l => l.url === IVANTI_URL)) notes.push(`Ivanti Neurons for MDM: ${IVANTI_URL}`);
   return { lines: out, notes, ivantiUrl: out.some(l => l.url === IVANTI_URL) ? IVANTI_URL : null };
@@ -6015,8 +6049,9 @@ function formatPrice(num) {
 function buildPricingBlock(urlItems, showPricing) {
   if (!showPricing) return '';
   // Same EOL swap as buildStratusUrl so the dollar lines always match the
-  // order link (idempotent — a pre-swapped seam passes through unchanged).
-  urlItems = applyEolSwaps(urlItems).lines;
+  // order link (idempotent — a pre-swapped seam passes through unchanged;
+  // valid:false lines dropped to mirror the link).
+  urlItems = applyEolSwaps(urlItems).lines.filter(l => l.valid !== false);
   let lines = [];
   let cartTotal = 0;
   for (const { sku, qty } of urlItems) {
@@ -8966,6 +9001,14 @@ async function preferNonHwQuotedItems(quotedItems, env) {
     const cacheKey = `nonhw:${base}`;
     let resolvedId = null;
     try { resolvedId = kv ? await kv.get(cacheKey) : null; } catch (_) { resolvedId = null; }
+    // Cache hygiene (codex 2026-07-21): a cached value is only trusted when
+    // it is the 'none' sentinel or a plausible Zoho record id. Anything else
+    // (corrupt/truncated/poisoned) is treated as a MISS and re-resolved live
+    // — a malformed id must never be written into a quote line.
+    if (resolvedId != null && resolvedId !== 'none' && !/^\d{15,20}$/.test(String(resolvedId))) {
+      console.log(`[NONHW] discarding malformed cached id for ${base}: "${String(resolvedId).slice(0, 40)}"`);
+      resolvedId = null;
+    }
     if (resolvedId == null) {
       try {
         const res = await zohoApiCall('GET',
@@ -9141,8 +9184,21 @@ function scrubMarginFromQuotedItems(quotedItems, context = 'Quoted_Items') {
 // 2026-07-21; the anchor also yields 53-week years like FY27 correctly).
 // `suggested` = the recommended chip: EOM, capped to the fiscal quarter end.
 // UTC throughout — matches the existing toISOString() date idiom.
-function ciscoFiscalQuarterEnd(now = new Date()) {
+// Business-calendar "today": the policy clock is Pacific (Stratus is a CA
+// company). The worker runs on UTC, which flipped the business date at 5pm
+// PT — a July 25 evening quote would have read as July 26 and skipped the
+// fiscal cap entirely (codex 2026-07-21). Returns a UTC-midnight Date of the
+// America/Los_Angeles calendar date so all downstream math stays UTC-idiom.
+function businessDate(now = new Date()) {
   const t = now instanceof Date ? now : new Date(now);
+  const d = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(t);
+  return new Date(`${d}T00:00:00Z`);
+}
+
+function ciscoFiscalQuarterEnd(now = new Date()) {
+  const t = businessDate(now);
   const todayStr = t.toISOString().split('T')[0];
   const lastSatJuly = (y) => {
     const jul31 = new Date(Date.UTC(y, 6, 31));
@@ -9159,7 +9215,7 @@ function ciscoFiscalQuarterEnd(now = new Date()) {
 }
 
 function defaultQuoteDealDate(created = new Date()) {
-  const t = created instanceof Date ? created : new Date(created);
+  const t = businessDate(created);
   const eom = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0));
   const date = eom.toISOString().split('T')[0];
   const daysToMonthEnd = eom.getUTCDate() - t.getUTCDate();
@@ -15450,6 +15506,20 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             results.steps.push(`Using user-confirmed close date ${closingDate} for Deal Closing_Date and Quote Valid_Till`);
           } else if (existingDealData?.Closing_Date
               && existingDealData.Closing_Date >= earliestAcceptedUserDate()) {
+            // Attach-mode inherit is NOT exempt from the fiscal cap (codex
+            // 2026-07-21: an existing Deal dated past the quarter end slipped
+            // a Quote Valid_Till into the next fiscal quarter unconfirmed).
+            const _fiscalEndInherit = ciscoFiscalQuarterEnd();
+            if (existingDealData.Closing_Date > _fiscalEndInherit && toolInput.date_confirmed !== true) {
+              return {
+                success: false,
+                error: 'closing_date_needs_confirmation',
+                suggested_date: _fiscalEndInherit,
+                instruction: `The existing Deal's Closing_Date ${existingDealData.Closing_Date} falls AFTER the current Cisco fiscal quarter end (${_fiscalEndInherit}) — the Quote's Valid_Till must not inherit a next-quarter date without explicit approval. ASK the user: use ${_fiscalEndInherit} (fiscal quarter end, recommended) or keep the Deal's ${existingDealData.Closing_Date}? Re-call this tool with closing_date:"<chosen YYYY-MM-DD>"; if the user keeps the later date, also pass date_confirmed:true.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
             closingDate = existingDealData.Closing_Date;
             results.steps.push(`Quote Valid_Till matched to the existing Deal's Closing_Date ${closingDate}`);
           } else {
@@ -20064,7 +20134,14 @@ const swapEolUrlsInText = (s) => String(s || '')
   .replace(/https:\/\/stratusinfosystems\.com\/order\/\?[^\s)>\]"'<]+/g, (u) => {
     try {
       const parsed = parseStratusUrl(u);
-      if (!parsed || parsed.skus.length === 0) return u;
+      if (!parsed || parsed.skus.length === 0) {
+        // Every line in the URL was retired (e.g. an all-Insight link): the
+        // original URL must NOT survive into the reply (codex review
+        // 2026-07-21) — replace it with a review note instead.
+        return /[?&]item=[^&\s]/.test(u)
+          ? '[order link removed — the quoted product is retired; ask for an updated quote]'
+          : u;
+      }
       return buildStratusUrl(parsed.skus.map((sku, i) => ({ sku, qty: parsed.qtys[i] })));
     } catch { return u; }
   });
@@ -26740,16 +26817,28 @@ CRITICAL URL RULES:
                     .replace(/\b(QUOTE|QUOTING|THIS|THESE|IT|PLEASE|CAN|YOU|ECOMM|URL|LINK|LINKS|ORDER|CART|RENDER|RERENDER|RE|CHECK|VALIDATE|VERIFY|FOR|ME|A|AN|THE|AND)\b/g, ' ')
                     .replace(/[^A-Z0-9]+/g, '')
                 : 'skip';
-              if (_urlM && _echoResidue === '') {
+              // Exactly ONE order URL may take this branch — a second pasted
+              // URL used to vanish silently because the residue check blanked
+              // ALL urls while only the first was rendered (codex 2026-07-21).
+              const _allOrderUrls = text.match(/https:\/\/stratusinfosystems\.com\/order\/\?[^\s)>\]"'<]+/gi) || [];
+              if (_urlM && _echoResidue === '' && _allOrderUrls.length === 1) {
                 try {
                   const _u = new URL(_urlM[0]);
                   const _rawSkus = (_u.searchParams.get('item') || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
                   const _rawQty = (_u.searchParams.get('qty') || '').split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
                   const _qtys = _rawQty.length === _rawSkus.length ? _rawQty : _rawSkus.map(() => 1);
                   const _sw = applyEolSwaps(_rawSkus.map((s, i) => ({ sku: s, qty: _qtys[i] })));
-                  const _items = _sw.lines.filter(l => l.valid !== false).map(l => ({ sku: String(l.sku), qty: Number(l.qty) || 1 }));
+                  // Fail closed on ANY problem line (codex 2026-07-21): an
+                  // un-sizable retired SKU (valid:false), an unrecognized
+                  // hardware model, OR an unknown LIC token all fall through
+                  // to the normal parse path, which owns suggestions and
+                  // "couldn't quote" wording — this branch never silently
+                  // drops an item or echoes an unvalidated license.
+                  const _hasDroppable = _sw.lines.some(l => l.valid === false);
+                  const _items = _sw.lines.map(l => ({ sku: String(l.sku), qty: Number(l.qty) || 1 }));
                   const _badHw = _items.filter(i => !i.sku.startsWith('LIC-') && !validateSku(i.sku).valid);
-                  if (_items.length > 0 && _badHw.length === 0) {
+                  const _badLic = _items.filter(i => i.sku.startsWith('LIC-') && !getPrice(i.sku));
+                  if (_items.length > 0 && !_hasDroppable && _badHw.length === 0 && _badLic.length === 0) {
                     const _TERM_RE = /-([135])(YR|Y-S\d+|Y)$/;
                     const _lics = _items.filter(i => i.sku.startsWith('LIC-') && _TERM_RE.test(i.sku));
                     const _canExpand = _lics.length > 0

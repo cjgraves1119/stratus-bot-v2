@@ -85,6 +85,19 @@ const call = async (text, pid) => {
   const j3 = await call('https://stratusinfosystems.com/order/?item=MS130-99P-HW,LIC-MS130-24-3Y&qty=1,1', 'echo-t3');
   ok((j3.suggestions || []).length > 0, 'invalid model in URL → did-you-mean suggestions');
 
+  // ── 5. Codex HOLD findings: echoback must fail closed, never silently drop ──
+  console.log('codex findings: echoback containment');
+  const j4 = await call('https://stratusinfosystems.com/order/?item=LIC-NOTREAL-3Y,LIC-MS130-24-3Y&qty=1,1', 'echo-t4');
+  const j4urls = JSON.stringify(j4.quoteUrls || []);
+  ok(!/LIC-NOTREAL/.test(j4urls), 'F1b: unknown LIC token never echoed into an order URL');
+  const j5 = await call('https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-SEC-3Y,LIC-VMX100&qty=1,1,1', 'echo-t5');
+  const j5all = JSON.stringify(j5);
+  ok(!(j5.handlerType === 'deterministic' && (j5.parsedItems || []).length === 2 && !/VMX100/.test(j5all)),
+    'F1a: valid hardware + LIC-VMX100 does NOT silently quote only the hardware');
+  const j6 = await call('https://stratusinfosystems.com/order/?item=MR44-HW&qty=1 and https://stratusinfosystems.com/order/?item=MX85-HW&qty=1', 'echo-t6');
+  ok(!(j6.handlerType === 'deterministic' && (j6.quoteUrls || []).length > 0 && !/MX85/.test(JSON.stringify(j6.quoteUrls))),
+    'F1c: two pasted URLs are never half-rendered (first-only)');
+
   console.log('');
   console.log(fail === 0 ? `✅ ${pass}/${pass + fail} assertions passed` : `❌ ${fail} FAILED, ${pass} passed`);
   process.exit(fail === 0 ? 0 : 1);
