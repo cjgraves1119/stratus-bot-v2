@@ -23106,6 +23106,13 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
   // paraphrased them away. Keyed by order; we keep only the LAST mutation's
   // summary by default (the one the user most recently made).
   const mutationSummaries = [];
+  // Dry-run benchmark parity (2026-07-22): mocked writes return success but
+  // never populate mutationSummaries, so any model that phrases the mock as a
+  // completed write trips the truth-guard banner — grading then measures
+  // hedging style, not correctness. Track mocked successful writes so the
+  // banner check can honor them in dryRun ONLY; live runs are unaffected and
+  // claiming a write with zero write calls still banners in dry runs.
+  let mockedWriteSucceeded = false;
   // Response-truth guard (2026-04-24 TestCo forensic fix + Codex pre-merge hardening):
   // Track every {module, record_id} pair that appeared in a SUCCESSFUL tool
   // result this turn. Any Zoho CRM URL in finalReply whose (module, id) pair
@@ -23253,6 +23260,10 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
             while ((_mm = urlRe.exec(resultStrForGuard)) !== null) {
               addVerifiedRef(_mm[1], _mm[2]);
             }
+          }
+          if (mocked && !resultIsError
+              && typeof BENCHMARK_WRITE_TOOLS !== 'undefined' && BENCHMARK_WRITE_TOOLS.has(call.name)) {
+            mockedWriteSucceeded = true;
           }
           // ── Paths 2–4: args / data / record_id whitelisting. ───────────────
           // These remain success-only — args and structural ids could be
@@ -23472,7 +23483,8 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
     }
 
     // Detect success-claim language paired with ZERO successful mutations.
-    const successfulMutation = mutationSummaries.some(s => !s.isError);
+    const successfulMutation = mutationSummaries.some(s => !s.isError)
+      || (dryRun && mockedWriteSucceeded);
     const claimsSuccess = /\b(quote|deal|task|record|contact|account)\s+(?:was|has\s+been|is)\s+(?:successfully\s+)?(?:created|added|updated|cloned|saved|made)\b/i.test(finalReply)
       || /\bcreated\s+(?:a\s+new\s+)?(?:quote|deal|task|contact|account)\b/i.test(finalReply);
     if (claimsSuccess && !successfulMutation) {
