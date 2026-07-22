@@ -22821,11 +22821,14 @@ function anthropicToolsToOpenAiFormat(anthropicTools) {
 // <think> tail (max_tokens truncation) is dropped rather than shown.
 function stripCfThinkArtifacts(text) {
   if (!text || typeof text !== 'string' || text.indexOf('think>') === -1) return text;
-  return text
-    .replace(/<think>[\s\S]*?<\/think>/g, '')
-    .replace(/^\s*<\/think>\s*/, '')
-    .replace(/<think>[\s\S]*$/, '')
-    .trim();
+  let out = text.replace(/<think>[\s\S]*?<\/think>/g, '');
+  // A lone </think> after paired removal means the opening tag was swallowed
+  // by the chat template: everything before it is leaked reasoning (observed
+  // 2026-07-22 benchmark task_08: "I have all the information. Let me
+  // format...</think>Most recent open deal..."). Drop through the tag.
+  out = out.replace(/^[\s\S]*?<\/think>\s*/, '');
+  out = out.replace(/<think>[\s\S]*$/, '');
+  return out.trim();
 }
 
 function extractCfResponse(cfResponse) {
@@ -24273,7 +24276,12 @@ function pickOptimizedPrompt(modelId, ownerCtx) {
   let base;
   if (/llama-4/i.test(modelId)) base = LLAMA4_OPTIMIZED_PROMPT;
   else if (/gpt-oss|openai/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GPT_OSS_TOOL_USE_GUARDRAILS}`;
-  else if (/glm|zai-org/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GLM_TOOL_USE_ADDENDUM}`;
+  // Kimi K2.x shares GLM's failure surface with thinking disabled: it
+  // narrates its analysis into the reply (benchmark 2026-07-22: 4/6 replies
+  // opened with "The user is asking me..." plans). The addendum's ACT-DON'T-
+  // PLAN-ALOUD + final-reply rules target exactly that; its multi-step push
+  // is harmless (Kimi already chains well).
+  else if (/glm|zai-org|kimi|moonshot/i.test(modelId)) base = `${GEMMA_OPTIMIZED_PROMPT}${GLM_TOOL_USE_ADDENDUM}`;
   else base = GEMMA_OPTIMIZED_PROMPT;
   return applyOwnerPlaceholders(base, ownerCtx);
 }
