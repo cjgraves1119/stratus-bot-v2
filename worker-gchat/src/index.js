@@ -9602,6 +9602,12 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
     }
   }
 
+  // 2026-07-22 council fix: the __date_confirmed escape hatch must NEVER reach
+  // Zoho. The create paths strip it above after the fiscal checks consume it,
+  // but UPDATE payloads bypassed the Quotes strip entirely (create-only block)
+  // — the helper key would ride into the Zoho write. Final unconditional strip.
+  if (data && data.__date_confirmed !== undefined) delete data.__date_confirmed;
+
   return errors.length > 0
     ? { valid: false, error: errors.join('\n') }
     : { valid: true };

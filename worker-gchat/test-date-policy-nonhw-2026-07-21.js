@@ -28,7 +28,7 @@ function loadEngine() {
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const ed = src.indexOf('export default');
   if (ed > -1) { let d = 0, s = false, e = ed; for (let i = ed; i < src.length; i++) { if (src[i] === '{') { d++; s = true; } if (src[i] === '}') { d--; if (s && d === 0) { e = i + 1; break; } } } src = src.slice(0, ed) + src.slice(e + 1); }
-  src += '\nmodule.exports = { ciscoFiscalQuarterEnd, defaultQuoteDealDate, preferNonHwQuotedItems, getProductIdToSkuMap };';
+  src += '\nmodule.exports = { ciscoFiscalQuarterEnd, defaultQuoteDealDate, preferNonHwQuotedItems, getProductIdToSkuMap, validateCrmWrite };';
   const tmp = path.join(os.tmpdir(), `date-nonhw-${process.pid}.cjs`);
   fs.writeFileSync(tmp, src);
   return require(tmp);
@@ -104,6 +104,18 @@ const D = (s) => new Date(s + 'T12:00:00Z');
     const items3 = [{ Product_Name: { id: mx85hwId }, Quantity: 1 }];
     await G.preferNonHwQuotedItems(items3, env3); // live re-lookup throws w/o creds → -HW kept
     ok(items3[0].Product_Name.id === mx85hwId, `${label} → discarded, -HW id kept (fail open)`);
+  }
+
+  // 2026-07-22 council fix: __date_confirmed must be stripped on UPDATE
+  // payloads too (the Quotes strip was create-only; the helper key reached
+  // the Zoho write on updates).
+  {
+    const upd = { Valid_Till: '2026-09-30', __date_confirmed: true };
+    await G.validateCrmWrite('Quotes', upd, false, null);
+    ok(!('__date_confirmed' in upd), 'Quotes UPDATE: __date_confirmed stripped before Zoho write');
+    const updD = { Closing_Date: '2026-09-30', __date_confirmed: true };
+    await G.validateCrmWrite('Deals', updD, false, null);
+    ok(!('__date_confirmed' in updD), 'Deals UPDATE: __date_confirmed stripped before Zoho write');
   }
 
   console.log('');
