@@ -9001,13 +9001,22 @@ async function preferNonHwQuotedItems(quotedItems, env) {
     const cacheKey = `nonhw:${base}`;
     let resolvedId = null;
     try { resolvedId = kv ? await kv.get(cacheKey) : null; } catch (_) { resolvedId = null; }
-    // Cache hygiene (codex 2026-07-21): a cached value is only trusted when
-    // it is the 'none' sentinel or a plausible Zoho record id. Anything else
-    // (corrupt/truncated/poisoned) is treated as a MISS and re-resolved live
-    // — a malformed id must never be written into a quote line.
-    if (resolvedId != null && resolvedId !== 'none' && !/^\d{15,20}$/.test(String(resolvedId))) {
-      console.log(`[NONHW] discarding malformed cached id for ${base}: "${String(resolvedId).slice(0, 40)}"`);
-      resolvedId = null;
+    // Cache hygiene (codex 2026-07-21, both passes): a cached value is only
+    // trusted when it is the 'none' sentinel or a SELF-VERIFYING "id|BASE"
+    // pair whose id is a plausible Zoho record id AND whose BASE matches this
+    // cache key. A well-formed id under the wrong key (crossed/stale/poisoned
+    // entry) would silently put the WRONG PRODUCT on a customer quote — the
+    // worst commercial failure — so anything that doesn't self-verify is a
+    // MISS and re-resolved live. Legacy bare-id values (pre-hardening) are
+    // deliberately discarded too.
+    if (resolvedId != null && resolvedId !== 'none') {
+      const _m = String(resolvedId).match(/^(\d{15,20})\|(.+)$/);
+      if (_m && _m[2] === base) {
+        resolvedId = _m[1];
+      } else {
+        console.log(`[NONHW] discarding unverifiable cached value for ${base}: "${String(resolvedId).slice(0, 60)}"`);
+        resolvedId = null;
+      }
     }
     if (resolvedId == null) {
       try {
@@ -9016,7 +9025,9 @@ async function preferNonHwQuotedItems(quotedItems, env) {
         const rec = (res?.data || []).find(r =>
           String(r.Product_Code || '').toUpperCase() === base && r.Product_Active !== false);
         resolvedId = rec ? String(rec.id) : 'none';
-        try { if (kv) await kv.put(cacheKey, resolvedId, { expirationTtl: 30 * 86400 }); } catch (_) {}
+        // Stored as self-verifying "id|BASE" so a read under the wrong key
+        // can never pass the cache-hygiene check above ('none' stays bare).
+        try { if (kv) await kv.put(cacheKey, rec ? `${resolvedId}|${base}` : 'none', { expirationTtl: 30 * 86400 }); } catch (_) {}
       } catch (e) {
         console.log(`[NONHW] live lookup for ${base} threw (kept ${sku}): ${e.message}`);
         continue;

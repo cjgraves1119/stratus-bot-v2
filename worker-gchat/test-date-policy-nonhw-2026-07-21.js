@@ -72,7 +72,7 @@ const D = (s) => new Date(s + 'T12:00:00Z');
   const mx85hwId = Object.keys(idMap).find(k => idMap[k] === 'MX85-HW');
   const mr44hwId = Object.keys(idMap).find(k => idMap[k] === 'MR44-HW');
   ok(Boolean(mx85hwId && mr44hwId), 'reverse map has MX85-HW and MR44-HW ids');
-  const kvStore = new Map([['nonhw:MX85', '2570562000388889594']]); // pre-cached resolution — no live call needed
+  const kvStore = new Map([['nonhw:MX85', '2570562000388889594|MX85']]); // self-verifying pre-cached resolution
   const env = { PRICES_KV: { get: async k => kvStore.get(k) ?? null, put: async (k, v) => { kvStore.set(k, v); } } };
   const items = [
     { Product_Name: { id: mx85hwId }, Quantity: 1 },            // MX → swaps
@@ -92,6 +92,19 @@ const D = (s) => new Date(s + 'T12:00:00Z');
   const items2 = [{ Product_Name: { id: ms24hwId }, Quantity: 1 }];
   await G.preferNonHwQuotedItems(items2, env2);
   ok(items2[0].Product_Name.id === ms24hwId, 'cached "none" (no non-HW record) → -HW id kept (fail open)');
+  // Codex edge-hunt (2026-07-21): a WELL-FORMED id under the WRONG key must
+  // never reach a quote line — the entry self-verifies via its |BASE suffix.
+  for (const [label, poisoned] of [
+    ['crossed entry (valid id, wrong base)', '2570562000388889594|MX95'],
+    ['legacy bare id (pre-hardening format)', '2570562000388889594'],
+    ['garbage value', 'DROP TABLE quotes'],
+  ]) {
+    const kv3 = new Map([['nonhw:MX85', poisoned]]);
+    const env3 = { PRICES_KV: { get: async k => kv3.get(k) ?? null, put: async () => {} } };
+    const items3 = [{ Product_Name: { id: mx85hwId }, Quantity: 1 }];
+    await G.preferNonHwQuotedItems(items3, env3); // live re-lookup throws w/o creds → -HW kept
+    ok(items3[0].Product_Name.id === mx85hwId, `${label} → discarded, -HW id kept (fail open)`);
+  }
 
   console.log('');
   console.log(fail === 0 ? `✅ ${pass}/${pass + fail} assertions passed` : `❌ ${fail} FAILED, ${pass} passed`);
