@@ -240,6 +240,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   // Create Task form state
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [createTaskData, setCreateTaskData] = useState({ subject: '', dueDate: '', priority: 'Normal', description: '' });
+  // Seeded when the form opens (deals/contact are resolved by then). '' = Account only.
+  const [createTaskDealId, setCreateTaskDealId] = useState('');
+  const [createTaskContactEmail, setCreateTaskContactEmail] = useState('');
   const [createTaskLoading, setCreateTaskLoading] = useState(false);
   const [createTaskError, setCreateTaskError] = useState(null);
   const [createTaskSuccess, setCreateTaskSuccess] = useState(null);
@@ -309,6 +312,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     // Tier 1 (polluted-data safe) and adds Tier 4 consumer local-part fallback.
     if (!domain) {
       setData(null); setDeals(null); setTasks(null);
+      resetCreateTaskForm(); // no lookup on this path — reset the form here too
       return;
     }
     lookupCrm(email, domain);
@@ -354,6 +358,21 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     }
   }, [data?.contact?.email]);
 
+  // The Create Task form seeds dealId/contact from the CURRENT account, so any
+  // context change invalidates them. Close the form outright rather than leave a
+  // stale half-filled one that could file a task against the outgoing account's
+  // deal (DealSelect would silently fall back to "None (Account only)" while
+  // handleCreateTask still sent the stale id).
+  function resetCreateTaskForm() {
+    setShowCreateTask(false);
+    setCreateTaskDealId('');
+    setCreateTaskContactEmail('');
+    // Also clear the typed fields — a subject written for account A must not be
+    // reopened and filed against account B.
+    setCreateTaskData({ subject: '', dueDate: '', priority: 'Normal', description: '' });
+    setCreateTaskError(null);
+  }
+
   const lookupCrm = useCallback(async (email, domain) => {
     setLoading(true);
     setError(null);
@@ -361,6 +380,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setDeals(null);
     setTasks(null);
     setIsrDeals(null);
+    resetCreateTaskForm();
     try {
       const result = await sendToBackground(MSG.CRM_LOOKUP, { email, domain });
       setData(result);
@@ -427,7 +447,16 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   async function handleTaskAction(action, taskId, options = {}) {
     setTaskActionLoading(taskId);
     try {
-      const result = await sendToBackground(MSG.TASK_ACTION, { action, taskId, ...options });
+      // gmailThreadUrl rides every action, but the worker only writes it on
+      // complete_and_followup, where it seeds the NEW successor task's description.
+      // Existing tasks are deliberately left alone so an edit never appends a
+      // duplicate link. `...options` last so a caller can still override it.
+      const result = await sendToBackground(MSG.TASK_ACTION, {
+        action,
+        taskId,
+        gmailThreadUrl: emailContext?.url || '',
+        ...options,
+      });
       // Show success briefly
       if (result?.success) {
         const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
@@ -446,6 +475,32 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   }
 
   // ── Create Task ──
+  // Resolve a picked participant email to a Zoho contact id, but ONLY when that
+  // contact's own email actually matches what was picked. Returns '' otherwise, so
+  // the task is created with no Who_Id rather than one pointing at the wrong person.
+  // Empty input ("None") deliberately yields '' — an explicit choice, not a fallback.
+  async function resolveWhoId(pickedEmail) {
+    const picked = (pickedEmail || '').trim().toLowerCase();
+    if (!picked) return '';
+    // Fast path: the panel's already-resolved contact, but ONLY if the worker
+    // flagged it a real match (contact.matched) for this same email. A Tier-5
+    // account primary-fallback placeholder has matched:false — and its email is
+    // fabricated from the request email, so an equality check would wrongly pass.
+    if (data?.contact?.matched && (data.contact.email || '').toLowerCase() === picked) {
+      return data.contact.id || '';
+    }
+    // verifyOnly: don't let this verification lookup clobber the warm CRM context.
+    const looked = await sendToBackground(MSG.CRM_LOOKUP, {
+      email: picked,
+      domain: picked.split('@')[1] || '',
+      verifyOnly: true,
+    }).catch(() => null);
+    const found = looked?.contact;
+    // Trust the worker's own match verdict, not the echoed email. This also keeps
+    // Secondary_Email matches (whose primary email differs from `picked`) working.
+    return found?.matched && found.id ? found.id : '';
+  }
+
   async function handleCreateTask(e) {
     e.preventDefault();
     if (!createTaskData.subject.trim()) return;
@@ -453,13 +508,27 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setCreateTaskError(null);
     setCreateTaskSuccess(null);
     try {
+      // Who_Id must be EMAIL-VERIFIED — see resolveWhoId. Never data.contact.id
+      // by default: when no contact matched the sender, the worker substitutes the
+      // account's most-recently-modified contact purely so the sidebar has someone
+      // to display (fetchPrimaryContactForAccount). Filing a task against that
+      // placeholder is exactly the misattribution this picker exists to prevent.
+      const contactId = await resolveWhoId(createTaskContactEmail);
+      // Belt and braces behind the context reset: never send a deal id that is not
+      // in the CURRENTLY displayed deal list, so a stale seed can't misattribute
+      // the task to another account's deal.
+      const currentDealIds = [...(deals?.deals || []), ...(isrDeals?.deals || [])]
+        .map(d => d?.id).filter(Boolean);
+      const safeDealId = (createTaskDealId && currentDealIds.includes(createTaskDealId))
+        ? createTaskDealId : '';
       const result = await sendToBackground(MSG.CRM_CREATE_TASK, {
         subject: createTaskData.subject,
         dueDate: createTaskData.dueDate,
-        dealId: data?.deals?.[0]?.id || deals?.deals?.[0]?.id || '',
-        contactId: data?.contact?.id || '',
+        dealId: safeDealId,
+        contactId,
         priority: createTaskData.priority,
         description: createTaskData.description,
+        gmailThreadUrl: emailContext?.url || '',
       });
       if (result?.success) {
         setCreateTaskSuccess('Task created' + (result.zohoUrl ? '' : ''));
@@ -514,12 +583,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       setSuggestPreview(preview);
       setSuggestEditSubject(preview.subject || `Follow up with ${preview.contactName || preview.senderName || preview.senderEmail || 'contact'}`);
       // Auto-select first open deal (non-Closed) if available
-      const allDeals = [...(deals?.deals || []), ...(isrDeals?.deals || [])];
-      const openDeals = allDeals.filter(d => {
-        const st = (typeof (d.stage || d.Stage) === 'object' ? (d.stage || d.Stage)?.name : (d.stage || d.Stage)) || '';
-        return !st.toLowerCase().includes('closed');
-      });
-      setSuggestDealId(openDeals.length > 0 ? (openDeals[0].id || '') : '');
+      setSuggestDealId(firstOpenDealId([...(deals?.deals || []), ...(isrDeals?.deals || [])]));
     } catch (err) {
       setSuggestResult({ error: err.message });
     } finally {
@@ -536,19 +600,25 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       const confirmSenderLower = confirmSender.toLowerCase();
       const confirmSenderDomain = (confirmSender.split('@')[1] || '').toLowerCase();
       const confirmSenderIsInternal = confirmSenderLower.includes('@stratusinfosystems.com') || confirmSenderDomain === 'cisco.com';
+      const confirmTaskEmail = suggestPreview.senderEmail
+        || emailContext?.customerEmail
+        || (confirmSenderIsInternal ? '' : confirmSender)
+        || '';
+      // Same email-verified rule as handleCreateTask. Sending an unverified id here
+      // would suppress the worker's own by-sender-email Contact search, so when we
+      // can't verify we send '' and let the worker resolve it authoritatively.
+      const confirmWhoId = await resolveWhoId(confirmTaskEmail);
       const result = await sendToBackground(MSG.SUGGEST_TASK, {
-        senderEmail: suggestPreview.senderEmail
-          || emailContext?.customerEmail
-          || (confirmSenderIsInternal ? '' : confirmSender)
-          || '',
+        senderEmail: confirmTaskEmail,
         senderName: suggestPreview.senderName || suggestPreview.contactName || emailContext?.customerName || '',
         subject: suggestEditSubject || suggestPreview.subject,
         hasAccount: !!suggestPreview.accountId,
         accountId: suggestPreview.accountId || data?.account?.id || '',
-        contact_id: suggestPreview.contact_id || suggestPreview.contactId || data?.contact?.id || '',
+        contact_id: confirmWhoId,
         dealId: suggestDealId || '',
         priority: suggestPreview.priority || 'Normal',
         description: suggestPreview.description || '',
+        gmailThreadUrl: emailContext?.url || '',
       });
       setSuggestResult(result);
       setSuggestPreview(null);
@@ -1330,7 +1400,18 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 Open Tasks ({taskList.length})
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => { setShowCreateTask(v => !v); setSuggestPreview(null); }}
+                <button onClick={() => {
+                    const opening = !showCreateTask;
+                    setShowCreateTask(opening);
+                    setSuggestPreview(null);
+                    if (opening) {
+                      // Default to the first OPEN deal and the selected participant.
+                      setCreateTaskDealId(firstOpenDealId([...(dealList || []), ...(isrDealList || [])]));
+                      // Seed the picker only from a real match, never a Tier-5 placeholder
+                      // (matched:false), whose email is a fabricated echo of the sender.
+                      setCreateTaskContactEmail(selectedContact || (data?.contact?.matched ? data.contact.email : '') || '');
+                    }
+                  }}
                   style={{
                     padding: '4px 10px', background: 'transparent',
                     border: `1px solid ${COLORS.STRATUS_BLUE}`, borderRadius: 6,
@@ -1388,6 +1469,32 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                       <option>Low</option>
                     </select>
                   </div>
+                  <DealSelect
+                    deals={[...(dealList || []), ...(isrDealList || [])]}
+                    value={createTaskDealId}
+                    onChange={e => setCreateTaskDealId(e.target.value)}
+                    labelColor={COLORS.TEXT_SECONDARY}
+                    selectStyle={{ ...inputStyle, width: '100%', boxSizing: 'border-box', cursor: 'pointer' }}
+                  />
+                  {externalContacts.length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.TEXT_SECONDARY, marginBottom: 3, textTransform: 'uppercase' }}>
+                        Contact
+                      </div>
+                      <select
+                        value={createTaskContactEmail}
+                        onChange={e => setCreateTaskContactEmail(e.target.value)}
+                        style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', cursor: 'pointer' }}
+                      >
+                        <option value="">None</option>
+                        {externalContacts.map((c, idx) => (
+                          <option key={idx} value={c.email}>
+                            {c.name !== c.email.split('@')[0] ? `${c.name} (${c.email})` : c.email}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                   <input type="text" placeholder="Description (optional)" value={createTaskData.description}
                     onChange={e => setCreateTaskData(p => ({ ...p, description: e.target.value }))}
                     style={{ ...inputStyle, width: '100%', marginBottom: 8, boxSizing: 'border-box' }} />
@@ -1437,46 +1544,18 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                   onBlur={(e) => e.target.style.borderColor = '#a5d6a7'}
                 />
                 {/* Deal selector */}
-                {(() => {
-                  const allDeals = [...(dealList || []), ...(isrDealList || [])];
-                  // Deduplicate by id
-                  const seen = new Set();
-                  const uniqueDeals = allDeals.filter(d => {
-                    if (!d.id || seen.has(d.id)) return false;
-                    seen.add(d.id);
-                    return true;
-                  });
-                  return (
-                    <div style={{ marginBottom: 6 }}>
-                      <div style={{ fontSize: 10, fontWeight: 600, color: '#2e7d32', marginBottom: 3, textTransform: 'uppercase' }}>
-                        Link to Deal
-                      </div>
-                      <select
-                        value={suggestDealId}
-                        onChange={(e) => setSuggestDealId(e.target.value)}
-                        style={{
-                          width: '100%', padding: '5px 8px', fontSize: 12,
-                          borderRadius: 4, border: '1px solid #a5d6a7',
-                          background: 'white', color: COLORS.TEXT_PRIMARY,
-                          cursor: 'pointer', boxSizing: 'border-box',
-                        }}
-                      >
-                        <option value="">None (Account only)</option>
-                        {uniqueDeals.map(deal => {
-                          const name = typeof (deal.name || deal.Deal_Name) === 'object'
-                            ? (deal.name || deal.Deal_Name)?.name : (deal.name || deal.Deal_Name);
-                          const stage = typeof (deal.stage || deal.Stage) === 'object'
-                            ? (deal.stage || deal.Stage)?.name : (deal.stage || deal.Stage);
-                          return (
-                            <option key={deal.id} value={deal.id}>
-                              {name || 'Unnamed Deal'}{stage ? ` (${stage})` : ''}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </div>
-                  );
-                })()}
+                <DealSelect
+                  deals={[...(dealList || []), ...(isrDealList || [])]}
+                  value={suggestDealId}
+                  onChange={(e) => setSuggestDealId(e.target.value)}
+                  labelColor="#2e7d32"
+                  selectStyle={{
+                    width: '100%', padding: '5px 8px', fontSize: 12,
+                    borderRadius: 4, border: '1px solid #a5d6a7',
+                    background: 'white', color: COLORS.TEXT_PRIMARY,
+                    cursor: 'pointer', boxSizing: 'border-box',
+                  }}
+                />
 
                 {suggestPreview.description && (
                   <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 4 }}>{suggestPreview.description}</div>
@@ -2172,6 +2251,49 @@ function SmallButton({ children, onClick, disabled, color }) {
     }}>
       {children}
     </button>
+  );
+}
+
+// Zoho returns deal name/stage as either a string or a lookup object {name, id}.
+function dealField(deal, key, apiKey) {
+  const v = deal?.[key] ?? deal?.[apiKey];
+  return (typeof v === 'object' ? v?.name : v) || '';
+}
+
+// First non-Closed deal id, '' when there is none. Used to default both task forms
+// so a task never silently attaches to a closed deal.
+function firstOpenDealId(deals) {
+  const open = (deals || []).find(d => d?.id && !dealField(d, 'stage', 'Stage').toLowerCase().includes('closed'));
+  return open?.id || '';
+}
+
+// "Link to Deal" picker, deduped by id — shared by the Create Task form and the
+// Suggest preview card. Colors stay per-caller so neither card is restyled.
+function DealSelect({ deals, value, onChange, labelColor, selectStyle }) {
+  const seen = new Set();
+  const uniqueDeals = (deals || []).filter(d => {
+    if (!d?.id || seen.has(d.id)) return false;
+    seen.add(d.id);
+    return true;
+  });
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ fontSize: 10, fontWeight: 600, color: labelColor, marginBottom: 3, textTransform: 'uppercase' }}>
+        Link to Deal
+      </div>
+      <select value={value} onChange={onChange} style={selectStyle}>
+        <option value="">None (Account only)</option>
+        {uniqueDeals.map(deal => {
+          const name = dealField(deal, 'name', 'Deal_Name');
+          const stage = dealField(deal, 'stage', 'Stage');
+          return (
+            <option key={deal.id} value={deal.id}>
+              {name || 'Unnamed Deal'}{stage ? ` (${stage})` : ''}
+            </option>
+          );
+        })}
+      </select>
+    </div>
   );
 }
 

@@ -436,6 +436,28 @@ const MODEL_PRICING = {
   'claude-3-haiku-20240307': { input: 0.25, output: 1.25 },
 };
 
+// Cloudflare Workers AI pricing per 1M tokens (USD), fetched from
+// https://developers.cloudflare.com/workers-ai/platform/pricing/ 2026-07-22.
+// Previously CF benchmark runs had no cost table at all (costUsd stuck at 0
+// for every @cf/ model) — this closes that blind spot for the 6-model blend
+// eval (Llama 4, Kimi K2.7, GLM 5.2, Qwen3, Gemma 4, Nemotron 3) plus the
+// other roster entries priced on the same page. cachedInput applies only to
+// models CF prices separately for cache hits (Kimi, GLM); omit elsewhere.
+const CF_MODEL_PRICING = {
+  '@cf/meta/llama-4-scout-17b-16e-instruct': { input: 0.270, output: 0.850 },
+  '@cf/moonshotai/kimi-k2.7-code': { input: 0.950, output: 4.000, cachedInput: 0.190 },
+  '@cf/moonshotai/kimi-k2.6': { input: 0.950, output: 4.000, cachedInput: 0.190 },
+  '@cf/zai-org/glm-5.2': { input: 1.400, output: 4.400, cachedInput: 0.260 },
+  '@cf/qwen/qwen3-30b-a3b-fp8': { input: 0.051, output: 0.335 },
+  '@cf/google/gemma-4-26b-a4b-it': { input: 0.100, output: 0.300 },
+  '@cf/nvidia/nemotron-3-120b-a12b': { input: 0.500, output: 1.500 },
+};
+function estimateCfCostUsd(modelId, inputTokens, outputTokens) {
+  const rate = CF_MODEL_PRICING[modelId];
+  if (!rate || !Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return 0;
+  return (inputTokens / 1e6) * rate.input + (outputTokens / 1e6) * rate.output;
+}
+
 // ─── CRM agent model override (§7 latency/model strategy, 2026-06-03) ────────
 // Force the CRM/agent path onto ONE model and bypass the per-iteration tier
 // swap (Sonnet executor + Haiku dispatch). Set via env — either a wrangler
@@ -807,7 +829,33 @@ function getReasoningControl(modelId, requestedPolicy = REASONING_POLICY_DISABLE
     };
   }
 
-  if (/nemotron|gpt-oss|qwen|qwq|mistral|llama|sea-lion|sealion|hermes/.test(id)) {
+  // Nemotron (nvidia) does NOT reason by default (no reasoning_content field
+  // in its response at all, confirmed empirically 2026-07-22 on
+  // @cf/nvidia/nemotron-3-120b-a12b) — unlike Kimi/GLM/Qwen3. Sending
+  // chat_template_kwargs:{enable_thinking:false} anyway further trims
+  // completion tokens (142→46 on a tool-call probe) with NO side effects:
+  // content/tool_calls populate normally in both cases. Safe, verified win.
+  if (/nemotron/.test(id)) {
+    return {
+      reasoningPolicy: REASONING_POLICY_DISABLED,
+      reasoningDisableSupported: true,
+      requestOptions: { chat_template_kwargs: { enable_thinking: false } },
+      reasoningControl: 'cf_chat_template_enable_thinking_false'
+    };
+  }
+
+  // Qwen3 (qwen) DOES reason by default like Kimi/GLM, but its "disable"
+  // knob is a TRAP, not a win: chat_template_kwargs:{enable_thinking:false}
+  // (verified 2026-07-22 on @cf/qwen/qwen3-30b-a3b-fp8) does cut completion
+  // tokens, but on tool-use turns the model emits the call as literal
+  // `<tool_call>{...}</tool_call>` text INSIDE reasoning_content instead of
+  // the native tool_calls field — content:null, tool_calls:[] — which
+  // extractCfResponse has no parser for. Wiring that override in today would
+  // silently zero out every Qwen3 CRM tool call. Left as UNSUPPORTED
+  // (reasoning stays on, current safe behavior) until a matching
+  // extractCfResponse variant recovers <tool_call> JSON from
+  // reasoning_content — do not "fix" this without adding that extraction.
+  if (/gpt-oss|qwen|qwq|mistral|llama|sea-lion|sealion|hermes/.test(id)) {
     return {
       reasoningPolicy: REASONING_POLICY_UNSUPPORTED,
       reasoningDisableSupported: false,
@@ -1222,6 +1270,86 @@ function callerEmailFromPersonId(personId) {
   return m ? normalizeCallerEmail(m[1]) : null;
 }
 
+// ─── Shared Task helpers (2026-07-23) ────────────────────────────────────────
+// One business-day calculator for the whole worker. Four byte-identical copies
+// used to live inside createFollowUpTaskForDeal, /api/task-action,
+// /api/suggest-task, /api/suggest-task-preview and /api/crm-create-task.
+// Skips Sat/Sun, returns YYYY-MM-DD.
+function addBusinessDays(startDate, days) {
+  const d = new Date(startDate);
+  let added = 0;
+  while (added < days) {
+    d.setDate(d.getDate() + 1);
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) added++;
+  }
+  return d.toISOString().split('T')[0];
+}
+
+// DST-safe UTC offset for the org timezone. Hardcoding -04:00 or -05:00 is a
+// bug — the org flips twice a year. try/catch so a malformed date string can
+// never throw out of a Task write (falls back to standard time).
+function zohoTzOffset(dateStr, tz = 'America/New_York') {
+  try {
+    const d = new Date(dateStr + 'T12:00:00Z');
+    const s = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'longOffset' }).format(d);
+    const m = s.match(/GMT([+-]\d{2}:\d{2})/);
+    return m ? m[1] : '-05:00';
+  } catch (_) { return '-05:00'; }
+}
+
+// Zoho stores Remind_At as a jsonobject with a single ALARM string. VERIFIED
+// LIVE against this org: Zoho strips a leading FREQ=NONE, so we don't send it.
+// The reminder always tracks the due date at 9:00 AM local.
+// Returns null for anything that isn't a YYYY-MM-DD date — fail closed on the
+// reminder rather than shipping a malformed ALARM that makes Zoho reject the
+// whole write (newDueDate arrives from request bodies, i.e. untrusted).
+function taskRemindAt(dueDate) {
+  const raw = String(dueDate || '');
+  // A YYYY-M-D shaped input ('2026-8-4') is a real date missing only its zero
+  // padding — pad it instead of silently shipping a Task with NO reminder and a
+  // success response. Anything still unparseable keeps returning null below.
+  const loose = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  const ds = loose
+    ? `${loose[1]}-${loose[2].padStart(2, '0')}-${loose[3].padStart(2, '0')}`
+    : raw.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ds)) return null;
+  return { ALARM: `ACTION=EMAIL;TRIGGER=DATE-TIME:${ds}T09:00:00${zohoTzOffset(ds)}` };
+}
+
+// Single choke point for every Zoho Tasks CREATE in this worker. Returns ONE
+// Tasks record object. `gmailThreadUrl` is optional everywhere — absent/empty
+// behaves exactly as before (no Description key is emitted if the result is
+// empty). contactId/dealId/accountId are passed through VERBATIM so each call
+// site keeps its own verified-live lookup shape (bare id string or { id }).
+async function buildTaskPayload(fields, env) {
+  const f = fields || {};
+  const dueDate = f.dueDate || addBusinessDays(new Date(), 3);
+  const description = [f.description, f.gmailThreadUrl && `Email thread: ${f.gmailThreadUrl}`]
+    .filter(Boolean).join('\n\n');
+  const payload = {
+    Subject: f.subject,
+    Status: f.status || 'Not Started',
+    Priority: f.priority || 'Normal',
+    Due_Date: dueDate,
+    // Caller-resolved owner wins (e.g. the R6 follow-up owner chain); only fall
+    // back to the caller lookup when the site has none.
+    Owner: f.owner || await getOwnerForCaller(env)
+  };
+  const remindAt = taskRemindAt(dueDate);
+  if (remindAt) payload.Remind_At = remindAt;
+  if (description) payload.Description = description;
+  if (f.contactId) payload.Who_Id = f.contactId;
+  if (f.dealId) {
+    payload.What_Id = f.dealId;
+    payload.$se_module = 'Deals';
+  } else if (f.accountId) {
+    payload.What_Id = f.accountId;
+    payload.$se_module = 'Accounts';
+  }
+  return payload;
+}
+
 async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, ownerId, existingDeal = false }) {
   // ── Dedupe (2026-07-21): both call sites can fire for the same deal in one
   // turn (create_deal_and_quote STEP 8 + a direct zoho_create_record), and a
@@ -1233,13 +1361,7 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     console.log(`[TASK-DEDUPE] Same-turn memo hit for deal ${dealId} — reusing Task ${_memo.taskId}`);
     return { success: true, deduped: true, taskId: _memo.taskId, taskUrl: _memo.taskUrl, dueDate: _memo.dueDate, retried: false, http_classified: 'deduped' };
   }
-  const taskDueDate = new Date();
-  let daysAdded = 0;
-  while (daysAdded < 3) {
-    taskDueDate.setDate(taskDueDate.getDate() + 1);
-    if (taskDueDate.getDay() !== 0 && taskDueDate.getDay() !== 6) daysAdded++;
-  }
-  const dueDateStr = taskDueDate.toISOString().split('T')[0];
+  const dueDateStr = addBusinessDays(new Date(), 3);
   // (b) Cross-turn check — ONLY when the caller signals the deal pre-existed
   // (existingDeal:true): an open "Follow up -" Task on the deal means skip.
   // FAIL-CLOSED on a query error: do NOT create (the task_create_failed
@@ -1313,15 +1435,16 @@ async function createFollowUpTaskForDeal({ dealId, subjectLabel, env, personId, 
     return { success: false, taskId: null, taskUrl: null, dueDate: dueDateStr, error: 'No owner id resolved (SYSTEM_OWNER_ID unset) — refused to avoid API-token attribution', retried: false, http_classified: 'validation' };
   }
   console.log(`[TASK-OWNER] Follow-up task owner ${_taskOwnerId} (source: ${_taskOwnerSource})`);
-  const taskData = {
-    Subject: `Follow up - ${subjectLabel || `Deal ${dealId}`}`,
-    Due_Date: dueDateStr,
-    Status: 'Not Started',
-    Priority: 'Normal',
-    Owner: { id: _taskOwnerId },
-    What_Id: { id: dealId },
-    $se_module: 'Deals'
-  };
+  const taskData = await buildTaskPayload({
+    subject: `Follow up - ${subjectLabel || `Deal ${dealId}`}`,
+    dueDate: dueDateStr,
+    // { id } shape preserved — this path has always written the object form.
+    dealId: { id: dealId },
+    owner: { id: _taskOwnerId }
+    // No gmailThreadUrl: this path runs from the CRM agent (create_deal_and_quote /
+    // zoho_create_record), where no Gmail thread URL reaches the worker. Add the
+    // param only once a caller actually has one to pass.
+  }, env);
 
   // Single-attempt invoker. Returns
   //   { ok: true, taskId } on success
@@ -12710,6 +12833,43 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           console.warn(`[TASK-SE-MODULE] Auto-injected $se_module="${recordData.$se_module}" for What_Id=${_whatIdVal} (caller omitted it)`);
         }
 
+        // ── Shared Task payload for the generic LLM tool path (2026-07-23) ──
+        // Every agent-created Task (GChat, queue consumer, /_work, /_continue,
+        // /api/handoff, /api/chat-waterfall) lands here. Route it through
+        // buildTaskPayload so it gets the same business-day Due_Date default and
+        // 9:00 AM Remind_At as the four HTTP endpoints. FILL-ONLY MERGE: anything
+        // the model supplied (Description, Remind_At, Due_Date, Owner, …) wins.
+        if (module_name === 'Tasks') {
+          // Non-Zoho field: consumed here (and scrubbed) so it can never reach
+          // the POST as an invalid field if a caller or the model supplies it.
+          const _taskThreadUrl = recordData.gmailThreadUrl || '';
+          delete recordData.gmailThreadUrl;
+          const _isAcctLink = recordData.$se_module === 'Accounts';
+          const _taskBase = await buildTaskPayload({
+            subject: recordData.Subject,
+            dueDate: recordData.Due_Date,
+            priority: recordData.Priority,
+            description: recordData.Description,
+            status: recordData.Status,
+            contactId: recordData.Who_Id,
+            dealId: _isAcctLink ? '' : recordData.What_Id,
+            accountId: _isAcctLink ? recordData.What_Id : '',
+            // Owner was already resolved above — reuse it rather than re-looking
+            // it up, and never clobber a model-supplied owner.
+            owner: recordData.Owner,
+            gmailThreadUrl: _taskThreadUrl
+          }, env);
+          for (const [_k, _v] of Object.entries(_taskBase)) {
+            if (recordData[_k] === undefined || recordData[_k] === null || recordData[_k] === '') {
+              recordData[_k] = _v;
+            }
+          }
+          // Description is the one field the fill-only loop can't handle: the
+          // built value is model text + the thread link, i.e. a SUPERSET of what
+          // the model supplied, so it replaces rather than being skipped.
+          if (_taskBase.Description) recordData.Description = _taskBase.Description;
+        }
+
         // Pre-flight validation
         const createCheck = await validateCrmWrite(module_name, recordData, true, env);
         if (!createCheck.valid) {
@@ -13076,6 +13236,27 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 console.warn(`[FIX-C] Cross-account guard fetch failed (non-blocking, allowing write): ${_guardErr.message}`);
               }
             }
+          }
+        }
+
+        // ── Task reminder tracks the Due_Date (2026-07-23) ───────────────────
+        // This case is the ONLY route from chat (GChat, Webex, extension chat,
+        // queue, /_work, /_continue) to a Task's Due_Date. Without this the date
+        // moves and Remind_At stays pinned to the OLD day, so the 9:00 AM email
+        // fires on the wrong date — or already fired and never fires again.
+        // Mirrors /api/task-action 'reschedule' and 'edit'. FILL-ONLY, same
+        // precedence as the create path above: a model-supplied Remind_At wins.
+        // taskRemindAt returns null on an unparseable date — leave Remind_At
+        // alone in that case rather than ship a malformed ALARM that makes Zoho
+        // reject the ENTIRE write (losing the reminder beats losing the update).
+        if (module_name === 'Tasks' && data.Due_Date
+            && (data.Remind_At === undefined || data.Remind_At === null || data.Remind_At === '')) {
+          const _updRemind = taskRemindAt(data.Due_Date);
+          if (_updRemind) {
+            data.Remind_At = _updRemind;
+            console.log(`[TASK-REMIND] Tasks/${record_id} Due_Date=${data.Due_Date} → Remind_At ${_updRemind.ALARM}`);
+          } else {
+            console.warn(`[TASK-REMIND] Tasks/${record_id} Due_Date="${data.Due_Date}" unparseable — leaving Remind_At untouched (fail closed)`);
           }
         }
 
@@ -27928,24 +28109,16 @@ CRITICAL URL RULES:
 
           // ── Task Action: Complete/reschedule/edit Zoho tasks ──
           case '/api/task-action': {
-            const { action, taskId, newSubject, newDueDate, dealId, contactId, accountName } = apiBody;
+            // gmailThreadUrl is accepted for every action but INTENTIONALLY only
+            // consumed by 'complete_and_followup', which CREATES a Task. edit/
+            // reschedule/complete update an EXISTING Task, and appending the
+            // link there would duplicate it in the Description. Not a bug.
+            const { action, taskId, newSubject, newDueDate, dealId, contactId, accountName, gmailThreadUrl } = apiBody;
             if (!action || !taskId) {
               return new Response(JSON.stringify({ error: 'action and taskId required' }), { status: 400, headers: jsonHeaders });
             }
 
             try {
-              // Helper: calculate N business days from today
-              function addBusinessDays(startDate, days) {
-                let d = new Date(startDate);
-                let added = 0;
-                while (added < days) {
-                  d.setDate(d.getDate() + 1);
-                  const dow = d.getDay();
-                  if (dow !== 0 && dow !== 6) added++;
-                }
-                return d.toISOString().split('T')[0]; // YYYY-MM-DD
-              }
-
               switch (action) {
                 case 'complete_and_followup': {
                   // 1. Complete the existing task
@@ -27960,21 +28133,14 @@ CRITICAL URL RULES:
                   const followUpDate = addBusinessDays(new Date(), 3);
                   const successorSubject = newSubject || 'Follow up: next steps';
                   const successorPayload = {
-                    data: [{
-                      Subject: successorSubject,
-                      Status: 'Not Started',
-                      Due_Date: newDueDate || followUpDate,
-                      Owner: await getOwnerForCaller(env),
-                    }]
+                    data: [await buildTaskPayload({
+                      subject: successorSubject,
+                      dueDate: newDueDate || followUpDate,
+                      dealId,
+                      contactId,
+                      gmailThreadUrl
+                    }, env)]
                   };
-                  // Attach to deal if available
-                  if (dealId) {
-                    successorPayload.data[0].What_Id = dealId;
-                    successorPayload.data[0].$se_module = 'Deals';
-                  }
-                  if (contactId) {
-                    successorPayload.data[0].Who_Id = contactId;
-                  }
 
                   const createResp = await zohoApiCall('POST', 'Tasks', env, successorPayload);
                   const newTaskId = (createResp.data && createResp.data[0]) ? createResp.data[0].details.id : null;
@@ -28006,8 +28172,14 @@ CRITICAL URL RULES:
                   if (!newDueDate) {
                     return new Response(JSON.stringify({ error: 'newDueDate required for reschedule' }), { status: 400, headers: jsonHeaders });
                   }
+                  // Reminder tracks the due date: recompute for 9:00 AM on the new day.
+                  const reschedRemind = taskRemindAt(newDueDate);
                   const reschedResp = await zohoApiCall('PUT', `Tasks/${taskId}`, env, {
-                    data: [{ Due_Date: newDueDate, ...(newSubject ? { Subject: newSubject } : {}) }]
+                    data: [{
+                      Due_Date: newDueDate,
+                      ...(reschedRemind ? { Remind_At: reschedRemind } : {}),
+                      ...(newSubject ? { Subject: newSubject } : {})
+                    }]
                   });
                   if (reschedResp.data && reschedResp.data[0] && reschedResp.data[0].code !== 'SUCCESS') {
                     throw new Error('Failed to reschedule: ' + (reschedResp.data[0].message || 'unknown'));
@@ -28019,7 +28191,12 @@ CRITICAL URL RULES:
                 case 'edit': {
                   const updateFields = {};
                   if (newSubject) updateFields.Subject = newSubject;
-                  if (newDueDate) updateFields.Due_Date = newDueDate;
+                  if (newDueDate) {
+                    updateFields.Due_Date = newDueDate;
+                    // Reminder tracks the due date.
+                    const editRemind = taskRemindAt(newDueDate);
+                    if (editRemind) updateFields.Remind_At = editRemind;
+                  }
                   if (Object.keys(updateFields).length === 0) {
                     return new Response(JSON.stringify({ error: 'Nothing to update' }), { status: 400, headers: jsonHeaders });
                   }
@@ -28050,16 +28227,6 @@ CRITICAL URL RULES:
             try {
               const prevDomain = prevEmail.split('@')[1] || '';
               const prevIsGeneric = /^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac|comcast|att|verizon)\.\w+$/i.test(prevDomain);
-
-              function previewAddBizDays(start, days) {
-                let d = new Date(start);
-                let added = 0;
-                while (added < days) {
-                  d.setDate(d.getDate() + 1);
-                  if (d.getDay() !== 0 && d.getDay() !== 6) added++;
-                }
-                return d.toISOString().split('T')[0];
-              }
 
               let prevAccountId = prevAcctId || null;
               let prevAccountName = '';
@@ -28158,7 +28325,7 @@ CRITICAL URL RULES:
                 isGenericEmail: prevIsGeneric,
                 domain: prevDomain,
                 companyName: prevCompanyName,
-                suggestedDueDate: previewAddBizDays(new Date(), 3),
+                suggestedDueDate: addBusinessDays(new Date(), 3),
                 associationUncertain: prevAssociationUncertain
               };
             } catch (err) {
@@ -28169,7 +28336,11 @@ CRITICAL URL RULES:
 
           // ── Suggest Task: Auto-create lead/contact + follow-up task ──
           case '/api/suggest-task': {
-            const { senderEmail, senderName, subject: taskSubject, hasAccount, accountId, dealId: suggestDealId, createContact: shouldCreateContact } = apiBody;
+            // contact_id (2026-07-23): the person picker in CrmPanel already
+            // resolved a Contact — honor it instead of re-deriving one from the
+            // sender email and creating the Task with no Who_Id. Absent → the
+            // email-search path below still runs unchanged.
+            const { senderEmail, senderName, subject: taskSubject, hasAccount, accountId, dealId: suggestDealId, createContact: shouldCreateContact, gmailThreadUrl: suggestThreadUrl, contact_id: suggestContactId } = apiBody;
             if (!senderEmail) {
               return new Response(JSON.stringify({ error: 'senderEmail required' }), { status: 400, headers: jsonHeaders });
             }
@@ -28178,21 +28349,11 @@ CRITICAL URL RULES:
               const domain = senderEmail.split('@')[1] || '';
               const isGenericEmail = /^(gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|live|msn|me|mac|comcast|att|verizon)\.\w+$/i.test(domain);
 
-              function suggestAddBusinessDays(startDate, days) {
-                let d = new Date(startDate);
-                let added = 0;
-                while (added < days) {
-                  d.setDate(d.getDate() + 1);
-                  const dow = d.getDay();
-                  if (dow !== 0 && dow !== 6) added++;
-                }
-                return d.toISOString().split('T')[0];
-              }
-              const followUpDate = suggestAddBusinessDays(new Date(), 3);
+              const followUpDate = addBusinessDays(new Date(), 3);
 
               let resultAccountId = accountId || null;
               let resultAccountName = '';
-              let contactId = null;
+              let contactId = suggestContactId || null;
               let contactCreated = false;
               let leadCreated = false;
               let taskCreated = false;
@@ -28213,7 +28374,9 @@ CRITICAL URL RULES:
                 if (existingContact?.data?.[0]?.Account_Name?.id) {
                   resultAccountId = existingContact.data[0].Account_Name.id;
                   resultAccountName = existingContact.data[0].Account_Name.name || '';
-                  contactId = existingContact.data[0].id;
+                  // Account resolution still runs; only the contact is deferred
+                  // to the panel-supplied one when it exists.
+                  if (!contactId) contactId = existingContact.data[0].id;
                 }
               } catch (e) { /* contact search failed */ }
 
@@ -28286,12 +28449,14 @@ CRITICAL URL RULES:
                   resultAccountName = acctResp?.data?.[0]?.Account_Name || 'Unknown';
                 }
 
-                const contactSearch = await zohoApiCall('GET',
+                // Panel-resolved contact wins — skip the re-search entirely
+                // rather than discarding it. No contactId → search as before.
+                const contactSearch = contactId ? null : await zohoApiCall('GET',
                   `Contacts/search?email=${encodeURIComponent(senderEmail)}&fields=id,Full_Name,Email`, env
                 );
                 if (contactSearch?.data && contactSearch.data.length > 0) {
                   contactId = contactSearch.data[0].id;
-                } else if (shouldCreateContact) {
+                } else if (shouldCreateContact && !contactId) {
                   // Create contact under existing account (user confirmed via preview)
                   const nameParts = (senderName || '').split(' ');
                   const firstName = nameParts[0] || senderEmail.split('@')[0];
@@ -28341,25 +28506,19 @@ CRITICAL URL RULES:
 
               // Create follow-up task
               const taskPayload = {
-                data: [{
-                  Subject: 'Follow up: ' + (taskSubject || senderName || senderEmail),
-                  Status: 'Not Started',
-                  Due_Date: followUpDate,
-                  Owner: await getOwnerForCaller(env),
-                  Description: 'Auto-created from Gmail add-on.\nSender: ' + senderName + ' <' + senderEmail + '>\nOriginal subject: ' + (taskSubject || 'N/A')
-                }]
+                data: [await buildTaskPayload({
+                  subject: 'Follow up: ' + (taskSubject || senderName || senderEmail),
+                  dueDate: followUpDate,
+                  // Existing add-on description kept verbatim — the thread link
+                  // is APPENDED to it, never replaces it.
+                  description: 'Auto-created from Gmail add-on.\nSender: ' + senderName + ' <' + senderEmail + '>\nOriginal subject: ' + (taskSubject || 'N/A'),
+                  contactId,
+                  // Link to deal if provided, otherwise link to account
+                  dealId: suggestDealId,
+                  accountId: resultAccountId,
+                  gmailThreadUrl: suggestThreadUrl
+                }, env)]
               };
-              if (contactId) {
-                taskPayload.data[0].Who_Id = contactId;
-              }
-              // Link to deal if provided, otherwise link to account
-              if (suggestDealId) {
-                taskPayload.data[0].What_Id = suggestDealId;
-                taskPayload.data[0].$se_module = 'Deals';
-              } else if (resultAccountId) {
-                taskPayload.data[0].What_Id = resultAccountId;
-                taskPayload.data[0].$se_module = 'Accounts';
-              }
 
               const createTaskResp = await zohoApiCall('POST', 'Tasks', env, taskPayload);
               if (createTaskResp?.data?.[0]?.details?.id) {
@@ -29692,14 +29851,21 @@ CRITICAL URL RULES:
                   }
                 }
 
+                let contactFromPrimaryFallback = false;
                 if (rawAccount && !rawContact) {
                   const primary = await fetchPrimaryContactForAccount(rawAccount.id, env);
-                  if (primary) rawContact = primary;
+                  if (primary) { rawContact = primary; contactFromPrimaryFallback = true; }
                 }
 
                 if (rawContact) {
                   contact = {
                     id: rawContact.id,
+                    // matched: true only for a real email/name/Secondary_Email hit; false
+                    // when this is the account primary-fallback placeholder (surfaced only
+                    // so the sidebar has someone to show). No Who_Id may be written from a
+                    // placeholder — the extension's resolveWhoId trusts this flag, NOT the
+                    // echoed email (which is fabricated from the request email below).
+                    matched: !contactFromPrimaryFallback,
                     firstName: rawContact.First_Name || '', lastName: rawContact.Last_Name || '',
                     fullName: rawContact.Full_Name || ((rawContact.First_Name || '') + ' ' + (rawContact.Last_Name || '')).trim(),
                     email: rawContact.Email || fullEmail,
@@ -30027,15 +30193,19 @@ CRITICAL URL RULES:
                 // Tier 5: contact-by-account fallback.
                 // Waterfall resolved an Account but no Contact tied back — surface
                 // the primary (most recently modified) contact on that account.
+                let contactFromPrimaryFallback = false;
                 if (rawAccount && !rawContact) {
                   const primary = await fetchPrimaryContactForAccount(rawAccount.id, env);
-                  if (primary) rawContact = primary;
+                  if (primary) { rawContact = primary; contactFromPrimaryFallback = true; }
                 }
 
                 // ── Normalize into the extension's expected shape ──
                 if (rawContact) {
                   contact = {
                     id: rawContact.id,
+                    // matched: real email/name hit vs account primary-fallback placeholder.
+                    // The extension's resolveWhoId trusts this, not the echoed email.
+                    matched: !contactFromPrimaryFallback,
                     firstName: rawContact.First_Name || '',
                     lastName: rawContact.Last_Name || '',
                     fullName: rawContact.Full_Name || ((rawContact.First_Name || '') + ' ' + (rawContact.Last_Name || '')).trim(),
@@ -31044,41 +31214,23 @@ Return ONLY a JSON object (no markdown, no explanation):
 
           // ── CRM Create Task: Create a new task ──
           case '/api/crm-create-task': {
-            const { subject: newTaskSubject, dueDate: newTaskDue, dealId: newTaskDeal, contactId: newTaskContact, priority: newTaskPriority, description: newTaskDesc } = apiBody;
+            const { subject: newTaskSubject, dueDate: newTaskDue, dealId: newTaskDeal, contactId: newTaskContact, priority: newTaskPriority, description: newTaskDesc, gmailThreadUrl: newTaskThreadUrl } = apiBody;
             if (!newTaskSubject) {
               return new Response(JSON.stringify({ error: 'subject required' }), { status: 400, headers: jsonHeaders });
             }
 
             try {
-              function createTaskBizDays(startDate, days) {
-                let d = new Date(startDate);
-                let added = 0;
-                while (added < days) {
-                  d.setDate(d.getDate() + 1);
-                  if (d.getDay() !== 0 && d.getDay() !== 6) added++;
-                }
-                return d.toISOString().split('T')[0];
-              }
-
               const taskPayload = {
-                data: [{
-                  Subject: newTaskSubject,
-                  Status: 'Not Started',
-                  Due_Date: newTaskDue || createTaskBizDays(new Date(), 3),
-                  Priority: newTaskPriority || 'Normal',
-                  Owner: await getOwnerForCaller(env),
-                }]
+                data: [await buildTaskPayload({
+                  subject: newTaskSubject,
+                  dueDate: newTaskDue,
+                  priority: newTaskPriority,
+                  description: newTaskDesc,
+                  contactId: newTaskContact,
+                  dealId: newTaskDeal,
+                  gmailThreadUrl: newTaskThreadUrl
+                }, env)]
               };
-              if (newTaskDeal) {
-                taskPayload.data[0].What_Id = newTaskDeal;
-                taskPayload.data[0].$se_module = 'Deals';
-              }
-              if (newTaskContact) {
-                taskPayload.data[0].Who_Id = newTaskContact;
-              }
-              if (newTaskDesc) {
-                taskPayload.data[0].Description = newTaskDesc;
-              }
 
               const createResp = await zohoApiCall('POST', 'Tasks', env, taskPayload);
               const parsed = parseZohoResponse(createResp, 'Task creation');

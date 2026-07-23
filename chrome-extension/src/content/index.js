@@ -629,8 +629,25 @@ function extractEmailData(options = {}) {
     ccwDealNumber,       // CCW Deal ID if detected in subject
     isCiscoNotification, // True for notificationsapp@cisco.com
     url: window.location.href,
+    // Fresh DOM read, not the cache-gated `threadPermId` const above: that one
+    // is deliberately null until the thread nav settles so stale-id cache
+    // merges can't happen. Consumers just want the current thread's id.
+    threadPermId: getThreadPermId(),
     extractedAt: Date.now(),
   };
+}
+
+/**
+ * Escape a user/CRM-derived string before interpolating it into innerHTML.
+ * Zoho subjects and deal names routinely contain quotes and angle brackets.
+ */
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /**
@@ -746,10 +763,10 @@ function showContactChipPopup(anchorEl, email) {
         background:${avatarColor};color:white;
         display:flex;align-items:center;justify-content:center;
         font-size:18px;font-weight:500;
-      ">${avatarLetter}</div>
+      ">${escapeHtml(avatarLetter)}</div>
       <div style="min-width:0;flex:1;">
-        <div style="font-size:14px;font-weight:500;color:#202124;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${displayName}</div>
-        <div style="font-size:12px;color:#5f6368;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${email}</div>
+        <div style="font-size:14px;font-weight:500;color:#202124;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(displayName)}</div>
+        <div style="font-size:12px;color:#5f6368;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(email)}</div>
       </div>
     </div>
     <div class="chip-crm-info" style="padding:0 16px 10px;min-height:20px;font-size:12px;color:#5f6368;">
@@ -827,13 +844,13 @@ function renderChipCrmInfo(el, result, email, domain) {
   const con = result.contact;
   let html = '';
   if (acc?.name) {
-    html += `<div style="font-weight:500;color:#202124;margin-bottom:1px;">${acc.name}</div>`;
+    html += `<div style="font-weight:500;color:#202124;margin-bottom:1px;">${escapeHtml(acc.name)}</div>`;
   }
   if (con?.title) {
-    html += `<div style="color:#5f6368;">${con.title}</div>`;
+    html += `<div style="color:#5f6368;">${escapeHtml(con.title)}</div>`;
   }
   if (con?.phone) {
-    html += `<div style="color:#5f6368;">${con.phone}</div>`;
+    html += `<div style="color:#5f6368;">${escapeHtml(con.phone)}</div>`;
   }
   if (!html) html = `<div style="color:#2e7d32;font-size:11px;">✓ Found in Zoho CRM</div>`;
   el.innerHTML = html;
@@ -951,7 +968,7 @@ function setupEmailHoverPopups() {
             document.body.appendChild(popup);
           }
 
-          popup.innerHTML = `<div style="color: ${COLORS.TEXT_SECONDARY};">Looking up ${email}...</div>`;
+          popup.innerHTML = `<div style="color: ${COLORS.TEXT_SECONDARY};">Looking up ${escapeHtml(email)}...</div>`;
 
           // Position near cursor
           const rect = e.target.getBoundingClientRect();
@@ -969,24 +986,27 @@ function setupEmailHoverPopups() {
               const accountName = account?.name || 'Unknown Account';
               const contactName = contact?.name || contact?.email || email;
               const contactTitle = contact?.title || '';
-              const accountZoho = account?.zohoUrl || '#';
+              // CRM-supplied URL: anything that isn't http(s) (javascript:, data:)
+              // must never become a live href. Fail closed to '#'.
+              const rawZoho = account?.zohoUrl || '';
+              const accountZoho = /^https?:\/\//i.test(rawZoho) ? rawZoho : '#';
 
               popup.innerHTML = `
                 <div style="margin-bottom: 8px;">
                   <div style="font-weight: 600; color: ${COLORS.TEXT_PRIMARY}; margin-bottom: 4px;">
-                    ${accountName}
+                    ${escapeHtml(accountName)}
                   </div>
                   <div style="color: ${COLORS.TEXT_SECONDARY}; font-size: 11px;">
-                    ${contactName}${contactTitle ? ` • ${contactTitle}` : ''}
+                    ${escapeHtml(contactName)}${contactTitle ? ` • ${escapeHtml(contactTitle)}` : ''}
                   </div>
                 </div>
-                <a href="${accountZoho}" target="_blank" rel="noopener"
+                <a href="${escapeHtml(accountZoho)}" target="_blank" rel="noopener"
                    style="color: ${COLORS.STRATUS_BLUE}; text-decoration: none; font-size: 11px; font-weight: 500;">
                   View in Zoho →
                 </a>
               `;
             } else {
-              popup.innerHTML = `<div style="color: ${COLORS.TEXT_SECONDARY};">No CRM record for ${email}</div>`;
+              popup.innerHTML = `<div style="color: ${COLORS.TEXT_SECONDARY};">No CRM record for ${escapeHtml(email)}</div>`;
             }
           } catch (err) {
             popup.innerHTML = `<div style="color: ${COLORS.ERROR}; font-size: 11px;">Lookup failed</div>`;
@@ -1224,7 +1244,7 @@ function showSendConfirmation(message) {
   toast.innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;">
       <span style="font-size:18px;">✅</span>
-      <span style="font-size:13px;color:#1a1a1a;">${message}</span>
+      <span style="font-size:13px;color:#1a1a1a;">${escapeHtml(message)}</span>
     </div>
   `;
   document.body.appendChild(toast);
@@ -1235,18 +1255,123 @@ function showSendConfirmation(message) {
 // Send + Task Confirmation Popup
 // ─────────────────────────────────────────────
 
+/**
+ * Reduce a name or email address to its comparable letters, so a compose
+ * recipient can be folded into the CRM contact that owns the same tasks.
+ * "john.smith@acme.com" and "John Smith" both collapse to "johnsmith".
+ * ponytail: token match, not identity resolution — /api/tasks carries no
+ * contact email. If false splits show up, add Email to mapTask and match on it.
+ */
+function personTokens(nameOrEmail) {
+  return String(nameOrEmail || '').toLowerCase().replace(/@.*$/, '').replace(/[^a-z]/g, '');
+}
+
+/**
+ * Group the fetched tasks by the person they belong to. Only people who own at
+ * least one task are listed — this picker exists to answer "which of my open
+ * tasks am I updating", which a zero-task recipient cannot. Compose recipients
+ * only fold into (and flag) the contact that owns their tasks.
+ * Each entry: { key, label, tokens, isRecipient, tasks }.
+ * Tasks inside a person are sorted soonest-due first (no date last).
+ */
+function buildTaskPeople(tasks, recipients) {
+  const people = new Map();
+
+  for (const t of tasks) {
+    const name = t.contactName || '';
+    const key = t.contactId
+      ? `c:${t.contactId}`
+      : (name ? `n:${name.toLowerCase()}` : `a:${(t.accountName || 'unassigned').toLowerCase()}`);
+    let entry = people.get(key);
+    if (!entry) {
+      entry = {
+        key,
+        label: name || t.accountName || 'Unassigned',
+        tokens: personTokens(name),
+        isRecipient: false,
+        tasks: [],
+      };
+      people.set(key, entry);
+    }
+    entry.tasks.push(t);
+  }
+
+  for (const entry of people.values()) {
+    entry.tasks.sort((a, b) => {
+      if (!a.dueDate && !b.dueDate) return 0;
+      if (!a.dueDate) return 1;
+      if (!b.dueDate) return -1;
+      return a.dueDate < b.dueDate ? -1 : (a.dueDate > b.dueDate ? 1 : 0);
+    });
+  }
+
+  for (const r of recipients || []) {
+    const tokens = personTokens(r);
+    if (tokens.length < 4) continue;
+    const match = [...people.values()].find(p => p.tokens.length >= 4
+      && (p.tokens === tokens || p.tokens.includes(tokens) || tokens.includes(p.tokens)));
+    if (match) match.isRecipient = true;
+  }
+
+  // The people you actually emailed first, then the rest of the account.
+  return [...people.values()].sort((a, b) => {
+    if (a.isRecipient !== b.isRecipient) return a.isRecipient ? -1 : 1;
+    return 0;
+  });
+}
+
 function showSendTaskPopup(tasks, recipients, subject) {
   // Remove any existing popup
   document.querySelector('.stratus-send-task-popup')?.remove();
 
-  const task = tasks[0]; // Focus on the most relevant task
   const popup = document.createElement('div');
   popup.className = 'stratus-send-task-popup';
 
-  const dueDate = task.dueDate || '';
-  const isOverdue = dueDate && new Date(dueDate) < new Date();
-  const dealInfo = task.dealName ? `<div style="font-size:11px;color:#5f6368;margin-top:2px;">Deal: ${task.dealName}</div>` : '';
-  const otherCount = tasks.length > 1 ? `<div style="font-size:11px;color:#5f6368;margin-top:4px;">+ ${tasks.length - 1} other task${tasks.length > 1 ? 's' : ''}</div>` : '';
+  const people = buildTaskPeople(tasks || [], recipients || []);
+  if (!people.length) {
+    // Defensive: FETCH_TASKS said there were tasks but nothing survived
+    // grouping. Never silently show an empty picker.
+    showSendConfirmation('Email sent! No task could be matched to update.');
+    return;
+  }
+  const selectedPersonKey = (people.find(p => p.isRecipient && p.tasks.length) || people[0]).key;
+
+  const taskRowHTML = (t, hideRadio, personKey, checked) => {
+    const dueDate = t.dueDate || '';
+    const isOverdue = dueDate && new Date(dueDate) < new Date();
+    return `
+      <label class="stp-task-row" data-person="${escapeHtml(personKey)}" style="
+        display:${personKey === selectedPersonKey ? 'flex' : 'none'};align-items:flex-start;gap:8px;
+        padding:6px 6px;border-radius:6px;cursor:pointer;
+      ">
+        <input type="radio" name="stratus-task-pick" value="${escapeHtml(t.id)}" ${checked ? 'checked' : ''}
+          style="margin:3px 0 0 0;accent-color:#1a73e8;${hideRadio ? 'display:none;' : ''}" />
+        <span style="flex:1;min-width:0;">
+          <span style="display:block;font-size:12px;font-weight:600;color:#1a1a1a;word-break:break-word;">${escapeHtml(t.subject || 'Follow-up Task')}</span>
+          <span style="display:block;font-size:11px;color:${isOverdue ? '#d93025' : '#5f6368'};margin-top:2px;">
+            Due: ${escapeHtml(dueDate || 'No date')}${isOverdue ? ' ⚠️ Overdue' : ''}
+          </span>
+          ${t.dealName ? `<span style="display:block;font-size:11px;color:#5f6368;margin-top:2px;word-break:break-word;">Deal: ${escapeHtml(t.dealName)}</span>` : ''}
+        </span>
+      </label>`;
+  };
+
+  const taskListHTML = people.map(p =>
+    p.tasks.map((t, i) => taskRowHTML(t, p.tasks.length === 1, p.key, p.key === selectedPersonKey && i === 0)).join('')
+  ).join('');
+
+  const personSelectorHTML = people.length > 1 ? `
+    <div style="margin-bottom:10px;">
+      <div style="font-size:11px;font-weight:600;color:#5f6368;margin-bottom:4px;">Person:</div>
+      <div style="background:#f8f9fa;border-radius:6px;padding:6px 10px;max-height:96px;overflow-y:auto;">
+        ${people.map(p => `
+          <label style="display:flex;align-items:center;gap:6px;padding:3px 0;cursor:pointer;">
+            <input type="radio" name="stratus-task-person" value="${escapeHtml(p.key)}" ${p.key === selectedPersonKey ? 'checked' : ''} style="margin:0;accent-color:#1a73e8;" />
+            <span style="font-size:12px;color:#1a1a1a;">${escapeHtml(p.label)}</span>
+            <span style="font-size:11px;color:#5f6368;margin-left:auto;">${p.tasks.length || 'none'}</span>
+          </label>`).join('')}
+      </div>
+    </div>` : '';
 
   popup.style.cssText = `
     position: fixed; bottom: 24px; right: 24px; z-index: 99999;
@@ -1275,13 +1400,10 @@ function showSendTaskPopup(tasks, recipients, subject) {
       <div style="font-size:13px;font-weight:700;color:#1a1a1a;">📋 Email Sent — Update Task?</div>
       <button class="stp-close" style="background:none;border:none;cursor:pointer;color:#5f6368;font-size:18px;padding:0 2px;line-height:1;">×</button>
     </div>
-    <div style="background:#f8f9fa;border-radius:8px;padding:10px 12px;margin-bottom:12px;">
-      <div style="font-size:13px;font-weight:600;color:#1a1a1a;">${task.subject || 'Follow-up Task'}</div>
-      <div style="font-size:11px;color:${isOverdue ? '#d93025' : '#5f6368'};margin-top:2px;">
-        Due: ${dueDate || 'No date'}${isOverdue ? ' ⚠️ Overdue' : ''}
-      </div>
-      ${dealInfo}
-      ${otherCount}
+    ${personSelectorHTML}
+    <div style="background:#f8f9fa;border-radius:8px;padding:6px 6px;margin-bottom:12px;max-height:172px;overflow-y:auto;">
+      ${taskListHTML}
+      <div class="stp-none" style="display:none;font-size:12px;color:#5f6368;padding:6px;">No open tasks for this person.</div>
     </div>
     <div style="display:flex;flex-direction:column;gap:7px;">
       <button class="stp-complete" style="
@@ -1304,8 +1426,13 @@ function showSendTaskPopup(tasks, recipients, subject) {
 
   document.body.appendChild(popup);
 
-  // Auto-dismiss after 30 seconds
-  const autoDismiss = setTimeout(() => popup.remove(), 30000);
+  // Auto-dismiss after 30 seconds — restarted on each pick so the picker can't
+  // vanish out from under someone mid-selection.
+  let autoDismiss = setTimeout(() => popup.remove(), 30000);
+  function resetAutoDismiss() {
+    clearTimeout(autoDismiss);
+    autoDismiss = setTimeout(() => popup.remove(), 30000);
+  }
 
   function setStatus(msg, isError = false) {
     const el = popup.querySelector('.stp-status');
@@ -1319,7 +1446,48 @@ function showSendTaskPopup(tasks, recipients, subject) {
       b.disabled = true;
       b.style.opacity = '0.5';
     });
+    popup.querySelectorAll('input[type="radio"]').forEach(i => { i.disabled = true; });
   }
+
+  // The action buttons always act on the CHECKED task row — never tasks[0].
+  function selectedTask() {
+    const id = popup.querySelector('input[name="stratus-task-pick"]:checked')?.value || '';
+    return id ? ((tasks || []).find(t => String(t.id) === id) || null) : null;
+  }
+
+  function syncActionState() {
+    const has = !!selectedTask();
+    popup.querySelectorAll('.stp-complete, .stp-extend').forEach(b => {
+      b.disabled = !has;
+      b.style.opacity = has ? '' : '0.5';
+      b.style.cursor = has ? 'pointer' : 'default';
+    });
+  }
+
+  function showPerson(key) {
+    let firstVisible = null;
+    popup.querySelectorAll('.stp-task-row').forEach(row => {
+      const match = row.dataset.person === key;
+      row.style.display = match ? 'flex' : 'none';
+      const radio = row.querySelector('input[type="radio"]');
+      if (!radio) return;
+      if (!match) radio.checked = false;
+      else if (!firstVisible) firstVisible = radio; // rows are soonest-due first
+    });
+    if (firstVisible && !popup.querySelector('input[name="stratus-task-pick"]:checked')) {
+      firstVisible.checked = true;
+    }
+    popup.querySelector('.stp-none').style.display = firstVisible ? 'none' : 'block';
+    syncActionState();
+  }
+
+  popup.querySelectorAll('input[name="stratus-task-person"]').forEach(radio => {
+    radio.addEventListener('change', () => { resetAutoDismiss(); showPerson(radio.value); });
+  });
+  popup.querySelectorAll('input[name="stratus-task-pick"]').forEach(radio => {
+    radio.addEventListener('change', () => { resetAutoDismiss(); syncActionState(); });
+  });
+  showPerson(selectedPersonKey);
 
   popup.querySelector('.stp-close').addEventListener('click', () => {
     clearTimeout(autoDismiss);
@@ -1332,6 +1500,8 @@ function showSendTaskPopup(tasks, recipients, subject) {
   });
 
   popup.querySelector('.stp-complete').addEventListener('click', async () => {
+    const task = selectedTask();
+    if (!task) { setStatus('Select a task first.', true); return; }
     disableButtons();
     setStatus('Completing task...');
     try {
@@ -1341,6 +1511,7 @@ function showSendTaskPopup(tasks, recipients, subject) {
         dealId: task.dealId || '',
         contactId: task.contactId || '',
         newSubject: `Follow up: ${task.subject}`,
+        gmailThreadUrl: window.location.href,
       });
       setStatus('✓ Task completed. Follow-up created.');
       setTimeout(() => { clearTimeout(autoDismiss); popup.remove(); }, 2500);
@@ -1350,6 +1521,8 @@ function showSendTaskPopup(tasks, recipients, subject) {
   });
 
   popup.querySelector('.stp-extend').addEventListener('click', async () => {
+    const task = selectedTask();
+    if (!task) { setStatus('Select a task first.', true); return; }
     disableButtons();
     setStatus('Rescheduling...');
     try {
@@ -1409,13 +1582,38 @@ function showCreateTaskPrompt(recipients, subject) {
   const defaultDue = addDays(3);
   const taskSubject = subject ? `Follow up: ${subject}` : 'Follow up';
 
-  // Build contact selector HTML if multiple recipients
+  // Selectable people = compose recipients ∪ thread participants, de-duped by
+  // lowercased email. Someone on the thread but not on this particular reply is
+  // still the right person to file the task under.
+  const people = [];
+  const seenEmails = new Set();
+  for (const r of recipients) {
+    const lower = (r || '').toLowerCase();
+    if (!lower || seenEmails.has(lower)) continue;
+    seenEmails.add(lower);
+    people.push({ email: r, name: '' });
+  }
+  try {
+    for (const c of (extractEmailData()?.threadContacts || [])) {
+      const lower = (c.email || '').toLowerCase();
+      if (!lower || seenEmails.has(lower)) continue;
+      seenEmails.add(lower);
+      people.push({ email: c.email, name: c.name || '' });
+    }
+  } catch (err) {
+    // Thread extraction is best-effort — compose recipients still work.
+    console.warn('[Stratus] Thread participant merge failed:', err);
+  }
+
+  const personLabel = (p) => (p.name ? `${p.name} <${p.email}>` : p.email);
+
+  // Build contact selector HTML if more than one person is available
   let contactSelectorHTML = '';
-  if (recipients.length > 1) {
-    const options = recipients.map((r, i) =>
+  if (people.length > 1) {
+    const options = people.map((p, i) =>
       `<label style="display:flex;align-items:center;gap:6px;padding:4px 0;cursor:pointer;">
-        <input type="radio" name="stratus-task-contact" value="${r}" ${i === 0 ? 'checked' : ''} style="margin:0;accent-color:#1a73e8;" />
-        <span style="font-size:12px;color:#1a1a1a;">${r}</span>
+        <input type="radio" name="stratus-task-contact" value="${escapeHtml(p.email)}" ${i === 0 ? 'checked' : ''} style="margin:0;accent-color:#1a73e8;" />
+        <span style="font-size:12px;color:#1a1a1a;word-break:break-word;">${escapeHtml(personLabel(p))}</span>
       </label>`
     ).join('');
     contactSelectorHTML = `
@@ -1426,11 +1624,11 @@ function showCreateTaskPrompt(recipients, subject) {
         </div>
       </div>
     `;
-  } else if (recipients.length === 1) {
+  } else if (people.length === 1) {
     contactSelectorHTML = `
       <div style="font-size:12px;color:#5f6368;margin-bottom:10px;">
-        Contact: <strong style="color:#1a1a1a;">${recipients[0]}</strong>
-        <input type="hidden" name="stratus-task-contact" value="${recipients[0]}" />
+        Contact: <strong style="color:#1a1a1a;">${escapeHtml(personLabel(people[0]))}</strong>
+        <input type="hidden" name="stratus-task-contact" value="${escapeHtml(people[0].email)}" />
       </div>
     `;
   }
@@ -1441,13 +1639,13 @@ function showCreateTaskPrompt(recipients, subject) {
       <button class="stp-close" style="background:none;border:none;cursor:pointer;color:#5f6368;font-size:18px;padding:0 2px;line-height:1;">×</button>
     </div>
     <div style="font-size:12px;color:#5f6368;margin-bottom:10px;">
-      No open Zoho tasks found for ${recipients.length > 1 ? 'these recipients' : (recipients[0] || 'this contact')}.
+      No open Zoho tasks found for ${recipients.length > 1 ? 'these recipients' : escapeHtml(recipients[0] || 'this contact')}.
       Would you like to create a follow-up?
     </div>
     ${contactSelectorHTML}
     <div style="margin-bottom:10px;">
       <div style="font-size:11px;font-weight:600;color:#5f6368;margin-bottom:3px;">Task subject:</div>
-      <input type="text" class="stp-subject" value="${taskSubject.replace(/"/g, '&quot;')}" style="
+      <input type="text" class="stp-subject" value="${escapeHtml(taskSubject)}" style="
         width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #dadce0;border-radius:6px;
         font-size:12px;font-family:inherit;color:#1a1a1a;outline:none;
       " />
@@ -1514,6 +1712,7 @@ function showCreateTaskPrompt(recipients, subject) {
 
       // Look up contact in CRM by email to get contactId
       let contactId = '';
+      let ambiguityNote = '';
       if (selectedContact) {
         try {
           const searchResult = await sendToBackground(MSG.CRM_SEARCH, {
@@ -1523,6 +1722,12 @@ function showCreateTaskPrompt(recipients, subject) {
           const contacts = searchResult?.records || searchResult?.results || [];
           if (contacts.length > 0) {
             contactId = contacts[0].id || contacts[0].Id || '';
+            if (contacts.length > 1) {
+              // Don't guess silently — say which of the matches got the task.
+              const picked = contacts[0].Full_Name || contacts[0].Email || contactId || 'the first match';
+              ambiguityNote = ` ⚠️ ${contacts.length} CRM contacts matched ${selectedContact} — linked to ${picked}.`;
+              setStatus(`Multiple CRM contacts matched — linking to ${picked}...`);
+            }
           }
         } catch { /* proceed without contactId */ }
       }
@@ -1533,9 +1738,10 @@ function showCreateTaskPrompt(recipients, subject) {
         contactId: contactId,
         priority: 'Normal',
         description: `Auto-created from Send+Task after email to ${selectedContact || recipients.join(', ')}`,
+        gmailThreadUrl: window.location.href,
       });
 
-      setStatus('✓ Task created!');
+      setStatus('✓ Task created!' + ambiguityNote);
       setTimeout(() => { clearTimeout(autoDismiss); popup.remove(); }, 2500);
     } catch (err) {
       setStatus('Error: ' + (err.message || 'Could not create task'), true);

@@ -316,7 +316,7 @@ export async function crmAddContact(firstName, lastName, email, phone, title, ac
 /**
  * Create a CRM task.
  */
-export async function crmCreateTask(subject, dueDate, dealId, contactId, priority, description) {
+export async function crmCreateTask(subject, dueDate, dealId, contactId, priority, description, gmailThreadUrl) {
   return apiCall('/api/crm-create-task', {
     subject,
     dueDate: dueDate || '',
@@ -324,6 +324,7 @@ export async function crmCreateTask(subject, dueDate, dealId, contactId, priorit
     contactId: contactId || '',
     priority: priority || 'Normal',
     description: description || '',
+    gmailThreadUrl: gmailThreadUrl || '',
   });
 }
 
@@ -529,6 +530,8 @@ export async function suggestTaskPreview(senderEmail, senderName, subject, accou
 
 /**
  * Confirm and create the suggested follow-up task.
+ * `params` is forwarded verbatim, which includes the optional `gmailThreadUrl`
+ * the panel sends — do not narrow this to a fixed field list.
  */
 export async function suggestTask(params) {
   return apiCall('/api/suggest-task', params);

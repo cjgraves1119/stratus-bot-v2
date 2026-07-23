@@ -441,9 +441,11 @@ registerMessageHandlers({
   },
 
   // ── CRM Operations ──
-  [MSG.CRM_LOOKUP]: async ({ email, domain }) => {
+  [MSG.CRM_LOOKUP]: async ({ email, domain, verifyOnly }) => {
     const result = await api.crmContactLookup(email, domain);
-    if (result && result.found) {
+    // verifyOnly lookups (e.g. resolving a task's Who_Id for an off-thread
+    // participant) must not repoint the warm, thread-scoped CRM context.
+    if (result && result.found && !verifyOnly) {
       currentCrmContext = result;
     }
     return result;
@@ -499,6 +501,9 @@ registerMessageHandlers({
     return api.fetchTasks(domains, emails, accountId, contactId);
   },
 
+  // `...options` is forwarded verbatim (newDueDate, newSubject, dealId, contactId,
+  // gmailThreadUrl for the complete_and_followup successor) — do not narrow it to a
+  // fixed field list or new optional fields get silently dropped here.
   [MSG.TASK_ACTION]: async ({ action, taskId, ...options }) => {
     return api.taskAction(action, taskId, options);
   },
@@ -648,8 +653,8 @@ registerMessageHandlers({
   },
 
   // ── CRM Create Task ──
-  [MSG.CRM_CREATE_TASK]: async ({ subject, dueDate, dealId, contactId, priority, description }) => {
-    return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description);
+  [MSG.CRM_CREATE_TASK]: async ({ subject, dueDate, dealId, contactId, priority, description, gmailThreadUrl }) => {
+    return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description, gmailThreadUrl);
   },
 
   // ── Zoho Page Context ──
