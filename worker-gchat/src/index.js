@@ -26746,6 +26746,7 @@ STYLE RULES:
 - Use contractions naturally: I'll, you're, that's, we've, can't, won't
 - Keep paragraphs to 1-3 lines max with blank lines between
 - ALWAYS end with a question or specific call to action
+- NEVER offer a phone call or meeting: no "jump on a call", "hop on a call", "walk through it on a call", "quick call", or scheduling suggestions. End with the ask itself (or an availability line) instead.
 - Never start with "I hope this email finds you well" or similar filler
 - Signature is handled separately, do NOT include one
 - NEVER invent or fabricate URLs. Only use the pre-built Stratus quote URLs provided in the PRODUCT INTELLIGENCE section below.
