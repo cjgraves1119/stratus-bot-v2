@@ -12498,7 +12498,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner',
           Products: 'id,Product_Name,Product_Code,Unit_Price,Description',
           WooProducts: 'id,WooProduct_Code,Stratus_Price,Product_Name',
-          Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
+          Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Quote_Stage',
           Tasks: 'id,Subject,Status,Due_Date,What_Id,Who_Id,Description'
         };
         params.set('fields', fields || defaultFields[module_name] || '');
@@ -12759,6 +12759,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         }
         // 2026-05-19 Fix D: placeholder address detection (warn + log only)
         if (module_name === 'Quotes' || module_name === 'Accounts' || module_name === 'Contacts') {
+        // 2026-07-24: omit invalid Phone/Mobile so Zoho does not INVALID_DATA
+        if (module_name === 'Contacts') {
+          const _omittedPhones = applyZohoPhoneFields(recordData);
+          if (_omittedPhones.length) console.log(`[CONTACT-PHONE] zoho_create_record omitted invalid: ${_omittedPhones.join(', ')}`);
+        }
           detectPlaceholderAddress(recordData, `zoho_create_record(${module_name})`);
         }
 
@@ -13148,6 +13153,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
         if (data.Mailing_Country) data.Mailing_Country = normalizeCountryCode(data.Mailing_Country);
         // 2026-05-19 Fix D: placeholder detection on updates too
         if (module_name === 'Quotes' || module_name === 'Accounts' || module_name === 'Contacts') {
+        // 2026-07-24: omit invalid Phone/Mobile on Contact updates too
+        if (module_name === 'Contacts') {
+          const _omittedPhones = applyZohoPhoneFields(data);
+          if (_omittedPhones.length) console.log(`[CONTACT-PHONE] zoho_update_record omitted invalid: ${_omittedPhones.join(', ')}`);
+        }
           detectPlaceholderAddress(data, `zoho_update_record(${module_name})`);
         }
 
@@ -25491,6 +25501,45 @@ function deriveContactNameFields(email, nameHint) {
   return { firstName: '', lastName: '' };
 }
 
+/**
+ * Zoho phone-typed fields (Phone / Mobile) reject some strings with
+ * INVALID_DATA / expected_data_type:"phone" (ericg report 2026-07-21).
+ * Live UPDATE probe 2026-07-23: "" / "mmm" / "none" / "404-555-0134" accepted;
+ * "N/A" and emails rejected. Return a trimmed safe value, or null to OMIT
+ * the field entirely (never send "").
+ * Kept byte-identical with corp worker-gchat (corp 5690ebf) — do not diverge.
+ */
+function sanitizeZohoPhoneField(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+  if (s.length > 30) return null;
+  // Emails, N/A, URLs — confirmed INVALID_DATA against corp Zoho
+  if (/[@/\\]|https?:/i.test(s)) return null;
+  // Approximate Zoho phone charset (letters/digits + common phone punctuation)
+  if (!/^[+]?[\dA-Za-z().\-, ;#]+$/.test(s)) return null;
+  return s;
+}
+
+/** Mutates record: keep only valid Phone/Mobile; delete empty/invalid keys. */
+function applyZohoPhoneFields(record, fields = ['Phone', 'Mobile']) {
+  if (!record || typeof record !== 'object') return [];
+  const omitted = [];
+  for (const f of fields) {
+    if (!Object.prototype.hasOwnProperty.call(record, f)) continue;
+    const raw = record[f];
+    const clean = sanitizeZohoPhoneField(raw);
+    if (clean == null) {
+      delete record[f];
+      const rawStr = raw == null ? '' : String(raw).trim();
+      if (rawStr) omitted.push(`${f}=${JSON.stringify(rawStr)}`);
+    } else {
+      record[f] = clean;
+    }
+  }
+  return omitted;
+}
+
 // 2026-05-19 Meraki_ISRs Name auto-build (OPTK postmortem).
 function normalizeMerakiIsrPayload(module_name, data) {
   if (module_name !== 'Meraki_ISRs' || !data || typeof data !== 'object') return data;
@@ -27734,7 +27783,7 @@ CRITICAL URL RULES:
               Accounts: 'id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code',
               Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
               Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name',
-              Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
+              Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Quote_Stage',
               Sales_Orders: 'id,Subject,SO_Number,Grand_Total,Status,Deal_Name,Account_Name,Client_Send_Status,Disti_Tracking_Number,Disti_Estimated_Ship_Date,Vendor_SO_Number',
             };
 
@@ -29996,11 +30045,11 @@ CRITICAL URL RULES:
                 const quotesPromise = (sections.includes('quotes') && resolvedAcctId)
                   ? (async () => {
                       try {
-                        const coql = `select Subject, Quote_Number, Grand_Total, Stage, Valid_Till, Deal_Name, Created_Time from Quotes where Account_Name.id = '${resolvedAcctId}' order by Created_Time desc limit 15`;
+                        const coql = `select Subject, Quote_Number, Grand_Total, Quote_Stage, Valid_Till, Deal_Name, Created_Time from Quotes where Account_Name.id = '${resolvedAcctId}' order by Created_Time desc limit 15`;
                         const resp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
                         return (resp?.data || []).map(q => ({
                           id: q.id, subject: q.Subject || '', quoteNumber: q.Quote_Number || '',
-                          grandTotal: q.Grand_Total || 0, stage: q.Stage || '',
+                          grandTotal: q.Grand_Total || 0, stage: q.Quote_Stage || '',
                           validTill: q.Valid_Till || '', dealName: q.Deal_Name?.name || '',
                           createdTime: q.Created_Time ? q.Created_Time.split('T')[0] : '',
                           zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
@@ -30557,7 +30606,7 @@ CRITICAL URL RULES:
               if (quotesDealId) {
                 // Direct: get quotes for a specific deal
                 const qResp = await zohoApiCall('GET',
-                  `Deals/${quotesDealId}/Quotes?fields=id,Subject,Quote_Number,Grand_Total,Stage,Valid_Till,Created_Time&per_page=10`, env
+                  `Deals/${quotesDealId}/Quotes?fields=id,Subject,Quote_Number,Grand_Total,Quote_Stage,Valid_Till,Created_Time&per_page=10`, env
                 );
                 if (qResp?.data) {
                   quotes = qResp.data.map(q => ({
@@ -30565,7 +30614,7 @@ CRITICAL URL RULES:
                     subject: q.Subject || '',
                     quoteNumber: q.Quote_Number || '',
                     grandTotal: q.Grand_Total || 0,
-                    stage: q.Stage || '',
+                    stage: q.Quote_Stage || '',
                     validTill: q.Valid_Till || '',
                     createdTime: q.Created_Time ? q.Created_Time.split('T')[0] : '',
                     zohoUrl: `https://crm.zoho.com/crm/org647122552/tab/Quotes/${q.id}`,
@@ -30573,7 +30622,7 @@ CRITICAL URL RULES:
                 }
               } else if (quotesAcctId) {
                 // Get quotes across all account deals via COQL
-                const coql = `select Subject, Quote_Number, Grand_Total, Stage, Valid_Till, Deal_Name, Created_Time from Quotes where Account_Name.id = '${quotesAcctId}' order by Created_Time desc limit 15`;
+                const coql = `select Subject, Quote_Number, Grand_Total, Quote_Stage, Valid_Till, Deal_Name, Created_Time from Quotes where Account_Name.id = '${quotesAcctId}' order by Created_Time desc limit 15`;
                 const qResp = await zohoApiCall('POST', 'coql', env, { select_query: coql });
                 if (qResp?.data) {
                   quotes = qResp.data.map(q => ({
@@ -30581,7 +30630,7 @@ CRITICAL URL RULES:
                     subject: q.Subject || '',
                     quoteNumber: q.Quote_Number || '',
                     grandTotal: q.Grand_Total || 0,
-                    stage: q.Stage || '',
+                    stage: q.Quote_Stage || '',
                     validTill: q.Valid_Till || '',
                     dealName: q.Deal_Name?.name || '',
                     createdTime: q.Created_Time ? q.Created_Time.split('T')[0] : '',
@@ -30932,8 +30981,6 @@ CRITICAL URL RULES:
                   First_Name: newCtFirst || '',
                   Last_Name: newCtLast || newCtEmail.split('@')[0] || 'Unknown',
                   Email: newCtEmail || '',
-                  Phone: newCtPhone || '',
-                  Mobile: newCtMobile || '',
                   Title: newCtTitle || '',
                   Owner: { id: await getOwnerForCaller(env) },
                 }]
@@ -30941,6 +30988,14 @@ CRITICAL URL RULES:
               if (newCtAcctId) {
                 contactPayload.data[0].Account_Name = { id: newCtAcctId };
               }
+
+              // 2026-07-24: only send Phone/Mobile when they are valid phone values
+              const _safePhone = sanitizeZohoPhoneField(newCtPhone);
+              const _safeMobile = sanitizeZohoPhoneField(newCtMobile);
+              if (_safePhone) contactPayload.data[0].Phone = _safePhone;
+              else if (newCtPhone && String(newCtPhone).trim()) console.log(`[CONTACT-PHONE] /api/crm-add-contact omitted invalid Phone=${JSON.stringify(String(newCtPhone).trim())}`);
+              if (_safeMobile) contactPayload.data[0].Mobile = _safeMobile;
+              else if (newCtMobile && String(newCtMobile).trim()) console.log(`[CONTACT-PHONE] /api/crm-add-contact omitted invalid Mobile=${JSON.stringify(String(newCtMobile).trim())}`);
 
               const createResp = await zohoApiCall('POST', 'Contacts', env, contactPayload);
               const parsed = parseZohoResponse(createResp, 'Contact creation');
