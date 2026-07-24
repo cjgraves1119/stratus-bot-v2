@@ -146,6 +146,75 @@ function CopyButton({ text }) {
   );
 }
 
+// Copy a draft reply together with the ENGINE-BUILT quote URLs (result.quoteUrls),
+// writing text/html so a paste into Gmail compose keeps them as real hyperlinks.
+// Port of corp PR #9, hardened in two places the corp version gets wrong:
+//   1. both payloads are built BEFORE any clipboard call, so a malformed url can
+//      never throw between the rich path and the fallback;
+//   2. success is only claimed when a path actually succeeded (the corp version
+//      reports "✓ Copied with links" even when every path failed).
+function CopyDraftWithLinks({ text, quoteUrls }) {
+  const [state, setState] = useState('idle'); // idle | done | failed
+  const esc = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const flash = (next) => { setState(next); setTimeout(() => setState('idle'), 1800); };
+
+  async function copy() {
+    const links = (Array.isArray(quoteUrls) ? quoteUrls : [])
+      .map((q, i) => ({
+        url: typeof q === 'string' ? q : (q && q.url) || '',
+        label: (q && q.label) || `Quote ${i + 1}`,
+      }))
+      .filter((q) => /^https?:\/\//i.test(q.url));
+    const plain = links.length
+      ? `${text}\n\n${links.map((q) => `${q.label}: ${q.url}`).join('\n')}`
+      : text;
+    const html = `<div style="white-space:pre-wrap">${esc(text)}</div>`
+      + (links.length ? `<div><br>${links.map((q) => `<div><a href="${esc(q.url)}">${esc(q.label)}</a></div>`).join('')}</div>` : '');
+
+    if (navigator.clipboard && navigator.clipboard.write && typeof window.ClipboardItem === 'function') {
+      try {
+        await navigator.clipboard.write([new window.ClipboardItem({
+          'text/html': new Blob([html], { type: 'text/html' }),
+          'text/plain': new Blob([plain], { type: 'text/plain' }),
+        })]);
+        flash('done');
+        return;
+      } catch { /* rich write unavailable or denied — fall through */ }
+    }
+    try {
+      await navigator.clipboard.writeText(plain);
+      flash('done');
+      return;
+    } catch { /* fall through to the legacy path */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = plain;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      flash(ok ? 'done' : 'failed');
+    } catch {
+      flash('failed');
+    }
+  }
+
+  return (
+    <button
+      onClick={copy}
+      title="Copy the draft with the engine-built quote links as hyperlinks"
+      style={{
+        marginTop: 6, background: 'none', border: 'none', padding: 0,
+        fontSize: 10, color: COLORS.STRATUS_BLUE, cursor: 'pointer', opacity: 0.8,
+      }}
+    >
+      {state === 'done' ? '✓ Copied with links' : state === 'failed' ? '⚠ Copy failed' : '⧉ Copy with links'}
+    </button>
+  );
+}
+
 // Extract ALL Zoho Quotes record references from assistant text — the CRM
 // agent returns a crm.zoho.com/.../tab/Quotes/{id} link whenever it creates or
 // finds a quote, which is exactly where the "Download Zoho PDF" affordance
@@ -1392,6 +1461,9 @@ export default function ChatPanel({
         instructions,
       });
       const drafts = (result && result.drafts) || (result && result.draft ? [result.draft] : []);
+      // Engine-built quote URLs travel alongside the draft. Keep them: the model
+      // must never be the source of a quote link (corp PR #9).
+      const draftQuoteUrls = (result && Array.isArray(result.quoteUrls)) ? result.quoteUrls : [];
       if (!drafts.length) {
         appendMessage(infoMsg('No draft generated. Try again, or add instructions in the input box first.'));
       } else {
@@ -1402,6 +1474,7 @@ export default function ChatPanel({
           kind: 'draft',
           content: typeof d === 'string' ? d : (d.body || d.text || ''),
           label: drafts.length > 1 ? `Draft option ${i + 1}` : 'Draft reply',
+          quoteUrls: draftQuoteUrls,
           timestamp: new Date().toISOString(),
         }));
       }
@@ -1681,6 +1754,9 @@ export default function ChatPanel({
           }
           // Draft reply (copy-only handoff)
           if (msg.role === 'assistant' && msg.kind === 'draft') {
+            // NOTE: msg.quoteUrls is the DRAFT shape (from result.quoteUrls) and is
+            // not interchangeable with msg.result.urls used by the quote card.
+            const dUrls = Array.isArray(msg.quoteUrls) ? msg.quoteUrls : [];
             return (
               <div key={msg.id} style={{
                 alignSelf: 'flex-start', maxWidth: '95%', padding: '8px 12px',
@@ -1691,7 +1767,27 @@ export default function ChatPanel({
                   {msg.label || 'Draft reply'}
                 </div>
                 <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
-                <CopyButton text={msg.content} />
+                {dUrls.length > 0 && (
+                  <div style={{ marginTop: 8, paddingTop: 6, borderTop: `1px solid ${COLORS.BORDER || 'rgba(0,0,0,0.12)'}` }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 3 }}>
+                      Quote links (engine-built)
+                    </div>
+                    {dUrls.map((q, qi) => {
+                      const url = typeof q === 'string' ? q : (q && q.url) || '';
+                      const label = (q && q.label) || `Quote ${qi + 1}`;
+                      if (!/^https?:\/\//i.test(url)) return null;
+                      return (
+                        <div key={qi} style={{ fontSize: 12, marginBottom: 2 }}>
+                          <a href={url} target="_blank" rel="noreferrer" style={{ color: COLORS.STRATUS_BLUE }}>{label}</a>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <CopyButton text={msg.content} />
+                  {dUrls.length > 0 && <CopyDraftWithLinks text={msg.content} quoteUrls={dUrls} />}
+                </div>
               </div>
             );
           }
