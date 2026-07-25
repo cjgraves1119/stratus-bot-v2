@@ -45,12 +45,19 @@ console.log('── undefined-variable scope regressions (PR #98) ──');
 check('no getOwnerForCaller(env, callerEmail) call site remains',
   !/await\s+getOwnerForCaller\s*\(\s*env\s*,\s*callerEmail\s*\)/.test(src));
 
-// 2. `callerEmail` may appear ONLY inside getOwnerContext / getOwnerForCaller.
-//    Strip those two function bodies and assert no `callerEmail` token survives.
+// 2. `callerEmail` may appear ONLY as an in-scope parameter/local. The #8
+//    request-scoping fix (2026-07-15) added two more legitimate holders beyond
+//    the original two: callerScopedEnv(env, callerEmail) and CrmWorkflow.run's
+//    `callerEmail` destructured from event.payload (used once in the scoped-env
+//    call). Strip all four; any SURVIVING bare `callerEmail` is out-of-scope and
+//    would throw the PR #98 ReferenceError class that node --check can't catch.
 const restAfterStrip = src
   .split(grab('getOwnerContext')).join('')
-  .split(grab('getOwnerForCaller')).join('');
-check('callerEmail does not leak outside getOwnerContext/getOwnerForCaller',
+  .split(grab('getOwnerForCaller')).join('')
+  .split(grab('callerScopedEnv')).join('')
+  .replace(/,\s*callerEmail\s*}\s*=\s*event\.payload;/, ' } = event.payload;')
+  .replace(/callerEmail\s*\|\|\s*callerEmailFromPersonId\(personId\)/, 'callerEmailFromPersonId(personId)');
+check('callerEmail does not leak outside its in-scope holders (getOwnerContext/getOwnerForCaller/callerScopedEnv/CrmWorkflow.run)',
   !/\bcallerEmail\b/.test(restAfterStrip));
 
 // 3. askClaudeContinue (continuation path) must declare a `personId` parameter.

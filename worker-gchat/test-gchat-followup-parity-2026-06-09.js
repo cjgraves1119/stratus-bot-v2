@@ -35,6 +35,7 @@ function loadEngine(workerDir, tag) {
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${esc('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const ed = src.indexOf('export default');
@@ -159,6 +160,7 @@ const MR44_QUOTE = [
     wsrc = wsrc.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${wesc('src/data/auto-catalog.json')}');`);
     wsrc = wsrc.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${wesc('src/data/specs.json')}');`);
     wsrc = wsrc.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${wesc('src/data/accessories.json')}');`);
+    wsrc = wsrc.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${wesc('src/email-reply-voice-skill.json')}');`);
     wsrc = wsrc.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
     wsrc = wsrc.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
     wsrc = wsrc.replace(/^export default /m, 'module.exports.__worker = ');
@@ -211,16 +213,27 @@ const MR44_QUOTE = [
     ok(q3.handlerType === 'followup-modifier' && /LIC-DUO-ADVANTAGE-3YR/.test(JSON.stringify(q3.quoteUrls)) && !/1YR/.test(JSON.stringify(q3.quoteUrls)),
       `single-term rewrite "3 year only" → DUO-ADVANTAGE-3YR deterministically (got: ${q3.handlerType})`);
 
-    // SME 5-year cap through the term rewrite (HARD RULE: LIC-SME-5YR must NEVER be emitted)
+    // SME EOL substitution through the term rewrite (HARD RULE: LIC-SME-* is
+    // discontinued in EVERY term and must NEVER be emitted — smeReplacementSku()
+    // substitutes LIC-MI-EMSC-D-1YMC-A-{1,3,5}YR at the requested term)
     let q4 = await callQuote('100 systems manager licenses 1 year', 'fp-int-4');
-    ok(q4.quoteUrls && /LIC-SME-1YR/.test(JSON.stringify(q4.quoteUrls)), 'turn 1 SME 1yr quote renders');
+    ok(q4.quoteUrls && /LIC-MI-EMSC-D-1YMC-A-1YR/.test(JSON.stringify(q4.quoteUrls)), 'turn 1 SME 1yr quote renders');
     q4 = await callQuote('5 year only', 'fp-int-4');
     const q4s = JSON.stringify(q4);
     ok(!/LIC-SME-5YR/.test(q4s), 'SME "5 year only" NEVER emits LIC-SME-5YR (hard business rule)');
-    ok(q4.handlerType === 'followup-modifier' && /LIC-SME-3YR/.test(q4s),
-      `SME "5 year only" → capped to LIC-SME-3YR deterministically (got: ${q4.handlerType})`);
-    ok(typeof q4.pricingResponse === 'string' && /Systems Manager/.test(q4.pricingResponse),
-      'SME cap note reaches the extension via pricingResponse');
+    ok(q4.handlerType === 'followup-modifier' && /LIC-MI-EMSC-D-1YMC-A-5YR/.test(q4s),
+      `SME "5 year only" → Ivanti replacement 5YR deterministically (got: ${q4.handlerType})`);
+    // Legacy LIC-SME URL still in history (pre-substitution quote): the term
+    // rewrite must substitute the replacement AND surface the EOL flag note.
+    store.set('conv:fp-int-4L', { messages: [
+      { role: 'user', content: '100 systems manager licenses 1 year' },
+      { role: 'assistant', content: '**1-Year Co-Term:** https://stratusinfosystems.com/order/?item=LIC-SME-1YR&qty=100' },
+    ] });
+    const q5 = await callQuote('5 year only', 'fp-int-4L');
+    ok(typeof q5.pricingResponse === 'string'
+      && /\(LIC-SME\) licenses are discontinued/.test(q5.pricingResponse)
+      && /Ivanti Neurons for MDM per device \(MI-EMSC-D-1YMC-A\)/.test(q5.pricingResponse),
+      'SME EOL flag note reaches the extension via pricingResponse');
   }
 
   console.log('');

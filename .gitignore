@@ -21,3 +21,5 @@ node_modules/
 
 .wrangler/
 **/.wrangler/
+deploys.log
+.pressure-loop/

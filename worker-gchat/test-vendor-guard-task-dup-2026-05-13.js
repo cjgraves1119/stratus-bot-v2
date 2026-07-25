@@ -125,7 +125,11 @@ t('Task Subject uses the resolved label (passed to helper)', () => {
     'STEP 8 must pass _taskAccountLabel as subjectLabel to createFollowUpTaskForDeal'
   );
   assert.ok(
-    /Subject: `Follow up - \$\{subjectLabel \|\| `Deal \$\{dealId\}`\}`/.test(source),
+    // 2026-07-23: the helper now hands this string to the shared buildTaskPayload()
+    // choke point (which adds Due_Date/Owner/Remind_At), so the key is the payload
+    // field `subject:` rather than the raw Zoho `Subject:`. Template is unchanged —
+    // accept either spelling so the invariant, not the call shape, is what's guarded.
+    /[Ss]ubject: `Follow up - \$\{subjectLabel \|\| `Deal \$\{dealId\}`\}`/.test(source),
     'helper Subject template must use subjectLabel with Deal-id fallback'
   );
 });

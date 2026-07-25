@@ -133,10 +133,10 @@ const LOAD_BEARING_PHRASES = [
   '_undo_token',
   'confirm: true',
   'Restate the undo token',
-  // Anti-hallucination
-  'LIC-ENT-1YR',
-  'LIC-ENT-3YR',
-  'LIC-ENT-5YR',
+  // Anti-hallucination — 2026-07-14 coterm rewording: the prompt now teaches the
+  // SKU FORM (LIC-ENT-{term}YR, 7/10YR real but Zoho-quote-only) instead of
+  // enumerating the three ecomm terms; the malformed-pattern guard is unchanged.
+  'LIC-ENT-{term}YR',
   'LIC-ENT-MR',                  // explicit ❌ pattern
   'Cisco reps live in the Meraki_ISRs',
   'Meraki ISR Referal',

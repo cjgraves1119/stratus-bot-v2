@@ -30,7 +30,8 @@ console.log('\n=== Test 1: zoho_create_record(Deals) triggers Task POST ===\n');
 
 t('createFollowUpTaskForDeal helper is defined', () => {
   assert.ok(
-    /async function createFollowUpTaskForDeal\(\{ dealId, subjectLabel, env, personId, ownerId \}\)/.test(source),
+    // existingDeal param added 2026-07-21 (follow-up task dedupe)
+    /async function createFollowUpTaskForDeal\(\{ dealId, subjectLabel, env, personId, ownerId, existingDeal = false \}\)/.test(source),
     'createFollowUpTaskForDeal signature missing'
   );
 });
@@ -174,7 +175,9 @@ t('Helper logs successful task creation to crm_operations (logCrmOpToD1)', () =>
 
 t('Failure telemetry includes classification + retried flag for triage', () => {
   assert.ok(
-    /details: \{ dealId, dueDate: dueDateStr, retried, classification: attempt\.classification, source: 'createFollowUpTaskForDeal' \}/.test(source),
+    // ownerSource added 2026-07-15 (R6 owner-resolution fix) — optional here so
+    // the marker keeps guarding classification/retried/source.
+    /details: \{ dealId, dueDate: dueDateStr, retried, classification: attempt\.classification, source: 'createFollowUpTaskForDeal'(, ownerSource: _taskOwnerSource)? \}/.test(source),
     'failure telemetry missing classification/retried/source markers'
   );
 });
