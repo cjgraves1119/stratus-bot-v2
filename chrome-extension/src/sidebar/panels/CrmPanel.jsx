@@ -659,6 +659,52 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     }
   }
 
+  // ── Close Lost (confirm-gated; worker verifies stage via read-back) ──
+  async function handleDealCloseLost(dealId, dealName) {
+    setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], clLoading: true, clResult: null } }));
+    try {
+      const result = await sendToBackground(MSG.DEAL_CLOSE_LOST, { dealId, expectedDealName: dealName });
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], clLoading: false, clResult: result } }));
+      if (result?.success && result?.verifiedStage === 'Closed (Lost)') {
+        // Reflect the VERIFIED stage in the visible deals list without a refetch.
+        const patch = (list) => (list || []).map(d => d.id === dealId ? { ...d, stage: result.verifiedStage } : d);
+        setDeals(prev => (prev ? { ...prev, deals: patch(prev.deals) } : prev));
+        setIsrDeals(prev => (prev ? { ...prev, deals: patch(prev.deals) } : prev));
+      }
+    } catch (err) {
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], clLoading: false, clResult: { success: false, error: err.message } } }));
+    }
+  }
+
+  // ── Complete the exact linked task — only offered AFTER a verified Closed (Lost) ──
+  async function handleCompleteLinkedTask(dealId, taskId) {
+    const clResult = dealActions[dealId]?.clResult;
+    const linked = (tasks?.tasks || []).find(t => t.id === taskId && t.dealId === dealId);
+    // Hard gate: verified Closed (Lost) + exact linked task proven via What_Id match.
+    if (!clResult?.success || clResult?.verifiedStage !== 'Closed (Lost)' || !linked) {
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctResult: { success: false, taskId, error: 'Not a verified linked task for this deal — nothing was changed.' } } }));
+      return;
+    }
+    setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctLoading: taskId, ctResult: null } }));
+    try {
+      const result = await sendToBackground(MSG.TASK_ACTION, { action: 'complete', taskId });
+      // verifiedStatus comes from the worker's post-update read-back of the task record.
+      const verified = !!(result?.success && result?.verifiedStatus === 'Completed');
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctLoading: null, ctResult: { ...result, verified, taskId, subject: linked.subject } } }));
+      if (result?.success) {
+        const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
+          domains: emailContext?.allDomains || [],
+          emails: emailContext?.allEmails || [],
+          accountId: data?.account?.id || '',
+          contactId: data?.contact?.id || '',
+        }).catch(() => null);
+        if (taskResult) setTasks(taskResult);
+      }
+    } catch (err) {
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctLoading: null, ctResult: { success: false, error: err.message, taskId } } }));
+    }
+  }
+
   // ── Add Contact ──
   function openAddForm() {
     const contact = externalContacts.find(c => c.email?.toLowerCase() === selectedContact?.toLowerCase());
@@ -1350,6 +1396,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                     actions={dealActions[deal.id] || {}}
                     onVelocityHub={() => handleDealVelocityHub(deal.id)}
                     onAssignRep={(repEmail) => handleDealAssignRep(deal.id, repEmail)}
+                    linkedTasks={taskList.filter(t => t.dealId === deal.id)}
+                    onCloseLost={(dealName) => handleDealCloseLost(deal.id, dealName)}
+                    onCompleteLinkedTask={(taskId) => handleCompleteLinkedTask(deal.id, taskId)}
                   />
                 ))}
               </Card>
@@ -1366,6 +1415,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                     actions={dealActions[deal.id] || {}}
                     onVelocityHub={() => handleDealVelocityHub(deal.id)}
                     onAssignRep={(repEmail) => handleDealAssignRep(deal.id, repEmail)}
+                    linkedTasks={taskList.filter(t => t.dealId === deal.id)}
+                    onCloseLost={(dealName) => handleDealCloseLost(deal.id, dealName)}
+                    onCompleteLinkedTask={(taskId) => handleCompleteLinkedTask(deal.id, taskId)}
                   />
                 ))}
               </Card>
@@ -1631,9 +1683,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
 
 // ── Sub-components ──
 
-function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRep }) {
+function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRep, linkedTasks = [], onCloseLost, onCompleteLinkedTask }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedRep, setSelectedRep] = useState('');
+  const [confirmingClose, setConfirmingClose] = useState(false);
+  const [confirmingTaskId, setConfirmingTaskId] = useState(null);
   const [licenseKey, setLicenseKey] = useState(deal.licenseKey || null);
   const [keyLoading, setKeyLoading] = useState(false);
   const [keyError, setKeyError] = useState('');
@@ -1709,6 +1763,142 @@ function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRe
             </button>
             {keyError && <div style={{ fontSize: 10, color: '#c62828', marginTop: 4 }}>{keyError}</div>}
           </div>
+
+          {/* ── Close Lost — explicit confirm naming the exact deal; Zoho write + read-back verify on the worker ── */}
+          {(() => {
+            const closable = !!stage && !['Closed (Lost)', 'Closed (Won)', 'Closed Won'].includes(stage);
+            const verifiedClosed = !!(actions.clResult?.success && actions.clResult?.verifiedStage === 'Closed (Lost)');
+            return (
+              <div style={{ marginBottom: 8 }}>
+                {closable && !verifiedClosed && !confirmingClose && (
+                  <button
+                    onClick={() => setConfirmingClose(true)}
+                    disabled={actions.clLoading}
+                    style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, border: '1px solid #c6282866', background: '#fff', cursor: actions.clLoading ? 'default' : 'pointer', color: '#c62828', fontWeight: 600 }}
+                  >
+                    Mark Closed (Lost)…
+                  </button>
+                )}
+
+                {closable && !verifiedClosed && confirmingClose && (
+                  <div style={{ padding: 8, background: '#fce8e6', border: '1px solid #c6282844', borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: COLORS.TEXT_PRIMARY, fontWeight: 600 }}>
+                      Mark "{dealName}" as Closed (Lost)?
+                    </div>
+                    <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginTop: 3 }}>
+                      This will update this deal's Stage in Zoho CRM (current stage: {stage}). Nothing else on the deal is changed.
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                      <button
+                        onClick={() => { setConfirmingClose(false); onCloseLost && onCloseLost(dealName); }}
+                        disabled={actions.clLoading}
+                        style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: 'none', background: '#c62828', color: '#fff', fontWeight: 600, cursor: 'pointer' }}
+                      >
+                        Confirm — update Zoho CRM
+                      </button>
+                      <button
+                        onClick={() => setConfirmingClose(false)}
+                        style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: `1px solid ${COLORS.BORDER}`, background: '#fff', color: COLORS.TEXT_SECONDARY, cursor: 'pointer' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {actions.clLoading && (
+                  <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic', marginTop: 4 }}>
+                    Updating Zoho CRM and verifying…
+                  </div>
+                )}
+
+                {actions.clResult && !actions.clResult.success && (
+                  <div style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, marginTop: 4, background: '#fce8e6', color: COLORS.ERROR }}>
+                    {actions.clResult.error || 'Close-lost failed — deal unchanged.'}
+                  </div>
+                )}
+
+                {verifiedClosed && (
+                  <div style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, marginTop: 4, background: '#e6f4ea', color: '#137333' }}>
+                    ✓ {actions.clResult.message || `Verified: "${dealName}" is now Closed (Lost) in Zoho CRM.`}
+                  </div>
+                )}
+
+                {/* ── Linked task completion — separate explicit action, only after verified Closed (Lost),
+                       only for tasks proven linked to THIS deal (task.dealId === deal.id from Zoho What_Id) ── */}
+                {verifiedClosed && (
+                  <div style={{ marginTop: 6 }}>
+                    {linkedTasks.length === 0 ? (
+                      <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
+                        No open task linked to this deal was found — nothing to complete.
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 4 }}>
+                          Linked open task{linkedTasks.length > 1 ? 's' : ''} ({linkedTasks.length})
+                        </div>
+                        {linkedTasks.map((t) => (
+                          <div key={t.id} style={{ marginBottom: 6 }}>
+                            <div style={{ fontSize: 11, color: COLORS.TEXT_PRIMARY }}>
+                              {t.subject}{t.dueDate ? ` · due ${t.dueDate}` : ''}
+                            </div>
+                            {confirmingTaskId !== t.id && actions.ctResult?.taskId !== t.id && (
+                              <button
+                                onClick={() => setConfirmingTaskId(t.id)}
+                                disabled={!!actions.ctLoading}
+                                style={{ fontSize: 11, padding: '3px 8px', borderRadius: 4, border: `1px solid ${COLORS.STRATUS_BLUE}66`, background: '#fff', color: COLORS.STRATUS_BLUE, cursor: 'pointer', marginTop: 2 }}
+                              >
+                                Complete this task…
+                              </button>
+                            )}
+                            {confirmingTaskId === t.id && (
+                              <div style={{ padding: 6, background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, marginTop: 4 }}>
+                                <div style={{ fontSize: 10, color: COLORS.TEXT_PRIMARY }}>
+                                  Mark task "{t.subject}" as Completed in Zoho CRM? Only this task is changed.
+                                </div>
+                                <div style={{ display: 'flex', gap: 6, marginTop: 5 }}>
+                                  <button
+                                    onClick={() => { setConfirmingTaskId(null); onCompleteLinkedTask && onCompleteLinkedTask(t.id); }}
+                                    style={{ fontSize: 11, padding: '3px 8px', borderRadius: 4, border: 'none', background: COLORS.STRATUS_BLUE, color: '#fff', fontWeight: 600, cursor: 'pointer' }}
+                                  >
+                                    Confirm — complete task
+                                  </button>
+                                  <button
+                                    onClick={() => setConfirmingTaskId(null)}
+                                    style={{ fontSize: 11, padding: '3px 8px', borderRadius: 4, border: `1px solid ${COLORS.BORDER}`, background: '#fff', color: COLORS.TEXT_SECONDARY, cursor: 'pointer' }}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                            {actions.ctLoading === t.id && (
+                              <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic', marginTop: 2 }}>
+                                Completing task and verifying…
+                              </div>
+                            )}
+                            {actions.ctResult?.taskId === t.id && (
+                              <div style={{
+                                fontSize: 10, padding: '3px 6px', borderRadius: 4, marginTop: 3,
+                                background: actions.ctResult.verified ? '#e6f4ea' : (actions.ctResult.success ? '#fef7e0' : '#fce8e6'),
+                                color: actions.ctResult.verified ? '#137333' : (actions.ctResult.success ? '#b06000' : COLORS.ERROR),
+                              }}>
+                                {actions.ctResult.verified
+                                  ? '✓ Task completed — verified in Zoho.'
+                                  : actions.ctResult.success
+                                    ? 'Completion sent, but Zoho verification is pending/unavailable — double-check the task in Zoho.'
+                                    : (actions.ctResult.error || 'Task completion failed — task unchanged.')}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* 2026-05-12: Velocity Hub button removed per Chris. Server-side
               velocity_hub_submit tool stays intact for use by the

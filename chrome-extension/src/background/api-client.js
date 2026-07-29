@@ -499,6 +499,20 @@ export async function velocityHubSubmit(dealId, country) {
 }
 
 /**
+ * Mark a Deal Closed (Lost) — confirm-gated in the UI, deterministic on the worker.
+ * The worker fetches the deal first (existence + exact-name guard), refuses
+ * Closed (Won) deals, writes Stage: 'Closed (Lost)', then reads the record back
+ * and only reports success when the VERIFIED stage is Closed (Lost).
+ * Only call this after the user explicitly confirmed the named deal.
+ */
+export async function dealCloseLost(dealId, expectedDealName) {
+  return apiCall('/api/deal-close-lost', {
+    dealId,
+    expectedDealName: expectedDealName || '',
+  }, { timeout: 30000 });
+}
+
+/**
  * Assign a Cisco rep to a Deal's Meraki_ISR field.
  */
 export async function assignCiscoRep(dealId, repEmail, repName) {

@@ -136,6 +136,9 @@ export const MSG = {
   ASSIGN_REP: 'ASSIGN_REP',
   FIND_LICENSE_KEY: 'FIND_LICENSE_KEY',
 
+  // Deal Close Lost — confirm-gated Stage update with server-side read-back verify
+  DEAL_CLOSE_LOST: 'DEAL_CLOSE_LOST',
+
   // Task suggestion
   SUGGEST_TASK_PREVIEW: 'SUGGEST_TASK_PREVIEW',
   SUGGEST_TASK: 'SUGGEST_TASK',

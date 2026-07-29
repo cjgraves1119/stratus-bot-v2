@@ -616,6 +616,11 @@ registerMessageHandlers({
     return api.findLicenseKey(dealId);
   },
 
+  // ── Deal Close Lost (confirm-gated in sidebar; worker verifies via read-back) ──
+  [MSG.DEAL_CLOSE_LOST]: async ({ dealId, expectedDealName }) => {
+    return api.dealCloseLost(dealId, expectedDealName);
+  },
+
   // ── Download Zoho's native templated Quote PDF (web-UI "Export to PDF") ──
   [MSG.EXPORT_ZOHO_PDF]: async ({ recordId, templateName, org }) => {
     return exportZohoQuotePdf({ recordId, templateName, org });

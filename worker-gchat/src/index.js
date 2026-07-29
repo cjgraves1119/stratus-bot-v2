@@ -28214,7 +28214,23 @@ CRITICAL URL RULES:
                   if (compOnlyResp.data && compOnlyResp.data[0] && compOnlyResp.data[0].code !== 'SUCCESS') {
                     throw new Error('Failed to complete task: ' + (compOnlyResp.data[0].message || 'unknown'));
                   }
-                  apiResult = { success: true, action: 'complete', taskId };
+                  // 2026-07-29 additive read-back verification: the extension's
+                  // "Complete linked task" flow requires proof the task really is
+                  // Completed (a re-fetch of /api/tasks can't distinguish "completed"
+                  // from "hidden because its deal just went Closed (Lost)").
+                  // verifiedStatus/verifiedSubject/verifiedWhatId are NEW fields —
+                  // existing callers that only check success are unaffected.
+                  let verifiedStatus = null, verifiedSubject = null, verifiedWhatId = null;
+                  try {
+                    const vResp = await zohoApiCall('GET', `Tasks/${taskId}?fields=Status,Subject,What_Id`, env);
+                    const vTask = vResp?.data?.[0];
+                    if (vTask) {
+                      verifiedStatus = vTask.Status || null;
+                      verifiedSubject = vTask.Subject || null;
+                      verifiedWhatId = vTask.What_Id?.id || null;
+                    }
+                  } catch (_) { /* verification read failed — report null, not a guess */ }
+                  apiResult = { success: true, action: 'complete', taskId, verifiedStatus, verifiedSubject, verifiedWhatId };
                   break;
                 }
 
@@ -30864,6 +30880,95 @@ CRITICAL URL RULES:
               };
             } catch (err) {
               apiResult = { success: false, error: 'Rep assignment failed: ' + err.message };
+            }
+            break;
+          }
+
+          // ── Deal Close Lost: confirm-gated, deterministic Stage update with read-back verify ──
+          // Extension side-panel "Close lost" action. Fetches the deal first (existence +
+          // exact-name guard against a stale UI), refuses Closed (Won) deals, writes
+          // Stage: 'Closed (Lost)' via the same zohoApiCall path every other deal update
+          // uses, then reads the record back and reports the VERIFIED stage. Never touches
+          // any other field; Reason_For_Loss is optional in the Zoho schema and is only
+          // written if the caller passes one of the exact VALID_REASON_FOR_LOSS values.
+          case '/api/deal-close-lost': {
+            const { dealId: clDealId, expectedDealName: clExpectedName, reasonForLoss: clReason } = apiBody;
+            if (!clDealId || !/^\d{10,25}$/.test(String(clDealId))) {
+              return new Response(JSON.stringify({ success: false, error: 'valid dealId required' }), { status: 400, headers: jsonHeaders });
+            }
+            if (clReason && !VALID_REASON_FOR_LOSS.includes(clReason)) {
+              return new Response(JSON.stringify({ success: false, error: `Invalid reasonForLoss. Valid options: ${VALID_REASON_FOR_LOSS.join(', ')}` }), { status: 400, headers: jsonHeaders });
+            }
+            try {
+              const fetchDeal = async () => {
+                const resp = await zohoApiCall('GET', `Deals/${clDealId}?fields=Deal_Name,Stage,Account_Name`, env);
+                return resp?.data?.[0] || null;
+              };
+
+              const before = await fetchDeal();
+              if (!before) {
+                apiResult = { success: false, dealId: clDealId, error: 'Deal not found in Zoho CRM — nothing was changed.' };
+                break;
+              }
+              const dealName = before.Deal_Name || '';
+              const previousStage = before.Stage || '';
+
+              // Exact-name guard: the UI confirmed a specific deal by name. If the record's
+              // name no longer matches, refuse rather than close the wrong deal.
+              if (clExpectedName && dealName !== clExpectedName) {
+                apiResult = {
+                  success: false, dealId: clDealId, dealName, previousStage,
+                  error: `Deal name mismatch: Zoho has "${dealName}" but you confirmed "${clExpectedName}". Nothing was changed — refresh and retry.`,
+                };
+                break;
+              }
+              if (previousStage === 'Closed (Won)') {
+                apiResult = {
+                  success: false, dealId: clDealId, dealName, previousStage,
+                  error: 'This deal is Closed (Won) — refusing to change a won deal to Closed (Lost). Nothing was changed.',
+                };
+                break;
+              }
+              if (previousStage === 'Closed (Lost)') {
+                apiResult = {
+                  success: true, alreadyClosedLost: true, dealId: clDealId, dealName,
+                  previousStage, verifiedStage: previousStage,
+                  message: 'Deal was already Closed (Lost). No update sent.',
+                };
+                break;
+              }
+
+              const updateData = { Stage: 'Closed (Lost)' };
+              if (clReason) updateData.Reason_For_Loss = clReason;
+              const upResp = await zohoApiCall('PUT', `Deals/${clDealId}`, env, { data: [updateData] });
+              const upRecord = upResp?.data?.[0];
+              if (upRecord?.code !== 'SUCCESS') {
+                apiResult = {
+                  success: false, dealId: clDealId, dealName, previousStage,
+                  error: 'Zoho rejected the update: ' + (upRecord?.message || upRecord?.code || JSON.stringify(upRecord || upResp).substring(0, 200)),
+                };
+                break;
+              }
+
+              // Read-back verification — trust the record, not the API status code.
+              const after = await fetchDeal();
+              const verifiedStage = after?.Stage || '';
+              const verified = verifiedStage === 'Closed (Lost)';
+              apiResult = {
+                success: verified,
+                dealId: clDealId,
+                dealName,
+                previousStage,
+                verifiedStage,
+                ...(clReason ? { reasonForLoss: clReason } : {}),
+                message: verified
+                  ? `Verified: "${dealName}" is now Closed (Lost) in Zoho CRM.`
+                  : `Update was accepted but read-back shows Stage "${verifiedStage}" — treat as NOT closed and check the deal in Zoho.`,
+                ...(verified ? {} : { error: `Read-back verification failed: Stage is "${verifiedStage}", expected "Closed (Lost)".` }),
+              };
+              console.log(`[DEAL-CLOSE-LOST] dealId=${clDealId} name="${dealName}" prev="${previousStage}" verified="${verifiedStage}" ok=${verified}`);
+            } catch (err) {
+              apiResult = { success: false, dealId: clDealId, error: 'Close-lost failed: ' + err.message };
             }
             break;
           }
