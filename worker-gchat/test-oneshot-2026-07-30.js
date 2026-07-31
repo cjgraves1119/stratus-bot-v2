@@ -311,6 +311,26 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
     assert.strictEqual(calls.length, 0, 'no tool call may happen — nothing created');
   });
 
+  await checkAsync('structured first/last contact (Account-name/IT fallback) maps through UNSPLIT', async () => {
+    const { run, calls } = loadExecuteOneshot();
+    const r = await run({
+      ...validNewDeal,
+      contact: { create: { first_name: 'American Implement', last_name: 'IT', email: 'barry@americanimplement.com' } },
+    });
+    assert.strictEqual(r.success, true);
+    assert.strictEqual(calls[0].input.contact_first_name, 'American Implement', 'whole account name must survive as First_Name');
+    assert.strictEqual(calls[0].input.contact_last_name, 'IT');
+    assert.strictEqual(calls[0].input.contact_name, 'American Implement IT');
+    assert.strictEqual(calls[0].input.contact_email, 'barry@americanimplement.com');
+  });
+
+  await checkAsync('contact.create with NEITHER name nor first/last → invalid', async () => {
+    const { run } = loadExecuteOneshot();
+    const r = await run({ ...validNewDeal, contact: { create: { email: 'x@y.com' } } });
+    assert.strictEqual(r.error, 'oneshot_invalid');
+    assert.ok(r.missing.some((mi) => mi.includes('first_name+last_name')));
+  });
+
   await checkAsync('Meraki ISR Referal without meraki_isr_email → invalid', async () => {
     const { run } = loadExecuteOneshot();
     const r = await run({ ...validNewDeal, lead_source: 'Meraki ISR Referal' });
@@ -472,6 +492,11 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
   });
 
   console.log('\n(6) source-level wiring');
+
+  check('create branch honors structured contact_first_name/contact_last_name over the split', () => {
+    assert.ok(/toolInput\.contact_first_name && String\(toolInput\.contact_first_name\)\.trim\(\)\) \|\| nameParts\[0\]/.test(SRC));
+    assert.ok(/toolInput\.contact_last_name && String\(toolInput\.contact_last_name\)\.trim\(\)\)/.test(SRC));
+  });
 
   check('single-token contact create uses the neutral "-" surname placeholder', () => {
     assert.ok(/nameParts\.slice\(1\)\.join\(' '\) \|\| '-'/.test(SRC), 'placeholder branch missing');

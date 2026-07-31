@@ -8916,7 +8916,11 @@ async function executeOneshot(input, env, caller) {
   }
   if (contactMode === 'create') {
     const c = contact.create || {};
-    if (!c.name || !String(c.name).trim()) missing.push('contact.create.name');
+    // Structured first/last (recipient-driven refinement 2026-07-30): the
+    // Account-name/IT fallback needs First_Name to hold the WHOLE account name
+    // — a whitespace split would shred it. name alone is still accepted.
+    const hasStructured = !!(c.first_name && String(c.first_name).trim() && c.last_name && String(c.last_name).trim());
+    if (!hasStructured && (!c.name || !String(c.name).trim())) missing.push('contact.create.name (or first_name+last_name)');
     if (!c.email || !String(c.email).includes('@')) missing.push('contact.create.email');
   }
   const deal = p.deal || {};
@@ -8986,7 +8990,17 @@ async function executeOneshot(input, env, caller) {
     strict_contact: true,
   };
   if (effContactMode === 'existing') toolInput.contact_id = String(effContact.id);
-  else { toolInput.contact_name = String(effContact.create.name).trim(); toolInput.contact_email = String(effContact.create.email).trim().toLowerCase(); }
+  else {
+    const cc = effContact.create;
+    if (cc.first_name && cc.last_name) {
+      toolInput.contact_first_name = String(cc.first_name).trim();
+      toolInput.contact_last_name = String(cc.last_name).trim();
+      toolInput.contact_name = `${toolInput.contact_first_name} ${toolInput.contact_last_name}`;
+    } else {
+      toolInput.contact_name = String(cc.name).trim();
+    }
+    toolInput.contact_email = String(cc.email).trim().toLowerCase();
+  }
 
   let result;
   if (effDealMode === 'attach') {
@@ -15655,12 +15669,15 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // named participant must win over an arbitrary account contact).
           if (!contactId && contact_name && contact_email) {
             const nameParts = contact_name.trim().split(/\s+/);
-            const first = nameParts[0];
-            // Single-token names get the agreed NEUTRAL placeholder surname "-"
-            // (review 2026-07-30) — never silently duplicate the first name or
-            // invent a surname. The plan/card surfaces the placeholder before
-            // any write happens.
-            const last = nameParts.slice(1).join(' ') || '-';
+            // Structured caller-supplied fields win over the whitespace split —
+            // the Account-name/IT fallback puts the WHOLE account name in
+            // First_Name ("American Implement" / "IT"), which a split would
+            // shred into First="American". Single-token names still get the
+            // agreed NEUTRAL placeholder surname "-" (review 2026-07-30) —
+            // never silently duplicate the first name or invent a surname.
+            const first = (toolInput.contact_first_name && String(toolInput.contact_first_name).trim()) || nameParts[0];
+            const last = (toolInput.contact_last_name && String(toolInput.contact_last_name).trim())
+              || nameParts.slice(1).join(' ') || '-';
             const newContact = await zohoApiCall('POST', 'Contacts', env, {
               data: [{
                 First_Name: first,
