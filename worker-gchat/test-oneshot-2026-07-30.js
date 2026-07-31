@@ -430,7 +430,7 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
       grab('selectCustomerFromParticipants'),
       grab('isZohoTrue'),
       `const fetchAccountById = async () => __cfg.waterfallAccount;`,
-      `const resolveAccountWaterfall = async () => (__cfg.waterfallAccount ? { account: __cfg.waterfallAccount, confidence: 'high', source: 'test' } : null);`,
+      `const resolveAccountWaterfall = async (args) => { __cfg.wfArgs = args; return (__cfg.waterfallAccount ? { account: __cfg.waterfallAccount, confidence: 'high', source: 'test' } : null); };`,
       `const enrichCompanyV2 = async () => null;`,
       `const resolveContactByEmail = async () => __cfg.contactByEmail;`,
       `const zohoApiCall = async (method, pathArg) => { if (String(pathArg) === 'coql') return { data: __cfg.openDeals }; return { data: [] }; };`,
@@ -476,6 +476,41 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
     assert.ok(linked, 'contact_linked_elsewhere blocker required');
     assert.strictEqual(linked.contact_account_name, 'John Deere');
     assert.strictEqual(plan.plan.contact.linked_account.id, 'ACC-JD');
+  });
+
+  await checkAsync('Marlette proof: participants-only input → waterfall gets NO nameHint, no existing account attaches, create prefilled without a name', async () => {
+    const cfg = { waterfallAccount: null, contactByEmail: null, openDeals: [] };
+    const m = { exports: {} };
+    const stubs = [
+      grabConstSet('CONSUMER_DOMAINS'),
+      grabConstSet('ONESHOT_VENDOR_DOMAINS'),
+      grabConstArray('REQUIRED_ACCOUNT_FIELDS'),
+      grab('isDomainLike'),
+      grab('getMissingAccountFields'),
+      grab('selectCustomerFromParticipants'),
+      grab('isZohoTrue'),
+      `const fetchAccountById = async () => __cfg.waterfallAccount;`,
+      `const resolveAccountWaterfall = async (args) => { __cfg.wfArgs = args; return null; };`,
+      `const enrichCompanyV2 = async () => null;`,
+      `const resolveContactByEmail = async () => null;`,
+      `const zohoApiCall = async () => ({ data: [] });`,
+      grab('resolveMerakiIsrByName'),
+      `const executeToolCall = async (tool, input) => { const out = {}; for (const s of input.skus) out[s.sku] = { suffixed_sku: s.sku, found: true, ecomm_price: 100, list_price: 150, product_active: true }; return { products: out }; };`,
+      `const defaultQuoteDealDate = () => ({ date: '2026-07-31', suggested: '2026-07-25', fiscalQuarterEnd: '2026-07-25', crossesFiscalQuarter: true, daysToMonthEnd: 1, needsConfirmation: true });`,
+      grab('buildOneshotPlan'),
+      'module.exports = buildOneshotPlan;'
+    ].join('\n');
+    new Function('module', '__cfg', stubs)(m, cfg);
+    const plan = await m.exports({
+      skus: [{ sku: 'LIC-ENT-3YR', qty: 1 }],
+      participants: [{ email: 'billing@marlettefunding.com', name: '' }],
+      enrich: false,
+      // NOTE: no account_name — the dashboard no longer sends the card org.
+    }, {}, 'test@stratusinfosystems.com');
+    assert.strictEqual(cfg.wfArgs.nameHint, undefined, 'card/org name must never reach the waterfall as a lookup hint');
+    assert.strictEqual(cfg.wfArgs.domain, 'marlettefunding.com', 'recipient domain is the lookup authority');
+    assert.strictEqual(plan.plan.account.mode, 'create', 'no trustworthy domain match → CREATE review, never a similar-name attach');
+    assert.strictEqual(plan.plan.account.prefill.name, '', 'engine leaves the name empty for the dashboard display-only backfill');
   });
 
   await checkAsync('open deals present → deal_choice blocker with the list', async () => {
