@@ -8664,7 +8664,12 @@ async function resolveMerakiIsrByName(name, env) {
 // EXECUTE takes only fully-explicit, already-reviewed decisions and drives the
 // existing create_deal_and_quote executor directly (no agent loop). Neither
 // path ever guesses: ambiguity blocks.
-async function buildOneshotPlan(input, env, caller, ctx) {
+// `enrich` is INJECTED by the route (2026-07-30): enrichCompanyV2 is not
+// resolvable from this module-level scope — calling it directly threw
+// "enrichCompanyV2 is not defined", which the old silent catch hid as a blank
+// address. The route handler shares scope with /api/enrich-company, so it
+// hands the function in.
+async function buildOneshotPlan(input, env, caller, ctx, enrich) {
   const p = input || {};
   const blockers = [];
   const plan = {};
@@ -8733,10 +8738,10 @@ async function buildOneshotPlan(input, env, caller, ctx) {
     if (p.enrich !== false && selectedDomain && !CONSUMER_DOMAINS.has(selectedDomain)
         && env.ENRICH_KILL_SWITCH !== 'true' && env.ENRICH_KILL_SWITCH !== '1') {
       try {
-        // ctx is REQUIRED (2026-07-30 Marlette diagnosis): enrichCompanyV2 and
-        // its cache helpers take (env, ctx) exactly like /api/enrich-company —
-        // omitting it was why this path produced blank addresses.
-        const er = await enrichCompanyV2(selectedDomain, { env, ctx, cache_bust: p.enrich_cache_bust === true });
+        if (typeof enrich !== 'function') throw new Error('enricher_not_injected');
+        // ctx matters too: enrichCompanyV2's cache helpers take (env, ctx)
+        // exactly like /api/enrich-company does.
+        const er = await enrich(selectedDomain, { env, ctx, cache_bust: p.enrich_cache_bust === true });
         if (er && !er.error && (er.name || er.address || er.city)) {
           prefill.name = prefill.name || er.name || '';
           prefill.street = er.address || er.street || '';
@@ -28626,7 +28631,7 @@ CRITICAL URL RULES:
           // fully-reviewed decisions. No agent loop on either path.
           case '/api/oneshot-plan': {
             try {
-              apiResult = await buildOneshotPlan(apiBody, env, (env && env.__CALLER_EMAIL) || null, ctx);
+              apiResult = await buildOneshotPlan(apiBody, env, (env && env.__CALLER_EMAIL) || null, ctx, enrichCompanyV2);
             } catch (err) {
               apiResult = { success: false, error: 'oneshot_plan_failed', detail: err.message };
             }

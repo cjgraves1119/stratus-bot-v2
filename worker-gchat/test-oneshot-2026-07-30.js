@@ -528,11 +528,15 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
 
   console.log('\n(6) source-level wiring');
 
-  check('plan enrichment passes ctx and NEVER fails silently (Marlette blank-address diagnosis)', () => {
-    assert.ok(/enrichCompanyV2\(selectedDomain, \{ env, ctx, cache_bust: p\.enrich_cache_bust === true \}\)/.test(SRC),
-      'enrichCompanyV2 must receive ctx like /api/enrich-company does');
-    assert.ok(/async function buildOneshotPlan\(input, env, caller, ctx\)/.test(SRC), 'ctx must be a plan parameter');
-    assert.ok(/buildOneshotPlan\(apiBody, env, \(env && env\.__CALLER_EMAIL\) \|\| null, ctx\)/.test(SRC), 'route must forward ctx');
+  check('plan enrichment is INJECTED + ctx-aware and NEVER fails silently (Marlette blank-address diagnosis)', () => {
+    assert.ok(/await enrich\(selectedDomain, \{ env, ctx, cache_bust: p\.enrich_cache_bust === true \}\)/.test(SRC),
+      'must call the injected enricher with ctx');
+    assert.ok(/async function buildOneshotPlan\(input, env, caller, ctx, enrich\)/.test(SRC), 'ctx + enrich must be plan parameters');
+    assert.ok(/buildOneshotPlan\(apiBody, env, \(env && env\.__CALLER_EMAIL\) \|\| null, ctx, enrichCompanyV2\)/.test(SRC),
+      'route must inject enrichCompanyV2 from its own scope');
+    assert.ok(/if \(typeof enrich !== 'function'\) throw new Error\('enricher_not_injected'\)/.test(SRC),
+      'a missing injection must surface, not silently skip');
+    assert.ok(!/const er = await enrichCompanyV2\(/.test(SRC), 'module-scope direct call (ReferenceError) must be gone');
     assert.ok(/prefill\.enrich_error = er\?\.error \|\|/.test(SRC), 'a non-result must record enrich_error');
     assert.ok(/prefill\.enrich_error = String\(\(e && e\.message\) \|\| e\)/.test(SRC), 'a throw must record enrich_error');
     assert.ok(!/catch \(_\) \{ \/\* enrichment is best-effort prefill only \*\/ \}/.test(SRC), 'the silent catch must be gone');
