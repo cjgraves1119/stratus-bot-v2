@@ -513,6 +513,20 @@ export async function dealCloseLost(dealId, expectedDealName) {
 }
 
 /**
+ * One-shot customer-to-quote. PLAN is strictly read-only resolution (account,
+ * contact from the FULL participant list, open deals, ISR, pricing, date) with
+ * blockers[] for anything ambiguous; EXECUTE takes only fully-explicit reviewed
+ * decisions and drives the deterministic compound create — no agent loop.
+ */
+export async function oneshotPlan(payload) {
+  return apiCall('/api/oneshot-plan', payload || {}, { timeout: 45000 });
+}
+
+export async function oneshotExecute(payload) {
+  return apiCall('/api/oneshot-execute', payload || {}, { timeout: 90000 });
+}
+
+/**
  * Assign a Cisco rep to a Deal's Meraki_ISR field.
  */
 export async function assignCiscoRep(dealId, repEmail, repName) {

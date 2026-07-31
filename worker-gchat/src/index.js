@@ -8568,6 +8568,467 @@ function getMissingAccountFields(account) {
   return missing;
 }
 
+// ─── One-shot customer selection (2026-07-30) ────────────────────────────────
+// Deterministic, fail-closed pick of "the customer" from a full email-thread
+// participant list. Replaces the extension's first-in-DOM-order default
+// (American Implement postmortem: balloujoshr@johndeere.com beat the real
+// customer because it rendered first). Rules:
+//   - Stratus, vendor (cisco/meraki/distributor) addresses are never the customer.
+//   - Exactly ONE non-freemail candidate → resolved.
+//   - Multiple candidates (people or domains) → ambiguous. NEVER auto-pick.
+// accountWebsiteDomain (when an account is already pinned/resolved) narrows the
+// pool to participants on that domain before the count.
+const ONESHOT_VENDOR_DOMAINS = new Set([
+  'cisco.com', 'meraki.com', 'webex.com', 'tdsynnex.com', 'techdata.com',
+  'ingrammicro.com', 'synnex.com', 'mixmax.com',
+]);
+function selectCustomerFromParticipants(participants, { accountWebsiteDomain = null } = {}) {
+  const seen = new Set();
+  const candidates = [];
+  const vendors = [];
+  for (const p of Array.isArray(participants) ? participants : []) {
+    const email = String(p?.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@') || seen.has(email)) continue;
+    seen.add(email);
+    const domain = email.split('@')[1] || '';
+    if (!domain || email.endsWith('@stratusinfosystems.com')) continue;
+    const entry = { email, name: String(p?.name || '').trim(), domain, role: p?.role || '' };
+    if (ONESHOT_VENDOR_DOMAINS.has(domain)) { vendors.push(entry); continue; }
+    if (CONSUMER_DOMAINS.has(domain)) entry.freemail = true;
+    candidates.push(entry);
+  }
+  // STRICT invariant (review 2026-07-30): more than one distinct non-vendor
+  // external person — freemail included, they are potential customers too —
+  // is AMBIGUOUS, full stop. A pinned account's website domain produces a
+  // `suggested` candidate for the UI to pre-highlight; it never auto-commits.
+  if (candidates.length === 0) return { status: 'none', candidates: [], vendors };
+  if (candidates.length === 1) return { status: 'resolved', contact: candidates[0], candidates, vendors };
+  let suggested = null;
+  if (accountWebsiteDomain) {
+    const d = String(accountWebsiteDomain).trim().toLowerCase().replace(/^www\./, '');
+    const onDomain = candidates.filter((c) => c.domain === d);
+    if (onDomain.length === 1) suggested = onDomain[0];
+  }
+  const domains = [...new Set(candidates.map((c) => c.domain))];
+  return {
+    status: 'ambiguous',
+    reason: domains.length > 1 ? 'multiple_external_domains' : 'multiple_people_same_domain',
+    candidates,
+    suggested,
+    vendors,
+  };
+}
+
+// Zoho checkbox fields normally arrive as booleans, but defensive equality on
+// the string form costs nothing and has bitten before at other seams.
+function isZohoTrue(v) {
+  return v === true || v === 'true';
+}
+
+// Pure cross-check for pinned records: a Contact linked to a DIFFERENT Account
+// than the one being quoted is a hard mismatch. An orphan Contact (no
+// Account_Name) is not a mismatch — Zoho links it at write time.
+function contactAccountMismatch(contactData, accountId) {
+  const linked = contactData?.Account_Name;
+  const linkedId = linked && typeof linked === 'object' ? linked.id : null;
+  if (!linkedId || !accountId) return false;
+  return String(linkedId) !== String(accountId);
+}
+
+// Resolve a Meraki ISR by display NAME (word search). Email remains the primary
+// key; this exists so "referral from Josh Disla" doesn't force a two-turn email
+// ask when the rep is unambiguous in the Meraki_ISRs module. Fail-closed: 0 or
+// >1 matches return 'none'/'ambiguous' — callers must ask/pick, never guess.
+async function resolveMerakiIsrByName(name, env) {
+  const q = String(name || '').trim();
+  if (q.length < 3) return { status: 'none', candidates: [] };
+  let rows = [];
+  try {
+    const r = await zohoApiCall('GET',
+      `Meraki_ISRs/search?word=${encodeURIComponent(q)}&fields=id,Name,Email,Inactive&per_page=10`, env);
+    rows = Array.isArray(r?.data) ? r.data : [];
+  } catch (_) { return { status: 'error', candidates: [] }; }
+  if (rows.length === 0) return { status: 'none', candidates: [] };
+  const qLower = q.toLowerCase();
+  const exact = rows.filter((r) => String(r.Name || '').trim().toLowerCase() === qLower);
+  const pool = exact.length > 0 ? exact : rows;
+  if (pool.length === 1) return { status: 'resolved', rep: pool[0], candidates: pool };
+  return { status: 'ambiguous', candidates: pool.slice(0, 6) };
+}
+
+// ─── One-shot plan / execute (2026-07-30) ────────────────────────────────────
+// Deterministic customer-to-quote pipeline for the renewal dashboard and the
+// extension's reviewed-plan card. PLAN is strictly read-only: it resolves
+// every decision the compound create needs and returns blockers[] for anything
+// ambiguous — the UI turns blockers into pickers instead of chat questions.
+// EXECUTE takes only fully-explicit, already-reviewed decisions and drives the
+// existing create_deal_and_quote executor directly (no agent loop). Neither
+// path ever guesses: ambiguity blocks.
+async function buildOneshotPlan(input, env, caller) {
+  const p = input || {};
+  const blockers = [];
+  const plan = {};
+  const personId = `oneshot:${caller || 'unknown'}`;
+
+  if (!Array.isArray(p.skus) || p.skus.length === 0) {
+    return { success: false, error: 'missing_skus', blockers: [{ code: 'missing_skus' }] };
+  }
+
+  // 1. Customer selection from the FULL participant list (never insertion order)
+  let selectedEmail = String(p.contact_email || '').trim().toLowerCase() || null;
+  let selectedName = String(p.contact_name || '').trim() || null;
+  plan.customer = selectedEmail
+    ? { status: 'explicit', contact: { email: selectedEmail, name: selectedName || '' } }
+    : selectCustomerFromParticipants(p.participants, { accountWebsiteDomain: p.account_website_domain || null });
+  if (!selectedEmail) {
+    if (plan.customer.status === 'resolved') {
+      selectedEmail = plan.customer.contact.email;
+      selectedName = plan.customer.contact.name || null;
+    } else if (plan.customer.status === 'ambiguous') {
+      blockers.push({ code: 'ambiguous_contact', reason: plan.customer.reason, candidates: plan.customer.candidates });
+    } else {
+      blockers.push({ code: 'missing_contact' });
+    }
+  }
+  const selectedDomain = selectedEmail ? (selectedEmail.split('@')[1] || null) : (p.domain || null);
+
+  // 2. Account: pinned id wins; otherwise the standard waterfall + name hint
+  let account = null;
+  if (p.account_id) {
+    account = await fetchAccountById(String(p.account_id).trim(), env).catch(() => null);
+    if (!account) blockers.push({ code: 'account_not_readable', account_id: p.account_id });
+  } else {
+    const wf = await resolveAccountWaterfall({
+      domain: selectedDomain || undefined,
+      email: selectedEmail || undefined,
+      nameHint: p.account_name || undefined,
+    }, env).catch(() => null);
+    if (wf?.account) {
+      account = wf.account;
+      if (wf.confidence === 'low') {
+        blockers.push({ code: 'account_confirm', candidate: { id: account.id, name: account.Account_Name }, source: wf.source });
+      }
+    }
+  }
+  if (account) {
+    const missing = getMissingAccountFields(account);
+    plan.account = {
+      mode: 'existing',
+      id: account.id,
+      name: account.Account_Name,
+      billing: {
+        street: account.Billing_Street || '', city: account.Billing_City || '',
+        state: account.Billing_State || '', zip: account.Billing_Code || '',
+        country: account.Billing_Country || '',
+      },
+      website: account.Website || '',
+      missing_fields: missing,
+    };
+    if (missing.length > 0) blockers.push({ code: 'account_billing_incomplete', missing });
+  } else if (!p.account_id) {
+    // No account resolvable → creation path. Enrichment PRE-FILLS the editable
+    // card fields only; a human reviews every value before execute. Always a
+    // blocker — a new Account is never created unreviewed.
+    const prefill = { name: p.account_name || '', street: '', city: '', state: '', zip: '', country: 'United States', website: selectedDomain ? `www.${selectedDomain}` : '' };
+    if (p.enrich !== false && selectedDomain && !CONSUMER_DOMAINS.has(selectedDomain)
+        && env.ENRICH_KILL_SWITCH !== 'true' && env.ENRICH_KILL_SWITCH !== '1') {
+      try {
+        const er = await enrichCompanyV2(selectedDomain, { env });
+        if (er && !er.error) {
+          prefill.name = prefill.name || er.name || '';
+          prefill.street = er.address || er.street || '';
+          prefill.city = er.city || '';
+          prefill.state = er.state || '';
+          prefill.zip = er.zip || er.postal_code || '';
+          prefill.enrich_tier = er.tier || null;
+          prefill.enrich_confidence = er.confidence ?? null;
+        }
+      } catch (_) { /* enrichment is best-effort prefill only */ }
+    }
+    plan.account = { mode: 'create', prefill };
+    blockers.push({ code: 'account_create_review', prefill });
+  }
+
+  // 3. Contact on the selected email
+  if (selectedEmail) {
+    const contact = await resolveContactByEmail(selectedEmail, env).catch(() => null);
+    if (contact?.id) {
+      const linked = contact.Account_Name && typeof contact.Account_Name === 'object'
+        ? { id: contact.Account_Name.id, name: contact.Account_Name.name || '' } : null;
+      plan.contact = { mode: 'existing', id: contact.id, name: contact.Full_Name || '', email: contact.Email || selectedEmail, linked_account: linked };
+      if (linked?.id && plan.account?.id && String(linked.id) !== String(plan.account.id)) {
+        blockers.push({ code: 'contact_account_mismatch', contact_account_id: linked.id, contact_account_name: linked.name, account_id: plan.account.id });
+      }
+      // Review 2026-07-30 #2: an existing contact already linked to SOME
+      // account is incompatible with creating a brand-new Account — execute
+      // would create an orphan Account and then hard-stop on the pinned
+      // mismatch check. Force the pairing decision here instead: use the
+      // contact's own account, or pick/create a different contact.
+      if (linked?.id && plan.account?.mode === 'create') {
+        blockers.push({ code: 'contact_linked_elsewhere', contact_id: contact.id, contact_account_id: linked.id, contact_account_name: linked.name });
+      }
+    } else {
+      const nameTokens = String(selectedName || '').trim().split(/\s+/).filter(Boolean);
+      plan.contact = {
+        mode: 'create', name: selectedName || '', email: selectedEmail,
+        // Single-token names will be created with the neutral "-" surname
+        // placeholder — surfaced here so the card shows it before any write.
+        last_name_placeholder: nameTokens.length === 1 || undefined,
+      };
+      if (!selectedName) blockers.push({ code: 'contact_name_required', email: selectedEmail });
+    }
+  }
+
+  // 4. Open deals → attach-vs-new is always an explicit decision when any exist
+  plan.deal = { mode: 'new', open_deals: [] };
+  if (p.existing_deal_id) {
+    plan.deal = { mode: 'attach', existing_deal_id: String(p.existing_deal_id), open_deals: [] };
+  } else if (plan.account?.id) {
+    try {
+      // Same criteria as create_deal_and_quote HARD GATE #3b — keep in sync.
+      const openDealsResp = await zohoApiCall('POST', 'coql', env, {
+        select_query: `select id, Deal_Name, Stage, Amount, Closing_Date from Deals where Account_Name = '${plan.account.id}' and Stage not in ('Closed (Won)', 'Closed (Lost)') order by Modified_Time desc limit 5`
+      });
+      const openDeals = Array.isArray(openDealsResp?.data) ? openDealsResp.data : [];
+      if (openDeals.length > 0) {
+        plan.deal = { mode: 'choose', open_deals: openDeals.map((d) => ({ id: d.id, name: d.Deal_Name, stage: d.Stage, amount: d.Amount, closing_date: d.Closing_Date })) };
+        blockers.push({ code: 'deal_choice', open_deals: plan.deal.open_deals });
+      }
+    } catch (_) {
+      // Fail CLOSED: if the open-deals read failed we cannot promise "new deal
+      // is safe" — force the explicit choice in the card.
+      plan.deal = { mode: 'choose', open_deals: [], read_failed: true };
+      blockers.push({ code: 'deal_choice', open_deals: [], read_failed: true });
+    }
+  }
+
+  // 5. ISR — email is authoritative, name resolves via the module, never guessed
+  const leadSource = p.lead_source || 'Stratus Referal';
+  plan.isr = { status: 'not_required' };
+  if (p.meraki_isr_email) {
+    try {
+      const isrSearch = await zohoApiCall('GET',
+        `Meraki_ISRs/search?criteria=(Email:equals:${encodeURIComponent(String(p.meraki_isr_email).trim().toLowerCase())})&fields=id,Name,Email,Inactive`, env);
+      const rec = isrSearch?.data?.[0];
+      if (rec?.id) {
+        plan.isr = { status: isZohoTrue(rec.Inactive) ? 'inactive' : 'resolved', rep: { id: rec.id, name: rec.Name, email: rec.Email, inactive: isZohoTrue(rec.Inactive) } };
+        if (isZohoTrue(rec.Inactive)) blockers.push({ code: 'isr_inactive', rep: plan.isr.rep });
+      } else {
+        plan.isr = { status: 'none', query: p.meraki_isr_email };
+        blockers.push({ code: 'isr_not_found', query: p.meraki_isr_email });
+      }
+    } catch (_) {
+      plan.isr = { status: 'error' };
+      blockers.push({ code: 'isr_not_found', query: p.meraki_isr_email, read_failed: true });
+    }
+  } else if (p.meraki_isr_name) {
+    const byName = await resolveMerakiIsrByName(p.meraki_isr_name, env);
+    if (byName.status === 'resolved') {
+      const rec = byName.rep;
+      plan.isr = { status: isZohoTrue(rec.Inactive) ? 'inactive' : 'resolved', rep: { id: rec.id, name: rec.Name, email: rec.Email, inactive: isZohoTrue(rec.Inactive) } };
+      if (isZohoTrue(rec.Inactive)) blockers.push({ code: 'isr_inactive', rep: plan.isr.rep });
+    } else if (byName.status === 'ambiguous') {
+      plan.isr = { status: 'ambiguous', candidates: byName.candidates.map((r) => ({ id: r.id, name: r.Name, email: r.Email, inactive: isZohoTrue(r.Inactive) })) };
+      blockers.push({ code: 'isr_ambiguous', candidates: plan.isr.candidates });
+    } else {
+      plan.isr = { status: 'none', query: p.meraki_isr_name };
+      blockers.push({ code: 'isr_not_found', query: p.meraki_isr_name });
+    }
+  }
+  if (leadSource === 'Meraki ISR Referal' && plan.isr.status !== 'resolved') {
+    blockers.push({ code: 'isr_required_for_lead_source' });
+  }
+  plan.lead_source = leadSource;
+
+  // 6. Product lines with live ecomm pricing (read-only catalog resolution)
+  try {
+    const lookup = await executeToolCall('batch_product_lookup', { skus: p.skus.map((s) => ({ sku: String(s.sku || s).toUpperCase(), qty: Number(s.qty) || 1 })) }, env, personId);
+    const rmap = lookup?.results || lookup || {};
+    plan.lines = p.skus.map((s) => {
+      const key = String(s.sku || s).toUpperCase();
+      const r = rmap[key] || {};
+      return {
+        sku: r.suffixed_sku || key,
+        qty: Number(s.qty) || 1,
+        found: r.found === true,
+        ecomm_price: r.ecomm_price ?? null,
+        list_price: r.list_price ?? null,
+        product_active: r.product_active !== false,
+        eol: r.eol === true || undefined,
+        replaced_by: r.replaced_by || undefined,
+      };
+    });
+    for (const line of plan.lines) {
+      if (!line.found) blockers.push({ code: 'unresolved_sku', sku: line.sku });
+      else if (!line.product_active) blockers.push({ code: 'inactive_sku', sku: line.sku, replaced_by: line.replaced_by });
+    }
+    plan.total_ecomm = plan.lines.every((l) => typeof l.ecomm_price === 'number')
+      ? Math.round(plan.lines.reduce((t, l) => t + l.ecomm_price * l.qty, 0) * 100) / 100
+      : null;
+  } catch (e) {
+    blockers.push({ code: 'product_lookup_failed', detail: String(e?.message || e) });
+  }
+
+  // 7. Close date — the card always collects/pre-confirms it, so the month-end
+  // chat gate never fires mid-run.
+  const dd = defaultQuoteDealDate();
+  plan.date = {
+    suggested: dd.suggested,
+    fiscal_quarter_end: dd.fiscalQuarterEnd,
+    needs_confirmation: dd.needsConfirmation,
+    days_to_month_end: dd.daysToMonthEnd,
+  };
+
+  return { success: true, plan, blockers };
+}
+
+// Fixed-schema execute: every decision must be explicit. Rejects anything
+// unresolved rather than guessing (the card is the only place decisions are
+// made). Drives create_deal_and_quote / create_quote_on_deal directly.
+async function executeOneshot(input, env, caller) {
+  const p = input || {};
+  const personId = `oneshot:${caller || 'unknown'}`;
+  const missing = [];
+  const key = String(p.idempotency_key || '').trim();
+  if (key.length < 8) missing.push('idempotency_key (min 8 chars)');
+  if (!Array.isArray(p.skus) || p.skus.length === 0) missing.push('skus');
+  const closingDate = String(p.closing_date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(closingDate)) missing.push('closing_date (YYYY-MM-DD)');
+  const acct = p.account || {};
+  const acctMode = acct.id ? 'existing' : (acct.create ? 'create' : null);
+  if (!acctMode) missing.push('account ({id} or {create})');
+  if (acctMode === 'create') {
+    const c = acct.create || {}; const b = c.billing || {};
+    for (const [f, v] of [['account.create.name', c.name], ['billing.street', b.street], ['billing.city', b.city], ['billing.state', b.state], ['billing.zip', b.zip], ['billing.country', b.country]]) {
+      if (!v || !String(v).trim()) missing.push(f);
+    }
+    if (c.name && (isDomainLike(c.name) || isPlaceholderName(c.name))) missing.push('account.create.name (domain/placeholder rejected)');
+  }
+  const contact = p.contact || {};
+  const contactMode = contact.id ? 'existing' : (contact.create ? 'create' : null);
+  if (!contactMode) missing.push('contact ({id} or {create})');
+  // Review 2026-07-30 #2: an EXISTING contact cannot ride a brand-new Account —
+  // it already belongs to its own Account, and proceeding would create an
+  // orphan Account before the pinned-contact mismatch check hard-stops.
+  if (acctMode === 'create' && contactMode === 'existing') {
+    missing.push('contact ({create} required when account is being created — an existing contact belongs to its own Account; use that account or a new contact)');
+  }
+  if (contactMode === 'create') {
+    const c = contact.create || {};
+    if (!c.name || !String(c.name).trim()) missing.push('contact.create.name');
+    if (!c.email || !String(c.email).includes('@')) missing.push('contact.create.email');
+  }
+  const deal = p.deal || {};
+  const dealMode = deal.existing_deal_id ? 'attach' : (deal.new === true ? 'new' : null);
+  if (!dealMode) missing.push('deal ({existing_deal_id} or {new:true})');
+  if (dealMode === 'new' && deal.confirmed !== true) missing.push('deal.confirmed (explicit new-deal confirmation)');
+  const leadSource = p.lead_source || 'Stratus Referal';
+  if (leadSource === 'Meraki ISR Referal' && !p.meraki_isr_email) missing.push('meraki_isr_email (required for Meraki ISR Referal)');
+  const dd = defaultQuoteDealDate();
+  if (closingDate && closingDate > dd.fiscalQuarterEnd && p.date_beyond_quarter_confirmed !== true) {
+    missing.push(`date_beyond_quarter_confirmed (closing_date ${closingDate} is past fiscal quarter end ${dd.fiscalQuarterEnd})`);
+  }
+  if (missing.length > 0) {
+    return { success: false, error: 'oneshot_invalid', missing };
+  }
+
+  // Idempotency: a stored SUCCESS replays; failures stay retryable.
+  // ponytail: KV has no CAS — a same-millisecond double-fire can race past the
+  // lock sentinel; the dashboard's D1 compare-and-set is the hard mutex, this
+  // is belt-and-suspenders for the extension path.
+  const kvKey = `oneshot:${key}`;
+  try {
+    const prior = await env.CONVERSATION_KV?.get?.(kvKey, 'json');
+    if (prior?.success) return { ...prior, replayed: true };
+  } catch (_) {}
+
+  // STAGE LEDGER (review 2026-07-30): partial CRM ids from a prior failed run
+  // are recovered BEFORE any new write, so a retry RESUMES instead of
+  // duplicating. A deal without a quote → attach mode on the stored deal
+  // (skips Account/Contact/Deal entirely); created-but-not-dealt account/
+  // contact ids → pinned so the create branches never re-run.
+  const stageKey = `oneshot-stage:${key}`;
+  let stage = {};
+  try { stage = (await env.CONVERSATION_KV?.get?.(stageKey, 'json')) || {}; } catch (_) {}
+  let effAcct = acct, effAcctMode = acctMode, effContact = contact, effContactMode = contactMode;
+  let effDealMode = dealMode, effAttachId = deal.existing_deal_id ? String(deal.existing_deal_id) : null;
+  const resumed = [];
+  if (stage.deal_id && !stage.quote_id && effDealMode === 'new') {
+    effDealMode = 'attach'; effAttachId = String(stage.deal_id);
+    resumed.push(`deal ${stage.deal_id} (created on a prior attempt — resuming at the Quote)`);
+  }
+  if (effAcctMode === 'create' && stage.account_id) {
+    effAcct = { id: String(stage.account_id), name: acct.create?.name };
+    effAcctMode = 'existing';
+    resumed.push(`account ${stage.account_id}`);
+  }
+  if (effContactMode === 'create' && stage.contact_id) {
+    effContact = { id: String(stage.contact_id) };
+    effContactMode = 'existing';
+    resumed.push(`contact ${stage.contact_id}`);
+  }
+
+  const toolInput = {
+    skus: p.skus,
+    license_term: p.license_term || undefined,
+    renewal: p.renewal === true || undefined,
+    license_only: p.license_only === true || undefined,
+    hardware_only: p.hardware_only === true || undefined,
+    include_licenses: p.include_licenses === false ? false : undefined,
+    closing_date: closingDate,
+    date_confirmed: p.date_beyond_quarter_confirmed === true || undefined,
+    lead_source: leadSource,
+    meraki_isr_email: p.meraki_isr_email || undefined,
+    reactivate_inactive_isr: p.reactivate_inactive_isr === true || undefined,
+    cisco_billing_term: p.cisco_billing_term || undefined,
+    deal_name: p.deal_name || undefined,
+    strict_contact: true,
+  };
+  if (effContactMode === 'existing') toolInput.contact_id = String(effContact.id);
+  else { toolInput.contact_name = String(effContact.create.name).trim(); toolInput.contact_email = String(effContact.create.email).trim().toLowerCase(); }
+
+  let result;
+  if (effDealMode === 'attach') {
+    result = await executeToolCall('create_quote_on_deal', { ...toolInput, deal_id: String(effAttachId) }, env, personId);
+  } else {
+    if (effAcctMode === 'existing') {
+      toolInput.account_id = String(effAcct.id);
+      toolInput.account_name = String(effAcct.name || 'pinned-account');
+    } else {
+      toolInput.account_name = String(effAcct.create.name).trim();
+      toolInput.billing_address = {
+        street: effAcct.create.billing.street, city: effAcct.create.billing.city,
+        state: effAcct.create.billing.state, zip: effAcct.create.billing.zip,
+        country: effAcct.create.billing.country,
+      };
+    }
+    toolInput.confirm_new_deal = true; // deal.confirmed===true was validated above
+    toolInput.force_new_deal = true;   // reviewed one-shots never silently reuse the KV master deal
+    result = await executeToolCall('create_deal_and_quote', toolInput, env, personId);
+  }
+
+  // Harvest stage ids from BOTH success and failure payloads (the compound
+  // spreads ...results on every stop, so partial records ride failures) and
+  // persist them BEFORE returning — the next retry recovers them above.
+  try {
+    const rec = (result && result.records) || {};
+    const nextStage = {
+      account_id: rec.account?.id || stage.account_id || null,
+      contact_id: rec.contact?.id || stage.contact_id || null,
+      deal_id: rec.deal?.id || stage.deal_id || null,
+      quote_id: rec.quote?.id || stage.quote_id || null,
+    };
+    if (JSON.stringify(nextStage) !== JSON.stringify(stage)) {
+      await env.CONVERSATION_KV?.put?.(stageKey, JSON.stringify(nextStage), { expirationTtl: 604800 });
+    }
+  } catch (_) {}
+  if (result?.success) {
+    if (resumed.length) result.resumed = resumed;
+    try { await env.CONVERSATION_KV?.put?.(kvKey, JSON.stringify(result), { expirationTtl: 86400 }); } catch (_) {}
+  }
+  return result;
+}
+
 // Search Zoho Accounts by the customerDomain extracted from the Chrome Extension
 // email context. Returns the first Account whose Website equals the domain (with
 // or without www.). Returns null on no match.
@@ -14702,7 +15163,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
       // ── Compound: Create Deal + Quote in One Shot ──
       case 'create_deal_and_quote': {
-        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id, meraki_isr_email, force_new_deal, reactivate_inactive_isr } = toolInput;
+        const { account_name, contact_name, contact_email, deal_name, skus, license_term, billing_address, cisco_billing_term, existing_deal_id, meraki_isr_email, meraki_isr_name, force_new_deal, reactivate_inactive_isr, strict_contact } = toolInput;
         let { lead_source } = toolInput;
         const includeLicenses = toolInput.include_licenses !== false && toolInput.hardware_only !== true;
         let _eolRefreshUnits = [];
@@ -14820,6 +15281,30 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // address we merely failed to read. (Codex review 2026-06-15.)
           let accountBillingConfirmed = false;
 
+          // 1a-pre (one-shot, 2026-07-30): a caller that already REVIEWED a
+          // specific Account passes account_id — resolution must pin to that
+          // record, never re-derive by domain/name (the reviewed record is the
+          // contract). Fail CLOSED on a failed read: falling through to a
+          // name/domain search could silently swap in a different account.
+          if (!accountId && toolInput.account_id) {
+            const pinnedId = String(toolInput.account_id).trim();
+            const pinned = await zohoApiCall('GET',
+              `Accounts/${encodeURIComponent(pinnedId)}?fields=id,Account_Name,Billing_Street,Billing_City,Billing_State,Billing_Code,Billing_Country,Shipping_Street,Shipping_City,Shipping_State,Shipping_Code,Shipping_Country,Phone,Website`, env).catch(() => null);
+            if (pinned?.data?.[0]?.id) {
+              accountData = pinned.data[0];
+              accountId = accountData.id;
+              accountBillingConfirmed = true; // full authoritative GET succeeded
+              results.steps.push(`Pinned Account by id: ${accountData.Account_Name} (${accountId})`);
+            } else {
+              return {
+                success: false,
+                error: 'pinned_account_not_found',
+                instruction: `STOP. account_id "${pinnedId}" could not be read from Zoho. Do not fall back to a name/domain search — re-verify the account with the user.`,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+          }
+
           // 1a: If we have a contact_email, try the domain first
           if (!accountId && contact_email && contact_email.includes('@')) {
             const dom = contact_email.split('@')[1];
@@ -14886,7 +15371,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 needs_account_info: true,
                 error: `Account "${account_name}" not found in Zoho, and the required fields to create one are missing: ${missingCreateFields.join(', ')}`,
                 missing_fields: missingCreateFields,
-                instruction: `STOP. Do NOT retry this tool. Ask the user to provide: ${missingCreateFields.join(', ')}. Only retry create_deal_and_quote once you have ALL of these values. Creating a blank Account is not permitted.`,
+                instruction: `STOP. Do NOT retry this tool yet. FIRST call web_search_domain with the customer's email domain to pre-fill the company name and address, present the extracted values to the user for confirmation (never invent or silently trust them), and ask only for what enrichment could not find: ${missingCreateFields.join(', ')}. Only retry create_deal_and_quote once the user has confirmed ALL of these values. Creating a blank Account is not permitted.`,
                 wall_ms: Date.now() - _startMs
               };
             }
@@ -15117,29 +15602,64 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           if (contactId) {
             results.steps.push(`Using Contact from existing Deal: ${contactData.Full_Name || contactId} (${contactId})`);
           }
+          // 2-pre (one-shot, 2026-07-30): a reviewed contact_id pins the exact
+          // record. Fail CLOSED on a failed read — substituting another contact
+          // is the bug this whole path exists to prevent.
+          if (!contactId && toolInput.contact_id) {
+            const pinnedContact = await zohoApiCall('GET',
+              `Contacts/${encodeURIComponent(String(toolInput.contact_id).trim())}?fields=id,Full_Name,Email,Account_Name`, env).catch(() => null);
+            if (pinnedContact?.data?.[0]?.id) {
+              // Cross-check (review 2026-07-30): a pinned Contact linked to a
+              // DIFFERENT Account than the resolved/pinned one is a hard stop —
+              // never create or quote across mismatched records.
+              if (contactAccountMismatch(pinnedContact.data[0], accountId)) {
+                return {
+                  success: false,
+                  error: 'contact_account_mismatch',
+                  contact_id: pinnedContact.data[0].id,
+                  contact_account_id: pinnedContact.data[0].Account_Name?.id || null,
+                  account_id: accountId,
+                  instruction: `STOP. Contact "${pinnedContact.data[0].Full_Name || pinnedContact.data[0].id}" belongs to a different Account than the one being quoted. Re-verify the account/contact pairing with the user; do not proceed with mismatched records.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              contactId = pinnedContact.data[0].id;
+              contactData = pinnedContact.data[0];
+              results.steps.push(`Pinned Contact by id: ${contactData.Full_Name || contactId} (${contactId})`);
+            } else {
+              return {
+                success: false,
+                error: 'pinned_contact_not_found',
+                instruction: 'STOP. The provided contact_id could not be read from Zoho. Re-verify the contact with the user; do not substitute another contact.',
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+          }
           if (!contactId && contact_email) {
-            const contactSearch = await zohoApiCall('GET',
-              `Contacts/search?criteria=(Email:equals:${encodeURIComponent(contact_email)})&fields=id,Full_Name,Email,Account_Name&per_page=1`, env);
-            if (contactSearch?.data?.[0]) {
-              contactId = contactSearch.data[0].id;
-              contactData = contactSearch.data[0];
-              results.steps.push(`Found Contact by email: ${contactSearch.data[0].Full_Name} (${contactId})`);
+            // resolveContactByEmail checks Email AND Secondary_Email and prefers
+            // the account-linked row (Ray-vs-Raymond fix) — strictly better than
+            // the old single-field Email:equals per_page=1 search here.
+            const contactByEmail = await resolveContactByEmail(contact_email, env);
+            if (contactByEmail?.id) {
+              contactId = contactByEmail.id;
+              contactData = contactByEmail;
+              results.steps.push(`Found Contact by email: ${contactByEmail.Full_Name} (${contactId})`);
             }
           }
-          if (!contactId) {
-            const acctContacts = await zohoApiCall('GET',
-              `Contacts/search?criteria=(Account_Name:equals:${encodeURIComponent(accountData.Account_Name || account_name)})&fields=id,Full_Name,Email&per_page=3`, env);
-            if (acctContacts?.data?.[0]) {
-              contactId = acctContacts.data[0].id;
-              contactData = acctContacts.data[0];
-              results.steps.push(`Found Contact on Account: ${acctContacts.data[0].Full_Name} (${contactId})`);
-            }
-          }
-          // If still no contact and caller provided name+email, create one
+          // If no contact matched the caller's email but the caller NAMED a
+          // person, create that person — do NOT silently substitute some other
+          // contact already on the Account (American Implement postmortem: the
+          // named participant must win over an arbitrary account contact).
           if (!contactId && contact_name && contact_email) {
             const nameParts = contact_name.trim().split(/\s+/);
             const first = nameParts[0];
-            const last = nameParts.slice(1).join(' ') || nameParts[0];
+            // Single-token names get the agreed NEUTRAL placeholder surname "-"
+            // (review 2026-07-30) — never silently duplicate the first name or
+            // invent a surname. The plan/card surfaces the placeholder before
+            // any write happens.
+            const last = nameParts.slice(1).join(' ') || '-';
             const newContact = await zohoApiCall('POST', 'Contacts', env, {
               data: [{
                 First_Name: first,
@@ -15152,6 +15672,18 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             if (newContact?.data?.[0]?.details?.id) {
               contactId = newContact.data[0].details.id;
               results.steps.push(`Created Contact: ${contact_name} <${contact_email}> (${contactId})`);
+            }
+          }
+          // Last-resort fallback: most recently modified Contact on the Account
+          // — NOT an arbitrary unsorted row (American Implement postmortem).
+          // Skipped under strict_contact (one-shot): guessing ANY contact is
+          // worse than blocking, so HARD GATE #4 below handles it instead.
+          if (!contactId && strict_contact !== true) {
+            const fallbackContact = await fetchPrimaryContactForAccount(accountId, env);
+            if (fallbackContact?.id) {
+              contactId = fallbackContact.id;
+              contactData = fallbackContact;
+              results.steps.push(`Found Contact on Account (most recently modified): ${fallbackContact.Full_Name} (${contactId})`);
             }
           }
           // ── HARD GATE #4: Contact required ──
@@ -15279,6 +15811,54 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               } catch (isrErr) {
                 results.steps.push(`Meraki ISR lookup failed for ${_isrEmail}: ${isrErr.message}`);
               }
+            }
+          }
+          // Name-based ISR resolution (2026-07-30): "referral from Josh Disla"
+          // no longer forces a two-turn email ask. Fail-closed: 0 or >1 name
+          // matches return a structured stop with candidates — never guess.
+          if (!merakiIsrId && meraki_isr_name) {
+            const isrByName = await resolveMerakiIsrByName(meraki_isr_name, env);
+            if (isrByName.status === 'resolved' && !isrByName.rep?.Email) {
+              // Review 2026-07-30: a name-resolved rep must carry an Email
+              // before we trust the assignment — fail closed to email confirm.
+              return {
+                success: false,
+                error: 'meraki_isr_required',
+                needs_meraki_isr: true,
+                instruction: `STOP. "${meraki_isr_name}" matched a Meraki_ISRs record with NO email on file — confirm the rep's @cisco.com email with the user, then retry with meraki_isr_email set.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            }
+            if (isrByName.status === 'resolved') {
+              const rec = isrByName.rep;
+              if (isZohoTrue(rec.Inactive)) {
+                return {
+                  success: false,
+                  error: 'meraki_isr_inactive',
+                  meraki_isr_inactive: true,
+                  isr_id: rec.id,
+                  isr_name: rec.Name || meraki_isr_name,
+                  instruction: buildInactiveIsrInstruction(rec.Name || meraki_isr_name,
+                    `retry this SAME create_deal_and_quote call with meraki_isr_email: "${rec.Email || ''}" and reactivate_inactive_isr: true`),
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              }
+              merakiIsrId = rec.id;
+              merakiIsrName = rec.Name;
+              results.steps.push(`Resolved Meraki ISR by name: ${rec.Name} <${rec.Email || 'no email'}>`);
+            } else if (isrByName.status === 'ambiguous') {
+              return {
+                success: false,
+                error: 'meraki_isr_ambiguous',
+                candidates: isrByName.candidates.map((r) => ({ id: r.id, name: r.Name, email: r.Email, inactive: isZohoTrue(r.Inactive) })),
+                instruction: `STOP. "${meraki_isr_name}" matches ${isrByName.candidates.length} Meraki_ISRs records. Ask the user which rep (offer name + email as chips), then retry with meraki_isr_email set to the chosen rep's email. Never pick one yourself.`,
+                ...results,
+                wall_ms: Date.now() - _startMs
+              };
+            } else {
+              results.steps.push(`Meraki ISR name lookup: no unique match for "${meraki_isr_name}" (${isrByName.status})`);
             }
           }
           const VALID_BILLING_TERMS = ['Prepaid Term', 'Prepaid'];
@@ -15859,7 +16439,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 success: false,
                 error: 'meraki_isr_required',
                 needs_meraki_isr: true,
-                instruction: `STOP — do NOT create this Deal yet, and do NOT fall back to Stratus Sales. Lead_Source "Meraki ISR Referal" requires the referring Cisco rep. ${meraki_isr_email ? `The email "${meraki_isr_email}" did not match any Meraki_ISRs record — confirm the exact @cisco.com email with the user.` : `Ask the user which Cisco rep (@cisco.com email) referred this deal.`} Then retry create_deal_and_quote with meraki_isr_email set. If NO Cisco rep is actually involved, use lead_source "Stratus Referal" instead.`,
+                instruction: `STOP — do NOT create this Deal yet, and do NOT fall back to Stratus Sales. Lead_Source "Meraki ISR Referal" requires the referring Cisco rep. ${meraki_isr_email ? `The email "${meraki_isr_email}" did not match any Meraki_ISRs record — confirm the exact @cisco.com email with the user.` : meraki_isr_name ? `The name "${meraki_isr_name}" did not uniquely match a Meraki_ISRs record — confirm the rep's @cisco.com email with the user.` : `Ask the user which Cisco rep referred this deal — a NAME is fine (retry with meraki_isr_name), or the @cisco.com email (meraki_isr_email).`} Then retry create_deal_and_quote with meraki_isr_email (or meraki_isr_name) set. If NO Cisco rep is actually involved, use lead_source "Stratus Referal" instead.`,
                 ...results,
                 wall_ms: Date.now() - _startMs
               };
@@ -18345,14 +18925,16 @@ const CRM_EMAIL_TOOLS = [
         closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (end of the current month, capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation" — pass the date the user confirmed.' },
         date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a close date that falls after the current Cisco fiscal quarter end. Never set it on your own.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
-        closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (end of the current month, capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation" — pass the date the user confirmed.' },
-        date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a close date that falls after the current Cisco fiscal quarter end. Never set it on your own.' },
+        account_id: { type: 'string', description: 'Zoho Account record id. Pass ONLY when a specific already-reviewed Account is known (e.g. pinned CRM context or a one-shot plan). Pins resolution to that exact record — the tool fails closed rather than falling back to a name/domain search if the id cannot be read.' },
+        contact_id: { type: 'string', description: 'Zoho Contact record id. Pass ONLY when a specific already-reviewed Contact is known. Pins the Quote/Deal contact to that exact record; fails closed if unreadable.' },
+        strict_contact: { type: 'boolean', description: 'Set true when the contact MUST be exactly the one specified (one-shot/reviewed flows): disables the "any recent contact on the Account" fallback so a missing contact blocks instead of guessing.' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses. Prevents auto-added licenses and ignores explicit LIC-* tokens.' },
         renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
         license_only: { type: 'boolean', description: '(2026-05-20) Set true for a license-only quote (no hardware). Triggers the same model-agnostic family collapse as renewal. Leave unset/false for hardware purchases.' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal" (Stratus found/introduced the deal). Use "Meraki ISR Referal" ONLY when a Cisco rep referred the deal — and then meraki_isr_email is REQUIRED (the server refuses a Meraki ISR Referal without a real rep; it will NEVER default to Stratus Sales).' },
-        meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal". OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal" (meraki_isr_name is accepted instead when only the name is known). OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        meraki_isr_name: { type: 'string', description: 'The referring Cisco rep\'s NAME (e.g. "Josh Disla") when the email is not known. Resolved against the Meraki_ISRs module server-side; 0 or multiple matches return a structured error listing candidates — never ask the user for the email first when you have a name, pass the name here instead. meraki_isr_email wins when both are set.' },
         reactivate_inactive_isr: { type: 'boolean', description: 'Set true ONLY after the user has EXPLICITLY approved unchecking the Inactive flag on the referred rep (the tool returns meraki_isr_inactive:true with the question to ask). Unchecks Inactive on the Meraki_ISRs record, then proceeds with the assignment. Never set this without the user\'s approval in this conversation.' },
         force_new_deal: { type: 'boolean', description: 'Set true ONLY when the user explicitly wants a separate NEW deal. By default, quotes created in the same conversation for the same account reuse one master deal (e.g. 3-year and 5-year option quotes share a single deal).' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
@@ -19392,7 +19974,7 @@ Before any Deal or Quote create you MUST have: Company name (Account); Contact n
 **PRODUCTS ARE NOT MISSING IF ALREADY GIVEN.** If a Stratus order URL (\`stratusinfosystems.com/order/?item=…\`), a \`[LINE ITEMS ALREADY SPECIFIED …]\` block, or an explicit SKU/BOM list appears earlier in this conversation, those ARE the products — they are RESOLVED. NEVER ask "what products/SKUs would you like to quote" again, even after several clarify turns about account/contact/term. Resolve their product IDs with \`parse_quote_url\` (for a URL) or \`batch_product_lookup\` (for a SKU list) and proceed. Only the still-unknown fields (account, contact, rep, billing) may be asked. EXCEPTION: if the user LATER changes the items (adds/removes/swaps a SKU or pastes a new list/URL), the most recent items win — re-resolve and use those.
 
 **CLICKABLE CONFIRMATIONS (reduce typing — ALWAYS do this when asking the user to pick/confirm).** Whenever your reply asks the user to choose or confirm from a small discrete set of answers, you MUST render it as chips. This is GENERAL — it is NOT limited to a fixed list: it covers contact, license term, Cisco rep / Lead_Source, a SKU correction, which existing deal, yes/no, **PSU wattage, hardware config, product variant, transceiver/optic type, port count, color/region**, and ANY other question where you would otherwise list 2–6 options in prose ("… A, B, or C?"). RULE OF THUMB: if your prose contains a question with 2–6 enumerated options, it MUST have a chip group. You MUST (1) resolve a sensible DEFAULT and say it in your prose, then (2) append ONE machine-readable block at the very END of your reply that the app turns into clickable buttons (and strips from the visible text). One group per question (e.g. a Wattage group AND a Config group). DEFAULTS to assume (mark as the recommended option):
-- **Contact:** if none was referenced, look up the Account's contacts (\`zoho_search_records\` Contacts for that Account) and propose the primary/first one as recommended.
+- **Contact:** the "Thread participants" list in the email context is the authoritative candidate set. If it names MULTIPLE external people, NEVER silently pick one (and never blindly trust the single "Customer:" line) — ask ONCE with a Contact chip group listing each participant (name + email), recommending the one whose domain matches the resolved Account's website. Only when there are no thread participants: look up the Account's contacts (\`zoho_search_records\` Contacts for that Account) and propose the most recently active one as recommended.
 - **License term:** ALWAYS include a "License term" group whenever the quote has ANY license/subscription line — even if a term is already implied by a license SKU (e.g. …-3Y) or was stated earlier. Pre-select the known/resolved term as recommended (default **3 year** if none stated), and still offer the others so the user can change it in one click: 1/3/5 year (SME: only 1/3 year). Omit the Term group for hardware-only quotes with no license — AND for **accessory-only** quotes (power supply/PSU, adapter, cable, transceiver, mount): an accessory has NO license term, so NEVER show a License term chip for it; ask only its variant (e.g. PSU wattage) when needed.
 - **Cisco rep / Lead_Source:** default **"Stratus Referal" (no rep)** recommended, UNLESS a Cisco/Meraki rep appears in the email/thread/context.
 Block format — valid JSON on ONE line, 1–3 groups, EXACTLY one \`"recommended":true\` per group; each option's \`send\` is the literal chat message a click submits:
@@ -28009,6 +28591,47 @@ CRITICAL URL RULES:
             break;
           }
 
+          // ── One-shot customer-to-quote (2026-07-30): deterministic plan + execute ──
+          // PLAN is read-only; EXECUTE drives create_deal_and_quote directly with
+          // fully-reviewed decisions. No agent loop on either path.
+          case '/api/oneshot-plan': {
+            try {
+              apiResult = await buildOneshotPlan(apiBody, env, (env && env.__CALLER_EMAIL) || null);
+            } catch (err) {
+              apiResult = { success: false, error: 'oneshot_plan_failed', detail: err.message };
+            }
+            break;
+          }
+          case '/api/oneshot-execute': {
+            const _osStart = Date.now();
+            try {
+              apiResult = await executeOneshot(apiBody, env, (env && env.__CALLER_EMAIL) || null);
+            } catch (err) {
+              apiResult = { success: false, error: 'oneshot_execute_failed', detail: err.message };
+            }
+            try {
+              await logCrmOpToD1(env, {
+                personId: (env && env.__CALLER_EMAIL) || 'oneshot',
+                bot: 'oneshot',
+                operation: 'oneshot_execute',
+                module: 'Deals',
+                recordId: apiResult?.records?.deal?.id || null,
+                recordName: apiBody?.deal_name || null,
+                status: apiResult?.success ? 'success' : 'error',
+                durationMs: Date.now() - _osStart,
+                errorMessage: apiResult?.success ? null : (apiResult?.error || 'unknown'),
+                details: { source: apiBody?.source || 'unknown', idempotency_key: apiBody?.idempotency_key || null, replayed: apiResult?.replayed === true },
+                preState: null,
+                postState: apiResult?.records || null,
+                requestPayload: { endpoint: '/api/oneshot-execute' },
+                responsePayload: null,
+                undoToken: null,
+                userVisibleSummary: apiResult?.success ? `One-shot created Deal ${apiResult?.records?.deal?.id || ''} / Quote ${apiResult?.records?.quote?.id || ''}` : null
+              });
+            } catch (_logErr) { /* logging must never break the flow */ }
+            break;
+          }
+
           // ── Tasks: Fetch open Zoho tasks for account/contact (by ID or domain/email fallback) ──
           case '/api/tasks': {
             const { domains, emails, accountId: directAccountId, contactId: directContactId } = apiBody;
@@ -28890,6 +29513,15 @@ CRITICAL URL RULES:
                 if (wEc.senderName || wEc.senderEmail) ctxParts.push(`From: ${wEc.senderName || ''} (${wEc.senderEmail || ''})`);
                 if (wEc.customerEmail) ctxParts.push(`Customer: ${wEc.customerEmail}`);
                 if (wEc.customerDomain) ctxParts.push(`Domain: ${wEc.customerDomain}`);
+                // 2026-07-30 (American Implement postmortem): surface the FULL
+                // participant list so the model can see every candidate contact
+                // instead of blindly trusting the extension's single Customer
+                // pick. Bounded to 8; names/emails only, no bodies.
+                const wThreadContacts = Array.isArray(wEc.threadContacts)
+                  ? wEc.threadContacts.filter((c) => c && c.email).slice(0, 8) : [];
+                if (wThreadContacts.length > 1) {
+                  ctxParts.push(`Thread participants: ${wThreadContacts.map((c) => `${(c.name || '').trim()} <${c.email}>`.trim()).join('; ')}`);
+                }
                 // 2026-06-09 SEDA postmortem: the extension captures the email body but this
                 // preamble dropped it, so "create a quote based off this email" saw only the
                 // subject line. Same pattern as /api/handoff's emailBodySnippet, truncated.
@@ -29374,6 +30006,14 @@ CRITICAL URL RULES:
                 }
                 if (chatEc.customerDomain) {
                   ctxParts.push(`Domain: ${chatEc.customerDomain}`);
+                }
+                // 2026-07-30 (American Implement postmortem): full participant
+                // list so the model sees every candidate contact — parity with
+                // the live /api/chat-waterfall path.
+                const chatThreadContacts = Array.isArray(chatEc.threadContacts)
+                  ? chatEc.threadContacts.filter((c) => c && c.email).slice(0, 8) : [];
+                if (chatThreadContacts.length > 1) {
+                  ctxParts.push(`Thread participants: ${chatThreadContacts.map((c) => `${(c.name || '').trim()} <${c.email}>`.trim()).join('; ')}`);
                 }
                 // 2026-06-09 SEDA postmortem: the extension captures the email body but this
                 // preamble dropped it, so "create a quote based off this email" saw only the

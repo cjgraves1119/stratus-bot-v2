@@ -139,6 +139,10 @@ export const MSG = {
   // Deal Close Lost — confirm-gated Stage update with server-side read-back verify
   DEAL_CLOSE_LOST: 'DEAL_CLOSE_LOST',
 
+  // One-shot customer-to-quote: deterministic reviewed plan + execute (no agent loop)
+  ONESHOT_PLAN: 'ONESHOT_PLAN',
+  ONESHOT_EXECUTE: 'ONESHOT_EXECUTE',
+
   // Task suggestion
   SUGGEST_TASK_PREVIEW: 'SUGGEST_TASK_PREVIEW',
   SUGGEST_TASK: 'SUGGEST_TASK',

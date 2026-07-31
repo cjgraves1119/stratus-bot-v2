@@ -621,6 +621,14 @@ registerMessageHandlers({
     return api.dealCloseLost(dealId, expectedDealName);
   },
 
+  // ── One-shot customer-to-quote (reviewed plan card in ChatPanel) ──
+  [MSG.ONESHOT_PLAN]: async (payload) => {
+    return api.oneshotPlan(payload);
+  },
+  [MSG.ONESHOT_EXECUTE]: async (payload) => {
+    return api.oneshotExecute(payload);
+  },
+
   // ── Download Zoho's native templated Quote PDF (web-UI "Export to PDF") ──
   [MSG.EXPORT_ZOHO_PDF]: async ({ recordId, templateName, org }) => {
     return exportZohoQuotePdf({ recordId, templateName, org });

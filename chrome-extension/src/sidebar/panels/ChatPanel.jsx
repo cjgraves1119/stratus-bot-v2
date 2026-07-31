@@ -696,6 +696,211 @@ function buildParticipantOptions(emailContext) {
   return opts;
 }
 
+// Parse a stratus /order/ link (item=A,B&qty=1,2) into [{sku, qty}] for the
+// one-shot plan payload.
+function parseOrderUrlItems(url) {
+  const items = ((String(url || '').match(/[?&]item=([^&]*)/) || [])[1] || '')
+    .split(',').map(decodeURIComponent).map((s) => s.trim()).filter(Boolean);
+  const qtys = ((String(url || '').match(/[?&]qty=([^&]*)/) || [])[1] || '')
+    .split(',').map((q) => parseInt(q, 10));
+  return items.map((sku, i) => ({ sku, qty: Number.isFinite(qtys[i]) && qtys[i] > 0 ? qtys[i] : 1 }));
+}
+
+// ─────────────────────────────────────────────
+// One-shot reviewed-plan card (customer→quote)
+// ─────────────────────────────────────────────
+// The card IS the confirmation boundary: everything above the Execute click is
+// read-only plan data; blockers render as pickers, never as chat questions.
+// Ambiguous customer picks re-plan (server re-resolves account/contact for the
+// chosen participant). Execute drives the deterministic endpoint — no agent.
+function OneshotPlanCard({ msg, busy, onReplan, onExecute }) {
+  const p = msg.plan || {};
+  const blockers = msg.blockers || [];
+  const cust = p.customer || {};
+  const acctPlan = p.account || {};
+  const ct = p.contact || null;
+  const deal = p.deal || {};
+  const isr = p.isr || { status: 'not_required' };
+  const linkedElse = blockers.find((b) => b.code === 'contact_linked_elsewhere');
+  const [acct, setAcct] = useState(() => ({
+    name: (acctPlan.prefill && acctPlan.prefill.name) || '',
+    street: (acctPlan.prefill && acctPlan.prefill.street) || '',
+    city: (acctPlan.prefill && acctPlan.prefill.city) || '',
+    state: (acctPlan.prefill && acctPlan.prefill.state) || '',
+    zip: (acctPlan.prefill && acctPlan.prefill.zip) || '',
+    country: (acctPlan.prefill && acctPlan.prefill.country) || 'United States',
+  }));
+  const [useLinked, setUseLinked] = useState(true);
+  const [contactName, setContactName] = useState((ct && ct.name) || '');
+  const [dealChoice, setDealChoice] = useState(deal.mode === 'choose' ? '' : '__new__');
+  const [lead, setLead] = useState(p.lead_source || 'Stratus Referal');
+  const [isrEmail, setIsrEmail] = useState((isr.rep && isr.rep.email) || '');
+  const [reactivate, setReactivate] = useState(false);
+  const [date, setDate] = useState((p.date && p.date.suggested) || '');
+  const [overQuarter, setOverQuarter] = useState(false);
+  const [err, setErr] = useState(null);
+  const hard = blockers.filter((b) => ['unresolved_sku', 'inactive_sku', 'product_lookup_failed', 'account_not_readable', 'contact_account_mismatch'].includes(b.code));
+  const S = { sec: { marginTop: 8 }, lab: { fontSize: 10, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 2 }, in: { fontSize: 12, padding: '3px 6px', marginRight: 4, marginBottom: 3, borderRadius: 4, border: '1px solid rgba(0,0,0,0.2)' } };
+
+  function collect() {
+    const missing = [];
+    const d = {};
+    if (linkedElse && ct && ct.linked_account && useLinked) {
+      d.account = { id: ct.linked_account.id, name: ct.linked_account.name };
+      d.contact = { id: ct.id };
+    } else if (linkedElse && !useLinked) {
+      missing.push('pick a different customer above (existing contact + new account is incompatible)');
+    } else {
+      if (acctPlan.mode === 'existing') d.account = { id: acctPlan.id, name: acctPlan.name };
+      else if (acctPlan.mode === 'create') {
+        ['name', 'street', 'city', 'state', 'zip', 'country'].forEach((f) => { if (!String(acct[f] || '').trim()) missing.push('account ' + f); });
+        d.account = { create: { name: acct.name, billing: { street: acct.street, city: acct.city, state: acct.state, zip: acct.zip, country: acct.country } } };
+      } else missing.push('account (pick the customer above first)');
+      if (ct && ct.mode === 'existing') d.contact = { id: ct.id };
+      else if (ct && ct.mode === 'create') {
+        if (!String(contactName || ct.name || '').trim()) missing.push('contact name');
+        d.contact = { create: { name: String(contactName || ct.name || '').trim(), email: ct.email } };
+      } else missing.push('contact (pick the customer above first)');
+    }
+    if (deal.mode === 'attach') d.deal = { existing_deal_id: deal.existing_deal_id };
+    else if (!dealChoice) missing.push('deal choice');
+    else if (dealChoice !== '__new__') d.deal = { existing_deal_id: dealChoice };
+    else d.deal = { new: true, confirmed: true };
+    d.lead_source = lead;
+    if (isrEmail && isrEmail.includes('@')) d.meraki_isr_email = isrEmail.trim();
+    if (lead === 'Meraki ISR Referal' && !d.meraki_isr_email) missing.push('Cisco rep email');
+    if (isr.status === 'inactive' && lead === 'Meraki ISR Referal' && !reactivate) missing.push('approve reactivating the inactive rep (or change lead source)');
+    if (reactivate) d.reactivate_inactive_isr = true;
+    if (!date) missing.push('close date');
+    d.closing_date = date;
+    if (overQuarter) d.date_beyond_quarter_confirmed = true;
+    if (date && p.date && p.date.fiscal_quarter_end && date > p.date.fiscal_quarter_end && !overQuarter) {
+      missing.push('approve the past-fiscal-quarter date');
+    }
+    return { missing, decisions: d };
+  }
+
+  return (
+    <div style={{ alignSelf: 'stretch', maxWidth: '100%', padding: '10px 12px', borderRadius: 8, background: COLORS.BG_SECONDARY, fontSize: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4 }}>⚡ One-shot: review, then create in Zoho CRM</div>
+      {msg.executed && (
+        <div style={{ color: '#188038', fontWeight: 600 }}>✓ Created.{' '}
+          {msg.records?.deal?.url && <a href={msg.records.deal.url} target="_blank" rel="noopener noreferrer">Deal ↗</a>}{' '}
+          {msg.records?.quote?.url && <a href={msg.records.quote.url} target="_blank" rel="noopener noreferrer">Quote ↗</a>}
+        </div>
+      )}
+      {!msg.executed && (
+        <>
+          {hard.length > 0 && (
+            <div style={{ color: '#c5221f', marginBottom: 6 }}>
+              Blocked: {hard.map((b) => b.code + (b.sku ? ` (${b.sku})` : '')).join(' · ')} — fix in Zoho/catalog first.
+            </div>
+          )}
+          {cust.status === 'ambiguous' && (
+            <div style={S.sec}>
+              <div style={S.lab}>Customer — multiple people on the thread, explicit pick required</div>
+              <select style={S.in} defaultValue="" onChange={(e) => e.target.value && onReplan(e.target.value)} disabled={busy}>
+                <option value="">— pick the customer —</option>
+                {(cust.candidates || []).map((c) => (
+                  <option key={c.email} value={c.email}>
+                    {(c.name ? c.name + ' ' : '') + '<' + c.email + '>'}{cust.suggested && cust.suggested.email === c.email ? ' — suggested' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {acctPlan.mode === 'existing' && (
+            <div style={S.sec}><div style={S.lab}>Account (existing)</div>
+              <b>{acctPlan.name}</b>{acctPlan.missing_fields && acctPlan.missing_fields.length > 0 && (
+                <span style={{ color: '#e37400' }}> — missing in Zoho: {acctPlan.missing_fields.join(', ')} (Execute will block until fixed)</span>
+              )}
+            </div>
+          )}
+          {acctPlan.mode === 'create' && !(linkedElse && useLinked) && (
+            <div style={S.sec}><div style={S.lab}>Account — will be created (review every field{acctPlan.prefill && acctPlan.prefill.enrich_tier ? ` · prefilled by ${acctPlan.prefill.enrich_tier} enrichment` : ''})</div>
+              {['name', 'street', 'city', 'state', 'zip', 'country'].map((f) => (
+                <input key={f} style={S.in} placeholder={f} value={acct[f]} disabled={busy}
+                  onChange={(e) => setAcct((a) => ({ ...a, [f]: e.target.value }))} />
+              ))}
+            </div>
+          )}
+          {linkedElse && ct && ct.linked_account && (
+            <div style={S.sec}><div style={S.lab}>Pairing — this contact already belongs to {ct.linked_account.name || 'another account'}</div>
+              <label style={{ display: 'block' }}><input type="checkbox" checked={useLinked} onChange={(e) => setUseLinked(e.target.checked)} disabled={busy} /> Use <b>{ct.linked_account.name || ct.linked_account.id}</b> as the Account (recommended)</label>
+            </div>
+          )}
+          {ct && ct.mode === 'existing' && !linkedElse && (
+            <div style={S.sec}><div style={S.lab}>Contact (existing)</div><b>{ct.name}</b> &lt;{ct.email}&gt;</div>
+          )}
+          {ct && ct.mode === 'create' && (
+            <div style={S.sec}><div style={S.lab}>Contact — will be created</div>
+              <input style={S.in} value={contactName} placeholder="Full name" disabled={busy} onChange={(e) => setContactName(e.target.value)} /> &lt;{ct.email}&gt;
+              {ct.last_name_placeholder && <div style={{ color: COLORS.TEXT_SECONDARY }}>Single name — surname will be the neutral placeholder “-” unless you add one.</div>}
+            </div>
+          )}
+          <div style={S.sec}><div style={S.lab}>Deal</div>
+            {deal.mode === 'attach' && <span>Attach quote to existing Deal {deal.existing_deal_id}</span>}
+            {deal.mode !== 'attach' && (deal.open_deals || []).map((od) => (
+              <label key={od.id} style={{ display: 'block' }}>
+                <input type="radio" name={`os_deal_${msg.id}`} checked={dealChoice === od.id} onChange={() => setDealChoice(od.id)} disabled={busy} />{' '}
+                Attach to <b>{od.name}</b> ({od.stage || '-'}{od.amount != null ? ` · $${od.amount}` : ''})
+              </label>
+            ))}
+            {deal.mode !== 'attach' && (
+              <label style={{ display: 'block' }}>
+                <input type="radio" name={`os_deal_${msg.id}`} checked={dealChoice === '__new__'} onChange={() => setDealChoice('__new__')} disabled={busy} />{' '}
+                {deal.mode === 'choose' ? 'Create a SEPARATE new Deal' : 'A NEW Deal will be created'}
+              </label>
+            )}
+          </div>
+          <div style={S.sec}><div style={S.lab}>Lead source / Cisco rep</div>
+            <select style={S.in} value={lead} onChange={(e) => setLead(e.target.value)} disabled={busy}>
+              <option value="Stratus Referal">Stratus Referal</option>
+              <option value="Meraki ISR Referal">Meraki ISR Referal</option>
+            </select>
+            {isr.status === 'resolved' && <span>Rep: <b>{isr.rep.name}</b> &lt;{isr.rep.email}&gt;</span>}
+            {isr.status === 'inactive' && (
+              <span>Rep <b>{isr.rep.name}</b> is INACTIVE — <label><input type="checkbox" checked={reactivate} onChange={(e) => setReactivate(e.target.checked)} disabled={busy} /> approve reactivation</label></span>
+            )}
+            {isr.status === 'ambiguous' && (
+              <select style={S.in} value={isrEmail} onChange={(e) => setIsrEmail(e.target.value)} disabled={busy}>
+                <option value="">— pick the rep —</option>
+                {(isr.candidates || []).map((c) => <option key={c.id} value={c.email || ''}>{c.name} &lt;{c.email || 'no email'}&gt;{c.inactive ? ' (inactive)' : ''}</option>)}
+              </select>
+            )}
+            {(isr.status === 'none' || isr.status === 'not_required') && (
+              <input style={S.in} placeholder="rep@cisco.com (only for ISR referral)" value={isrEmail} disabled={busy} onChange={(e) => setIsrEmail(e.target.value)} />
+            )}
+          </div>
+          <div style={S.sec}><div style={S.lab}>Close date (Deal Closing Date = Quote Valid Till · fiscal quarter ends {(p.date && p.date.fiscal_quarter_end) || '?'})</div>
+            <input type="date" style={S.in} value={date} disabled={busy} onChange={(e) => setDate(e.target.value)} />
+            <label style={{ marginLeft: 6 }}><input type="checkbox" checked={overQuarter} onChange={(e) => setOverQuarter(e.target.checked)} disabled={busy} /> approve past-quarter date</label>
+          </div>
+          {(p.lines || []).length > 0 && (
+            <div style={S.sec}><div style={S.lab}>Quote lines (ecomm)</div>
+              {(p.lines || []).map((l, i) => (
+                <div key={i}>• {l.sku} × {l.qty}{typeof l.ecomm_price === 'number' ? ` — $${l.ecomm_price} ea` : ' — unresolved'}</div>
+              ))}
+              {typeof p.total_ecomm === 'number' && <div style={{ fontWeight: 700 }}>Total: ${p.total_ecomm}</div>}
+            </div>
+          )}
+          {err && <div style={{ color: '#c5221f', marginTop: 6 }}>Still needed: {err}</div>}
+          <button
+            style={{ marginTop: 8, padding: '6px 12px', borderRadius: 6, border: 'none', cursor: 'pointer', background: hard.length || busy ? '#9aa0a6' : '#1a73e8', color: '#fff', fontWeight: 600 }}
+            disabled={hard.length > 0 || busy}
+            onClick={() => {
+              const col = collect();
+              if (col.missing.length) { setErr(col.missing.join('; ')); return; }
+              setErr(null);
+              onExecute(col.decisions);
+            }}
+          >{busy ? 'Executing…' : 'Execute — create in Zoho CRM'}</button>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────
@@ -1512,12 +1717,66 @@ export default function ChatPanel({
 
   // Hand a finished ecomm quote to the CRM agent to create a Zoho quote.
   // selectedUrlIdx is the term the user copied/opened in the card.
-  function handleSendQuoteToZoho(result, selectedUrlIdx = 0) {
-    const { orderUrl, skuSummary } = orderSummaryFromResult(result, selectedUrlIdx);
-    let text = 'Create a Zoho CRM quote from this Stratus quote';
-    if (orderUrl) text += `: ${orderUrl}`;
-    if (skuSummary) text += `\nLine items: ${skuSummary}`;
-    handleSendMessage(text);
+  // One-shot: "Send quote to Zoho" now opens a REVIEWED plan card instead of a
+  // free-text chat turn (American Implement postmortem — the old path inherited
+  // whatever contact the panel defaulted to and re-entered every agent gate).
+  // The FULL participant list goes to the server; ambiguity comes back as a
+  // picker on the card, and Execute drives the deterministic endpoint.
+  async function handleSendQuoteToZoho(result, selectedUrlIdx = 0) {
+    const { orderUrl } = orderSummaryFromResult(result, selectedUrlIdx);
+    const skus = parseOrderUrlItems(orderUrl);
+    if (!skus.length) { appendMessage(infoMsg('⚠️ No SKUs found on the selected quote URL.')); return; }
+    const base = {
+      skus,
+      participants: (emailContext?.threadContacts || []).map((c) => ({ email: c.email, name: c.name || '', role: c.role || '' })),
+      // ONLY an explicit user pick rides along — the server decides (or blocks)
+      // from the participant list otherwise. Never forward the auto default.
+      contact_email: (selectedContextEmail && selectedContextEmail !== '__none__') ? selectedContextEmail : undefined,
+      source: 'ext-oneshot',
+    };
+    const pin = manualRecord || autoPinnedRecord || null;
+    if (pin && pin.module === 'Accounts' && pin.recordId) base.account_id = pin.recordId;
+    setLoading(true);
+    const res = await sendToBackground(MSG.ONESHOT_PLAN, base).catch((e) => ({ success: false, error: e.message }));
+    setLoading(false);
+    if (!res || res.success !== true) {
+      appendMessage(infoMsg(`⚠️ One-shot plan failed: ${res?.detail || res?.error || 'unknown'}`));
+      return;
+    }
+    appendMessage({
+      id: nextId(), role: 'assistant', kind: 'oneshot', timestamp: new Date().toISOString(),
+      plan: res.plan, blockers: res.blockers, base,
+      idempotencyKey: 'ext:' + (globalThis.crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2)),
+    });
+  }
+
+  async function replanOneshot(msg, contactEmail) {
+    setLoading(true);
+    const base = { ...msg.base, contact_email: contactEmail };
+    const res = await sendToBackground(MSG.ONESHOT_PLAN, base).catch((e) => ({ success: false, error: e.message }));
+    setLoading(false);
+    if (!res || res.success !== true) { appendMessage(infoMsg(`⚠️ Re-plan failed: ${res?.detail || res?.error || 'unknown'}`)); return; }
+    onMessagesChange((msgs) => msgs.map((m) => m.id === msg.id ? { ...m, plan: res.plan, blockers: res.blockers, base } : m));
+  }
+
+  async function executeOneshotCard(msg, decisions) {
+    onMessagesChange((msgs) => msgs.map((m) => m.id === msg.id ? { ...m, busy: true } : m));
+    const payload = {
+      idempotency_key: msg.idempotencyKey,
+      skus: msg.base.skus,
+      source: 'ext-oneshot',
+      ...decisions,
+    };
+    const res = await sendToBackground(MSG.ONESHOT_EXECUTE, payload).catch((e) => ({ success: false, error: e.message }));
+    if (res && res.success === true) {
+      onMessagesChange((msgs) => msgs.map((m) => m.id === msg.id ? { ...m, busy: false, executed: true, records: res.records } : m));
+      const q = res.records?.quote || {}; const d = res.records?.deal || {};
+      appendMessage(infoMsg(`✓ Created in Zoho${res.replayed ? ' (replayed — already existed)' : ''}.${d.url ? ` Deal: ${d.url}` : ''}${q.url ? ` Quote: ${q.url}` : ''}`));
+    } else {
+      onMessagesChange((msgs) => msgs.map((m) => m.id === msg.id ? { ...m, busy: false } : m));
+      const extra = res?.missing ? ` — ${res.missing.join('; ')}` : (res?.instruction || res?.detail ? ` — ${res.instruction || res.detail}` : '');
+      appendMessage(infoMsg(`⚠️ One-shot stopped: ${res?.error || 'failed'}${extra}${res?.records?.deal?.id ? ' (CRM records from this attempt are preserved — Execute again resumes)' : ''}`));
+    }
   }
 
   // Send dispatcher: route obvious ecomm-quote asks to the deterministic
@@ -1739,6 +1998,18 @@ export default function ChatPanel({
                   onSendToZoho={handleSendQuoteToZoho}
                 />
               </div>
+            );
+          }
+          // One-shot reviewed-plan card (customer→quote)
+          if (msg.role === 'assistant' && msg.kind === 'oneshot') {
+            return (
+              <OneshotPlanCard
+                key={msg.id}
+                msg={msg}
+                busy={msg.busy === true}
+                onReplan={(email) => replanOneshot(msg, email)}
+                onExecute={(decisions) => executeOneshotCard(msg, decisions)}
+              />
             );
           }
           // Email analysis card
