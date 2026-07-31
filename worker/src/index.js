@@ -6129,6 +6129,20 @@ function parseMessage(text) {
         const singleMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*$/i);
         if (singleMatch) {
           licItems.push({ sku: singleMatch[1].toUpperCase(), qty: 1 });
+        } else {
+          // 2026-07-31 (gchat error_reports #7 sibling): a line carrying
+          // MULTIPLE "SKU,qty" pairs ("LIC-A,1  LIC-B,27") matched none of the
+          // single-pair rules and was silently dropped — a partial list then
+          // quoted. Accept the line only when every LIC token on it is an
+          // explicit pair, so ambiguous fragments still fall through.
+          const linePairs = [...line.matchAll(/\b(LIC-[A-Z0-9-]+)\s*,\s*(\d{1,5})(?=[\s,;]|$)/gi)];
+          const lineLicCount = (line.match(/\bLIC-[A-Z0-9-]+/gi) || []).length;
+          if (linePairs.length >= 2 && linePairs.length === lineLicCount) {
+            for (const m of linePairs) {
+              const q = parseInt(m[2]);
+              if (q > 0) licItems.push({ sku: m[1].toUpperCase(), qty: q });
+            }
+          }
         }
         // Skip non-matching lines (headers, garbage, double-pasted data)
       }
@@ -6162,6 +6176,34 @@ function parseMessage(text) {
   // The multi-line parser above requires >= 2 newline-separated lines,
   // so comma-separated input on a single line falls through. Catch it here.
   if (lines.length <= 2) {
+    // ── "SKU,qty SKU,qty …" pair format (2026-07-31, gchat error_reports #7 —
+    // Ohio Valley Gas): splitting a dashboard paste like
+    // "LIC-C9300-24E-3Y,1  LIC-ENT-3YR,27 …" on commas turned it into
+    // fragments like "1  LIC-ENT-3YR", binding every quantity to the NEXT SKU
+    // (all 20 lines shifted by one). When EVERY LIC token is an explicit
+    // "SKU,qty" pair, parse the pairs directly (comma binds the qty to the
+    // PRECEDING SKU) and skip the comma split entirely.
+    const _pairMatches = [...text.matchAll(/\b(LIC-[A-Z0-9-]+)\s*,\s*(\d{1,5})(?=[\s,;]|$)/gi)];
+    const _licTokenCount = (text.match(/\bLIC-[A-Z0-9-]+/gi) || []).length;
+    if (_pairMatches.length >= 2 && _pairMatches.length === _licTokenCount) {
+      const seenP = new Set();
+      const dedupP = [];
+      for (const m of _pairMatches) {
+        const sku = m[1].toUpperCase();
+        const q = parseInt(m[2]);
+        if (q > 0 && !seenP.has(sku)) { seenP.add(sku); dedupP.push({ sku, qty: q }); }
+      }
+      return {
+        items: [],
+        directLicenseList: dedupP,
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false
+      };
+    }
     const commaParts = text.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
     const licFromComma = [];
     for (const part of commaParts) {
