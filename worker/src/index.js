@@ -6135,11 +6135,12 @@ function parseMessage(text) {
           // single-pair rules and was silently dropped — a partial list then
           // quoted. Accept the line only when every LIC token on it is an
           // explicit pair, so ambiguous fragments still fall through.
-          const linePairs = [...line.matchAll(/(LIC-[A-Z0-9-]+)\s*,\s*(\d+)(?=[\s,;]|$)/gi)];
-          const lineLicCount = (line.match(/LIC-[A-Z0-9-]+/gi) || []).length;
+          const linePairs = [...line.matchAll(/\b(LIC-[A-Z0-9-]+)\s*,\s*(\d{1,5})(?=[\s,;]|$)/gi)];
+          const lineLicCount = (line.match(/\bLIC-[A-Z0-9-]+/gi) || []).length;
           if (linePairs.length >= 2 && linePairs.length === lineLicCount) {
             for (const m of linePairs) {
-              licItems.push({ sku: m[1].toUpperCase(), qty: parseInt(m[2]) });
+              const q = parseInt(m[2]);
+              if (q > 0) licItems.push({ sku: m[1].toUpperCase(), qty: q });
             }
           }
         }
@@ -6182,14 +6183,15 @@ function parseMessage(text) {
     // (all 20 lines shifted by one). When EVERY LIC token is an explicit
     // "SKU,qty" pair, parse the pairs directly (comma binds the qty to the
     // PRECEDING SKU) and skip the comma split entirely.
-    const _pairMatches = [...text.matchAll(/(LIC-[A-Z0-9-]+)\s*,\s*(\d+)(?=[\s,;]|$)/gi)];
-    const _licTokenCount = (text.match(/LIC-[A-Z0-9-]+/gi) || []).length;
+    const _pairMatches = [...text.matchAll(/\b(LIC-[A-Z0-9-]+)\s*,\s*(\d{1,5})(?=[\s,;]|$)/gi)];
+    const _licTokenCount = (text.match(/\bLIC-[A-Z0-9-]+/gi) || []).length;
     if (_pairMatches.length >= 2 && _pairMatches.length === _licTokenCount) {
       const seenP = new Set();
       const dedupP = [];
       for (const m of _pairMatches) {
         const sku = m[1].toUpperCase();
-        if (!seenP.has(sku)) { seenP.add(sku); dedupP.push({ sku, qty: parseInt(m[2]) }); }
+        const q = parseInt(m[2]);
+        if (q > 0 && !seenP.has(sku)) { seenP.add(sku); dedupP.push({ sku, qty: q }); }
       }
       return {
         items: [],

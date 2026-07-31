@@ -4861,11 +4861,12 @@ function parseMessage(text) {
           // single-pair rules and was silently dropped — a partial list then
           // quoted. Accept the line only when every LIC token on it is an
           // explicit pair, so ambiguous fragments still fall through.
-          const linePairs = [...line.matchAll(/(LIC-[A-Z0-9-]+)\s*,\s*(\d+)(?=[\s,;]|$)/gi)];
-          const lineLicCount = (line.match(/LIC-[A-Z0-9-]+/gi) || []).length;
+          const linePairs = [...line.matchAll(/\b(LIC-[A-Z0-9-]+)\s*,\s*(\d{1,5})(?=[\s,;]|$)/gi)];
+          const lineLicCount = (line.match(/\bLIC-[A-Z0-9-]+/gi) || []).length;
           if (linePairs.length >= 2 && linePairs.length === lineLicCount) {
             for (const m of linePairs) {
-              licItems.push({ sku: m[1].toUpperCase(), qty: parseInt(m[2]) });
+              const q = parseInt(m[2]);
+              if (q > 0) licItems.push({ sku: m[1].toUpperCase(), qty: q });
             }
           }
         }
@@ -4909,14 +4910,15 @@ function parseMessage(text) {
     // 20 lines shifted by one. When EVERY LIC token on the line is written as an
     // explicit "SKU,qty" pair, parse those pairs directly (comma binds the qty
     // to the PRECEDING SKU) and skip the comma split entirely.
-    const _pairMatches = [...text.matchAll(/(LIC-[A-Z0-9-]+)\s*,\s*(\d+)(?=[\s,;]|$)/gi)];
-    const _licTokenCount = (text.match(/LIC-[A-Z0-9-]+/gi) || []).length;
+    const _pairMatches = [...text.matchAll(/\b(LIC-[A-Z0-9-]+)\s*,\s*(\d{1,5})(?=[\s,;]|$)/gi)];
+    const _licTokenCount = (text.match(/\bLIC-[A-Z0-9-]+/gi) || []).length;
     if (_pairMatches.length >= 2 && _pairMatches.length === _licTokenCount) {
       const seenP = new Set();
       const dedupP = [];
       for (const m of _pairMatches) {
         const sku = m[1].toUpperCase();
-        if (!seenP.has(sku)) { seenP.add(sku); dedupP.push({ sku, qty: parseInt(m[2]) }); }
+        const q = parseInt(m[2]);
+        if (q > 0 && !seenP.has(sku)) { seenP.add(sku); dedupP.push({ sku, qty: q }); }
       }
       return {
         items: [],
@@ -8383,12 +8385,14 @@ function stripUndefinedLiterals(data) {
 // naming), hardened with the literal-junk class that produced corp's
 // "undefined" Account on 2026-07-30 — undefined/null/[object Object]/NaN pass
 // his regex, and a name that is ONLY punctuation/whitespace passes both.
-const PLACEHOLDER_NAME_RE = /^(company|customer|account|client|business|organization)\s*_?\s*names?\b|\bplaceholder\b|\blorem ipsum\b|^(unknown|tbd|n\/?a|none|-+)$|^(test|sample|example|fake)\s+(company|account|customer|client)\b|[{}]|^<?(undefined|null|nan|\[object(\s+object)?\])>?$/i;
+const PLACEHOLDER_NAME_RE = /^(company|customer|account|client|business|organization)\s*_?\s*name\b|\bplaceholder\b|\blorem ipsum\b|^(unknown|tbd|n\/?a|none|-+)$|^(test|sample|example|fake)\s+(company|account|customer|client)\b|[{}]|^<?(undefined|null|nan|\[object(\s+object)?\])>?$/i;
 function isPlaceholderName(s) {
   if (!s || typeof s !== 'string') return true;
   const trimmed = s.trim();
   if (trimmed.length < 2) return true;
-  if (!/[a-z0-9]/i.test(trimmed)) return true; // punctuation-only ("—", "--", "??")
+  // Punctuation-only ("—", "--", "??"). Unicode-aware so non-Latin company
+  // names (CJK etc.) are never flagged (2026-07-31 adversarial review).
+  if (!/[\p{L}\p{N}]/u.test(trimmed)) return true;
   return PLACEHOLDER_NAME_RE.test(trimmed);
 }
 
@@ -8409,8 +8413,10 @@ function deriveQuoteTermLabel(resolvedProducts, licenseTermArg) {
   }
   if (years.size === 1) return `${[...years][0]}-Year`;
   if (years.size > 1) return null; // mixed terms — never stamp a wrong one
-  const t = String(licenseTermArg || '').match(/^(\d{1,2})$/);
-  return t ? `${t[1]}-Year` : null;
+  // Whitelist real Cisco terms — an unvalidated model arg ("36") must never
+  // become a "36-Year" Subject (2026-07-31 adversarial review).
+  const t = String(licenseTermArg || '').trim();
+  return /^(1|3|5|7|10)$/.test(t) ? `${t}-Year` : null;
 }
 
 // True when a subject already tells the reader its term ("3yr", "3-Year",
@@ -8865,8 +8871,10 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
     // 2026-07-31 (corp error_reports #39): a blank Quote Stage breaks the
     // quote→PO conversion downstream. Prompt-level guidance alone still let the
     // model omit it, so default it server-side. The Won/Sold guard above still
-    // blocks illegitimate values.
-    if (!data.Quote_Stage) {
+    // blocks illegitimate values. Skipped when Admin_Action is present — the
+    // Admin_Action+Quote_Stage combo is forbidden above, and defaulting here
+    // would inject exactly that combo after the guard already ran.
+    if (!data.Quote_Stage && !data.Admin_Action) {
       data.Quote_Stage = 'Qualification';
       console.log('[VALIDATE] Quote_Stage missing on create — defaulted to "Qualification"');
     }
@@ -13688,6 +13696,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (_pick.length === 1 && _pick[0].Email) {
                 _isrEmailInput = String(_pick[0].Email).trim();
                 results.steps.push(`Resolved Meraki ISR by name: "${_wantedName}" → ${_pick[0].Name} <${_isrEmailInput}> (Meraki_ISRs module)`);
+              } else if (_pick.length === 1 && !_pick[0].Email) {
+                // Found the rep but their record has no Email — say so instead
+                // of the misleading "no record matches" (2026-07-31 review).
+                results.steps.push(`Meraki ISR name lookup: "${_wantedName}" matched ${_pick[0].Name} but that Meraki_ISRs record has NO Email on file — confirm the rep's @cisco.com address with the user`);
               } else if (_pick.length > 1) {
                 return {
                   success: false,
@@ -17381,10 +17393,21 @@ function stripInjectedClassifierContext(text) {
     const end = s.lastIndexOf(']\n\n');
     if (end > bodyStart) {
       s = s.slice(0, bodyStart) + s.slice(end + 3);
+    } else {
+      // 2026-07-31 hardening over the corp original: an [Email body: block at
+      // the very end of the message has no "]\n\n" close marker — failing open
+      // left the whole body in the classified text (the exact hijack class the
+      // strip exists for). Strip to end instead.
+      s = s.slice(0, bodyStart);
     }
   }
   s = s.replace(/\[Email context:[^\n]*\]/g, ' ');
-  s = s.replace(/^\s*\[(?:CRM context|Session):[^\n]*\]\s*/gm, '');
+  // 2026-07-31: [Active Zoho page:...] added to the line strip (diverges from
+  // the corp original deliberately) — the extension PREFIXES it to zoho-page
+  // turns, and any ^-anchored rule (e.g. the continuation guard) never fired
+  // with the header in front. Context flags at the callsite still read the RAW
+  // message, so hasActivePageContext is unaffected.
+  s = s.replace(/^\s*\[(?:CRM context|Session|Active Zoho page):[^\n]*\]\s*/gm, '');
   return s;
 }
 
@@ -17419,7 +17442,12 @@ function classifyCrmIntent(text, ctx = {}) {
     const _short = _s.length > 0 && _s.length <= 220;
     const _affirm = /^(yes\b|yep\b|yeah\b|ok(?:ay)?\b|sure\b|correct\b|confirmed?\b|approved?\b|sounds good\b|go ahead\b|proceed\b|do it\b|please (?:do|proceed)\b|use\s|go with\s|make it\s|let'?s (?:do|go|use)\s)/i.test(_s);
     const _bareAnswer = /^(?:both\s+)?(?:\d{1,2}\s*-?\s*(?:year|yr)s?|end of (?:the\s+)?(?:this\s+|next\s+)?(?:month|quarter|week)|option\s+\d|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})[\s.!]*$/i.test(_s);
-    const _otherClassSignal = /\b(did|velocity|esign|e-sign|docusign|convert to po|create (?:a |the )?po\b|sub ?mod|draft|email|inbox|gmail|reply|url quote|ecomm link|order link|shopping cart)\b/i.test(_s);
+    // assign/uncheck/reactivate/inactive excluded (2026-07-31 adversarial
+    // review): "yes, uncheck the inactive flag and assign Jesse" must fall
+    // through to the cisco_rep rule — its subset carries
+    // assign_cisco_rep_to_deal, which crm_write does not (the 2026-07-09
+    // reactivation-retry fix depends on it).
+    const _otherClassSignal = /\b(did|velocity|esign|e-sign|docusign|convert to po|create (?:a |the )?po\b|sub ?mod|draft|email|inbox|gmail|reply|url quote|ecomm link|order link|shopping cart|assign|reassign|uncheck|reactivate|re-activate|inactive)\b/i.test(_s);
     if (_short && (_affirm || _bareAnswer) && !_otherClassSignal) {
       return { class: 'crm_write', confidence: 0.85 };
     }

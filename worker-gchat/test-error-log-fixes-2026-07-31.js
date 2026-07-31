@@ -119,16 +119,43 @@ t('multi-line CSV format (one pair per line) unchanged', () => {
   ]);
 });
 
+t('embedded LIC substring ("PUBLIC-SECTOR,3") never mints a bogus SKU (adversarial P3)', () => {
+  const r = parseMessage('PUBLIC-SECTOR,3 LIC-ENT-3YR,27');
+  const skus = (r && r.directLicenseList || []).map(i => i.sku);
+  assert.ok(!skus.includes('LIC-SECTOR'), `LIC-SECTOR minted from PUBLIC-SECTOR: ${JSON.stringify(skus)}`);
+});
+
+t('zero-qty pairs are skipped, not quoted as 0', () => {
+  const r = parseMessage('LIC-ENT-3YR,0  LIC-MX67-SEC-3YR,2  LIC-MT-3Y,1');
+  assert.ok(r && Array.isArray(r.directLicenseList));
+  const map = Object.fromEntries(r.directLicenseList.map(i => [i.sku, i.qty]));
+  assert.equal(map['LIC-ENT-3YR'], undefined, 'qty-0 line must be dropped');
+  assert.equal(map['LIC-MX67-SEC-3YR'], 2);
+  assert.equal(map['LIC-MT-3Y'], 1);
+});
+
 console.log('\n=== B. Continuation turns keep create tools (corp error_reports #16/#31) ===\n');
 
 const pageCtx = { hasActivePageContext: true, hasQuoteSession: false };
 
-t('corp #31 exact turn "Yes, use gacuevas@cisco.com as the referring Cisco rep. 1 year" → crm_write with create tools', () => {
-  const intent = classifyCrmIntent('Yes, use gacuevas@cisco.com as the referring Cisco rep. 1 year', pageCtx);
+t('corp #31-shaped turn "Yes, use <rep>@cisco.com as the referring Cisco rep. 1 year" → crm_write with create tools', () => {
+  const intent = classifyCrmIntent('Yes, use arep@cisco.com as the referring Cisco rep. 1 year', pageCtx);
   assert.equal(intent.class, 'crm_write', `classified ${intent.class}`);
   const names = toolNames(intent);
   assert.ok(names.includes('create_deal_and_quote'), 'subset must carry create_deal_and_quote');
   assert.ok(names.includes('create_quote_on_deal'), 'subset must carry create_quote_on_deal');
+});
+
+t('same turn WITH the real [Active Zoho page:] prefix the extension injects → still crm_write (adversarial P1)', () => {
+  const msg = '[Active Zoho page: Quotes 2570562000399909180]\nYes, use arep@cisco.com as the referring Cisco rep. 1 year';
+  const intent = classifyCrmIntent(msg, { hasActivePageContext: true, hasQuoteSession: false });
+  assert.equal(intent.class, 'crm_write', `classified ${intent.class} — Active-page prefix must not defeat the ^-anchored continuation rule`);
+});
+
+t('reactivation approval "yes, uncheck the inactive flag and assign Jesse" → cisco_rep, NOT hijacked (adversarial P2)', () => {
+  const intent = classifyCrmIntent('yes, uncheck the inactive flag and assign Jesse', pageCtx);
+  assert.equal(intent.class, 'cisco_rep', `classified ${intent.class} — must reach the subset carrying assign_cisco_rep_to_deal`);
+  assert.ok(toolNames(intent).includes('assign_cisco_rep_to_deal'));
 });
 
 t('"Use 2026-07-31 as the close date" (repeated in 4 of the week\'s transcripts) → crm_write', () => {
@@ -141,8 +168,8 @@ t('bare "1 year" answer with quote session → crm_write', () => {
   assert.equal(intent.class, 'crm_write');
 });
 
-t('bare rep-email answer "shemajor@cisco.com" (corp #28 transcript) → crm_write', () => {
-  const intent = classifyCrmIntent('shemajor@cisco.com', pageCtx);
+t('bare rep-email answer (corp #28 transcript shape) → crm_write', () => {
+  const intent = classifyCrmIntent('brep@cisco.com', pageCtx);
   assert.equal(intent.class, 'crm_write');
 });
 
@@ -163,6 +190,14 @@ t('continuation guard does NOT hijack email follow-ups ("yes, draft the reply to
 t('bare "1 year" WITHOUT any session/page context stays general (no behavior change)', () => {
   const intent = classifyCrmIntent('1 year', {});
   assert.equal(intent.class, 'general');
+});
+
+t('strip removes [Active Zoho page:] lines and un-closed [Email body: tails (adversarial hardening)', () => {
+  const s1 = stripInjectedClassifierContext('[Active Zoho page: Deals 123 — Acme]\nUse 2026-07-31 as the close date');
+  assert.ok(!s1.includes('Active Zoho page'), 'Active-page line must be stripped');
+  assert.ok(s1.includes('Use 2026-07-31'), 'user text must survive');
+  const s2 = stripInjectedClassifierContext('create a quote [Email body: please esign the docusign contract');
+  assert.ok(!/esign|docusign/.test(s2), 'un-closed Email body tail must not fail open into the classified text');
 });
 
 t('stripInjectedClassifierContext removes [Session:]/[Email context:]/[Pre-resolved products:] blocks', () => {
@@ -194,8 +229,8 @@ t('isPlaceholderName catches Amir\'s corp placeholder class (ported)', () => {
   }
 });
 
-t('isPlaceholderName passes real names', () => {
-  for (const good of ['Trophy Auto Group', 'Ohio Valley Gas', "O'Brien & Sons", 'First Service Solutions', 'None of the Above LLC', 'Nullify Security Inc']) {
+t('isPlaceholderName passes real names (incl. non-Latin + name-adjacent)', () => {
+  for (const good of ['Trophy Auto Group', 'Ohio Valley Gas', "O'Brien & Sons", 'First Service Solutions', 'None of the Above LLC', 'Nullify Security Inc', 'Client Names LLC', '株式会社日立']) {
     assert.ok(!isPlaceholderName(good), `"${good}" must NOT be flagged`);
   }
 });
@@ -241,6 +276,12 @@ await ta('an explicit legitimate Quote_Stage is preserved (not overwritten)', as
   assert.equal(data.Quote_Stage, 'Negotiation');
 });
 
+await ta('Admin_Action create is NOT given a Quote_Stage default (forbidden combo guard)', async () => {
+  const data = { Subject: 'Acme - Renewal', Deal_Name: { id: 'd' }, Valid_Till: '2099-01-01', Admin_Action: 'LIVE_CiscoQuote_Deal' };
+  await validateCrmWrite('Quotes', data, true, null);
+  assert.equal(data.Quote_Stage, undefined, 'defaulting Quote_Stage alongside Admin_Action recreates the forbidden combo');
+});
+
 t('deterministic create_deal_and_quote payload sets Quote_Stage (source assertion)', () => {
   const idx = rawSource.indexOf('const quoteData = {');
   assert.notEqual(idx, -1);
@@ -268,6 +309,12 @@ t('mixed terms → null (never stamp a wrong term)', () => {
 t('no explicit-term SKUs + license_term arg → arg wins (Duo single-SKU class)', () => {
   assert.equal(deriveQuoteTermLabel([{ sku: 'DUO-EDU-ESS-F' }], '1'), '1-Year');
   assert.equal(deriveQuoteTermLabel([{ sku: 'DUO-EDU-ESS-F' }], '3'), '3-Year');
+});
+
+t('license_term arg outside real Cisco terms never stamps ("36" ≠ "36-Year")', () => {
+  assert.equal(deriveQuoteTermLabel([{ sku: 'DUO-EDU-ESS-F' }], '36'), null);
+  assert.equal(deriveQuoteTermLabel([{ sku: 'DUO-EDU-ESS-F' }], '2'), null);
+  assert.equal(deriveQuoteTermLabel([{ sku: 'DUO-EDU-ESS-F' }], '10'), '10-Year');
 });
 
 t('hardware-only quote with no term arg → null', () => {
