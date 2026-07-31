@@ -4855,6 +4855,19 @@ function parseMessage(text) {
         const singleMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*$/i);
         if (singleMatch) {
           licItems.push({ sku: singleMatch[1].toUpperCase(), qty: 1 });
+        } else {
+          // 2026-07-31 (personal error_reports #7 sibling): a line carrying
+          // MULTIPLE "SKU,qty" pairs ("LIC-A,1  LIC-B,27") matched none of the
+          // single-pair rules and was silently dropped — a partial list then
+          // quoted. Accept the line only when every LIC token on it is an
+          // explicit pair, so ambiguous fragments still fall through.
+          const linePairs = [...line.matchAll(/(LIC-[A-Z0-9-]+)\s*,\s*(\d+)(?=[\s,;]|$)/gi)];
+          const lineLicCount = (line.match(/LIC-[A-Z0-9-]+/gi) || []).length;
+          if (linePairs.length >= 2 && linePairs.length === lineLicCount) {
+            for (const m of linePairs) {
+              licItems.push({ sku: m[1].toUpperCase(), qty: parseInt(m[2]) });
+            }
+          }
         }
         // Skip non-matching lines (headers, garbage, double-pasted data)
       }
@@ -4888,6 +4901,34 @@ function parseMessage(text) {
   // The multi-line parser above requires >= 2 newline-separated lines,
   // so comma-separated input on a single line falls through. Catch it here.
   if (lines.length <= 2) {
+    // ── "SKU,qty SKU,qty …" pair format (2026-07-31, personal error_reports #7 —
+    // Ohio Valley Gas $84k quote): a dashboard paste like
+    //   "LIC-C9300-24E-3Y,1  LIC-ENT-3YR,27  LIC-MS120-24-3YR,4 …"
+    // was split on commas, turning it into fragments like "1  LIC-ENT-3YR" —
+    // the qty-first rule (m3) then bound every quantity to the NEXT SKU, so all
+    // 20 lines shifted by one. When EVERY LIC token on the line is written as an
+    // explicit "SKU,qty" pair, parse those pairs directly (comma binds the qty
+    // to the PRECEDING SKU) and skip the comma split entirely.
+    const _pairMatches = [...text.matchAll(/(LIC-[A-Z0-9-]+)\s*,\s*(\d+)(?=[\s,;]|$)/gi)];
+    const _licTokenCount = (text.match(/LIC-[A-Z0-9-]+/gi) || []).length;
+    if (_pairMatches.length >= 2 && _pairMatches.length === _licTokenCount) {
+      const seenP = new Set();
+      const dedupP = [];
+      for (const m of _pairMatches) {
+        const sku = m[1].toUpperCase();
+        if (!seenP.has(sku)) { seenP.add(sku); dedupP.push({ sku, qty: parseInt(m[2]) }); }
+      }
+      return {
+        items: [],
+        directLicenseList: dedupP,
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false
+      };
+    }
     const commaParts = text.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
     const licFromComma = [];
     for (const part of commaParts) {
@@ -6668,6 +6709,7 @@ Catalyst C9300L-M: C9300L-24T-4X-M, C9300L-24P-4X-M, C9300L-24UXG-4X-M, C9300L-4
 Catalyst C9200L-M: C9200L-24T-4G-M, C9200L-24P-4G-M, C9200L-24T-4X-M, C9200L-24P-4X-M, C9200L-24PXG-4X-M, C9200L-24PXG-2Y-M, C9200L-48T-4G-M, C9200L-48P-4G-M, C9200L-48PL-4G-M, C9200L-48T-4X-M, C9200L-48P-4X-M, C9200L-48PL-4X-M, C9200L-48PXG-4X-M, C9200L-48PXG-2Y-M
 MV Cameras: MV2, MV13, MV13M, MV22, MV22X, MV23M, MV23X, MV32, MV33, MV33M, MV52, MV53X, MV63, MV63M, MV63X, MV72, MV72X, MV73X, MV73M, MV84X, MV93, MV93M, MV93X
 MT Sensors: MT10, MT11, MT12, MT14, MT15, MT20, MT30, MT40
+MT sensor TYPES (pick by what the sensor MEASURES — never guess): MT10 = temperature + humidity (indoor ambient). MT11 = temperature probe (fridge/freezer/cold storage). MT12 = WATER LEAK detection (pair with MA-CBL-LEAK-1 sensing cable, one per sensor). MT14 = indoor AIR QUALITY (TVOC/PM2.5 — NOT water). MT15 = air quality + CO2. MT20 = door open/close. MT30 = smart button. MT40 = smart power controller. "Water sensor" / "leak sensor" / "moisture sensor" → MT12, NEVER MT14.
 MG Cellular: MG21, MG21E, MG41, MG41E, MG51, MG51E, MG52, MG52E
 Z-Series: Z4, Z4C, Z4X, Z4CX
 
@@ -6877,7 +6919,7 @@ Extract ALL Cisco/Meraki products mentioned in the email. Return a JSON block wi
 - **Firewalls**: MX-series (MX67, MX85, MX95, etc.)
 - **Switches**: MS150, MS390, C9300, C9300X, C9300L, C9200L
 - **Cameras**: MV13, MV33, MV53X, MV63, MV73X, MV84X, MV93
-- **Sensors**: MT10, MT14, MT20, MT40
+- **Sensors**: MT10, MT11, MT12 (water leak), MT14 (air quality), MT15, MT20, MT30, MT40
 - **Cellular Gateways**: MG21, MG41, MG51, MG52
 - **Teleworker Gateways**: Z4, Z4C
 - **Licenses**: Any mention of "license renewal", "co-term", "refresh", "support", "upgrade"
@@ -8322,15 +8364,59 @@ function stripUndefinedLiterals(data) {
   for (const key of Object.keys(data)) {
     const v = data[key];
     if (typeof v === 'string') {
-      const trimmed = v.trim();
+      // 2026-07-31: compare case-insensitively — corp's 2026-07-30 "undefined"
+      // Account showed the literal class arrives in any casing.
+      const trimmed = v.trim().toLowerCase();
       if (trimmed === '<undefined>' || trimmed === 'undefined' ||
           trimmed === '<null>' || trimmed === 'null' ||
-          trimmed === '[object Object]' || trimmed === 'NaN') {
+          trimmed === '[object object]' || trimmed === 'nan') {
         console.log(`[VALIDATE] Stripped literal garbage on field "${key}": "${v}" → null`);
         delete data[key];
       }
     }
   }
+}
+
+// 2026-07-31 — Placeholder/junk record-name guard.
+// Ported from the Corp Edition worker (Amir's isPlaceholderName, added for corp
+// error_reports #18/#24/#28: Deals created as "Company Name -" with no real
+// naming), hardened with the literal-junk class that produced corp's
+// "undefined" Account on 2026-07-30 — undefined/null/[object Object]/NaN pass
+// his regex, and a name that is ONLY punctuation/whitespace passes both.
+const PLACEHOLDER_NAME_RE = /^(company|customer|account|client|business|organization)\s*_?\s*names?\b|\bplaceholder\b|\blorem ipsum\b|^(unknown|tbd|n\/?a|none|-+)$|^(test|sample|example|fake)\s+(company|account|customer|client)\b|[{}]|^<?(undefined|null|nan|\[object(\s+object)?\])>?$/i;
+function isPlaceholderName(s) {
+  if (!s || typeof s !== 'string') return true;
+  const trimmed = s.trim();
+  if (trimmed.length < 2) return true;
+  if (!/[a-z0-9]/i.test(trimmed)) return true; // punctuation-only ("—", "--", "??")
+  return PLACEHOLDER_NAME_RE.test(trimmed);
+}
+
+// 2026-07-31 — Term-aware Quote Subject (corp error_reports #26/#38: a "1yr and
+// 3yr quotes" flow produced two quotes whose Subjects didn't say which term
+// they were — one was titled "1yr" while its lines were 3-year, and a Duo pair
+// came out as two identical-looking quotes).
+// Returns "1-Year" / "3-Year" / "5-Year" (etc.) when the quote's term is
+// unambiguous: every resolved license SKU carries the SAME explicit -NY/-NYR
+// suffix, or the caller passed license_term. Returns null when mixed/unknown.
+function deriveQuoteTermLabel(resolvedProducts, licenseTermArg) {
+  const years = new Set();
+  for (const p of (resolvedProducts || [])) {
+    const sku = String(p?.sku || '').toUpperCase();
+    if (!sku.startsWith('LIC-') && !/^DUO-|^SFC-|^SA-/.test(sku)) continue;
+    const m = sku.match(/-(\d{1,2})\s*YR?$/);
+    if (m) years.add(m[1]);
+  }
+  if (years.size === 1) return `${[...years][0]}-Year`;
+  if (years.size > 1) return null; // mixed terms — never stamp a wrong one
+  const t = String(licenseTermArg || '').match(/^(\d{1,2})$/);
+  return t ? `${t[1]}-Year` : null;
+}
+
+// True when a subject already tells the reader its term ("3yr", "3-Year",
+// "1 year option", "36 mo") — stamping another suffix would double-label it.
+function subjectHasTermToken(subject) {
+  return /\b\d{1,2}\s*-?\s*(y(?:ea)?rs?|mo(?:nth)?s?)\b/i.test(String(subject || ''));
 }
 
 // Common misspellings/wrong values → correct values for helpful error messages
@@ -8660,6 +8746,11 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
           errors.push(`❌ Missing required field "${field}" for Deal creation.`);
         }
       }
+      // 2026-07-31 (ported from Corp Edition / corp error_reports #18/#24/#28):
+      // reject placeholder/template Deal names before they reach Zoho.
+      if (data.Deal_Name && typeof data.Deal_Name === 'string' && isPlaceholderName(data.Deal_Name)) {
+        errors.push(`❌ Deal_Name "${data.Deal_Name}" is a placeholder/template value, not a real deal name. STOP and ask the user for the real company/deal name before creating anything.`);
+      }
       // Account_Name must be {id: "..."} — string form triggers a special signal
       // so the executor can auto-resolve by lookup rather than erroring.
       if (data.Account_Name && typeof data.Account_Name === 'string') {
@@ -8746,12 +8837,38 @@ async function validateCrmWrite(module_name, data, isCreate = false, env = null)
     }
   }
 
+  // 2026-07-31 (corp 2026-07-30 "undefined" Account): a literal-junk or
+  // placeholder Account_Name must never become a real Account record.
+  // stripUndefinedLiterals above already deleted exact junk literals, so by
+  // here a garbage name is either gone (→ missing-field error) or a
+  // placeholder phrase — both stop the create.
+  if (module_name === 'Accounts' && isCreate) {
+    if (!data.Account_Name) {
+      errors.push('❌ Missing required field "Account_Name" for Account creation.');
+    } else if (typeof data.Account_Name === 'string' && isPlaceholderName(data.Account_Name)) {
+      errors.push(`❌ Account_Name "${data.Account_Name}" is a placeholder/junk value, not a real company name. STOP and ask the user for the real company name before creating anything.`);
+    }
+  }
+
   if (module_name === 'Quotes' && isCreate) {
     const required = ['Subject', 'Deal_Name', 'Valid_Till'];
     for (const field of required) {
       if (!data[field]) {
         errors.push(`❌ Missing required field "${field}" for Quote creation.`);
       }
+    }
+    // 2026-07-31 (ported from Corp Edition): placeholder Subjects blocked like
+    // placeholder Deal names.
+    if (data.Subject && typeof data.Subject === 'string' && isPlaceholderName(data.Subject)) {
+      errors.push(`❌ Quote Subject "${data.Subject}" is a placeholder/template value. STOP and ask the user for the real company/quote name before creating anything.`);
+    }
+    // 2026-07-31 (corp error_reports #39): a blank Quote Stage breaks the
+    // quote→PO conversion downstream. Prompt-level guidance alone still let the
+    // model omit it, so default it server-side. The Won/Sold guard above still
+    // blocks illegitimate values.
+    if (!data.Quote_Stage) {
+      data.Quote_Stage = 'Qualification';
+      console.log('[VALIDATE] Quote_Stage missing on create — defaulted to "Qualification"');
     }
     // Server-side Valid_Till enforcement: if Claude passes a past date or invalid date,
     // override with today + 30 days. LLMs frequently miscalculate dates.
@@ -10982,7 +11099,10 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name,Contact_Name,Owner',
           Products: 'id,Product_Name,Product_Code,Unit_Price,Description',
           WooProducts: 'id,WooProduct_Code,Stratus_Price,Product_Name',
-          Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
+          // 2026-07-31: Quotes have no 'Stage' field — the picklist is Quote_Stage.
+          // (Same field-list fix Amir shipped in the Corp Edition after corp
+          // error_reports #22's "Stage field search" backend error.)
+          Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Quote_Stage',
           Tasks: 'id,Subject,Status,Due_Date,What_Id,Who_Id,Description'
         };
         params.set('fields', fields || defaultFields[module_name] || '');
@@ -13050,6 +13170,31 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
 
+          // 2026-07-31 (corp 2026-07-30 "undefined" Account + corp error_reports
+          // #18/#24/#28): the deterministic path bypasses validateCrmWrite, so a
+          // literal-junk or placeholder account/deal name from the model would
+          // POST straight to Zoho. Guard both at intake — an existing_deal_id
+          // flow doesn't need account_name, so only reject values that are
+          // present-but-garbage, plus a fully missing account_name when there is
+          // no existing deal to inherit from.
+          if ((account_name !== undefined && account_name !== null && isPlaceholderName(String(account_name))) ||
+              (!existingDealId && !account_name)) {
+            return {
+              success: false,
+              error: 'invalid_account_name',
+              instruction: `STOP. Account name ${account_name === undefined || account_name === null ? 'is missing' : `"${String(account_name)}" is a placeholder/junk value`} — never create records with it. Ask the user for the real company name, then retry create_deal_and_quote.`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
+          if (deal_name && isPlaceholderName(String(deal_name))) {
+            return {
+              success: false,
+              error: 'invalid_deal_name',
+              instruction: `STOP. Deal name "${String(deal_name)}" is a placeholder/template value. Either omit deal_name (the server derives "<Account> - <SKU summary>") or pass the real deal name, then retry.`,
+              wall_ms: Date.now() - _startMs
+            };
+          }
+
           // ── Layer 1: deterministic model-agnostic renewal collapse (2026-05-20) ──
           // When the caller flags renewal/license-only, collapse MV/MR/CW/MT hardware
           // models into a single totaled agnostic license alias BEFORE product staging.
@@ -13515,13 +13660,57 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           const STRATUS_SALES_ISR_ID = '2570562000027286729';
           let merakiIsrId = null;
           let merakiIsrName = null;
-          if (meraki_isr_email) {
+          // 2026-07-31 (personal error_reports #8 — Millennium Corporate): when
+          // the user names the rep ("Josh Disla") without an email, resolve the
+          // email from the Meraki_ISRs module by name instead of bouncing the
+          // question back. Exactly one match wins (active preferred); multiple
+          // matches return the candidates so the model can chip-ask the user.
+          let _isrEmailInput = meraki_isr_email ? String(meraki_isr_email).trim() : '';
+          if (!_isrEmailInput && toolInput.meraki_isr_name && !isPlaceholderName(String(toolInput.meraki_isr_name))) {
+            const _wantedName = String(toolInput.meraki_isr_name).trim().replace(/\s+/g, ' ');
+            const _firstToken = _wantedName.split(' ')[0].replace(/[^A-Za-z0-9'-]/g, '');
+            try {
+              const nameSearch = _firstToken
+                ? await zohoApiCall('GET',
+                    `Meraki_ISRs/search?criteria=(Name:starts_with:${encodeURIComponent(_firstToken)})&fields=id,Name,Email,Inactive&per_page=50`, env)
+                : null;
+              const _rows = nameSearch?.data || [];
+              const _ci = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+              let _candidates = _rows.filter(r => _ci(r.Name) === _ci(_wantedName));
+              if (_candidates.length === 0) {
+                const _tokens = _ci(_wantedName).split(' ').filter(Boolean);
+                _candidates = _rows.filter(r => { const n = _ci(r.Name); return _tokens.every(tok => n.includes(tok)); });
+              }
+              // Prefer active records; a single inactive-only match still flows
+              // into the existing inactive/reactivation path below via its email.
+              const _activeCands = _candidates.filter(r => r.Inactive !== true);
+              const _pick = _activeCands.length >= 1 ? _activeCands : _candidates;
+              if (_pick.length === 1 && _pick[0].Email) {
+                _isrEmailInput = String(_pick[0].Email).trim();
+                results.steps.push(`Resolved Meraki ISR by name: "${_wantedName}" → ${_pick[0].Name} <${_isrEmailInput}> (Meraki_ISRs module)`);
+              } else if (_pick.length > 1) {
+                return {
+                  success: false,
+                  error: 'meraki_isr_ambiguous',
+                  candidates: _pick.slice(0, 6).map(r => ({ name: r.Name, email: r.Email, inactive: r.Inactive === true })),
+                  instruction: `Multiple Meraki_ISRs records match "${_wantedName}". Ask the user which rep it is (offer the candidates as chips), then retry create_deal_and_quote with that rep's meraki_isr_email.`,
+                  ...results,
+                  wall_ms: Date.now() - _startMs
+                };
+              } else {
+                results.steps.push(`Meraki ISR name lookup: no Meraki_ISRs record matches "${_wantedName}"`);
+              }
+            } catch (nameErr) {
+              results.steps.push(`Meraki ISR name lookup failed for "${_wantedName}": ${nameErr.message}`);
+            }
+          }
+          if (_isrEmailInput) {
             // Strict email shape gate BEFORE it reaches the Zoho criteria
             // string — encodeURIComponent leaves ) ' ! * unescaped, so a
             // malformed value could break the (Email:equals:...) expression.
-            const _isrEmail = String(meraki_isr_email).trim().toLowerCase();
+            const _isrEmail = _isrEmailInput.toLowerCase();
             if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(_isrEmail)) {
-              results.steps.push(`Meraki ISR lookup skipped: "${String(meraki_isr_email).slice(0, 80)}" is not a valid email`);
+              results.steps.push(`Meraki ISR lookup skipped: "${_isrEmailInput.slice(0, 80)}" is not a valid email`);
             } else {
               try {
                 const isrSearch = await zohoApiCall('GET',
@@ -14039,7 +14228,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 success: false,
                 error: 'meraki_isr_required',
                 needs_meraki_isr: true,
-                instruction: `STOP — do NOT create this Deal yet, and do NOT fall back to Stratus Sales. Lead_Source "Meraki ISR Referal" requires the referring Cisco rep. ${meraki_isr_email ? `The email "${meraki_isr_email}" did not match any Meraki_ISRs record — confirm the exact @cisco.com email with the user.` : `Ask the user which Cisco rep (@cisco.com email) referred this deal.`} Then retry create_deal_and_quote with meraki_isr_email set. If NO Cisco rep is actually involved, use lead_source "Stratus Referal" instead.`,
+                instruction: `STOP — do NOT create this Deal yet, and do NOT fall back to Stratus Sales. Lead_Source "Meraki ISR Referal" requires the referring Cisco rep. ${meraki_isr_email ? `The email "${meraki_isr_email}" did not match any Meraki_ISRs record — confirm the exact @cisco.com email with the user.` : toolInput.meraki_isr_name ? `The name "${String(toolInput.meraki_isr_name)}" did not resolve in the Meraki_ISRs module — check the email thread (To/CC/BCC) for their @cisco.com address, else confirm it with the user.` : `RESOLVE IT YOURSELF FIRST: if the user gave a rep NAME, retry with meraki_isr_name (the server resolves it against the Meraki_ISRs module); also check the email thread's To/CC/BCC for an @cisco.com address. Only ask the user if neither resolves.`} Then retry create_deal_and_quote with meraki_isr_email (or meraki_isr_name) set. If NO Cisco rep is actually involved, use lead_source "Stratus Referal" instead.`,
                 ...results,
                 wall_ms: Date.now() - _startMs
               };
@@ -14146,10 +14335,25 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           });
 
+          // 2026-07-31 (corp error_reports #26/#38): stamp the quote's term into
+          // the Subject when it is unambiguous and the Subject doesn't already
+          // say it — multi-term flows (1yr + 3yr on one deal) otherwise produce
+          // identically-titled or mislabeled quotes.
+          let quoteSubject = deal_name || existingDealData?.Deal_Name || `${accountData?.Account_Name || account_name} - ${skuSummary}`;
+          {
+            const _termLabel = deriveQuoteTermLabel(resolvedProducts, license_term);
+            if (_termLabel && !subjectHasTermToken(quoteSubject)) {
+              quoteSubject = `${quoteSubject} - ${_termLabel}`;
+              results.steps.push(`Quote Subject stamped with term: ${_termLabel}`);
+            }
+          }
           const quoteData = {
-            Subject: deal_name || existingDealData?.Deal_Name || `${accountData?.Account_Name || account_name} - ${skuSummary}`,
+            Subject: quoteSubject,
             Deal_Name: { id: dealId },
             Account_Name: { id: accountId },
+            // 2026-07-31 (corp error_reports #39): blank Quote Stage breaks
+            // quote→PO conversion — always set it on create.
+            Quote_Stage: 'Qualification',
             Valid_Till: validTill,
             Billing_Street: billingAddr.street,
             Billing_City: billingAddr.city,
@@ -16455,7 +16659,8 @@ const CRM_EMAIL_TOOLS = [
         renewal: { type: 'boolean', description: '(2026-05-20) Set true for a license RENEWAL / co-term renewal of existing devices. Model-agnostic camera/AP/sensor families (MV, MR, CW, MT) are deterministically collapsed to ONE totaled license line (the hardware model is irrelevant to licensing) and EOL hardware will not block the quote. Do NOT set true for a brand-new hardware purchase.' },
         license_only: { type: 'boolean', description: '(2026-05-20) Set true for a license-only quote (no hardware). Triggers the same model-agnostic family collapse as renewal. Leave unset/false for hardware purchases.' },
         lead_source: { type: 'string', description: 'Lead source. Default "Stratus Referal" (Stratus found/introduced the deal). Use "Meraki ISR Referal" ONLY when a Cisco rep referred the deal — and then meraki_isr_email is REQUIRED (the server refuses a Meraki ISR Referal without a real rep; it will NEVER default to Stratus Sales).' },
-        meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal". OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        meraki_isr_email: { type: 'string', description: 'The referring Cisco rep\'s @cisco.com email, resolved against the Meraki_ISRs module. REQUIRED when lead_source is "Meraki ISR Referal" (meraki_isr_name also satisfies it). OPTIONAL for "Stratus Referal" — pass it when a Cisco rep is involved even though Stratus sourced the deal (otherwise Stratus Referal defaults the ISR to Stratus Sales).' },
+        meraki_isr_name: { type: 'string', description: 'The referring Cisco rep\'s NAME (e.g. "Josh Disla") when their email is unknown — the server resolves the email from the Meraki_ISRs module automatically (single match wins; multiple matches return candidates to offer the user). Prefer meraki_isr_email when you have it; NEVER ask the user for an email when you have a name to resolve.' },
         reactivate_inactive_isr: { type: 'boolean', description: 'Set true ONLY after the user has EXPLICITLY approved unchecking the Inactive flag on the referred rep (the tool returns meraki_isr_inactive:true with the question to ask). Unchecks Inactive on the Meraki_ISRs record, then proceeds with the assignment. Never set this without the user\'s approval in this conversation.' },
         force_new_deal: { type: 'boolean', description: 'Set true ONLY when the user explicitly wants a separate NEW deal. By default, quotes created in the same conversation for the same account reuse one master deal (e.g. 3-year and 5-year option quotes share a single deal).' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
@@ -17163,18 +17368,61 @@ const TOOL_SUBSET_CLASSES = Object.freeze([
  *   7. Search / find / list / show / pull up → crm_read (0.8)
  *   8. Otherwise → general (0.5, below the 0.7 confidence floor)
  */
+// 2026-07-31 — Classifier input hygiene, ported from the Corp Edition worker.
+// The classifier must read the USER's words, not the extension's injected
+// context blocks: a "renewal reminder" email body or a [CRM context:] preamble
+// carrying admin/DID vocabulary hijacks the class and strips the tools the
+// actual request needs (corp error_reports #16/#31 tool-availability class).
+function stripInjectedClassifierContext(text) {
+  let s = String(text);
+  s = s.replace(/\n\s*\[Pre-resolved products:[\s\S]*$/, '');
+  const bodyStart = s.indexOf('[Email body:');
+  if (bodyStart !== -1) {
+    const end = s.lastIndexOf(']\n\n');
+    if (end > bodyStart) {
+      s = s.slice(0, bodyStart) + s.slice(end + 3);
+    }
+  }
+  s = s.replace(/\[Email context:[^\n]*\]/g, ' ');
+  s = s.replace(/^\s*\[(?:CRM context|Session):[^\n]*\]\s*/gm, '');
+  return s;
+}
+
 function classifyCrmIntent(text, ctx = {}) {
   if (typeof text !== 'string' || !text.trim()) {
     return { class: 'general', confidence: 0.5 };
   }
-  const t = text.toLowerCase();
 
   // 00. Drafting-banner override (2026-07-09, corp error_reports #4): the extension
   // marks draft asks deterministically. Without this, words inside the injected
   // thread block (contract / esign / "create a quote") hijack the class and strip
   // the gmail tools — the exact follow-up failure from the incident.
+  // Checked on the RAW text — the banner is itself an injected marker.
   if (text.includes('[User asked to draft a reply')) {
     return { class: 'email', confidence: 0.98 };
+  }
+
+  const _userText = stripInjectedClassifierContext(text);
+  const t = _userText.toLowerCase();
+
+  // 000. Confirmation/continuation turns (2026-07-31, corp error_reports #16/#31):
+  // "Yes, use gacuevas@cisco.com as the referring Cisco rep. 1 year",
+  // "use Shelby Smeltz for ISR", bare "1 year" / "end of next month" — short
+  // answers to a question the bot just asked. Re-classifying them from scratch
+  // dropped the in-flight create flow into a subset with no create tools, and
+  // the model told the rep "I don't have a quote-creation tool available right
+  // now… retry in a new message." With page/session context and no explicit
+  // other-class signal, a short continuation routes to crm_write — the superset
+  // that can FINISH any pending create/update flow (and still read email/CRM).
+  if (ctx.hasActivePageContext || ctx.hasQuoteSession) {
+    const _s = _userText.trim();
+    const _short = _s.length > 0 && _s.length <= 220;
+    const _affirm = /^(yes\b|yep\b|yeah\b|ok(?:ay)?\b|sure\b|correct\b|confirmed?\b|approved?\b|sounds good\b|go ahead\b|proceed\b|do it\b|please (?:do|proceed)\b|use\s|go with\s|make it\s|let'?s (?:do|go|use)\s)/i.test(_s);
+    const _bareAnswer = /^(?:both\s+)?(?:\d{1,2}\s*-?\s*(?:year|yr)s?|end of (?:the\s+)?(?:this\s+|next\s+)?(?:month|quarter|week)|option\s+\d|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})[\s.!]*$/i.test(_s);
+    const _otherClassSignal = /\b(did|velocity|esign|e-sign|docusign|convert to po|create (?:a |the )?po\b|sub ?mod|draft|email|inbox|gmail|reply|url quote|ecomm link|order link|shopping cart)\b/i.test(_s);
+    if (_short && (_affirm || _bareAnswer) && !_otherClassSignal) {
+      return { class: 'crm_write', confidence: 0.85 };
+    }
   }
 
   // 0. Quote/Deal creation guard (2026-05-15 Codex defense-in-depth):
@@ -17448,7 +17696,7 @@ Billing address lookup order: (1) Zoho Account record → (2) Gmail thread / ema
 
 **Lead_Source valid values** (ONE R, intentional): "Stratus Referal" (DEFAULT, 99%), "Meraki ISR Referal" (Cisco rep referred), "Meraki ADR Referal" (prompt for ADR name), "VDC", "Website". NEVER "-None-" or invented values.
 
-**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729) UNLESS a Cisco rep is involved — then pass meraki_isr_email to list them. Meraki ISR Referal → the referring rep is MANDATORY: pass their @cisco.com email as \`meraki_isr_email\` on create_deal_and_quote (the server resolves it against Meraki_ISRs and REFUSES to create a Meraki ISR Referal deal without it — Stratus Sales is never valid on an ISR referral). Don't know the rep? ASK the user before creating. Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
+**Meraki_ISR:** Stratus Referal / Website / VDC → Stratus Sales (id 2570562000027286729) UNLESS a Cisco rep is involved — then pass meraki_isr_email to list them. Meraki ISR Referal → the referring rep is MANDATORY: pass their @cisco.com email as \`meraki_isr_email\` on create_deal_and_quote (the server resolves it against Meraki_ISRs and REFUSES to create a Meraki ISR Referal deal without it — Stratus Sales is never valid on an ISR referral). Have only the rep's NAME? Pass \`meraki_isr_name\` — the server resolves the email from the Meraki_ISRs module itself; NEVER ask the user for an email you can resolve. Also check the thread's To/CC/BCC for an @cisco.com address before asking. Only ask the user when neither the name nor the thread resolves the rep. Reason = "Meraki ISR recommended". Meraki ADR Referal → prompt for ADR name.
 
 **Multi-option quotes (e.g. 3-year AND 5-year):** all option quotes for the same account in one conversation share ONE master deal — the server enforces this automatically (second create_deal_and_quote call reuses the deal). Only pass force_new_deal:true if the user explicitly asks for a separate deal.
 
@@ -25091,7 +25339,8 @@ CRITICAL URL RULES:
               Accounts: 'id,Account_Name,Phone,Website,Billing_Street,Billing_City,Billing_State,Billing_Code',
               Contacts: 'id,First_Name,Last_Name,Email,Phone,Account_Name',
               Deals: 'id,Deal_Name,Stage,Amount,Closing_Date,Account_Name',
-              Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Stage',
+              // 2026-07-31: Quotes have no 'Stage' field — the picklist is Quote_Stage.
+              Quotes: 'id,Subject,Quote_Number,Grand_Total,Deal_Name,Quote_Stage',
               Sales_Orders: 'id,Subject,SO_Number,Grand_Total,Status,Deal_Name,Account_Name,Client_Send_Status,Disti_Tracking_Number,Disti_Estimated_Ship_Date,Vendor_SO_Number',
             };
 
