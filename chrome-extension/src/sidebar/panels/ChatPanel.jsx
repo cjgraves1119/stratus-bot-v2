@@ -1499,6 +1499,17 @@ export default function ChatPanel({
           timestamp: new Date().toISOString(),
         };
         onMessagesChange([...updatedMessages, assistantMsg]);
+        // Auto-open the reviewed one-shot plan when a plain-English quote ask
+        // ("create a quote from this email") produced engine order URL(s) in
+        // the reply — the deterministic email→SKU parse stays exactly as-is;
+        // this only ADDS the CRM plan card. Most recent URL wins. Read-only:
+        // no CRM write happens until Execute on the card.
+        if (shouldReadFullEmailForQuote && !isDraftAsk && gatedEmailContext && response.reply) {
+          const replyOrderUrls = String(response.reply).match(/https:\/\/(?:www\.)?stratusinfosystems\.com\/order\/\?[^\s)"'<>\]]+/g) || [];
+          if (replyOrderUrls.length) {
+            startOneshotFromUrl(replyOrderUrls[replyOrderUrls.length - 1], { auto: true }).catch(() => {});
+          }
+        }
       } else if (response && response.error) {
         setError(response.error);
       } else {
@@ -1544,6 +1555,13 @@ export default function ChatPanel({
     setLoading(false);
     if (error) { appendMessage(infoMsg(`⚠️ ${error}`)); return; }
     appendMessage({ id: nextId(), role: 'assistant', kind: 'quote', result, skuText: text, timestamp: new Date().toISOString() });
+    // Auto-open the reviewed one-shot plan card once SKU parsing succeeded on
+    // an email thread — the Zoho tab and the "Send quote to Zoho" click are
+    // optional. Plan is read-only; Execute on the card is the only write gate.
+    if (emailContext) {
+      const { orderUrl } = orderSummaryFromResult(result, 0);
+      if (orderUrl) startOneshotFromUrl(orderUrl, { auto: true }).catch(() => {});
+    }
   }
 
   // Apply / stack a "did you mean?" suggestion: re-quote and replace the card.
@@ -1717,15 +1735,29 @@ export default function ChatPanel({
 
   // Hand a finished ecomm quote to the CRM agent to create a Zoho quote.
   // selectedUrlIdx is the term the user copied/opened in the card.
-  // One-shot: "Send quote to Zoho" now opens a REVIEWED plan card instead of a
-  // free-text chat turn (American Implement postmortem — the old path inherited
-  // whatever contact the panel defaulted to and re-entered every agent gate).
-  // The FULL participant list goes to the server; ambiguity comes back as a
-  // picker on the card, and Execute drives the deterministic endpoint.
+  // One-shot: the reviewed plan card replaces the free-text "send to Zoho" chat
+  // turn (American Implement postmortem — the old path inherited whatever
+  // contact the panel defaulted to and re-entered every agent gate). The FULL
+  // participant list goes to the server; ambiguity comes back as a picker on
+  // the card, and Execute drives the deterministic endpoint. The card opens
+  // AUTOMATICALLY whenever SKU parsing succeeds on an email thread (no second
+  // click, Zoho tab optional) — but Execute stays the only write boundary.
+  const lastAutoPlanUrlRef = useRef(null);
+
   async function handleSendQuoteToZoho(result, selectedUrlIdx = 0) {
     const { orderUrl } = orderSummaryFromResult(result, selectedUrlIdx);
+    return startOneshotFromUrl(orderUrl, { auto: false });
+  }
+
+  async function startOneshotFromUrl(orderUrl, { auto = false } = {}) {
     const skus = parseOrderUrlItems(orderUrl);
-    if (!skus.length) { appendMessage(infoMsg('⚠️ No SKUs found on the selected quote URL.')); return; }
+    if (!skus.length) { if (!auto) appendMessage(infoMsg('⚠️ No SKUs found on the selected quote URL.')); return; }
+    // Auto-opens dedupe on the URL so a re-quoted follow-up doesn't stack
+    // identical plan cards; the explicit button always opens a fresh one.
+    if (auto) {
+      if (lastAutoPlanUrlRef.current === orderUrl) return;
+      lastAutoPlanUrlRef.current = orderUrl;
+    }
     const base = {
       skus,
       participants: (emailContext?.threadContacts || []).map((c) => ({ email: c.email, name: c.name || '', role: c.role || '' })),
