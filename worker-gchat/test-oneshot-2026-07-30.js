@@ -415,7 +415,7 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
       `const resolveContactByEmail = async () => __cfg.contactByEmail;`,
       `const zohoApiCall = async (method, pathArg) => { if (String(pathArg) === 'coql') return { data: __cfg.openDeals }; return { data: [] }; };`,
       grab('resolveMerakiIsrByName'),
-      `const executeToolCall = async (tool, input) => { const out = {}; for (const s of input.skus) out[s.sku] = { suffixed_sku: s.sku, found: true, ecomm_price: 100, list_price: 150, product_active: true }; return { results: out }; };`,
+      `const executeToolCall = async (tool, input) => { const out = {}; for (const s of input.skus) out[s.sku] = { suffixed_sku: s.sku, found: true, ecomm_price: 100, list_price: 150, product_active: true }; return { products: out }; };`,
       `const defaultQuoteDealDate = () => ({ date: '2026-07-31', suggested: '2026-07-25', fiscalQuarterEnd: '2026-07-25', crossesFiscalQuarter: true, daysToMonthEnd: 1, needsConfirmation: true });`,
       grab('buildOneshotPlan'),
       'module.exports = buildOneshotPlan;'

@@ -8843,7 +8843,8 @@ async function buildOneshotPlan(input, env, caller) {
   // 6. Product lines with live ecomm pricing (read-only catalog resolution)
   try {
     const lookup = await executeToolCall('batch_product_lookup', { skus: p.skus.map((s) => ({ sku: String(s.sku || s).toUpperCase(), qty: Number(s.qty) || 1 })) }, env, personId);
-    const rmap = lookup?.results || lookup || {};
+    // The tool's envelope key is `products` (keyed by RAW input SKU).
+    const rmap = lookup?.products || lookup?.results || {};
     plan.lines = p.skus.map((s) => {
       const key = String(s.sku || s).toUpperCase();
       const r = rmap[key] || {};
