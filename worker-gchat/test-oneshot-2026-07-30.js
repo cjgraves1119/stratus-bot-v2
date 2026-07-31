@@ -528,6 +528,16 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
 
   console.log('\n(6) source-level wiring');
 
+  check('plan enrichment passes ctx and NEVER fails silently (Marlette blank-address diagnosis)', () => {
+    assert.ok(/enrichCompanyV2\(selectedDomain, \{ env, ctx, cache_bust: p\.enrich_cache_bust === true \}\)/.test(SRC),
+      'enrichCompanyV2 must receive ctx like /api/enrich-company does');
+    assert.ok(/async function buildOneshotPlan\(input, env, caller, ctx\)/.test(SRC), 'ctx must be a plan parameter');
+    assert.ok(/buildOneshotPlan\(apiBody, env, \(env && env\.__CALLER_EMAIL\) \|\| null, ctx\)/.test(SRC), 'route must forward ctx');
+    assert.ok(/prefill\.enrich_error = er\?\.error \|\|/.test(SRC), 'a non-result must record enrich_error');
+    assert.ok(/prefill\.enrich_error = String\(\(e && e\.message\) \|\| e\)/.test(SRC), 'a throw must record enrich_error');
+    assert.ok(!/catch \(_\) \{ \/\* enrichment is best-effort prefill only \*\/ \}/.test(SRC), 'the silent catch must be gone');
+  });
+
   check('create branch honors structured contact_first_name/contact_last_name over the split', () => {
     assert.ok(/toolInput\.contact_first_name && String\(toolInput\.contact_first_name\)\.trim\(\)\) \|\| nameParts\[0\]/.test(SRC));
     assert.ok(/toolInput\.contact_last_name && String\(toolInput\.contact_last_name\)\.trim\(\)\)/.test(SRC));

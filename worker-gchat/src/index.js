@@ -8664,7 +8664,7 @@ async function resolveMerakiIsrByName(name, env) {
 // EXECUTE takes only fully-explicit, already-reviewed decisions and drives the
 // existing create_deal_and_quote executor directly (no agent loop). Neither
 // path ever guesses: ambiguity blocks.
-async function buildOneshotPlan(input, env, caller) {
+async function buildOneshotPlan(input, env, caller, ctx) {
   const p = input || {};
   const blockers = [];
   const plan = {};
@@ -8733,8 +8733,11 @@ async function buildOneshotPlan(input, env, caller) {
     if (p.enrich !== false && selectedDomain && !CONSUMER_DOMAINS.has(selectedDomain)
         && env.ENRICH_KILL_SWITCH !== 'true' && env.ENRICH_KILL_SWITCH !== '1') {
       try {
-        const er = await enrichCompanyV2(selectedDomain, { env });
-        if (er && !er.error) {
+        // ctx is REQUIRED (2026-07-30 Marlette diagnosis): enrichCompanyV2 and
+        // its cache helpers take (env, ctx) exactly like /api/enrich-company —
+        // omitting it was why this path produced blank addresses.
+        const er = await enrichCompanyV2(selectedDomain, { env, ctx, cache_bust: p.enrich_cache_bust === true });
+        if (er && !er.error && (er.name || er.address || er.city)) {
           prefill.name = prefill.name || er.name || '';
           prefill.street = er.address || er.street || '';
           prefill.city = er.city || '';
@@ -8742,8 +8745,17 @@ async function buildOneshotPlan(input, env, caller) {
           prefill.zip = er.zip || er.postal_code || '';
           prefill.enrich_tier = er.tier || null;
           prefill.enrich_confidence = er.confidence ?? null;
+        } else {
+          // NEVER silent again: a blank address must say why, and whether a
+          // retry is worth it (in_progress = another request is mid-flight).
+          prefill.enrich_error = er?.error || (er?.tier === 'in_progress' ? 'in_progress' : 'no_result');
+          prefill.enrich_tier = er?.tier || null;
+          prefill.enrich_retryable = er?.tier === 'in_progress' || !er?.error;
         }
-      } catch (_) { /* enrichment is best-effort prefill only */ }
+      } catch (e) {
+        prefill.enrich_error = String((e && e.message) || e).slice(0, 200);
+        prefill.enrich_retryable = true;
+      }
     }
     plan.account = { mode: 'create', prefill };
     blockers.push({ code: 'account_create_review', prefill });
@@ -28614,7 +28626,7 @@ CRITICAL URL RULES:
           // fully-reviewed decisions. No agent loop on either path.
           case '/api/oneshot-plan': {
             try {
-              apiResult = await buildOneshotPlan(apiBody, env, (env && env.__CALLER_EMAIL) || null);
+              apiResult = await buildOneshotPlan(apiBody, env, (env && env.__CALLER_EMAIL) || null, ctx);
             } catch (err) {
               apiResult = { success: false, error: 'oneshot_plan_failed', detail: err.message };
             }
