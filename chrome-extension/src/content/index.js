@@ -10,7 +10,12 @@
 
 import { MSG, DEAL_ID_PATTERN, CONSUMER_DOMAINS, COLORS } from '../lib/constants.js';
 import { sendToBackground, onMessage } from '../lib/messaging.js';
+import { nextFollowUpSubject } from '../lib/task-subjects.mjs';
 import './gmail-observer.js';
+// Source-level preservation of the reviewed post-send Task/Snooze workflow:
+// default Snooze + Task, task-date synchronization, exact Gmail confirmation,
+// search-route support, and fail-closed conversation identity checks.
+import './gmail-send-task-snooze.js';
 
 // ─────────────────────────────────────────────
 // Initialization
@@ -57,6 +62,26 @@ const BOT_EMAILS = new Set([
   'no-reply@cisco.com',
   'donotreply@cisco.com',
 ]);
+
+// Gmail sometimes renders a participant chip's text as
+// "Ron Jarman <ron@example.com>" even though the same element already exposes
+// the address in an `email` attribute. Participant names are later used as
+// reviewed Contact defaults, so email-shaped text must never survive as part of
+// a name. Keep this pure so the regression suite can exercise the DOM fallback
+// without a browser.
+function sanitizeParticipantName(value) {
+  return String(value || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/<[^<>]*@[^<>]*>/g, ' ')
+    .replace(/\bmailto:\s*/gi, '')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, ' ')
+    .split(/\s+/)
+    .filter((token) => token && !token.includes('@'))
+    .join(' ')
+    .replace(/^[,;|()[\]<>\-\s]+|[,;|()[\]<>\-\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 // ── Per-thread participant memory + print-view header fetch ──
 //
@@ -142,7 +167,7 @@ function parsePrintHeaderParticipants(html) {
       const lower = email.toLowerCase();
       if (lower.includes('@stratusinfosystems.com')) continue;
       if (BOT_EMAILS.has(lower)) continue;
-      const name = (pair[1] || pair[3] || '').trim();
+      const name = sanitizeParticipantName(pair[1] || pair[3] || '');
       const cur = found.get(lower);
       if (cur) {
         cur.count += 1;
@@ -210,10 +235,12 @@ async function fetchThreadHeaderParticipants(permId) {
     for (const p of participants) {
       const lower = p.email.toLowerCase();
       const existing = cache.get(lower);
+      const incomingName = sanitizeParticipantName(p.name);
       if (existing) {
-        if (p.name && p.name.length > (existing.name || '').length) existing.name = p.name;
+        existing.name = sanitizeParticipantName(existing.name);
+        if (incomingName && incomingName.length > existing.name.length) existing.name = incomingName;
       } else {
-        cache.set(lower, { email: p.email, name: p.name, role: p.role || 'cc' });
+        cache.set(lower, { email: p.email, name: incomingName, role: p.role || 'cc' });
       }
     }
     printFetchState.set(permId, 'done');
@@ -463,7 +490,10 @@ function extractEmailData(options = {}) {
     const domain = email.split('@')[1];
     if (domain) allDomains.add(domain);
 
-    const name = el.getAttribute('name') || el.textContent.trim();
+    // Sanitize before the "longest name wins" merge. Otherwise Gmail's longer
+    // "Ron Jarman <email>" rendering permanently beats the clean "Ron Jarman"
+    // value in the grow-only per-thread cache.
+    const name = sanitizeParticipantName(el.getAttribute('name') || el.textContent || '');
     const role = el.closest ? (determineRole(el) || defaultRole) : defaultRole;
 
     if (!contactsByEmail.has(lower)) {
@@ -539,15 +569,18 @@ function extractEmailData(options = {}) {
     const cache = threadCacheFor(threadPermId);
     const roleMap = { sender: 3, cc: 2, to: 1 };
     for (const [lower, contact] of contactsByEmail) {
+      contact.name = sanitizeParticipantName(contact.name);
       const cached = cache.get(lower);
       if (!cached) {
         cache.set(lower, { ...contact });
       } else {
+        cached.name = sanitizeParticipantName(cached.name);
         if (contact.name && contact.name.length > (cached.name || '').length) cached.name = contact.name;
         if ((roleMap[contact.role] || 0) > (roleMap[cached.role] || 0)) cached.role = contact.role;
       }
     }
     for (const [lower, cached] of cache) {
+      cached.name = sanitizeParticipantName(cached.name);
       if (!contactsByEmail.has(lower)) {
         // DOM finds stay first in insertion order, so visible participants
         // keep priority when the customer default is picked below.
@@ -558,6 +591,7 @@ function extractEmailData(options = {}) {
         if (domain === 'cisco.com' && !ciscoEmails.includes(lower)) ciscoEmails.push(lower);
       } else {
         const contact = contactsByEmail.get(lower);
+        contact.name = sanitizeParticipantName(contact.name);
         if (cached.name && cached.name.length > (contact.name || '').length) contact.name = cached.name;
       }
     }
@@ -566,7 +600,7 @@ function extractEmailData(options = {}) {
 
   // Populate threadContacts — filter consumer domains for CRM lookup
   for (const contact of contactsByEmail.values()) {
-    threadContacts.push(contact);
+    threadContacts.push({ ...contact, name: sanitizeParticipantName(contact.name) });
   }
 
   const isOutbound = senderEmail.toLowerCase().includes('@stratusinfosystems.com');
@@ -637,6 +671,40 @@ function extractEmailData(options = {}) {
   };
 }
 
+function findVisibleExpandAllControl() {
+  const candidates = document.querySelectorAll('button, [role="button"]');
+  for (const el of candidates) {
+    const label = String(
+      el.getAttribute('aria-label')
+      || el.getAttribute('data-tooltip')
+      || el.getAttribute('title')
+      || el.textContent
+      || ''
+    ).trim().toLowerCase();
+    if (label !== 'expand all') continue;
+    const rect = el.getBoundingClientRect?.();
+    if (rect && rect.width > 0 && rect.height > 0) return el;
+  }
+  return null;
+}
+
+async function extractExpandedEmailData() {
+  const expandAll = findVisibleExpandAllControl();
+  if (expandAll) {
+    expandAll.click();
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline && findVisibleExpandAllControl()) {
+      await new Promise((resolve) => setTimeout(resolve, 125));
+    }
+  }
+  const data = extractEmailData({ includeFullThread: true }) || { empty: true };
+  return {
+    ...data,
+    fullThreadExpanded: !findVisibleExpandAllControl(),
+    expansionAttempted: !!expandAll,
+  };
+}
+
 /**
  * Escape a user/CRM-derived string before interpolating it into innerHTML.
  * Zoho subjects and deal names routinely contain quotes and angle brackets.
@@ -655,7 +723,20 @@ function escapeHtml(value) {
  */
 async function onEmailChanged() {
   const data = extractEmailData();
-  if (!data) return;
+  if (!data) {
+    // Gmail hash navigation does not reliably emit a tab load event. Tell the
+    // background/sidebar when the active tab leaves a thread so the prior
+    // thread cannot remain as live (unlocked) context on the inbox/list view.
+    if (lastEmailHash !== '__empty__') {
+      lastEmailHash = '__empty__';
+      await sendToBackground(MSG.EMAIL_CHANGED, {
+        empty: true,
+        clearedAt: Date.now(),
+        url: window.location.href,
+      }).catch(() => {});
+    }
+    return;
+  }
 
   // Deduplicate — don't re-process the same extraction result. The hash MUST
   // include the participant set: Gmail hydrates a thread progressively, so an
@@ -1510,7 +1591,7 @@ function showSendTaskPopup(tasks, recipients, subject) {
         taskId: task.id,
         dealId: task.dealId || '',
         contactId: task.contactId || '',
-        newSubject: `Follow up: ${task.subject}`,
+        newSubject: nextFollowUpSubject(task.subject),
         gmailThreadUrl: window.location.href,
       });
       setStatus('✓ Task completed. Follow-up created.');
@@ -1894,8 +1975,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case MSG.GET_FULL_EMAIL_CONTEXT:
-      sendResponse(extractEmailData({ includeFullThread: true }) || { empty: true });
-      break;
+      extractExpandedEmailData().then(sendResponse).catch((error) => {
+        sendResponse({ empty: true, fullThreadExpanded: false, error: String(error?.message || error) });
+      });
+      return true;
 
     case MSG.GET_EMAIL_CONTEXT:
       // Live extraction on demand — lets the background serve the sidebar

@@ -24,6 +24,20 @@ import { startZohoAuth, getAuthStatus, disconnectZoho, getValidZohoToken } from 
 import { setupCacheAlarms, handleAlarm, refreshPriceCatalog } from './cache.js';
 import { setupContextMenus, handleContextMenuClick } from './context-menus.js';
 import { handleCommand } from './shortcuts.js';
+import { acknowledgeQuoteSidebarAction, claimQuoteSidebarAction } from './sidebar-actions.js';
+import { requiredBusinessText } from '../lib/task-subjects.mjs';
+
+const ZOHO_ID_RE = /^\d{13,19}$/;
+function optionalZohoId(value) {
+  const id = String(value?.id || value || '').trim();
+  return ZOHO_ID_RE.test(id) ? id : '';
+}
+
+// Context-lock snapshots contain bounded Gmail thread text. Keep session
+// storage extension-private even if Chrome's default access level changes.
+if (chrome.storage?.session?.setAccessLevel) {
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
+}
 
 // ─────────────────────────────────────────────
 // Zoho Quote → PDF export (web-UI "Export to PDF") helpers
@@ -373,6 +387,11 @@ registerMessageHandlers({
       // context is only ever written by Gmail content scripts.
       return { success: false, error: 'EMAIL_CHANGED requires a tab id (only Gmail content scripts may set it)' };
     }
+    if (payload?.empty) {
+      await setEmailContextForTab(tabId, null);
+      currentCrmContext = null;
+      return { success: true, cleared: true };
+    }
     // Participant-growth re-sends for the SAME thread (progressive Gmail
     // hydration, print-view enrichment) must not wipe the CRM context — the
     // content script dedupes its CRM lookup per thread, so a wipe here would
@@ -477,8 +496,13 @@ registerMessageHandlers({
   },
 
   // ── Quoting ──
-  [MSG.GENERATE_QUOTE]: async ({ skuText, personId }) => {
-    return api.generateQuote(skuText, personId);
+  [MSG.GENERATE_QUOTE]: async ({ skuText, personId, priorQuoteText }) => {
+    return api.generateQuote(skuText, personId, priorQuoteText);
+  },
+
+  // Read-only, bounded product autocomplete for explicit quote-line editing.
+  [MSG.PRODUCT_SEARCH]: async ({ query }) => {
+    return api.productSearch(query);
   },
 
   // ── Draft Reply ──
@@ -505,6 +529,16 @@ registerMessageHandlers({
   // gmailThreadUrl for the complete_and_followup successor) — do not narrow it to a
   // fixed field list or new optional fields get silently dropped here.
   [MSG.TASK_ACTION]: async ({ action, taskId, ...options }) => {
+    if (action === 'complete_and_followup') {
+      options.newSubject = requiredBusinessText(options.newSubject, 'Follow-up subject');
+      const dealId = optionalZohoId(options.dealId);
+      const contactId = optionalZohoId(options.contactId);
+      if (!dealId && !contactId) {
+        throw new Error('Follow-up was not created because neither its Deal nor Contact association could be verified. The original task was not completed.');
+      }
+      options.dealId = dealId;
+      options.contactId = contactId;
+    }
     return api.taskAction(action, taskId, options);
   },
 
@@ -541,6 +575,15 @@ registerMessageHandlers({
     }
     // Message is also received by the sidebar's onMessage listener for in-panel navigation
     return { forwarded: true };
+  },
+
+  [MSG.SIDEBAR_ACTION_CLAIM]: async (payload, sender) => {
+    const claim = await claimQuoteSidebarAction(payload, sender);
+    return { claim };
+  },
+
+  [MSG.SIDEBAR_ACTION_ACK]: async (payload, sender) => {
+    return acknowledgeQuoteSidebarAction(payload, sender);
   },
 
   // ── Email Sent Detection & Task Rescheduling ──
@@ -621,12 +664,23 @@ registerMessageHandlers({
     return api.dealCloseLost(dealId, expectedDealName);
   },
 
+  // ── Scripted CRM delete / undo (no agent in the loop) ──
+  [MSG.CRM_DELETE]: async (payload) => {
+    return api.crmDelete(payload || {});
+  },
+  [MSG.CRM_UNDO]: async ({ undoToken }) => {
+    return api.crmUndo(undoToken);
+  },
+
   // ── One-shot customer-to-quote (reviewed plan card in ChatPanel) ──
   [MSG.ONESHOT_PLAN]: async (payload) => {
     return api.oneshotPlan(payload);
   },
   [MSG.ONESHOT_EXECUTE]: async (payload) => {
     return api.oneshotExecute(payload);
+  },
+  [MSG.ONESHOT_INTAKE]: async (payload) => {
+    return api.oneshotIntake(payload);
   },
 
   // ── Download Zoho's native templated Quote PDF (web-UI "Export to PDF") ──
@@ -643,6 +697,7 @@ registerMessageHandlers({
   },
 
   [MSG.SUGGEST_TASK]: async (params) => {
+    if (params.subject) params.subject = requiredBusinessText(params.subject, 'Task subject');
     return api.suggestTask(params);
   },
 
@@ -653,6 +708,7 @@ registerMessageHandlers({
 
   // ── CRM Create Account ──
   [MSG.CRM_CREATE_ACCOUNT]: async ({ name, street, city, state, zip, website }) => {
+    name = requiredBusinessText(name, 'Account name');
     return api.crmCreateAccount(name, street, city, state, zip, website);
   },
 
@@ -667,6 +723,12 @@ registerMessageHandlers({
 
   // ── CRM Create Task ──
   [MSG.CRM_CREATE_TASK]: async ({ subject, dueDate, dealId, contactId, priority, description, gmailThreadUrl }) => {
+    subject = requiredBusinessText(subject, 'Task subject');
+    dealId = optionalZohoId(dealId);
+    contactId = optionalZohoId(contactId);
+    if (!dealId && !contactId) {
+      throw new Error('Task was not created because neither a Deal nor Contact association could be verified.');
+    }
     return api.crmCreateTask(subject, dueDate, dealId, contactId, priority, description, gmailThreadUrl);
   },
 
@@ -823,6 +885,78 @@ registerMessageHandlers({
       return { items: [], error: 'Could not reach the Zoho page. Reload the tab and try again.' };
     }
     return resp;
+  },
+
+  // ── Quote Line Editor (2026-08-20) ──
+  //
+  // Two narrow POSTs to the worker and nothing else. The agent tool loop is
+  // deliberately not involved: the ops were built from a snapshot the rep just
+  // looked at, so the write must be deterministic.
+  [MSG.GET_QUOTE_LINES]: async ({ recordId, module }) => {
+    const id = String(recordId || '').trim();
+    if (!/^\d{10,25}$/.test(id)) return { lines: [], error: 'A Zoho record id is required.' };
+    return api.getQuoteLines(id, module || 'Quotes');
+  },
+
+  // Read-only preview of a term clone. Writes nothing.
+  [MSG.PREVIEW_QUOTE_CLONE_TERMS]: async ({ recordId, terms }) => {
+    const id = String(recordId || '').trim();
+    if (!/^\d{10,25}$/.test(id)) return { previews: [], error: 'A Zoho record id is required.' };
+    return api.previewQuoteCloneTerms(id, Array.isArray(terms) ? terms : undefined);
+  },
+
+  // Creates NEW Zoho quotes, one per term. Never auto-retried: a retry after a
+  // partial failure would leave duplicate quotes behind.
+  [MSG.CLONE_QUOTE_TERMS]: async (payload) => {
+    const id = String(payload?.recordId || '').trim();
+    if (!/^\d{10,25}$/.test(id)) return { results: [], error: 'A Zoho record id is required.' };
+    return api.cloneQuoteTerms(payload);
+  },
+
+  // Read-only. One Vendor_Lines search; writes nothing.
+  [MSG.GET_QUOTE_LINE_COSTS]: async ({ recordId, module }) => {
+    const id = String(recordId || '').trim();
+    if (!/^\d{10,25}$/.test(id)) return { costs: [], error: 'A Zoho record id is required.' };
+    return api.getQuoteLineCosts(id, module || 'Quotes');
+  },
+
+  // Read-only price resolution. Slow by design (sequential live lookups), and
+  // it writes nothing: the rep reviews the resulting diff and commits it.
+  [MSG.MATCH_QUOTE_LINES_TO_ECOMM]: async ({ recordId, module }) => {
+    const id = String(recordId || '').trim();
+    if (!/^\d{10,25}$/.test(id)) return { quotes: [], error: 'A Zoho record id is required.' };
+    return api.matchQuoteLinesToEcomm(id, module || 'Quotes');
+  },
+
+  // No retry here on purpose: apiCall has none and the worker's zohoApiCall has
+  // no 429 retry, so one user action is exactly one request. A failed commit is
+  // reported to the card, which keeps the local edits for a manual retry.
+  [MSG.COMMIT_QUOTE_LINE_OPS]: async (payload) => {
+    const id = String(payload?.recordId || '').trim();
+    if (!/^\d{10,25}$/.test(id)) return { success: false, error: 'invalid_record_id', message: 'A Zoho record id is required.' };
+    return api.commitQuoteLineOps(payload);
+  },
+
+  // Mount the in-page overlay on the active Zoho tab. Re-injects the bundle if
+  // the tab is stale, which is exactly why the content script's mount is
+  // idempotent (a second mount would stack two overlays).
+  [MSG.OPEN_QUOTE_LINE_EDITOR]: async ({ tabId, recordId } = {}) => {
+    let target = tabId ?? null;
+    let url = '';
+    if (target == null) {
+      const tab = await getActiveTab();
+      target = tab?.id ?? null;
+      url = tab?.url || '';
+    } else {
+      try { url = (await chrome.tabs.get(target))?.url || ''; } catch (_) { url = ''; }
+    }
+    if (target == null) return { ok: false, error: 'No active tab.' };
+    if (!url.startsWith('https://crm.zoho.com/')) return { ok: false, error: 'Open a Zoho Quote record first.' };
+    const info = parseZohoRecordUrl(url);
+    const id = String(recordId || info?.recordId || '').trim();
+    if (!id || info?.module !== 'Quotes') return { ok: false, error: 'The quote line editor only opens on a Zoho Quote record page.' };
+    const resp = await sendToZohoTabWithInjection(target, MSG.OPEN_QUOTE_LINE_EDITOR, { recordId: id });
+    return resp || { ok: false, error: 'Could not reach the Zoho page. Reload the tab and try again.' };
   },
 
   // ── WS4: Build a URL quote from scraped { sku, qty } line items ──

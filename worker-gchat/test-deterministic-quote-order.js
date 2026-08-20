@@ -39,6 +39,48 @@ const optBlock = (msg, n) => {
 };
 const firstUrl = (block) => (block.split('\n').find(l => l.includes('Co-Term: http')) || '');
 
+// ─── Canonical editor snapshot: adding an SKU must retain every row ─────────
+{
+  const parsed = parseMessage('2 MX85\n1 MX75\nhardware only');
+  const out = parsed ? buildQuoteResponse(parsed) : null;
+  const msg = (out && out.message) || '';
+  const rawUrl = (msg.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)]+/) || [])[0] || '';
+  let composition = new Map();
+  if (rawUrl) {
+    const url = new URL(rawUrl);
+    const items = String(url.searchParams.get('item') || '').split(',').map((sku) => sku.replace(/-HW(?:-(?:NA|WW))?$/, ''));
+    const qtys = String(url.searchParams.get('qty') || '').split(',').map(Number);
+    composition = new Map(items.map((sku, index) => [sku, qtys[index]]));
+  }
+  check('hardware-only editor rebuild retains original MX85 quantity', composition.get('MX85') === 2, rawUrl || msg);
+  check('hardware-only editor rebuild adds MX75 quantity on the first request', composition.get('MX75') === 1, rawUrl || msg);
+  check('hardware-only editor rebuild emits no license SKU', !/LIC-/.test(rawUrl), rawUrl || msg);
+}
+
+// ─── Multiline quantities must never bleed into the preceding SKU ───────────
+{
+  const fixtures = [
+    ['three-row editor snapshot', '2 MX85\n1 MX75\n3 MX105\nhardware only', [['MX85', 2], ['MX75', 1], ['MX105', 3]]],
+    ['CRLF editor snapshot', '2 MX85\r\n1 MX75\r\nhardware only', [['MX85', 2], ['MX75', 1]]],
+    ['same-line suffix quantities', 'MX85 x2\nMX75 x1\nhardware only', [['MX85', 2], ['MX75', 1]]],
+  ];
+  for (const [label, text, expected] of fixtures) {
+    const parsed = parseMessage(text);
+    const actual = (parsed?.items || []).map(({ baseSku, qty }) => [baseSku, qty]);
+    check(label + ' preserves every quantity', JSON.stringify(actual) === JSON.stringify(expected), JSON.stringify(actual));
+  }
+
+  const bundled = parseMessage('2 MX85\n1 MX75');
+  check('normal bundle preserves independent hardware quantities',
+    JSON.stringify((bundled?.items || []).map(({ baseSku, qty }) => [baseSku, qty])) === JSON.stringify([['MX85', 2], ['MX75', 1]]),
+    JSON.stringify(bundled?.items));
+
+  const bareFamily = parseMessage('2 MS130\n1 MX75\nhardware only');
+  check('bare-family branch does not steal the next row quantity',
+    bareFamily?.items?.some(item => item.baseSku === 'MS130' && item.qty === 2),
+    JSON.stringify(bareFamily?.items));
+}
+
 // ─── Mixed non-EOL (first) + EOL (second): order must be preserved ───────────
 // MX85 is non-EOL; MX64 is EOL → MX67. Request order: MX85 then MX64.
 // Old bucketed builder emitted the EOL license FIRST (wrong). New builder keeps
@@ -68,7 +110,7 @@ const firstUrl = (block) => (block.split('\n').find(l => l.includes('Co-Term: ht
 
   // ORDER in refresh: MX85 (carried) before MX67 (MX64's replacement)
   const o2 = firstUrl(optBlock(msg, 2));
-  check('Option 2: replacement MX67-HW present', /MX67-HW/.test(o2), o2);
+  check('Option 2: active replacement MX67 order SKU present', /(?:item=|,)MX67(?:,|&qty=)/.test(o2) && !/MX67-HW/.test(o2), o2);
   check('Option 2: MX85 before MX67 (request order)',
     o2.indexOf('MX85') > -1 && o2.indexOf('MX67') > -1 && o2.indexOf('MX85') < o2.indexOf('MX67'),
     o2);

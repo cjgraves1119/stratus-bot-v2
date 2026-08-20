@@ -5,6 +5,23 @@
  */
 
 import { generateQuote, crmSearch } from './api-client.js';
+import { queueQuoteSidebarAction } from './sidebar-actions.js';
+
+/**
+ * Post one message to a Zoho tab's content script. Kept local and tiny rather
+ * than importing the background's own helper, because context-menus.js is
+ * imported BY background/index.js and a back-import would be circular.
+ */
+function sendToZohoTab(tabId, type, payload) {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tabId, { type, ...payload }, (response) => {
+        void chrome.runtime.lastError;
+        resolve(response || null);
+      });
+    } catch (_) { resolve(null); }
+  });
+}
 
 /**
  * Detect which Zoho CRM module a highlighted string most likely belongs to,
@@ -99,6 +116,17 @@ export function setupContextMenus() {
       documentUrlPatterns: ['https://crm.zoho.com/*'],
     });
 
+    // Quote Line Editor (2026-08-20). A real user gesture, scoped to Zoho, so
+    // the in-page overlay can be opened without the keyboard shortcuts (which
+    // shortcuts.js hard-gates to Gmail tabs). The content script decides
+    // whether the current page is actually a Quote record.
+    chrome.contextMenus.create({
+      id: 'stratus-quote-line-editor',
+      title: 'Edit quote line items',
+      contexts: ['page'],
+      documentUrlPatterns: ['https://crm.zoho.com/*'],
+    });
+
     // Right-click on email addresses to look up contact in CRM
     chrome.contextMenus.create({
       id: 'stratus-lookup-email',
@@ -127,17 +155,23 @@ export async function handleContextMenuClick(info, tab) {
   switch (info.menuItemId) {
     case 'stratus-quote-selection': {
       if (!selectedText.trim()) return;
-      // Open sidebar with quote panel pre-filled
       try {
+        // Preserve the user gesture: opening the panel must be the first async
+        // browser action. The quote request itself is then queued durably so a
+        // slower panel mount cannot lose it behind a fixed timeout.
         await chrome.sidePanel.open({ tabId: tab.id });
-        // Send message to sidebar to navigate to quote panel with pre-filled text
-        setTimeout(() => {
-          chrome.runtime.sendMessage({
-            type: 'SIDEBAR_NAVIGATE',
-            panel: 'chat',
-            data: { quoteSkuText: selectedText.trim() },
-          });
-        }, 500);
+        const action = await queueQuoteSidebarAction({
+          quoteSkuText: selectedText.trim(),
+          tabId: tab.id,
+          windowId: tab.windowId,
+        });
+        if (!action) throw new Error('Could not create a bounded quote action');
+        // Fast wake-up only. The sidebar still claims the stored action on
+        // mount/storage change, so this message may be missed without data loss.
+        chrome.runtime.sendMessage({
+          type: 'SIDEBAR_ACTION_AVAILABLE',
+          actionId: action.actionId,
+        }, () => void chrome.runtime.lastError);
       } catch (err) {
         console.error('[Stratus] Context menu quote failed:', err);
       }
@@ -234,6 +268,18 @@ export async function handleContextMenuClick(info, tab) {
         }, 500);
       } catch (err) {
         console.error('[Stratus] Screenshot capture context menu failed:', err);
+      }
+      break;
+    }
+
+    case 'stratus-quote-line-editor': {
+      if (!tab?.id) return;
+      // Mounting is idempotent in the content script, so a double right-click
+      // cannot stack two overlays.
+      try {
+        await sendToZohoTab(tab.id, 'OPEN_QUOTE_LINE_EDITOR', {});
+      } catch (err) {
+        console.warn('[Stratus AI] quote line editor could not be opened:', err?.message || err);
       }
       break;
     }

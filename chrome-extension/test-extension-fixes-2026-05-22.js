@@ -8,10 +8,9 @@ const here = __dirname;
 const quoteSource = fs.readFileSync(path.join(here, 'src/lib/quote-engine.js'), 'utf8');
 const catalog = JSON.parse(fs.readFileSync(path.join(here, 'src/lib/auto-catalog.json'), 'utf8'));
 const contextMenuSource = fs.readFileSync(path.join(here, 'src/background/context-menus.js'), 'utf8');
-const quotePanelSource = fs.readFileSync(path.join(here, 'src/sidebar/panels/QuotePanel.jsx'), 'utf8');
+const quoteResultSource = fs.readFileSync(path.join(here, 'src/sidebar/components/QuoteResult.jsx'), 'utf8');
 const searchPanelSource = fs.readFileSync(path.join(here, 'src/sidebar/panels/SearchPanel.jsx'), 'utf8');
-const emailPanelSource = fs.readFileSync(path.join(here, 'src/sidebar/panels/EmailPanel.jsx'), 'utf8');
-const workerSource = fs.readFileSync(path.join(here, '../worker-gchat/src/index.js'), 'utf8');
+const chatPanelSource = fs.readFileSync(path.join(here, 'src/sidebar/panels/ChatPanel.jsx'), 'utf8');
 
 let passed = 0;
 let failed = 0;
@@ -160,7 +159,6 @@ t('SearchPanel hides Deals and routes short deal IDs to quote search', () => {
   assert.ok(/dlid/.test(searchPanelSource));
   assert.ok(/isStrongAutoModuleSearch/.test(searchPanelSource));
   assert.ok(/CCW_Deal_Number/.test(searchPanelSource));
-  assert.ok(/CCW_Deal_Number:equals/.test(workerSource));
 });
 
 t('context menu routes DLID and bare 8-digit searches to Quotes', () => {
@@ -169,25 +167,25 @@ t('context menu routes DLID and bare 8-digit searches to Quotes', () => {
   assert.ok(/\\d\{8\}/.test(contextMenuSource));
 });
 
-t('QuotePanel has labeled Copy All Links action', () => {
-  assert.ok(/function handleCopyAll/.test(quotePanelSource));
-  assert.ok(/Copy All Links/.test(quotePanelSource));
-  assert.ok(/\$\{u\.label \|\| `Option/.test(quotePanelSource));
-  assert.ok(/text\/html/.test(quotePanelSource));
-  assert.ok(/ClipboardItem/.test(quotePanelSource));
+t('QuoteResult has labeled Copy All Links action', () => {
+  assert.ok(/function handleCopyAll/.test(quoteResultSource));
+  assert.ok(/Copy All Links/.test(quoteResultSource));
+  assert.ok(/\$\{u\.label \|\| `Option/.test(quoteResultSource));
+  assert.ok(/text\/html/.test(quoteResultSource));
+  assert.ok(/ClipboardItem/.test(quoteResultSource));
 });
 
-t('QuotePanel no longer offers Google Chat routing', () => {
-  assert.ok(!/Open Google Chat/.test(quotePanelSource));
-  assert.ok(!/handleSendToGChat/.test(quotePanelSource));
+t('QuoteResult no longer offers Google Chat routing', () => {
+  assert.ok(!/Open Google Chat/.test(quoteResultSource));
+  assert.ok(!/handleSendToGChat/.test(quoteResultSource));
 });
 
-t('EmailPanel can route detected SKUs to quote and Zoho creation', () => {
-  assert.ok(/function getDetectedQuoteText/.test(emailPanelSource));
-  assert.ok(/Generate Quote/.test(emailPanelSource));
-  assert.ok(/Send to Zoho/.test(emailPanelSource));
-  assert.ok(/onNavigate\?\.\('quote'/.test(emailPanelSource));
-  assert.ok(/onNavigate\?\.\('chat'/.test(emailPanelSource));
+t('ChatPanel routes Gmail Create Quote through eCommerce before explicit Zoho review', () => {
+  assert.ok(/startEmailEcommQuote/.test(chatPanelSource));
+  assert.ok(/buildEcommQuoteFromIntake/.test(chatPanelSource));
+  assert.ok(/Create Zoho CRM quote from this/.test(quoteResultSource));
+  assert.ok(/consentSource: 'quote-card-button'/.test(chatPanelSource));
+  assert.ok(/Execute — create in Zoho CRM/.test(chatPanelSource));
 });
 
 console.log(`\n--- ${passed} passed, ${failed} failed ---\n`);

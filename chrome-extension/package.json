@@ -1,14 +1,22 @@
 {
   "name": "stratus-ai-chrome-extension",
   "version": "1.0.0",
-  "description": "Stratus AI Chrome Extension — Cisco/Meraki sales assistant for Gmail",
+  "description": "Stratus AI Chrome Extension \u2014 Cisco/Meraki sales assistant for Gmail",
   "private": true,
   "scripts": {
     "dev": "webpack --mode development --watch",
     "build": "webpack --mode production",
+    "build:dev": "STRATUS_API_BASE=https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev STRATUS_ENV=dev webpack --mode production",
+    "test:context-lock": "node --test test-context-lock-2026-08-12.mjs",
+    "test:quote-persistence": "node --test test-context-lock-2026-08-12.mjs test-sidebar-actions-2026-08-13.mjs",
+    "test:deal-default": "node --test test-deal-default-2026-08-13.mjs",
+    "test:email-quote": "node --test test-email-quote-flow-2026-08-17.mjs && node test-oneshot-card-2026-07-30.js && node test-oneshot-intake-card-2026-07-31.js",
+    "test:task-subjects": "node --test test-task-subjects-2026-08-17.mjs",
+    "test:preserved-fixes": "node test-cart-sku-priority-2026-08-17.cjs && node test-preserved-v1267-fixes-2026-08-17.cjs",
     "build:crx": "bash scripts/build-crx.sh",
     "pack:crx": "node scripts/pack-crx.mjs",
-    "clean": "rm -rf dist/ release/"
+    "clean": "rm -rf dist/ release/",
+    "build:harness": "webpack --config harness/webpack.harness.js --mode development"
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",

@@ -63,13 +63,17 @@ const call = async (text, pid) => {
   const j = await call('https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-SEC-3Y,MS130-24P-HW,LIC-MS130-24-3Y,MS130-8P-HW,LIC-MS130-CMPT-3Y&qty=1,1,1,1,1,1', 'echo-t1');
   ok(j.handlerType === 'deterministic' && !(j.suggestions || []).length, `no bogus suggestions (got ${j.handlerType}, ${(j.suggestions || []).length} suggestions)`);
   ok((j.parsedItems || []).length === 6, `all 6 items parsed (got ${(j.parsedItems || []).length})`);
+  ok((j.parsedItems || []).some(i => i.sku === 'MX85')
+      && (j.parsedItems || []).some(i => i.sku === 'MS130-24P')
+      && !(j.parsedItems || []).some(i => /^(?:MX|MS).*\-HW(?:-|$)/.test(i.sku)),
+    'extension-facing parsed items also expose bare MX/MS SKUs');
   ok((j.quoteUrls || []).length === 3, `3 term buckets (got ${(j.quoteUrls || []).length})`);
   const u3 = (j.quoteUrls || []).find(u => u.label === '3-Year');
-  ok(u3 && u3.url === 'https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-SEC-3Y,MS130-24P-HW,LIC-MS130-24-3Y,MS130-8P-HW,LIC-MS130-CMPT-3Y&qty=1,1,1,1,1,1',
-    '3-Year bucket echoes the original URL byte-identical');
+  ok(u3 && u3.url === 'https://stratusinfosystems.com/order/?item=MX85,LIC-MX85-SEC-3Y,MS130-24P,LIC-MS130-24-3Y,MS130-8P,LIC-MS130-CMPT-3Y&qty=1,1,1,1,1,1',
+    '3-Year bucket normalizes inactive MX/MS -HW tokens to active non-HW order SKUs');
   const u1 = (j.quoteUrls || []).find(u => u.label === '1-Year');
-  ok(u1 && /MX85-HW/.test(u1.url) && /MS130-8P-HW/.test(u1.url) && /LIC-MS130-CMPT-1Y/.test(u1.url),
-    '1-Year bucket carries hardware AND the CMPT license (rewritten)');
+  ok(u1 && /[?&,]item=MX85,|[?,]item=[^\n]*\bMX85,/.test(u1.url) && /MS130-8P/.test(u1.url) && !/-HW/.test(u1.url) && /LIC-MS130-CMPT-1Y/.test(u1.url),
+    '1-Year bucket carries non-HW order SKUs AND the CMPT license (rewritten)');
 
   // ── 3. Legacy tokens in a pasted URL: swaps + warnings ──
   console.log('URL echoback + EOL swaps');

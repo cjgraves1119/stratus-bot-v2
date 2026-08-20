@@ -452,6 +452,98 @@ function injectGmailLinks() {
 }
 
 // ─────────────────────────────────────────────
+// Quote Line Editor overlay (2026-08-20)
+// ─────────────────────────────────────────────
+//
+// Renders sidebar.html?view=quote-lines in a fixed-position IFRAME pinned to the
+// Zoho record page. sidebar.html is already in web_accessible_resources matched
+// to https://crm.zoho.com/* (manifest.json), so this needs no manifest change.
+//
+// Why an iframe rather than mounting React into this content script: complete
+// CSS and JS isolation from Zoho's very aggressive stylesheets without adding
+// shadow DOM (new territory here), zero webpack change, and the overlay becomes
+// literally the same page the side panel renders, so the two can never drift.
+//
+// Construction follows showSendTaskPopup (content/index.js:1404): remove any
+// prior node, createElement, inline cssText, very high z-index, appendChild.
+
+const QLE_HOST_ID = 'stratus-qle-host';
+const QLE_CHIP_ID = 'stratus-qle-chip';
+
+/** True only on a Zoho Quote RECORD page, which is the only place this works. */
+function qleQuoteRecordId() {
+  const info = parseZohoRecordUrl(window.location.href);
+  return (info?.isRecord && info.module === 'Quotes' && info.recordId) ? info.recordId : null;
+}
+
+function mountQuoteLineEditor(recordId) {
+  const id = String(recordId || qleQuoteRecordId() || '');
+  if (!/^\d{10,25}$/.test(id)) return false;
+  // IDEMPOTENCY IS REQUIRED, not a nicety: sendToZohoTabWithInjection
+  // (background/index.js:105) re-injects this whole bundle into a live tab when
+  // a message goes unanswered, so without this guard a second mount would stack
+  // two overlays on top of each other.
+  const existing = document.getElementById(QLE_HOST_ID);
+  if (existing) {
+    if (existing.dataset.recordId === id) return true;
+    existing.remove(); // a different record: replace rather than stack
+  }
+
+  const host = document.createElement('div');
+  host.id = QLE_HOST_ID;
+  host.dataset.recordId = id;
+  host.style.cssText = 'position:fixed;top:64px;right:24px;width:520px;'
+    + 'height:calc(100vh - 96px);z-index:2147483000;border-radius:10px;'
+    + 'box-shadow:0 8px 28px rgba(0,0,0,.28);overflow:hidden;background:#fff;';
+
+  const frame = document.createElement('iframe');
+  frame.src = chrome.runtime.getURL('sidebar.html')
+    + `?view=quote-lines&closable=1&module=Quotes&recordId=${encodeURIComponent(id)}`;
+  frame.style.cssText = 'width:100%;height:100%;border:0;display:block;';
+  host.appendChild(frame);
+  document.body.appendChild(host);
+  return true;
+}
+
+function unmountQuoteLineEditor() {
+  document.getElementById(QLE_HOST_ID)?.remove();
+}
+
+// The overlay's own close button lives inside the iframe, which cannot reach
+// this document. It posts up instead. Verify the sender is OUR frame before
+// acting: any page script can post to this window.
+window.addEventListener('message', (event) => {
+  if (event?.data?.type !== 'STRATUS_QLE_CLOSE') return;
+  const frame = document.getElementById(QLE_HOST_ID)?.querySelector('iframe');
+  if (!frame || event.source !== frame.contentWindow) return;
+  unmountQuoteLineEditor();
+});
+
+/** The always-visible launcher, shown only on a Quote record page. */
+function injectQuoteLineEditorChip() {
+  const recordId = qleQuoteRecordId();
+  if (!recordId) { document.getElementById(QLE_CHIP_ID)?.remove(); return; }
+  const existing = document.getElementById(QLE_CHIP_ID);
+  if (existing) { existing.dataset.recordId = recordId; return; }
+
+  const chip = document.createElement('button');
+  chip.id = QLE_CHIP_ID;
+  chip.type = 'button';
+  chip.dataset.recordId = recordId;
+  chip.textContent = '⚡ Edit quote lines';
+  chip.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:2147482999;'
+    + 'padding:8px 14px;border:none;border-radius:18px;background:#7b1fa2;color:#fff;'
+    + 'font:600 12px/1 system-ui,-apple-system,sans-serif;cursor:pointer;'
+    + 'box-shadow:0 3px 10px rgba(0,0,0,.28);';
+  chip.addEventListener('click', () => {
+    const open = document.getElementById(QLE_HOST_ID);
+    if (open) unmountQuoteLineEditor();
+    else mountQuoteLineEditor(chip.dataset.recordId);
+  });
+  document.body.appendChild(chip);
+}
+
+// ─────────────────────────────────────────────
 // Initialization & SPA navigation tracking
 // ─────────────────────────────────────────────
 
@@ -461,6 +553,7 @@ publishMinimalUrlContext();
 setTimeout(() => {
   detectAndSendContext();
   injectGmailLinks();
+  injectQuoteLineEditorChip();
 }, 500);
 
 // Retry context detection a few times as Zoho lazy-loads record content
@@ -498,6 +591,12 @@ const urlObserver = new MutationObserver(() => {
     // change — no stale-record window.
     publishMinimalUrlContext();
 
+    // The overlay is bound to ONE record id. Navigating away from that quote
+    // must tear it down on the same tick, or it would keep showing (and let the
+    // rep commit against) a record that is no longer on screen.
+    unmountQuoteLineEditor();
+    injectQuoteLineEditorChip();
+
     // Enrich with DOM data as soon as Zoho has rendered.
     setTimeout(() => {
       detectAndSendContext();
@@ -516,6 +615,7 @@ const urlObserver = new MutationObserver(() => {
 
   // Always re-inject Gmail links (Zoho re-renders DOM frequently)
   injectGmailLinks();
+  injectQuoteLineEditorChip();
 });
 
 urlObserver.observe(document.body, {
@@ -712,6 +812,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       accountName: extractAccountName(),
       website: extractWebsite(),
     });
+    return true;
+  }
+
+  // Quote Line Editor: the context menu and the side panel both land here via
+  // the background's OPEN_QUOTE_LINE_EDITOR handler. Mounting is idempotent.
+  if (msg.type === 'OPEN_QUOTE_LINE_EDITOR') {
+    const recordId = String(msg?.recordId || '') || qleQuoteRecordId();
+    const ok = mountQuoteLineEditor(recordId);
+    sendResponse(ok
+      ? { ok: true, recordId }
+      : { ok: false, error: 'The quote line editor only opens on a Zoho Quote record page.' });
     return true;
   }
 

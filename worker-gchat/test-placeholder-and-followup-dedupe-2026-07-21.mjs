@@ -35,9 +35,13 @@ t('placeholder TRUE: empty/null/non-string/1-char', () => {
 });
 
 // ── 2. createFollowUpTaskForDeal same-turn memo dedupe ───────────────────────
-const fnStart = SRC.indexOf('async function createFollowUpTaskForDeal');
+// Extract the full self-contained follow-up helper block. The runtime function
+// now deliberately shares the business-day and subject-validation helpers, so
+// evaluating only the final function would make this harness diverge from the
+// deployed module.
+const fnStart = SRC.indexOf('function addBusinessDays');
 const fnEnd = SRC.indexOf('/**\n * Log a bot interaction to D1 bot_usage table', fnStart);
-assert(fnStart > -1 && fnEnd > fnStart, 'createFollowUpTaskForDeal not found in src/index.js');
+assert(fnStart > -1 && fnEnd > fnStart, 'follow-up helper block not found in src/index.js');
 const fnSrc = SRC.slice(fnStart, fnEnd);
 
 let zohoPosts = 0;

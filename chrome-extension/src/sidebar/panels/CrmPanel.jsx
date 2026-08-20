@@ -11,6 +11,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS, CONSUMER_DOMAINS } from '../../lib/constants';
+import { nextFollowUpSubject } from '../../lib/task-subjects.mjs';
+import { CrmDeleteControl } from '../components/CrmDeleteControl.jsx';
 
 const ZOHO_ORG = 'org647122552';
 
@@ -1303,6 +1305,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 <p style={{ fontSize: 13 }}>Select a participant or enter an email above.</p>
               </div>
             )}
+
+            <ManualCrmDelete />
           </>
         )}
 
@@ -1662,7 +1666,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 onComplete={() => handleTaskAction('complete_and_followup', task.id, {
                   dealId: task.dealId,
                   contactId: task.contactId,
-                  newSubject: `Follow up: ${task.subject}`,
+                  newSubject: nextFollowUpSubject(task.subject),
                 })}
                 onClose={() => handleTaskAction('complete', task.id)}
                 onReschedule={() => handleTaskAction('reschedule', task.id, {
@@ -2484,6 +2488,90 @@ function DealSelect({ deals, value, onChange, labelColor, selectStyle }) {
         })}
       </select>
     </div>
+  );
+}
+
+/**
+ * Delete any Zoho record you can already name, without going through the chat
+ * agent. Deleting used to cost two LLM round trips (search, then confirm, then
+ * the tool call), and it failed when the model serialized confirm as a string
+ * (Chris, 2026-08-19). When the quote number or record id is already in hand,
+ * none of that is needed.
+ *
+ * The delete itself is the shared CrmDeleteControl, so this form and the
+ * one-shot card take the identical two-step, undoable, server-guarded path.
+ */
+function ManualCrmDelete() {
+  const [moduleName, setModuleName] = useState('Quotes');
+  const [value, setValue] = useState('');
+  const [open, setOpen] = useState(false);
+
+  const trimmed = String(value || '').trim();
+  // A Quote_Number and a record id are BOTH long numerics, and passing one as
+  // the other is the classic mistake here. Zoho record ids are 15+ digits, so
+  // anything shorter (or non-numeric) is sent as a quote number and the server
+  // resolves it to the real id. Getting this wrong is not dangerous: the server
+  // refuses a Quote_Number passed as a record_id and says so.
+  const looksLikeRecordId = /^\d{15,25}$/.test(trimmed);
+  const isQuote = moduleName === 'Quotes';
+  const recordId = looksLikeRecordId ? trimmed : '';
+  const quoteNumber = (!looksLikeRecordId && isQuote) ? trimmed : '';
+  const usable = isQuote ? !!(recordId || quoteNumber) : looksLikeRecordId;
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ fontWeight: 600, fontSize: 12, color: COLORS.TEXT_PRIMARY }}>Delete a Zoho record</div>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{ background: 'none', border: 'none', color: COLORS.STRATUS_BLUE, fontSize: 11, cursor: 'pointer', padding: 0 }}
+        >
+          {open ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <select
+              value={moduleName}
+              onChange={(e) => setModuleName(e.target.value)}
+              style={{ ...inputStyle, flex: '0 0 130px' }}
+            >
+              <option value="Quotes">Quotes</option>
+              <option value="Deals">Deals</option>
+              <option value="Sales_Orders">Sales Orders</option>
+              <option value="Purchase_Orders">Purchase Orders</option>
+              <option value="Tasks">Tasks</option>
+            </select>
+            <input
+              style={inputStyle}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder={isQuote ? 'Quote number or record id' : 'Record id'}
+            />
+          </div>
+          {usable ? (
+            <CrmDeleteControl
+              styles={{ btn: { ...inputStyle, flex: 'none', cursor: 'pointer', padding: '4px 10px' } }}
+              sendToBackground={sendToBackground}
+              moduleName={moduleName}
+              recordId={recordId}
+              quoteNumber={quoteNumber}
+              label={quoteNumber ? `quote #${quoteNumber}` : `${moduleName} ${recordId}`}
+            />
+          ) : (
+            <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>
+              {isQuote
+                ? 'Enter the customer-facing quote number, or the record id.'
+                : 'Enter the record id (15 or more digits).'}
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>
+            Asks you to confirm before anything is sent, and offers Undo afterwards.
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

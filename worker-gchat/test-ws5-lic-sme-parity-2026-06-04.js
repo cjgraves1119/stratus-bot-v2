@@ -168,7 +168,7 @@ t('mixed "mr44 x4, MX67, 3 lic-sme-3yr" RETAINS hardware (SME over-match regress
 });
 t('mixed output matches worker/: hardware multi-term present', () => {
   const r = quote('mr44 x4, MX67, and 3 lic-sme-3yr');
-  assert.ok(/MR44-HW/.test(r.message || '') && /MX67-HW/.test(r.message || ''), `hardware missing: ${(r.message || '').slice(0, 200)}`);
+  assert.ok(/MR44-HW/.test(r.message || '') && /(?:item=|,)MX67(?:,|&qty=)/.test(r.message || '') && !/MX67-HW/.test(r.message || ''), `hardware missing or inactive MX67-HW survived: ${(r.message || '').slice(0, 200)}`);
 });
 t('mixed "4 mr44, 2 sme, 5 MS130-12X" injects SME-AGN and keeps hardware', () => {
   const p = parseMessage('4 mr44, 2 sme, 5 MS130-12X');

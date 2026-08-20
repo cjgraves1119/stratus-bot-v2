@@ -69,6 +69,9 @@ module.exports = (env, argv) => {
           { from: 'manifest.json', to: 'manifest.json' },
           { from: 'src/icons', to: 'icons', noErrorOnMissing: true },
           { from: 'src/content/content.css', to: 'content.css' },
+          { from: 'public/stratus-cart-core.js', to: 'stratus-cart-core.js' },
+          { from: 'public/stratus-cart-popup.js', to: 'stratus-cart-popup.js' },
+          { from: 'public/stratus-task-email-optin.js', to: 'stratus-task-email-optin.js' },
         ],
       }),
       new HtmlWebpackPlugin({

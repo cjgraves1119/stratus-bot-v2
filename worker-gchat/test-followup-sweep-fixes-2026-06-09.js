@@ -99,7 +99,7 @@ const qtys = (r, sku) => { const m = (r || '').match(new RegExp('item=([^&\\s]*)
   r = await W.handleFollowUpModifier('add 100 duo essentials', 'p', kvWith(DUO200));
   ok(r && !/LIC-DUO-ESSENTIALS-3YR[^&]*&[^#]*1-Year/.test(r) && qtys(r, 'LIC-DUO-ESSENTIALS-1YR').length === 1 && qtys(r, 'LIC-DUO-ESSENTIALS-3YR').length === 1, '"add 100 duo essentials" → each term bucket gets ONLY its own term SKU (no cross-term poison)');
   r = await W.handleFollowUpModifier('add 2 MX67', 'p', kvWith(MR44Q));
-  ok(r && qtys(r, 'MX67-HW')[0] === 2 && qtys(r, 'LIC-MX67-SEC-3YR')[0] === 2, '"add 2 MX67" → hardware + paired co-term license (was hardware only)');
+  ok(r && qtys(r, 'MX67')[0] === 2 && !/MX67-HW/.test(r) && qtys(r, 'LIC-MX67-SEC-3YR')[0] === 2, '"add 2 MX67" → active non-HW order SKU + paired co-term license');
 
   console.log('── SME discontinued → replacement substitution (was: 5-year cap) ──');
   r = await W.handleFollowUpModifier('5 year', 'p', kvWith(SMEQ));

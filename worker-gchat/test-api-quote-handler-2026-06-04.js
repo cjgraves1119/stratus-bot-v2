@@ -26,6 +26,19 @@ function loadWorker() {
 const worker = loadWorker();
 
 const kv = { get: async () => null, put: async () => {}, list: async () => ({ keys: [] }), getWithMetadata: async () => ({ value: null, metadata: null }) };
+function createStatefulKv() {
+  const values = new Map();
+  return {
+    get: async (key, type) => {
+      const value = values.get(key);
+      if (value == null) return null;
+      return type === 'json' ? JSON.parse(value) : value;
+    },
+    put: async (key, value) => { values.set(key, String(value)); },
+    list: async () => ({ keys: [...values.keys()].map(name => ({ name })) }),
+    getWithMetadata: async (key, type) => ({ value: await (type === 'json' ? JSON.parse(values.get(key) || 'null') : values.get(key) || null), metadata: null }),
+  };
+}
 const db = { prepare: () => ({ bind: () => ({ run: async () => ({ success: true }), first: async () => null, all: async () => ({ results: [] }) }), run: async () => ({ success: true }), first: async () => null, all: async () => ({ results: [] }) }) };
 const env = { GMAIL_ADDON_API_KEY: 'test-key', CONVERSATION_KV: kv, PRICES_KV: kv, ANALYTICS_DB: db, BOT_METRICS: { writeDataPoint: () => {} }, BOT_STORAGE: kv };
 const ctx = { waitUntil: (p) => { try { if (p && p.catch) p.catch(() => {}); } catch (_) {} } };
@@ -55,6 +68,88 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(/MX84|MX85/.test(urls), `MX84 EOL handling missing: ${urls}`);
     assert.ok(!/MR-AGN/.test(JSON.stringify(r)), `MR-AGN alias leaked to response: ${JSON.stringify(r).slice(0,200)}`);
   });
+  await t('compact WITH-term bundle bypasses hostile V3 and stays correct on repeat', async () => {
+    const statefulKv = createStatefulKv();
+    let aiCalls = 0;
+    const hostileV3 = {
+      CF_QUOTE_V3_ENABLED: 'true',
+      CONVERSATION_KV: statefulKv,
+      AI: {
+        run: async () => {
+          aiCalls++;
+          return { response: JSON.stringify({
+            intent: 'quote',
+            confidence: 0.99,
+            clarify: { needed: false, question: '' },
+            items: [
+              { product: 'MX67', qty: 1, intent: 'license' },
+              { product: 'MS130-24P', qty: 1, intent: 'license' },
+            ],
+            modifiers: { term_years: 3, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+            revision: {}, reference: {}, dashboard: { is_meraki_license_page: false },
+          }) };
+        },
+      },
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = await callQuote('quote 1 MX67 and 1 MS130-24P with 3yr licenses', hostileV3);
+      assert.strictEqual(r.handlerType, 'deterministic', JSON.stringify(r).slice(0, 500));
+      assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 1, JSON.stringify(r.quoteUrls));
+      const url = r.quoteUrls[0].url;
+      assert.ok(/(?:item=|,)MX67(?:,|&qty=)/.test(url), `attempt ${attempt + 1}: MX67 hardware missing: ${url}`);
+      assert.ok(/(?:item=|,)MS130-24P(?:,|&qty=)/.test(url), `attempt ${attempt + 1}: MS130-24P hardware missing: ${url}`);
+      assert.ok(!/(?:MX67|MS130-24P)-HW/.test(url), `legacy -HW leaked: ${url}`);
+      assert.ok(/LIC-MX67-SEC-3YR/.test(url) && /LIC-MS130-24-3Y/.test(url), `licenses missing: ${url}`);
+    }
+    assert.strictEqual(aiCalls, 0, 'explicit compact SKU request must bypass V3 on every attempt');
+  });
+  await t('term-prefixed LICENSES FOR applies license-only scope to the whole list', async () => {
+    let aiCalls = 0;
+    const r = await callQuote('3-year licenses for 1 MX67 and 1 MS130-24P', {
+      CF_QUOTE_V3_ENABLED: 'true',
+      AI: { run: async () => { aiCalls++; throw new Error('V3 must be bypassed'); } },
+    });
+    assert.strictEqual(aiCalls, 0, 'explicit SKU request must bypass V3');
+    assert.strictEqual(r.handlerType, 'deterministic', JSON.stringify(r).slice(0, 500));
+    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 1, JSON.stringify(r.quoteUrls));
+    const url = r.quoteUrls[0].url;
+    assert.ok(!/(?:item=|,)(?:MX67|MS130-24P)(?:,|&qty=)/.test(url), `hardware leaked into license-only request: ${url}`);
+    assert.ok(/LIC-MX67-SEC-3YR/.test(url) && /LIC-MS130-24-3Y/.test(url), `licenses missing: ${url}`);
+  });
+  await t('courtesy-wrapped term-prefixed LICENSES FOR remains list-wide license-only', async () => {
+    const r = await callQuote('please quote 3-year licenses for 1 MX67 and 1 MS130-24P');
+    assert.strictEqual(r.handlerType, 'deterministic', JSON.stringify(r).slice(0, 500));
+    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 1, JSON.stringify(r.quoteUrls));
+    const url = r.quoteUrls[0].url;
+    assert.ok(!/(?:item=|,)(?:MX67|MS130-24P)(?:,|&qty=)/.test(url), `hardware leaked into license-only request: ${url}`);
+    assert.ok(/LIC-MX67-SEC-3YR/.test(url) && /LIC-MS130-24-3Y/.test(url), `licenses missing: ${url}`);
+  });
+  await t('I-need-a-quote wrapper keeps LICENSES FOR list-wide', async () => {
+    const r = await callQuote('I would like a quote for 3-year licenses for 1 MX67 and 1 MS130-24P');
+    const url = (r.quoteUrls || [])[0]?.url || '';
+    assert.strictEqual(r.handlerType, 'deterministic', JSON.stringify(r).slice(0, 500));
+    assert.ok(!/(?:item=|,)(?:MX67|MS130-24P)(?:,|&qty=)/.test(url), `hardware leaked: ${url}`);
+    assert.ok(/LIC-MX67-SEC-3YR/.test(url) && /LIC-MS130-24-3Y/.test(url), `licenses missing: ${url}`);
+  });
+  await t('descriptive "has no licenses" does not override an explicit renewal', async () => {
+    const r = await callQuote('customer has no licenses currently please quote renewals for 1 MS130-24P');
+    assert.strictEqual(r.handlerType, 'deterministic', JSON.stringify(r).slice(0, 500));
+    const urls = (r.quoteUrls || []).map(item => item.url).join('\n');
+    assert.ok(/LIC-MS130-24-/.test(urls), `renewal license missing: ${urls}`);
+    assert.ok(!/(?:item=|,)MS130-24P(?:,|&qty=)/.test(urls), `descriptive no-license text forced hardware: ${urls}`);
+  });
+  await t('descriptive state with adverb does not become hardware-only', async () => {
+    const r = await callQuote('customer has absolutely no licenses currently please quote renewals for 1 MS130-24P');
+    const urls = (r.quoteUrls || []).map(item => item.url).join('\n');
+    assert.ok(/LIC-MS130-24-/.test(urls), `renewal license missing: ${urls}`);
+    assert.ok(!/(?:item=|,)MS130-24P(?:,|&qty=)/.test(urls), `descriptive no-license text forced hardware: ${urls}`);
+  });
+  await t('there-are-no-licenses state does not become hardware-only', async () => {
+    const r = await callQuote('there are currently no licenses; renewal for 1 MS130-24P');
+    const urls = (r.quoteUrls || []).map(item => item.url).join('\n');
+    assert.ok(/LIC-MS130-24-/.test(urls), `renewal license missing: ${urls}`);
+    assert.ok(!/(?:item=|,)MS130-24P(?:,|&qty=)/.test(urls), `descriptive no-license text forced hardware: ${urls}`);
+  });
   await t('"4 mr44, 2 sme, 5 MS130-12X" → quote with hardware + SME replacement, no error', async () => {
     const r = await callQuote('4 mr44, 2 sme, 5 MS130-12X');
     assert.notStrictEqual(r.handlerType, 'suggestions-only', `suggestions-only: ${JSON.stringify(r.suggestions)}`);
@@ -77,6 +172,30 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(/LIC-ENT-1YR,LIC-MV-1YR,LIC-MX67W-SEC-1YR/.test(urls), `1YR URL missing: ${urls}`);
     assert.ok(/LIC-ENT-3YR,LIC-MV-3YR,LIC-MX67W-SEC-3YR/.test(urls), `3YR URL missing: ${urls}`);
     assert.ok(/LIC-ENT-5YR,LIC-MV-5YR,LIC-MX67W-SEC-5YR/.test(urls), `5YR URL missing: ${urls}`);
+  });
+  await t('live Aug-11 malformed Catalyst license is blocked before any order URL', async () => {
+    const r = await callQuote('lic-c9300-24-3yr x 1 , 2 x lic-ent-3yr');
+    assert.strictEqual(r.errorCode, 'catalog_sku_unresolved', JSON.stringify(r).slice(0, 500));
+    assert.deepStrictEqual(r.quoteUrls, []);
+    assert.ok(!/stratusinfosystems\.com\/order\//.test(JSON.stringify(r)), 'an unresolved SKU must never reach an order URL');
+    const suggestion = (r.suggestions || []).find((item) => item.input === 'LIC-C9300-24-3YR');
+    assert.ok(suggestion, `missing catalog-backed picker: ${JSON.stringify(r.suggestions)}`);
+    assert.deepStrictEqual(suggestion.suggest, ['LIC-C9300-24A-3Y', 'LIC-C9300-24E-3Y']);
+  });
+  await t('the same malformed Catalyst SKU is blocked on the single-license branch', async () => {
+    const r = await callQuote('quote LIC-C9300-24-3YR');
+    assert.strictEqual(r.errorCode, 'catalog_sku_unresolved', JSON.stringify(r).slice(0, 500));
+    assert.deepStrictEqual(r.quoteUrls, []);
+    assert.ok(!/stratusinfosystems\.com\/order\//.test(JSON.stringify(r)));
+  });
+  await t('exact Catalyst Enterprise catalog SKU still emits the available term URLs', async () => {
+    const r = await callQuote('LIC-C9300-24E-3Y x1, LIC-ENT-3YR x2');
+    assert.strictEqual(r.handlerType, 'deterministic', JSON.stringify(r).slice(0, 500));
+    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 3, JSON.stringify(r.quoteUrls));
+    const urls = r.quoteUrls.map((item) => item.url).join('\n');
+    assert.ok(/LIC-C9300-24E-1Y,LIC-ENT-1YR/.test(urls), urls);
+    assert.ok(/LIC-C9300-24E-3Y,LIC-ENT-3YR/.test(urls), urls);
+    assert.ok(/LIC-C9300-24E-5Y,LIC-ENT-5YR/.test(urls), urls);
   });
   await t('mixed valid/invalid SKU list bypasses V3 clarification and returns partial quote', async () => {
     let aiCalls = 0;

@@ -9,6 +9,7 @@
 import { API_BASE, CACHE_TTL, MAX_EMAIL_BODY_CHARS } from '../lib/constants.js';
 import { getSettings } from '../lib/storage.js';
 import { getCached, setCached } from '../lib/storage.js';
+import { normalizeProductSearchQuery, sanitizeProductSearchResponse } from '../lib/product-search.mjs';
 
 // In-flight request deduplication — prevents duplicate API calls for the same data
 const _inflightRequests = new Map();
@@ -112,8 +113,38 @@ export async function draftReply(subject, body, senderEmail, senderName, tone, i
  * Generate a Stratus URL quote from SKU text.
  * Passes a persistent personId for conversation history (pricing follow-ups, revisions, etc.)
  */
-export async function generateQuote(skuText, personId) {
-  return apiCall('/api/quote', { text: skuText, personId }, { timeout: 60000 });
+export async function generateQuote(skuText, personId, priorQuoteText) {
+  return apiCall('/api/quote', {
+    text: skuText,
+    personId,
+    priorQuoteText: priorQuoteText || undefined,
+  }, { timeout: 60000 });
+}
+
+/**
+ * Read-only product autocomplete. The Worker owns the bounded cache/Zoho
+ * lookup; this client strips every response before it reaches extension UI.
+ */
+export async function productSearch(query) {
+  const normalized = normalizeProductSearchQuery(query);
+  if (!normalized.ok) {
+    return { ok: false, query: '', results: [], live: false, error: normalized.error };
+  }
+  try {
+    const response = await apiCall('/api/product-search', { query: normalized.query }, {
+      timeout: 8000,
+      skipCache: true,
+    });
+    return sanitizeProductSearchResponse(response, normalized.query);
+  } catch (error) {
+    return {
+      ok: false,
+      query: normalized.query,
+      results: [],
+      live: false,
+      error: error?.message || 'Product search was unavailable.',
+    };
+  }
 }
 
 /**
@@ -159,6 +190,82 @@ export async function buildUrlQuoteFromSkus(items, personId) {
  */
 export async function getZohoQuoteItems(recordId, module) {
   return apiCall('/api/zoho-quote-items', { recordId, module }, { timeout: 30000 });
+}
+
+/**
+ * Quote Line Editor read. Unlike getZohoQuoteItems above (sku + qty only, pinned
+ * by a no-margin invariant test), this returns LIST PRICE and DISCOUNT so the
+ * rep can see and edit what Zoho holds. INTERNAL ONLY: never let this payload
+ * reach customer-facing copy.
+ *
+ * @param {string} recordId 10-25 digit Zoho record id
+ * @param {string} [module] Quotes | Sales_Orders | Invoices | Purchase_Orders
+ */
+export async function getQuoteLines(recordId, module = 'Quotes') {
+  return apiCall('/api/quote-lines', { recordId, module }, { timeout: 30000 });
+}
+
+/**
+ * Quote Line Editor write. ONE atomic Zoho PUT behind this call.
+ *
+ * 60s because the worker does a fetch, the PUT, and a verification re-fetch.
+ * apiCall has no retry and the worker's zohoApiCall has no 429 retry, so a
+ * failed write is NEVER retried automatically: the card shows the error and
+ * keeps the local edits for a deliberate manual retry.
+ *
+ * @param {{recordId: string, module?: string, personId?: string,
+ *          ops: {setDiscounts: Array<{id: string, pct: number}>, deletes: string[], reorder: string[]},
+ *          writeDescriptions?: boolean}} payload
+ */
+/**
+ * Resolve each quote line's live ECOMM (storefront) price, so a hand-priced
+ * quote can be brought back into parity with stratusinfosystems.com. Read-only:
+ * it returns prices for the diff panel, and the rep still commits through
+ * commitQuoteLineOps.
+ *
+ * 45s because the worker resolves each DISTINCT SKU sequentially against
+ * WooProducts and Products rather than fanning out (zohoApiCall has no 429
+ * retry), so a wide quote genuinely takes a while.
+ */
+export async function matchQuoteLinesToEcomm(recordId, module = 'Quotes') {
+  return apiCall('/api/quote-line-ecomm', { recordId, module }, { timeout: 45000 });
+}
+
+/**
+ * Read the quote's distributor cost per line (Zoho's "Costs By Lines", the
+ * Vendor_Lines module), so the editor can price each line to a target profit
+ * margin exactly the way Zoho's own margin function does.
+ *
+ * INTERNAL ONLY: this carries distributor cost. Never let it reach
+ * customer-facing copy.
+ */
+export async function getQuoteLineCosts(recordId, module = 'Quotes') {
+  return apiCall('/api/quote-line-costs', { recordId, module }, { timeout: 30000 });
+}
+
+/**
+ * Preview what a term clone would do. Writes NOTHING: it runs the same
+ * classification and pricing the clone would, so the card can show which
+ * licences move, to which SKUs, at what price, before anything exists in Zoho.
+ */
+export async function previewQuoteCloneTerms(recordId, terms) {
+  return apiCall('/api/quote-clone-terms-preview', { recordId, terms }, { timeout: 45000 });
+}
+
+/**
+ * Clone the quote onto one or more licence terms. Creates a NEW Zoho quote per
+ * term, hardware carried over untouched, licences swapped and priced at ecomm
+ * (7YR/10YR take the fixed co-term discount, which has no ecomm equivalent).
+ *
+ * 90s: each term is a clone plus a re-read plus an atomic PUT plus a
+ * verification re-fetch, run sequentially. No retry anywhere on this path.
+ */
+export async function cloneQuoteTerms(payload) {
+  return apiCall('/api/quote-clone-terms', payload, { timeout: 90000 });
+}
+
+export async function commitQuoteLineOps(payload) {
+  return apiCall('/api/quote-line-ops', payload, { timeout: 60000 });
 }
 
 // ─────────────────────────────────────────────
@@ -524,6 +631,36 @@ export async function oneshotPlan(payload) {
 
 export async function oneshotExecute(payload) {
   return apiCall('/api/oneshot-execute', payload || {}, { timeout: 90000 });
+}
+
+/**
+ * One-shot email intake: literal SKUs parse deterministically (no LLM);
+ * otherwise ONE constrained fact extraction resolved against the worker's
+ * local catalog matrix. Read-only — never writes CRM. Flag- and
+ * allowlist-gated server-side.
+ */
+export async function oneshotIntake(payload) {
+  return apiCall('/api/oneshot-intake', payload || {}, { timeout: 30000 });
+}
+
+/**
+ * Scripted CRM delete. Works anywhere a record_id or quote_number is already
+ * known, so nothing waits on the chat agent to rediscover the record. The
+ * server delegates to the same delete tool the agent uses, so every guard and
+ * the pre-delete snapshot still apply, and it returns an undo_token.
+ */
+export async function crmDelete({ moduleName, recordId, quoteNumber, confirm }) {
+  return apiCall('/api/crm-delete', {
+    module_name: moduleName,
+    ...(recordId ? { record_id: String(recordId) } : {}),
+    ...(quoteNumber ? { quote_number: String(quoteNumber) } : {}),
+    confirm: confirm === true,
+  }, { timeout: 45000 });
+}
+
+/** Reverse a scripted delete (or any mutation) from its undo token. */
+export async function crmUndo(undoToken) {
+  return apiCall('/api/crm-undo', { undo_token: String(undoToken || '') }, { timeout: 45000 });
 }
 
 /**

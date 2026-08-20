@@ -20,7 +20,7 @@ function slice(name){
 }
 const ctx = { console:{log(){},warn(){}} };
 vm.createContext(ctx);
-vm.runInContext(slice('_titleCaseNameToken')+'\n'+slice('deriveContactNameFields'), ctx);
+vm.runInContext(slice('sanitizeContactNameHint')+'\n'+slice('_titleCaseNameToken')+'\n'+slice('deriveContactNameFields'), ctx);
 const derive = (e,h)=>vm.runInContext(`JSON.stringify(deriveContactNameFields(${JSON.stringify(e)}, ${JSON.stringify(h||null)}))`, ctx);
 
 console.log('\n=== Method 2: email local-part best guess ===\n');
@@ -37,6 +37,7 @@ t('empty email -> blanks', ()=>{ assert.deepEqual(JSON.parse(derive('')), {first
 console.log('\n=== Method 1: thread display-name hint (preferred over local-part) ===\n');
 t('hint "Kevin Goosic" wins', ()=>{ assert.deepEqual(JSON.parse(derive('kg@optk.com','Kevin Goosic')), {firstName:'Kevin',lastName:'Goosic'}); });
 t('hint with angle-bracket email stripped', ()=>{ assert.deepEqual(JSON.parse(derive('kg@optk.com','Kevin Goosic <kg@optk.com>')), {firstName:'Kevin',lastName:'Goosic'}); });
+t('hint with bare email stripped', ()=>{ assert.deepEqual(JSON.parse(derive('ron.jarman@example.com','Ron Jarman ron.jarman@example.com')), {firstName:'Ron',lastName:'Jarman'}); });
 t('hint that is just the local-part is ignored -> falls back to local-part', ()=>{ assert.deepEqual(JSON.parse(derive('kevin.goosic@optk.com','kevin.goosic')), {firstName:'Kevin',lastName:'Goosic'}); });
 t('three-word hint -> First + rest', ()=>{ assert.deepEqual(JSON.parse(derive('x@y.com','Mary Jane Watson')), {firstName:'Mary',lastName:'Jane Watson'}); });
 t('single-word hint -> last only', ()=>{ assert.deepEqual(JSON.parse(derive('x@y.com','Cher')), {firstName:'',lastName:'Cher'}); });
