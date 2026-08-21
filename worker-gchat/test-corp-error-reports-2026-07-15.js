@@ -162,10 +162,10 @@ t('waterfall Tier-0: page-context pin wired into skipDeterministic', () => {
   assert.ok(/skipDeterministic = wSource === 'chat-tab' \|\| \(wEc && wEc\.source === 'chat-tab'\) \|\| wZohoPagePinned/.test(rawSrc));
 });
 t('prompt: ACTIVE RECORD BINDING + fast-path rules present', () => {
-  assert.ok(/ACTIVE RECORD BINDING/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/on a Quote page → that quote; else → its Deal; else → its Account/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/FAST-PATH — quote on the active\/known Deal/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/EXCEPTION — \[Active Zoho page\] present: every quote ask is a ZOHO CRM quote/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/## RECORD BINDING/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/\[Active Zoho page: MODULE ID\] binds unqualified work to that exact record/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/On a known Deal, create_quote_on_deal is the one-call quote path/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/A quote-page request for a new quote targets that Quote's Deal/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
 });
 t('benchmarks: R11 fixtures assert CRM routing + zero zoho_search_records', () => {
   const t76 = BENCHMARK_TASKS.find(x => x.id === 'task_76');
@@ -261,12 +261,12 @@ t('create_deal_and_quote: closing_date param + month-end gate + deal matching (s
   assert.ok(/const validTill = closingDate;/.test(rawSrc), 'Valid_Till always matches Closing_Date');
 });
 t('prompt templates: EOM default + fiscal cap, no +14/+30 anywhere, DATE RULE present', () => {
-  assert.ok(/END OF THE CURRENT MONTH/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/Default month-end/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
   assert.ok(!/today \+ 14 days/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
   assert.ok(!/today \+ 30 days/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/DATE RULE \(Chris, 2026-07-21\)/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/within 7 days of the end of the month/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/Cisco fiscal quarter/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/Deal Closing_Date and Quote Valid_Till must match/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/within seven days of month-end/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/Cisco fiscal-quarter end/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
 });
 t('server: no remaining 30-day Closing_Date/Valid_Till defaults', () => {
   assert.ok(!/30 \* 86400000\).toISOString\(\).split\('T'\)\[0\]/.test(rawSrc.replace(/taskDueDate[^]*?dueDateStr/g, '')));
@@ -276,9 +276,9 @@ console.log('\nR5 — MX license tier never defaults ENT');
 console.log('────────────────────────────────────────────────────────────────');
 
 t('prompt: MX/C81xx tier rule — assume SEC, state it, offer ENT/SDW', () => {
-  assert.ok(/NEVER default to ENT/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/assume \*\*SEC\*\*/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/offer ENT and SDW/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/MX\/C81xx tier defaults to SEC when unspecified/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/state the assumption/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/offer ENT\/SDW chips/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
 });
 t('benchmark fixture task_79 covers the MX-tier default', () => {
   const f = BENCHMARK_TASKS.find(x => x.id === 'task_79');
@@ -299,8 +299,8 @@ t('batch_product_lookup wires eol/replaced_by/eol_note in BOTH paths (static evi
   assert.strictEqual(count, 2, `expected 2 wiring sites (cache + API), found ${count}`);
 });
 t('prompt: EOL upgrade mapping is default behavior', () => {
-  assert.ok(/EOL \/ UPGRADE MAPPING IS DEFAULT BEHAVIOR/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
-  assert.ok(/quote the returned replacement by default/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/EOL\/upgrade mapping is default behavior/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/quote the reviewed returned replacement by default/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
 });
 
 console.log('\nR2 — FedRAMP license conversion (fixed 35% off list)');
@@ -354,7 +354,7 @@ t('generic write path enforces the 35% FED discount (double-enforcement)', () =>
   assert.ok(/isFedRamp.*FEDRAMP_DEFAULT_DISCOUNT|if \(isFedRamp\)/.test(body));
 });
 t('prompt documents the conversion tool + fixed 35%', () => {
-  assert.ok(/FedRAMP \/ Government License Conversion/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
+  assert.ok(/FedRAMP\/government conversion uses convert_quote_licenses_fedramp atomically/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
   assert.ok(/FIXED 35% off the FED list price/.test(CRM_AGENT_SYSTEM_PROMPT_BASE));
 });
 

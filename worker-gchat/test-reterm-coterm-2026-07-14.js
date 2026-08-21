@@ -67,7 +67,7 @@ t('invalid term 6 → null', () => assert.strictEqual(retermTargetLicenseSku('LI
 
 console.log('── COTERM_DEFAULT_DISCOUNT: fixed term discounts ──');
 t('7YR default discount = 0.50 (50%)', () => assert.strictEqual(COTERM_DEFAULT_DISCOUNT[7], 0.50));
-t('10YR default discount = 0.60 (60%)', () => assert.strictEqual(COTERM_DEFAULT_DISCOUNT[10], 0.60));
+t('10YR default discount = 0.55 (55%)', () => assert.strictEqual(COTERM_DEFAULT_DISCOUNT[10], 0.55));
 t('1/3/5 have NO fixed discount (preserve source %)', () => {
   assert.strictEqual(COTERM_DEFAULT_DISCOUNT[1], undefined);
   assert.strictEqual(COTERM_DEFAULT_DISCOUNT[3], undefined);

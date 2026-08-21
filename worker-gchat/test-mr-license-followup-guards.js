@@ -30,10 +30,15 @@ t('model-agnostic license aliases refuse missing terms instead of defaulting', (
   assert.match(src, /Do NOT create a Deal or Quote until they choose a term/);
 });
 
-t('tool schema tells Llama not to convert MR licenses into AP hardware', () => {
-  assert.match(src, /For "MR licenses" use MR-ENT or LIC-ENT-\{term\}YR/);
-  assert.match(src, /never substitute MR46\/MR44 hardware unless the user asked for AP hardware/);
-  assert.match(src, /NEVER turn "MR licenses" into MR46-HW, MR44-HW, or any AP hardware line/);
+t('create_deal_and_quote schema semantically forbids turning MR license requests into AP hardware', () => {
+  const start = src.indexOf("name: 'create_deal_and_quote'");
+  const end = src.indexOf("name: 'create_quote_on_deal'", start);
+  assert.ok(start > -1 && end > start, 'create_deal_and_quote tool definition must be isolatable');
+  const tool = src.slice(start, end);
+  assert.match(tool, /For "MR licenses" use MR-ENT or LIC-ENT-\{term\}YR/);
+  assert.match(tool, /never substitute MR46\/MR44 hardware unless the user asked for AP hardware/);
+  assert.match(tool, /For license-only requests,[\s\S]{0,180}do NOT invent hardware/);
+  assert.match(tool, /License-only requests must stay license-only/);
 });
 
 t('create_deal_and_quote emits truth-guard mutation side-channel fields', () => {

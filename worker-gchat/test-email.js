@@ -1,27 +1,49 @@
-import indexData from './src/index.js';
+#!/usr/bin/env node
+// Local, synthetic regression for detectEmailContent. This test intentionally
+// extracts only the pure helper: importing the Worker entrypoint in Node would
+// require the Cloudflare runtime, and reading /tmp/test_email.txt made the old
+// test depend on an untracked machine-local fixture.
 
-// Read the test email
-import fs from 'fs';
-const testEmail = fs.readFileSync('/tmp/test_email.txt', 'utf8');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 
-// Test email detection
-const lines = fs.readFileSync('./src/index.js', 'utf8');
-const detectEmailContentMatch = lines.match(/function detectEmailContent\(text\) \{[\s\S]*?\n\}/);
-if (!detectEmailContentMatch) {
-  console.error('Could not extract detectEmailContent function');
-  process.exit(1);
+const source = fs.readFileSync(path.join(__dirname, 'src/index.js'), 'utf8');
+
+function extractFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = bodyStart; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}' && --depth === 0) return source.slice(start, i + 1);
+  }
+  throw new Error(`Could not isolate ${name}`);
 }
 
-// Create inline test
-eval(detectEmailContentMatch[0]);
+const sandbox = {};
+vm.createContext(sandbox);
+vm.runInContext(extractFunction('detectEmailContent'), sandbox);
 
-console.log('Testing email detection...');
-const isEmail = detectEmailContent(testEmail);
-console.log(`Email detected: ${isEmail}`);
+const syntheticForward = [
+  'Please review the request below.',
+  '',
+  '---------- Forwarded message ----------',
+  'From: Pat Customer <pat.customer@example.test>',
+  'Subject: Synthetic access-point request',
+  '',
+  'Could you quote 4 MR44 access points?',
+  'Thanks,',
+  'Pat',
+].join('\n');
 
-if (isEmail) {
-  console.log('✅ Email detection working!');
-} else {
-  console.log('❌ Email detection failed');
-  process.exit(1);
-}
+assert.equal(sandbox.detectEmailContent(syntheticForward), true,
+  'a checked-in synthetic forwarded email should be detected');
+assert.equal(sandbox.detectEmailContent('Subject: Synthetic quote request\nBody text'), true,
+  'a Subject header should be detected');
+assert.equal(sandbox.detectEmailContent('Please quote 4 MR44 access points.'), false,
+  'ordinary chat text should not be classified as an email');
+
+console.log('3 passed, 0 failed');

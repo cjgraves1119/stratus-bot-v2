@@ -34,11 +34,11 @@ if (edIdx > -1) {
   }
   src = src.slice(0, edIdx) + src.slice(end + 1);
 }
-src += '\nmodule.exports = { parseMessage, classifyCrmIntent, selectToolSubset, stripInjectedClassifierContext, isPlaceholderName, deriveQuoteTermLabel, subjectHasTermToken, validateCrmWrite, CRM_EMAIL_TOOLS };';
+src += '\nmodule.exports = { parseMessage, parseExplicitDirectLicenseListBeforeClassifier, classifyCrmIntent, selectToolSubset, stripInjectedClassifierContext, isPlaceholderName, deriveQuoteTermLabel, subjectHasTermToken, validateCrmWrite, CRM_EMAIL_TOOLS };';
 const tmp = path.join(os.tmpdir(), `stratus-gchat-error-log-fixes-${process.pid}.cjs`);
 fs.writeFileSync(tmp, src);
 const {
-  parseMessage, classifyCrmIntent, selectToolSubset, stripInjectedClassifierContext,
+  parseMessage, parseExplicitDirectLicenseListBeforeClassifier, classifyCrmIntent, selectToolSubset, stripInjectedClassifierContext,
   isPlaceholderName, deriveQuoteTermLabel, subjectHasTermToken, validateCrmWrite,
   CRM_EMAIL_TOOLS
 } = require(tmp);
@@ -132,6 +132,17 @@ t('zero-qty pairs are skipped, not quoted as 0', () => {
   assert.equal(map['LIC-ENT-3YR'], undefined, 'qty-0 line must be dropped');
   assert.equal(map['LIC-MX67-SEC-3YR'], 2);
   assert.equal(map['LIC-MT-3Y'], 1);
+});
+
+t('six-digit pair quantity fails closed instead of shifting onto the next SKU', () => {
+  const input = 'LIC-A-3YR,100000  LIC-B-3YR,2  LIC-C-3YR,1';
+  const r = parseMessage(input);
+  assert.equal(r?.isClarification, true, `expected clarification, got ${JSON.stringify(r)}`);
+  assert.equal(r?.directLicenseList, undefined, 'invalid input must not expose a shifted directLicenseList');
+
+  const bypass = parseExplicitDirectLicenseListBeforeClassifier(input);
+  assert.equal(bypass?.isClarification, true, 'classifier bypass must preserve the fail-closed result');
+  assert.equal(bypass?.directLicenseList, undefined, 'bypass must not recreate shifted quantities');
 });
 
 console.log('\n=== B. Continuation turns keep create tools (corp error_reports #16/#31) ===\n');
@@ -354,6 +365,17 @@ t('create_deal_and_quote accepts meraki_isr_name and resolves it from Meraki_ISR
   assert.ok(/const active = pool\.filter\(\(r\) => r\.Inactive !== true && r\.Inactive !== 'true'\)/.test(rawSource),
     'shared ISR resolver must prefer active candidates while preserving inactive-only review');
   assert.ok(/meraki_isr_ambiguous/.test(rawSource), 'ambiguous name matches must surface candidates');
+});
+
+t('active prompts accept ISR name resolution and ask only after name/address routes fail', () => {
+  assert.ok(/meraki_isr_email OR meraki_isr_name is REQUIRED/.test(rawSource),
+    'tool guidance must allow either a rep email or name');
+  assert.ok(/pass the supplied name as \\`meraki_isr_name\\` for server-side resolution/.test(rawSource),
+    'full prompt must direct a supplied name through server-side resolution');
+  assert.ok(/inspect To\/CC\/BCC for a Cisco\/Meraki address/.test(rawSource),
+    'optimized prompt must inspect message participants before asking');
+  assert.doesNotMatch(rawSource, /Don't know the rep\? ASK/,
+    'contradictory email-only ISR prompt must not remain active');
 });
 
 console.log(`\n${'='.repeat(50)}`);

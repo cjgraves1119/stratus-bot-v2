@@ -10,7 +10,7 @@
 //      hardware followed by its auto-paired license.
 
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync } = require('node:fs');
+const { readFileSync, readdirSync } = require('node:fs');
 const { join } = require('node:path');
 
 const here = __dirname;
@@ -36,7 +36,9 @@ const chromeExtRoot = join(here, '..', 'chrome-extension');
 const contentJs = readFileSync(join(chromeExtRoot, 'src/content/index.js'), 'utf8');
 const contentCss = readFileSync(join(chromeExtRoot, 'src/content/content.css'), 'utf8');
 const contextMenus = readFileSync(join(chromeExtRoot, 'src/background/context-menus.js'), 'utf8');
-const emailPanel = readFileSync(join(chromeExtRoot, 'src/sidebar/panels/EmailPanel.jsx'), 'utf8');
+const panelsDir = join(chromeExtRoot, 'src/sidebar/panels');
+const activePanelFiles = readdirSync(panelsDir).filter((name) => /\.[cm]?[jt]sx?$/.test(name)).sort();
+const activePanelSources = activePanelFiles.map((name) => ({ name, source: readFileSync(join(panelsDir, name), 'utf8') }));
 const crmPanel = readFileSync(join(chromeExtRoot, 'src/sidebar/panels/CrmPanel.jsx'), 'utf8');
 
 t('content/index.js: highlightDealIdsInEmail function removed', () => {
@@ -71,9 +73,14 @@ t('context-menus.js: case "stratus-velocity-hub" handler removed', () => {
     'stratus-velocity-hub case handler must be removed');
 });
 
-t('EmailPanel: "Submit to Velocity Hub" button removed', () => {
-  assert.ok(!/Submit to Velocity Hub/.test(emailPanel),
-    'EmailPanel must not render the Velocity Hub button');
+t('active sidebar panel inventory has no retired Velocity Hub submit button', () => {
+  assert.ok(activePanelFiles.length >= 3, `expected active sidebar panels, found ${activePanelFiles.join(', ')}`);
+  assert.ok(!activePanelFiles.includes('EmailPanel.jsx'),
+    'retired EmailPanel.jsx should not be treated as an active surface');
+  for (const panel of activePanelSources) {
+    assert.ok(!/Submit to Velocity Hub/.test(panel.source),
+      `${panel.name} must not render the retired Velocity Hub submit button`);
+  }
 });
 
 t('CrmPanel: 🚀 Velocity Hub button removed', () => {
@@ -208,7 +215,7 @@ t('end-to-end stripTermFromLicSku sample stems', () => {
 
 // ─── Section 4: ordered Quoted_Items output ────────────────────────────────
 
-section('4. create_deal_and_quote line ordering — STEP 3c is sole authority post-revert');
+section('4. create_deal_and_quote line ordering — resolvedProducts order survives preflight');
 
 t('PR #62 input-order override is removed (Cisco BOM compatibility)', () => {
   // 2026-05-13: license-before-hardware ordering hangs Cisco CCW DID
@@ -232,10 +239,16 @@ t('PR #62 input-order override is removed (Cisco BOM compatibility)', () => {
   );
 });
 
-t('quotedItems built directly from STEP-3c-reordered resolvedProducts', () => {
+t('normal compound path maps resolvedProducts in order, then reuses that exact preflight payload', () => {
+  const preflight = extractFunction('preflightResolvedQuoteProducts');
   assert.ok(
-    /const quotedItems = resolvedProducts\.map\(p => \{[\s\S]+?Product_Name: \{ id: p\.product_id \}/.test(source),
-    'final quotedItems mapping must consume resolvedProducts directly (STEP 3c output)'
+    /const quotedItems = resolvedProducts\.map\(\(product\) => \(\{[\s\S]+?Product_Name: \{ id: product\?\.product_id \}/.test(preflight),
+    'preflight must map resolvedProducts directly and preserve its established order'
+  );
+  assert.ok(
+    /preparedQuoteProducts = await preflightResolvedQuoteProducts\(resolvedProducts, env\)/.test(source)
+      && /quotedItems = preparedQuoteProducts\.quoted_items/.test(source),
+    'compound Quote create must reuse the exact preflighted Quoted_Items payload'
   );
 });
 

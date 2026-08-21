@@ -42,6 +42,8 @@ const check = (desc, cond, diag) => {
   if (cond) { console.log(`✅ ${desc}`); pass++; }
   else { console.log(`❌ ${desc}${diag ? '\n   ' + (typeof diag === 'string' ? diag.substring(0, 1000) : diag) : ''}`); fail++; }
 };
+const hasOrderSku = (text, sku) => [...String(text || '').matchAll(/[?&]item=([^&\s]+)/g)]
+  .some((match) => decodeURIComponent(match[1]).split(',').includes(sku));
 
 // ─── case3-eol-mixed ────────────────────────────────────────────────────────
 {
@@ -85,17 +87,17 @@ const check = (desc, cond, diag) => {
       /LIC-MX85-SEC-5Y\b/.test(opt1Section) &&
       /LIC-ENT-5YR/.test(opt1Section),
     opt1Section);
-  check('Option 1 has NO MX64-HW (license-only renewal)',
-    !!opt1Section && !/MX64-HW/.test(opt1Section), opt1Section);
-  check('Option 1 has NO MX67-HW (no hardware in main renewal cart)',
-    !!opt1Section && !/MX67-HW/.test(opt1Section), opt1Section);
-  check('Option 1 has NO MX85-HW (license-only renewal)',
-    !!opt1Section && !/MX85-HW/.test(opt1Section), opt1Section);
+  check('Option 1 has NO MX64 hardware (license-only renewal)',
+    !!opt1Section && !hasOrderSku(opt1Section, 'MX64'), opt1Section);
+  check('Option 1 has NO MX67 hardware (no hardware in main renewal cart)',
+    !!opt1Section && !hasOrderSku(opt1Section, 'MX67'), opt1Section);
+  check('Option 1 has NO MX85 hardware (license-only renewal)',
+    !!opt1Section && !hasOrderSku(opt1Section, 'MX85'), opt1Section);
 
-  // Option 2 URLs: every term has MX67-HW qty 2 + LIC-MX67-SEC-{term} qty 2 + LIC-MX85-SEC-{term} qty 1 + LIC-ENT-{term} qty 4
+  // Option 2 URLs: every term has public MX67 qty 2 + LIC-MX67-SEC-{term} qty 2 + LIC-MX85-SEC-{term} qty 1 + LIC-ENT-{term} qty 4
   const opt2Section = msg && (msg.split('Option 2')[1] || '');
-  check('Option 2 includes MX67-HW (replacement hardware)',
-    !!opt2Section && /MX67-HW/.test(opt2Section), opt2Section);
+  check('Option 2 includes public MX67 replacement hardware',
+    !!opt2Section && hasOrderSku(opt2Section, 'MX67'), opt2Section);
   check('Option 2 includes LIC-MX67-SEC-{1,3,5}YR (replacement license)',
     !!opt2Section &&
       /LIC-MX67-SEC-1YR/.test(opt2Section) &&
@@ -169,8 +171,8 @@ const check = (desc, cond, diag) => {
   check('Option 1 has MX64 current license (LIC-MX64-SEC-{1,3,5}YR)',
     !!opt1 && /LIC-MX64-SEC-1YR/.test(opt1) && /LIC-MX64-SEC-3YR/.test(opt1) && /LIC-MX64-SEC-5YR/.test(opt1),
     opt1);
-  check('Option 1 has NO replacement hardware (no MX67-HW / MX68-HW / MX85-HW / C9300L-)',
-    !!opt1 && !/MX67-HW/.test(opt1) && !/MX68-HW/.test(opt1) && !/MX85-HW/.test(opt1) && !/C9300L-/.test(opt1),
+  check('Option 1 has NO replacement hardware (no MX67 / MX68 / MX85 / C9300L)',
+    !!opt1 && !hasOrderSku(opt1, 'MX67') && !hasOrderSku(opt1, 'MX68') && !hasOrderSku(opt1, 'MX85') && !/C9300L-/.test(opt1),
     opt1);
 
   // Option 2 (1G) — MS225-24P → MS150-24P-4G; Option 3 (10G) → MS150-24P-4X
@@ -190,11 +192,11 @@ const check = (desc, cond, diag) => {
     opt3);
 
   // Scalar replacements present in BOTH Option 2 and Option 3 (same SKU)
-  check('Option 2 includes scalar MX67-HW + MX68-HW + MX85-HW',
-    !!opt2 && /MX67-HW/.test(opt2) && /MX68-HW/.test(opt2) && /MX85-HW/.test(opt2),
+  check('Option 2 includes public scalar MX67 + MX68 + MX85 hardware',
+    !!opt2 && hasOrderSku(opt2, 'MX67') && hasOrderSku(opt2, 'MX68') && hasOrderSku(opt2, 'MX85'),
     opt2);
-  check('Option 3 also includes scalar MX67-HW + MX68-HW + MX85-HW (same as Option 2 for non-uplink replacements)',
-    !!opt3 && /MX67-HW/.test(opt3) && /MX68-HW/.test(opt3) && /MX85-HW/.test(opt3),
+  check('Option 3 also includes public scalar MX67 + MX68 + MX85 hardware (same as Option 2 for non-uplink replacements)',
+    !!opt3 && hasOrderSku(opt3, 'MX67') && hasOrderSku(opt3, 'MX68') && hasOrderSku(opt3, 'MX85'),
     opt3);
 
   // MR-ENT carry-forward in all three options
@@ -217,8 +219,8 @@ const check = (desc, cond, diag) => {
     !!msg && /Option 1 - Renew As-Is/.test(msg), msg);
   check('Pure non-EOL: NO Option 2 / Option 3',
     !!msg && !/Option 2/.test(msg) && !/Option 3/.test(msg), msg);
-  check('Pure non-EOL: URLs are license-only (no MX85-HW)',
-    !!msg && !/MX85-HW/.test(msg), msg);
+  check('Pure non-EOL: URLs are license-only (no MX85 hardware)',
+    !!msg && !hasOrderSku(msg, 'MX85'), msg);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

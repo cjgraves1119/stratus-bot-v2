@@ -350,10 +350,15 @@ t('selectToolSubset — unknown class falls back to general', () => {
   assert.deepStrictEqual(names, expected);
 });
 
-t('selectToolSubset — quote_url path is minimal (1-2 tools)', () => {
+t('selectToolSubset — quote_url path contains the exact validated lookup waterfall', () => {
   const intent = { class: 'quote_url', confidence: 0.9 };
   const subset = selectToolSubset(intent, CRM_EMAIL_TOOLS);
-  assert.ok(subset.length <= 3, `quote_url subset has ${subset.length} tools, expected ≤ 3`);
+  assert.deepStrictEqual(subset.map(tool => tool.name).sort(), [
+    'batch_product_lookup',
+    'find_product_candidates',
+    'parse_quote_url',
+    'web_search_sku',
+  ].sort());
 });
 
 t('selectToolSubset — every subset is non-empty when input is non-empty', () => {

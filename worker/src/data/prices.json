@@ -2303,10 +2303,10 @@
     },
     "LIC-SME-1YR": {
       "list": 40,
-      "price": 28.0,
+      "price": 28,
       "discount": 0.3,
       "zoho_product_id": "2570562000001277653",
-      "discount_per_unit": 12.0,
+      "discount_per_unit": 12,
       "discount_pct": 30,
       "zoho_active": false,
       "replaced_by": "LIC-MI-EMSC-D-1YMC-A-1YR"
@@ -4967,11 +4967,11 @@
       "discount_pct": 32
     },
     "MV32": {
-      "list": 1142,
+      "list": 1142.05,
       "price": 769,
       "discount": 0.3266,
       "zoho_product_id": "2570562000016927096",
-      "discount_per_unit": 373,
+      "discount_per_unit": 373.05,
       "discount_pct": 33
     },
     "MA-PWR-30W-US-O": {
@@ -5007,19 +5007,19 @@
       "discount_pct": 33
     },
     "MV72": {
-      "list": 1558,
+      "list": 1557.72,
       "price": 1048,
-      "discount": 0.3273,
+      "discount": 0.3272,
       "zoho_product_id": "2570562000012504179",
-      "discount_per_unit": 510,
+      "discount_per_unit": 509.72,
       "discount_pct": 33
     },
     "MV72X": {
-      "list": 1766,
+      "list": 1765.55,
       "price": 1187,
-      "discount": 0.3279,
+      "discount": 0.3277,
       "zoho_product_id": "2570562000029952621",
-      "discount_per_unit": 579,
+      "discount_per_unit": 578.55,
       "discount_pct": 33
     },
     "MA-SFP-1GB-TX": {
@@ -5071,11 +5071,11 @@
       "discount_pct": 33
     },
     "MV84X": {
-      "list": 8590,
-      "price": 5777,
-      "discount": 0.3275,
+      "list": 11900.1,
+      "price": 8002,
+      "discount": 0.3276,
       "zoho_product_id": "2570562000310730303",
-      "discount_per_unit": 2813,
+      "discount_per_unit": 3898.1,
       "discount_pct": 33
     },
     "MA-MNT-MV-19": {
@@ -5327,36 +5327,40 @@
       "discount_pct": 33
     },
     "MX75-HW": {
-      "list": 2041,
-      "price": 951,
-      "discount": 0.5341,
-      "zoho_product_id": "2570562000064739443",
-      "discount_per_unit": 1090,
-      "discount_pct": 53
+      "list": 2839.03,
+      "price": 1322,
+      "discount": 0.5343,
+      "zoho_product_id": "2570562000353537045",
+      "discount_per_unit": 1517.03,
+      "discount_pct": 53,
+      "_superseded_by": "MX75"
     },
     "MX85-HW": {
-      "list": 3171,
-      "price": 2132,
-      "discount": 0.3277,
-      "zoho_product_id": "2570562000064739444",
-      "discount_per_unit": 1039,
-      "discount_pct": 33
+      "list": 4411.2,
+      "price": 2967,
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000388889594",
+      "discount_per_unit": 1444.2,
+      "discount_pct": 33,
+      "_superseded_by": "MX85"
     },
     "MX95-HW": {
-      "list": 6348,
-      "price": 4269,
+      "list": 8831.22,
+      "price": 5939,
       "discount": 0.3275,
-      "zoho_product_id": "2570562000064739445",
-      "discount_per_unit": 2079,
-      "discount_pct": 33
+      "zoho_product_id": "2570562000357707553",
+      "discount_per_unit": 2892.22,
+      "discount_pct": 33,
+      "_superseded_by": "MX95"
     },
     "MX105-HW": {
-      "list": 9525,
-      "price": 6405,
+      "list": 13251.24,
+      "price": 8910,
       "discount": 0.3276,
-      "zoho_product_id": "2570562000064739446",
-      "discount_per_unit": 3120,
-      "discount_pct": 33
+      "zoho_product_id": "2570562000362957337",
+      "discount_per_unit": 4341.24,
+      "discount_pct": 33,
+      "_superseded_by": "MX105"
     },
     "MG41-HW": {
       "list": 1804,
@@ -5590,12 +5594,13 @@
       "discount_pct": 33
     },
     "MX67-HW": {
-      "list": 883,
-      "price": 412,
-      "discount": 59,
+      "list": 1228.77,
+      "price": 572,
+      "discount": 0.5345,
       "zoho_product_id": "2570562000009234263",
-      "discount_per_unit": 471,
-      "discount_pct": 53
+      "discount_per_unit": 656.77,
+      "discount_pct": 53,
+      "_superseded_by": "MX67"
     },
     "PWR-C5-1KWAC-M-O": {
       "list": 4170,
@@ -5654,13 +5659,13 @@
       "discount_pct": 32
     },
     "MX67W-HW": {
-      "list": 1366,
-      "price": 715,
-      "discount": 0.4766,
-      "zoho_product_id": "2570562000009567283",
-      "zoho_active": false,
-      "discount_per_unit": 651,
-      "discount_pct": 48
+      "list": 1900.61,
+      "price": 994,
+      "discount": 0.477,
+      "zoho_product_id": "2570562000399386178",
+      "discount_per_unit": 906.61,
+      "discount_pct": 48,
+      "_superseded_by": "MX67W"
     },
     "MA-ANT-3-C6": {
       "list": 610,
@@ -5679,12 +5684,13 @@
       "discount_pct": 33
     },
     "MX68-HW": {
-      "list": 1264,
-      "price": 589,
-      "discount": 59,
+      "list": 1759.18,
+      "price": 820,
+      "discount": 0.5339,
       "zoho_product_id": "2570562000010523428",
-      "discount_per_unit": 675,
-      "discount_pct": 53
+      "discount_per_unit": 939.18,
+      "discount_pct": 53,
+      "_superseded_by": "MX68"
     },
     "FAN-T2-M": {
       "list": 367,
@@ -5769,7 +5775,7 @@
     "MA-RCKMNT-KIT-1": {
       "list": 2,
       "price": 2,
-      "discount": 0.0,
+      "discount": 0,
       "zoho_product_id": "2570562000080039875",
       "discount_per_unit": 0,
       "discount_pct": 0
@@ -5854,20 +5860,22 @@
       "discount_pct": 33
     },
     "MX250-HW": {
-      "list": 14100,
-      "price": 9482,
+      "list": 19616.07,
+      "price": 13191,
       "discount": 0.3275,
-      "zoho_product_id": "2570562000001097489",
-      "discount_per_unit": 4618,
-      "discount_pct": 33
+      "zoho_product_id": "2570562000362907219",
+      "discount_per_unit": 6425.07,
+      "discount_pct": 33,
+      "_superseded_by": "MX250"
     },
     "MX450-HW": {
-      "list": 28206,
-      "price": 18967,
+      "list": 39240.97,
+      "price": 26386,
       "discount": 0.3276,
-      "zoho_product_id": "2570562000001097491",
-      "discount_per_unit": 9239,
-      "discount_pct": 33
+      "zoho_product_id": "2570562000362960228",
+      "discount_per_unit": 12854.97,
+      "discount_pct": 33,
+      "_superseded_by": "MX450"
     },
     "MA-ANT-3-D5": {
       "list": 512,
@@ -6285,11 +6293,11 @@
       "discount_pct": 33
     },
     "MV53X": {
-      "list": 3664,
-      "price": 2464,
+      "list": 4109.89,
+      "price": 2764,
       "discount": 0.3275,
       "zoho_product_id": "2570562000302894046",
-      "discount_per_unit": 1200,
+      "discount_per_unit": 1345.89,
       "discount_pct": 33
     },
     "C9300X-48TX-M": {
@@ -6429,12 +6437,13 @@
       "discount_pct": 32
     },
     "MS130-8P-I-HW": {
-      "list": 1581,
-      "price": 918,
-      "discount": 0.4194,
-      "zoho_product_id": "2570562000235367001",
-      "discount_per_unit": 663,
-      "discount_pct": 42
+      "list": 1781.73,
+      "price": 830,
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000388130266",
+      "discount_per_unit": 951.73,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-8P-I"
     },
     "MV93-HW": {
       "list": 1832,
@@ -6541,20 +6550,22 @@
       "discount_pct": 33
     },
     "MX68W-HW": {
-      "list": 1779,
-      "price": 931,
-      "discount": 0.4767,
-      "zoho_product_id": "2570562000010523059",
-      "discount_per_unit": 848,
-      "discount_pct": 48
+      "list": 2475.21,
+      "price": 1295,
+      "discount": 0.4768,
+      "zoho_product_id": "2570562000399386198",
+      "discount_per_unit": 1180.21,
+      "discount_pct": 48,
+      "_superseded_by": "MX68W"
     },
     "MS130R-8P-HW": {
-      "list": 4023,
-      "price": 2706,
-      "discount": 0.3274,
-      "zoho_product_id": "2570562000194740372",
-      "discount_per_unit": 1317,
-      "discount_pct": 33
+      "list": 4534.04,
+      "price": 3049,
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000405312561",
+      "discount_per_unit": 1485.04,
+      "discount_pct": 33,
+      "_superseded_by": "MS130R-8P"
     },
     "CW-MNT-ART2-00": {
       "list": 208,
@@ -6709,11 +6720,13 @@
       "discount_pct": 35
     },
     "MV22-HW": {
-      "list": 1403,
-      "price": 944,
-      "discount": 42,
-      "discount_per_unit": 459,
-      "discount_pct": 33
+      "list": 1349.89,
+      "price": 908,
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000012349690",
+      "discount_per_unit": 441.89,
+      "discount_pct": 33,
+      "_superseded_by": "MV22"
     },
     "MR76-HW": {
       "list": 2534,
@@ -7203,12 +7216,13 @@
       "discount_pct": 32
     },
     "MS130-24X-HW": {
-      "list": 6324,
-      "price": 3671,
-      "discount": 0.4195,
-      "zoho_product_id": "2570562000182445395",
-      "discount_per_unit": 2653,
-      "discount_pct": 42
+      "list": 7126.95,
+      "price": 3318,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000390025730",
+      "discount_per_unit": 3808.95,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-24X"
     },
     "CW9162I-MR": {
       "list": 1523,
@@ -7227,12 +7241,13 @@
       "discount_pct": 32
     },
     "MS130-24P-HW": {
-      "list": 3443,
-      "price": 1999,
-      "discount": 0.4194,
-      "zoho_product_id": "2570562000182445396",
-      "discount_per_unit": 1444,
-      "discount_pct": 42
+      "list": 3880.95,
+      "price": 1807,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000348083785",
+      "discount_per_unit": 2073.95,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-24P"
     },
     "C9300L-48P-4X-M": {
       "list": 12812,
@@ -7243,12 +7258,13 @@
       "discount_pct": 61
     },
     "MS130-8P-HW": {
-      "list": 1581,
-      "price": 918,
-      "discount": 0.4194,
-      "zoho_product_id": "2570562000182445398",
-      "discount_per_unit": 663,
-      "discount_pct": 42
+      "list": 1781.73,
+      "price": 830,
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000388426062",
+      "discount_per_unit": 951.73,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-8P"
     },
     "MR36H-HW": {
       "list": 1152,
@@ -7259,12 +7275,13 @@
       "discount_pct": 48
     },
     "MS130-48P-HW": {
-      "list": 6151,
-      "price": 3571,
-      "discount": 0.4194,
-      "zoho_product_id": "2570562000182445400",
-      "discount_per_unit": 2580,
-      "discount_pct": 42
+      "list": 6932.57,
+      "price": 3228,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000350111408",
+      "discount_per_unit": 3704.57,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-48P"
     },
     "C9200L-24P-4G-M": {
       "list": 3562,
@@ -7498,28 +7515,31 @@
       "discount_pct": 22
     },
     "MS130-8-HW": {
-      "list": 920,
-      "price": 534,
-      "discount": 0.4196,
-      "zoho_product_id": "2570562000182445402",
-      "discount_per_unit": 386,
-      "discount_pct": 42
+      "list": 1036.65,
+      "price": 483,
+      "discount": 0.5341,
+      "zoho_product_id": "2570562000396425107",
+      "discount_per_unit": 553.65,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-8"
     },
     "MS130-8X-HW": {
-      "list": 2501,
-      "price": 1452,
-      "discount": 0.4194,
-      "zoho_product_id": "2570562000182445403",
-      "discount_per_unit": 1049,
-      "discount_pct": 42
+      "list": 2818.38,
+      "price": 1313,
+      "discount": 0.5341,
+      "zoho_product_id": "2570562000388092810",
+      "discount_per_unit": 1505.38,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-8X"
     },
     "MS130-48X-HW": {
-      "list": 9428,
-      "price": 5474,
-      "discount": 0.4194,
-      "zoho_product_id": "2570562000182445404",
-      "discount_per_unit": 3954,
-      "discount_pct": 42
+      "list": 10625.63,
+      "price": 4947,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000390014574",
+      "discount_per_unit": 5678.63,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-48X"
     },
     "MA-MNT-MR-8": {
       "list": 58,
@@ -7544,28 +7564,31 @@
       "discount_pct": 53
     },
     "MS130-12X-HW": {
-      "list": 3162,
-      "price": 1836,
-      "discount": 0.4194,
-      "zoho_product_id": "2570562000182445405",
-      "discount_per_unit": 1326,
-      "discount_pct": 42
+      "list": 3563.48,
+      "price": 1660,
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000388240854",
+      "discount_per_unit": 1903.48,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-12X"
     },
     "MS130-24-HW": {
-      "list": 2139,
-      "price": 1241,
-      "discount": 0.4198,
-      "zoho_product_id": "2570562000182445407",
-      "discount_per_unit": 898,
-      "discount_pct": 42
+      "list": 2410.21,
+      "price": 1123,
+      "discount": 0.5341,
+      "zoho_product_id": "2570562000403499128",
+      "discount_per_unit": 1287.21,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-24"
     },
     "MS130-48-HW": {
-      "list": 3794,
-      "price": 2203,
-      "discount": 0.4193,
-      "zoho_product_id": "2570562000182445409",
-      "discount_per_unit": 1591,
-      "discount_pct": 42
+      "list": 4276.17,
+      "price": 1991,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000363261166",
+      "discount_per_unit": 2285.17,
+      "discount_pct": 53,
+      "_superseded_by": "MS130-48"
     },
     "MR28-HW": {
       "list": 610,
@@ -8384,28 +8407,28 @@
       "discount_pct": 29
     },
     "MV2": {
-      "list": 519,
-      "price": 266,
+      "list": 538.51,
+      "price": 276,
       "discount": 0.4875,
       "zoho_product_id": "2570562000062657390",
-      "discount_per_unit": 253,
+      "discount_per_unit": 262.51,
       "discount_pct": 49
     },
     "MX67": {
-      "list": 567,
-      "price": 397.0,
-      "discount": 0.3,
+      "list": 1228.77,
+      "price": 572,
+      "discount": 0.5345,
       "zoho_product_id": "2570562000009234263",
-      "discount_per_unit": 170.0,
-      "discount_pct": 30
+      "discount_per_unit": 656.77,
+      "discount_pct": 53
     },
     "MX68": {
-      "list": 810,
-      "price": 567.0,
-      "discount": 0.3,
+      "list": 1759.18,
+      "price": 820,
+      "discount": 0.5339,
       "zoho_product_id": "2570562000010523428",
-      "discount_per_unit": 243.0,
-      "discount_pct": 30
+      "discount_per_unit": 939.18,
+      "discount_pct": 53
     },
     "LIC-L-AC-APX-1Y-S1": {
       "list": 15,
@@ -8478,6 +8501,204 @@
       "zoho_product_id": "2570562000414875796",
       "discount_per_unit": 0,
       "discount_pct": 0
+    },
+    "MS130-8": {
+      "list": 1036.65,
+      "price": 483,
+      "discount": 0.5341,
+      "zoho_product_id": "2570562000396425107",
+      "discount_per_unit": 553.65,
+      "discount_pct": 53
+    },
+    "MS130-8P": {
+      "list": 1781.73,
+      "price": 830,
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000388426062",
+      "discount_per_unit": 951.73,
+      "discount_pct": 53
+    },
+    "MS130-8P-I": {
+      "list": 1781.73,
+      "price": 830,
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000388130266",
+      "discount_per_unit": 951.73,
+      "discount_pct": 53
+    },
+    "MS130-8X": {
+      "list": 2818.38,
+      "price": 1313,
+      "discount": 0.5341,
+      "zoho_product_id": "2570562000388092810",
+      "discount_per_unit": 1505.38,
+      "discount_pct": 53
+    },
+    "MS130-12X": {
+      "list": 3563.48,
+      "price": 1660,
+      "discount": 0.5342,
+      "zoho_product_id": "2570562000388240854",
+      "discount_per_unit": 1903.48,
+      "discount_pct": 53
+    },
+    "MS130-24": {
+      "list": 2410.21,
+      "price": 1123,
+      "discount": 0.5341,
+      "zoho_product_id": "2570562000403499128",
+      "discount_per_unit": 1287.21,
+      "discount_pct": 53
+    },
+    "MS130-24P": {
+      "list": 3880.95,
+      "price": 1807,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000348083785",
+      "discount_per_unit": 2073.95,
+      "discount_pct": 53
+    },
+    "MS130-24X": {
+      "list": 7126.95,
+      "price": 3318,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000390025730",
+      "discount_per_unit": 3808.95,
+      "discount_pct": 53
+    },
+    "MS130-48": {
+      "list": 4276.17,
+      "price": 1991,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000363261166",
+      "discount_per_unit": 2285.17,
+      "discount_pct": 53
+    },
+    "MS130-48P": {
+      "list": 6932.57,
+      "price": 3228,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000350111408",
+      "discount_per_unit": 3704.57,
+      "discount_pct": 53
+    },
+    "MS130-48X": {
+      "list": 10625.63,
+      "price": 4947,
+      "discount": 0.5344,
+      "zoho_product_id": "2570562000390014574",
+      "discount_per_unit": 5678.63,
+      "discount_pct": 53
+    },
+    "MS130R-8P": {
+      "list": 4534.04,
+      "price": 3049,
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000405312561",
+      "discount_per_unit": 1485.04,
+      "discount_pct": 33
+    },
+    "MX68W": {
+      "list": 2475.21,
+      "price": 1295,
+      "discount": 0.4768,
+      "zoho_product_id": "2570562000399386198",
+      "discount_per_unit": 1180.21,
+      "discount_pct": 48
+    },
+    "MX75": {
+      "list": 2839.03,
+      "price": 1322,
+      "discount": 0.5343,
+      "zoho_product_id": "2570562000353537045",
+      "discount_per_unit": 1517.03,
+      "discount_pct": 53
+    },
+    "MX85": {
+      "list": 4411.2,
+      "price": 2967,
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000388889594",
+      "discount_per_unit": 1444.2,
+      "discount_pct": 33
+    },
+    "MX95": {
+      "list": 8831.22,
+      "price": 5939,
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000357707553",
+      "discount_per_unit": 2892.22,
+      "discount_pct": 33
+    },
+    "MX105": {
+      "list": 13251.24,
+      "price": 8910,
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000362957337",
+      "discount_per_unit": 4341.24,
+      "discount_pct": 33
+    },
+    "MX250": {
+      "list": 19616.07,
+      "price": 13191,
+      "discount": 0.3275,
+      "zoho_product_id": "2570562000362907219",
+      "discount_per_unit": 6425.07,
+      "discount_pct": 33
+    },
+    "MX450": {
+      "list": 39240.97,
+      "price": 26386,
+      "discount": 0.3276,
+      "zoho_product_id": "2570562000362960228",
+      "discount_per_unit": 12854.97,
+      "discount_pct": 33
+    },
+    "MX67W": {
+      "list": 1900.61,
+      "price": 994,
+      "discount": 0.477,
+      "zoho_product_id": "2570562000399386178",
+      "discount_per_unit": 906.61,
+      "discount_pct": 48
+    },
+    "MV22": {
+      "list": 1349.89,
+      "price": 908,
+      "discount": 0.3274,
+      "zoho_product_id": "2570562000012349690",
+      "discount_per_unit": 441.89,
+      "discount_pct": 33
+    }
+  },
+  "legacy_product_id_aliases": {
+    "_meta": {
+      "purpose": "Read-only reverse lookup for MX/MS -HW product IDs used before the non-HW Zoho migration.",
+      "source_commit": "3104e92b2b024debe51e61b9837a403ba770d580",
+      "authority": "historical_alias_only",
+      "write_policy": "Never use an alias as write authority; resolve and verify the canonical bare Product in Zoho before a quote write."
+    },
+    "aliases": {
+      "2570562000064739443": { "sku": "MX75-HW", "canonical_sku": "MX75" },
+      "2570562000064739444": { "sku": "MX85-HW", "canonical_sku": "MX85" },
+      "2570562000064739445": { "sku": "MX95-HW", "canonical_sku": "MX95" },
+      "2570562000064739446": { "sku": "MX105-HW", "canonical_sku": "MX105" },
+      "2570562000009567283": { "sku": "MX67W-HW", "canonical_sku": "MX67W" },
+      "2570562000001097489": { "sku": "MX250-HW", "canonical_sku": "MX250" },
+      "2570562000001097491": { "sku": "MX450-HW", "canonical_sku": "MX450" },
+      "2570562000235367001": { "sku": "MS130-8P-I-HW", "canonical_sku": "MS130-8P-I" },
+      "2570562000010523059": { "sku": "MX68W-HW", "canonical_sku": "MX68W" },
+      "2570562000194740372": { "sku": "MS130R-8P-HW", "canonical_sku": "MS130R-8P" },
+      "2570562000182445395": { "sku": "MS130-24X-HW", "canonical_sku": "MS130-24X" },
+      "2570562000182445396": { "sku": "MS130-24P-HW", "canonical_sku": "MS130-24P" },
+      "2570562000182445398": { "sku": "MS130-8P-HW", "canonical_sku": "MS130-8P" },
+      "2570562000182445400": { "sku": "MS130-48P-HW", "canonical_sku": "MS130-48P" },
+      "2570562000182445402": { "sku": "MS130-8-HW", "canonical_sku": "MS130-8" },
+      "2570562000182445403": { "sku": "MS130-8X-HW", "canonical_sku": "MS130-8X" },
+      "2570562000182445404": { "sku": "MS130-48X-HW", "canonical_sku": "MS130-48X" },
+      "2570562000182445405": { "sku": "MS130-12X-HW", "canonical_sku": "MS130-12X" },
+      "2570562000182445407": { "sku": "MS130-24-HW", "canonical_sku": "MS130-24" },
+      "2570562000182445409": { "sku": "MS130-48-HW", "canonical_sku": "MS130-48" }
     }
   },
   "_meta": {

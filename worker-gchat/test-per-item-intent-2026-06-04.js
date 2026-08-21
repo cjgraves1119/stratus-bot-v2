@@ -29,6 +29,7 @@ function loadGchatHandler() {
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
   src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
+  src = src.replace(/^import legacyProductIdAliasesData from '\.\/data\/legacy-product-id-aliases\.json';?$/m, `const legacyProductIdAliasesData = require('${esc('src/data/legacy-product-id-aliases.json')}');`);
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
@@ -46,9 +47,12 @@ function loadEngine(workerDir, tag) {
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
   src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
+  src = src.replace(/^import legacyProductIdAliasesData from '\.\/data\/legacy-product-id-aliases\.json';?$/m, `const legacyProductIdAliasesData = require('${esc('src/data/legacy-product-id-aliases.json')}');`);
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
+  // Only worker-gchat has this JSON import; harmless no-op for worker/Webex.
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${esc('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const ed = src.indexOf('export default');
@@ -159,10 +163,10 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
   });
   // Symmetry with "license for …": leading "hardware for …" must also be list-level
   // (cover every item), not just the first clause.
-  await t('"quote hardware for 1 MX67 and 1 MR44" (leading hardware) → all hardware, NO license', async () => {
+  await t('"quote hardware for 1 MX67 and 1 MR44" (leading hardware) → public MX67 + MR44-HW, NO license', async () => {
     const gm = engineSkuQty(G, 'quote hardware for 1 MX67 and 1 MR44'), wm = engineSkuQty(W, 'quote hardware for 1 MX67 and 1 MR44');
     assert.ok(!findKey(gm, /^LIC-/), `leading "hardware for" should suppress ALL licenses: ${keys(gm)}`);
-    assert.ok(findKey(gm, /^MX67-HW$/) && findKey(gm, /^MR44-HW$/), `hardware missing: ${keys(gm)}`);
+    assert.ok(findKey(gm, /^MX67$/) && findKey(gm, /^MR44-HW$/), `hardware missing: ${keys(gm)}`);
     assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
   });
   // Regression guard (2nd review pass): leading "license renewal for …" must be
@@ -197,7 +201,7 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     const gm = engineSkuQty(G, 'quote hardware support for 1 MX67 and 1 MR44 hardware model'), wm = engineSkuQty(W, 'quote hardware support for 1 MX67 and 1 MR44 hardware model');
     assert.ok(findKey(gm, /^LIC-ENT-\dYR$/), `MR44 license wrongly dropped ("hardware model" mis-read as hardware-only): ${keys(gm)}`);
     assert.ok(findKey(gm, /^LIC-MX67/), `MX67 license missing: ${keys(gm)}`);
-    assert.ok(findKey(gm, /^MR44-HW$/) && findKey(gm, /^MX67-HW$/), `hardware missing: ${keys(gm)}`);
+    assert.ok(findKey(gm, /^MR44-HW$/) && findKey(gm, /^MX67$/), `hardware missing: ${keys(gm)}`);
     assert.deepStrictEqual(keys(gm), keys(wm), `parity drift: ${keys(gm)} vs ${keys(wm)}`);
   });
 
@@ -208,9 +212,9 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     }
     return true;
   };
-  await t('"MS220-8P hardware only" → MS130-8P-HW present, no empty Option section, gchat≡webex', async () => {
+  await t('"MS220-8P hardware only" → public MS130-8P present, no empty Option section, gchat≡webex', async () => {
     const gMsg = (G.buildQuoteResponse(G.parseMessage('MS220-8P hardware only')) || {}).message || '';
-    assert.ok(/MS130-8P-HW/.test(gMsg), `replacement hardware missing: ${gMsg.slice(0, 160)}`);
+    assert.ok(/(?:[?&,]item=|,)MS130-8P(?:,|&qty=)/.test(gMsg), `replacement hardware missing: ${gMsg.slice(0, 160)}`);
     assert.ok(noEmptyOption(gMsg), `empty Option section present:\n${gMsg}`);
     assert.deepStrictEqual(engineSkuQty(G, 'MS220-8P hardware only'), engineSkuQty(W, 'MS220-8P hardware only'), 'parity drift');
   });

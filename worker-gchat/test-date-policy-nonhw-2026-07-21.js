@@ -70,6 +70,17 @@ const D = (s) => new Date(s + 'T12:00:00Z');
   // ── 3. Non-HW Zoho product preference (KV-cached resolution path) ──
   console.log('preferNonHwQuotedItems');
   const idMap = G.getProductIdToSkuMap();
+  const priceData = require('./src/data/prices.json');
+  const lineage = priceData.legacy_product_id_aliases;
+  ok(lineage?._meta?.authority === 'historical_alias_only'
+      && lineage._meta.source_commit === '3104e92b2b024debe51e61b9837a403ba770d580',
+    'legacy Product-ID aliases carry explicit historical-only snapshot provenance');
+  ok(Object.entries(lineage?.aliases || {}).every(([historicalId, alias]) => {
+    const canonicalId = priceData.prices?.[alias.canonical_sku]?.zoho_product_id;
+    return idMap[historicalId] === alias.sku
+      && idMap[canonicalId] === alias.canonical_sku
+      && historicalId !== canonicalId;
+  }), 'all migrated historical ids preserve -HW lineage without overwriting canonical bare owners');
   const mx85hwId = Object.keys(idMap).find(k => idMap[k] === 'MX85-HW');
   const mr44hwId = Object.keys(idMap).find(k => idMap[k] === 'MR44-HW');
   ok(Boolean(mx85hwId && mr44hwId), 'reverse map has MX85-HW and MR44-HW ids');
@@ -125,7 +136,9 @@ const D = (s) => new Date(s + 'T12:00:00Z');
     `MX85-HW line swapped to the non-HW Zoho product (swapped=${r.swapped})`);
   ok(items[1].Product_Name.id === mr44hwId, 'MR44-HW (not MX/MS) untouched');
   ok(items[2].Product_Name.id === '2570562000388889594', 'existing row with explicit Product_Name is normalized too');
-  ok(idMap['2570562000388889594'] === 'MX85-HW', 'swapped id registered in reverse map for discount correction');
+  ok(idMap['2570562000388889594'] === 'MX85', 'canonical bare id keeps its canonical reverse-map owner after swap');
+  ok(idMap[mx85hwId] === 'MX85-HW' && mx85hwId !== '2570562000388889594',
+    'historical -HW id remains a read-only lineage alias distinct from the canonical bare id');
   ok(G.publicMxMsHardwareSku('MX67-HW') === 'MX67'
       && G.publicMxMsHardwareSku('MX67C-HW-NA') === 'MX67C-NA'
       && G.publicMxMsHardwareSku('MS130-24P-HW') === 'MS130-24P'

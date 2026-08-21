@@ -2658,6 +2658,20 @@ function applySuffix(sku) {
   return upper;
 }
 
+// Cisco's current MX/MS public order codes omit the legacy `-HW` token.
+// Keep applySuffix() as the internal catalog/pricing adapter, then normalize
+// only the customer-facing cart entry while preserving NA/WW geography.
+function publicMxMsHardwareSku(sku) {
+  const upper = String(sku || '').trim().toUpperCase();
+  if (!/^(?:MX|MS)\d/.test(upper)) return upper;
+  return upper.replace(/-HW(?=-(?:NA|WW)$|$)/, '');
+}
+
+function isLegacyMxMsHwSku(sku) {
+  const upper = String(sku || '').trim().toUpperCase();
+  return /^(?:MX|MS)\d[A-Z0-9-]*-HW(?:-(?:NA|WW))?$/.test(upper);
+}
+
 // ─── License SKU Rules ───────────────────────────────────────────────────────
 // ── Dashboard license-row passthrough ──────────────────────────────────────
 // A Cisco Meraki license-dashboard "License information" row is ALREADY a
@@ -2944,6 +2958,45 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
 }
 
 // ─── URL Builder ─────────────────────────────────────────────────────────────
+// Zoho pricing/product lookup and Stratus order links intentionally use
+// different identifiers for MX/MS hardware. prices.json remains keyed by the
+// legacy -HW Product_Code, while the order form uses the catalog-valid non-HW
+// equivalent. Resolve the whole list before rendering and fail atomically:
+// never fall back to an inactive -HW link or emit a partial cart. Region
+// suffixes survive the rewrite.
+function resolveOrderLinkItems(items) {
+  const resolved = [];
+  const blocked = [];
+  for (const item of (Array.isArray(items) ? items : [])) {
+    const upper = String(item?.sku || '').trim().toUpperCase();
+    if (!isLegacyMxMsHwSku(upper)) {
+      resolved.push({ ...item, sku: upper });
+      continue;
+    }
+    const candidate = publicMxMsHardwareSku(upper);
+    const check = validateSku(candidate);
+    if (!check.valid || check.eol) {
+      blocked.push({
+        sku: upper,
+        candidate,
+        reason: check.reason || (check.eol ? 'candidate is EOL' : 'candidate is not in the active order catalog'),
+      });
+      continue;
+    }
+    resolved.push({ ...item, sku: candidate });
+  }
+  if (blocked.length > 0) {
+    return {
+      ok: false,
+      error: 'order_sku_unavailable',
+      message: `No active non-HW order SKU could be confirmed for: ${blocked.map(b => `${b.sku} → ${b.candidate}`).join(', ')}. No quote link was generated.`,
+      blocked,
+      items: [],
+    };
+  }
+  return { ok: true, items: resolved, blocked: [] };
+}
+
 function buildStratusUrl(items) {
   // EOL swap safety net: no order link may carry a retired SKU regardless of
   // which path assembled the items (edition inferred from sibling lines here;
@@ -2952,6 +3005,15 @@ function buildStratusUrl(items) {
   // from the link — a purchase URL must never sell a retired SKU (codex
   // review 2026-07-21); their flags surface at the seams that own text.
   items = applyEolSwaps(items).lines.filter(l => l.valid !== false);
+
+  const orderResolution = resolveOrderLinkItems(items);
+  if (!orderResolution.ok) {
+    const err = new Error(orderResolution.message);
+    err.code = orderResolution.error;
+    err.details = orderResolution;
+    throw err;
+  }
+  items = orderResolution.items;
 
   // Consolidate duplicate SKUs by summing quantities
   const merged = new Map();
@@ -3775,7 +3837,7 @@ async function handleFollowUpModifier(text, personId, kv) {
         let changed = false;
         const pMods = parsed.modifiers || {};
         for (const it of parsed.items) {
-          const hwSku = applySuffix(it.baseSku);
+          const hwSku = publicMxMsHardwareSku(applySuffix(it.baseSku));
           const tm = String(hwSku).match(/-([135])(?:YR|Y-S\d+|Y)$/i);
           // A term-bearing addition into an UNLABELED bucket can't be placed without mixing
           // terms in one URL — fail closed (codex: bare prior URL + "add 100 duo essentials"
@@ -4904,6 +4966,44 @@ function hasOtherQuoteSkuForSme(upper) {
   return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*|LIC-(?!SME\b)[A-Z0-9-]+)\b/i.test(String(upper || ''));
 }
 
+function textNamesHardwareModel(rawText) {
+  const withoutLicenseSkus = String(rawText || '').replace(/\bLIC-[A-Z0-9-]+\b/gi, ' ');
+  return /\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*)\b/i.test(withoutLicenseSkus);
+}
+
+const MAX_DIRECT_LICENSE_QUANTITY = 99999;
+
+function directLicenseQuantityClarification() {
+  return {
+    isClarification: true,
+    clarificationMessage: `License quantities must be between 1 and ${MAX_DIRECT_LICENSE_QUANTITY.toLocaleString('en-US')}. Please correct the list and resend it.`,
+  };
+}
+
+// Parse only an unambiguous sequence where every LIC-* token is immediately
+// followed by its comma-bound quantity. Match arbitrary digit lengths first so
+// an oversized quantity cannot evade this path and fall into the legacy comma
+// parser, where it would bind to the following SKU and shift the whole list.
+function parseExplicitLicenseQuantityPairs(rawText) {
+  const input = String(rawText || '');
+  const pairs = [...input.matchAll(/\b(LIC-[A-Z0-9-]+)\s*,\s*(\d+)(?=[\s,;]|$)/gi)];
+  const licenseTokenCount = (input.match(/\bLIC-[A-Z0-9-]+/gi) || []).length;
+  if (pairs.length < 2 || pairs.length !== licenseTokenCount) return null;
+  if (pairs.some((m) => Number(m[2]) > MAX_DIRECT_LICENSE_QUANTITY)) {
+    return { invalid: true, items: [] };
+  }
+  const seen = new Set();
+  const items = [];
+  for (const pair of pairs) {
+    const sku = pair[1].toUpperCase();
+    const qty = Number(pair[2]);
+    if (!(qty > 0) || seen.has(sku)) continue;
+    seen.add(sku);
+    items.push({ sku, qty });
+  }
+  return { invalid: false, items };
+}
+
 function extractEmbeddedDirectLicenseList(rawText) {
   const text = String(rawText || '');
   if (/stratusinfosystems\.com\/order\/|stratus\.supply\/|[?&]item=/i.test(text)) return null;
@@ -4918,8 +5018,7 @@ function extractEmbeddedDirectLicenseList(rawText) {
 
   const matches = [...text.matchAll(/\bLIC-[A-Z0-9-]+\b/gi)];
   if (matches.length < 2) return null;
-  const textWithoutLicenseSkus = text.replace(/\bLIC-[A-Z0-9-]+\b/gi, ' ');
-  if (/\b(?:C9[23]\d{2}[LX]?-[\dA-Z]+-[\dA-Z]+-M(?:-O)?|C8[14]\d{2}-G2-MX|MA-[A-Z0-9-]+|CW9\d{3}[A-Z0-9]*|MS150-[\dA-Z]+-[\dA-Z]+|MS450-\d+|MS[12345]\d{2}R?-[\dA-Z]+(?:-I)?(?:-RF)?|(?:MR|MV|MT|MG)\d+[A-Z]?(?![A-Z])|MX\d+[A-Z]*(?:-NA)?|Z\d+[A-Z]*)\b/i.test(textWithoutLicenseSkus)) return null;
+  if (textNamesHardwareModel(text)) return null;
 
   const items = [];
   for (const match of matches) {
@@ -5415,9 +5514,8 @@ function parseExplicitDirectLicenseListBeforeClassifier(rawText) {
   if (new Set(explicitLicTerms).size < 2) return null;
   try {
     const parsed = parseMessage(rawText);
-    return parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length >= 2
-      ? parsed
-      : null;
+    if (parsed?.isClarification) return parsed;
+    return parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length >= 2 ? parsed : null;
   } catch (_) {
     return null;
   }
@@ -6348,7 +6446,21 @@ function parseMessage(text) {
   // This ensures bulleted lists (common in Webex/GChat/email pastes) parse correctly.
   const lines = rawLines.map(l => l.replace(/^[\s•\-\*·▸▹►‣⁃◦]+\s*/, '').replace(/^\d+[.)]\s*/, '').trim()).filter(Boolean);
   // Extract all LIC- entries, skipping headers and non-matching lines
-  if (lines.length >= 2) {
+  if (lines.length >= 2 && !textNamesHardwareModel(text)) {
+    const explicitPairs = parseExplicitLicenseQuantityPairs(text);
+    if (explicitPairs?.invalid) return directLicenseQuantityClarification();
+    if (explicitPairs) {
+      return {
+        items: [],
+        directLicenseList: explicitPairs.items,
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false
+      };
+    }
     const licItems = [];
     for (const line of lines) {
       // Match: LIC-xxx,qty or LIC-xxx qty
@@ -6358,15 +6470,28 @@ function parseMessage(text) {
       // Match: LIC-xxx x qty (SKU-first with x separator, e.g. "LIC-ENT-1YR x5")
       const skuXqtyMatch = !csvMatch && !qtyFirstMatch && line.match(/^\s*(LIC-[A-Z0-9-]+)\s*[xX×]\s*(\d+)\s*$/i);
       if (csvMatch) {
-        licItems.push({ sku: csvMatch[1].toUpperCase(), qty: parseInt(csvMatch[2]) });
+        const qty = parseInt(csvMatch[2]);
+        if (qty > MAX_DIRECT_LICENSE_QUANTITY) return directLicenseQuantityClarification();
+        if (qty > 0) licItems.push({ sku: csvMatch[1].toUpperCase(), qty });
       } else if (qtyFirstMatch) {
-        licItems.push({ sku: qtyFirstMatch[2].toUpperCase(), qty: parseInt(qtyFirstMatch[1]) });
+        const qty = parseInt(qtyFirstMatch[1]);
+        if (qty > MAX_DIRECT_LICENSE_QUANTITY) return directLicenseQuantityClarification();
+        if (qty > 0) licItems.push({ sku: qtyFirstMatch[2].toUpperCase(), qty });
       } else if (skuXqtyMatch) {
-        licItems.push({ sku: skuXqtyMatch[1].toUpperCase(), qty: parseInt(skuXqtyMatch[2]) });
+        const qty = parseInt(skuXqtyMatch[2]);
+        if (qty > MAX_DIRECT_LICENSE_QUANTITY) return directLicenseQuantityClarification();
+        if (qty > 0) licItems.push({ sku: skuXqtyMatch[1].toUpperCase(), qty });
       } else {
         const singleMatch = line.match(/^\s*(LIC-[A-Z0-9-]+)\s*$/i);
         if (singleMatch) {
           licItems.push({ sku: singleMatch[1].toUpperCase(), qty: 1 });
+        } else {
+          // A line can contain multiple dashboard pairs. Accept it only when
+          // every LIC token is an explicit pair; otherwise preserve the legacy
+          // fallback instead of partially quoting an ambiguous paste.
+          const linePairs = parseExplicitLicenseQuantityPairs(line);
+          if (linePairs?.invalid) return directLicenseQuantityClarification();
+          if (linePairs) licItems.push(...linePairs.items);
         }
         // Skip non-matching lines (headers, garbage, double-pasted data)
       }
@@ -6399,7 +6524,21 @@ function parseMessage(text) {
   // Also handles qty variants: "2x LIC-ENT-1YR, LIC-MX68-SEC-1YR"
   // The multi-line parser above requires >= 2 newline-separated lines,
   // so comma-separated input on a single line falls through. Catch it here.
-  if (lines.length <= 2) {
+  if (lines.length <= 2 && !textNamesHardwareModel(text)) {
+    const explicitPairs = parseExplicitLicenseQuantityPairs(text);
+    if (explicitPairs?.invalid) return directLicenseQuantityClarification();
+    if (explicitPairs) {
+      return {
+        items: [],
+        directLicenseList: explicitPairs.items,
+        requestedTerm: null,
+        modifiers: { hardwareOnly: false, licenseOnly: true },
+        requestedTier: null,
+        isAdvisory: false,
+        isRevision: false,
+        showPricing: false
+      };
+    }
     const commaParts = text.split(/[,;]+/).map(s => s.trim()).filter(Boolean);
     const licFromComma = [];
     for (const part of commaParts) {
@@ -6409,11 +6548,17 @@ function parseMessage(text) {
       const m3 = part.match(/^\s*(\d+)\s*[xX×]?\s*(LIC-[A-Z0-9-]+)\s*$/i);
       const m4 = part.match(/^\s*(LIC-[A-Z0-9-]+)\s*[xX×]\s*(\d+)\s*$/i);
       if (m2) {
-        licFromComma.push({ sku: m2[1].toUpperCase(), qty: parseInt(m2[2]) });
+        const qty = parseInt(m2[2]);
+        if (qty > MAX_DIRECT_LICENSE_QUANTITY) return directLicenseQuantityClarification();
+        if (qty > 0) licFromComma.push({ sku: m2[1].toUpperCase(), qty });
       } else if (m3) {
-        licFromComma.push({ sku: m3[2].toUpperCase(), qty: parseInt(m3[1]) });
+        const qty = parseInt(m3[1]);
+        if (qty > MAX_DIRECT_LICENSE_QUANTITY) return directLicenseQuantityClarification();
+        if (qty > 0) licFromComma.push({ sku: m3[2].toUpperCase(), qty });
       } else if (m4) {
-        licFromComma.push({ sku: m4[1].toUpperCase(), qty: parseInt(m4[2]) });
+        const qty = parseInt(m4[2]);
+        if (qty > MAX_DIRECT_LICENSE_QUANTITY) return directLicenseQuantityClarification();
+        if (qty > 0) licFromComma.push({ sku: m4[1].toUpperCase(), qty });
       } else if (m1) {
         licFromComma.push({ sku: m1[1].toUpperCase(), qty: 1 });
       }

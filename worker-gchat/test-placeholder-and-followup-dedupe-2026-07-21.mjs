@@ -144,6 +144,22 @@ t('cross-turn: COQL no-rows ({error:"",status:204}) still falls through to CREAT
   assert.ok(!noRows204.deduped, '204 no-rows must not report deduped');
   assert.strictEqual(posts3, 1, 'exactly one Tasks POST');
 });
+
+let ordinalQuery = '';
+stubs.zohoApiCall = async (method, path, _env, body) => {
+  if (path === 'Tasks') { posts3++; return { data: [{ status: 'success', details: { id: 'UNEXPECTED' } }] }; }
+  ordinalQuery = body?.select_query || '';
+  return { data: [{ id: 'TASK-ORDINAL', Subject: 'First Follow-Up: Acme' }] };
+};
+const ordinalHit = await buildAndRun('D-7');
+t('cross-turn: current ordinal follow-up subject dedupes without a Tasks POST', () => {
+  assert.strictEqual(ordinalHit.success, true);
+  assert.strictEqual(ordinalHit.deduped, true);
+  assert.strictEqual(ordinalHit.taskId, 'TASK-ORDINAL');
+  assert.match(ordinalQuery, /select id, Subject from Tasks/,
+    'dedupe query must retrieve Subject for local legacy/current normalization');
+  assert.strictEqual(posts3, 1, 'ordinal match must not create another Task');
+});
 stubs.zohoApiCall = savedZoho;
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : 'FAILURES'} — ${pass} passed, ${fail} failed`);

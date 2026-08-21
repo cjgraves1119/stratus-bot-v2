@@ -255,8 +255,8 @@ const t = async (name, fn) => {
     assert.ok(RAW_SRC.includes('ACCESSORY SKU FIND (PSU / power supply / injector')));
   await t('parity gap: SME→Ivanti substitution in the Llama knowledge block', () =>
     assert.ok(RAW_SRC.includes('LIC-MI-EMSC-D-1YMC-A-{1|3|5}YR')));
-  await t('parity gap: Meraki ISR Referal requires meraki_isr_email in the Llama prompt', () =>
-    assert.ok(RAW_SRC.includes('"Meraki ISR Referal" REQUIRES meraki_isr_email')));
+  await t('parity gap: Meraki ISR Referal accepts reviewed email or name resolution in the Llama prompt', () =>
+    assert.ok(/Lead_Source "Meraki ISR Referal" REQUIRES either meraki_isr_email[\s\S]*or meraki_isr_name/.test(RAW_SRC)));
   await t('parity gap: SKU miss ladder in the Llama prompt', () =>
     assert.ok(RAW_SRC.includes('SKU MISS LADDER:')));
   await t('round-2: stalled CF runs never persist crm_context', () =>

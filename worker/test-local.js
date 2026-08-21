@@ -67,12 +67,14 @@ function buildParserShim() {
 }
 
 let _realParseMessage = null;
+let _realBuildStratusUrl = null;
 let _realBuildQuoteFromV2 = null;
 let _realApplyV2Revision = null;
 let _realExtractPriorFromAssistantUrl = null;
 try {
   const shim = buildParserShim();
   _realParseMessage = shim.parseMessage;
+  _realBuildStratusUrl = shim.buildStratusUrl;
   _realBuildQuoteFromV2 = shim.buildQuoteFromV2;
   _realApplyV2Revision = shim.applyV2Revision;
   _realExtractPriorFromAssistantUrl = shim.extractPriorFromAssistantUrl;
@@ -115,7 +117,6 @@ const SYNC_FUNCTIONS = [
   'getLicenseSkus',
   'checkEol',
   'isEol',
-  'buildStratusUrl',
   'handleEolDateRequest',
 ];
 
@@ -568,17 +569,8 @@ function isEol(baseSku) {
 }
 
 function buildStratusUrl(items) {
-  // Consolidate duplicate SKUs by summing quantities
-  const merged = new Map();
-  for (const { sku, qty } of items) {
-    merged.set(sku, (merged.get(sku) || 0) + qty);
-  }
-
-  // Preserve insertion order (= request order). Hardware is pushed before its
-  // license in every call site, so each device's HW+LIC stay grouped naturally.
-  const orderedSkus = [...merged.keys()];
-  const qtys = orderedSkus.map(s => merged.get(s));
-  return `https://stratusinfosystems.com/order/?item=${orderedSkus.join(',')}&qty=${qtys.join(',')}`;
+  if (!_realBuildStratusUrl) throw new Error('real buildStratusUrl shim unavailable');
+  return _realBuildStratusUrl(items);
 }
 
 // ─── Prices lookup helper ────────────────────────────────────────────────────

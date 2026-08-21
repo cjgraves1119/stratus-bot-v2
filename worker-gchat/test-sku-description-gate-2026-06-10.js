@@ -19,6 +19,7 @@ function loadEngine() {
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
   src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
+  src = src.replace(/^import legacyProductIdAliasesData from '\.\/data\/legacy-product-id-aliases\.json';?$/m, `const legacyProductIdAliasesData = require('${esc('src/data/legacy-product-id-aliases.json')}');`);
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
@@ -114,11 +115,13 @@ console.log('Wiring / source-guards (call-site placement + schema)');
     'skus[] item schema gains source_text on BOTH create_deal_and_quote and create_quote_on_deal');
   ok((src.match(/confirm_resolved_items: \{ type: 'boolean'/g) || []).length === 2,
     'top-level confirm_resolved_items on BOTH tool schemas');
-  // create_quote_on_deal delegates wholesale (...rest) into create_deal_and_quote,
-  // so source_text + confirm_resolved_items flow through and the gate comes free.
-  ok(/const \{ deal_id, \.\.\.rest \} = toolInput \|\| \{\};/.test(src)
-     && /return await executeToolCall\('create_deal_and_quote', \{\s*\.\.\.rest,/.test(src),
-    'create_quote_on_deal still forwards toolInput wholesale (gate inherited)');
+  // create_quote_on_deal consumes confirm_attach at its explicit consent gate,
+  // then delegates every remaining field (including source_text and
+  // confirm_resolved_items) through ...rest so the mismatch gate is inherited.
+  ok(/const \{ deal_id, confirm_attach, \.\.\.rest \} = toolInput \|\| \{\};/.test(src)
+     && /if \(confirm_attach !== true\)/.test(src)
+     && /return await executeToolCall\('create_deal_and_quote', \{\s*\.\.\.rest,\s*existing_deal_id: deal_id/.test(src),
+    'create_quote_on_deal consumes confirm_attach and forwards all gated quote fields');
   ok(/_gateEntries\.push\(\{ sku: rawSku, qty, source_text: sourceText \}\)/.test(src),
     'staging loop threads entry.source_text into the gate entries');
 

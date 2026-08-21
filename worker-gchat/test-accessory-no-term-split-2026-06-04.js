@@ -20,6 +20,7 @@ function loadGchatHandler() {
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
   src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
+  src = src.replace(/^import legacyProductIdAliasesData from '\.\/data\/legacy-product-id-aliases\.json';?$/m, `const legacyProductIdAliasesData = require('${esc('src/data/legacy-product-id-aliases.json')}');`);
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
@@ -39,9 +40,13 @@ function loadEngine(workerDir, tag) {
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
   src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
+  src = src.replace(/^import legacyProductIdAliasesData from '\.\/data\/legacy-product-id-aliases\.json';?$/m, `const legacyProductIdAliasesData = require('${esc('src/data/legacy-product-id-aliases.json')}');`);
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
+  // worker-gchat embeds its reply-voice JSON alongside the catalog imports;
+  // the Webex worker has no such import, so this replacement is a no-op there.
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${esc('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const ed = src.indexOf('export default');
@@ -132,12 +137,21 @@ async function t(name, fn) { try { await fn(); console.log(`  ✅ ${name}`); pas
     assert.ok(/LIC-ENT-1YR/.test(joined) && /LIC-ENT-3YR/.test(joined) && /LIC-ENT-5YR/.test(joined), `MR licenses not spread across terms: ${joined}`);
   });
 
-  // ── CONTROL: explicit single-term license unaffected (directLicense path, not noTermSplit) ──
-  console.log('\n── CONTROL: explicit single-term license is unaffected (directLicense path) ──');
-  await t('"10 lic-sme-3yr" → 1 URL labeled 3-Year (capped term, NOT collapsed-to-neutral)', async () => {
+  // ── CONTROL: retired Systems Manager follows the reviewed replacement policy ──
+  // Initial quote requests offer every available Ivanti replacement term; a
+  // later revision narrows to one. The discontinued input quantity is floored
+  // to the replacement's 50-device minimum, and LIC-SME must never leak out.
+  console.log('\n── CONTROL: retired LIC-SME expands to the sanitized Ivanti replacement set ──');
+  await t('"10 lic-sme-3yr" → Ivanti 1/3/5-year choices at the 50-device minimum, zero LIC-SME', async () => {
     const r = await callQuote('10 lic-sme-3yr');
-    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 1, `expected 1 URL, got ${(r.quoteUrls || []).length}`);
-    assert.ok(/3\s*-?\s*year/i.test(r.quoteUrls[0].label), `expected 3-Year label, got "${r.quoteUrls[0].label}"`);
+    assert.ok(Array.isArray(r.quoteUrls) && r.quoteUrls.length === 3, `expected 3 replacement URLs, got ${(r.quoteUrls || []).length}`);
+    const joined = r.quoteUrls.map((u) => `${u.label} ${u.url}`).join(' ');
+    for (const term of [1, 3, 5]) {
+      assert.ok(new RegExp(`${term}\\s*-?\\s*year`, 'i').test(joined), `missing ${term}-Year label: ${joined}`);
+      assert.ok(joined.includes(`LIC-MI-EMSC-D-1YMC-A-${term}YR`), `missing ${term}-year Ivanti replacement: ${joined}`);
+    }
+    for (const u of r.quoteUrls) assert.ok(/[?&]qty=50(?:&|$)/.test(u.url), `replacement minimum was not 50: ${u.url}`);
+    assert.ok(!/LIC-SME/i.test(joined), `retired LIC-SME leaked into output: ${joined}`);
   });
 
   console.log(`\n${fail === 0 ? '✅' : '❌'} ${fail === 0 ? 'ALL PASS' : 'FAILURES'} — ${pass} passed, ${fail} failed`);

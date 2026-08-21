@@ -47,7 +47,13 @@ t('LLM zoho_create_record(Contacts) derives when First+Last blank', ()=>{ assert
 t('LLM Contacts has Last_Name local-part fallback (Codex hardening)', ()=>{ assert.ok(/Codex review hardening \(2026-05-19\): Last_Name is Zoho-required/.test(source)); assert.ok(/zoho_create_record Last_Name fallback to local-part/.test(source)); });
 t('/api/crm-add-contact accepts nameHint + derives', ()=>{ assert.ok(/nameHint: newCtNameHint/.test(source)); assert.ok(/deriveContactNameFields\(newCtEmail, newCtNameHint\)/.test(source)); });
 t('api derive only when both names blank', ()=>{ assert.ok(/if \(!newCtFirst && !newCtLast && newCtEmail\) \{/.test(source)); });
-t('CrmPanel openAddForm prefills from thread + local-part', ()=>{ assert.ok(/Contact name derivation \(Chris request\)/.test(crmPanel)); assert.ok(/emailContext\?\.threadContacts/.test(crmPanel)); });
+t('CrmPanel openAddForm prefills from the selected thread contact with a local-part fallback', ()=>{
+  assert.ok(/function openAddForm\(\)/.test(crmPanel));
+  assert.ok(/externalContacts\.find\(c => c\.email\?\.toLowerCase\(\) === selectedContact\?\.toLowerCase\(\)\)/.test(crmPanel));
+  assert.ok(/const bestName = contact\?\.fullName \|\| contact\?\.name/.test(crmPanel));
+  assert.ok(/const nameParts = splitContactName\(bestName, emailForForm\)/.test(crmPanel));
+  assert.ok(/firstName: nameParts\.firstName \|\| ''[\s\S]{0,100}lastName: nameParts\.lastName \|\| '-'/.test(crmPanel));
+});
 t('CrmPanel passes nameHint to background', ()=>{ assert.ok(/nameHint: _hintContact\?\.name/.test(crmPanel)); });
 
 console.log(`\n--- ${passed} passed, ${failed} failed ---\n`);

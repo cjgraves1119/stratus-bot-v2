@@ -28,12 +28,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = '/Users/chris/Documents/Codex/2026-08-13/install-and-verify-the-newly-rebuilt/work/stratus-v1.26.8';
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(HERE, '..');
 const WORKER = path.join(ROOT, 'worker-gchat');
-const require = createRequire(path.join(WORKER, 'x.cjs'));
+const require = createRequire(import.meta.url);
 
 const flow = await import(path.join(ROOT, 'chrome-extension/src/lib/email-quote-flow.mjs'));
 const core = await import(path.join(ROOT, 'chrome-extension/src/sidebar/components/sku-editor-core.mjs'));
@@ -47,7 +50,7 @@ function extractWorker() {
   const i = src.indexOf('export default');
   if (i > -1) { let d = 0, s = false, e = i; for (let k = i; k < src.length; k++) { if (src[k] === '{') { d++; s = true; } if (src[k] === '}') { d--; if (s && d === 0) { e = k + 1; break; } } } src = src.slice(0, i) + src.slice(e + 1); }
   src += `\nmodule.exports={parseMessage,buildQuoteResponse,expandOneshotRequestedProducts};\n`;
-  const t = path.join(WORKER, `.tmp-sweep-${process.pid}.cjs`);
+  const t = path.join(os.tmpdir(), `stratus-oneshot-sweep-${process.pid}.cjs`);
   fs.writeFileSync(t, src);
   try { delete require.cache[require.resolve(t)]; return require(t); } finally { fs.unlinkSync(t); }
 }

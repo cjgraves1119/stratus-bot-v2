@@ -74,9 +74,10 @@ const MARKERS = [
   ['BOM: confirm once', /ONE confirmation message/i],
   ['BOM: one create_deal_and_quote call, complete skus[]', /create_deal_and_quote ONCE with the complete skus\[\]/],
   ['BOM: never a subset', /only a subset of the confirmed items/i],
-  // SME / Systems Manager term cap
-  ['SME: 1YR/3YR only', /LIC-SME\)?: 1YR\/3YR/i],
-  ['SME: never 5YR', /Never quote LIC-SME-5YR/i],
+  // Systems Manager retirement / Ivanti replacement contract
+  ['SME: legacy SKU never emitted', /Systems Manager LIC-SME is retired: never output LIC-SME/i],
+  ['SME: Ivanti replacement supports 1\/3\/5', /LIC-MI-EMSC-D-1YMC-A-\{1YR\|3YR\|5YR\}/i],
+  ['SME: Ivanti minimum 50', /minimum quantity 50/i],
   // Model-agnostic renewals (lives in the email-intake conditional section)
   ['agnostic renewals: MV → MV-AGN', /MV → MV-AGN/],
   ['agnostic renewals: MR/CW → MR-AGN', /MR\/CW → MR-AGN/],

@@ -13,7 +13,6 @@ const SYNC_FUNCTIONS = [
   'getLicenseSkus',
   'checkEol',
   'isEol',
-  'buildStratusUrl',
   'handleEolDateRequest',
 ];
 

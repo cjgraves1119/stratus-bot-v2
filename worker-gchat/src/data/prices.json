@@ -8671,6 +8671,36 @@
       "discount_pct": 33
     }
   },
+  "legacy_product_id_aliases": {
+    "_meta": {
+      "purpose": "Read-only reverse lookup for MX/MS -HW product IDs used before the non-HW Zoho migration.",
+      "source_commit": "3104e92b2b024debe51e61b9837a403ba770d580",
+      "authority": "historical_alias_only",
+      "write_policy": "Never use an alias as write authority; resolve and verify the canonical bare Product in Zoho before a quote write."
+    },
+    "aliases": {
+      "2570562000064739443": { "sku": "MX75-HW", "canonical_sku": "MX75" },
+      "2570562000064739444": { "sku": "MX85-HW", "canonical_sku": "MX85" },
+      "2570562000064739445": { "sku": "MX95-HW", "canonical_sku": "MX95" },
+      "2570562000064739446": { "sku": "MX105-HW", "canonical_sku": "MX105" },
+      "2570562000009567283": { "sku": "MX67W-HW", "canonical_sku": "MX67W" },
+      "2570562000001097489": { "sku": "MX250-HW", "canonical_sku": "MX250" },
+      "2570562000001097491": { "sku": "MX450-HW", "canonical_sku": "MX450" },
+      "2570562000235367001": { "sku": "MS130-8P-I-HW", "canonical_sku": "MS130-8P-I" },
+      "2570562000010523059": { "sku": "MX68W-HW", "canonical_sku": "MX68W" },
+      "2570562000194740372": { "sku": "MS130R-8P-HW", "canonical_sku": "MS130R-8P" },
+      "2570562000182445395": { "sku": "MS130-24X-HW", "canonical_sku": "MS130-24X" },
+      "2570562000182445396": { "sku": "MS130-24P-HW", "canonical_sku": "MS130-24P" },
+      "2570562000182445398": { "sku": "MS130-8P-HW", "canonical_sku": "MS130-8P" },
+      "2570562000182445400": { "sku": "MS130-48P-HW", "canonical_sku": "MS130-48P" },
+      "2570562000182445402": { "sku": "MS130-8-HW", "canonical_sku": "MS130-8" },
+      "2570562000182445403": { "sku": "MS130-8X-HW", "canonical_sku": "MS130-8X" },
+      "2570562000182445404": { "sku": "MS130-48X-HW", "canonical_sku": "MS130-48X" },
+      "2570562000182445405": { "sku": "MS130-12X-HW", "canonical_sku": "MS130-12X" },
+      "2570562000182445407": { "sku": "MS130-24-HW", "canonical_sku": "MS130-24" },
+      "2570562000182445409": { "sku": "MS130-48-HW", "canonical_sku": "MS130-48" }
+    }
+  },
   "_meta": {
     "source": "Meraki Price Book Mar 14, 2026",
     "last_updated": "2026-03-14",
