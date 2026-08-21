@@ -180,8 +180,10 @@ t('QuoteResult no longer offers Google Chat routing', () => {
   assert.ok(!/handleSendToGChat/.test(quoteResultSource));
 });
 
-t('ChatPanel routes Gmail Create Quote through eCommerce before explicit Zoho review', () => {
-  assert.ok(/startEmailEcommQuote/.test(chatPanelSource));
+t('ChatPanel opens a manual quote builder with optional Gmail population before Zoho review', () => {
+  assert.ok(/startManualEcommQuote/.test(chatPanelSource));
+  assert.ok(/populateManualQuoteFromGmail/.test(chatPanelSource));
+  assert.ok(/Populate from Gmail context/.test(chatPanelSource));
   assert.ok(/buildEcommQuoteFromIntake/.test(chatPanelSource));
   assert.ok(/Create Zoho CRM quote from selected/.test(quoteResultSource));
   assert.ok(/disabled=\{busy \|\| !hasExplicitTermSelection\}/.test(quoteResultSource));

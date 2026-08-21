@@ -28,19 +28,24 @@ const quoteSource = fs.readFileSync(new URL('./src/sidebar/components/QuoteResul
 const content = fs.readFileSync(new URL('./src/content/index.js', import.meta.url), 'utf8');
 
 function functionSlice(name, nextMarker) {
-  const start = chatSource.indexOf(`async function ${name}(`);
+  const start = chatSource.indexOf(`function ${name}(`);
   assert.ok(start >= 0, `${name} must exist`);
   const end = chatSource.indexOf(nextMarker, start);
   assert.ok(end > start, `${name} end marker must exist`);
   return chatSource.slice(start, end);
 }
 
-test('visible Create Quote is a read-only Gmail eCommerce action, never generic chat', () => {
-  assert.match(chatSource, /\{ label: 'Create Quote', action: 'email-ecomm-quote' \}/);
-  assert.match(chatSource, /action\.action === 'email-ecomm-quote'[\s\S]{0,120}startEmailEcommQuote\(\)/);
+test('visible Create Quote opens a manual builder; Gmail population is separate and never generic chat', () => {
+  assert.match(chatSource, /\{ label: 'Create Quote', action: 'manual-ecomm-quote' \}/);
+  assert.match(chatSource, /action\.action === 'manual-ecomm-quote'[\s\S]{0,120}startManualEcommQuote\(\)/);
   assert.doesNotMatch(chatSource, /\{ label: 'Create Quote', text:/);
 
-  const intake = functionSlice('startEmailEcommQuote', 'function resolveIntakeLine');
+  const manual = functionSlice('startManualEcommQuote', 'async function populateManualQuoteFromGmail');
+  assert.match(manual, /blankQuoteEditorRows\(\)/);
+  assert.match(manual, /source: 'manual-quote-builder'/);
+  assert.doesNotMatch(manual, /sendToBackground|runQuote|MSG\.ONESHOT_/);
+
+  const intake = functionSlice('populateManualQuoteFromGmail', 'function resolveIntakeLine');
   assert.match(intake, /MSG\.ONESHOT_INTAKE/);
   assert.match(intake, /MSG\.GET_FULL_EMAIL_CONTEXT/);
   assert.match(content, /function findVisibleExpandAllControl\(\)/);
@@ -49,12 +54,14 @@ test('visible Create Quote is a read-only Gmail eCommerce action, never generic 
   assert.match(intake, /validateGmailQuoteContext\(fresh/);
   assert.match(intake, /expectedThreadPermId: emailContext\?\.threadPermId/);
   assert.match(intake, /emailQuoteStartRef\.current/);
-  assert.match(intake, /order_urls: orderUrls/);
+  assert.match(intake, /order_urls: validation\.orderUrls/);
   assert.match(intake, /messages: \(Array\.isArray\(quoteContext\.messageContexts\)/);
   assert.match(intake, /intent: res\.intent \|\| null/);
-  assert.match(intake, /buildEcommQuoteFromIntake\(cardMsg, lines, true\)/);
+  assert.match(intake, /quoteEditorRowsFromIntake\(res\.lines \|\| \[\], res\.intent \|\| \{\}\)/);
+  assert.match(chatSource, />\s*\{msg\.gmailPopulated \? 'Gmail context populated' : 'Populate from Gmail context'\}/);
+  assert.match(chatSource, /quoteUpdateLabel=[\s\S]{0,180}'Generate quote'/);
   assert.doesNotMatch(intake, /handleSend\(/);
-  assert.doesNotMatch(intake, /MSG\.ONESHOT_PLAN|MSG\.ONESHOT_EXECUTE|MSG\.CHAT_HANDOFF/);
+  assert.doesNotMatch(intake, /runQuote|buildEcommQuoteFromIntake|MSG\.ONESHOT_PLAN|MSG\.ONESHOT_EXECUTE|MSG\.CHAT_HANDOFF/);
 
   const build = functionSlice('buildEcommQuoteFromIntake', '// Post-plan');
   assert.match(build, /runQuote\(skuText, personIdRef\.current\)/);

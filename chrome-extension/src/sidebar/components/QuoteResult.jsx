@@ -67,6 +67,7 @@ export default function QuoteResult({
   resultRevision = 0,
   onDraftRowsChange,
   onUpdateQuote,
+  quoteUpdateLabel = 'Update quote',
   onProductSearch,
   draftTier = '',
   onDraftTierChange,
@@ -193,7 +194,7 @@ export default function QuoteResult({
           dirty={draftDirty || suggestions.length > 0}
           disabled={busy}
           title="Quote items (edit before using links)"
-          updateLabel={suggestions.length > 0 ? 'Apply correction and update quote' : 'Update quote'}
+          updateLabel={suggestions.length > 0 ? 'Apply correction and update quote' : quoteUpdateLabel}
           status={draftStatus}
           tier={draftTier}
           onTierChange={onDraftTierChange}

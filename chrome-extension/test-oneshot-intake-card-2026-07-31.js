@@ -21,17 +21,20 @@ function segment(startMarker, endMarker) {
   return SRC.slice(s, e);
 }
 
-check('Create Quote uses dedicated Gmail eCommerce intake, never generic chat', () => {
-  assert.ok(/label: 'Create Quote', action: 'email-ecomm-quote'/.test(SRC));
-  assert.ok(/action\.action === 'email-ecomm-quote'[\s\S]*startEmailEcommQuote\(\)/.test(SRC));
+check('Create Quote opens a blank manual editor; Gmail population remains separate from chat', () => {
+  assert.ok(/label: 'Create Quote', action: 'manual-ecomm-quote'/.test(SRC));
+  assert.ok(/action\.action === 'manual-ecomm-quote'[\s\S]*startManualEcommQuote\(\)/.test(SRC));
   assert.ok(!/label: 'Create Quote', text:/.test(SRC));
-  const intake = segment('async function startEmailEcommQuote', 'function resolveIntakeLine');
+  const manual = segment('function startManualEcommQuote', 'async function populateManualQuoteFromGmail');
+  assert.ok(/blankQuoteEditorRows\(\)/.test(manual));
+  assert.ok(!/sendToBackground|runQuote|MSG\.CHAT_HANDOFF|MSG\.ONESHOT_PLAN|MSG\.ONESHOT_EXECUTE/.test(manual));
+  const intake = segment('async function populateManualQuoteFromGmail', 'function resolveIntakeLine');
   assert.ok(/sendToBackground\(MSG\.ONESHOT_INTAKE/.test(intake));
   assert.ok(!/MSG\.CHAT_HANDOFF|MSG\.ONESHOT_PLAN|MSG\.ONESHOT_EXECUTE/.test(intake));
 });
 
-check('intake reads the locked subject/thread once and carries no CRM consent', () => {
-  const intake = segment('async function startEmailEcommQuote', 'function resolveIntakeLine');
+check('optional Gmail population reads verified context once and carries no CRM consent', () => {
+  const intake = segment('async function populateManualQuoteFromGmail', 'function resolveIntakeLine');
   assert.ok(/MSG\.GET_FULL_EMAIL_CONTEXT/.test(intake));
   assert.ok(/validateGmailQuoteContext\(fresh/.test(intake));
   assert.ok(/subject: quoteContext\.subject/.test(intake));
@@ -39,6 +42,7 @@ check('intake reads the locked subject/thread once and carries no CRM consent', 
   assert.ok(!/quoteContext\.fullThreadBody \|\| quoteContext\.body/.test(intake));
   assert.ok(/source: 'ext-email-ecomm-intake'/.test(intake));
   assert.ok(!/consentSource|idempotencyKey|reviewToken/.test(intake));
+  assert.ok(!/runQuote|buildEcommQuoteFromIntake/.test(intake));
 });
 
 check('intake card exposes normalized SKU quantity resolution and eCommerce build', () => {
@@ -79,9 +83,9 @@ check('only the separate finished-card button starts Zoho deterministic review',
 });
 
 check('Execute remains the sole CRM write boundary', () => {
-  const execute = segment('async function executeOneshotCard', '\n  // ── Gmail thread');
+  const execute = segment('async function executeOneshotCard', '\n  // ── Manual-first eCommerce quote builder');
   const outsideExecute = SRC.slice(0, SRC.indexOf('async function executeOneshotCard'))
-    + SRC.slice(SRC.indexOf('\n  // ── Gmail thread', SRC.indexOf('async function executeOneshotCard')));
+    + SRC.slice(SRC.indexOf('\n  // ── Manual-first eCommerce quote builder', SRC.indexOf('async function executeOneshotCard')));
   assert.ok(/sendToBackground\(MSG\.ONESHOT_EXECUTE/.test(execute));
   assert.ok(!/sendToBackground\(MSG\.ONESHOT_EXECUTE/.test(outsideExecute));
   assert.ok(/This older one-shot draft is inactive/.test(SRC));

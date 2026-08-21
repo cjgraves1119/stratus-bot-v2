@@ -1,5 +1,6 @@
 import {
   normalizeEditableQuoteLines,
+  normalizeQuoteIntakeLines,
 } from '../../lib/email-quote-flow.mjs';
 
 const SAFE_SKU = /^[A-Z0-9][A-Z0-9._/-]{1,79}$/;
@@ -70,6 +71,43 @@ export function editableRowsFromResult(result) {
     rows.push({ sku, qty: Number(suggestion?.qty) || 1, unresolved: true });
   }
   return rows.slice(0, MAX_ROWS);
+}
+
+/** The manual-first Create Quote card always starts with one usable blank row. */
+export function blankQuoteEditorRows() {
+  return [{ sku: '', qty: 1, unresolved: false }];
+}
+
+/** True only after the rep has entered at least one SKU. Quantities alone do not count. */
+export function quoteEditorHasSkuInput(rows) {
+  return (Array.isArray(rows) ? rows : []).some((row) => String(row?.sku || '').trim() !== '');
+}
+
+/**
+ * Convert the existing fail-closed Gmail intake result into the SAME controlled
+ * rows used by manual entry. This is deliberately a presentation adapter: the
+ * Gmail parser remains the authority for SKU/tier/quantity, while the user must
+ * still press Generate quote before any links are built.
+ */
+export function quoteEditorRowsFromIntake(lines, intent = {}) {
+  const normalized = normalizeQuoteIntakeLines(lines);
+  if (!normalized.length) return [];
+  const source = (Array.isArray(lines) ? lines : []).filter((line) => line?.status === 'resolved');
+  const parsed = normalized.map((line) => {
+    const matchingSource = source.filter((candidate) => (
+      String(candidate?.sku || '').trim().toUpperCase() === line.sku
+      && (!line.tier || String(candidate?.tier || '').trim().toUpperCase() === line.tier)
+    ));
+    return {
+      baseSku: line.sku,
+      qty: line.qty,
+      ...(line.tier ? { tier: line.tier } : {}),
+      ...((intent?.hardware_only === true || matchingSource.some((candidate) => candidate?.hardwareOnly === true))
+        ? { hardwareOnly: true }
+        : {}),
+    };
+  });
+  return editableRowsFromResult({ parsed });
 }
 
 /** Adapt the canonical strict line validator to the editor's `{ rows }` shape. */

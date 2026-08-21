@@ -62,10 +62,10 @@ check('explicit plan creation is single-flight and disables duplicate clicks', (
   assert.ok(/disabled=\{busy\}/.test(QUOTE), 'explicit Zoho handoff button must disable while planning');
 });
 
-check('Create Quote quick action is a read-only eCommerce intake and cannot enter one-shot directly', () => {
-  assert.ok(/\{ label: 'Create Quote', action: 'email-ecomm-quote' \}/.test(SRC));
+check('Create Quote quick action opens the manual editor and cannot enter one-shot directly', () => {
+  assert.ok(/\{ label: 'Create Quote', action: 'manual-ecomm-quote' \}/.test(SRC));
   const quick = SRC.slice(SRC.indexOf('{QUICK_ACTIONS.map'), SRC.indexOf('</button>', SRC.indexOf('{QUICK_ACTIONS.map')));
-  assert.ok(/action\.action === 'email-ecomm-quote'[\s\S]*startEmailEcommQuote\(\)/.test(quick));
+  assert.ok(/action\.action === 'manual-ecomm-quote'[\s\S]*startManualEcommQuote\(\)/.test(quick));
   assert.ok(!/handleSend\('Help me create a quote in Zoho CRM'\)|ONESHOT_PLAN|ONESHOT_EXECUTE/.test(quick));
 });
 

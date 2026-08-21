@@ -29,7 +29,10 @@ import { rebaseQuoteOptionIndexes } from '../components/quote-option-selection.m
 import { CrmDeleteControl } from '../components/CrmDeleteControl.jsx';
 import {
   applySkuSuggestion,
+  blankQuoteEditorRows,
   editableRowsFromResult,
+  quoteEditorHasSkuInput,
+  quoteEditorRowsFromIntake,
   quoteTextFromEditorRows,
   sameDeviceIdentity,
   splitRowsForTierRequote,
@@ -530,10 +533,10 @@ function messageHistoryText(m) {
 const QUICK_ACTIONS = [
   { label: 'Recent Quotes', text: 'Show my most recent quotes in Zoho' },
   { label: 'Open Deals', text: 'Show my open deals in Zoho CRM' },
-  // This action is intentionally not a chat prompt. It parses the locked Gmail
-  // thread into a read-only eCommerce quote; CRM planning remains a separate,
-  // explicit button on the finished quote card.
-  { label: 'Create Quote', action: 'email-ecomm-quote' },
+  // This action is intentionally not a chat prompt. It opens the read-only
+  // manual eCommerce builder; Gmail parsing is a separate explicit action on
+  // that card, and CRM planning remains a separate action after verification.
+  { label: 'Create Quote', action: 'manual-ecomm-quote' },
   { label: 'Look Up Account', text: 'Look up the account for this email in Zoho CRM' },
   { label: 'Find License Key', text: 'Find the license key for this deal' },
 ];
@@ -3538,22 +3541,48 @@ export default function ChatPanel({
     }
   }
 
-  // ── Gmail thread → read-only eCommerce quote ──
-  // Parse the locked email ONCE server-side (literal SKUs deterministically,
-  // otherwise one constrained fact extraction). This stage deliberately calls
-  // no generic chat, CRM plan, product-ID lookup, or execute route. The user
-  // sees normalized SKU quantities and eCommerce term options first; only the
-  // quote card's separate purple button may enter deterministic Zoho review.
-  async function startEmailEcommQuote() {
-    if (loading || emailQuoteStartRef.current) return;
-    if (contextLock && contextLock.kind !== 'gmail') {
-      appendMessage(infoMsg('⚠️ Create Quote is blocked because this chat is locked to non-Gmail context. Unlock or replace it from the intended Gmail conversation.'));
+  // ── Manual-first eCommerce quote builder ──
+  // Create Quote itself does no parsing or network work. It gives the rep an
+  // empty controlled editor backed by read-only Zoho product search. Generating
+  // links remains an explicit second step; CRM review remains a third step.
+  function startManualEcommQuote() {
+    if (loading) return;
+    appendMessage({
+      id: nextId(),
+      role: 'assistant',
+      kind: 'quote',
+      manualQuoteBuilder: true,
+      result: { urls: [], parsed: [], eolWarnings: [], suggestions: null, source: 'manual-quote-builder' },
+      draftRows: blankQuoteEditorRows(),
+      draftDirty: true,
+      draftStatus: 'Enter an exact SKU, select an active Zoho product, or populate from the current Gmail context.',
+      note: 'Manual quote builder — review the SKU rows, then generate read-only eCommerce options.',
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // Populate an EXISTING manual card from Gmail. This reuses the strict intake
+  // boundary but deliberately does not auto-run the quote: the parsed rows land
+  // in the editor for review and the rep must still press Generate quote.
+  async function populateManualQuoteFromGmail(msg) {
+    if (loading || emailQuoteStartRef.current || !msg?.manualQuoteBuilder) return;
+    if (quoteEditorHasSkuInput(quoteDraftRows(msg))) {
+      updateMessage(msg.id, {
+        draftStatus: 'Clear the current manual SKU rows before populating from Gmail; existing work was not replaced.',
+      });
       return;
     }
+    if (contextLock && contextLock.kind !== 'gmail') {
+      updateMessage(msg.id, {
+        draftStatus: 'Gmail population is unavailable because this chat is locked to non-Gmail context. Manual entry remains available.',
+      });
+      return;
+    }
+
     emailQuoteStartRef.current = true;
     setLoading(true);
+    updateMessage(msg.id, { busy: true, draftStatus: 'Reading the current Gmail conversation… Nothing is being written to Zoho.' });
     try {
-      let quoteContext = null;
       let validation = null;
       if (contextLock?.kind === 'gmail') {
         validation = validateGmailQuoteContext(contextLock.snapshot, { requireFresh: false });
@@ -3567,12 +3596,19 @@ export default function ChatPanel({
         });
       }
       if (!validation?.ok) {
-        appendMessage(infoMsg(`⚠️ Create Quote stopped: ${validation?.error || 'the Gmail conversation could not be verified.'}`));
+        updateMessage(msg.id, {
+          busy: false,
+          draftStatus: `Gmail population stopped: ${validation?.error || 'the Gmail conversation could not be verified.'} Manual entry remains available.`,
+        });
         return;
       }
-      quoteContext = validation.context;
-      const orderUrls = validation.orderUrls;
-      const participants = (quoteContext.threadContacts || []).map((c) => ({ email: c.email, name: c.name || '', role: c.role || '' }));
+
+      const quoteContext = validation.context;
+      const participants = (quoteContext.threadContacts || []).map((contact) => ({
+        email: contact.email,
+        name: contact.name || '',
+        role: contact.role || '',
+      }));
       const res = await sendToBackground(MSG.ONESHOT_INTAKE, {
         subject: quoteContext.subject,
         body_text: quoteContext.fullThreadBody.slice(0, 20000),
@@ -3585,21 +3621,47 @@ export default function ChatPanel({
           })),
         participants,
         sender: { email: quoteContext.senderEmail || '', name: quoteContext.senderName || '' },
-        order_urls: orderUrls,
+        order_urls: validation.orderUrls,
         source: 'ext-email-ecomm-intake',
-      }).catch((e) => ({ success: false, error: e.message }));
+      }).catch((error) => ({ success: false, error: error.message }));
       if (!res || res.success !== true) {
         const why = res?.error === 'intake_disabled'
           ? 'Email intake is not enabled on this worker (CHAT_ONESHOT_ROUTE_ENABLED).'
           : (res?.detail || res?.error || 'unknown');
-        appendMessage(infoMsg(`⚠️ Email intake failed: ${why}`));
+        updateMessage(msg.id, {
+          busy: false,
+          draftStatus: `Gmail population failed: ${why}. Manual entry remains available.`,
+        });
         return;
       }
-      const cardMsg = {
-        id: nextId(), role: 'assistant', kind: 'email-quote-intake', timestamp: new Date().toISOString(),
+
+      const rows = quoteEditorRowsFromIntake(res.lines || [], res.intent || {});
+      const unresolvedCount = (Array.isArray(res.lines) ? res.lines : [])
+        .filter((line) => line?.status !== 'resolved').length;
+      if (!rows.length) {
+        updateMessage(msg.id, {
+          busy: false,
+          draftStatus: 'Gmail did not contain any safely resolved SKU rows. Enter or select the products manually.',
+          intake: {
+            lines: res.lines || [], facts: res.facts || null, intent: res.intent || null,
+            selected_message_index: res.selected_message_index ?? null,
+            selected_message_from: res.selected_message_from || null,
+            extract_error: res.extract_error || null,
+          },
+        });
+        return;
+      }
+
+      invalidateQuoteUpdate(msg.id);
+      updateMessage(msg.id, (current) => ({
+        result: { urls: [], parsed: [], eolWarnings: [], suggestions: null, source: 'manual-quote-builder-gmail' },
+        draftRows: rows,
+        draftDirty: true,
+        draftStatus: unresolvedCount === 0
+          ? `Populated ${rows.length} SKU line${rows.length === 1 ? '' : 's'} from Gmail. Review them, then generate the quote.`
+          : `Populated ${rows.length} safely resolved Gmail SKU line${rows.length === 1 ? '' : 's'}; ${unresolvedCount} unresolved line${unresolvedCount === 1 ? '' : 's'} still need manual review.`,
         intake: {
-          lines: res.lines || [], facts: res.facts || null,
-          intent: res.intent || null,
+          lines: res.lines || [], facts: res.facts || null, intent: res.intent || null,
           selected_message_index: res.selected_message_index ?? null,
           selected_message_from: res.selected_message_from || null,
           extract_error: res.extract_error || null,
@@ -3609,15 +3671,11 @@ export default function ChatPanel({
           isrPrefill: res.isr_prefill || null,
           intent: res.intent || null,
         },
-      };
-      appendMessage(cardMsg);
-      // Literal emails can build the read-only eCommerce card immediately. There
-      // is still no CRM plan or write; unresolved families stay on the intake
-      // card until the user explicitly resolves them.
-      const lines = res.lines || [];
-      if (lines.length > 0 && lines.every((l) => l.status === 'resolved')) {
-        await buildEcommQuoteFromIntake(cardMsg, lines, true);
-      }
+        skuText: quoteSkuTextFromLines(res.lines || []),
+        gmailPopulated: true,
+        resultRevision: (current.resultRevision || 0) + 1,
+        busy: false,
+      }));
     } finally {
       setLoading(false);
       emailQuoteStartRef.current = false;
@@ -3927,8 +3985,8 @@ export default function ChatPanel({
             </p>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center' }}>
               {QUICK_ACTIONS.map((action, i) => (
-                <button key={i} onClick={() => action.action === 'email-ecomm-quote'
-                  ? startEmailEcommQuote()
+                <button key={i} onClick={() => action.action === 'manual-ecomm-quote'
+                  ? startManualEcommQuote()
                   : handleSend(action.text)}
                   style={{
                     padding: '6px 12px', background: COLORS.STRATUS_LIGHT,
@@ -3987,6 +4045,30 @@ export default function ChatPanel({
                 {msg.note && (
                   <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 8 }}>{msg.note}</div>
                 )}
+                {msg.manualQuoteBuilder === true && (!Array.isArray(msg.result?.urls) || msg.result.urls.length === 0) && (
+                  <div style={{ marginBottom: 8, padding: 8, border: `1px solid ${COLORS.BORDER}`, borderRadius: 8, background: COLORS.BG_PRIMARY }}>
+                    <button
+                      type="button"
+                      disabled={msg.busy || loading || quoteEditorHasSkuInput(draftRows)}
+                      onClick={() => populateManualQuoteFromGmail(msg)}
+                      title={quoteEditorHasSkuInput(draftRows)
+                        ? 'Clear the current SKU rows before replacing them with Gmail context'
+                        : 'Read the current Gmail conversation and populate reviewable SKU rows'}
+                      style={{
+                        width: '100%', padding: '7px 10px', borderRadius: 6,
+                        border: `1px solid ${COLORS.STRATUS_BLUE}`, background: 'transparent',
+                        color: COLORS.STRATUS_BLUE, fontSize: 11, fontWeight: 700,
+                        cursor: msg.busy || loading || quoteEditorHasSkuInput(draftRows) ? 'default' : 'pointer',
+                        opacity: msg.busy || loading || quoteEditorHasSkuInput(draftRows) ? 0.55 : 1,
+                      }}
+                    >
+                      {msg.gmailPopulated ? 'Gmail context populated' : 'Populate from Gmail context'}
+                    </button>
+                    <div style={{ marginTop: 5, color: COLORS.TEXT_SECONDARY, fontSize: 10 }}>
+                      Optional and read-only. Existing manual SKU rows are never overwritten.
+                    </div>
+                  </div>
+                )}
                 {msg.eolMapping && msg.eolMapping.length > 0 && (
                   <div style={{
                     marginBottom: 8, padding: 8, background: '#fef7e0',
@@ -4011,6 +4093,9 @@ export default function ChatPanel({
                   draftTier={msg.draftTier || ''}
                   onDraftTierChange={msg.restored ? undefined : (tier) => handleQuoteDraftTierChange(msg, tier)}
                   onUpdateQuote={msg.restored ? undefined : (rows) => rebuildQuoteMessage(msg, rows)}
+                  quoteUpdateLabel={msg.manualQuoteBuilder === true && (!Array.isArray(msg.result?.urls) || msg.result.urls.length === 0)
+                    ? 'Generate quote'
+                    : 'Update quote'}
                   onProductSearch={msg.restored ? undefined : searchQuoteProducts}
                   allowHaLicenseRatio={explicitQuoteHaRequested(msg)}
                   onApplySuggestion={msg.restored ? undefined : (s) => handleQuoteSuggestion(msg, s, 'apply', draftRows)}
