@@ -2271,7 +2271,14 @@ export default function ChatPanel({
 
   // "Quote these SKUs with Stratus" from the right-click selection menu.
   useEffect(() => {
-    if (navData?.quoteSkuText) runAndPushQuote(navData.quoteSkuText);
+    // A right-clicked URL/SKU selection is already an explicit quote gesture.
+    // Keep the returned links, but render the same editable rows as the manual
+    // quote builder so the rep can adjust the parsed cart before either using
+    // a link or beginning the separately-confirmed Zoho review.
+    if (navData?.quoteSkuText) runAndPushQuote(navData.quoteSkuText, {
+      editable: true,
+      source: 'context-menu',
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navData?.quoteActionId || navData?.quoteSkuText]);
 
@@ -2746,7 +2753,12 @@ export default function ChatPanel({
   const infoMsg = (text) => ({ id: nextId(), role: 'assistant', content: text, timestamp: new Date().toISOString() });
 
   // Run the deterministic engine for free-text SKUs and push a quote card.
-  async function runAndPushQuote(skuText, { pushUser = true, priorQuoteText = null } = {}) {
+  async function runAndPushQuote(skuText, {
+    pushUser = true,
+    priorQuoteText = null,
+    editable = false,
+    source = '',
+  } = {}) {
     const text = (skuText || '').trim();
     if (!text || loading) return;
     lastSendRef.current = Date.now();
@@ -2802,9 +2814,20 @@ export default function ChatPanel({
       }
       candidate = { ...candidate, urls: verified.urls };
     }
+    const draftRows = editable ? editableRowsFromResult(candidate) : undefined;
     appendMessage({
       id: nextId(), role: 'assistant', kind: 'quote', result: candidate,
-      skuText: text, quoteHaRequested, quoteLicenseTier, quoteHardwareOnly, timestamp: new Date().toISOString(),
+      skuText: text,
+      quoteHaRequested,
+      quoteLicenseTier,
+      quoteHardwareOnly,
+      ...(draftRows?.length ? {
+        draftRows,
+        draftDirty: false,
+        draftStatus: 'Parsed from the selected text. Edit or add SKU rows, then update the quote before using links or starting Zoho review.',
+        quoteSource: source || 'editable-quote',
+      } : {}),
+      timestamp: new Date().toISOString(),
     });
   }
 
