@@ -69,7 +69,7 @@ check('eCommerce build calls quote only and retains SKU output on pricing failur
 });
 
 check('only the separate finished-card button starts Zoho deterministic review', () => {
-  assert.ok(/Create Zoho CRM quote from this/.test(QUOTE));
+  assert.ok(/Create Zoho CRM quote from selected/.test(QUOTE));
   assert.ok(/Begin a separate deterministic Zoho review; nothing is written until Execute/.test(QUOTE));
   const plan = segment('async function startOneshotFromUrl', 'async function replanOneshot');
   assert.ok(/sendToBackground\(MSG\.ONESHOT_PLAN/.test(plan));
@@ -78,7 +78,14 @@ check('only the separate finished-card button starts Zoho deterministic review',
 });
 
 check('Execute remains the sole CRM write boundary', () => {
-  assert.strictEqual((SRC.match(/sendToBackground\(MSG\.ONESHOT_EXECUTE/g) || []).length, 1);
+  const start = SRC.indexOf('async function executeOneshotCard');
+  const end = SRC.indexOf('// ── Gmail thread', start);
+  const execute = SRC.slice(start, end);
+  const outside = SRC.slice(0, start) + SRC.slice(end);
+  assert.strictEqual((execute.match(/sendToBackground\(MSG\.ONESHOT_EXECUTE/g) || []).length, 2);
+  assert.ok(!/sendToBackground\(MSG\.ONESHOT_EXECUTE/.test(outside));
+  assert.ok(/review_token: planRes\.review_token/.test(execute));
+  assert.ok(/existing_deal_id: dealId/.test(execute));
   assert.ok(/This older one-shot draft is inactive/.test(SRC));
   assert.ok(/msg\.consentSource !== 'quote-card-button'/.test(SRC));
 });

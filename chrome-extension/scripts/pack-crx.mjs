@@ -3,15 +3,24 @@
  * pack-crx.mjs — Build a signed CRX3 + Chrome update manifest for self-hosted
  * auto-updates published to GitHub Pages.
  *
- * Reads:
- *   - chrome-extension/dist/            (the webpack build output; must exist)
- *   - $EXT_SIGNING_KEY_PEM_PATH         (path to an RSA private key in PEM format)
+ * Phases and trust boundary:
+ *   - prepare: verifies the reviewed checkout/tag, installs pinned dependencies,
+ *     rebuilds production source, and writes a sanitized unsigned ZIP + receipt
+ *     to chrome-extension/release/.prepared-prod without reading a signing key.
+ *   - verify-prepared: validates that transferred ZIP/receipt pair using only
+ *     audited Node built-ins and the canonical manifest/package metadata.
+ *   - sign-prepared: repeats that validation, then reads
+ *     $EXT_SIGNING_KEY_PEM_PATH and signs the hash-bound prepared ZIP. It never
+ *     invokes webpack, package-manager code, or build dependencies.
  *
  * Writes:
  *   - chrome-extension/release/stratus-ai-<version>.crx   (CRX3, signed)
  *   - chrome-extension/release/update-manifest.xml        (gupdate protocol 2.0)
+ *   - chrome-extension/release/*.provenance.json           (commit/build evidence)
+ *   - chrome-extension/release/SHA256SUMS                  (published hashes)
  *
- * The version is read from dist/manifest.json. The extension ID is derived from
+ * The version is bound across the canonical source manifest, package.json,
+ * release tag, prepared receipt, and ZIP-embedded manifest. The extension ID is derived from
  * the public key (first 16 bytes of SHA-256 of the SubjectPublicKeyInfo DER,
  * with each hex nibble 0-f mapped to a-p — Chrome's "mpdecimal" encoding).
  *
@@ -26,23 +35,52 @@
  *   "CRX3 SignedData\x00" + uint32LE(len(signedHeaderData)) + signedHeaderData + zipBytes
  * where signedHeaderData is a SignedData protobuf carrying the 16-byte crx_id.
  *
- * This is implemented directly with node:crypto + a tiny protobuf encoder
- * (no third-party CRX library) so it has no Node-version engine constraints and
- * produces exactly the bytes Chrome's CRX3 verifier expects.
+ * CRX framing is implemented directly with node:crypto + a tiny protobuf
+ * encoder. Build and package execution is nevertheless pinned to the exact
+ * Node/pnpm versions recorded in package.json.
  */
 
-import { createHash, createSign, createPublicKey, createPrivateKey } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import targetModule from '../release-targets.cjs';
+import {
+  signCrx3,
+  validatePreparedPayloadBinding,
+} from './crx3-core.mjs';
+import {
+  createSanitizedStage,
+  installFrozenReleaseDependencies,
+  sha256File,
+  validatePackageManifestVersion,
+  validateSourceIdentity,
+  writeDeterministicZip,
+  writeSha256Sums,
+} from './release-artifact.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EXT_DIR = resolve(__dirname, '..');
 const DIST_DIR = join(EXT_DIR, 'dist');
 const RELEASE_DIR = join(EXT_DIR, 'release');
+const REPOSITORY_DIR = resolve(EXT_DIR, '..');
+const LOCKFILE_PATH = join(EXT_DIR, 'pnpm-lock.yaml');
+const PACKAGE_JSON_PATH = join(EXT_DIR, 'package.json');
+const PREPARED_DIR = join(RELEASE_DIR, '.prepared-prod');
+const PREPARED_ZIP_PATH = join(PREPARED_DIR, 'unsigned-payload.zip');
+const PREPARED_RECEIPT_PATH = join(PREPARED_DIR, 'receipt.json');
 
-const EXPECTED_ID = 'haangicfjfkenoilhdadbnljcacighih'; // fresh key generated 2026-06-04 (original idkfe… key was unrecoverable)
+const { resolveBuildTarget } = targetModule;
+const EXPECTED_ID = 'haangicfjfkenoilhdadbnljcacighih';
 const PAGES_BASE = 'https://cjgraves1119.github.io/stratus-bot-v2';
 // Minimum Chrome version that supports CRX3 (Chromium switched in late 2017).
 const PRODVERSION_MIN = '64.0.3242';
@@ -52,173 +90,204 @@ function die(msg) {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Minimal protobuf (proto2) wire-format encoder.
-// We only need field type 2 (length-delimited / bytes) and the ability to nest
-// messages, which is all CrxFileHeader / AsymmetricKeyProof / SignedData use.
-// ---------------------------------------------------------------------------
+function git(...args) {
+  return execFileSync('git', args, {
+    cwd: REPOSITORY_DIR,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
 
-/** Encode an unsigned integer as a protobuf base-128 varint. */
-function varint(value) {
-  const bytes = [];
-  let v = value;
-  while (v > 0x7f) {
-    bytes.push((v & 0x7f) | 0x80);
-    v >>>= 7;
+function verifyReviewedCheckout(commit, tag) {
+  if (git('rev-parse', 'HEAD') !== commit) {
+    die('the checked-out source does not match STRATUS_RELEASE_COMMIT');
   }
-  bytes.push(v & 0x7f);
-  return Buffer.from(bytes);
-}
-
-/** Encode one length-delimited (wire type 2) field: tag, length, payload. */
-function bytesField(fieldNumber, payload) {
-  const tag = varint((fieldNumber << 3) | 2); // wire type 2 = length-delimited
-  const len = varint(payload.length);
-  return Buffer.concat([tag, len, payload]);
-}
-
-/**
- * SignedData { optional bytes crx_id = 1; }
- * Returns the serialized SignedData message bytes.
- */
-function encodeSignedData(crxId) {
-  return bytesField(1, crxId);
-}
-
-/**
- * AsymmetricKeyProof { optional bytes public_key = 1; optional bytes signature = 2; }
- */
-function encodeAsymmetricKeyProof(publicKeyDer, signature) {
-  return Buffer.concat([bytesField(1, publicKeyDer), bytesField(2, signature)]);
-}
-
-/**
- * CrxFileHeader {
- *   repeated AsymmetricKeyProof sha256_with_rsa = 2;
- *   optional bytes signed_header_data = 10000;
- * }
- */
-function encodeCrxFileHeader(proofMsg, signedHeaderData) {
-  return Buffer.concat([
-    bytesField(2, proofMsg), // sha256_with_rsa (single proof)
-    bytesField(10000, signedHeaderData), // signed_header_data
-  ]);
-}
-
-// ---------------------------------------------------------------------------
-// Extension ID derivation: SHA-256 of SPKI DER, first 16 bytes, hex nibble
-// 0-f -> a-p. Equivalent to Chrome's (nibble + 0x0a).toString(26).
-// ---------------------------------------------------------------------------
-function deriveExtensionId(publicKeyDer) {
-  const fullHash = createHash('sha256').update(publicKeyDer).digest();
-  const idHash = fullHash.subarray(0, 16);
-  let id = '';
-  for (const byte of idHash) {
-    const hi = byte >> 4;
-    const lo = byte & 0x0f;
-    id += String.fromCharCode(97 + hi); // 'a' + hi nibble
-    id += String.fromCharCode(97 + lo); // 'a' + lo nibble
+  if (git('status', '--porcelain', '--untracked-files=all')) {
+    die('the checkout has tracked or untracked source changes; release only an exact reviewed commit');
   }
-  return id;
+  if (!git('tag', '--points-at', commit).split('\n').filter(Boolean).includes(tag)) {
+    die(`tag ${tag} does not point at STRATUS_RELEASE_COMMIT`);
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Build the ZIP of the dist/ directory. We shell out to the `zip` CLI (present
-// on macOS and ubuntu-latest runners). Files are stored relative to dist/ so
-// the archive has manifest.json at its root (required by Chrome). Source maps
-// are excluded to keep the package lean.
-// ---------------------------------------------------------------------------
-function zipDist(outZipPath) {
-  if (existsSync(outZipPath)) rmSync(outZipPath);
-  // -r recurse, -q quiet, -9 max compression, -X strip extra file attrs,
-  // -x exclude source maps. Run with cwd=dist so paths are root-relative.
-  execFileSync('zip', ['-r', '-q', '-9', '-X', outZipPath, '.', '-x', '*.map'], {
-    cwd: DIST_DIR,
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
-  return readFileSync(outZipPath);
+function verifyToolchain() {
+  const pnpmVersion = execFileSync('pnpm', ['--version'], { encoding: 'utf8' }).trim();
+  if (process.version !== 'v24.19.0' || pnpmVersion !== '11.19.0') {
+    die(`expected Node 24.19.0 and pnpm 11.19.0, received ${process.version.slice(1)} and ${pnpmVersion}`);
+  }
+  return pnpmVersion;
+}
+
+function verifyNodeVersion() {
+  if (process.version !== 'v24.19.0') {
+    die(`expected Node 24.19.0, received ${process.version.slice(1)}`);
+  }
+}
+
+function releaseInputs() {
+  if (process.env.STRATUS_RELEASE_TARGET !== 'prod') {
+    die('STRATUS_RELEASE_TARGET must be prod; DEV artifacts are never self-updating CRX releases.');
+  }
+  return {
+    profile: resolveBuildTarget('prod'),
+    sourceCommit: process.env.STRATUS_RELEASE_COMMIT || '',
+    sourceTag: process.env.STRATUS_RELEASE_TAG || '',
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-function main() {
-  // 1. Validate inputs.
+function prepareUnsignedPayload() {
+  if (process.env.EXT_SIGNING_KEY || process.env.EXT_SIGNING_KEY_PEM_PATH) {
+    die('prepare must run before any production signing secret or key path is exposed');
+  }
+
+  const pnpmVersion = verifyToolchain();
+  const { profile, sourceCommit, sourceTag } = releaseInputs();
+  verifyReviewedCheckout(sourceCommit, sourceTag);
+
+  // Recreate ignored dependencies from the exact committed lock without
+  // network access, build, then prove the build did not mutate reviewed source.
+  installFrozenReleaseDependencies(EXT_DIR);
+  execFileSync('pnpm', ['run', 'build:prod'], {
+    cwd: EXT_DIR,
+    env: process.env,
+    stdio: 'inherit',
+  });
   if (!existsSync(DIST_DIR) || !existsSync(join(DIST_DIR, 'manifest.json'))) {
-    die(`built extension not found at ${DIST_DIR}. Run "npm run build" first.`);
+    die(`production build did not create ${DIST_DIR}/manifest.json`);
   }
+  verifyReviewedCheckout(sourceCommit, sourceTag);
 
-  const keyPath = process.env.EXT_SIGNING_KEY_PEM_PATH;
-  if (!keyPath) {
-    die('EXT_SIGNING_KEY_PEM_PATH is not set (path to the RSA private key PEM).');
-  }
-  if (!existsSync(keyPath)) {
-    die(`signing key not found at EXT_SIGNING_KEY_PEM_PATH="${keyPath}".`);
-  }
-
-  const manifest = JSON.parse(readFileSync(join(DIST_DIR, 'manifest.json'), 'utf8'));
-  const version = manifest.version;
-  if (!version) die('dist/manifest.json has no "version" field.');
-
-  // 2. Load the private key and derive the public key (SPKI DER).
-  let privateKey;
+  // Release output is ignored, derived state. Recreate this narrow directory so
+  // no prior CRX, manifest, or receipt can survive into the reviewed payload.
+  rmSync(RELEASE_DIR, { recursive: true, force: true });
+  mkdirSync(PREPARED_DIR, { recursive: true, mode: 0o755 });
+  const tempRoot = mkdtempSync(join(tmpdir(), 'stratus-crx-prepare-'));
   try {
-    privateKey = createPrivateKey(readFileSync(keyPath));
-  } catch (err) {
-    die(`could not parse private key as PEM: ${err.message}`);
+    const staged = createSanitizedStage({
+      distDirectory: DIST_DIR,
+      stageDirectory: join(tempRoot, 'stage'),
+      profile,
+      sourceCommit,
+      sourceTag,
+      lockfilePath: LOCKFILE_PATH,
+      packageJsonPath: PACKAGE_JSON_PATH,
+      nodeVersion: process.version.slice(1),
+      pnpmVersion,
+    });
+    const zipBytes = writeDeterministicZip({
+      stageDirectory: staged.stageDirectory,
+      files: staged.files,
+      outputPath: PREPARED_ZIP_PATH,
+    });
+    const receipt = {
+      schemaVersion: 1,
+      target: 'prod',
+      version: staged.manifest.version,
+      sourceCommit,
+      sourceTag,
+      unsignedPayload: 'unsigned-payload.zip',
+      unsignedPayloadBytes: zipBytes.length,
+      unsignedPayloadSha256: sha256File(PREPARED_ZIP_PATH),
+      provenance: staged.provenance,
+    };
+    writeFileSync(PREPARED_RECEIPT_PATH, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o644 });
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
   }
-  if (privateKey.asymmetricKeyType !== 'rsa') {
-    die(`signing key must be RSA, got "${privateKey.asymmetricKeyType}". CRX3 sha256_with_rsa requires an RSA key.`);
+
+  verifyReviewedCheckout(sourceCommit, sourceTag);
+  console.log('✓ unsigned CRX payload prepared before signing-key exposure');
+  console.log(`  receipt: ${PREPARED_RECEIPT_PATH}`);
+  console.log(`  payload SHA-256: ${sha256File(PREPARED_ZIP_PATH)}`);
+}
+
+function readAndValidatePreparedPayload({ profile, sourceCommit, sourceTag }) {
+  if (!existsSync(PREPARED_RECEIPT_PATH) || !existsSync(PREPARED_ZIP_PATH)) {
+    die('hash-bound unsigned payload is missing; run pack:crx:prepare before exposing the signing key');
   }
-  const publicKeyDer = createPublicKey(privateKey).export({ type: 'spki', format: 'der' });
+  const releaseEntries = readdirSync(RELEASE_DIR).sort();
+  if (releaseEntries.length !== 1 || releaseEntries[0] !== '.prepared-prod') {
+    die('release directory contains output outside the prepared payload boundary');
+  }
 
-  // 3. Derive the extension ID.
-  const extensionId = deriveExtensionId(publicKeyDer);
+  const receipt = JSON.parse(readFileSync(PREPARED_RECEIPT_PATH, 'utf8'));
+  const sourceManifest = JSON.parse(readFileSync(join(EXT_DIR, 'manifest.json'), 'utf8'));
+  const packageJson = JSON.parse(readFileSync(PACKAGE_JSON_PATH, 'utf8'));
+  validatePackageManifestVersion({
+    packageVersion: packageJson.version,
+    manifestVersion: sourceManifest.version,
+  });
+  validateSourceIdentity({
+    commit: sourceCommit,
+    tag: sourceTag,
+    target: 'prod',
+    version: sourceManifest.version,
+  });
+  const zipBytes = readFileSync(PREPARED_ZIP_PATH);
+  const packageManagerMatch = /^pnpm@(.+)$/.exec(packageJson.packageManager || '');
+  if (!packageManagerMatch) {
+    die('package.json must pin pnpm with an exact packageManager field');
+  }
+  const expectedProvenance = {
+    schemaVersion: 1,
+    product: 'Stratus AI Chrome Extension',
+    target: 'prod',
+    version: sourceManifest.version,
+    sourceCommit,
+    sourceTag,
+    apiOrigin: profile.apiBase,
+    environment: profile.stratusEnv,
+    nodeVersion: process.version.slice(1),
+    pnpmVersion: packageManagerMatch[1],
+    lockfile: 'pnpm-lock.yaml',
+    lockfileSha256: sha256File(LOCKFILE_PATH),
+    packageJson: 'package.json',
+    packageJsonSha256: sha256File(PACKAGE_JSON_PATH),
+  };
+  return validatePreparedPayloadBinding({
+    receipt,
+    zipBytes,
+    sourceCommit,
+    sourceTag,
+    version: sourceManifest.version,
+    target: 'prod',
+    unsignedPayload: 'unsigned-payload.zip',
+    expectedProvenance,
+  });
+}
 
-  mkdirSync(RELEASE_DIR, { recursive: true });
+function signPreparedPayload() {
+  verifyNodeVersion();
+  const { profile, sourceCommit, sourceTag } = releaseInputs();
+  verifyReviewedCheckout(sourceCommit, sourceTag);
+  const { receipt, zipBytes } = readAndValidatePreparedPayload({ profile, sourceCommit, sourceTag });
 
-  // 4. Zip the build.
-  const tmpZipPath = join(RELEASE_DIR, `.stratus-ai-${version}.zip`);
-  const zipBytes = zipDist(tmpZipPath);
+  // No package manager, dependency install, webpack loader, or source build runs
+  // after this point. Only the hash-bound ZIP and Node built-ins see the key.
+  const keyPath = process.env.EXT_SIGNING_KEY_PEM_PATH;
+  if (!keyPath || !existsSync(keyPath)) {
+    die('EXT_SIGNING_KEY_PEM_PATH must name the protected RSA private key PEM');
+  }
+  const privateKeyPem = readFileSync(keyPath);
+  let signedCrx;
+  try {
+    signedCrx = signCrx3({
+      zipBytes,
+      privateKeyPem,
+      expectedExtensionId: EXPECTED_ID,
+    });
+  } finally {
+    privateKeyPem.fill(0);
+  }
+  const { crxBytes: crxBuffer, extensionId } = signedCrx;
 
-  // 5. Build the CRX3 signed-header and signature.
-  //    crx_id = first 16 bytes of the public-key hash (raw, not a-p encoded).
-  const crxId = createHash('sha256').update(publicKeyDer).digest().subarray(0, 16);
-  const signedHeaderData = encodeSignedData(crxId);
-
-  //    Signed payload = magic + uint32LE(len) + signedHeaderData + zip.
-  const sizeOctets = Buffer.alloc(4);
-  sizeOctets.writeUInt32LE(signedHeaderData.length, 0);
-  const signer = createSign('sha256');
-  signer.update(Buffer.from('CRX3 SignedData\x00', 'binary'));
-  signer.update(sizeOctets);
-  signer.update(signedHeaderData);
-  signer.update(zipBytes);
-  // RSASSA-PKCS1-v1_5 over SHA-256 — Node's default RSA signature padding,
-  // which is exactly the "sha256_with_rsa" proof Chrome's CRX3 verifier expects.
-  const signature = signer.sign(privateKey);
-
-  // 6. Assemble the CrxFileHeader protobuf.
-  const proof = encodeAsymmetricKeyProof(publicKeyDer, signature);
-  const header = encodeCrxFileHeader(proof, signedHeaderData);
-
-  // 7. Assemble the final CRX3 file.
-  const magic = Buffer.from('Cr24', 'utf8');
-  const formatVersion = Buffer.alloc(4);
-  formatVersion.writeUInt32LE(3, 0); // CRX3
-  const headerSize = Buffer.alloc(4);
-  headerSize.writeUInt32LE(header.length, 0);
-
-  const crxBuffer = Buffer.concat([magic, formatVersion, headerSize, header, zipBytes]);
-
+  const version = receipt.version;
   const crxName = `stratus-ai-${version}.crx`;
   const crxPath = join(RELEASE_DIR, crxName);
-  writeFileSync(crxPath, crxBuffer);
-
-  // Clean up the intermediate zip — only the .crx + .xml ship to Pages.
-  rmSync(tmpZipPath, { force: true });
-
-  // 8. Generate the update manifest (gupdate protocol 2.0).
+  writeFileSync(crxPath, crxBuffer, { mode: 0o644 });
   const codebase = `${PAGES_BASE}/${crxName}`;
   const xml =
     `<?xml version='1.0' encoding='UTF-8'?>\n` +
@@ -228,27 +297,49 @@ function main() {
     `  </app>\n` +
     `</gupdate>\n`;
   const xmlPath = join(RELEASE_DIR, 'update-manifest.xml');
-  writeFileSync(xmlPath, xml);
+  writeFileSync(xmlPath, xml, { mode: 0o644 });
 
-  // 9. Report.
-  console.log('✓ pack-crx complete');
-  console.log(`  version:       ${version}`);
-  console.log(`  extension ID:  ${extensionId}`);
-  console.log(`  crx:           ${crxPath} (${crxBuffer.length} bytes)`);
-  console.log(`  manifest:      ${xmlPath}`);
-  console.log(`  codebase:      ${codebase}`);
+  const provenanceName = `stratus-ai-${version}.provenance.json`;
+  const provenancePath = join(RELEASE_DIR, provenanceName);
+  const provenance = {
+    ...receipt.provenance,
+    unsignedPayloadSha256: receipt.unsignedPayloadSha256,
+    extensionId,
+    crx: crxName,
+    crxSha256: sha256File(crxPath),
+    updateManifest: 'update-manifest.xml',
+    updateManifestSha256: sha256File(xmlPath),
+  };
+  writeFileSync(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`, { mode: 0o644 });
+  const sumsPath = join(RELEASE_DIR, 'SHA256SUMS');
+  writeSha256Sums({
+    [crxName]: crxPath,
+    [provenanceName]: provenancePath,
+    'update-manifest.xml': xmlPath,
+  }, sumsPath);
+  rmSync(PREPARED_DIR, { recursive: true, force: true });
 
-  if (extensionId !== EXPECTED_ID) {
-    console.warn(
-      `\n⚠ WARNING: derived extension ID (${extensionId}) does NOT match the ` +
-        `expected stable ID (${EXPECTED_ID}).\n` +
-        `  This is normal when signing with a throwaway/test key. In CI the real ` +
-        `EXT_SIGNING_KEY secret must be the key that yields the expected ID, or ` +
-        `installed users will not receive updates.`
-    );
-  } else {
-    console.log(`  ✓ extension ID matches the expected stable ID.`);
-  }
+  console.log('✓ hash-bound CRX payload signed');
+  console.log(`  version: ${version}`);
+  console.log(`  extension ID: ${extensionId}`);
+  console.log(`  CRX SHA-256: ${provenance.crxSha256}`);
 }
 
-main();
+function verifyPreparedPayload() {
+  verifyNodeVersion();
+  const { profile, sourceCommit, sourceTag } = releaseInputs();
+  verifyReviewedCheckout(sourceCommit, sourceTag);
+  const { receipt } = readAndValidatePreparedPayload({ profile, sourceCommit, sourceTag });
+  console.log(`✓ prepared payload verified for ${sourceCommit} (${sourceTag})`);
+  console.log(`  unsigned payload SHA-256: ${receipt.unsignedPayloadSha256}`);
+}
+
+try {
+  const phase = process.argv[2];
+  if (phase === 'prepare') prepareUnsignedPayload();
+  else if (phase === 'verify-prepared') verifyPreparedPayload();
+  else if (phase === 'sign-prepared') signPreparedPayload();
+  else die('expected phase argument: prepare, verify-prepared, or sign-prepared');
+} catch (error) {
+  die(error.message);
+}

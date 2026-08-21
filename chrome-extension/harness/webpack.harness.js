@@ -11,8 +11,16 @@
 const path = require('path');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const webpack = require('webpack');
+const { resolveBuildTarget } = require('../release-targets.cjs');
 
-module.exports = (env, argv) => ({
+module.exports = (env = {}, argv = {}) => {
+  const targetName = env.target;
+  if (!['team-dev', 'snapshot-dev'].includes(targetName)) {
+    throw new Error('QA harness requires --env target=team-dev or the explicit evidence-only snapshot-dev target');
+  }
+  const harnessProfile = resolveBuildTarget(targetName);
+
+  return ({
   entry: { harness: path.resolve(__dirname, 'index.jsx') },
   output: {
     path: path.resolve(__dirname, '../harness-dist'),
@@ -40,8 +48,8 @@ module.exports = (env, argv) => ({
   },
   plugins: [
     new webpack.DefinePlugin({
-      'process.env.STRATUS_API_BASE': JSON.stringify('https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev'),
-      'process.env.STRATUS_ENV': JSON.stringify('dev'),
+      STRATUS_API_BASE: JSON.stringify(harnessProfile.apiBase),
+      STRATUS_ENV: JSON.stringify(harnessProfile.stratusEnv),
     }),
     new HtmlWebpackPlugin({
       template: path.resolve(__dirname, 'index.html'),
@@ -50,5 +58,6 @@ module.exports = (env, argv) => ({
     }),
   ],
   devtool: false,
-  mode: argv.mode || 'development',
-});
+    mode: argv.mode || 'development',
+  });
+};

@@ -111,7 +111,7 @@ test('no deterministic quote result can auto-open the one-shot plan route', () =
   const segment = chat.slice(start, end);
   assert.ok(!/startOneshotFromUrl|ONESHOT_PLAN|isOneshotAutoPlanEligible/.test(segment));
   assert.ok(!/function isOneshotAutoPlanEligible|export function isOneshotAutoPlanEligible/.test(quoteClient));
-  assert.ok(/Create Zoho CRM quote from this/.test(quoteResult), 'explicit consent button must remain');
+  assert.ok(/Create Zoho CRM quote from selected/.test(quoteResult), 'explicit consent button must remain');
 });
 
 test('quote response mapping behaviorally preserves an inert typed recovery', () => {

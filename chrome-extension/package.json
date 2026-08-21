@@ -1,12 +1,16 @@
 {
   "name": "stratus-ai-chrome-extension",
-  "version": "1.0.0",
+  "version": "1.29.0",
   "description": "Stratus AI Chrome Extension \u2014 Cisco/Meraki sales assistant for Gmail",
   "private": true,
   "scripts": {
-    "dev": "webpack --mode development --watch",
-    "build": "webpack --mode production",
-    "build:dev": "STRATUS_API_BASE=https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev STRATUS_ENV=dev webpack --mode production",
+    "check:toolchain": "node scripts/check-toolchain.mjs",
+    "dev:snapshot": "pnpm run check:toolchain && webpack --mode development --watch --env target=snapshot-dev",
+    "dev:team": "pnpm run check:toolchain && webpack --mode development --watch --env target=team-dev",
+    "build": "pnpm run build:prod",
+    "build:prod": "pnpm run check:toolchain && webpack --mode production --env target=prod",
+    "build:snapshot-dev": "pnpm run check:toolchain && webpack --mode production --env target=snapshot-dev",
+    "build:team-dev": "pnpm run check:toolchain && webpack --mode production --env target=team-dev",
     "test:context-lock": "node --test test-context-lock-2026-08-12.mjs",
     "test:quote-persistence": "node --test test-context-lock-2026-08-12.mjs test-sidebar-actions-2026-08-13.mjs",
     "test:deal-default": "node --test test-deal-default-2026-08-13.mjs",
@@ -14,10 +18,21 @@
     "test:task-subjects": "node --test test-task-subjects-2026-08-17.mjs",
     "test:preserved-fixes": "node test-cart-sku-priority-2026-08-17.cjs && node test-preserved-v1267-fixes-2026-08-17.cjs",
     "build:crx": "bash scripts/build-crx.sh",
-    "pack:crx": "node scripts/pack-crx.mjs",
+    "pack:crx:prepare": "pnpm run check:toolchain && node scripts/pack-crx.mjs prepare",
+    "pack:crx:sign": "node scripts/pack-crx.mjs sign-prepared",
+    "package:prod": "pnpm run check:toolchain && STRATUS_RELEASE_TARGET=prod node scripts/package-extension.mjs",
+    "package:team-dev": "pnpm run check:toolchain && STRATUS_RELEASE_TARGET=team-dev node scripts/package-extension.mjs",
+    "test:release-architecture": "node --test test-release-architecture.mjs",
+    "test:all": "node scripts/run-maintained-tests.mjs",
     "clean": "rm -rf dist/ release/",
-    "build:harness": "webpack --config harness/webpack.harness.js --mode development"
+    "build:harness:team": "pnpm run check:toolchain && webpack --config harness/webpack.harness.js --mode development --env target=team-dev",
+    "build:harness:snapshot-evidence": "pnpm run check:toolchain && webpack --config harness/webpack.harness.js --mode development --env target=snapshot-dev"
   },
+  "engines": {
+    "node": "24.19.0",
+    "pnpm": "11.19.0"
+  },
+  "packageManager": "pnpm@11.19.0",
   "devDependencies": {
     "@babel/core": "^7.24.0",
     "@babel/preset-env": "^7.24.0",

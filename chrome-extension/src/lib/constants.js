@@ -2,21 +2,15 @@
  * Stratus AI Chrome Extension — Constants & Configuration
  */
 
-// Pointed at the gateway worker (Gemma-first waterfall with Claude fallback).
-// Gateway transparently forwards non-chat /api/* paths to the main worker.
-// ROLLBACK: change to 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev' to
-// revert to the original Claude-only path. No other code changes needed.
-// API_BASE is overridable at build time via webpack DefinePlugin (STRATUS_API_BASE) or a
-// global, so one bundle works for personal and corporate. Falls back to the personal-account
-// gateway for backward compat.
+// webpack injects both values from one named release target. A missing value is
+// a broken build, never a reason to fall back to a production/customer gateway.
 export const API_BASE = (typeof STRATUS_API_BASE !== 'undefined' && STRATUS_API_BASE)
-  || (typeof globalThis !== 'undefined' && globalThis.STRATUS_API_BASE)
-  || 'https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev';
+  || (() => { throw new Error('STRATUS_API_BASE was not injected by a named build target'); })();
 
-// Build environment. 'dev' for a locally-loaded unpacked TEST build (set STRATUS_ENV=dev at
-// build time); 'prod' otherwise. Drives the DEV header color/label so you can visually tell a
-// test build apart from the published one. Production/Web-Store builds leave this unset -> 'prod'.
-export const STRATUS_ENV_NAME = (typeof STRATUS_ENV !== 'undefined' && STRATUS_ENV) || 'prod';
+// Build environment is injected with the API origin by the named target. It
+// drives the DEV header color/label so test builds are visually distinct.
+export const STRATUS_ENV_NAME = (typeof STRATUS_ENV !== 'undefined' && STRATUS_ENV)
+  || (() => { throw new Error('STRATUS_ENV was not injected by a named build target'); })();
 export const IS_DEV_BUILD = STRATUS_ENV_NAME === 'dev';
 
 export const ZOHO = {

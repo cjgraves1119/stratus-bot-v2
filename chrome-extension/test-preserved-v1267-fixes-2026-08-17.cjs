@@ -15,11 +15,22 @@ const popup = read("public/popup.html");
 const webpack = read("webpack.config.js");
 const app = read("src/sidebar/App.jsx");
 const contextLock = read("src/lib/context-lock.mjs");
+const { manifestForTarget, resolveBuildTarget } = require("./release-targets.cjs");
 
-assert.equal(manifest.name, "Stratus AI (DEV)");
-assert.equal(manifest.version, "1.27.11");
+assert.equal(manifest.name, "Stratus AI");
+assert.equal(manifest.action.default_title, "Stratus AI");
+assert.equal(manifest.version, "1.29.0");
+assert.equal(manifest.update_url, "https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml");
 assert.ok(manifest.optional_host_permissions.includes("https://stratusinfosystems.com/*"));
 assert.ok(manifest.optional_host_permissions.includes("https://www.stratusinfosystems.com/*"));
+
+const snapshotManifest = manifestForTarget(manifest, resolveBuildTarget("snapshot-dev", { environment: {} }));
+assert.equal(snapshotManifest.name, "Stratus AI (DEV)");
+assert.equal(snapshotManifest.action.default_title, "Stratus AI (DEV)");
+assert.equal(snapshotManifest.version, "1.29.0");
+assert.equal(Object.hasOwn(snapshotManifest, "update_url"), false);
+assert.ok(snapshotManifest.optional_host_permissions.includes("https://stratusinfosystems.com/*"));
+assert.ok(snapshotManifest.optional_host_permissions.includes("https://www.stratusinfosystems.com/*"));
 
 assert.match(content, /import '\.\/gmail-send-task-snooze\.js'/);
 assert.match(snooze, /Snooze only — no Zoho task/);

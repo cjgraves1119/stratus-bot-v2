@@ -4,9 +4,11 @@ const HtmlWebpackPlugin = require('html-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const CssMinimizerPlugin = require('css-minimizer-webpack-plugin');
 const webpack = require('webpack');
+const { renderManifestForTarget, resolveBuildTarget } = require('./release-targets.cjs');
 
 module.exports = (env, argv) => {
   const isProd = argv.mode === 'production';
+  const profile = resolveBuildTarget(env && env.target);
 
   return {
     entry: {
@@ -54,19 +56,25 @@ module.exports = (env, argv) => {
       ],
     },
     plugins: [
-      // Build-time config. STRATUS_API_BASE points the bundle at a worker; STRATUS_ENV='dev'
-      // turns on the DEV color/banner. For a local test build pointed at your own worker:
-      //   STRATUS_API_BASE="https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev" STRATUS_ENV=dev npm run build
+      // The named target resolves API, environment, branding, host permissions,
+      // and update behavior as one reviewed unit. There are no independent
+      // gateway or branding overrides.
       new webpack.DefinePlugin({
-        STRATUS_API_BASE: JSON.stringify(process.env.STRATUS_API_BASE || ''),
-        STRATUS_ENV: JSON.stringify(process.env.STRATUS_ENV || 'prod'),
+        STRATUS_API_BASE: JSON.stringify(profile.apiBase),
+        STRATUS_ENV: JSON.stringify(profile.stratusEnv),
       }),
       new MiniCssExtractPlugin({
         filename: '[name].css',
       }),
       new CopyPlugin({
         patterns: [
-          { from: 'manifest.json', to: 'manifest.json' },
+          {
+            from: 'manifest.json',
+            to: 'manifest.json',
+            transform(content) {
+              return Buffer.from(renderManifestForTarget(content.toString('utf8'), profile));
+            },
+          },
           { from: 'src/icons', to: 'icons', noErrorOnMissing: true },
           { from: 'src/content/content.css', to: 'content.css' },
           { from: 'public/stratus-cart-core.js', to: 'stratus-cart-core.js' },
@@ -99,6 +107,10 @@ module.exports = (env, argv) => {
         new CssMinimizerPlugin(),
       ],
     },
-    devtool: isProd ? 'source-map' : 'cheap-module-source-map',
+    // Source maps are retained only for the historical snapshot comparison.
+    // Distribution targets are sanitized and must never contain source maps.
+    devtool: profile.name === 'snapshot-dev'
+      ? (isProd ? 'source-map' : 'cheap-module-source-map')
+      : false,
   };
 };
