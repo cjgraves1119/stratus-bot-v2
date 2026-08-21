@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rebuild the historical 1.29.0 DEV snapshot inside this checkout only.
+# Rebuild the reviewed personal DEV snapshot inside this checkout only.
 # This never copies into an installed extension and never reloads a browser.
 set -euo pipefail
 cd "$(dirname "$0")"

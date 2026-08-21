@@ -17,6 +17,7 @@ const presetReact = require('@babel/preset-react');
 const quoteResultPath = new URL('./src/sidebar/components/QuoteResult.jsx', import.meta.url);
 const editorPath = new URL('./src/sidebar/components/SkuQuantityEditor.jsx', import.meta.url);
 const chatPanelPath = new URL('./src/sidebar/panels/ChatPanel.jsx', import.meta.url);
+const quoteClientPath = new URL('./src/lib/quote-client.js', import.meta.url);
 
 test('strict editor normalization rejects partial invalid input and merges exact duplicates', () => {
   assert.deepEqual(normalizeSkuEditorRows([
@@ -120,4 +121,9 @@ test('product autocomplete consumes only the sanitized result shape and JSX pars
       configFile: false,
     }));
   }
+});
+
+test('ordinary API quote rows retain their reviewed per-row license tier', () => {
+  const source = readFileSync(quoteClientPath, 'utf8');
+  assert.match(source, /row\.requestedTier = p\.requestedTier \|\| p\.tier/);
 });

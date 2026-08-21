@@ -895,7 +895,7 @@ export default function App() {
           style={{ fontWeight: 700, fontSize: 15, flex: 1 }}
           title={IS_DEV_BUILD ? 'DEV build → ' + API_BASE : undefined}
         >
-          Stratus AI{IS_DEV_BUILD ? ' · DEV' : ''}
+          Stratus AI{IS_DEV_BUILD ? ` · DEV v${chrome.runtime.getManifest().version}` : ''}
         </div>
 
         {/* Blue pill — shows current Zoho record across ALL tabs, always visible */}

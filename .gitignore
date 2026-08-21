@@ -41,3 +41,4 @@ graphify-out/
 # trail after a clean-tree gate; keeping it local prevents the next deploy from
 # refusing its own prior log as an untracked repository change.
 /deploys.log
+/.pressure-loop/

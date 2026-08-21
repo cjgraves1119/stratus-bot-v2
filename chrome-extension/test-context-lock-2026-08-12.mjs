@@ -244,8 +244,8 @@ test('Deterministic quote cards retain only safe Stratus order data across reloa
       eolMapping: ['MX64-HW (EOL) → Replacement: MX75-HW'],
       result: {
         urls: [
-          { label: '1-Year', url: 'https://stratusinfosystems.com/order/?item=MX75-HW&qty=2' },
-          { label: '3-Year', url: 'https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-ENT-3YR&qty=2,2' },
+          { label: '1-Year', url: 'https://stratusinfosystems.com/order/?item=MX75-HW&qty=2', termYears: 1, optionKind: 'renew_as_is', optionGroupId: 'renew-as-is' },
+          { label: '3-Year', url: 'https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-ENT-3YR&qty=2,2', termYears: 3, optionKind: 'eol_refresh', optionGroupId: 'eol-refresh' },
         ],
         parsed: [{ baseSku: 'MX75-HW', qty: 2 }],
         eolWarnings: ['MX64-HW is End-of-Life'],
@@ -264,6 +264,13 @@ test('Deterministic quote cards retain only safe Stratus order data across reloa
   assert.equal(message.result.urls.length, 2);
   assert.equal(message.result.urls[0].label, '1-Year');
   assert.equal(message.result.urls[0].url, 'https://stratusinfosystems.com/order/?item=MX75-HW&qty=2');
+  assert.deepEqual(
+    message.result.urls.map(({ termYears, optionKind, optionGroupId }) => ({ termYears, optionKind, optionGroupId })),
+    [
+      { termYears: 1, optionKind: 'renew_as_is', optionGroupId: 'renew-as-is' },
+      { termYears: 3, optionKind: 'eol_refresh', optionGroupId: 'eol-refresh' },
+    ],
+  );
   assert.deepEqual(message.result.parsed, [{ baseSku: 'MX75-HW', qty: 2 }]);
   assert.equal(message.result.suggestions, null);
   assert.equal('customer' in message.result, false);
@@ -359,7 +366,7 @@ test('Clean quote persistence retains Hardware Only and trusted HA semantics wit
           { label: '3-Year', url: 'https://stratusinfosystems.com/order/?item=MX85-HW,LIC-MX85-ENT-3Y&qty=2,1' },
           { label: 'Hardware Only', url: 'https://stratusinfosystems.com/order/?item=MX85-HW&qty=2', hardwareOnly: true },
         ],
-        parsed: [{ baseSku: 'MX85', qty: 2 }],
+        parsed: [{ baseSku: 'MX85', qty: 2, requestedTier: 'ENT' }],
       },
     }],
   });
@@ -367,6 +374,7 @@ test('Clean quote persistence retains Hardware Only and trusted HA semantics wit
   assert.equal(message.kind, 'quote');
   assert.equal(message.quoteHaRequested, true);
   assert.equal(message.quoteLicenseTier, 'ENT');
+  assert.equal(message.result.parsed[0].requestedTier, 'ENT');
   assert.equal(message.quoteSupportsHardwareOnly, true);
   assert.equal(message.result.urls[1].hardwareOnly, true);
   assert.equal('intake' in message, false);
@@ -407,7 +415,7 @@ test('Restored Gmail intake is explicitly inert because intent and participants 
   assert.equal(JSON.stringify(message).includes('must-not-persist'), false);
 });
 
-test('Restored one-shot options preserve only validated term and Hardware Only semantics', () => {
+test('Restored one-shot options preserve validated term, scope, and alternative identity', () => {
   const stored = serializeChatSession({
     sessionId: 'chat_restored_oneshot_options',
     messages: [{
@@ -433,6 +441,8 @@ test('Restored one-shot options preserve only validated term and Hardware Only s
           label: 'Hardware Only',
           url: 'https://stratusinfosystems.com/order/?item=MX75-HW&qty=1',
           hardwareOnly: true,
+          optionKind: 'hardware_only',
+          optionGroupId: 'hardware-only',
           termYears: null,
           searchResults: [{ id: 'must-not-persist' }],
         },
@@ -440,6 +450,8 @@ test('Restored one-shot options preserve only validated term and Hardware Only s
           label: '3-Year',
           url: 'https://stratusinfosystems.com/order/?item=MX75-HW,LIC-MX75-ENT-3Y&qty=1,1',
           hardwareOnly: false,
+          optionKind: 'eol_refresh',
+          optionGroupId: 'eol-refresh',
           termYears: 3,
           draftLines: [{ sku: 'must-not-persist', qty: 99 }],
         },
@@ -449,9 +461,9 @@ test('Restored one-shot options preserve only validated term and Hardware Only s
   });
   const message = stored.messages[0];
   assert.equal(message.kind, 'oneshot');
-  assert.deepEqual(message.quoteOptions.map(({ hardwareOnly, termYears }) => ({ hardwareOnly, termYears })), [
-    { hardwareOnly: true, termYears: null },
-    { hardwareOnly: false, termYears: 3 },
+  assert.deepEqual(message.quoteOptions.map(({ hardwareOnly, termYears, optionKind, optionGroupId }) => ({ hardwareOnly, termYears, optionKind, optionGroupId })), [
+    { hardwareOnly: true, termYears: null, optionKind: 'hardware_only', optionGroupId: 'hardware-only' },
+    { hardwareOnly: false, termYears: 3, optionKind: 'eol_refresh', optionGroupId: 'eol-refresh' },
   ]);
   assert.equal(JSON.stringify(message).includes('searchResults'), false);
   assert.equal(JSON.stringify(message).includes('draftLines'), false);

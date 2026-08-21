@@ -25,6 +25,7 @@ import {
 import QuoteResult from '../components/QuoteResult';
 import EmailAnalysisResult from '../components/EmailAnalysisResult';
 import SkuQuantityEditor from '../components/SkuQuantityEditor';
+import { rebaseQuoteOptionIndexes } from '../components/quote-option-selection.mjs';
 import { CrmDeleteControl } from '../components/CrmDeleteControl.jsx';
 import {
   applySkuSuggestion,
@@ -37,7 +38,7 @@ import {
 // Quoting + screenshot parsing routed through the worker API (the same
 // deterministic engine the Webex/GChat bots use), consolidated into Chat
 // 2026-06-17 when the standalone Quote and Email tabs were removed.
-import { runQuote, analyzeImage, orderSummaryFromResult } from '../../lib/quote-client';
+import { runQuote, analyzeImage } from '../../lib/quote-client';
 import {
   applyExplicitMxWarmSpareToQuoteOptions,
   bindOneshotQuoteOptions,
@@ -1651,6 +1652,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
               title="Zoho plan products"
               updateLabel="Revalidate / re-plan"
               status={productStatus}
+              allowHaLicenseRatio={msg.base?.ha_mode === 'warm_spare'}
             />
           )}
           {quoteOptions.length > 1 && (
@@ -3165,27 +3167,37 @@ export default function ChatPanel({
     const selectedIndexes = (Array.isArray(selectedUrlIdx) ? selectedUrlIdx : [selectedUrlIdx])
       .map((value) => Number(value))
       .filter((value) => Number.isInteger(value) && value >= 0);
-    const primaryIdx = selectedIndexes[0] || 0;
-    const { orderUrl } = orderSummaryFromResult(result, primaryIdx);
-    const quoteOptions = (Array.isArray(result?.urls) ? result.urls : [])
+    const requestedIndexes = selectedIndexes.length ? selectedIndexes : [0];
+    const indexedQuoteOptions = (Array.isArray(result?.urls) ? result.urls : [])
       .map((option, index) => ({
+        sourceIndex: index,
         label: (option && typeof option === 'object' && option.label) || `Option ${index + 1}`,
         url: option && typeof option === 'object' ? String(option.url || '') : String(option || ''),
         hardwareOnly: option && typeof option === 'object' && option.hardwareOnly === true,
+        // Preserve the reviewed alternative identity after the URL itself has
+        // passed composition verification. Renewal and EOL refresh options can
+        // share the same term but represent different product scopes.
+        optionKind: option && typeof option === 'object' ? String(option.optionKind || '') : '',
+        optionGroupId: option && typeof option === 'object' ? String(option.optionGroupId || '') : '',
         termYears: option && typeof option === 'object' && Number.isInteger(option.termYears)
           ? option.termYears : quoteOptionTerm(option),
       }))
       .filter((option) => /^https:\/\/(?:www\.)?stratusinfosystems\.com\/order\//i.test(option.url));
-    const normalizedSelectedIndex = quoteOptions.findIndex((option) => option.url === orderUrl);
-    const extraQuoteOptionIndexes = selectedIndexes
-      .map((idx) => {
-        const url = result?.urls?.[idx]?.url || result?.urls?.[idx];
-        return quoteOptions.findIndex((option) => option.url === url);
-      })
-      .filter((idx, pos, all) => idx >= 0 && idx !== (normalizedSelectedIndex >= 0 ? normalizedSelectedIndex : 0) && all.indexOf(idx) === pos);
+    const rebasedSelectedIndexes = rebaseQuoteOptionIndexes(
+      requestedIndexes,
+      indexedQuoteOptions.map((option) => option.sourceIndex),
+    );
+    if (!rebasedSelectedIndexes.length) {
+      appendMessage(infoMsg('⚠️ The selected quote option is no longer available. Review the current links and select it again.'));
+      return null;
+    }
+    const normalizedSelectedIndex = rebasedSelectedIndexes[0];
+    const extraQuoteOptionIndexes = rebasedSelectedIndexes.slice(1);
+    const quoteOptions = indexedQuoteOptions.map(({ sourceIndex: _sourceIndex, ...option }) => option);
+    const orderUrl = quoteOptions[normalizedSelectedIndex]?.url || '';
     return startOneshotFromUrl(orderUrl, {
       quoteOptions,
-      selectedQuoteOptionIndex: normalizedSelectedIndex >= 0 ? normalizedSelectedIndex : 0,
+      selectedQuoteOptionIndex: normalizedSelectedIndex,
       extraQuoteOptionIndexes,
       capturedParticipants: sourceMessage?.emailQuoteContext?.participants,
       hardwareOnlySkus: sourceMessage?.quoteHardwareOnlySkus,
@@ -3653,6 +3665,12 @@ export default function ChatPanel({
     else if (intakeIntent.license_tier === 'SEC') quoteModifiers.push('security');
     else if (intakeIntent.license_tier === 'SDW') quoteModifiers.push('SD-WAN');
     else if (intakeIntent.license_tier === 'A') quoteModifiers.push('advanced license');
+    // Carry the already-reviewed Gmail HA boolean into the deterministic
+    // Worker request. Mutating only the returned URL to 2:1 leaves a structured
+    // EOL source/target contract stale; the Worker must build both together.
+    if (intakeIntent.ha_requested === true && intakeIntent.hardware_only !== true) {
+      quoteModifiers.push('use warm spare HA');
+    }
     const skuText = [quoteSkuTextFromLines(lines), ...quoteModifiers].filter(Boolean).join('\n');
     if (!normalized.length || !skuText) {
       appendMessage(infoMsg('⚠️ No safe SKU quantities were available for the eCommerce quote.'));
@@ -3994,6 +4012,7 @@ export default function ChatPanel({
                   onDraftTierChange={msg.restored ? undefined : (tier) => handleQuoteDraftTierChange(msg, tier)}
                   onUpdateQuote={msg.restored ? undefined : (rows) => rebuildQuoteMessage(msg, rows)}
                   onProductSearch={msg.restored ? undefined : searchQuoteProducts}
+                  allowHaLicenseRatio={explicitQuoteHaRequested(msg)}
                   onApplySuggestion={msg.restored ? undefined : (s) => handleQuoteSuggestion(msg, s, 'apply', draftRows)}
                   onStackSuggestion={msg.restored ? undefined : (s) => handleQuoteSuggestion(msg, s, 'stack', draftRows)}
                   onSendToZoho={msg.restored ? undefined : (result, selectedUrlIdx) => handleSendQuoteToZoho(msg, result, selectedUrlIdx)}

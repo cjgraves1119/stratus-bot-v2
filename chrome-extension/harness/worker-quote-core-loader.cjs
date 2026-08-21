@@ -23,12 +23,13 @@ module.exports = function workerQuoteCoreLoader(source) {
   if (!/function\s+parseMessage\s*\(/.test(transformed)
       || !/function\s+buildQuoteResponse\s*\(/.test(transformed)
       || !/async\s+function\s+buildOneshotIntake\s*\(/.test(transformed)
+      || !/function\s+attachTrustedQuoteOptionContracts\s*\(/.test(transformed)
       || !/function\s+validateExplicitMxMsQuoteComposition\s*\(/.test(transformed)) {
-    throw new Error('QA harness could not find the Worker intake/parser/builder/endpoint guard.');
+    throw new Error('QA harness could not find the Worker intake/parser/builder/contract/endpoint guard.');
   }
 
   return `${transformed}\n
-export { buildOneshotIntake, parseMessage, buildQuoteResponse, validateExplicitMxMsQuoteComposition };
+export { attachTrustedQuoteOptionContracts, buildOneshotIntake, parseMessage, buildQuoteResponse, validateExplicitMxMsQuoteComposition };
 export const HARNESS_WORKER_SOURCE_SHA256 = '${hash}';
 `;
 };

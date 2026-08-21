@@ -35,10 +35,10 @@ named target
 ```
 
 This prevents independent flags from silently mixing branding, gateways, and
-update behavior. The explicitly named `snapshot-dev` evidence target retains
-the historical production gateway so its executable output can be compared to
-the installed 1.29.0 evidence; it is not distributable. The `team-dev` target
-fails closed unless a distinct reviewed gateway is selected. Neither DEV target
+update behavior. The explicitly named `snapshot-dev` target retains the
+reviewed personal DEV gateway for controlled local testing and artifact-lineage
+evidence; it is not a distributable team build. The `team-dev` target fails
+closed unless a distinct reviewed gateway is selected. Neither DEV target
 inherits the production auto-update feed.
 
 ## Target roles

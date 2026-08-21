@@ -1,7 +1,7 @@
 # Stratus AI extension release process
 
 The canonical repository contains one editable extension source tree. Production,
-historical snapshot DEV, and team DEV are build targets from that source; they
+personal snapshot DEV, and team DEV are build targets from that source; they
 are not forks and must never be maintained as copied/minified extension folders.
 
 ## Required toolchain
@@ -18,14 +18,14 @@ toolchain check before webpack.
 | Target | Branding | API origin | `update_url` | Permitted use |
 |---|---|---|---|---|
 | `prod` | Stratus AI | reviewed production gateway in `release-targets.cjs` | production Pages feed | reviewed production release |
-| `snapshot-dev` | Stratus AI (DEV) | historical 1.29.0 gateway | absent | artifact lineage comparison only |
+| `snapshot-dev` | Stratus AI (DEV) | reviewed personal DEV gateway | absent | local DEV testing and artifact lineage evidence only |
 | `team-dev` | Stratus AI (TEAM DEV) | explicit reviewed team origin | absent | future sanitized team package |
 
 One named target selects API origin, runtime environment, branding, host
 permission, and update behavior together. Legacy `STRATUS_API_BASE` and
 `STRATUS_ENV` overrides fail closed because they could mix those decisions.
 There is intentionally no ambiguous `pnpm dev` shortcut. Use the explicitly
-named `pnpm run dev:snapshot` only for historical comparison, or
+named `pnpm run dev:snapshot` only for reviewed personal DEV work, or
 `pnpm run dev:team` after the separate team gateway has been approved.
 
 The team DEV gateway is not yet authoritative. `APPROVED_TEAM_DEV_API_BASES` is
@@ -49,7 +49,7 @@ pnpm run test:all
 not copy into an installed extension, another project, or a browser profile.
 
 Production and team DEV builds omit source maps. The snapshot target retains
-source maps solely so the reviewed 1.29.0 source can be compared with the
+source maps solely so reviewed personal DEV source can be compared with the
 installed evidence artifact. Snapshot DEV also removes the production
 `update_url`; that intentional manifest safety delta means a post-reconciliation
 snapshot is not expected to be byte-identical to the installed manifest.

@@ -42,13 +42,10 @@ fi
 
 echo "== 5. DEV extension bundle staleness =="
 SRC_V="$(grep -o '"version": *"[^"]*"' chrome-extension/manifest.json | head -1 | grep -o '[0-9.]*')"
-DEV_MANIFEST="$HOME/Documents/Claude/Projects/Bots/stratus-bot-v2-DEV/chrome-extension/dist/manifest.json"
+DEV_MANIFEST="$HOME/Documents/Stratus extensions/stratus bot dev/manifest.json"
 DEV_V="$( [ -f "$DEV_MANIFEST" ] && grep -o '"version": *"[^"]*"' "$DEV_MANIFEST" | head -1 | grep -o '[0-9.]*' )"
 echo "   source=$SRC_V installed=${DEV_V:-missing}"
-[ "$SRC_V" != "${DEV_V:-}" ] && echo "   ^ STALE — run chrome-extension/build-dev.sh then reload 'Stratus AI (DEV)'"
-
-exit 0
-# ---- append to scripts/drift-check.sh (S6-S8 + S4 live-check, council-approved 2026-07-20) ----
+[ "$SRC_V" != "${DEV_V:-}" ] && echo "   ^ STALE — build snapshot-dev, sync the reviewed unpacked target, then reload 'Stratus AI (DEV)'"
 
 echo "== 6. corp PR audit (merged-into-branch trap — the #21/#22 failure) =="
 if command -v gh >/dev/null 2>&1; then
@@ -90,7 +87,7 @@ echo "== 9. live worker vs deploys.log (out-of-band/bundle deploy detector) =="
 if [ -f ~/.stratus-personal-credentials ] && [ -f deploys.log ]; then
   # shellcheck disable=SC1090
   source ~/.stratus-personal-credentials 2>/dev/null
-  LIVE_ID="$(cd worker-gchat 2>/dev/null && npx wrangler deployments list 2>/dev/null | grep -m1 -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | cut -c1-8)"
+  LIVE_ID="$(cd worker-gchat 2>/dev/null && npx --no-install wrangler deployments status 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=s.match(/Version\(s\):\s+\(100%\)\s+([0-9a-f-]{36})/i);process.stdout.write((m?.[1]||"").slice(0,8));})')"
   LOGGED_ID="$(tail -1 deploys.log | grep -oE 'version=[0-9a-f-]+' | cut -d= -f2 | cut -c1-8)"
   echo "   live=$LIVE_ID  last-logged=$LOGGED_ID"
   if [ -n "$LIVE_ID" ] && [ -n "$LOGGED_ID" ] && [ "$LIVE_ID" != "$LOGGED_ID" ]; then

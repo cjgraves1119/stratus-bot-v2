@@ -41,6 +41,31 @@ function mrOnlyUrls(qty) {
 // separate hardware and license-only links makes neither link represent the
 // committed full snapshot and lets a user accidentally order only one half.
 function mergeMrEntIntoQuoteOptions(options, qty) {
+  const safeSku = /^[A-Z0-9][A-Z0-9._/-]{1,79}$/;
+  const normalizedContractLine = (line) => {
+    const sku = String(line?.sku || '').trim().toUpperCase();
+    const lineQty = Number(line?.qty);
+    return safeSku.test(sku) && Number.isInteger(lineQty) && lineQty >= 1 && lineQty <= 99999
+      ? { ...line, sku, qty: lineQty }
+      : null;
+  };
+  const addContractQuantity = (rawLines, sku, addedQty) => {
+    if (!Array.isArray(rawLines) || rawLines.length === 0) return null;
+    const lines = rawLines.map(normalizedContractLine);
+    if (lines.some((line) => !line)) return null;
+    const existingIndexes = lines
+      .map((line, index) => (line.sku === sku ? index : -1))
+      .filter((index) => index >= 0);
+    const existingTotal = existingIndexes.reduce((sum, index) => sum + lines[index].qty, 0);
+    if (existingTotal + addedQty > 99999) return null;
+    if (existingIndexes.length) {
+      const index = existingIndexes[0];
+      lines[index] = { ...lines[index], qty: lines[index].qty + addedQty };
+    } else {
+      lines.push({ sku, qty: addedQty });
+    }
+    return lines;
+  };
   const merged = [];
   for (const rawOption of options) {
     const option = toUrlObj(rawOption);
@@ -55,6 +80,7 @@ function mergeMrEntIntoQuoteOptions(options, qty) {
       const items = String(url.searchParams.get('item') || '').split(',').map((value) => value.trim().toUpperCase());
       const quantities = String(url.searchParams.get('qty') || '').split(',').map(Number);
       if (!items.length || items.length !== quantities.length
+          || new Set(items).size !== items.length
           || quantities.some((value) => !Number.isInteger(value) || value < 1 || value > 99999)) return [];
       const labelTerm = String(option.label || '').match(/\b([135])\s*-?\s*YEAR\b/i)?.[1] || '';
       const urlTerms = [...new Set(items
@@ -63,6 +89,38 @@ function mergeMrEntIntoQuoteOptions(options, qty) {
       const term = labelTerm || (urlTerms.length === 1 ? urlTerms[0] : '');
       if (!term || (labelTerm && urlTerms.length && (urlTerms.length !== 1 || urlTerms[0] !== labelTerm))) return [];
       const licenseSku = `LIC-ENT-${term}YR`;
+      let verification = option.verification;
+      if (verification !== undefined && verification !== null) {
+        // EOL refresh options carry a source/target proof that the extension
+        // verifies against both the reviewed rows and the public URL. Adding a
+        // synthetic MR-ENT quantity to only the URL makes that proof stale and
+        // suppresses the otherwise valid refresh action. Extend all three
+        // surfaces atomically, or publish no options at all.
+        if (option.optionKind !== 'eol_refresh'
+            || !Number.isInteger(option.termYears) || option.termYears !== Number(term)
+            || !verification || typeof verification !== 'object' || Array.isArray(verification)
+            || verification.schema !== 'quote-option-v1'
+            || verification.mode !== 'eol_transform'
+            || !Array.isArray(verification.replacements) || verification.replacements.length === 0
+            || !Array.isArray(verification.targetLines)
+            || verification.targetLines.length !== items.length) return [];
+        const currentTargetLines = verification.targetLines.map(normalizedContractLine);
+        if (currentTargetLines.some((line) => !line)
+            || currentTargetLines.some((line, index) => (
+              line.sku !== items[index] || line.qty !== quantities[index]
+            ))) return [];
+        const sourceLines = addContractQuantity(verification.sourceLines, licenseSku, qty);
+        const targetLines = addContractQuantity(verification.targetLines, licenseSku, qty);
+        if (!sourceLines || !targetLines) return [];
+        verification = {
+          ...verification,
+          sourceLines,
+          targetLines,
+          // Copy the bounded array so this transformation cannot mutate the
+          // Worker's response object through a shared reference.
+          replacements: [...verification.replacements],
+        };
+      }
       const existing = items.indexOf(licenseSku);
       if (existing >= 0) {
         if (quantities[existing] + qty > 99999) return [];
@@ -71,10 +129,17 @@ function mergeMrEntIntoQuoteOptions(options, qty) {
         items.push(licenseSku);
         quantities.push(qty);
       }
-      merged.push({
+      const mergedOption = {
         ...option,
         url: `${ORDER_BASE}?item=${items.join(',')}&qty=${quantities.join(',')}`,
-      });
+        ...(verification !== undefined && verification !== null ? { verification } : {}),
+      };
+      // The option-level flag describes the complete cart, not an individual
+      // EOL replacement. Once LIC-ENT is merged into the cart it is no longer
+      // globally Hardware Only; per-replacement hardwareOnly proof remains in
+      // the signed transform contract for the bare EOL source row.
+      delete mergedOption.hardwareOnly;
+      merged.push(mergedOption);
     } catch {
       return [];
     }
@@ -115,6 +180,11 @@ export function mapQuoteResponse(res, mrEntQty = 0) {
     const row = { baseSku: p.sku || p.baseSku || '', qty: p.qty || 1 };
     if (p.resolvedSku) row.resolvedSku = p.resolvedSku;
     if (p.licenseOnly === true) row.licenseOnly = true;
+    if (p.hardwareOnly === true) row.hardwareOnly = true;
+    // Row-local tier is committed quote intent. Carry it into the editor so an
+    // ordinary Chat quote for MX67 Enterprise cannot reopen as the MX default
+    // (Advanced Security) merely because the API response was normalized.
+    if (p.requestedTier || p.tier) row.requestedTier = p.requestedTier || p.tier;
     return row;
   };
   const rawUrls = res.quoteUrls || res.urls || [];

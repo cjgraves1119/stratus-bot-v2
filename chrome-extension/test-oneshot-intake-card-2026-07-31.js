@@ -70,7 +70,7 @@ check('eCommerce build calls quote only and retains SKU output on pricing failur
 
 check('only the separate finished-card button starts Zoho deterministic review', () => {
   assert.ok(/Create Zoho CRM quote from selected/.test(QUOTE));
-  assert.ok(/onClick=\{\(\) => hasExplicitTermSelection && onSendToZoho\(result, selectedIndexes\)\}/.test(QUOTE));
+  assert.ok(/onClick=\{\(\) => hasExplicitTermSelection && onSendToZoho\(result, validSelectedIndexes\)\}/.test(QUOTE));
   assert.ok(/Begin a separate deterministic Zoho review; nothing is written until Execute/.test(QUOTE));
   const plan = segment('async function startOneshotFromUrl', 'async function replanOneshot');
   assert.ok(/sendToBackground\(MSG\.ONESHOT_PLAN/.test(plan));

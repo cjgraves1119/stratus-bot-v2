@@ -18,6 +18,11 @@ import { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import QuoteResult from '../src/sidebar/components/QuoteResult';
 import {
+  rebaseQuoteOptionIndexes,
+  selectQuoteOptionIndex,
+  toggleQuoteOptionIndex,
+} from '../src/sidebar/components/quote-option-selection.mjs';
+import {
   applyExplicitMxWarmSpareToQuoteOptions,
   hasExplicitMxHaIntent,
   verifyStratusOrderUrlComposition,
@@ -28,7 +33,9 @@ import {
   selectableQuoteTerms,
   verifyStratusOrderUrlOptions,
 } from '../src/lib/email-quote-flow.mjs';
+import { mapQuoteResponse } from '../src/lib/quote-client.js';
 import {
+  attachTrustedQuoteOptionContracts as workerAttachTrustedQuoteOptionContracts,
   buildOneshotIntake as workerBuildOneshotIntake,
   buildQuoteResponse as workerBuildQuoteResponse,
   HARNESS_WORKER_SOURCE_SHA256,
@@ -53,12 +60,27 @@ import {
   toggleRowSelected,
 } from '../src/sidebar/components/quote-line-editor-core.mjs';
 import {
+  licensePairReviewForRows,
   splitRowsForTierRequote,
   quoteTextFromEditorRows,
   skuModelToken,
   sameDeviceIdentity,
   termFromLicenseRows,
 } from '../src/sidebar/components/sku-editor-core.mjs';
+
+const HARNESS_RUNTIME_ERRORS = [];
+const HARNESS_CONSOLE_ERRORS = [];
+const originalConsoleError = console.error.bind(console);
+console.error = (...args) => {
+  HARNESS_CONSOLE_ERRORS.push(args.map((value) => String(value)).join(' '));
+  originalConsoleError(...args);
+};
+window.addEventListener('error', (event) => {
+  HARNESS_RUNTIME_ERRORS.push(String(event?.error?.stack || event?.message || 'browser error'));
+});
+window.addEventListener('unhandledrejection', (event) => {
+  HARNESS_RUNTIME_ERRORS.push(String(event?.reason?.stack || event?.reason || 'unhandled rejection'));
+});
 
 const orderUrl = (items) =>
   `https://stratusinfosystems.com/order/?item=${items.map((i) => i.sku).join(',')}&qty=${items.map((i) => i.qty).join(',')}`;
@@ -139,6 +161,7 @@ export function runActualQuotePipeline(rows, {
   sourceText = '',
   workerInputText = '',
   workerParsedInput = null,
+  tamperQuoteOptions = null,
 } = {}) {
   const haRequested = hasExplicitMxHaIntent(sourceText);
   const prepared = quoteTextFromEditorRows(rows, sourceText, { haRequested });
@@ -170,15 +193,19 @@ export function runActualQuotePipeline(rows, {
   }
 
   let options = workerOptionsFromMessage(built?.message);
+  options = workerAttachTrustedQuoteOptionContracts(options, built?.quoteOptionContracts);
+  const trustedWorkerOptions = options.map((option) => ({
+    ...option,
+    ...(option?.verification ? { verification: JSON.parse(JSON.stringify(option.verification)) } : {}),
+  }));
+  if (typeof tamperQuoteOptions === 'function') {
+    options = tamperQuoteOptions(options.map((option) => JSON.parse(JSON.stringify(option))));
+  }
   const workerComposition = workerValidateQuoteComposition(workerText, parsed, options, []);
   const workerParsedRows = (Array.isArray(parsed?.items) ? parsed.items : []).map((item) => ({
     sku: String(item?.baseSku || item?.sku || '').toUpperCase(),
     qty: Number(item?.qty) || 0,
     tier: String(item?.requestedTier || '').toUpperCase(),
-  }));
-  const workerOptions = options.map((option) => ({
-    ...option,
-    items: decodePipelineOption(option),
   }));
   options = applyExplicitMxWarmSpareToQuoteOptions(options, haRequested);
   if (!options.length) {
@@ -194,7 +221,10 @@ export function runActualQuotePipeline(rows, {
       workerSeparateQuotes: parsed?.modifiers?.separateQuotes === true,
       workerComposition,
       workerParsedRows,
-      workerOptions,
+      workerOptions: trustedWorkerOptions.map((option) => ({
+        ...option,
+        items: decodePipelineOption(option),
+      })),
       compositionBlocked: built?.compositionBlocked === true,
       publishedOptionCount: 0,
       options: [],
@@ -220,9 +250,13 @@ export function runActualQuotePipeline(rows, {
     workerSeparateQuotes: parsed?.modifiers?.separateQuotes === true,
     workerComposition,
     workerParsedRows,
-    workerOptions,
+    workerOptions: trustedWorkerOptions.map((option) => ({
+      ...option,
+      items: decodePipelineOption(option),
+    })),
     compositionBlocked: built?.compositionBlocked === true,
     publishedOptionCount: verified.urls.length,
+    dropped: verified.dropped || [],
     options: (verified.ok ? verified.urls : options).map((option) => ({
       ...option,
       items: decodePipelineOption(option),
@@ -295,6 +329,7 @@ function eolDirectLicenseCase(tier, suffix) {
     check: (outcome) => {
       const failures = [];
       if (outcome.compositionBlocked) failures.push(`Worker blocked a supported ${tier} EOL tier: ${outcome.error}`);
+      if (!outcome.ok) failures.push(`structured EOL options did not verify: ${outcome.error || 'unknown verifier failure'}`);
       const refreshOptions = (outcome.workerOptions || []).filter((option) =>
         (option.items || []).some((item) => /^MX67(?:-HW)?$/.test(item.sku)));
       if (refreshOptions.length !== PIPELINE_TERMS.length) {
@@ -323,8 +358,94 @@ function eolDirectLicenseCase(tier, suffix) {
           /^LIC-MX67-(?:ENT|SEC|SDW)-/.test(item.sku) && item.sku !== expectedReplacement);
         if (wrongTier) failures.push(`${term}Y ${tier} row was changed to ${wrongTier.sku}`);
       }
+      const publishedRefresh = (outcome.options || []).filter((option) => option.optionKind === 'eol_refresh');
+      const publishedRenewals = (outcome.options || []).filter((option) => option.optionKind !== 'eol_refresh');
+      if (publishedRefresh.length !== 3 || publishedRenewals.length !== 3) {
+        failures.push(`expected 3 Renew As-Is + 3 MX67 Refresh choices, got ${publishedRenewals.length} + ${publishedRefresh.length}`);
+      }
+      const selectable = selectableQuoteTerms(outcome.options);
+      if (selectable.length !== 6) failures.push(`same-term alternatives collapsed to ${selectable.length} selectable choices`);
       return failures;
     },
+  };
+}
+
+function tamperEveryEolReplacementTarget(options) {
+  return options.map((option) => {
+    if (option?.optionKind !== 'eol_refresh' || !option?.verification?.replacements?.[0]?.to?.[0]) return option;
+    option.verification.replacements[0].to[0].qty += 1;
+    return option;
+  });
+}
+
+function runMappedMrEntHardwareOnlyEolPipeline() {
+  const text = 'quote 1 MX64 hardware only';
+  let parsed;
+  let built;
+  try {
+    parsed = workerParseMessage(text);
+    built = workerBuildQuoteResponse(parsed);
+  } catch (error) {
+    return { ok: false, stage: 'worker', error: error.message, text, options: [] };
+  }
+  let workerOptions = workerOptionsFromMessage(built?.message);
+  workerOptions = workerAttachTrustedQuoteOptionContracts(workerOptions, built?.quoteOptionContracts);
+  // Production's response mapper receives the option header as its label.
+  // The harness URL regex cannot infer a term from byte-identical bare-MX67
+  // hardware-only URLs, so restore the trusted contract term in that same
+  // label surface before exercising mapQuoteResponse.
+  workerOptions = workerOptions.map((option) => ({
+    ...option,
+    ...(Number.isInteger(option?.termYears)
+      ? { label: `Hardware Refresh — ${option.termYears}-Year` }
+      : {}),
+  }));
+  const mapped = mapQuoteResponse({
+    quoteUrls: workerOptions,
+    parsedItems: [{ sku: 'MX64', qty: 1, hardwareOnly: true }],
+  }, 2);
+  const options = Array.isArray(mapped?.result?.urls) ? mapped.result.urls : [];
+  const verified = verifyStratusOrderUrlOptions(options, [
+    { sku: 'MX64', qty: 1, tier: 'none' },
+    { sku: 'MR-ENT', qty: 2 },
+  ], { hardwareOnlySkus: ['MX64'] });
+  return {
+    ok: verified.ok,
+    stage: verified.ok ? 'done' : 'verify',
+    error: verified.error || mapped?.error || '',
+    text,
+    mapped,
+    workerOptions,
+    options: (verified.ok ? verified.urls : options).map((option) => ({
+      ...option,
+      items: decodePipelineOption(option),
+    })),
+  };
+}
+
+function runDuplicateUrlOptionIdentityPipeline() {
+  const sharedUrl = 'https://stratusinfosystems.com/order/?item=MX67&qty=1';
+  const options = [
+    { label: 'Renew As-Is', optionKind: 'renew_as_is', optionGroupId: 'renew-as-is', url: sharedUrl },
+    { label: 'MX67 Refresh', optionKind: 'eol_refresh', optionGroupId: 'eol-refresh', url: sharedUrl },
+  ];
+  const selected = selectQuoteOptionIndex([], 1, options.length);
+  const rebased = rebaseQuoteOptionIndexes(selected, options.map((_option, sourceIndex) => sourceIndex));
+  const toggledFirst = toggleQuoteOptionIndex(selected, 0, options.length);
+  const toggledSecondBackOff = toggleQuoteOptionIndex(toggledFirst, 1, options.length);
+  return {
+    ok: JSON.stringify(selected) === '[1]'
+      && JSON.stringify(rebased) === '[1]'
+      && JSON.stringify(toggledFirst) === '[1,0]'
+      && JSON.stringify(toggledSecondBackOff) === '[0]',
+    stage: 'done',
+    error: '',
+    text: 'duplicate URL alternative selection',
+    selected,
+    rebased,
+    toggledFirst,
+    toggledSecondBackOff,
+    options,
   };
 }
 
@@ -553,6 +674,97 @@ const REAL_PIPELINE_CASES = [
   eolDirectLicenseCase('ENT', 'YR'),
   eolDirectLicenseCase('SEC', 'YR'),
   eolDirectLicenseCase('SDW', 'Y'),
+  {
+    name: 'tampered structured EOL transforms are dropped while Renew As-Is stays usable',
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: 'LIC-MX64-SEC-3YR', qty: 1 },
+    ],
+    sourceText: 'renew LIC-ENT-3YR x2 and LIC-MX64-SEC-3YR x1',
+    workerInputText: 'renew LIC-ENT-3YR x2 and LIC-MX64-SEC-3YR x1',
+    tamperQuoteOptions: tamperEveryEolReplacementTarget,
+    stageLabel: 'extension-eol-contract-fail-closed',
+    check: (outcome) => {
+      const refresh = (outcome.options || []).filter((option) => option.optionKind === 'eol_refresh');
+      const renewals = (outcome.options || []).filter((option) => option.optionKind !== 'eol_refresh');
+      const dropped = outcome.dropped || [];
+      const failures = [];
+      if (!outcome.ok) failures.push(`valid renewal alternatives were also suppressed: ${outcome.error || 'unknown verifier failure'}`);
+      if (refresh.length !== 0) failures.push(`${refresh.length} tampered refresh option(s) were published`);
+      if (renewals.length !== 3) failures.push(`expected 3 safe renewals after tamper, got ${renewals.length}`);
+      if (dropped.length !== 3 || dropped.some((entry) => !/EOL refresh option could not be verified/i.test(entry.reason || ''))) {
+        failures.push(`tamper drops were not explicit and complete: ${JSON.stringify(dropped)}`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'EOL MX64 hardware-only transforms to selectable bare MX67 refreshes',
+    rows: [{ sku: 'MX64', qty: 1, tier: 'none' }],
+    sourceText: 'quote 1 MX64 hardware only',
+    workerInputText: 'quote 1 MX64 hardware only',
+    stageLabel: 'worker-eol-hardware-only',
+    check: (outcome) => {
+      const failures = [];
+      if (!outcome.ok) failures.push(`hardware-only EOL refresh did not verify: ${outcome.error || 'unknown verifier failure'}`);
+      if (outcome.options.length !== 3) failures.push(`expected 3 term-labelled refresh choices, got ${outcome.options.length}`);
+      for (const option of outcome.options) {
+        if (option.optionKind !== 'eol_refresh' || option.hardwareOnly !== true) {
+          failures.push(`missing trusted hardware-only EOL metadata on ${option.label || option.url}`);
+        }
+        if (qtyInPipelineOption(option, /^MX67(?:-HW)?$/) !== 1) failures.push(`${option.label} did not contain bare MX67 x1`);
+        if ((option.items || []).some((item) => item.sku.startsWith('LIC-'))) failures.push(`${option.label} unexpectedly contained a license`);
+      }
+      if (selectableQuoteTerms(outcome.options).length !== 3) failures.push('hardware-only term choices collapsed');
+      return failures;
+    },
+  },
+  {
+    name: 'MR-ENT merge converts a hardware-only EOL cart into a verified mixed cart',
+    run: runMappedMrEntHardwareOnlyEolPipeline,
+    stageLabel: 'worker-map-extension-verify',
+    check: (outcome) => {
+      const failures = [];
+      if (!outcome.ok) failures.push(`mapped MR-ENT EOL cart did not verify: ${outcome.error || 'unknown failure'}`);
+      if (outcome.options.length !== 3) failures.push(`expected 3 mapped term choices, got ${outcome.options.length}`);
+      for (const option of outcome.options) {
+        const term = Number(option.termYears || optionTermFromUrl(option.url));
+        if (!PIPELINE_TERMS.includes(term)) failures.push(`mapped option has no valid term: ${option.label || option.url}`);
+        if (option.hardwareOnly === true) failures.push(`${term || '?'}Y retained a whole-cart Hardware Only flag`);
+        const replacement = option.verification?.replacements?.[0];
+        const replacementTargets = replacement?.to || [];
+        if (replacement?.hardwareOnly !== true) {
+          failures.push(`${term || '?'}Y lost the explicit bare-EOL replacement proof`);
+        }
+        if (!replacementTargets.length
+            || replacementTargets.some((line) => line?.role === 'license' || /^LIC-/.test(String(line?.sku || '')))) {
+          failures.push(`${term || '?'}Y lost the structural bare-EOL replacement proof`);
+        }
+        if (qtyInPipelineOption(option, /^MX67$/) !== 1) failures.push(`${term || '?'}Y MX67 quantity was not x1`);
+        if (qtyInPipelineOption(option, new RegExp(`^LIC-ENT-${term}YR$`)) !== 2) {
+          failures.push(`${term || '?'}Y LIC-ENT quantity was not x2`);
+        }
+        if ((option.items || []).some((item) => /^LIC-MX67-/.test(item.sku))) {
+          failures.push(`${term || '?'}Y hardware-only replacement gained an MX67 license`);
+        }
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'duplicate URLs preserve reviewed option identity through Zoho index rebasing',
+    run: runDuplicateUrlOptionIdentityPipeline,
+    stageLabel: 'extension-option-index-handoff',
+    check: (outcome) => {
+      const failures = [];
+      if (!outcome.ok) failures.push('index selection helpers did not preserve independent alternatives');
+      if (JSON.stringify(outcome.selected) !== '[1]') failures.push(`second option selected as ${JSON.stringify(outcome.selected)}`);
+      if (JSON.stringify(outcome.rebased) !== '[1]') failures.push(`downstream handoff rebased as ${JSON.stringify(outcome.rebased)}`);
+      if (JSON.stringify(outcome.toggledFirst) !== '[1,0]') failures.push('selecting the first duplicate collapsed the second');
+      if (JSON.stringify(outcome.toggledSecondBackOff) !== '[0]') failures.push('deselecting the second duplicate changed the first');
+      return failures;
+    },
+  },
   {
     name: 'malformed EOL MX64 tier fails closed without a default SEC refresh',
     rows: [{ sku: 'LIC-MX64-NOPE-3YR', qty: 1 }],
@@ -792,11 +1004,14 @@ const REAL_PIPELINE_CASES = [
 
 function runActualPipelineMatrix() {
   return REAL_PIPELINE_CASES.map((testCase) => {
-    const outcome = runActualQuotePipeline(testCase.rows, {
-      sourceText: testCase.sourceText,
-      workerInputText: testCase.workerInputText,
-      workerParsedInput: testCase.workerParsedInput,
-    });
+    const outcome = typeof testCase.run === 'function'
+      ? testCase.run()
+      : runActualQuotePipeline(testCase.rows, {
+        sourceText: testCase.sourceText,
+        workerInputText: testCase.workerInputText,
+        workerParsedInput: testCase.workerParsedInput,
+        tamperQuoteOptions: testCase.tamperQuoteOptions,
+      });
     const failures = testCase.check(outcome);
     return {
       name: testCase.name,
@@ -817,14 +1032,15 @@ function runActualPipelineMatrix() {
 // action. The result is asynchronous because buildOneshotIntake is the actual
 // Worker intake implementation.
 
-function gmailIntakeInput(body) {
-  return {
+function gmailIntakeInput(body, overrides = {}) {
+  const input = {
     source: 'ext-email-ecomm-intake',
     subject: 'Synthetic quote request',
     body_text: body,
     participants: [{ email: 'customer@example.com', name: 'Synthetic Customer', role: 'customer' }],
     messages: [{ index: 0, from_email: 'customer@example.com', body }],
   };
+  return { ...input, ...overrides };
 }
 
 function intakeModifiers(intent) {
@@ -834,12 +1050,12 @@ function intakeModifiers(intent) {
   ] || [];
 }
 
-async function runActualGmailIntakePipeline(body) {
+async function runActualGmailIntakePipeline(body, inputOverrides = {}) {
   let extractorCalls = 0;
   let intake;
   try {
     intake = await workerBuildOneshotIntake(
-      gmailIntakeInput(body),
+      gmailIntakeInput(body, inputOverrides),
       {},
       'sales@example.com',
       async () => {
@@ -905,6 +1121,7 @@ async function runActualGmailIntakePipeline(body) {
   }
 
   let candidates = workerOptionsFromMessage(built?.message);
+  candidates = workerAttachTrustedQuoteOptionContracts(candidates, built?.quoteOptionContracts);
   candidates = applyExplicitMxWarmSpareToQuoteOptions(candidates, intent.ha_requested === true);
   const verified = verifyStratusOrderUrlOptions(candidates, normalized, {
     licenseTier: intent.hardware_only === true ? null : intent.license_tier,
@@ -926,6 +1143,7 @@ async function runActualGmailIntakePipeline(body) {
     rawOptions: candidates.map(decode),
     options: (verified.ok ? verified.urls : []).map(decode),
     publishedOptionCount: verified.urls.length,
+    dropped: verified.dropped || [],
   };
 }
 
@@ -1024,7 +1242,110 @@ function explicitCompanionIntakeCase(firstTier, secondTier) {
   };
 }
 
+const REPORTED_THREAD_CUSTOMER_REQUEST = `Hi Chris,
+Please quote renewal options for 2 x LIC-ENT-3YR and 1 x LIC-MX64-SEC-3YR.
+Thanks!`;
+const REPORTED_THREAD_ORDER_URLS = [
+  'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,LIC-MX64-SEC-1YR&qty=2,1',
+  'https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,LIC-MX64-SEC-3YR&qty=2,1',
+  'https://stratusinfosystems.com/order/?item=LIC-ENT-5YR,LIC-MX64-SEC-5YR&qty=2,1',
+  'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,MX67,LIC-MX67-SEC-1YR&qty=2,1,1',
+  'https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,MX67,LIC-MX67-SEC-3YR&qty=2,1,1',
+  'https://stratusinfosystems.com/order/?item=LIC-ENT-5YR,MX67,LIC-MX67-SEC-5YR&qty=2,1,1',
+];
+const REPORTED_THREAD_INTERNAL_REPLY = [
+  'Here are the Renew As-Is and MX67 Refresh options:',
+  ...REPORTED_THREAD_ORDER_URLS,
+].join('\n');
+const REPORTED_THREAD_APPROVAL = 'The MX67 refresh quote looks good. Please proceed with that option.';
+
 const REAL_INTAKE_CASES = [
+  {
+    name: 'reported multi-message thread keeps the original external request ahead of six outgoing carts',
+    body: [REPORTED_THREAD_CUSTOMER_REQUEST, REPORTED_THREAD_INTERNAL_REPLY, REPORTED_THREAD_APPROVAL].join('\n\n'),
+    inputOverrides: {
+      subject: 'MX64 renewal and refresh options',
+      order_urls: REPORTED_THREAD_ORDER_URLS,
+      messages: [
+        { index: 0, from_email: 'customer@example.com', body: REPORTED_THREAD_CUSTOMER_REQUEST },
+        { index: 1, from_email: 'chrisg@stratusinfosystems.com', body: REPORTED_THREAD_INTERNAL_REPLY },
+        { index: 2, from_email: 'customer@example.com', body: REPORTED_THREAD_APPROVAL },
+      ],
+    },
+    preview: true,
+    check: (outcome) => {
+      const failures = [];
+      if (!outcome.ok) failures.push(`${outcome.stage}: ${outcome.error || 'no verified quote options'}`);
+      if (outcome.extractorCalls !== 0) failures.push(`literal thread intake invoked the extractor ${outcome.extractorCalls} time(s)`);
+      if (outcome.intake?.selected_message_index !== 0) {
+        failures.push(`selected message ${String(outcome.intake?.selected_message_index)}, expected original external index 0`);
+      }
+      if (outcome.intake?.used_structured_message !== true) failures.push('structured external message was not authoritative');
+      if (outcome.intake?.used_order_url !== false) failures.push('a later outgoing order URL replaced the original request');
+      const lines = (outcome.intake?.lines || []).map(({ sku, qty, status }) => ({ sku, qty, status }));
+      if (JSON.stringify(lines) !== JSON.stringify([
+        { sku: 'LIC-ENT-3YR', qty: 2, status: 'resolved' },
+        { sku: 'LIC-MX64-SEC-3YR', qty: 1, status: 'resolved' },
+      ])) failures.push(`authoritative request rows changed: ${JSON.stringify(lines)}`);
+      const refresh = (outcome.options || []).filter((option) => option.optionKind === 'eol_refresh');
+      const renewals = (outcome.options || []).filter((option) => option.optionKind !== 'eol_refresh');
+      if (renewals.length !== 3 || refresh.length !== 3) {
+        failures.push(`expected 3 Renew As-Is + 3 MX67 Refresh choices, got ${renewals.length} + ${refresh.length}`);
+      }
+      for (const term of PIPELINE_TERMS) {
+        const renewal = pipelineOptionForTerm(renewals, term);
+        const replacement = pipelineOptionForTerm(refresh, term);
+        if (qtyInPipelineOption(renewal, new RegExp(`^LIC-ENT-${term}YR$`)) !== 2
+            || qtyInPipelineOption(renewal, new RegExp(`^LIC-MX64-SEC-${term}YR$`)) !== 1) {
+          failures.push(`${term}Y original Renew As-Is composition changed`);
+        }
+        if (qtyInPipelineOption(replacement, /^MX67$/) !== 1
+            || qtyInPipelineOption(replacement, new RegExp(`^LIC-MX67-SEC-${term}YR$`)) !== 1
+            || qtyInPipelineOption(replacement, new RegExp(`^LIC-ENT-${term}YR$`)) !== 2) {
+          failures.push(`${term}Y original MX67 Refresh composition changed`);
+        }
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'reported Gmail-equivalent MX64 renewal exposes Renew As-Is and MX67 Refresh alternatives',
+    // Semantic CSV form of the two rows visible in the reported Gmail table.
+    // This keeps the case focused on intake → EOL option construction and does
+    // not make the harness depend on Gmail's accessibility flattening of cells.
+    body: 'Hi Aaron,\n\nWe need updated licensing for our equipment. Can you send a quote for updating the following licenses?\n\nSKU,Count\nLIC-ENT-3YR,2\nLIC-MX64-SEC-3YR,1\n\nRegards,\nSean Carpenter',
+    preview: true,
+    check: (outcome) => {
+      const failures = [];
+      if (!outcome.ok) failures.push(`${outcome.stage}: ${outcome.error || 'no verified quote options'}`);
+      if (outcome.extractorCalls !== 0) failures.push(`literal Gmail intake invoked the extractor ${outcome.extractorCalls} time(s)`);
+      const lines = (outcome.intake?.lines || []).map(({ sku, qty, status }) => ({ sku, qty, status }));
+      if (JSON.stringify(lines) !== JSON.stringify([
+        { sku: 'LIC-ENT-3YR', qty: 2, status: 'resolved' },
+        { sku: 'LIC-MX64-SEC-3YR', qty: 1, status: 'resolved' },
+      ])) failures.push(`reported Gmail rows changed: ${JSON.stringify(lines)}`);
+      const refresh = (outcome.options || []).filter((option) => option.optionKind === 'eol_refresh');
+      const renewals = (outcome.options || []).filter((option) => option.optionKind !== 'eol_refresh');
+      if (refresh.length !== 3 || renewals.length !== 3) {
+        failures.push(`expected 3 Renew As-Is + 3 MX67 Refresh choices, got ${renewals.length} + ${refresh.length}`);
+      }
+      if (selectableQuoteTerms(outcome.options).length !== 6) failures.push('same-term Gmail alternatives collapsed');
+      for (const term of PIPELINE_TERMS) {
+        const renewal = pipelineOptionForTerm(renewals, term);
+        const replacement = pipelineOptionForTerm(refresh, term);
+        if (qtyInPipelineOption(renewal, new RegExp(`^LIC-ENT-${term}YR$`)) !== 2
+            || qtyInPipelineOption(renewal, new RegExp(`^LIC-MX64-SEC-${term}YR$`)) !== 1) {
+          failures.push(`${term}Y Renew As-Is composition changed`);
+        }
+        if (qtyInPipelineOption(replacement, /^MX67$/) !== 1
+            || qtyInPipelineOption(replacement, new RegExp(`^LIC-MX67-SEC-${term}YR$`)) !== 1
+            || qtyInPipelineOption(replacement, new RegExp(`^LIC-ENT-${term}YR$`)) !== 2) {
+          failures.push(`${term}Y MX67 Refresh composition changed`);
+        }
+      }
+      return failures;
+    },
+  },
   {
     name: 'literal LIC-ENT never reties blank MX67 away from default SEC',
     body: 'Please quote 2 LIC-ENT-3YR and 1 MX67.',
@@ -1077,7 +1398,7 @@ const REAL_INTAKE_CASES = [
 async function runActualIntakeMatrix() {
   const results = [];
   for (const testCase of REAL_INTAKE_CASES) {
-    const outcome = await runActualGmailIntakePipeline(testCase.body);
+    const outcome = await runActualGmailIntakePipeline(testCase.body, testCase.inputOverrides);
     const failures = testCase.check(outcome);
     results.push({
       name: testCase.name,
@@ -1092,6 +1413,29 @@ async function runActualIntakeMatrix() {
 }
 
 const SCENARIOS = [
+  {
+    id: 'pairedMx67',
+    name: 'Reported MX67 + explicit SEC license',
+    covers: 'counted-once pairing review',
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: 'MX67', qty: 1 },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+    ],
+  },
+  {
+    id: 'eolAlternatives',
+    name: 'MX64 Renew As-Is + MX67 Refresh',
+    covers: 'same-term EOL alternative selection',
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: 'LIC-MX64-SEC-3YR', qty: 1 },
+    ],
+    actualQuote: {
+      sourceText: 'renew LIC-ENT-3YR x2 and LIC-MX64-SEC-3YR x1',
+      workerInputText: 'renew LIC-ENT-3YR x2 and LIC-MX64-SEC-3YR x1',
+    },
+  },
   {
     id: 'terms',
     name: 'Term dropdown + Hardware Only',
@@ -1117,6 +1461,19 @@ const SCENARIOS = [
     rows: [{ sku: 'MR44', qty: 1 }, { sku: 'MS130-24', qty: 2 }, { sku: 'CW9164I', qty: 5 }],
   },
 ];
+
+function resultForScenario(scenario) {
+  if (scenario?.actualQuote) {
+    const outcome = runActualQuotePipeline(scenario.rows, scenario.actualQuote);
+    return {
+      urls: outcome.ok ? outcome.options : [],
+      parsedItems: scenario.rows,
+      deterministic: true,
+      ...(outcome.ok ? {} : { error: outcome.error || 'Actual quote pipeline failed.' }),
+    };
+  }
+  return { urls: buildQuoteOptions(scenario.rows), parsedItems: scenario.rows };
+}
 
 // ── Automated matrix ────────────────────────────────────────────────────────
 // Each case: a starting cart, an edit, and the expectation. Every case runs the
@@ -1394,7 +1751,7 @@ function Harness() {
   const scenario = useMemo(() => SCENARIOS.find((s) => s.id === activeId), [activeId]);
 
   const [rows, setRows] = useState(scenario.rows);
-  const [result, setResult] = useState(() => ({ urls: buildQuoteOptions(scenario.rows), parsedItems: scenario.rows }));
+  const [result, setResult] = useState(() => resultForScenario(scenario));
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState('');
   const [log, setLog] = useState([]);
@@ -1417,7 +1774,7 @@ function Harness() {
     const next = SCENARIOS.find((s) => s.id === id);
     setActiveId(id);
     setRows(next.rows);
-    setResult({ urls: buildQuoteOptions(next.rows), parsedItems: next.rows });
+    setResult(resultForScenario(next));
     setDirty(false);
     setStatus('');
     setMatrix(null);
@@ -1529,6 +1886,9 @@ function Harness() {
           <div className="card">
             <h2>Actual pipeline results</h2>
             <div className="log" id="actual-pipeline-out" data-worker-sha256={HARNESS_WORKER_SOURCE_SHA256}>
+              <div id="harness-runtime-errors" className={HARNESS_RUNTIME_ERRORS.length || HARNESS_CONSOLE_ERRORS.length ? 'assert-fail' : 'assert-pass'}>
+                Browser runtime errors: {HARNESS_RUNTIME_ERRORS.length}; console errors: {HARNESS_CONSOLE_ERRORS.length}
+              </div>
               <div className={actualPipeline.every((resultRow) => resultRow.pass) ? 'assert-pass' : 'assert-fail'}>
                 {actualPipeline.filter((resultRow) => resultRow.pass).length}/{actualPipeline.length} actual-pipeline cases passed
               </div>
@@ -2001,6 +2361,9 @@ window.__stratus = {
   actualIntakeLoop: runActualIntakeMatrix,
   ACTUAL_INTAKE_CASES: REAL_INTAKE_CASES,
   workerSourceSha256: HARNESS_WORKER_SOURCE_SHA256,
+  runtimeErrors: HARNESS_RUNTIME_ERRORS,
+  consoleErrors: HARNESS_CONSOLE_ERRORS,
+  pairedLicenseReview: licensePairReviewForRows,
   replan: oneshotReplan,
   replanLegacy,
   CASES: REPLAN_CASES,

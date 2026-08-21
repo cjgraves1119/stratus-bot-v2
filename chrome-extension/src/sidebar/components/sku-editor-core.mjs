@@ -46,12 +46,14 @@ export function editableRowsFromResult(result) {
     const resolvedSku = String(item?.resolvedSku || '').trim().toUpperCase();
     const sku = resolvedSku || typedSku;
     const rawTier = String(item?.tier || item?.requestedTier || '').trim().toUpperCase().replace(/[\s_-]+/g, '');
-    const tier = sku.startsWith('LIC-') ? '' : ({
-      ENT: 'enterprise', ENTERPRISE: 'enterprise',
-      SEC: 'security', SECURITY: 'security', ADVANCEDSECURITY: 'security',
-      SDW: 'sdwan', SDWAN: 'sdwan', SDWANPLUS: 'sdwan',
-      A: 'advanced', ADV: 'advanced', ADVANCED: 'advanced', ADVANTAGE: 'advanced',
-    })[rawTier] || '';
+    const tier = sku.startsWith('LIC-')
+      ? ''
+      : (item?.hardwareOnly === true ? 'none' : ({
+        ENT: 'enterprise', ENTERPRISE: 'enterprise',
+        SEC: 'security', SECURITY: 'security', ADVANCEDSECURITY: 'security',
+        SDW: 'sdwan', SDWAN: 'sdwan', SDWANPLUS: 'sdwan',
+        A: 'advanced', ADV: 'advanced', ADVANCED: 'advanced', ADVANTAGE: 'advanced',
+      })[rawTier] || '');
     return {
       sku,
       qty: Number(item?.qty ?? item?.quantity) || 1,
@@ -255,6 +257,135 @@ export function licenseTierValueFromMode(tier) {
     case 'SD-WAN': return 'sdwan';
     default: return '';
   }
+}
+
+/**
+ * Concrete tier encoded by a device-specific licence SKU.
+ *
+ * This is intentionally stricter than the Worker's general SKU parsing. A
+ * shared family licence such as LIC-ENT-3YR does not name the device it covers,
+ * so the review UI must not claim that it is paired with one particular MR or
+ * CW row. This first review contract is MX-only: legacy Z models have a
+ * different blank-tier default from Z4, which cannot be inferred safely from
+ * licenseFamilyForSku() alone.
+ */
+export function deviceLicenseTierFromSku(sku) {
+  const value = String(sku || '').trim().toUpperCase();
+  if (!value.startsWith('LIC-')) return '';
+  const segments = value.slice(4).split('-').filter(Boolean);
+  if (segments.includes('ENT') || segments.includes('ENTERPRISE')) return 'enterprise';
+  if (segments.includes('SEC') || segments.includes('SECURITY')) return 'security';
+  if (segments.includes('SDW') || segments.includes('SDWAN')) return 'sdwan';
+  return '';
+}
+
+/** Effective reviewed tier for hardware whose concrete licence can be paired. */
+export function effectivePairableHardwareTier(row) {
+  const family = licenseFamilyForSku(row?.sku);
+  if (family !== 'mx') return '';
+  const selected = String(row?.tier || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!selected) return 'security';
+  if (selected === 'enterprise' || selected === 'ent') return 'enterprise';
+  if (selected === 'security' || selected === 'sec' || selected === 'advancedsecurity') return 'security';
+  if (selected === 'sdwan' || selected === 'sdwanplus' || selected === 'sdw') return 'sdwan';
+  return '';
+}
+
+function reviewQuantity(row) {
+  const raw = typeof row?.qty === 'number' ? String(row.qty) : String(row?.qty ?? '').trim();
+  if (!/^\d{1,5}$/.test(raw)) return null;
+  const qty = Number(raw);
+  return Number.isInteger(qty) && qty > 0 && qty <= 99999 ? qty : null;
+}
+
+function uniqueReviewSkus(rows, indexes) {
+  return [...new Set(indexes
+    .map((index) => String(rows[index]?.sku || '').trim().toUpperCase())
+    .filter(Boolean))];
+}
+
+/**
+ * Derive read-only hardware/licence pairing annotations from the CURRENT rows.
+ * No flag is persisted on a row, so changing a SKU, quantity, or tier always
+ * recomputes the review and stale "paired" state cannot survive an edit.
+ *
+ * Pairing is conservative:
+ * - only MX device-specific licences participate;
+ * - device identity and effective tier must match;
+ * - duplicate rows aggregate, but multiple distinct licence products (for
+ *   example mixed 1YR and 3YR terms) are a mismatch rather than one pair;
+ * - exact aggregate quantities are paired; same-scope differences are marked
+ *   as mismatches; unrelated or different-tier licences remain unpaired.
+ */
+export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  const review = list.map(() => ({ kind: 'none' }));
+  const hardwareGroups = [];
+
+  list.forEach((row, index) => {
+    const sku = String(row?.sku || '').trim().toUpperCase();
+    if (!sku || sku.startsWith('LIC-')) return;
+    const tier = effectivePairableHardwareTier(row);
+    if (!tier) return;
+    let group = hardwareGroups.find((candidate) => (
+      candidate.tier === tier && sameDeviceIdentity(candidate.anchorSku, sku)
+    ));
+    if (!group) {
+      group = { anchorSku: sku, tier, hardwareIndexes: [], licenseIndexes: [] };
+      hardwareGroups.push(group);
+    }
+    group.hardwareIndexes.push(index);
+  });
+
+  list.forEach((row, index) => {
+    const sku = String(row?.sku || '').trim().toUpperCase();
+    const tier = deviceLicenseTierFromSku(sku);
+    if (!tier) return;
+    // licenseFamilyForSku() quite correctly calls every LIC-* row "license";
+    // inspect its device token to keep this visual contract MX-only.
+    const deviceFamily = licenseFamilyForSku(skuModelToken(sku));
+    if (deviceFamily !== 'mx') return;
+    const matches = hardwareGroups.filter((candidate) => (
+      candidate.tier === tier && sameDeviceIdentity(candidate.anchorSku, sku)
+    ));
+    // Ambiguous identity must never be dressed up as a confirmed pairing.
+    if (matches.length === 1) matches[0].licenseIndexes.push(index);
+  });
+
+  for (const group of hardwareGroups) {
+    if (!group.licenseIndexes.length) continue;
+    const hardwareQuantities = group.hardwareIndexes.map((index) => reviewQuantity(list[index]));
+    const licenseQuantities = group.licenseIndexes.map((index) => reviewQuantity(list[index]));
+    const hardwareQty = hardwareQuantities.every(Number.isInteger)
+      ? hardwareQuantities.reduce((sum, qty) => sum + qty, 0)
+      : null;
+    const licenseQty = licenseQuantities.every(Number.isInteger)
+      ? licenseQuantities.reduce((sum, qty) => sum + qty, 0)
+      : null;
+    const hardwareSkus = uniqueReviewSkus(list, group.hardwareIndexes);
+    const licenseSkus = uniqueReviewSkus(list, group.licenseIndexes);
+    const exactProduct = licenseSkus.length === 1;
+    const exactPair = exactProduct && hardwareQty !== null && licenseQty !== null && hardwareQty === licenseQty;
+    const warmSparePair = allowHaLicenseRatio === true
+      && exactProduct
+      && hardwareQty !== null
+      && licenseQty !== null
+      && hardwareQty === licenseQty * 2;
+    const kind = exactPair || warmSparePair ? 'paired' : 'mismatch';
+    const common = {
+      kind,
+      hardwareQty,
+      licenseQty,
+      hardwareSkus,
+      licenseSkus,
+      tier: group.tier,
+      ...(warmSparePair ? { warmSpare: true } : {}),
+    };
+    group.hardwareIndexes.forEach((index) => { review[index] = { ...common, role: 'hardware' }; });
+    group.licenseIndexes.forEach((index) => { review[index] = { ...common, role: 'license' }; });
+  }
+
+  return review;
 }
 
 /**

@@ -61,6 +61,8 @@ test('visible Create Quote is a read-only Gmail eCommerce action, never generic 
   assert.match(build, /license_tier === 'ENT'/);
   assert.match(build, /label: 'Hardware Only'/);
   assert.match(build, /hardwareOnly: true/);
+  assert.match(build, /quoteModifiers\.push\('use warm spare HA'\)/,
+    'reviewed Gmail HA intent must reach the Worker before a structured EOL contract is built');
   assert.match(build, /Pricing\/link generation was unavailable/);
   assert.doesNotMatch(build, /MSG\.ONESHOT_PLAN|MSG\.ONESHOT_EXECUTE|CRM_/);
 });
@@ -141,7 +143,9 @@ test('returned 1-5-year options are explicit and only the separate button enters
   // checkbox multiselect (2026-08-17) so 1/3/5-year options can be checked
   // together and created as separate quotes under the same deal.
   assert.match(quoteSource, /Create Zoho CRM quote from selected/);
-  assert.match(quoteSource, /type="checkbox"[\s\S]*checked=\{selectedIndexes\.includes\(option\.index\)\}/);
+  assert.match(quoteSource, /type="checkbox"[\s\S]*checked=\{validSelectedIndexes\.includes\(option\.index\)\}/);
+  assert.match(quoteSource, /onChange=\{\(\) => toggleIndex\(option\.index\)\}/);
+  assert.match(quoteSource, /onSendToZoho\(result, validSelectedIndexes\)/);
   assert.doesNotMatch(quoteSource, /<option value="" disabled>Select a term or Hardware Only…<\/option>/);
   assert.match(quoteSource, /disabled=\{busy \|\| !hasExplicitTermSelection\}/);
   assert.doesNotMatch(quoteSource, /Math\.max\(0, urls\.findIndex/);

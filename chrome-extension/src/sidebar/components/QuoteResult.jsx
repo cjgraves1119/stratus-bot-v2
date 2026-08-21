@@ -16,6 +16,11 @@
 import { useEffect, useState } from 'react';
 import { COLORS } from '../../lib/constants';
 import { selectableQuoteTerms } from '../../lib/email-quote-flow.mjs';
+import {
+  normalizeQuoteOptionIndexes,
+  selectQuoteOptionIndex,
+  toggleQuoteOptionIndex,
+} from './quote-option-selection.mjs';
 import SkuQuantityEditor from './SkuQuantityEditor';
 
 function escapeHtml(value) {
@@ -65,11 +70,14 @@ export default function QuoteResult({
   onProductSearch,
   draftTier = '',
   onDraftTierChange,
+  allowHaLicenseRatio = false,
 }) {
   const [copiedIdx, setCopiedIdx] = useState(null);
   // Copy/Open also select that option for Zoho. Multiple terms can be checked
-  // so 1/3/5-year quotes are created under the same deal.
-  const [selectedUrls, setSelectedUrls] = useState([]);
+  // so 1/3/5-year quotes are created under the same deal. Selection identity
+  // is the reviewed option INDEX, not its URL: two semantically distinct
+  // alternatives are allowed to share one deterministic cart URL.
+  const [selectedIndexes, setSelectedIndexes] = useState([]);
   const urls = Array.isArray(result?.urls) ? result.urls : [];
   const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : [];
   const termOptions = selectableQuoteTerms(urls);
@@ -79,31 +87,21 @@ export default function QuoteResult({
   // Suggestions are unresolved input, and edits are uncommitted input. In
   // either state every link/term/Zoho action from the prior response is stale.
   const quoteActionsBlocked = busy || draftDirty || suggestions.length > 0;
-  const selectedIndexes = urls
-    .map((option, index) => (selectedUrls.includes(String(option?.url || '')) ? index : -1))
-    .filter((index) => index >= 0);
-  const hasExplicitTermSelection = selectedIndexes.length > 0;
+  const validSelectedIndexes = normalizeQuoteOptionIndexes(selectedIndexes, urls.length);
+  const hasExplicitTermSelection = validSelectedIndexes.length > 0;
 
-  function selectUrl(url, { exclusive = false } = {}) {
-    const next = String(url || '');
-    if (!next) return;
-    setSelectedUrls((current) => {
-      if (exclusive) return [next];
-      if (current.includes(next)) return current;
-      return [...current, next];
-    });
-  }
-
-  function toggleUrl(url) {
-    const next = String(url || '');
-    if (!next) return;
-    setSelectedUrls((current) => (
-      current.includes(next) ? current.filter((item) => item !== next) : [...current, next]
+  function selectIndex(index, { exclusive = false } = {}) {
+    setSelectedIndexes((current) => selectQuoteOptionIndex(
+      current, index, urls.length, { exclusive },
     ));
   }
 
+  function toggleIndex(index) {
+    setSelectedIndexes((current) => toggleQuoteOptionIndex(current, index, urls.length));
+  }
+
   useEffect(() => {
-    setSelectedUrls([]);
+    setSelectedIndexes([]);
   }, [resultRevision]);
 
   if (!result) return null;
@@ -111,7 +109,7 @@ export default function QuoteResult({
   async function handleCopy(text, idx) {
     await plainCopy(text);
     const url = urls[idx]?.url;
-    if (url) selectUrl(url);
+    if (url) selectIndex(idx);
     setCopiedIdx(idx);
     setTimeout(() => setCopiedIdx(null), 2000);
   }
@@ -199,6 +197,7 @@ export default function QuoteResult({
           status={draftStatus}
           tier={draftTier}
           onTierChange={onDraftTierChange}
+          allowHaLicenseRatio={allowHaLicenseRatio}
         />
       )}
 
@@ -285,20 +284,20 @@ export default function QuoteResult({
           {urls.map((urlObj, i) => (
             <div key={i} style={{
               background: COLORS.BG_PRIMARY,
-              border: `1px solid ${selectedIndexes.includes(i) ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
+              border: `1px solid ${validSelectedIndexes.includes(i) ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
               borderRadius: 8, padding: 10, marginBottom: 8,
             }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontWeight: 600, cursor: busy ? 'default' : 'pointer' }}>
                   <input
                     type="checkbox"
-                    checked={selectedIndexes.includes(i)}
+                    checked={validSelectedIndexes.includes(i)}
                     disabled={busy}
-                    onChange={() => toggleUrl(urlObj.url)}
+                    onChange={() => toggleIndex(i)}
                   />
                   {urlObj.label || `Option ${i + 1}`}
                 </label>
-                {selectedIndexes.includes(i) && (
+                {validSelectedIndexes.includes(i) && (
                   <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.STRATUS_BLUE }}>
                     selected for Zoho
                   </span>
@@ -328,7 +327,7 @@ export default function QuoteResult({
                 </button>
                 <a
                   href={urlObj.url} target="_blank" rel="noopener"
-                  onClick={() => selectUrl(urlObj.url)}
+                  onClick={() => selectIndex(i)}
                   style={{
                     flex: 1, padding: '6px 10px', background: 'transparent',
                     color: COLORS.STRATUS_BLUE, border: `1px solid ${COLORS.STRATUS_BLUE}`,
@@ -352,9 +351,9 @@ export default function QuoteResult({
                 <label key={`${option.index}:${option.url}`} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginBottom: 3, cursor: busy ? 'default' : 'pointer' }}>
                   <input
                     type="checkbox"
-                    checked={selectedIndexes.includes(option.index)}
+                    checked={validSelectedIndexes.includes(option.index)}
                     disabled={busy}
-                    onChange={() => toggleUrl(option.url)}
+                    onChange={() => toggleIndex(option.index)}
                   />
                   {option.years && option.label !== `${option.years}-Year`
                     ? `${option.years}-Year: ${option.label}`
@@ -362,7 +361,7 @@ export default function QuoteResult({
                 </label>
               ))}
               <button
-                onClick={() => hasExplicitTermSelection && onSendToZoho(result, selectedIndexes)}
+                onClick={() => hasExplicitTermSelection && onSendToZoho(result, validSelectedIndexes)}
                 disabled={busy || !hasExplicitTermSelection}
                 style={{
                   width: '100%', padding: '7px 10px', background: '#7b1fa2',
@@ -376,8 +375,8 @@ export default function QuoteResult({
               >
                 {busy
                   ? 'Preparing Zoho review…'
-                  : (selectedIndexes.length > 1
-                    ? `Create ${selectedIndexes.length} Zoho CRM quotes from selected`
+                  : (validSelectedIndexes.length > 1
+                    ? `Create ${validSelectedIndexes.length} Zoho CRM quotes from selected`
                     : (hasExplicitTermSelection ? 'Create Zoho CRM quote from selected' : 'Select an option to enable Zoho conversion'))}
               </button>
             </div>

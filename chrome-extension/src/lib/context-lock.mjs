@@ -49,6 +49,12 @@ function sanitizeStoredQuoteMessage(message) {
       label: safeCustomerVisibleString(source.label, 160) || `Option ${index + 1}`,
     };
     if (source.hardwareOnly === true) stored.hardwareOnly = true;
+    const termYears = Number(source.termYears);
+    if (Number.isInteger(termYears) && termYears >= 1 && termYears <= 5) stored.termYears = termYears;
+    const optionKind = safeCustomerVisibleString(source.optionKind, 40);
+    const optionGroupId = safeCustomerVisibleString(source.optionGroupId, 100);
+    if (optionKind) stored.optionKind = optionKind;
+    if (optionGroupId) stored.optionGroupId = optionGroupId;
     return stored;
   }).filter(Boolean).slice(0, MAX_STORED_QUOTE_URLS);
   if (urls.length === 0) return null;
@@ -58,7 +64,29 @@ function sanitizeStoredQuoteMessage(message) {
       const baseSku = safeCustomerVisibleString(item?.baseSku || item?.sku, 160);
       const qty = Number(item?.qty);
       if (!baseSku || !Number.isFinite(qty) || qty <= 0 || qty > 500) return null;
-      return { baseSku, qty: Math.floor(qty) };
+      const resolvedSku = safeCustomerVisibleString(item?.resolvedSku, 160).trim().toUpperCase();
+      const safeResolvedSku = /^[A-Z0-9][A-Z0-9._/-]{1,79}$/.test(resolvedSku)
+        ? resolvedSku
+        : '';
+      const requestedTier = safeCustomerVisibleString(item?.requestedTier || item?.tier, 40)
+        .toUpperCase().replace(/[\s_-]+/g, '');
+      const effectiveSku = safeResolvedSku || baseSku.trim().toUpperCase();
+      const hardwareOnly = item?.hardwareOnly === true
+        && item?.licenseOnly !== true
+        && !effectiveSku.startsWith('LIC-');
+      const licenseOnly = item?.licenseOnly === true
+        && item?.hardwareOnly !== true
+        && effectiveSku.startsWith('LIC-');
+      return {
+        baseSku,
+        qty: Math.floor(qty),
+        ...(safeResolvedSku ? { resolvedSku: safeResolvedSku } : {}),
+        ...(hardwareOnly ? { hardwareOnly: true } : {}),
+        ...(licenseOnly ? { licenseOnly: true } : {}),
+        ...(['ENT', 'ENTERPRISE', 'SEC', 'SECURITY', 'ADVANCEDSECURITY', 'SDW', 'SDWAN', 'SDWANPLUS', 'A', 'ADVANCED', 'E', 'ESSENTIALS'].includes(requestedTier)
+          ? { requestedTier }
+          : {}),
+      };
     })
     .filter(Boolean)
     .slice(0, MAX_STORED_QUOTE_ITEMS);
@@ -480,10 +508,13 @@ function sanitizeStoredOneshotMessage(message) {
       return {
         url,
         label: safeCustomerVisibleString(option?.label, 160) || `Option ${index + 1}`,
-        // Preserve only the two reviewed quote-option semantics needed to
-        // re-plan safely after a side-panel reload. Product search results,
-        // editor drafts, and every other option field remain excluded.
+        // Preserve only the reviewed quote-option semantics needed to re-plan
+        // safely after a side-panel reload. The kind/group keep same-term
+        // renewal and EOL-refresh alternatives distinct; product search
+        // results, editor drafts, and every other option field stay excluded.
         hardwareOnly: option?.hardwareOnly === true,
+        optionKind: safeCustomerVisibleString(option?.optionKind, 40),
+        optionGroupId: safeCustomerVisibleString(option?.optionGroupId, 100),
         termYears: Number.isInteger(termYears) && termYears >= 1 && termYears <= 5
           ? termYears
           : null,

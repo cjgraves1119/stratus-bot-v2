@@ -185,9 +185,9 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
   });
   check('gate probes never invoked the extractor', () => assert.strictEqual(I.ctl.extractorCalls, 0));
 
-  console.log('\n(1b) extension order_urls — strict, deterministic, most recent cart only');
+  console.log('\n(1b) extension order_urls — selected request first, strict last-cart fallback');
 
-  await checkAsync('last exact order URL wins and preserves line order + exact quantities', async () => {
+  await checkAsync('when message parsing yields no safe lines, last exact order URL wins and preserves line order + exact quantities', async () => {
     const U = loadIntake();
     const input = {
       ...EMAIL_INPUT,
@@ -205,7 +205,7 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
     assert.deepStrictEqual(r.lines.map((line) => [line.sku, line.qty]), [
       ['MX75', 2], ['LIC-MX75-SEC-3Y', 1], ['MA-PWR-CORD-US', 4],
     ]);
-    assert.strictEqual(U.ctl.parseCalls, 0, 'generic parseMessage must not run');
+    assert.strictEqual(U.ctl.parseCalls, 1, 'the authoritative request must be parsed before URL fallback');
     assert.strictEqual(U.ctl.validateCalls, 0, 'intake must not validate products');
     assert.strictEqual(extracted, 0, 'LLM extractor must not run');
   });
@@ -222,9 +222,29 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
     assert.deepStrictEqual(r.lines.map((line) => [line.sku, line.qty]), [
       ['CW9176D1-RTG', 31], ['LIC-ENT-1YR', 31],
     ]);
+    assert.strictEqual(U.ctl.parseCalls, 0, 'a truly link-only handoff has no message text to parse');
   });
 
-  await checkAsync('malformed selected item/qty pairs fail closed before parsing', async () => {
+  await checkAsync('an unresolved selected-message SKU may use one exact URL as the bounded fallback', async () => {
+    const U = loadIntake();
+    U.ctl.parseResult = { items: [{ sku: 'UNKNOWN-MODEL', qty: 2 }] };
+    const selectedCart = 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-3YR&qty=1,1';
+    const r = await U.buildOneshotIntake({
+      ...EMAIL_INPUT,
+      source: 'ext-email-ecomm-intake',
+      order_urls: [selectedCart],
+    }, {}, 'rep@stratusinfosystems.com', async () => { throw new Error('must not extract'); });
+    assert.strictEqual(r.success, true);
+    assert.strictEqual(r.used_order_url, true);
+    assert.strictEqual(r.selected_order_url, selectedCart);
+    assert.deepStrictEqual(r.lines.map((line) => [line.sku, line.qty]), [
+      ['MX67', 1], ['LIC-MX67-SEC-3YR', 1],
+    ]);
+    assert.strictEqual(U.ctl.parseCalls, 1);
+    assert.strictEqual(U.ctl.validateCalls, 1);
+  });
+
+  await checkAsync('malformed fallback item/qty pairs fail closed after the request parser yields no safe lines', async () => {
     const U = loadIntake();
     const input = {
       ...EMAIL_INPUT,
@@ -234,7 +254,7 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
     let extracted = 0;
     const r = await U.buildOneshotIntake(input, {}, 'rep@stratusinfosystems.com', async () => { extracted++; return {}; });
     assert.strictEqual(r.error, 'order_url_malformed');
-    assert.strictEqual(U.ctl.parseCalls, 0);
+    assert.strictEqual(U.ctl.parseCalls, 1);
     assert.strictEqual(U.ctl.validateCalls, 0);
     assert.strictEqual(extracted, 0);
   });
@@ -365,6 +385,14 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
     assert.strictEqual(r.intent.ha_requested, true);
     assert.strictEqual(r.intent.hardware_only, false);
     assert.ok(L.normalizeOneshotRequestText('2 - MX105 and 2 - MX85').includes('2 MX105'));
+  });
+  check('an approval plus a genuine new quote ask remains eligible as the current request', () => {
+    const L = loadIntake();
+    const selected = L.selectOneshotRequestedMessage([
+      { index: 0, from_email: 'jody@example.com', body: 'Please quote 1 MX67.' },
+      { index: 1, from_email: 'jody@example.com', body: 'The MX67 looks good. Could you provide us a quote for 2 MX85 as well?' },
+    ], '');
+    assert.strictEqual(selected.selected_message_index, 1);
   });
   check('HA detector accepts hyphen/plural intent and rejects quantity, unrelated spare, and negated wording', () => {
     for (const text of [

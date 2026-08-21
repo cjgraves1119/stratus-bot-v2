@@ -42,11 +42,13 @@ check('chat email-quote replies never auto-open a one-shot plan', () => {
 
 check('only the explicit quote-card button authorizes the first one-shot plan', () => {
   assert.ok(QUOTE.includes('Create Zoho CRM quote from selected'), 'explicit consent button is missing');
-  assert.ok(/onClick=\{\(\) => hasExplicitTermSelection && onSendToZoho\(result, selectedIndexes\)\}/.test(QUOTE), 'Zoho review must require a selected quote option and a separate button click');
+  assert.ok(/onClick=\{\(\) => hasExplicitTermSelection && onSendToZoho\(result, validSelectedIndexes\)\}/.test(QUOTE), 'Zoho review must require a selected quote option and a separate button click');
   const starts = SRC.match(/startOneshotFromUrl\(/g) || [];
   assert.strictEqual(starts.length, 2, `expected one declaration + one explicit call, found ${starts.length}`);
   const seg = SRC.slice(SRC.indexOf('async function handleSendQuoteToZoho'), SRC.indexOf('async function replanOneshot'));
-  assert.ok(/return startOneshotFromUrl\(orderUrl, \{[\s\S]*selectedQuoteOptionIndex: normalizedSelectedIndex >= 0 \? normalizedSelectedIndex : 0/.test(seg));
+  assert.ok(/rebaseQuoteOptionIndexes\([\s\S]*indexedQuoteOptions\.map\(\(option\) => option\.sourceIndex\)/.test(seg), 'Zoho handoff must preserve the original reviewed index after safe-option filtering');
+  assert.ok(/return startOneshotFromUrl\(orderUrl, \{[\s\S]*selectedQuoteOptionIndex: normalizedSelectedIndex/.test(seg));
+  assert.ok(!/findIndex\(\(option\) => option\.url ===/.test(seg), 'Zoho handoff must never collapse alternatives by URL equality');
   assert.ok(/consentSource: 'quote-card-button'/.test(seg), 'explicit consent provenance must be stored on the card');
   assert.ok(/msg\.consentSource !== 'quote-card-button'/.test(SRC), 'legacy auto/intake cards must render inert');
   assert.ok(!/auto\s*:|lastAutoPlanUrlRef|isOneshotAutoPlanEligible|action: 'oneshot_email'/.test(SRC), 'legacy proactive-plan entry points must be removed');
@@ -80,12 +82,12 @@ check('term switch parses the exact selected URL and re-plans the SAME card', ()
   assert.ok(/replanOneshot\(msg, \{[\s\S]*skus,[\s\S]*hardware_only: hardwareOnly,[\s\S]*\}, \{ \.\.\.messagePatch, selectedQuoteOptionIndex \}, \{ boundOptionSelection: true \}\)/.test(change), 'same card is not replanned in place with its reviewed account draft');
   assert.ok(/quoteOptionsSnapshotHash !== currentSnapshotHash/.test(change), 'stale option URLs must be rejected before they can trigger a new plan');
   assert.ok(!/appendMessage\(\{[\s\S]*kind: 'oneshot'/.test(change), 'term switch must not append a stale second card');
-  assert.ok(/selectedUrls\.includes\(String\(option\?\.url \|\| ''\)\)/.test(QUOTE), 'quote-card selection must follow URL identity, not a stale index');
-  assert.ok(/const \[selectedUrls, setSelectedUrls\] = useState\(\[\]\)/.test(QUOTE), 'Zoho conversion must begin with no implicit quote option');
-  assert.ok(/checked=\{selectedIndexes\.includes\(option\.index\)\}[\s\S]*onChange=\{\(\) => toggleUrl\(option\.url\)\}/.test(QUOTE), 'quote options must be selected explicitly');
+  assert.ok(/const \[selectedIndexes, setSelectedIndexes\] = useState\(\[\]\)/.test(QUOTE), 'Zoho conversion must begin with no implicit quote option');
+  assert.ok(/checked=\{validSelectedIndexes\.includes\(option\.index\)\}[\s\S]*onChange=\{\(\) => toggleIndex\(option\.index\)\}/.test(QUOTE), 'quote options must be selected explicitly by reviewed option identity');
+  assert.ok(/normalizeQuoteOptionIndexes\(selectedIndexes, urls\.length\)/.test(QUOTE), 'stale selected indexes must be normalized against current options');
   assert.ok(/disabled=\{busy \|\| !hasExplicitTermSelection\}/.test(QUOTE), 'Zoho conversion must stay disabled until explicit term selection');
-  assert.ok(/const url = urls\[idx\]\?\.url;[\s\S]*if \(url\) selectUrl\(url\)/.test(QUOTE), 'Copy must select the exact URL without starting Zoho review');
-  assert.ok(/onClick=\{\(\) => selectUrl\(urlObj\.url\)\}/.test(QUOTE), 'Open must select the exact URL without starting Zoho review');
+  assert.ok(/const url = urls\[idx\]\?\.url;[\s\S]*if \(url\) selectIndex\(idx\)/.test(QUOTE), 'Copy must select the exact option index without starting Zoho review');
+  assert.ok(/onClick=\{\(\) => selectIndex\(i\)\}/.test(QUOTE), 'Open must select the exact option index without starting Zoho review');
 });
 
 check('term replan replaces payload, plan, and review token while locking races', () => {

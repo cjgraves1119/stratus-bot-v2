@@ -566,6 +566,382 @@ function committedHardwareTierForLicense(licenseSku, lines, hardwareOnlySkus) {
   return association?.expectedTier || '';
 }
 
+const QUOTE_OPTION_VERIFICATION_SCHEMA = 'quote-option-v1';
+const EOL_TRANSFORM_MODE = 'eol_transform';
+const EOL_REFRESH_KIND = 'eol_refresh';
+const EOL_OPTION_GROUP_ID = /^eol-refresh(?:-(?:1g|10g))?$/;
+
+function strictContractLines(value, name) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_EDITABLE_QUOTE_LINES) {
+    return { ok: false, lines: [], map: null, error: `${name} must contain 1-${MAX_EDITABLE_QUOTE_LINES} valid lines.` };
+  }
+  for (const [index, line] of value.entries()) {
+    if (!line || typeof line !== 'object' || Array.isArray(line)) {
+      return { ok: false, lines: [], map: null, error: `${name} line ${index + 1} was malformed.` };
+    }
+    if (!Number.isInteger(line.qty) || line.qty < 1 || line.qty > 99999) {
+      return { ok: false, lines: [], map: null, error: `${name} line ${index + 1} contained an invalid quantity.` };
+    }
+    const rawTier = String(line.tier || '').trim();
+    if (rawTier && !normalizedCommittedLicenseTier(rawTier)) {
+      return { ok: false, lines: [], map: null, error: `${name} line ${index + 1} contained an unknown license tier.` };
+    }
+  }
+  const normalized = normalizeEditableQuoteLines(value);
+  if (!normalized.ok) {
+    return { ok: false, lines: [], map: null, error: `${name} was invalid: ${normalized.error}` };
+  }
+  const map = canonicalCompositionMap(normalized.lines);
+  if (!map) return { ok: false, lines: [], map: null, error: `${name} exceeded safe quantity limits.` };
+  return { ok: true, lines: normalized.lines, map, error: '' };
+}
+
+function exactCompositionMapsEqual(left, right) {
+  if (!(left instanceof Map) || !(right instanceof Map) || left.size !== right.size) return false;
+  for (const [sku, qty] of left) {
+    if (right.get(sku) !== qty) return false;
+  }
+  return true;
+}
+
+// Source snapshots are emitted per option, while the editor may still carry a
+// model-agnostic licence alias (LIC-ENT / LIC-MV / LIC-MT). Bind those aliases
+// to exactly one same-quantity term SKU and otherwise require exact canonical
+// equality. This is intentionally much narrower than normal quote resolution:
+// a contract may not invent companions or reinterpret an arbitrary model stem.
+function contractSourceMatchesCommitted(sourceMap, sourceLines, committedLines) {
+  const committed = normalizeEditableQuoteLines(committedLines);
+  if (!committed.ok || !(sourceMap instanceof Map)) return false;
+  let committedMap = canonicalCompositionMap(committed.lines);
+  if (!committedMap) return false;
+  committedMap = resolveBareHardwareStems(committedMap, sourceMap);
+  const remaining = new Map(sourceMap);
+  for (const [sku, qty] of committedMap) {
+    if (remaining.get(sku) === qty) {
+      remaining.delete(sku);
+      continue;
+    }
+    const aliasPattern = termAgnosticLicenseAliasPattern(sku);
+    if (!aliasPattern) return false;
+    const matches = [...remaining.entries()].filter(([candidate, candidateQty]) => (
+      candidateQty === qty && aliasPattern.test(candidate)
+    ));
+    if (matches.length !== 1) return false;
+    remaining.delete(matches[0][0]);
+  }
+  if (remaining.size !== 0) return false;
+
+  // Quantity equality alone cannot bind a hardware row whose reviewed tier was
+  // edited after the Worker produced this contract. When sourceLines declares
+  // row tiers, compare the full canonical SKU+tier partition. reviewedInputLines
+  // has already stamped blank hardware rows with the same family defaults the
+  // Worker uses, so SEC -> ENT edits reliably invalidate the old option.
+  const sourceHardware = (Array.isArray(sourceLines) ? sourceLines : [])
+    .filter((line) => {
+      const sku = canonicalOrderCompositionSku(line?.sku);
+      return sku && !sku.startsWith('LIC-');
+    });
+  const declaredTierSkus = new Set(sourceHardware
+    .filter((line) => String(line?.tier || '').trim())
+    .map((line) => canonicalOrderCompositionSku(line?.sku)));
+  for (const sku of declaredTierSkus) {
+    const sourceRows = sourceHardware.filter((line) => canonicalOrderCompositionSku(line?.sku) === sku);
+    if (sourceRows.some((line) => !String(line?.tier || '').trim())) return false;
+    const sourceTiers = new Map();
+    for (const line of sourceRows) {
+      const tier = normalizedCommittedLicenseTier(line?.tier);
+      const qty = Number(line?.qty);
+      if (!tier || !Number.isInteger(qty) || qty < 1) return false;
+      sourceTiers.set(tier, (sourceTiers.get(tier) || 0) + qty);
+    }
+    const committedTiers = new Map();
+    for (const line of (Array.isArray(committedLines) ? committedLines : [])) {
+      if (canonicalOrderCompositionSku(line?.sku) !== sku) continue;
+      const tier = committedHardwareRowTier(line);
+      const qty = Number(line?.qty);
+      if (!tier || tier === 'NONE' || !Number.isInteger(qty) || qty < 1) return false;
+      committedTiers.set(tier, (committedTiers.get(tier) || 0) + qty);
+    }
+    if (!exactCompositionMapsEqual(sourceTiers, committedTiers)) return false;
+  }
+  return true;
+}
+
+function contractLicenseTerm(sku) {
+  const match = String(sku || '').toUpperCase().match(/-(\d{1,2})Y(?:R)?$/);
+  return match ? Number(match[1]) : null;
+}
+
+function contractLineTier(line) {
+  const declared = normalizedCommittedLicenseTier(line?.tier);
+  const encoded = committedLicenseSkuTier(line?.sku);
+  if (declared && encoded && declared !== encoded) return null;
+  return declared || encoded || '';
+}
+
+function invalidEolTransform(error, expectedLines = [], urlLines = []) {
+  return unusableOrderUrl(
+    'invalid_eol_transform_verification',
+    `The EOL refresh option could not be verified: ${error}`,
+    expectedLines,
+    urlLines,
+  );
+}
+
+/**
+ * Verify the Worker's structured EOL transform without trusting its label.
+ *
+ * The complete source snapshot must bind to the rep's current cart. Every
+ * replacement consumes an explicit source quantity once, adds a one-for-one
+ * hardware+licence replacement, and leaves all unrelated lines untouched. The
+ * derived result must exactly equal both targetLines and the public order URL.
+ */
+function verifyStructuredEolTransformOption(option, rawUrl, committedLines, requirements = {}) {
+  const verification = option?.verification;
+  const termYears = option?.termYears;
+  const optionGroupId = String(option?.optionGroupId || '').trim();
+  if (option?.optionKind !== EOL_REFRESH_KIND) {
+    return invalidEolTransform('the option kind was not eol_refresh.');
+  }
+  if (!Number.isInteger(termYears) || termYears < 1 || termYears > 5) {
+    return invalidEolTransform('termYears was missing or invalid.');
+  }
+  if (!EOL_OPTION_GROUP_ID.test(optionGroupId)) {
+    return invalidEolTransform('optionGroupId was missing or invalid.');
+  }
+  const labelTerm = quoteOptionTerm({ label: option?.label || '', url: '' });
+  if (labelTerm != null && labelTerm !== termYears) {
+    return invalidEolTransform('the displayed term did not match termYears.');
+  }
+  if (!verification || typeof verification !== 'object' || Array.isArray(verification)
+      || verification.schema !== QUOTE_OPTION_VERIFICATION_SCHEMA
+      || verification.mode !== EOL_TRANSFORM_MODE) {
+    return invalidEolTransform('the structured verification contract was missing or malformed.');
+  }
+
+  const source = strictContractLines(verification.sourceLines, 'sourceLines');
+  const target = strictContractLines(verification.targetLines, 'targetLines');
+  if (!source.ok) return invalidEolTransform(source.error);
+  if (!target.ok) return invalidEolTransform(target.error, source.lines);
+  const optionHardwareOnly = option?.hardwareOnly === true;
+  const targetHasLicense = target.lines.some(({ sku }) => String(sku).startsWith('LIC-'));
+  if (optionHardwareOnly === targetHasLicense) {
+    return invalidEolTransform(optionHardwareOnly
+      ? 'the Hardware Only refresh target unexpectedly contained a license SKU.'
+      : 'a license-free refresh target was not explicitly marked Hardware Only.', source.lines, target.lines);
+  }
+  if (!contractSourceMatchesCommitted(source.map, verification.sourceLines, committedLines)) {
+    return invalidEolTransform('sourceLines did not match the current committed cart.', source.lines);
+  }
+  for (const { sku } of [...source.lines, ...target.lines]) {
+    if (String(sku).startsWith('LIC-') && contractLicenseTerm(sku) !== termYears) {
+      return invalidEolTransform(`the ${termYears}-year option contained a mismatched license term (${sku}).`, source.lines, target.lines);
+    }
+  }
+
+  if (!Array.isArray(verification.replacements) || verification.replacements.length === 0
+      || verification.replacements.length > MAX_EDITABLE_QUOTE_LINES) {
+    return invalidEolTransform('replacements must contain at least one bounded transform.', source.lines, target.lines);
+  }
+
+  const derived = new Map(source.map);
+  const bareSourceSkus = new Set(
+    (Array.isArray(requirements?.hardwareOnlySkus) ? requirements.hardwareOnlySkus : [])
+      .map((value) => canonicalOrderCompositionSku(value)),
+  );
+  const transformedBareSkus = new Set(bareSourceSkus);
+  // Preserve row-level tier intent while applying the transform. The quantity
+  // map below enforces global bounds; these rows let the ordinary composition
+  // verifier validate deterministic companions for retained non-EOL hardware.
+  // Without them, an unrelated MR44 -> LIC-ENT companion looked like an
+  // undeclared EOL target even though it was generated by the normal rules.
+  const derivedRows = verification.sourceLines.map((line) => ({
+    sku: canonicalOrderCompositionSku(line?.sku),
+    qty: Number(line?.qty),
+    ...(String(line?.tier || '').trim() ? { tier: line.tier } : {}),
+  }));
+  const consumeDerivedRows = (rawLine) => {
+    const sku = canonicalOrderCompositionSku(rawLine?.sku);
+    const requestedQty = Number(rawLine?.qty);
+    const requestedTier = contractLineTier(rawLine);
+    const candidates = derivedRows.filter((line) => line.qty > 0
+      && canonicalOrderCompositionSku(line.sku) === sku
+      && (!requestedTier || contractLineTier(line) === requestedTier));
+    if (!requestedTier) {
+      const candidateTiers = new Set(candidates.map((line) => contractLineTier(line)).filter(Boolean));
+      if (candidateTiers.size > 1) return false;
+    }
+    let remaining = requestedQty;
+    for (const line of candidates) {
+      const used = Math.min(line.qty, remaining);
+      line.qty -= used;
+      remaining -= used;
+      if (remaining === 0) break;
+    }
+    return remaining === 0;
+  };
+  for (const [replacementIndex, replacement] of verification.replacements.entries()) {
+    const displayIndex = replacementIndex + 1;
+    if (!replacement || typeof replacement !== 'object' || Array.isArray(replacement)
+        || replacement.kind !== 'eol_replace') {
+      return invalidEolTransform(`replacement ${displayIndex} was malformed.`, source.lines, target.lines);
+    }
+    const from = strictContractLines(replacement.from, `replacement ${displayIndex} from`);
+    const to = strictContractLines(replacement.to, `replacement ${displayIndex} to`);
+    if (!from.ok) return invalidEolTransform(from.error, source.lines, target.lines);
+    if (!to.ok) return invalidEolTransform(to.error, source.lines, target.lines);
+
+    const rawTo = Array.isArray(replacement.to) ? replacement.to : [];
+    if (rawTo.length !== to.lines.length) {
+      return invalidEolTransform(`replacement ${displayIndex} contained duplicate target SKUs.`, source.lines, target.lines);
+    }
+    const roleBySku = new Map();
+    for (const line of rawTo) {
+      const sku = canonicalOrderCompositionSku(line?.sku);
+      const role = line?.role;
+      if (!sku || (role !== 'hardware' && role !== 'license') || roleBySku.has(sku)) {
+        return invalidEolTransform(`replacement ${displayIndex} contained an invalid or duplicate target role.`, source.lines, target.lines);
+      }
+      if ((role === 'license') !== sku.startsWith('LIC-')) {
+        return invalidEolTransform(`replacement ${displayIndex} mislabeled a target line role (${sku}).`, source.lines, target.lines);
+      }
+      roleBySku.set(sku, role);
+    }
+
+    let sourceHardwareQty = 0;
+    let sourceLicenseQty = 0;
+    const sourceTiers = new Set();
+    for (const rawFrom of replacement.from) {
+      const sku = canonicalOrderCompositionSku(rawFrom?.sku);
+      const qty = Number(rawFrom?.qty);
+      const available = derived.get(sku) || 0;
+      if (!Number.isInteger(qty) || qty < 1 || qty > available) {
+        return invalidEolTransform(`replacement ${displayIndex} over-consumed ${sku}.`, source.lines, target.lines);
+      }
+      const tier = contractLineTier(rawFrom);
+      if (tier == null) {
+        return invalidEolTransform(`replacement ${displayIndex} declared a tier that contradicted ${sku}.`, source.lines, target.lines);
+      }
+      if (tier) sourceTiers.add(tier);
+      if (sku.startsWith('LIC-')) sourceLicenseQty += qty;
+      else sourceHardwareQty += qty;
+      if (!consumeDerivedRows(rawFrom)) {
+        return invalidEolTransform(`replacement ${displayIndex} could not bind its source row and tier.`, source.lines, target.lines);
+      }
+      if (qty === available) derived.delete(sku);
+      else derived.set(sku, available - qty);
+    }
+    if (sourceTiers.size > 1) {
+      return invalidEolTransform(`replacement ${displayIndex} mixed source license tiers.`, source.lines, target.lines);
+    }
+    const coverageQty = sourceHardwareQty || sourceLicenseQty;
+    if (!coverageQty) {
+      return invalidEolTransform(`replacement ${displayIndex} did not consume a source quantity.`, source.lines, target.lines);
+    }
+    if (sourceHardwareQty && sourceLicenseQty) {
+      const validSourceCoverage = sourceLicenseQty === sourceHardwareQty
+        || (requirements?.allowHaLicenseRatio === true
+          && sourceHardwareQty % 2 === 0
+          && sourceLicenseQty === sourceHardwareQty / 2);
+      if (!validSourceCoverage) {
+        return invalidEolTransform(`replacement ${displayIndex} contained inconsistent paired source quantities.`, source.lines, target.lines);
+      }
+    }
+
+    const sourceTier = [...sourceTiers][0] || '';
+    const hardwareOnlyReplacement = !rawTo.some((line) => line?.role === 'license');
+    if (hardwareOnlyReplacement
+      ? replacement.hardwareOnly !== true
+      : replacement.hardwareOnly === true) {
+      return invalidEolTransform(
+        `replacement ${displayIndex} did not explicitly match its Hardware Only scope.`,
+        source.lines,
+        target.lines,
+      );
+    }
+    let hardwareQty = 0;
+    let licenseQty = 0;
+    const targetTiers = new Set();
+    for (const rawToLine of rawTo) {
+      const sku = canonicalOrderCompositionSku(rawToLine?.sku);
+      const qty = Number(rawToLine?.qty);
+      const role = roleBySku.get(sku);
+      if (role === 'hardware') hardwareQty += qty;
+      else {
+        licenseQty += qty;
+        const tier = contractLineTier(rawToLine);
+        if (tier == null) {
+          return invalidEolTransform(`replacement ${displayIndex} declared a tier that contradicted ${sku}.`, source.lines, target.lines);
+        }
+        if (tier) targetTiers.add(tier);
+      }
+      const next = (derived.get(sku) || 0) + qty;
+      if (next > 99999) {
+        return invalidEolTransform(`replacement ${displayIndex} exceeded safe quantity limits.`, source.lines, target.lines);
+      }
+      derived.set(sku, next);
+      derivedRows.push({
+        sku,
+        qty,
+        ...(role === 'hardware'
+          ? { ...(hardwareOnlyReplacement ? { tier: 'none' } : (sourceTier ? { tier: sourceTier } : {})) }
+          : {}),
+      });
+      if (role === 'hardware' && hardwareOnlyReplacement) transformedBareSkus.add(sku);
+    }
+    const expectedTargetHardwareQty = sourceHardwareQty || coverageQty;
+    // A reviewed per-row "None (hardware only)" choice may legitimately be
+    // transformed to replacement hardware without a licence. Authorize that
+    // exception only from the current committed hardwareOnlySkus snapshot;
+    // the Worker flag or a user-visible label is never sufficient on its own.
+    const sourceHardwareSkus = from.lines
+      .filter(({ sku }) => !String(sku).startsWith('LIC-'))
+      .map(({ sku }) => canonicalOrderCompositionSku(sku));
+    if (hardwareOnlyReplacement) {
+      if (!sourceHardwareQty || sourceLicenseQty
+          || sourceHardwareSkus.length === 0
+          || sourceHardwareSkus.some((sku) => !bareSourceSkus.has(sku))) {
+        return invalidEolTransform(`replacement ${displayIndex} was license-free without a matching reviewed Hardware Only source.`, source.lines, target.lines);
+      }
+    } else if (sourceHardwareSkus.some((sku) => bareSourceSkus.has(sku))) {
+      return invalidEolTransform(`replacement ${displayIndex} added a license to a reviewed Hardware Only source.`, source.lines, target.lines);
+    }
+    const expectedTargetLicenseQty = hardwareOnlyReplacement ? 0 : (sourceLicenseQty || coverageQty);
+    if (hardwareQty !== expectedTargetHardwareQty || licenseQty !== expectedTargetLicenseQty) {
+      return invalidEolTransform(`replacement ${displayIndex} did not preserve the source hardware/license coverage.`, source.lines, target.lines);
+    }
+    if (targetTiers.size > 1 || (hardwareOnlyReplacement
+      ? targetTiers.size !== 0
+      : (sourceTier
+        ? targetTiers.size !== 1 || !targetTiers.has(sourceTier)
+        : targetTiers.size !== 0))) {
+      return invalidEolTransform(`replacement ${displayIndex} changed the committed license tier.`, source.lines, target.lines);
+    }
+  }
+
+  const transformedExpectedLines = derivedRows.filter((line) => Number(line.qty) > 0);
+  const transformedRequirements = {
+    ...requirements,
+    hardwareOnlySkus: [...transformedBareSkus],
+  };
+  const targetVerification = verifyStratusOrderUrlComposition(
+    rawUrl,
+    transformedExpectedLines,
+    transformedRequirements,
+  );
+  if (targetVerification.usable !== true || !targetVerification.usableUrl) {
+    return invalidEolTransform(targetVerification.error || 'the order URL did not match the declared transforms.', source.lines, targetVerification.urlLines);
+  }
+  const urlMap = canonicalCompositionMap(targetVerification.urlLines);
+  if (!urlMap || !exactCompositionMapsEqual(target.map, urlMap)) {
+    return invalidEolTransform('the order URL did not exactly equal targetLines.', source.lines, targetVerification.urlLines);
+  }
+  return {
+    ...targetVerification,
+    expectedLines: target.lines,
+  };
+}
+
 export function verifyStratusOrderUrlOptions(values, expectedInputLines, requirements = {}) {
   const options = Array.isArray(values) ? values : [];
   if (!options.length) {
@@ -611,14 +987,20 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
     // explicit term SKU in the editor does not invalidate the other term options.
     const optionTerm = option && typeof option === 'object' && option.hardwareOnly === true
       ? null
-      : quoteOptionTerm({ label: option?.label || '', url: rawUrl || '' });
+      : quoteOptionTerm(option && typeof option === 'object'
+        ? option
+        : { label: '', url: rawUrl || '' });
     const expectedForOption = Number.isInteger(optionTerm)
       // Reterm the caller's rows, not normalizeEditableQuoteLines().lines:
       // normalization deliberately strips UI metadata such as the per-hardware
       // tier, which is required below to validate mixed-tier companions.
       ? committedLinesAtTerm(reviewedExpectedInputLines, optionTerm)
       : reviewedExpectedInputLines;
-    const verification = verifyStratusOrderUrlComposition(rawUrl, expectedForOption, requirements);
+    const isStructuredEolRefresh = option && typeof option === 'object'
+      && option.optionKind === EOL_REFRESH_KIND;
+    const verification = isStructuredEolRefresh
+      ? verifyStructuredEolTransformOption(option, rawUrl, expectedForOption, requirements)
+      : verifyStratusOrderUrlComposition(rawUrl, expectedForOption, requirements);
     if (verification.usable !== true || !verification.usableUrl) {
       // Drop this representation, keep looking. See the note on `dropped`.
       dropped.push({
@@ -648,7 +1030,9 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
       if (['ENT', 'SEC', 'SDW', 'A'].includes(expectedTier) && !licenseLines.length) {
         { dropped.push({ option: index + 1, label: String(option?.label || `Option ${index + 1}`), reason: `The generated option did not contain a license SKU when ${expectedTier} was requested.` }); continue optionLoop; }
       }
-      const labelTerm = quoteOptionTerm({ label: option?.label || '', url: '' });
+      const labelTerm = isStructuredEolRefresh
+        ? optionTerm
+        : quoteOptionTerm({ label: option?.label || '', url: '' });
       if (hasTermAgnosticLicenseAlias && labelTerm == null) {
         { dropped.push({ option: index + 1, label: String(option?.label || `Option ${index + 1}`), reason: 'The generated option did not identify a term for the term-agnostic license request.' }); continue optionLoop; }
       }
@@ -1224,6 +1608,8 @@ export function withOneshotAccountDraft(messagePatch, accountDraft) {
 }
 
 export function quoteOptionTerm(option) {
+  const explicit = Number(option?.termYears);
+  if (Number.isInteger(explicit) && explicit >= 1 && explicit <= 5) return explicit;
   const text = `${option?.label || ''} ${option?.url || ''}`;
   const match = text.match(/(?:^|[^0-9])([1-5])\s*(?:-?\s*(?:year|yr)|YR\b)/i);
   return match ? Number(match[1]) : null;
@@ -1236,10 +1622,20 @@ export function selectableQuoteTerms(options) {
     const url = sanitizeStratusOrderUrls([option?.url])[0] || '';
     if (!url) continue;
     const years = quoteOptionTerm(option);
-    const key = years || `option-${index}`;
+    const optionGroupId = String(option?.optionGroupId || '').trim();
+    const key = years && optionGroupId
+      ? `${optionGroupId}:${years}`
+      : (years || `option-${index}`);
     if (seen.has(key)) continue;
     seen.add(key);
-    result.push({ index, years, label: option?.label || (years ? `${years}-Year` : `Option ${index + 1}`), url });
+    result.push({
+      index,
+      years,
+      label: option?.label || (years ? `${years}-Year` : `Option ${index + 1}`),
+      url,
+      ...(optionGroupId ? { optionGroupId } : {}),
+      ...(option?.optionKind ? { optionKind: option.optionKind } : {}),
+    });
   }
   return result;
 }

@@ -3293,6 +3293,204 @@ function isEol(baseSku) {
   return false;
 }
 
+// ─── Trusted quote-option verification contracts ───────────────────────────
+// The extension normally verifies every returned order URL against the literal
+// rows the user committed. EOL refresh options are intentionally different:
+// they replace an old model/license with its reviewed successor. Rather than
+// weakening the extension's exact verifier (or trusting a user-visible label),
+// the deterministic builder can attach a small, machine-checkable transform
+// contract to those options. The helpers below fail closed: malformed URLs,
+// stale replacement mappings, or non-EOL source rows leave the legacy option
+// untouched and unannotated.
+function quoteContractLinesFromOrderUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''));
+    if (parsed.hostname !== 'stratusinfosystems.com' || parsed.pathname !== '/order/') return null;
+    const skus = String(parsed.searchParams.get('item') || '').split(',').map((sku) => sku.trim().toUpperCase()).filter(Boolean);
+    const rawQtys = String(parsed.searchParams.get('qty') || '').split(',').map((qty) => qty.trim()).filter(Boolean);
+    if (skus.length === 0 || skus.length !== rawQtys.length || new Set(skus).size !== skus.length) return null;
+    const qtys = rawQtys.map((qty) => Number(qty));
+    if (qtys.some((qty) => !Number.isInteger(qty) || qty <= 0)) return null;
+    return skus.map((sku, index) => ({ sku, qty: qtys[index] }));
+  } catch (_) {
+    return null;
+  }
+}
+
+function quoteContractLine(rawLine, { roleRequired = false } = {}) {
+  const sku = String(rawLine?.sku || '').trim().toUpperCase();
+  const qty = Number(rawLine?.qty);
+  if (!sku || !Number.isInteger(qty) || qty <= 0) return null;
+  const line = { sku, qty };
+  const tier = String(rawLine?.tier || '').trim().toUpperCase();
+  if (tier) line.tier = tier;
+  const role = String(rawLine?.role || '').trim().toLowerCase();
+  if (roleRequired && !['hardware', 'license'].includes(role)) return null;
+  if (role) line.role = role;
+  return line;
+}
+
+function quoteContractEolModel(rawSku) {
+  const upper = String(rawSku || '').trim().toUpperCase();
+  if (!upper) return null;
+  if (isEol(upper)) return upper;
+  const licenseModel = upper.match(/^LIC-(MS\d{3}-[A-Z0-9]+)-\d+Y/i)
+    || upper.match(/^LIC-(MX\d+[A-Z]*)-[A-Z]+-\d+Y/i)
+    || upper.match(/^LIC-(Z\d+[A-Z]*)-[A-Z]+-\d+Y/i)
+    || upper.match(/^LIC-(MG\d+[A-Z]*)-[A-Z]+-\d+Y/i);
+  const model = licenseModel?.[1]?.toUpperCase() || null;
+  return model && isEol(model) ? model : null;
+}
+
+function quoteContractLineTier(rawLine) {
+  const declared = String(rawLine?.tier || '').trim().toUpperCase();
+  if (declared) return declared;
+  const sku = String(rawLine?.sku || '').trim().toUpperCase();
+  const match = sku.match(/^LIC-(?:(?:MX|Z|MG)\d+[A-Z]*|C(?:8111|8121|8455))-(ENT|SEC|SDW)-\d+Y(?:R)?$/);
+  return match?.[1] || null;
+}
+
+function quoteContractLineTotals(lines) {
+  const totals = new Map();
+  for (const line of lines) {
+    const normalized = quoteContractLine(line);
+    if (!normalized) return null;
+    totals.set(normalized.sku, (totals.get(normalized.sku) || 0) + normalized.qty);
+  }
+  return totals;
+}
+
+function isTrustedEolQuoteOptionContract(contract) {
+  if (!contract || contract.optionKind !== 'eol_refresh') return false;
+  if (!/^eol-refresh(?:-(?:1g|10g))?$/.test(String(contract.optionGroupId || ''))) return false;
+  if (![1, 3, 5].includes(Number(contract.termYears))) return false;
+  const verification = contract.verification;
+  if (verification?.schema !== 'quote-option-v1' || verification?.mode !== 'eol_transform') return false;
+  if (!Array.isArray(verification.sourceLines) || verification.sourceLines.length === 0) return false;
+  if (!Array.isArray(verification.targetLines) || verification.targetLines.length === 0) return false;
+  if (!Array.isArray(verification.replacements) || verification.replacements.length === 0) return false;
+
+  const urlLines = quoteContractLinesFromOrderUrl(contract.url);
+  if (!urlLines) return false;
+  const targetLines = verification.targetLines.map((line) => quoteContractLine(line));
+  if (targetLines.some((line) => !line) || JSON.stringify(urlLines) !== JSON.stringify(targetLines)) return false;
+  const targetIsHardwareOnly = targetLines.every((line) => !line.sku.startsWith('LIC-'));
+  if (targetIsHardwareOnly ? contract.hardwareOnly !== true : contract.hardwareOnly === true) return false;
+  const sourceTotals = quoteContractLineTotals(verification.sourceLines);
+  const targetTotals = quoteContractLineTotals(targetLines);
+  if (!sourceTotals || !targetTotals) return false;
+
+  for (const replacement of verification.replacements) {
+    if (replacement?.kind !== 'eol_replace'
+        || !Array.isArray(replacement.from) || replacement.from.length === 0
+        || !Array.isArray(replacement.to) || replacement.to.length === 0) return false;
+    const from = replacement.from.map((line) => quoteContractLine(line));
+    const to = replacement.to.map((line) => quoteContractLine(line, { roleRequired: true }));
+    if (from.some((line) => !line) || to.some((line) => !line)) return false;
+    for (const line of from) {
+      if ((sourceTotals.get(line.sku) || 0) < line.qty) return false;
+    }
+    for (const line of to) {
+      if ((targetTotals.get(line.sku) || 0) < line.qty) return false;
+    }
+
+    const hardwareSources = from.filter((line) => !line.sku.startsWith('LIC-'));
+    const licenseSources = from.filter((line) => line.sku.startsWith('LIC-'));
+    const hardwareTargets = to.filter((line) => line.role === 'hardware');
+    const licenseTargets = to.filter((line) => line.role === 'license');
+    if (hardwareTargets.length === 0) return false;
+    // Bare-hardware transforms must say so on the replacement itself. The
+    // option-level flag describes the complete target cart and disappears when
+    // unrelated licences (for example synthetic MR-ENT) are merged later.
+    // Requiring the per-replacement marker keeps that reviewed exception
+    // explicit without allowing it to authorize anything by itself.
+    if (licenseTargets.length === 0
+      ? replacement.hardwareOnly !== true
+      : replacement.hardwareOnly === true) return false;
+
+    // Every consumed source line must independently identify the SAME retired
+    // model. This prevents a single valid MX64→MX67 pair from laundering an
+    // unrelated current-model source row inside the same replacement.
+    const sourceModels = from.map((line) => quoteContractEolModel(line.sku));
+    if (sourceModels.some((model) => !model) || new Set(sourceModels).size !== 1) return false;
+    const sourceModel = sourceModels[0];
+    const current = checkEol(sourceModel);
+    const allowed = (Array.isArray(current) ? current : [current])
+      .filter(Boolean)
+      .flatMap((sku) => [String(sku).toUpperCase(), String(applySuffix(sku)).toUpperCase()]);
+    // Every hardware target—not merely one convenient target—must be a current
+    // reviewed replacement for that exact source model.
+    if (hardwareTargets.some((line) => !allowed.includes(line.sku))) return false;
+
+    // Quantity conservation is exact. Hardware shorthand is authoritative when
+    // present; direct LIC-* intake uses the old licence quantity as its device
+    // count. An explicit old companion (including reviewed HA half coverage)
+    // also fixes the replacement licence total exactly.
+    const sourceHardwareQty = hardwareSources.reduce((sum, line) => sum + line.qty, 0);
+    const sourceLicenseQty = licenseSources.reduce((sum, line) => sum + line.qty, 0);
+    const targetHardwareQty = hardwareTargets.reduce((sum, line) => sum + line.qty, 0);
+    const targetLicenseQty = licenseTargets.reduce((sum, line) => sum + line.qty, 0);
+    const expectedHardwareQty = sourceHardwareQty || sourceLicenseQty;
+    if (!expectedHardwareQty || targetHardwareQty !== expectedHardwareQty) return false;
+    if (licenseTargets.length > 0) {
+      const expectedLicenseQty = sourceLicenseQty || expectedHardwareQty;
+      if (targetLicenseQty !== expectedLicenseQty) return false;
+    } else if (sourceHardwareQty === 0) {
+      // A direct old licence cannot silently become bare hardware.
+      return false;
+    }
+
+    const sourceTiers = [...new Set(from.map(quoteContractLineTier).filter(Boolean))];
+    const targetTiers = [...new Set(licenseTargets.map(quoteContractLineTier).filter(Boolean))];
+    if (sourceTiers.length > 1 || targetTiers.length > 1) return false;
+    if (sourceTiers.length === 1 && targetTiers.length === 1 && sourceTiers[0] !== targetTiers[0]) return false;
+  }
+  return true;
+}
+
+function createEolQuoteOptionContract({ url, optionGroupId, termYears, sourceLines, replacements }) {
+  const targetLines = quoteContractLinesFromOrderUrl(url);
+  const normalizedSource = (Array.isArray(sourceLines) ? sourceLines : []).map((line) => quoteContractLine(line));
+  if (!targetLines || normalizedSource.some((line) => !line)) return null;
+  const contract = {
+    url,
+    optionKind: 'eol_refresh',
+    optionGroupId,
+    termYears: Number(termYears),
+    ...(targetLines.every((line) => !line.sku.startsWith('LIC-')) ? { hardwareOnly: true } : {}),
+    verification: {
+      schema: 'quote-option-v1',
+      mode: 'eol_transform',
+      sourceLines: normalizedSource,
+      targetLines,
+      replacements,
+    },
+  };
+  return isTrustedEolQuoteOptionContract(contract) ? contract : null;
+}
+
+function attachTrustedQuoteOptionContracts(quoteUrls, contracts) {
+  // Consume matching records in order. Hardware-only EOL quotes intentionally
+  // produce one reviewed option per term even though their bare-hardware URLs
+  // are byte-identical; a simple `.find()` would attach the 1-year proof to all
+  // three cards.
+  const trusted = (Array.isArray(contracts) ? contracts : []).filter(isTrustedEolQuoteOptionContract);
+  return (Array.isArray(quoteUrls) ? quoteUrls : []).map((option) => {
+    const rawUrl = typeof option === 'string' ? option : option?.url;
+    const matchIndex = trusted.findIndex((candidate) => candidate.url === rawUrl);
+    const match = matchIndex >= 0 ? trusted.splice(matchIndex, 1)[0] : null;
+    if (!match || !option || typeof option !== 'object') return option;
+    return {
+      ...option,
+      optionKind: match.optionKind,
+      optionGroupId: match.optionGroupId,
+      termYears: match.termYears,
+      ...(match.hardwareOnly === true ? { hardwareOnly: true } : {}),
+      verification: match.verification,
+    };
+  });
+}
+
 // ─── WS2: Dashboard renewal helpers (ported verbatim from worker/src/index.js) ─
 function isValidSkuToken(sku) {
   if (!sku) return false;
@@ -4249,6 +4447,10 @@ function editorReadyParsedItems(rows, parsed) {
   for (let i = 0; i < out.length && i < items.length; i++) {
     const item = items[i];
     if (!item) continue;
+    const rowTier = effectiveQuoteItemTier(item, items, parsed?.requestedTier);
+    if (rowTier) out[i].requestedTier = rowTier;
+    if (typeof item.hardwareOnly === 'boolean') out[i].hardwareOnly = item.hardwareOnly;
+    if (typeof item.licenseOnly === 'boolean') out[i].licenseOnly = item.licenseOnly;
     const aliasCanonical = AGNOSTIC_CANONICAL[String(item.baseSku || '').toUpperCase()];
     if (aliasCanonical && getPrice(aliasCanonical)) {
       out[i].licenseOnly = true;
@@ -4270,6 +4472,23 @@ function editorReadyParsedItems(rows, parsed) {
     if (resolved) out[i].resolvedSku = resolved;
   }
   return out;
+}
+
+// Keep the editable-row contract additive and explicit at the API boundary.
+// The previous `{sku, qty}` projection discarded the reviewed per-row tier and
+// editorReadyParsedItems' resolvedSku/licenseOnly markers, so the extension
+// displayed a family default (SEC for MX) even after the deterministic parser
+// had correctly selected Enterprise or SD-WAN.
+function publicQuoteParsedItem(row) {
+  const item = { sku: row?.sku, qty: row?.qty };
+  for (const key of ['resolvedSku', 'requestedTier', 'licenseOnly', 'hardwareOnly']) {
+    if (row?.[key] !== undefined) item[key] = row[key];
+  }
+  return item;
+}
+
+function publicQuoteParsedItems(rows) {
+  return (Array.isArray(rows) ? rows : []).map(publicQuoteParsedItem);
 }
 
 function directLicenseCatalogBlock(items, missing) {
@@ -7417,6 +7636,10 @@ function buildQuoteResponse(parsed) {
   // Defensive: parseMessage returns null for non-quote inputs. Callers guard,
   // but null-safe here too so no caller can ever throw — route null → LLM.
   if (!parsed) return { message: null, needsLlm: true };
+  // Internal provenance records. Only the /api/quote boundary exposes these,
+  // and only after attachTrustedQuoteOptionContracts revalidates them against
+  // the current checkEol map and the exact generated order URL.
+  const quoteOptionContracts = [];
   const invalidDirectLicenses = normalizeParsedDirectLicenses(parsed);
   if (invalidDirectLicenses.length > 0) {
     // clarificationNote carries the per-SKU reason (retired vMX needing a
@@ -7649,6 +7872,46 @@ function buildQuoteResponse(parsed) {
         return urlItems;
       };
 
+      const _recordDirectLicenseRefreshContract = (term, uplinkIdx, optionGroupId, url) => {
+        const sourceLines = (shouldRewriteDirectLicenseTerms
+          ? rewriteDirectLicenseListForTerm(parsed.directLicenseList, term)
+          : parsed.directLicenseList
+        ).map(({ sku, qty }) => ({ sku, qty }));
+        const replacements = [];
+        const seenModels = new Set();
+        for (const entry of eolFound) {
+          if (seenModels.has(entry.baseModel)) continue;
+          seenModels.add(entry.baseModel);
+          const replacementModel = _hasAlt(entry.replacement)
+            ? entry.replacement[uplinkIdx]
+            : _primary(entry.replacement);
+          const sourceSku = shouldRewriteDirectLicenseTerms
+            ? (directLicenseSkuForTerm(entry.sku, term) || entry.sku)
+            : entry.sku;
+          const to = [{ sku: applySuffix(replacementModel), qty: entry.qty, role: 'hardware' }];
+          const replacementLicense = getLicenseSkus(replacementModel, entry.requestedTier)
+            ?.find((license) => license.term === `${term}Y`)?.sku;
+          if (replacementLicense) to.push({ sku: replacementLicense, qty: entry.qty, role: 'license' });
+          replacements.push({
+            kind: 'eol_replace',
+            from: [{
+              sku: sourceSku,
+              qty: entry.qty,
+              ...(entry.requestedTier ? { tier: entry.requestedTier } : {}),
+            }],
+            to,
+          });
+        }
+        const contract = createEolQuoteOptionContract({
+          url,
+          optionGroupId,
+          termYears: term,
+          sourceLines,
+          replacements,
+        });
+        if (contract) quoteOptionContracts.push(contract);
+      };
+
       // Hardware breakdown for license CSV path (shows combined quantities with source tracking)
       const _buildHardwareBreakdownLic = (uplinkIdx) => {
         const hwMap = new Map();
@@ -7685,6 +7948,7 @@ function buildQuoteResponse(parsed) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
             const url = buildStratusUrl(urlItems);
+            _recordDirectLicenseRefreshContract(term, 0, 'eol-refresh-1g', url);
             const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
             lines.push(`${termLabel}: ${url}`);
             lines.push('');
@@ -7698,6 +7962,7 @@ function buildQuoteResponse(parsed) {
           const urlItems = _buildRefreshItems(term, 1);
           if (urlItems.length > 0) {
             const url = buildStratusUrl(urlItems);
+            _recordDirectLicenseRefreshContract(term, 1, 'eol-refresh-10g', url);
             const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
             lines.push(`${termLabel}: ${url}`);
             lines.push('');
@@ -7712,6 +7977,7 @@ function buildQuoteResponse(parsed) {
           const urlItems = _buildRefreshItems(term, 0);
           if (urlItems.length > 0) {
             const url = buildStratusUrl(urlItems);
+            _recordDirectLicenseRefreshContract(term, 0, 'eol-refresh', url);
             const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
             lines.push(`${termLabel}: ${url}`);
             lines.push('');
@@ -7723,7 +7989,11 @@ function buildQuoteResponse(parsed) {
     let _msg = lines.join('\n').trim();
     const _dlNote = [parsed.note, parsed.clarificationNote].filter(Boolean).join(' ');
     if (_dlNote) _msg = `_${_dlNote}_\n\n${_msg}`;
-    return { message: _msg, needsLlm: false };
+    return {
+      message: _msg,
+      needsLlm: false,
+      ...(quoteOptionContracts.length > 0 ? { quoteOptionContracts } : {}),
+    };
   }
 
   if (parsed.directLicense) {
@@ -8044,6 +8314,27 @@ function buildQuoteResponse(parsed) {
     return sku;
   };
 
+  // Restate the user's committed rows at the option's term. Hardware shorthand
+  // stays hardware shorthand (plus its reviewed tier); exact licence rows are
+  // rewritten only through the same catalog-backed term rewriter the cart uses.
+  const contractSourceLinesForTerm = (term) => (Array.isArray(parsed.items) ? parsed.items : []).map((item) => {
+    const rawSku = String(item?.baseSku || item?.sku || '').trim().toUpperCase();
+    const agnosticSku = rawSku === 'MR-AGN' ? `LIC-ENT-${term}YR`
+      : rawSku === 'MV-AGN' ? `LIC-MV-${term}YR`
+        : rawSku === 'MT-AGN' ? `LIC-MT-${term}Y`
+          : rawSku === 'SME-AGN' ? `${SME_REPLACEMENT_BASE}-${term}YR`
+            : null;
+    const sku = agnosticSku || (rawSku.startsWith('LIC-') ? (directLicenseSkuForTerm(rawSku, term) || rawSku) : rawSku);
+    const tier = rawSku.startsWith('LIC-')
+      ? null
+      : effectiveQuoteItemTier(item, parsed.items, requestedTier);
+    return {
+      sku,
+      qty: Number(item?.qty) || 1,
+      ...(tier ? { tier } : {}),
+    };
+  }).filter((line) => line.sku);
+
   let lines = [];
   // Surface a carried business-rule note (e.g. the SME 5yr→3yr cap flag) at the top — identical to
   // worker/. A V3 collapsed named license routed through the default branch would otherwise drop it.
@@ -8170,6 +8461,91 @@ function buildQuoteResponse(parsed) {
       return urlItems;
     };
 
+    const _buildParsedItemRefreshReplacements = (term, uplinkIdx, sourceLines) => {
+      const replacements = [];
+      // Aggregate repeated occurrences before assigning an explicit companion.
+      // The cart builder ultimately merges identical SKUs, so the proof must do
+      // the same: two MX64 rows + LIC-MX64 qty 2 is one HW2→HW2/LIC2 transform,
+      // not an uneven HW1/LIC2 transform followed by a second HW1 transform.
+      const grouped = new Map();
+      for (const item of eolItems) {
+        const itHw = item.hardwareOnly ?? modifiers.hardwareOnly;
+        const replacementModel = _hasAlt(item.replacement)
+          ? item.replacement[uplinkIdx]
+          : _primary(item.replacement);
+        const groupKey = [
+          String(item.baseSku || '').toUpperCase(),
+          String(item.requestedTier || '').toUpperCase(),
+          String(replacementModel || '').toUpperCase(),
+          itHw ? 'hardware-only' : 'licensed',
+        ].join('|');
+        const existing = grouped.get(groupKey);
+        if (existing) {
+          existing.qty += Number(item.qty) || 0;
+        } else {
+          grouped.set(groupKey, {
+            item,
+            qty: Number(item.qty) || 0,
+            itHw,
+            replacementModel,
+          });
+        }
+      }
+
+      const emittedApprovedEolCompanions = new Set();
+      for (const { item, qty, itHw, replacementModel } of grouped.values()) {
+        if (!Number.isInteger(qty) || qty <= 0) return [];
+        const from = [{
+          sku: item.baseSku,
+          qty,
+          ...(item.requestedTier ? { tier: item.requestedTier } : {}),
+        }];
+        const to = [{ sku: applySuffix(replacementModel), qty, role: 'hardware' }];
+        if (!itHw) {
+          const oldLicenseSku = eolRenewalLicensesFor(item)
+            ?.find((license) => license.term === `${term}Y`)?.sku;
+          const oldKey = String(oldLicenseSku || '').toUpperCase();
+          const approvedQty = approvedExplicitEolQtyForTerm(term).get(oldKey) || null;
+          let includeReplacementLicense = !approvedQty;
+          // An explicitly committed old companion is part of the transform too:
+          // consume both the hardware trigger and that exact licence once. The
+          // extension's verifier separately enforces normal 1:1 or reviewed HA
+          // half coverage, so this does not turn two logical rows into qty 2.
+          if (approvedQty && !emittedApprovedEolCompanions.has(oldKey)) {
+            const committedLicense = sourceLines.find((line) => line.sku === oldKey);
+            if (!committedLicense) return [];
+            from.push({ sku: oldKey, qty: approvedQty });
+            emittedApprovedEolCompanions.add(oldKey);
+            includeReplacementLicense = true;
+          }
+          const replacementLicense = getLicenseSkus(replacementModel, item.requestedTier)
+            ?.find((license) => license.term === `${term}Y`)?.sku;
+          if (replacementLicense && includeReplacementLicense) {
+            to.push({ sku: replacementLicense, qty: approvedQty || qty, role: 'license' });
+          }
+        }
+        replacements.push({
+          kind: 'eol_replace',
+          ...(itHw ? { hardwareOnly: true } : {}),
+          from,
+          to,
+        });
+      }
+      return replacements;
+    };
+
+    const _recordParsedItemRefreshContract = (term, uplinkIdx, optionGroupId, url) => {
+      const sourceLines = contractSourceLinesForTerm(term);
+      const contract = createEolQuoteOptionContract({
+        url,
+        optionGroupId,
+        termYears: term,
+        sourceLines,
+        replacements: _buildParsedItemRefreshReplacements(term, uplinkIdx, sourceLines),
+      });
+      if (contract) quoteOptionContracts.push(contract);
+    };
+
     // Helper: build hardware breakdown showing what's existing vs replacement
     const _buildHardwareBreakdown = (uplinkIdx) => {
       const hwMap = new Map(); // finalHwSku -> { total, parts: [{qty, source}] }
@@ -8264,6 +8640,7 @@ function buildQuoteResponse(parsed) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
+          _recordParsedItemRefreshContract(term, 0, 'eol-refresh-1g', url);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
           lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
           lines.push('');
@@ -8282,6 +8659,7 @@ function buildQuoteResponse(parsed) {
         const urlItems = _buildRefreshItems(term, 1);
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
+          _recordParsedItemRefreshContract(term, 1, 'eol-refresh-10g', url);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
           lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
           lines.push('');
@@ -8300,6 +8678,7 @@ function buildQuoteResponse(parsed) {
         const urlItems = _buildRefreshItems(term, 0);
         if (urlItems.length > 0) {
           const url = buildStratusUrl(urlItems);
+          _recordParsedItemRefreshContract(term, 0, 'eol-refresh', url);
           const termLabel = term === 1 ? '1-Year Co-Term' : term === 3 ? '3-Year Co-Term' : '5-Year Co-Term';
           lines.push(`${termLabel}: ${url}${sme5yrNote(term, urlItems)}`);
           lines.push('');
@@ -8328,7 +8707,11 @@ function buildQuoteResponse(parsed) {
         }
         lines.push(buildPricingBlock(allItems, false));
       }
-      return { message: lines.join('\n').trim(), needsLlm: false };
+      return {
+        message: lines.join('\n').trim(),
+        needsLlm: false,
+        ...(quoteOptionContracts.length > 0 ? { quoteOptionContracts } : {}),
+      };
     }
   }
 
@@ -8452,7 +8835,12 @@ function buildQuoteResponse(parsed) {
     }
   }
 
-  return { message: lines.join('\n').trim(), needsLlm: false, noTermSplit };
+  return {
+    message: lines.join('\n').trim(),
+    needsLlm: false,
+    noTermSplit,
+    ...(quoteOptionContracts.length > 0 ? { quoteOptionContracts } : {}),
+  };
 }
 
 // ─── System Prompt (identical to Express version) ────────────────────────────
@@ -12297,7 +12685,16 @@ function selectOneshotRequestedMessage(messages, fallbackBody) {
       const body = String(message?.body || '').slice(0, 12000).trim();
       const fromEmail = normalizeOneshotEmail(message?.from_email || message?.fromEmail) || '';
       const internal = fromEmail.endsWith('@stratusinfosystems.com');
-      const directQuoteRequest = /\b(?:quote|pricing|price|looking\s+to\s+get\s+(?:a\s+)?quote|send\s+(?:me\s+)?(?:a\s+)?quote|request(?:ing)?\s+(?:a\s+)?quote)\b/i.test(body);
+      const quoteSignal = /\b(?:quote|pricing|price|looking\s+to\s+get\s+(?:a\s+)?quote|send\s+(?:me\s+)?(?:a\s+)?quote|request(?:ing)?\s+(?:a\s+)?quote)\b/i.test(body);
+      const freshQuoteAsk = /\b(?:please\s+quote|(?:can|could|would)\s+you\s+(?:please\s+)?(?:(?:send|provide|prepare|build|create|get)\s+(?:(?:me|us)\s+)?(?:a\s+)?quote|quote)|(?:need|want|would\s+like)\s+(?:a\s+)?quote|quote\s+(?:me|us|\d)|looking\s+to\s+get\s+(?:a\s+)?quote|send\s+(?:me\s+)?(?:a\s+)?quote|request(?:ing)?\s+(?:a\s+)?quote|(?:price|pricing)\s+(?:for|on))\b/i.test(body);
+      // A later customer approval can repeat the chosen model and the word
+      // "quote" without becoming a new line-item request. Do not let that
+      // follow-up outrank the original external request. A genuine new ask
+      // ("please quote ...") still remains eligible even when the same reply
+      // also acknowledges an earlier option.
+      const approvalOnly = /\b(?:approv(?:e|ed|ing)|looks?\s+good|go\s+with|move\s+forward|proceed|accept(?:ed)?|works?\s+for\s+(?:me|us)|we(?:'|\u2019)?ll\s+take)\b/i.test(body)
+        && !freshQuoteAsk;
+      const directQuoteRequest = quoteSignal && !approvalOnly;
       const purchaseIntent = /\b(?:order|purchase|buy|need\s+to\s+order)\b/i.test(body);
       const explicitQuote = directQuoteRequest || purchaseIntent;
       const hardwareOnly = /\b(?:hardware\s+only|no\s+licen[sc]e|without\s+licen[sc]e|just\s+the\s+hardware)\b/i.test(body);
@@ -12693,43 +13090,6 @@ async function buildOneshotIntake(input, env, caller, extractFacts) {
     }))
     .filter((c) => c.email);
 
-  // Order URLs are stronger evidence than generic email text. Consume only
-  // the most recent exact cart and return immediately, before parseMessage or
-  // any extraction/validation path can reinterpret its quantities.
-  if (extensionEcommIntake && p.order_urls != null) {
-    const order = parseOneshotIntakeOrderUrls(p.order_urls);
-    if (order.present && !order.success) return order;
-    if (order.success) {
-      return {
-        success: true,
-        used_llm: false,
-        used_order_url: true,
-        selected_order_url: order.selected_order_url,
-        selected_order_url_index: order.selected_index,
-        intent: {
-          license_tier: null,
-          hardware_only: order.lines.every((line) => !String(line.sku).startsWith('LIC-')),
-          license_only: order.lines.every((line) => String(line.sku).startsWith('LIC-')),
-          ha_requested: false,
-        },
-        facts: { requested_products: [], isr_mentions: [], customer_hint: null },
-        lines: order.lines.map((line) => ({
-          family: null,
-          sku: line.sku,
-          qty: line.qty,
-          status: 'resolved',
-          options: null,
-        })),
-        isr_prefill: null,
-        participants_echo: participants,
-      };
-    }
-  }
-
-  if (!subject.trim() && !body.trim()) {
-    return { success: false, error: 'email_required', detail: 'subject, body_text, or a valid order_urls entry is required.' };
-  }
-
   // 1) Literal SKUs — deterministic, and the LLM never runs. Prefer the
   // latest external message that explicitly asks for a quote/order over the
   // flattened whole thread. That prevents historical device mentions in
@@ -12743,7 +13103,10 @@ async function buildOneshotIntake(input, env, caller, extractFacts) {
   const requestedText = requestedMessage.used_structured_message
     ? requestedMessage.text
     : `${subject} ${requestedMessage.text}`;
-  const parsed = parseMessage(requestedText);
+  // A link-only handoff has no email text to parse. Keeping this conditional
+  // also makes the URL fallback an auditable boundary: parser success is
+  // considered first whenever an authoritative request message exists.
+  const parsed = requestedText.trim() ? parseMessage(requestedText) : null;
   const literal = [];
   let excludedLiteralCount = 0;
   for (const item of (parsed && parsed.items) || []) {
@@ -12820,11 +13183,78 @@ async function buildOneshotIntake(input, env, caller, extractFacts) {
       suggestions: Array.isArray(lv?.suggest) ? lv.suggest.slice(0, 8) : [],
     });
   }
-  if (literal.length > 0 || excludedLiteralCount > 0) {
-    const reviewedLiteral = reconcileOneshotLiteralMxTierRows(literal);
+  const reviewedLiteral = reconcileOneshotLiteralMxTierRows(literal);
+  const hasSafeRequestedLines = reviewedLiteral.length > 0
+    && reviewedLiteral.every((line) => line?.status === 'resolved'
+      && String(line?.sku || '').trim()
+      && Number.isInteger(Number(line?.qty))
+      && Number(line.qty) >= 1);
+
+  // A structured external quote request is the authoritative scope. Gmail's
+  // flat `order_urls` collection can also contain carts from Chris's later
+  // reply, so allowing those URLs to win here would replace the customer's
+  // original MX64 renewal request with the last historical MX67 refresh cart.
+  // Only fall back to the most recent exact URL when the selected-message
+  // parser could not produce a completely resolved, reviewable SKU set. URLs
+  // are still never merged across the thread.
+  if (hasSafeRequestedLines) {
     return {
       success: true,
       used_llm: false,
+      used_order_url: false,
+      selected_message_index: requestedMessage.selected_message_index,
+      selected_message_from: requestedMessage.selected_message_from,
+      used_structured_message: requestedMessage.used_structured_message,
+      intent: oneshotIntakeIntent(parsed, requestedMessage.text),
+      facts: { requested_products: [], isr_mentions: [], customer_hint: null },
+      lines: reviewedLiteral.map((l) => ({ family: null, ...l, options: null })),
+      isr_prefill: null,
+      participants_echo: participants,
+    };
+  }
+
+  if (extensionEcommIntake && p.order_urls != null) {
+    const order = parseOneshotIntakeOrderUrls(p.order_urls);
+    if (order.present && !order.success) return order;
+    if (order.success) {
+      return {
+        success: true,
+        used_llm: false,
+        used_order_url: true,
+        selected_order_url: order.selected_order_url,
+        selected_order_url_index: order.selected_index,
+        intent: {
+          license_tier: null,
+          hardware_only: order.lines.every((line) => !String(line.sku).startsWith('LIC-')),
+          license_only: order.lines.every((line) => String(line.sku).startsWith('LIC-')),
+          ha_requested: false,
+        },
+        facts: { requested_products: [], isr_mentions: [], customer_hint: null },
+        lines: order.lines.map((line) => ({
+          family: null,
+          sku: line.sku,
+          qty: line.qty,
+          status: 'resolved',
+          options: null,
+        })),
+        isr_prefill: null,
+        participants_echo: participants,
+      };
+    }
+  }
+
+  if (!subject.trim() && !body.trim() && !requestedMessage.text.trim()) {
+    return { success: false, error: 'email_required', detail: 'subject, body_text, a requested message, or a valid order_urls entry is required.' };
+  }
+
+  // Preserve the existing fail-closed review path when message parsing found
+  // literal candidates but no safe URL fallback was supplied. Unresolved or
+  // explicitly excluded rows must not disappear into generic LLM extraction.
+  if (literal.length > 0 || excludedLiteralCount > 0) {
+    return {
+      success: true,
+      used_llm: false,
+      used_order_url: false,
       selected_message_index: requestedMessage.selected_message_index,
       selected_message_from: requestedMessage.selected_message_from,
       used_structured_message: requestedMessage.used_structured_message,
@@ -33669,7 +34099,7 @@ CRITICAL URL RULES:
             await addToHistory(kv, quotePersonId, 'user', text);
 
             // Helper: extract URLs + labels from a buildQuoteResponse message string
-            function extractQuoteUrls(responseText) {
+            function extractQuoteUrls(responseText, quoteOptionContracts = []) {
               const urls = [];
               const tLabels = ['1-Year', '3-Year', '5-Year'];
               let curOption = '';
@@ -33695,7 +34125,7 @@ CRITICAL URL RULES:
                 const rawUrls = responseText.match(/https:\/\/stratusinfosystems\.com\/order\/[^\s)>\]]+/g) || [];
                 rawUrls.forEach((u, i) => urls.push({ url: u, label: tLabels[i] || 'Quote ' + (i + 1) }));
               }
-              return urls;
+              return attachTrustedQuoteOptionContracts(urls, quoteOptionContracts);
             }
 
             // Helper: store assistant response and return apiResult
@@ -34125,7 +34555,7 @@ CRITICAL URL RULES:
               const quoteResult = buildQuoteResponse(parsed);
               if (!quoteResult.needsLlm && quoteResult.message) {
                 const responseText = quoteResult.message;
-                const quoteUrls = extractQuoteUrls(responseText);
+                const quoteUrls = extractQuoteUrls(responseText, quoteResult.quoteOptionContracts);
                 await addToHistory(kv, quotePersonId, 'assistant', responseText);
                 apiResult = {
                   quoteUrls,
@@ -34265,7 +34695,7 @@ CRITICAL URL RULES:
               apiResult = await finalizeQuoteResponse({
                 quoteUrls: [],
                 eolWarnings: [],
-                parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                parsedItems: publicQuoteParsedItems(parsedWithValidation),
                 claudeResponse: _clarifyReply,
                 suggestions, // legacy array → narrowed +button picklist (renders today)
                 recovery: _clarifyRecovery || undefined,
@@ -34288,7 +34718,7 @@ CRITICAL URL RULES:
               apiResult = {
                 quoteUrls: [],
                 eolWarnings: [],
-                parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                parsedItems: publicQuoteParsedItems(parsedWithValidation),
                 suggestions,
                 handlerType: 'suggestions-only',
               };
@@ -34314,7 +34744,7 @@ CRITICAL URL RULES:
                 if (complexity.exhausted) {
                   apiResult = await finalizeQuoteResponse({
                     quoteUrls: [], eolWarnings: [],
-                    parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                    parsedItems: publicQuoteParsedItems(parsedWithValidation),
                     claudeResponse: complexity.reply,
                     recovery: complexity.recovery,
                     handlerType: 'complexity-recovery',
@@ -34334,7 +34764,7 @@ CRITICAL URL RULES:
                 apiResult = await finalizeQuoteResponse({
                   quoteUrls: cleanFbUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
                   eolWarnings: [],
-                  parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                  parsedItems: publicQuoteParsedItems(parsedWithValidation),
                   claudeResponse: sanitizedFb,
                   suggestions: _fbSug2 || synthesizeSuggestionsFromReply(sanitizedFb) || undefined,
                   handlerType: 'claude-fallback',
@@ -34366,7 +34796,7 @@ CRITICAL URL RULES:
               apiResult = await finalizeQuoteResponse({
                 quoteUrls: [],
                 eolWarnings,
-                parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                parsedItems: publicQuoteParsedItems(parsedWithValidation),
                 claudeResponse: detail,
                 recovery: {
                   kind: 'quote_composition_mismatch',
@@ -34405,7 +34835,7 @@ CRITICAL URL RULES:
                 if (complexity.exhausted) {
                   apiResult = await finalizeQuoteResponse({
                     quoteUrls: [], eolWarnings,
-                    parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                    parsedItems: publicQuoteParsedItems(parsedWithValidation),
                     claudeResponse: complexity.reply,
                     recovery: complexity.recovery,
                     handlerType: 'complexity-recovery',
@@ -34423,7 +34853,7 @@ CRITICAL URL RULES:
                 apiResult = await finalizeQuoteResponse({
                   quoteUrls: cleanUrls.map((u, i) => ({ url: u, label: termLabels[i] || 'Quote ' + (i + 1) })),
                   eolWarnings,
-                  parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                  parsedItems: publicQuoteParsedItems(parsedWithValidation),
                   claudeResponse: sanitizedReply,
                   handlerType: 'claude-advisory',
                 }, sanitizedReply);
@@ -34436,7 +34866,7 @@ CRITICAL URL RULES:
 
             // ── Deterministic quote — extract URLs from buildQuoteResponse output ──
             const responseText = quoteResult.message || quoteResult.text || quoteResult.reply || '';
-            let quoteUrls = extractQuoteUrls(responseText);
+            let quoteUrls = extractQuoteUrls(responseText, quoteResult.quoteOptionContracts);
             // Term-less quotes (accessories — mounts, injectors, power, cables) carry
             // no license, so buildQuoteResponse emits a single URL with no co-term.
             // extractQuoteUrls' positional fallback would mislabel it "1-Year" — relabel
@@ -34451,7 +34881,7 @@ CRITICAL URL RULES:
               apiResult = await finalizeQuoteResponse({
                 quoteUrls: [],
                 eolWarnings,
-                parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                parsedItems: publicQuoteParsedItems(parsedWithValidation),
                 claudeResponse: detail,
                 recovery: {
                   kind: 'quote_composition_mismatch',
@@ -34471,7 +34901,7 @@ CRITICAL URL RULES:
             apiResult = {
               quoteUrls,
               eolWarnings,
-              parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+              parsedItems: publicQuoteParsedItems(parsedWithValidation),
               // If we proceeded past the suggestions bail because a quote was
               // buildable (F3 hasQuotable), STILL surface any leftover "did you
               // mean" suggestions for tokens we couldn't resolve (e.g. a typo'd

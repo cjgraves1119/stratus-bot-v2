@@ -349,6 +349,107 @@ test('malformed explicit EOL license tier also fails closed in the Worker', () =
   );
 });
 
+test('Gmail thread scope keeps the original MX64 renewal request ahead of sent carts and a later approval', async () => {
+  const originalRequest = [
+    'Hi Chris,',
+    'Please quote renewal options for 2 x LIC-ENT-3YR and 1 x LIC-MX64-SEC-3YR.',
+    'Thanks!',
+  ].join('\n');
+  const renew1 = 'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,LIC-MX64-SEC-1YR&qty=2,1';
+  const renew3 = 'https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,LIC-MX64-SEC-3YR&qty=2,1';
+  const renew5 = 'https://stratusinfosystems.com/order/?item=LIC-ENT-5YR,LIC-MX64-SEC-5YR&qty=2,1';
+  const refresh1 = 'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,MX67,LIC-MX67-SEC-1YR&qty=2,1,1';
+  const refresh3 = 'https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,MX67,LIC-MX67-SEC-3YR&qty=2,1,1';
+  const refresh5 = 'https://stratusinfosystems.com/order/?item=LIC-ENT-5YR,MX67,LIC-MX67-SEC-5YR&qty=2,1,1';
+  const orderUrls = [renew1, renew3, renew5, refresh1, refresh3, refresh5];
+  const sentOptions = [
+    'Here are the Renew As-Is and MX67 Refresh options:',
+    ...orderUrls,
+  ].join('\n');
+  const approvalReply = 'The MX67 refresh quote looks good. Please proceed with that option.';
+
+  let extractorCalls = 0;
+  const intake = await worker.buildOneshotIntake({
+    source: 'ext-email-ecomm-intake',
+    subject: 'Re: Meraki renewal options',
+    body_text: [originalRequest, sentOptions, approvalReply].join('\n\n'),
+    participants: [{ email: 'customer@example.com', name: 'Synthetic Customer', role: 'customer' }],
+    messages: [
+      { index: 0, from_email: 'customer@example.com', body: originalRequest },
+      { index: 1, from_email: 'chrisg@stratusinfosystems.com', body: sentOptions },
+      { index: 2, from_email: 'customer@example.com', body: approvalReply },
+    ],
+    order_urls: orderUrls,
+  }, {}, 'sales@example.com', async () => {
+    extractorCalls += 1;
+    throw new Error('literal intake must not use the extractor');
+  });
+
+  assert.equal(intake.success, true, intake.detail || intake.error);
+  assert.equal(extractorCalls, 0);
+  assert.equal(intake.used_order_url, false, 'the last sent refresh cart replaced the customer request');
+  assert.equal(intake.used_structured_message, true);
+  assert.equal(intake.selected_message_index, 0, 'the approval reply replaced the original quote request');
+  assert.deepEqual(intake.lines.map(({ sku, qty, status }) => ({ sku, qty, status })), [
+    { sku: 'LIC-ENT-3YR', qty: 2, status: 'resolved' },
+    { sku: 'LIC-MX64-SEC-3YR', qty: 1, status: 'resolved' },
+  ]);
+
+  // Prove the selected source rows still reach the deterministic EOL builder:
+  // three renewal carts and three replacement carts, with no cross-cart merge.
+  const parsed = worker.parseMessage(quoteSkuTextFromLines(intake.lines));
+  const built = worker.buildQuoteResponse(parsed);
+  const options = optionsFromWorkerMessage(built.message);
+  assert.equal(options.length, 6, built.message);
+  const carts = options.map((option) => cartOf(option.url));
+  const renewals = carts.filter((cart) => [...cart.keys()].some((sku) => sku.startsWith('LIC-MX64-SEC-')));
+  const refreshes = carts.filter((cart) => cart.has('MX67'));
+  assert.equal(renewals.length, 3, 'renew-as-is alternatives were lost');
+  assert.equal(refreshes.length, 3, 'MX67 EOL refresh alternatives were lost');
+  assert.ok(carts.every((cart) => [...cart.entries()].some(([sku, qty]) => /^LIC-ENT-[135]YR$/.test(sku) && qty === 2)));
+  assert.ok(refreshes.every((cart) => [...cart.entries()].some(([sku, qty]) => /^LIC-MX67-SEC-[135]YR$/.test(sku) && qty === 1)));
+});
+
+test('link-only Gmail handoff still falls back to the most recent exact cart without merging history', async () => {
+  const oldCart = 'https://stratusinfosystems.com/order/?item=OLD-SKU&qty=99';
+  const selectedCart = 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-3YR&qty=1,1';
+  let extractorCalls = 0;
+  const intake = await worker.buildOneshotIntake({
+    source: 'ext-email-ecomm-intake',
+    subject: '',
+    body_text: '',
+    messages: [],
+    order_urls: [oldCart, selectedCart],
+  }, {}, 'sales@example.com', async () => { extractorCalls += 1; return {}; });
+  assert.equal(intake.success, true);
+  assert.equal(intake.used_order_url, true);
+  assert.equal(intake.selected_order_url_index, 1);
+  assert.equal(intake.selected_order_url, selectedCart);
+  assert.deepEqual(intake.lines.map(({ sku, qty }) => ({ sku, qty })), [
+    { sku: 'MX67', qty: 1 },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+  ]);
+  assert.equal(extractorCalls, 0);
+});
+
+test('a safe selected request ignores malformed historical thread URLs instead of consuming them', async () => {
+  const request = 'Please quote 2 LIC-ENT-3YR and 1 LIC-MX64-SEC-3YR.';
+  const intake = await worker.buildOneshotIntake({
+    source: 'ext-email-ecomm-intake',
+    subject: 'Renewal request',
+    body_text: request,
+    messages: [{ index: 7, from_email: 'customer@example.com', body: request }],
+    order_urls: ['https://evil.example/order/?item=MX67&qty=100'],
+  }, {}, 'sales@example.com', async () => { throw new Error('must not extract'); });
+  assert.equal(intake.success, true);
+  assert.equal(intake.used_order_url, false);
+  assert.equal(intake.selected_message_index, 7);
+  assert.deepEqual(intake.lines.map(({ sku, qty }) => [sku, qty]), [
+    ['LIC-ENT-3YR', 2],
+    ['LIC-MX64-SEC-3YR', 1],
+  ]);
+});
+
 test('intake card visibly labels row tiers and gates unresolved rows', () => {
   const cardStart = CHAT_SOURCE.indexOf('function EmailQuoteIntakeCard(');
   const cardEnd = CHAT_SOURCE.indexOf('function OneshotZohoLookup(', cardStart);
