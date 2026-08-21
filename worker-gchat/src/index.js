@@ -465,7 +465,11 @@ function validateExplicitMxMsQuoteComposition(rawText, parsed, quoteUrls, valida
       const termSku = directLicenseSkuForTerm(base, term) || base;
       const sku = String(termSku).toUpperCase();
       expectedLicenseUniverse.add(sku);
-      expectedLicenseQty.set(sku, qty);
+      // A reviewed standalone license is additive to the device-derived
+      // companion. The historical/default contract remains "explicit total".
+      expectedLicenseQty.set(sku, item?.explicitLicenseIntent === 'standalone'
+        ? (expectedLicenseQty.get(sku) || 0) + qty
+        : qty);
     }
   }
 
@@ -7632,6 +7636,36 @@ function buildPricingBlock(urlItems, showPricing) {
 }
 
 // ─── Quote Builder ───────────────────────────────────────────────────────────
+function applyReviewedLicenseIntents(parsed, values) {
+  const intents = Array.isArray(values) ? values : [];
+  if (!intents.length || !parsed || !Array.isArray(parsed.items)) return { parsed, error: '' };
+  if (intents.length > 50) return { parsed, error: 'Too many reviewed license-use choices.' };
+  const bySku = new Map();
+  for (const entry of intents) {
+    const sku = String(entry?.sku || '').trim().toUpperCase();
+    const qty = Number(entry?.qty);
+    const intent = String(entry?.intent || '').trim().toLowerCase();
+    if (!/^LIC-[A-Z0-9-]+$/.test(sku) || !Number.isInteger(qty) || qty < 1 || qty > 99999
+      || !['paired', 'standalone'].includes(intent) || bySku.has(sku)) {
+      return { parsed, error: 'A reviewed license-use choice did not match the current quote rows.' };
+    }
+    bySku.set(sku, { qty, intent });
+  }
+  const seen = new Set();
+  const items = parsed.items.map((item) => {
+    const sku = String(item?.baseSku || item?.sku || '').trim().toUpperCase();
+    const review = bySku.get(sku);
+    if (!review) return item;
+    if (seen.has(sku) || Number(item?.qty) !== review.qty) return null;
+    seen.add(sku);
+    return { ...item, explicitLicenseIntent: review.intent };
+  });
+  if (items.includes(null) || seen.size !== bySku.size) {
+    return { parsed, error: 'A reviewed license-use choice did not match the current quote rows.' };
+  }
+  return { parsed: { ...parsed, items }, error: '' };
+}
+
 function buildQuoteResponse(parsed) {
   // Defensive: parseMessage returns null for non-quote inputs. Callers guard,
   // but null-safe here too so no caller can ever throw — route null → LLM.
@@ -8030,7 +8064,7 @@ function buildQuoteResponse(parsed) {
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
 
-  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeReplaced: itemSmeReplaced, requestedTier: itemRequestedTier } of parsed.items) {
+  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeReplaced: itemSmeReplaced, requestedTier: itemRequestedTier, explicitLicenseIntent } of parsed.items) {
     const itemTier = effectiveQuoteItemTier({ requestedTier: itemRequestedTier }, parsed.items, requestedTier);
     // ── V3 collapsed named/multi-term license (Phase 4 — identical to worker/) ──
     // buildQuoteFromV3 collapses a named license (Duo/Umbrella/SME/AnyConnect/…) into ONE item
@@ -8124,6 +8158,7 @@ function buildQuoteResponse(parsed) {
         // Exact catalog rows are committed totals. They can satisfy the same
         // companion a hardware row would otherwise add automatically.
         isExplicitCatalogLicense: true,
+        explicitLicenseIntent: explicitLicenseIntent || '',
         hardwareOnly: false,
         licenseOnly: true
       };
@@ -8245,7 +8280,11 @@ function buildQuoteResponse(parsed) {
       const key = String(sku).toUpperCase();
       const qty = Number(item.qty) || 0;
       if (item.isExplicitCatalogLicense === true) {
-        explicit.set(key, (explicit.get(key) || 0) + qty);
+        const prior = explicit.get(key) || { qty: 0, standaloneQty: 0, pairedQty: 0 };
+        prior.qty += qty;
+        if (item.explicitLicenseIntent === 'standalone') prior.standaloneQty += qty;
+        else prior.pairedQty += qty;
+        explicit.set(key, prior);
       } else if (item.isAgnosticLicense !== true
           && !(item.hardwareOnly ?? modifiers.hardwareOnly)) {
         automatic.set(key, (automatic.get(key) || 0) + qty);
@@ -8263,7 +8302,16 @@ function buildQuoteResponse(parsed) {
     const approved = new Set();
     const approvedEol = new Set();
     const approvedEolQty = new Map();
-    for (const [sku, explicitQty] of explicit) {
+    for (const [sku, explicitReview] of explicit) {
+      const explicitQty = explicitReview.qty;
+      // An intentional standalone renewal is additive. It neither suppresses
+      // nor attempts to satisfy the hardware companion for the same model.
+      if (explicitReview.standaloneQty > 0) {
+        if (explicitReview.pairedQty > 0) {
+          companionQuantityErrors.push(`${sku} mixes device-associated and standalone quantities; split it into separate quote updates`);
+        }
+        continue;
+      }
       const hardwareQty = automatic.get(sku) || 0;
       if (!hardwareQty) continue; // unrelated standalone license remains additive
       const isMxHa = parsed.haRequested === true
@@ -34086,7 +34134,7 @@ CRITICAL URL RULES:
           // SKU quotes with validation/suggestions, Claude AI fallback for advisory,
           // and conversation history for multi-turn interactions.
           case '/api/quote': {
-            const { text, personId: reqPersonId, priorQuoteText } = apiBody;
+            const { text, personId: reqPersonId, priorQuoteText, licenseIntents } = apiBody;
             if (!text) {
               return new Response(JSON.stringify({ error: 'text required' }), { status: 400, headers: jsonHeaders });
             }
@@ -34396,6 +34444,16 @@ CRITICAL URL RULES:
               } catch (_) { parsed = null; }
             }
             if (!_accessoryFind && !parsed) parsed = parseMessage(_tierRequest || text);
+            const reviewedLicenseIntents = applyReviewedLicenseIntents(parsed, licenseIntents);
+            if (reviewedLicenseIntents.error) {
+              apiResult = {
+                quoteUrls: [], eolWarnings: [], parsedItems: [],
+                claudeResponse: `${reviewedLicenseIntents.error} No quote link was generated.`,
+                handlerType: 'quote-composition-blocked',
+              };
+              break;
+            }
+            parsed = reviewedLicenseIntents.parsed;
 
             // Clarification prompts (e.g. "which Duo tier?") — return as clarification response.
             // Store the question as an assistant turn so the NEXT message ("Essentials") can be

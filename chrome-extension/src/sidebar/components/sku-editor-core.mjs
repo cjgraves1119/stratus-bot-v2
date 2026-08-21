@@ -134,10 +134,19 @@ export function normalizeSkuEditorRows(rows) {
     const tier = sku.startsWith('LIC-')
       ? ''
       : String(row?.tier || '').trim().toLowerCase();
-    const key = `${sku}\u0000${tier}`;
+    const licenseIntent = sku.startsWith('LIC-')
+      ? String(row?.licenseIntent || '').trim().toLowerCase()
+      : '';
+    if (licenseIntent && !['paired', 'standalone'].includes(licenseIntent)) {
+      const message = `${sku} has an invalid license-use choice.`;
+      return { ok: false, rows: [], error: message, errors: [{ index: -1, code: 'invalid_license_intent', message }] };
+    }
+    // A paired and a standalone copy of the same catalogue license have
+    // different commercial meaning. Keep them as distinct editable rows.
+    const key = `${sku}\u0000${tier}\u0000${licenseIntent}`;
     const existing = grouped.get(key);
     if (existing) existing.qty += qty;
-    else grouped.set(key, { sku, qty, ...(tier ? { tier } : {}) });
+    else grouped.set(key, { sku, qty, ...(tier ? { tier } : {}), ...(licenseIntent ? { licenseIntent } : {}) });
 
     if (!sku.startsWith('LIC-')) {
       if (!intentsBySku.has(sku)) intentsBySku.set(sku, new Set());
@@ -409,7 +418,13 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
       && hardwareQty !== null
       && licenseQty !== null
       && hardwareQty === licenseQty * 2;
-    const kind = exactPair || warmSparePair ? 'paired' : 'mismatch';
+    const pairedIntent = group.licenseIndexes.every((index) => list[index]?.licenseIntent === 'paired');
+    const standaloneIntent = group.licenseIndexes.every((index) => list[index]?.licenseIntent === 'standalone');
+    const kind = standaloneIntent
+      ? 'standalone'
+      : (exactPair || warmSparePair)
+        ? (pairedIntent ? 'paired' : 'needs_review')
+        : 'mismatch';
     const common = {
       kind,
       hardwareQty,
@@ -621,6 +636,17 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
       return { ok: false, rows: [], text: '', error: editorNormalized.error, errors: editorNormalized.errors };
     }
     const lines = editorNormalized.rows.map(({ unresolved: _unresolved, ...line }) => line);
+    const unresolvedPair = licensePairReviewForRows(lines, { allowHaLicenseRatio: overrides?.haRequested === true })
+      .some((entry) => entry.kind === 'needs_review');
+    if (unresolvedPair) {
+      return {
+        ok: false,
+        rows: lines,
+        text: '',
+        error: 'Choose whether each matching hardware/license row is device-associated or a standalone renewal before updating the quote.',
+        errors: [{ index: -1, code: 'license_intent_required', message: 'Matching hardware/license rows require a license-use choice.' }],
+      };
+    }
     normalized = {
       ok: true,
       lines,
@@ -769,6 +795,9 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
     ok: true,
     hardwareOnlySkus,
     rows: [...committedRows, ...synthetic.lines.map(({ sku, qty }) => ({ sku, qty }))],
+    licenseIntents: committedRows
+      .filter((line) => /^LIC-/i.test(String(line.sku || '')) && line.licenseIntent)
+      .map(({ sku, qty, licenseIntent }) => ({ sku, qty, intent: licenseIntent })),
     text: [...combinedLines, ...modifiers].filter(Boolean).join('\n'),
     mode,
     error: '',

@@ -81,7 +81,7 @@ test('chat rebuild uses newest-response and canonical URL-composition gates', ()
   assert.match(source, /verifyStratusOrderUrlOptions\(result\?\.urls, committedRows, \{\s*\.\.\.quoteVerificationRequirements\(msg\)/);
   assert.match(source, /applyExplicitMxWarmSpareToQuoteOptions\(candidate\?\.urls, explicitQuoteHaRequested\(msg\)\)/);
   assert.match(source, /response\?\.result/);
-  assert.match(source, /runQuote\(prepared\.text, newQuotePersonId\(\)\)/,
+  assert.match(source, /runQuote\(prepared\.text, newQuotePersonId\(\), null, \{\s*licenseIntents: prepared\.licenseIntents,/,
     'canonical editor rebuilds must not reuse conversational quote history');
   assert.match(source, /draftDirty: false/);
   assert.match(source, /result: \{ \.\.\.candidate, urls: \[\] \}/);

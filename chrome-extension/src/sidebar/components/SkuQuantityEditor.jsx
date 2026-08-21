@@ -43,6 +43,16 @@ export default function SkuQuantityEditor({
     publish(values.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
   }
 
+  function moveRow(index, delta) {
+    const nextIndex = index + delta;
+    if (nextIndex < 0 || nextIndex >= values.length) return;
+    const nextRows = [...values];
+    [nextRows[index], nextRows[nextIndex]] = [nextRows[nextIndex], nextRows[index]];
+    searchTokenRef.current += 1;
+    setSearch({ index: -1, query: '', loading: false, products: [], error: '' });
+    publish(nextRows);
+  }
+
   function scheduleSearch(index, rawQuery) {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     const query = String(rawQuery || '').trim().toUpperCase();
@@ -87,8 +97,10 @@ export default function SkuQuantityEditor({
         const pairing = pairReview[index] || { kind: 'none' };
         const mismatch = pairing.kind === 'mismatch';
         const paired = pairing.kind === 'paired';
+        const needsReview = pairing.kind === 'needs_review';
+        const standalone = pairing.kind === 'standalone';
         const warmSpare = pairing.warmSpare === true;
-        const annotationColor = mismatch ? '#e37400' : '#188038';
+        const annotationColor = mismatch || needsReview ? '#e37400' : standalone ? COLORS.STRATUS_BLUE : '#188038';
         const hardwareLabel = pairing.hardwareSkus?.join(' + ') || 'hardware';
         const licenseLabel = pairing.licenseSkus?.join(' + ') || 'license';
         let annotation = '';
@@ -100,6 +112,12 @@ export default function SkuQuantityEditor({
           annotation = `License supplied by paired ${licenseLabel}`;
         } else if (paired && pairing.role === 'license') {
           annotation = `Paired with ${hardwareLabel} — counted once, not an extra license`;
+        } else if (standalone && pairing.role === 'license') {
+          annotation = `Standalone renewal/additional license — ${hardwareLabel} adds its own license; this row adds x${pairing.licenseQty ?? '?'}.`;
+        } else if (standalone && pairing.role === 'hardware') {
+          annotation = `Device license plus standalone renewal — total ${licenseLabel} coverage is x${(pairing.hardwareQty || 0) + (pairing.licenseQty || 0)}.`;
+        } else if (needsReview && pairing.role === 'license') {
+          annotation = `Review required: is ${licenseLabel} the license for ${hardwareLabel}, or an additional standalone renewal?`;
         } else if (mismatch) {
           annotation = `License quantity mismatch for ${hardwareLabel}: hardware x${pairing.hardwareQty ?? '?'}, explicit ${licenseLabel} x${pairing.licenseQty ?? '?'}`;
         }
@@ -186,6 +204,22 @@ export default function SkuQuantityEditor({
               )}
               <button
                 type="button"
+                aria-label={`Move SKU row ${index + 1} up`}
+                disabled={disabled || index === 0}
+                onClick={() => moveRow(index, -1)}
+                title="Move up"
+                style={{ padding: '4px 6px', borderRadius: 5, border: `1px solid ${COLORS.BORDER}`, background: 'transparent', cursor: disabled || index === 0 ? 'default' : 'pointer' }}
+              >↑</button>
+              <button
+                type="button"
+                aria-label={`Move SKU row ${index + 1} down`}
+                disabled={disabled || index === values.length - 1}
+                onClick={() => moveRow(index, 1)}
+                title="Move down"
+                style={{ padding: '4px 6px', borderRadius: 5, border: `1px solid ${COLORS.BORDER}`, background: 'transparent', cursor: disabled || index === values.length - 1 ? 'default' : 'pointer' }}
+              >↓</button>
+              <button
+                type="button"
                 disabled={disabled}
                 onClick={() => {
                   searchTokenRef.current += 1;
@@ -198,6 +232,22 @@ export default function SkuQuantityEditor({
                 Remove
               </button>
             </div>
+            {(pairing.role === 'license' && (needsReview || paired || standalone)) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 3, paddingLeft: 3 }}>
+                <span style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY }}>License use</span>
+                <select
+                  aria-label={`License use row ${index + 1}`}
+                  value={row?.licenseIntent || ''}
+                  disabled={disabled}
+                  onChange={(event) => patchRow(index, { licenseIntent: event.target.value })}
+                  style={{ fontSize: 10, padding: '3px 4px', borderRadius: 5, border: `1px solid ${needsReview ? '#e37400' : COLORS.BORDER}`, background: '#fff' }}
+                >
+                  <option value="">Choose…</option>
+                  <option value="paired">Device-associated license (one total)</option>
+                  <option value="standalone">Standalone renewal / additional license</option>
+                </select>
+              </div>
+            )}
             {annotation && (
               <div
                 aria-label={`License pairing row ${index + 1}`}

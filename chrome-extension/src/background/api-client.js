@@ -113,11 +113,12 @@ export async function draftReply(subject, body, senderEmail, senderName, tone, i
  * Generate a Stratus URL quote from SKU text.
  * Passes a persistent personId for conversation history (pricing follow-ups, revisions, etc.)
  */
-export async function generateQuote(skuText, personId, priorQuoteText) {
+export async function generateQuote(skuText, personId, priorQuoteText, licenseIntents) {
   return apiCall('/api/quote', {
     text: skuText,
     personId,
     priorQuoteText: priorQuoteText || undefined,
+    licenseIntents: Array.isArray(licenseIntents) ? licenseIntents : undefined,
   }, { timeout: 60000 });
 }
 

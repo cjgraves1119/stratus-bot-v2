@@ -2901,7 +2901,9 @@ export default function ChatPanel({
     // follow-up. Use a fresh deterministic quote session so the Worker's
     // history modifier path cannot reinterpret an added row against the prior
     // cart and silently drop an existing SKU.
-    const response = await runQuote(prepared.text, newQuotePersonId());
+    const response = await runQuote(prepared.text, newQuotePersonId(), null, {
+      licenseIntents: prepared.licenseIntents,
+    });
     if (quoteUpdateSequenceRef.current.get(msg.id) !== requestSequence) {
       // A user edit invalidated this response while it was in flight. The edit
       // handler already left the card dirty and hid its stale actions; release

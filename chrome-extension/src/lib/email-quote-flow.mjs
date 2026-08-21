@@ -397,6 +397,21 @@ export function verifyStratusOrderUrlComposition(value, expectedInputLines, requ
     (Array.isArray(requirements?.hardwareOnlySkus) ? requirements.hardwareOnlySkus : [])
       .map((value) => canonicalOrderCompositionSku(value)),
   );
+  // A reviewed standalone device license is intentionally additive: leave the
+  // hardware's generated companion in place and require the URL to contain
+  // both quantities. Only remove the literal expected row when it actually
+  // maps to current hardware; an unrelated standalone renewal stays strict.
+  const standaloneLicenseQty = new Map();
+  for (const line of (Array.isArray(expectedInputLines) ? expectedInputLines : [])) {
+    if (String(line?.licenseIntent || '').toLowerCase() !== 'standalone') continue;
+    const sku = canonicalOrderCompositionSku(line?.sku);
+    const qty = Number(line?.qty);
+    if (!sku.startsWith('LIC-') || !Number.isInteger(qty) || qty < 1) continue;
+    const association = automaticLicenseCompanionAssociation(sku, expectedMap, bareHardwareSkus, expectedInputLines);
+    if (!association) continue;
+    standaloneLicenseQty.set(sku, (standaloneLicenseQty.get(sku) || 0) + qty);
+    expectedMap.delete(sku);
+  }
   const allowedAliasActualSkus = new Set();
   const aliasGroups = new Map();
   // Aliases resolved from model shorthand. The shorthand IS the license line, so
@@ -458,11 +473,12 @@ export function verifyStratusOrderUrlComposition(value, expectedInputLines, requ
     if (automaticLicenseAssociations.has(companion.key)) {
       return unusableOrderUrl('composition_mismatch', `The generated order URL contained duplicate license companions for ${companion.key}.`, expected.lines, actual.lines);
     }
-    const validQty = qty === companion.expectedQty
+    const standaloneQty = standaloneLicenseQty.get(sku) || 0;
+    const validQty = qty === companion.expectedQty + standaloneQty
       || (requirements?.allowHaLicenseRatio === true
         && companion.haEligible === true
         && companion.expectedQty % 2 === 0
-        && qty === companion.expectedQty / 2);
+        && qty === companion.expectedQty / 2 + standaloneQty);
     if (!validQty) {
       return unusableOrderUrl('composition_mismatch', `The generated order URL contained the wrong license quantity for ${sku}.`, expected.lines, actual.lines);
     }

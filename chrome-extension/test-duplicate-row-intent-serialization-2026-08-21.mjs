@@ -185,6 +185,32 @@ test('blank editor row keeps the MX default Security tier when no global tier ex
   }
 });
 
+test('reviewed standalone MX license is additive to the new-device companion', () => {
+  const rows = [
+    { sku: 'MX75', qty: 1, tier: 'security' },
+    { sku: 'LIC-MX75-SEC-3Y', qty: 1, licenseIntent: 'standalone' },
+  ];
+  const prepared = quoteTextFromEditorRows(rows, '', {});
+  assert.equal(prepared.ok, true, prepared.error);
+  assert.deepEqual(prepared.licenseIntents, [{ sku: 'LIC-MX75-SEC-3Y', qty: 1, intent: 'standalone' }]);
+  const parsed = worker.parseMessage(prepared.text);
+  parsed.items = parsed.items.map((item) => (
+    String(item.baseSku || '').toUpperCase() === 'LIC-MX75-SEC-3Y'
+      ? { ...item, explicitLicenseIntent: 'standalone' }
+      : item
+  ));
+  const built = worker.buildQuoteResponse(parsed);
+  assert.notEqual(built.compositionBlocked, true, built.message);
+  const options = optionsFromWorkerMessage(built.message);
+  const verified = verifyStratusOrderUrlOptions(options, prepared.rows, { requireLicensedOption: true });
+  assert.equal(verified.ok, true, verified.error);
+  for (const [index, term] of [1, 3, 5].entries()) {
+    const cart = cartOf(verified.urls[index].url);
+    assert.equal(cart.get('MX75'), 1);
+    assert.equal(cart.get(`LIC-MX75-SEC-${term}Y`), 2);
+  }
+});
+
 test('reviewed blank rows enforce MX, Z4, and MS130 family-default tiers', () => {
   const verify = (url, rows, requirements = {}) => verifyStratusOrderUrlOptions([{
     label: '3-Year',

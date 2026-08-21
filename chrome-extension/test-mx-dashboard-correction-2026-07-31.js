@@ -65,12 +65,12 @@ test('MX edition correction detector accepts the worker-supported bounded phrase
 });
 
 test('prior quote text travels through every extension hop to /api/quote', () => {
-  assert.ok(/runQuote\(skuText, personId, priorQuoteText = null\)/.test(quoteClient));
+  assert.ok(/runQuote\(skuText, personId, priorQuoteText = null, \{ licenseIntents = \[\] \} = \{\}\)/.test(quoteClient));
   assert.ok(/priorQuoteText: priorQuoteText \|\| undefined/.test(quoteClient));
-  assert.ok(/generateQuote\(skuText, personId, priorQuoteText\)/.test(backgroundApi));
+  assert.ok(/generateQuote\(skuText, personId, priorQuoteText, licenseIntents\)/.test(backgroundApi));
   assert.ok(/priorQuoteText: priorQuoteText \|\| undefined/.test(backgroundApi));
-  assert.ok(/MSG\.GENERATE_QUOTE\]: async \(\{ skuText, personId, priorQuoteText \}\)/.test(background));
-  assert.ok(/api\.generateQuote\(skuText, personId, priorQuoteText\)/.test(background));
+  assert.ok(/MSG\.GENERATE_QUOTE\]: async \(\{ skuText, personId, priorQuoteText, licenseIntents \}\)/.test(background));
+  assert.ok(/api\.generateQuote\(skuText, personId, priorQuoteText, licenseIntents\)/.test(background));
 });
 
 test('dashboard ambiguity is returned as a clarification before SKU fallback', () => {

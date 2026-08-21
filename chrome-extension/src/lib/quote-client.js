@@ -242,7 +242,7 @@ export function mapQuoteResponse(res, mrEntQty = 0) {
  * lines, calls the worker engine, and appends the LIC-ENT co-term URLs.
  * @returns {Promise<{result?: object, error?: string}>}
  */
-export async function runQuote(skuText, personId, priorQuoteText = null) {
+export async function runQuote(skuText, personId, priorQuoteText = null, { licenseIntents = [] } = {}) {
   const raw = (skuText || '').trim();
   if (!raw) return { error: 'No SKUs provided.' };
 
@@ -273,6 +273,10 @@ export async function runQuote(skuText, personId, priorQuoteText = null) {
       // Bounded local quote-card context for deterministic corrections. The
       // worker accepts only Stratus order URLs or its dashboard marker.
       priorQuoteText: priorQuoteText || undefined,
+      // This reviewed UI metadata is intentionally separate from quote text:
+      // a matching explicit licence can mean either device coverage or an
+      // additional renewal, and prose cannot safely infer that distinction.
+      licenseIntents: Array.isArray(licenseIntents) ? licenseIntents : [],
     });
     if (!res) return { error: 'No response from quote API.' };
     return mapQuoteResponse(res, mrEntQty);

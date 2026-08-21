@@ -496,8 +496,8 @@ registerMessageHandlers({
   },
 
   // ── Quoting ──
-  [MSG.GENERATE_QUOTE]: async ({ skuText, personId, priorQuoteText }) => {
-    return api.generateQuote(skuText, personId, priorQuoteText);
+  [MSG.GENERATE_QUOTE]: async ({ skuText, personId, priorQuoteText, licenseIntents }) => {
+    return api.generateQuote(skuText, personId, priorQuoteText, licenseIntents);
   },
 
   // Read-only, bounded product autocomplete for explicit quote-line editing.

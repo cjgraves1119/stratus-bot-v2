@@ -286,7 +286,7 @@ test('an exact explicit MX SEC license is the committed total, not added to the 
   const r = updateQuote([
     { sku: 'LIC-ENT-3YR', qty: 2, tier: '' },
     { sku: 'MX67', qty: 1, tier: 'security' },
-    { sku: 'LIC-MX67-SEC-3YR', qty: 1, tier: '' },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1, tier: '', licenseIntent: 'paired' },
   ], { skuText: 'quote 2 LIC-ENT-3YR, 1 MX67 security, and 1 LIC-MX67-SEC-3YR' });
 
   assert.ok(r.ok, `the exact reported cart must verify: ${r.error}\n${JSON.stringify(r.options)}`);
@@ -369,7 +369,7 @@ test('a shared exact LIC-ENT row must equal aggregate MR and CW hardware coverag
 test('an explicit half-quantity MX companion is accepted only with affirmative HA authorization', () => {
   const rows = [
     { sku: 'MX67', qty: 2, tier: 'security' },
-    { sku: 'LIC-MX67-SEC-3YR', qty: 1, tier: '' },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1, tier: '', licenseIntent: 'paired' },
   ];
   const standard = updateQuote(rows, { skuText: 'quote 2 MX67 security; standard deployment' });
   assert.equal(standard.ok, false, '2:1 licensing must not pass as a standard deployment');

@@ -17,7 +17,7 @@ const editorPath = new URL('./src/sidebar/components/SkuQuantityEditor.jsx', imp
 const screenshotRows = () => [
   { sku: 'LIC-ENT-3YR', qty: 2 },
   { sku: 'MX67', qty: 1 },
-  { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+  { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
 ];
 
 test('reported MX67 default-security shape marks one exact pair and leaves shared LIC-ENT standalone', () => {
@@ -75,10 +75,31 @@ test('same-scope quantity mismatch is amber-review data on both rows', () => {
   assert.equal(review[1].role, 'license');
 });
 
+test('matching device license requires an explicit use choice and supports additive renewal', () => {
+  const ambiguous = licensePairReviewForRows([
+    { sku: 'MX75', qty: 1, tier: 'security' },
+    { sku: 'LIC-MX75-SEC-3Y', qty: 1 },
+  ]);
+  assert.deepEqual(ambiguous.map(({ kind }) => kind), ['needs_review', 'needs_review']);
+  assert.equal(quoteTextFromEditorRows([
+    { sku: 'MX75', qty: 1, tier: 'security' },
+    { sku: 'LIC-MX75-SEC-3Y', qty: 1 },
+  ], '').ok, false);
+
+  const standaloneRows = [
+    { sku: 'MX75', qty: 1, tier: 'security' },
+    { sku: 'LIC-MX75-SEC-3Y', qty: 1, licenseIntent: 'standalone' },
+  ];
+  assert.deepEqual(licensePairReviewForRows(standaloneRows).map(({ kind }) => kind), ['standalone', 'standalone']);
+  const prepared = quoteTextFromEditorRows(standaloneRows, '');
+  assert.equal(prepared.ok, true, prepared.error);
+  assert.deepEqual(prepared.licenseIntents, [{ sku: 'LIC-MX75-SEC-3Y', qty: 1, intent: 'standalone' }]);
+});
+
 test('reviewed warm-spare HA recognizes exact 2:1 coverage without weakening standard mode', () => {
   const rows = [
     { sku: 'MX67', qty: 2 },
-    { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
   ];
   assert.deepEqual(licensePairReviewForRows(rows).map(({ kind }) => kind), ['mismatch', 'mismatch']);
   const reviewed = licensePairReviewForRows(rows, { allowHaLicenseRatio: true });
@@ -97,8 +118,8 @@ test('duplicate rows aggregate only when one concrete license product matches th
   const review = licensePairReviewForRows([
     { sku: 'MX67', qty: 1 },
     { sku: 'MX67-HW', qty: 2 },
-    { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
-    { sku: 'lic-mx67-sec-3yr', qty: 2 },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1, licenseIntent: 'paired' },
+    { sku: 'lic-mx67-sec-3yr', qty: 2, licenseIntent: 'paired' },
   ]);
   assert.deepEqual(review.map((entry) => entry.kind), ['paired', 'paired', 'paired', 'paired']);
   assert.equal(review[0].hardwareQty, 3);
@@ -135,7 +156,8 @@ test('editor renders explicit pairing and mismatch explanations and still parses
   assert.match(source, /Warm-spare license supplied/);
   assert.match(source, /counted once for this HA pair/);
   assert.match(source, /License quantity mismatch/);
-  assert.match(source, /annotationColor = mismatch \? '#e37400'/);
+  assert.match(source, /Move SKU row .* up/);
+  assert.match(source, /Standalone renewal \/ additional license/);
   assert.doesNotThrow(() => babel.transformSync(source, {
     filename: 'SkuQuantityEditor.jsx',
     presets: [[presetEnv, { targets: { chrome: '120' } }], [presetReact, { runtime: 'automatic' }]],
