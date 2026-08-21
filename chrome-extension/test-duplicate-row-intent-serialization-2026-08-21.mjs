@@ -187,7 +187,7 @@ test('blank editor row keeps the MX default Security tier when no global tier ex
 
 test('reviewed standalone MX license is additive to the new-device companion', () => {
   const rows = [
-    { sku: 'MX75', qty: 1, tier: 'security' },
+    { sku: 'MX75', qty: 2, tier: 'security' },
     { sku: 'LIC-MX75-SEC-3Y', qty: 1, licenseIntent: 'standalone' },
   ];
   const prepared = quoteTextFromEditorRows(rows, '', {});
@@ -206,8 +206,8 @@ test('reviewed standalone MX license is additive to the new-device companion', (
   assert.equal(verified.ok, true, verified.error);
   for (const [index, term] of [1, 3, 5].entries()) {
     const cart = cartOf(verified.urls[index].url);
-    assert.equal(cart.get('MX75'), 1);
-    assert.equal(cart.get(`LIC-MX75-SEC-${term}Y`), 2);
+    assert.equal(cart.get('MX75'), 2);
+    assert.equal(cart.get(`LIC-MX75-SEC-${term}Y`), 3);
   }
 });
 

@@ -94,6 +94,16 @@ test('matching device license requires an explicit use choice and supports addit
   const prepared = quoteTextFromEditorRows(standaloneRows, '');
   assert.equal(prepared.ok, true, prepared.error);
   assert.deepEqual(prepared.licenseIntents, [{ sku: 'LIC-MX75-SEC-3Y', qty: 1, intent: 'standalone' }]);
+
+  // The key customer scenario: two new appliances each derive a license, and
+  // one existing appliance is renewed with the explicit line. The standalone
+  // choice must be offered even though its quantity differs from hardware.
+  const mixedQuantity = [
+    { sku: 'MX75', qty: 2, tier: 'security' },
+    { sku: 'LIC-MX75-SEC-3Y', qty: 1, licenseIntent: 'standalone' },
+  ];
+  assert.deepEqual(licensePairReviewForRows(mixedQuantity).map(({ kind }) => kind), ['standalone', 'standalone']);
+  assert.equal(quoteTextFromEditorRows(mixedQuantity, '').ok, true);
 });
 
 test('reviewed warm-spare HA recognizes exact 2:1 coverage without weakening standard mode', () => {
@@ -158,6 +168,7 @@ test('editor renders explicit pairing and mismatch explanations and still parses
   assert.match(source, /License quantity mismatch/);
   assert.match(source, /Move SKU row .* up/);
   assert.match(source, /Standalone renewal \/ additional license/);
+  assert.match(source, /needsReview \|\| paired \|\| standalone \|\| mismatch/);
   assert.doesNotThrow(() => babel.transformSync(source, {
     filename: 'SkuQuantityEditor.jsx',
     presets: [[presetEnv, { targets: { chrome: '120' } }], [presetReact, { runtime: 'automatic' }]],

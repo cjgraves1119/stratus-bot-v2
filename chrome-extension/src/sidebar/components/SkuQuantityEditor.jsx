@@ -232,7 +232,7 @@ export default function SkuQuantityEditor({
                 Remove
               </button>
             </div>
-            {(pairing.role === 'license' && (needsReview || paired || standalone)) && (
+            {(pairing.role === 'license' && (needsReview || paired || standalone || mismatch)) && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 3, paddingLeft: 3 }}>
                 <span style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY }}>License use</span>
                 <select
@@ -240,7 +240,7 @@ export default function SkuQuantityEditor({
                   value={row?.licenseIntent || ''}
                   disabled={disabled}
                   onChange={(event) => patchRow(index, { licenseIntent: event.target.value })}
-                  style={{ fontSize: 10, padding: '3px 4px', borderRadius: 5, border: `1px solid ${needsReview ? '#e37400' : COLORS.BORDER}`, background: '#fff' }}
+                  style={{ fontSize: 10, padding: '3px 4px', borderRadius: 5, border: `1px solid ${needsReview || mismatch ? '#e37400' : COLORS.BORDER}`, background: '#fff' }}
                 >
                   <option value="">Choose…</option>
                   <option value="paired">Device-associated license (one total)</option>
