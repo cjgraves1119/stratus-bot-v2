@@ -1,6 +1,10 @@
 # Dependencies and build output
 node_modules/
 dist/
+harness-dist/
+coverage/
+release/
+.release-stage/
 .wrangler/
 .wrangler-dry-run*/
 
@@ -9,6 +13,9 @@ dist/
 .dev.vars.*
 .env
 .env.*
+env/
+*.pem
+*.key
 
 # Point-in-time snapshot directories and file-level backups. These are local
 # safety nets, not history; git is the history now.
@@ -18,8 +25,14 @@ dist/
 *.keep
 *.pre-*-snapshot
 src/index.js.backup-*
+backup/
+backups/
+*.backup
+*.orig
 
 # Scratch
 .tmp-*
 .DS_Store
-*-backup-*
+graphify-out/
+*.crx
+*.zip

@@ -1,104 +1,302 @@
-name: Release Extension (CRX3 → Pages)
-
-# Builds, signs (CRX3), and publishes the Chrome extension to GitHub Pages so
-# installed copies auto-update with zero local-machine involvement.
-#
-# The published Pages site serves exactly two files:
-#   - update-manifest.xml   (the gupdate feed referenced by manifest.json's update_url)
-#   - stratus-ai-<version>.crx
-#
-# One-time setup (see chrome-extension/RELEASE.md):
-#   1. Add repo secret EXT_SIGNING_KEY = `base64 -i key.pem` of the EXISTING
-#      signing key (the one that yields ID idkfeabnpcnpklbgknibidbgjcpbcmkh).
-#   2. Settings → Pages → Build and deployment → Source = "GitHub Actions".
-#
-# Trigger a release by running this workflow manually, or by pushing a tag
-# matching `ext-v*` (e.g. ext-v1.12.4).
+name: Release Extension (reviewed main commit to Pages)
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'ext-v*'
+    inputs:
+      source_sha:
+        description: Full 40-character reviewed commit SHA at the current protected main tip
+        required: true
+        type: string
+      release_tag:
+        description: Existing protected ext-v<manifest-version> tag pointing at source_sha
+        required: true
+        type: string
 
-# Needed by the GitHub Pages deployment action.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Only one Pages deployment at a time; let an in-progress one finish.
 concurrency:
-  group: pages-extension
+  group: pages-extension-production
   cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
-    name: Build, sign, and deploy CRX3
+  verify-source:
+    name: Verify exact source before signing approval
     runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact reviewed commit and full refs
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Set up exact pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+          test "$(pnpm --version)" = "11.19.0"
+
+      - name: Verify protected-main source, immutable-tag shape, and version identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          printf '%s\n' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "::error::source_sha must be a full lowercase 40-character SHA"
+            exit 1
+          }
+          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^ext-v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' || {
+            echo "::error::release_tag must be ext-v followed by the manifest version"
+            exit 1
+          }
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          MAIN_SHA="$(git rev-parse refs/remotes/origin/main)"
+          test "$SOURCE_SHA" = "$MAIN_SHA" || {
+            echo "::error::production release source must be the current protected main tip"
+            exit 1
+          }
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
+          VERSION="$(node -p "require('./chrome-extension/manifest.json').version")"
+          test "$(node -p "require('./chrome-extension/package.json').version")" = "$VERSION"
+          test "$RELEASE_TAG" = "ext-v$VERSION"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Install from the sole extension lockfile
+        working-directory: chrome-extension
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Enumerate and run the complete maintained extension suite
+        working-directory: chrome-extension
+        run: pnpm run test:all
+
+      - name: Build production twice and compare every byte
+        working-directory: chrome-extension
+        run: |
+          pnpm run build:prod
+          cp -a dist "${RUNNER_TEMP}/stratus-extension-prod-first"
+          pnpm run build:prod
+          diff -qr "${RUNNER_TEMP}/stratus-extension-prod-first" dist
+          node -e "const m=require('./dist/manifest.json'); if(m.name!=='Stratus AI'||m.action?.default_title!=='Stratus AI'||!m.update_url) process.exit(1)"
+          test -z "$(find dist -type f -name '*.map' -print)"
+
+      - name: Validate the evidence-only snapshot target
+        working-directory: chrome-extension
+        run: |
+          pnpm run build:snapshot-dev
+          node -e "const m=require('./dist/manifest.json'); if(m.name!=='Stratus AI (DEV)'||m.action?.default_title!=='Stratus AI (DEV)'||Object.hasOwn(m,'update_url')) process.exit(1)"
+
+      - name: Install all Worker dependencies from lockfiles
+        run: |
+          for component in worker worker-gchat worker-gateway; do
+            test -f "$component/package-lock.json"
+            (cd "$component" && npm ci --include=dev --ignore-scripts)
+          done
+
+      - name: Enumerate and run every maintained non-live Worker test
+        run: node scripts/run-maintained-worker-tests.mjs
+
+      - name: Verify synchronized catalogs and shared data
+        run: bash sync-engine.sh
+
+      - name: Preflight all coupled Worker bundles
+        env:
+          PREFLIGHT_ROOT: ${{ runner.temp }}/stratus-worker-preflight
+        run: |
+          set -eu
+          mkdir -p "$PREFLIGHT_ROOT"
+          for component in worker worker-gchat worker-gateway; do
+            output="$PREFLIGHT_ROOT/$component"
+            mkdir -p "$output"
+            (
+              cd "$component"
+              npx --no-install wrangler deploy --dry-run --outdir "$output"
+            )
+            test -n "$(find "$output" -type f -print -quit)"
+          done
+
+      - name: Scan the exact release source for secrets
+        run: node scripts/scan-secrets.mjs
+
+      - name: Run gitleaks against the exact release history
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+      - name: Confirm verification did not mutate reviewed source
+        run: test -z "$(git status --porcelain --untracked-files=all)"
+
+  prepare-payload:
+    name: Prepare unsigned payload on a no-secret runner
+    needs: verify-source
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_digest: ${{ steps.upload-prepared.outputs.artifact-digest }}
+    steps:
+      - name: Check out the same exact reviewed commit and full refs
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Set up exact pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+          test "$(pnpm --version)" = "11.19.0"
+
+      - name: Reverify exact protected-main commit and tag
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Install from the sole extension lockfile
+        working-directory: chrome-extension
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build and hash-bind the sanitized unsigned CRX payload before key exposure
+        working-directory: chrome-extension
+        env:
+          STRATUS_RELEASE_TARGET: prod
+          STRATUS_RELEASE_COMMIT: ${{ inputs.source_sha }}
+          STRATUS_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: pnpm run pack:crx:prepare
+
+      - name: Upload only the prepared payload and receipt
+        id: upload-prepared
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: stratus-extension-prepared-${{ inputs.source_sha }}
+          path: chrome-extension/release/.prepared-prod/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  build-sign-deploy:
+    name: Sign on a fresh protected runner and publish
+    needs: prepare-payload
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - name: Check out the same exact reviewed commit and full refs
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: '20'
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Fail if signing secret is missing
+      - name: Set up exact Node.js only
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Reverify exact protected-main commit and tag after approval
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Download the prepared payload from the no-secret runner
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: stratus-extension-prepared-${{ inputs.source_sha }}
+          path: chrome-extension/release/.prepared-prod
+
+      - name: Record GitHub artifact digest verified during transfer
+        env:
+          PREPARED_ARTIFACT_DIGEST: ${{ needs.prepare-payload.outputs.artifact_digest }}
+        run: |
+          printf '%s\n' "$PREPARED_ARTIFACT_DIGEST" | grep -Eq '^[0-9a-f]{64}$'
+          echo "Prepared artifact SHA-256: $PREPARED_ARTIFACT_DIGEST"
+
+      - name: Verify source identity and prepared payload before key exposure
+        working-directory: chrome-extension
+        env:
+          STRATUS_RELEASE_TARGET: prod
+          STRATUS_RELEASE_COMMIT: ${{ inputs.source_sha }}
+          STRATUS_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/pack-crx.mjs verify-prepared
+
+      - name: Require protected signing secret
         env:
           EXT_SIGNING_KEY: ${{ secrets.EXT_SIGNING_KEY }}
         run: |
-          if [ -z "$EXT_SIGNING_KEY" ]; then
-            echo "::error::Repo secret EXT_SIGNING_KEY is not set. Add it (base64 of the signing key PEM) before releasing. See chrome-extension/RELEASE.md."
-            exit 1
-          fi
-          echo "✓ EXT_SIGNING_KEY is present"
+          test -n "$EXT_SIGNING_KEY" || { echo "::error::EXT_SIGNING_KEY is not configured"; exit 1; }
 
-      - name: Install and build extension
-        run: |
-          cd chrome-extension
-          npm ci
-          npm run build
-
-      - name: Decode signing key to a temp file
+      - name: Decode signing key into an ephemeral file
         env:
           EXT_SIGNING_KEY: ${{ secrets.EXT_SIGNING_KEY }}
         run: |
           KEY_FILE="$(mktemp)"
           printf '%s' "$EXT_SIGNING_KEY" | base64 -d > "$KEY_FILE"
-          # Sanity check: must be a private key PEM.
-          if ! grep -q "PRIVATE KEY" "$KEY_FILE"; then
-            echo "::error::Decoded EXT_SIGNING_KEY is not a PEM private key. Re-create the secret with: base64 -i key.pem"
-            rm -f "$KEY_FILE"
-            exit 1
-          fi
+          grep -q "PRIVATE KEY" "$KEY_FILE"
           echo "EXT_SIGNING_KEY_PEM_PATH=$KEY_FILE" >> "$GITHUB_ENV"
 
-      - name: Pack CRX3 + generate update manifest
-        run: |
-          cd chrome-extension
-          node scripts/pack-crx.mjs
+      - name: Sign only the prebuilt hash-bound payload
+        working-directory: chrome-extension
+        env:
+          STRATUS_RELEASE_TARGET: prod
+          STRATUS_RELEASE_COMMIT: ${{ inputs.source_sha }}
+          STRATUS_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/pack-crx.mjs sign-prepared
 
       - name: Remove decoded signing key
         if: always()
-        run: rm -f "$EXT_SIGNING_KEY_PEM_PATH"
-
-      - name: Stage Pages artifact (only .crx + update-manifest.xml)
         run: |
-          rm -rf pages-public
-          mkdir -p pages-public
+          if [ -n "${EXT_SIGNING_KEY_PEM_PATH:-}" ]; then
+            rm -f "$EXT_SIGNING_KEY_PEM_PATH"
+          fi
+
+      - name: Verify checksums and exact Pages inventory
+        working-directory: chrome-extension/release
+        run: |
+          sha256sum --check SHA256SUMS
+          test "$(find . -maxdepth 1 -type f | wc -l | tr -d ' ')" = "4"
+          test -f update-manifest.xml
+          test -f SHA256SUMS
+          test "$(find . -maxdepth 1 -type f -name '*.crx' | wc -l | tr -d ' ')" = "1"
+          test "$(find . -maxdepth 1 -type f -name '*.provenance.json' | wc -l | tr -d ' ')" = "1"
+
+      - name: Stage only reviewed release outputs
+        run: |
+          mkdir pages-public
           cp chrome-extension/release/update-manifest.xml pages-public/
+          cp chrome-extension/release/SHA256SUMS pages-public/
           cp chrome-extension/release/stratus-ai-*.crx pages-public/
-          echo "Pages site contents:"
-          ls -la pages-public/
+          cp chrome-extension/release/stratus-ai-*.provenance.json pages-public/
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: pages-public
 
-      - name: Deploy to GitHub Pages
+      - name: Deploy reviewed files to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

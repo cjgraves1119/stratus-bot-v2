@@ -14,16 +14,20 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   check-data-sync:
     name: Check Data File Synchronization
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Run sync check
         run: bash sync-engine.sh
-        continue-on-error: true
 
       - name: Check prices.json
         run: |
@@ -76,4 +80,4 @@ jobs:
         if: success()
         run: |
           echo "✓ All data files are synchronized between workers"
-          echo "Ready to deploy!"
+          echo "This source check is not deployment or live-service verification."
