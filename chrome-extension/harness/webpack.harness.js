@@ -13,6 +13,8 @@ const HtmlWebpackPlugin = require('html-webpack-plugin');
 const webpack = require('webpack');
 const { resolveBuildTarget } = require('../release-targets.cjs');
 
+const WORKER_SOURCE = path.resolve(__dirname, '../../worker-gchat/src/index.js');
+
 module.exports = (env = {}, argv = {}) => {
   const targetName = env.target;
   if (!['team-dev', 'snapshot-dev'].includes(targetName)) {
@@ -31,8 +33,16 @@ module.exports = (env = {}, argv = {}) => {
   module: {
     rules: [
       {
+        // Build-only exposure of the exact Worker quote core selected by this
+        // worktree. The loader stubs only Cloudflare's Workflow base class and
+        // exports parser/builder/endpoint-guard functions for local evidence.
+        test: /index\.js$/,
+        include: WORKER_SOURCE,
+        use: [{ loader: path.resolve(__dirname, 'worker-quote-core-loader.cjs') }],
+      },
+      {
         test: /\.jsx?$/,
-        exclude: /node_modules/,
+        exclude: [/node_modules/, WORKER_SOURCE],
         use: {
           loader: 'babel-loader',
           options: {

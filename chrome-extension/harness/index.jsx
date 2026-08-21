@@ -18,11 +18,23 @@ import { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import QuoteResult from '../src/sidebar/components/QuoteResult';
 import {
+  applyExplicitMxWarmSpareToQuoteOptions,
+  hasExplicitMxHaIntent,
   verifyStratusOrderUrlComposition,
   normalizeEditableQuoteLines,
+  normalizeQuoteIntakeLines,
+  quoteIntakeTierLabel,
+  quoteSkuTextFromLines,
   selectableQuoteTerms,
   verifyStratusOrderUrlOptions,
 } from '../src/lib/email-quote-flow.mjs';
+import {
+  buildOneshotIntake as workerBuildOneshotIntake,
+  buildQuoteResponse as workerBuildQuoteResponse,
+  HARNESS_WORKER_SOURCE_SHA256,
+  parseMessage as workerParseMessage,
+  validateExplicitMxMsQuoteComposition as workerValidateQuoteComposition,
+} from '../../worker-gchat/src/index.js';
 import { resolveForTerm, buildQuoteOptions, PRODUCT_POOL, resolveRequoteText, QLE_QUOTE, applyQuoteLineOps, resolveEcommPrices, QLE_COST_QUOTE, resolveLineCosts, ZOHO_DISCOUNT_AT_10, previewCloneTerms, cloneQuoteTerms } from './mock-worker.mjs';
 import SkuQuantityEditor from '../src/sidebar/components/SkuQuantityEditor';
 import QuoteLineEditor from '../src/sidebar/components/QuoteLineEditor';
@@ -71,6 +83,1012 @@ function rebuildAndVerify(rows, { term = 3, hardwareOnly = false } = {}) {
     return { ok: false, urls: [], message: set.error, url: rebuilt };
   }
   return { ok: true, urls: set.urls, message: '', url: rebuilt };
+}
+
+// ── Real extension -> Worker -> verifier pipeline ──────────────────────────
+//
+// This is deliberately separate from rebuildAndVerify above. That older loop
+// uses mock-worker.mjs to keep interactive component demos fast. These cases
+// execute the actual editor serializer, the actual Worker parseMessage /
+// buildQuoteResponse implementation (exposed only by the harness build loader),
+// and the actual extension option-set verifier. No HTTP or CRM action occurs.
+
+const WORKER_ORDER_URL_RE = /https:\/\/stratusinfosystems\.com\/order\/\?item=[^\s)\]]+/g;
+const PIPELINE_TERMS = [1, 3, 5];
+
+function optionTermFromUrl(rawUrl) {
+  try {
+    const items = String(new URL(rawUrl).searchParams.get('item') || '').split(',');
+    const terms = [...new Set(items
+      .map((sku) => String(sku).match(/-([135])YR?$/i)?.[1] || '')
+      .filter(Boolean))];
+    return terms.length === 1 ? Number(terms[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function workerOptionsFromMessage(message) {
+  return [...String(message || '').matchAll(WORKER_ORDER_URL_RE)].map((match, index) => {
+    const url = match[0];
+    const term = optionTermFromUrl(url);
+    return {
+      label: term ? `${term}-Year` : `Option ${index + 1}`,
+      url,
+      ...(term ? { termYears: term } : {}),
+    };
+  });
+}
+
+function decodePipelineOption(option) {
+  try {
+    const url = new URL(String(option?.url || ''));
+    const skus = String(url.searchParams.get('item') || '').split(',').map((sku) => sku.trim().toUpperCase());
+    const qtys = String(url.searchParams.get('qty') || '').split(',').map(Number);
+    return skus.map((sku, index) => ({ sku, qty: qtys[index] }));
+  } catch {
+    return [];
+  }
+}
+
+const verificationTier = (modeTier) => ({
+  enterprise: 'ENT', security: 'SEC', advanced: 'A', 'SD-WAN': 'SDW',
+}[modeTier] || null);
+
+export function runActualQuotePipeline(rows, {
+  sourceText = '',
+  workerInputText = '',
+  workerParsedInput = null,
+} = {}) {
+  const haRequested = hasExplicitMxHaIntent(sourceText);
+  const prepared = quoteTextFromEditorRows(rows, sourceText, { haRequested });
+  if (!prepared.ok) {
+    return { ok: false, stage: 'serialize', error: prepared.error, haRequested, options: [] };
+  }
+  // The editor serializer deliberately carries only reviewed quote modes
+  // (term/tier/hardware-only/HA). Initial-message routing such as "separate
+  // quotes" is tested with the exact initial request while still executing the
+  // real serializer above and using its committed rows for downstream checks.
+  const workerText = String(workerInputText || '').trim() || prepared.text;
+
+  let parsed;
+  let built;
+  try {
+    // Most cases exercise the real parser. The optional parsed fixture exists
+    // only for builder states which the parser intentionally rejects before
+    // quote construction (for example, an unknown EOL licence tier). It lets
+    // the visible harness prove that buildQuoteResponse itself fails closed.
+    parsed = workerParsedInput
+      ? JSON.parse(JSON.stringify(workerParsedInput))
+      : workerParseMessage(workerText);
+    built = workerBuildQuoteResponse(parsed);
+  } catch (error) {
+    return {
+      ok: false, stage: 'worker', error: `Worker quote core threw: ${error.message}`,
+      text: workerText, serializedText: prepared.text, haRequested, options: [],
+    };
+  }
+
+  let options = workerOptionsFromMessage(built?.message);
+  const workerComposition = workerValidateQuoteComposition(workerText, parsed, options, []);
+  const workerParsedRows = (Array.isArray(parsed?.items) ? parsed.items : []).map((item) => ({
+    sku: String(item?.baseSku || item?.sku || '').toUpperCase(),
+    qty: Number(item?.qty) || 0,
+    tier: String(item?.requestedTier || '').toUpperCase(),
+  }));
+  const workerOptions = options.map((option) => ({
+    ...option,
+    items: decodePipelineOption(option),
+  }));
+  options = applyExplicitMxWarmSpareToQuoteOptions(options, haRequested);
+  if (!options.length) {
+    return {
+      ok: false,
+      stage: built?.compositionBlocked ? 'composition' : 'worker',
+      error: String(built?.message || built?.errors?.join('; ') || 'Worker generated no quote links.'),
+      text: workerText,
+      serializedText: prepared.text,
+      haRequested,
+      workerHaRequested: parsed?.haRequested === true,
+      workerRequestedTerm: Number(parsed?.requestedTerm) || null,
+      workerSeparateQuotes: parsed?.modifiers?.separateQuotes === true,
+      workerComposition,
+      workerParsedRows,
+      workerOptions,
+      compositionBlocked: built?.compositionBlocked === true,
+      publishedOptionCount: 0,
+      options: [],
+    };
+  }
+
+  const verified = verifyStratusOrderUrlOptions(options, prepared.rows, {
+    licenseTier: verificationTier(prepared.mode?.tier),
+    allowHaLicenseRatio: haRequested,
+    requireLicensedOption: prepared.mode?.hardwareOnly !== true,
+    ...(prepared.hardwareOnlySkus?.length ? { hardwareOnlySkus: prepared.hardwareOnlySkus } : {}),
+  });
+  return {
+    ok: verified.ok,
+    stage: verified.ok ? 'done' : 'verify',
+    error: verified.error || '',
+    text: workerText,
+    serializedText: prepared.text,
+    rows: prepared.rows,
+    haRequested,
+    workerHaRequested: parsed?.haRequested === true,
+    workerRequestedTerm: Number(parsed?.requestedTerm) || null,
+    workerSeparateQuotes: parsed?.modifiers?.separateQuotes === true,
+    workerComposition,
+    workerParsedRows,
+    workerOptions,
+    compositionBlocked: built?.compositionBlocked === true,
+    publishedOptionCount: verified.urls.length,
+    options: (verified.ok ? verified.urls : options).map((option) => ({
+      ...option,
+      items: decodePipelineOption(option),
+    })),
+  };
+}
+
+function optionForTerm(outcome, term) {
+  return (outcome?.options || []).find((option) => Number(option.termYears || optionTermFromUrl(option.url)) === term) || null;
+}
+
+function itemForTerm(outcome, term, matcher) {
+  const option = optionForTerm(outcome, term);
+  return option?.items?.find((item) => matcher.test(item.sku)) || null;
+}
+
+function exactTerms(outcome) {
+  const actual = (outcome?.options || [])
+    .map((option) => Number(option.termYears || optionTermFromUrl(option.url)))
+    .filter(Boolean)
+    .sort();
+  return JSON.stringify(actual) === JSON.stringify(PIPELINE_TERMS)
+    ? null : `expected 1/3/5-year options, got ${actual.join('/') || 'none'}`;
+}
+
+function requireLine(outcome, term, matcher, qty, label) {
+  const item = itemForTerm(outcome, term, matcher);
+  if (!item) return `${term}Y missing ${label}`;
+  return item.qty === qty ? null : `${term}Y ${label} qty ${item.qty}, expected ${qty}`;
+}
+
+function successfulCaseChecks(outcome, lineChecks = []) {
+  const failures = [];
+  if (!outcome.ok) failures.push(`${outcome.stage}: ${outcome.error}`);
+  else {
+    const termError = exactTerms(outcome);
+    if (termError) failures.push(termError);
+    for (const check of lineChecks) {
+      for (const term of PIPELINE_TERMS) {
+        const error = requireLine(outcome, term, check.matcher(term), check.qty, check.label);
+        if (error) failures.push(error);
+      }
+    }
+  }
+  return failures;
+}
+
+function qtyInPipelineOption(option, matcher) {
+  return (option?.items || [])
+    .filter((item) => matcher.test(item.sku))
+    .reduce((sum, item) => sum + item.qty, 0);
+}
+
+function pipelineOptionForTerm(options, term) {
+  return (options || []).find((option) =>
+    Number(option.termYears || optionTermFromUrl(option.url)) === term) || null;
+}
+
+function eolDirectLicenseCase(tier, suffix) {
+  const sourceSku = `LIC-MX64-${tier}-3${suffix}`;
+  return {
+    name: `EOL MX64 ${tier} refresh preserves row tier and unrelated LIC-ENT`,
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: sourceSku, qty: 1 },
+    ],
+    sourceText: `renew LIC-ENT-3YR x2 and ${sourceSku} x1`,
+    workerInputText: `renew LIC-ENT-3YR x2 and ${sourceSku} x1`,
+    stageLabel: 'worker-eol-refresh',
+    check: (outcome) => {
+      const failures = [];
+      if (outcome.compositionBlocked) failures.push(`Worker blocked a supported ${tier} EOL tier: ${outcome.error}`);
+      const refreshOptions = (outcome.workerOptions || []).filter((option) =>
+        (option.items || []).some((item) => /^MX67(?:-HW)?$/.test(item.sku)));
+      if (refreshOptions.length !== PIPELINE_TERMS.length) {
+        failures.push(`expected 3 MX67 refresh URLs, got ${refreshOptions.length}`);
+      }
+      for (const term of PIPELINE_TERMS) {
+        const option = refreshOptions.find((candidate) =>
+          Number(candidate.termYears || optionTermFromUrl(candidate.url)) === term);
+        if (!option) {
+          failures.push(`${term}Y MX67 refresh URL is missing`);
+          continue;
+        }
+        const items = option.items || [];
+        const qtyFor = (matcher) => items
+          .filter((item) => matcher.test(item.sku))
+          .reduce((sum, item) => sum + item.qty, 0);
+        const expectedReplacement = `LIC-MX67-${tier}-${term}${suffix}`;
+        if (qtyFor(/^MX67(?:-HW)?$/) !== 1) failures.push(`${term}Y MX67 hardware quantity was not 1`);
+        if (qtyFor(new RegExp(`^${expectedReplacement}$`)) !== 1) {
+          failures.push(`${term}Y missing ${expectedReplacement} x1`);
+        }
+        if (qtyFor(new RegExp(`^LIC-ENT-${term}YR$`)) !== 2) {
+          failures.push(`${term}Y did not retain unrelated LIC-ENT x2`);
+        }
+        const wrongTier = items.find((item) =>
+          /^LIC-MX67-(?:ENT|SEC|SDW)-/.test(item.sku) && item.sku !== expectedReplacement);
+        if (wrongTier) failures.push(`${term}Y ${tier} row was changed to ${wrongTier.sku}`);
+      }
+      return failures;
+    },
+  };
+}
+
+const REAL_PIPELINE_CASES = [
+  {
+    name: 'reported cart: explicit MX67 SEC companion is total, not additive',
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: 'MX67', qty: 1, tier: 'security' },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+    ],
+    sourceText: 'MX67 refresh with the listed renewal licences',
+    check: (outcome) => successfulCaseChecks(outcome, [
+      { label: 'standalone LIC-ENT', qty: 2, matcher: (term) => new RegExp(`^LIC-ENT-${term}YR$`) },
+      { label: 'MX67 hardware', qty: 1, matcher: () => /^MX67(?:-HW)?$/ },
+      { label: 'MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR?$`) },
+    ]),
+  },
+  {
+    name: 'implicit MX67 SEC companion is derived once',
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: 'MX67', qty: 1, tier: 'security' },
+    ],
+    sourceText: 'MX67 refresh with the listed renewal licences',
+    check: (outcome) => successfulCaseChecks(outcome, [
+      { label: 'standalone LIC-ENT', qty: 2, matcher: (term) => new RegExp(`^LIC-ENT-${term}YR$`) },
+      { label: 'MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR?$`) },
+    ]),
+  },
+  {
+    name: 'reported remove-companion path keeps blank MX67 on default SEC beside LIC-ENT',
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: 'MX67', qty: 1 },
+    ],
+    sourceText: 'quote 2 LIC-ENT-3YR, 1 MX67, and 1 LIC-MX67-SEC-3YR',
+    check: (outcome) => {
+      const failures = successfulCaseChecks(outcome, [
+        { label: 'standalone LIC-ENT', qty: 2, matcher: (term) => new RegExp(`^LIC-ENT-${term}YR$`) },
+        { label: 'MX67 hardware', qty: 1, matcher: () => /^MX67$/ },
+        { label: 'default MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR$`) },
+      ]);
+      if (outcome.serializedText !== '2 LIC-ENT-3YR\n1 MX67') {
+        failures.push(`removed companion leaked tier intent: ${JSON.stringify(outcome.serializedText || '')}`);
+      }
+      for (const term of PIPELINE_TERMS) {
+        if (itemForTerm(outcome, term, /^LIC-MX67-ENT-/)) failures.push(`${term}Y literal LIC-ENT retiered blank MX67`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'blank MX67 row retains the prior global Enterprise tier',
+    rows: [{ sku: 'MX67', qty: 1 }],
+    sourceText: 'quote 1 MX67 enterprise',
+    check: (outcome) => {
+      const failures = successfulCaseChecks(outcome, [
+        { label: 'MX67 hardware', qty: 1, matcher: () => /^MX67$/ },
+        { label: 'MX67 ENT companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-ENT-${term}YR$`) },
+      ]);
+      if (outcome.serializedText !== '1 MX67\nenterprise') {
+        failures.push(`global Enterprise was not preserved: ${JSON.stringify(outcome.serializedText || '')}`);
+      }
+      if (outcome.rows?.[0]?.tier !== 'enterprise') failures.push('committed row did not retain Enterprise');
+      for (const term of PIPELINE_TERMS) {
+        if (itemForTerm(outcome, term, /^LIC-MX67-SEC-/)) failures.push(`${term}Y default SEC overrode global ENT`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'blank MX67 row keeps default Security without a global tier',
+    rows: [{ sku: 'MX67', qty: 1 }],
+    sourceText: 'quote 1 MX67',
+    check: (outcome) => {
+      const failures = successfulCaseChecks(outcome, [
+        { label: 'MX67 hardware', qty: 1, matcher: () => /^MX67$/ },
+        { label: 'MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR$`) },
+      ]);
+      if (outcome.serializedText !== '1 MX67') {
+        failures.push(`default-tier serializer changed: ${JSON.stringify(outcome.serializedText || '')}`);
+      }
+      if (outcome.rows?.[0]?.tier) failures.push(`blank row gained unexpected tier ${outcome.rows[0].tier}`);
+      for (const term of PIPELINE_TERMS) {
+        if (itemForTerm(outcome, term, /^LIC-MX67-ENT-/)) failures.push(`${term}Y default SEC changed to ENT`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'requested-term separate quotes suppress the automatic MX SEC companion',
+    rows: [
+      { sku: 'MX67', qty: 1, tier: 'security' },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+    ],
+    sourceText: 'quote the listed products with 3 year licenses',
+    workerInputText: 'quote 1 MX67 security and 1 LIC-MX67-SEC-3YR with 3 year licenses in separate quotes',
+    stageLabel: 'worker-aggregate',
+    check: (outcome) => {
+      const failures = [];
+      if (!/^1 MX67 security\n1 LIC-MX67-SEC-3YR\n3 year$/m.test(outcome.serializedText || '')) {
+        failures.push(`serializer produced an unexpected committed snapshot: ${JSON.stringify(outcome.serializedText || '')}`);
+      }
+      if (outcome.workerRequestedTerm !== 3) failures.push(`Worker requested term was ${outcome.workerRequestedTerm || 'unset'}, expected 3`);
+      if (outcome.workerSeparateQuotes !== true) failures.push('Worker did not retain separateQuotes');
+      if (outcome.workerComposition?.ok !== true) {
+        failures.push(`Worker aggregate guard failed: ${(outcome.workerComposition?.failures || []).join('; ') || 'unknown failure'}`);
+      }
+      const separatedOptions = outcome.workerOptions || [];
+      if (separatedOptions.length !== 2) {
+        const rendered = separatedOptions.map((option) => (option.items || []).map((item) => `${item.qty}x${item.sku}`).join('+')).join(' | ');
+        failures.push(`expected 2 separate URLs, got ${separatedOptions.length}${rendered ? ` (${rendered})` : ''}`);
+      }
+      const optionItems = separatedOptions.map((option) => option.items || []);
+      const hardwareOptions = optionItems.filter((items) => items.some((item) => /^MX67(?:-HW)?$/.test(item.sku)));
+      const licenseOptions = optionItems.filter((items) => items.some((item) => item.sku === 'LIC-MX67-SEC-3YR'));
+      const hardwareQty = optionItems.flat().filter((item) => /^MX67(?:-HW)?$/.test(item.sku))
+        .reduce((sum, item) => sum + item.qty, 0);
+      const licenseQty = optionItems.flat().filter((item) => item.sku === 'LIC-MX67-SEC-3YR')
+        .reduce((sum, item) => sum + item.qty, 0);
+      if (hardwareOptions.length !== 1 || hardwareQty !== 1) failures.push(`MX67 appeared in ${hardwareOptions.length} option(s) at total qty ${hardwareQty}`);
+      if (licenseOptions.length !== 1 || licenseQty !== 1) failures.push(`LIC-MX67-SEC-3YR appeared in ${licenseOptions.length} option(s) at total qty ${licenseQty}`);
+      if (hardwareOptions.some((items) => items.some((item) => item.sku === 'LIC-MX67-SEC-3YR'))) {
+        failures.push('automatic SEC companion leaked into the separate hardware URL');
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'aggregate shared LIC-ENT exact coverage suppresses automatic copies',
+    rows: [
+      { sku: 'CW9164', qty: 6, tier: 'enterprise' },
+      { sku: 'MR44', qty: 5, tier: 'enterprise' },
+      { sku: 'LIC-ENT-3YR', qty: 11 },
+    ],
+    sourceText: 'quote the listed access points',
+    check: (outcome) => successfulCaseChecks(outcome, [
+      { label: 'aggregate LIC-ENT', qty: 11, matcher: (term) => new RegExp(`^LIC-ENT-${term}YR$`) },
+    ]),
+  },
+  {
+    name: 'aggregate shared LIC-ENT under-coverage blocks every link',
+    rows: [
+      { sku: 'CW9164', qty: 6, tier: 'enterprise' },
+      { sku: 'MR44', qty: 5, tier: 'enterprise' },
+      { sku: 'LIC-ENT-3YR', qty: 10 },
+    ],
+    sourceText: 'quote the listed access points',
+    check: (outcome) => (!outcome.ok && outcome.options.length === 0
+      && /quantity 10.+hardware quantity 11/i.test(outcome.error)
+      ? [] : [`under-coverage did not fail closed: ${outcome.error || 'links were published'}`]),
+  },
+  {
+    name: 'aggregate shared LIC-ENT over-coverage blocks every link',
+    rows: [
+      { sku: 'CW9164', qty: 6, tier: 'enterprise' },
+      { sku: 'MR44', qty: 5, tier: 'enterprise' },
+      { sku: 'LIC-ENT-3YR', qty: 12 },
+    ],
+    sourceText: 'quote the listed access points',
+    check: (outcome) => (!outcome.ok && outcome.options.length === 0
+      && /quantity 12.+hardware quantity 11/i.test(outcome.error)
+      ? [] : [`over-coverage did not fail closed: ${outcome.error || 'links were published'}`]),
+  },
+  {
+    name: 'affirmative warm-spare HA permits reviewed 2:1 MX coverage',
+    rows: [
+      { sku: 'MX67', qty: 2, tier: 'security' },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+    ],
+    sourceText: 'Quote the MX67s with warm spare HA.',
+    check: (outcome) => {
+      const failures = successfulCaseChecks(outcome, [
+        { label: 'MX67 SEC HA companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR?$`) },
+      ]);
+      if (outcome.haRequested !== true || outcome.workerHaRequested !== true) {
+        failures.push('affirmative HA was not preserved through both detectors');
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'negated HA never authorizes 2:1 MX coverage',
+    rows: [
+      { sku: 'MX67', qty: 2, tier: 'security' },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+    ],
+    sourceText: 'Do not enable HA on these firewalls.',
+    check: (outcome) => (!outcome.ok && !outcome.haRequested && !outcome.workerHaRequested
+      && outcome.options.length === 0 && /quantity 1.+hardware quantity 2/i.test(outcome.error)
+      ? [] : [`negated HA did not fail closed: ${outcome.error || 'links were published'}`]),
+  },
+  {
+    name: 'historical HA never authorizes the current 2:1 quote',
+    rows: [
+      { sku: 'MX67', qty: 2, tier: 'security' },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+    ],
+    sourceText: 'Previously we used HA. Quote the current MX67 deployment as standard.',
+    check: (outcome) => (!outcome.ok && !outcome.haRequested && !outcome.workerHaRequested
+      && outcome.options.length === 0 && /quantity 1.+hardware quantity 2/i.test(outcome.error)
+      ? [] : [`historical HA did not fail closed: ${outcome.error || 'links were published'}`]),
+  },
+  {
+    name: 'row tiers stay isolated from an unrelated standalone ENT renewal',
+    rows: [
+      { sku: 'LIC-ENT-3YR', qty: 2 },
+      { sku: 'MX67', qty: 1, tier: 'security' },
+      { sku: 'MX75', qty: 1, tier: 'enterprise' },
+    ],
+    sourceText: 'quote the listed renewal and firewall refresh',
+    check: (outcome) => {
+      const failures = successfulCaseChecks(outcome, [
+        { label: 'standalone LIC-ENT', qty: 2, matcher: (term) => new RegExp(`^LIC-ENT-${term}YR$`) },
+        { label: 'MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR?$`) },
+        { label: 'MX75 ENT companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX75-ENT-${term}YR?$`) },
+      ]);
+      for (const term of PIPELINE_TERMS) {
+        if (itemForTerm(outcome, term, /^LIC-MX67-ENT-/)) failures.push(`${term}Y MX67 was globally overwritten to ENT`);
+        if (itemForTerm(outcome, term, /^LIC-MX75-SEC-/)) failures.push(`${term}Y MX75 inherited SEC from another row`);
+      }
+      return failures;
+    },
+  },
+  eolDirectLicenseCase('ENT', 'YR'),
+  eolDirectLicenseCase('SEC', 'YR'),
+  eolDirectLicenseCase('SDW', 'Y'),
+  {
+    name: 'malformed EOL MX64 tier fails closed without a default SEC refresh',
+    rows: [{ sku: 'LIC-MX64-NOPE-3YR', qty: 1 }],
+    sourceText: 'renew LIC-MX64-NOPE-3YR x1',
+    workerParsedInput: {
+      directLicenseList: [{ sku: 'LIC-MX64-NOPE-3YR', qty: 1 }],
+      requestedTerm: null,
+      requestedTier: null,
+      modifiers: {},
+    },
+    stageLabel: 'worker-eol-fail-closed',
+    check: (outcome) => {
+      const failures = [];
+      if (outcome.compositionBlocked !== true) failures.push('malformed tier was not composition-blocked');
+      if ((outcome.workerOptions || []).length || (outcome.options || []).length) {
+        failures.push('malformed tier published a quote URL');
+      }
+      if (!/does not contain a supported replacement license tier/i.test(outcome.error || '')) {
+        failures.push(`missing supported-tier error: ${outcome.error || 'none'}`);
+      }
+      if (/LIC-MX67-SEC-|stratusinfosystems\.com\/order/i.test(outcome.error || '')) {
+        failures.push('malformed tier silently published a default SEC refresh');
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'paired MX64/MX64W EOL rows keep tiered explicit companions by occurrence',
+    rows: [
+      { sku: 'MX64', qty: 1, tier: 'enterprise' },
+      { sku: 'LIC-MX64-ENT-3YR', qty: 1 },
+      { sku: 'MX64W', qty: 2, tier: 'security' },
+      { sku: 'LIC-MX64W-SEC-3YR', qty: 2 },
+    ],
+    sourceText: 'quote 1 MX64 enterprise and 1 LIC-MX64-ENT-3YR and 2 MX64W security and 2 LIC-MX64W-SEC-3YR',
+    workerInputText: 'quote 1 MX64 enterprise and 1 LIC-MX64-ENT-3YR and 2 MX64W security and 2 LIC-MX64W-SEC-3YR',
+    stageLabel: 'worker-occurrence-eol-pair',
+    check: (outcome) => {
+      const failures = [];
+      if (outcome.compositionBlocked) failures.push(`paired EOL cart was blocked: ${outcome.error}`);
+      const parsedRows = outcome.workerParsedRows || [];
+      const parsedHardware = parsedRows.filter((row) => /^MX64W?$/.test(row.sku));
+      if (JSON.stringify(parsedHardware) !== JSON.stringify([
+        { sku: 'MX64', qty: 1, tier: 'ENT' },
+        { sku: 'MX64W', qty: 2, tier: 'SEC' },
+      ])) failures.push(`paired hardware parser rows changed: ${JSON.stringify(parsedHardware)}`);
+      const parsedCompanions = parsedRows.filter((row) => /^LIC-MX64W?-(?:ENT|SEC)-3YR$/.test(row.sku));
+      if (parsedCompanions.length !== 2
+        || !parsedCompanions.some((row) => row.sku === 'LIC-MX64-ENT-3YR' && row.qty === 1)
+        || !parsedCompanions.some((row) => row.sku === 'LIC-MX64W-SEC-3YR' && row.qty === 2)) {
+        failures.push(`paired explicit companion parser rows changed: ${JSON.stringify(parsedCompanions)}`);
+      }
+      const rawOptions = outcome.workerOptions || [];
+      const refreshOptions = rawOptions.filter((option) =>
+        (option.items || []).some((item) => item.sku === 'MX67' || item.sku === 'MX67W'));
+      const asIsOptions = rawOptions.filter((option) =>
+        (option.items || []).some((item) => /^LIC-MX64W?-(?:ENT|SEC)-[135]YR$/.test(item.sku)));
+      if (refreshOptions.length !== 3) failures.push(`expected 3 paired refresh URLs, got ${refreshOptions.length}`);
+      if (asIsOptions.length !== 3) failures.push(`expected 3 paired as-is URLs, got ${asIsOptions.length}`);
+      for (const term of PIPELINE_TERMS) {
+        const refresh = pipelineOptionForTerm(refreshOptions, term);
+        const asIs = pipelineOptionForTerm(asIsOptions, term);
+        if (!refresh) failures.push(`${term}Y paired refresh URL is missing`);
+        else {
+          if (qtyInPipelineOption(refresh, /^MX67$/) !== 1) failures.push(`${term}Y MX67 quantity was not 1`);
+          if (qtyInPipelineOption(refresh, /^MX67W$/) !== 2) failures.push(`${term}Y MX67W quantity was not 2`);
+          if (qtyInPipelineOption(refresh, new RegExp(`^LIC-MX67-ENT-${term}YR$`)) !== 1) {
+            failures.push(`${term}Y MX64 ENT replacement companion was not x1`);
+          }
+          if (qtyInPipelineOption(refresh, new RegExp(`^LIC-MX67W-SEC-${term}YR$`)) !== 2) {
+            failures.push(`${term}Y MX64W SEC replacement companion was not x2`);
+          }
+          if ((refresh.items || []).some((item) => /^LIC-MX64W?-/.test(item.sku))) {
+            failures.push(`${term}Y obsolete MX64 companion leaked into refresh`);
+          }
+        }
+        if (!asIs) failures.push(`${term}Y paired as-is URL is missing`);
+        else {
+          if (qtyInPipelineOption(asIs, new RegExp(`^LIC-MX64-ENT-${term}YR$`)) !== 1) {
+            failures.push(`${term}Y explicit MX64 ENT total was not exactly x1`);
+          }
+          if (qtyInPipelineOption(asIs, new RegExp(`^LIC-MX64W-SEC-${term}YR$`)) !== 2) {
+            failures.push(`${term}Y explicit MX64W SEC total was not exactly x2`);
+          }
+        }
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'repeated MX67 occurrences retain row-local SEC and ENT tiers',
+    rows: [
+      { sku: 'MX67', qty: 1, tier: 'security' },
+      { sku: 'MX67', qty: 2, tier: 'enterprise' },
+    ],
+    sourceText: 'quote 1 MX67 security and 2 MX67 enterprise',
+    workerInputText: 'quote 1 MX67 security and 2 MX67 enterprise',
+    stageLabel: 'worker-occurrence-row-tier',
+    check: (outcome) => {
+      const failures = [];
+      if (outcome.compositionBlocked) failures.push(`repeated MX67 cart was blocked: ${outcome.error}`);
+      if (!/^1 MX67 security\n2 MX67 enterprise$/m.test(outcome.serializedText || '')) {
+        failures.push(`serializer lost repeated row-local tiers: ${JSON.stringify(outcome.serializedText || '')}`);
+      }
+      const parsedRows = (outcome.workerParsedRows || []).filter((row) => row.sku === 'MX67');
+      if (JSON.stringify(parsedRows) !== JSON.stringify([
+        { sku: 'MX67', qty: 1, tier: 'SEC' },
+        { sku: 'MX67', qty: 2, tier: 'ENT' },
+      ])) failures.push(`repeated parser rows changed: ${JSON.stringify(parsedRows)}`);
+      const rawOptions = outcome.workerOptions || [];
+      if (rawOptions.length !== 3) failures.push(`expected 3 repeated-row URLs, got ${rawOptions.length}`);
+      for (const term of PIPELINE_TERMS) {
+        const option = pipelineOptionForTerm(rawOptions, term);
+        if (!option) {
+          failures.push(`${term}Y repeated-row URL is missing`);
+          continue;
+        }
+        if (qtyInPipelineOption(option, /^MX67$/) !== 3) failures.push(`${term}Y MX67 total was not x3`);
+        if (qtyInPipelineOption(option, new RegExp(`^LIC-MX67-SEC-${term}YR$`)) !== 1) {
+          failures.push(`${term}Y SEC occurrence was not x1`);
+        }
+        if (qtyInPipelineOption(option, new RegExp(`^LIC-MX67-ENT-${term}YR$`)) !== 2) {
+          failures.push(`${term}Y ENT occurrence was not x2`);
+        }
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'repeated MX67 blank/default and ENT rows scope SEC to the blank quantity',
+    rows: [
+      { sku: 'MX67', qty: 1 },
+      { sku: 'MX67', qty: 2, tier: 'enterprise' },
+    ],
+    sourceText: 'quote 1 MX67 and 2 MX67 enterprise',
+    workerInputText: 'quote 1 MX67 and 2 MX67 enterprise',
+    stageLabel: 'worker-occurrence-default-tier',
+    check: (outcome) => {
+      const failures = successfulCaseChecks(outcome, [
+        { label: 'aggregate MX67 hardware', qty: 3, matcher: () => /^MX67$/ },
+        { label: 'default MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR$`) },
+        { label: 'row-local MX67 ENT companion', qty: 2, matcher: (term) => new RegExp(`^LIC-MX67-ENT-${term}YR$`) },
+      ]);
+      if (outcome.serializedText !== '1 MX67\n2 MX67 enterprise') {
+        failures.push(`serializer lost blank/default occurrence: ${JSON.stringify(outcome.serializedText || '')}`);
+      }
+      const parsedRows = (outcome.workerParsedRows || []).filter((row) => row.sku === 'MX67');
+      if (JSON.stringify(parsedRows) !== JSON.stringify([
+        { sku: 'MX67', qty: 1, tier: '' },
+        { sku: 'MX67', qty: 2, tier: 'ENT' },
+      ])) failures.push(`default/ENT parser rows changed: ${JSON.stringify(parsedRows)}`);
+      return failures;
+    },
+  },
+  {
+    name: 'legacy Z3 blank/default and ENT rows share the ENT-only family default',
+    rows: [
+      { sku: 'Z3', qty: 1 },
+      { sku: 'Z3', qty: 2, tier: 'enterprise' },
+    ],
+    sourceText: 'quote 1 Z3 and 2 Z3 enterprise',
+    workerInputText: 'quote 1 Z3 and 2 Z3 enterprise',
+    stageLabel: 'worker-occurrence-z3-default',
+    check: (outcome) => {
+      const failures = [];
+      if (outcome.serializedText !== '1 Z3\n2 Z3 enterprise') {
+        failures.push(`serializer lost Z3 blank/default occurrence: ${JSON.stringify(outcome.serializedText || '')}`);
+      }
+      const parsedRows = (outcome.workerParsedRows || []).filter((row) => row.sku === 'Z3');
+      if (JSON.stringify(parsedRows) !== JSON.stringify([
+        { sku: 'Z3', qty: 1, tier: '' },
+        { sku: 'Z3', qty: 2, tier: 'ENT' },
+      ])) failures.push(`Z3 default/ENT parser rows changed: ${JSON.stringify(parsedRows)}`);
+      if (outcome.compositionBlocked) failures.push(`Worker blocked the reviewed Z3 request: ${outcome.error}`);
+      const rawOptions = outcome.workerOptions || [];
+      const asIsOptions = rawOptions.filter((option) =>
+        (option.items || []).some((item) => /^LIC-Z3-ENT-[135]YR$/.test(item.sku)));
+      const refreshOptions = rawOptions.filter((option) =>
+        (option.items || []).some((item) => item.sku === 'Z4-HW'));
+      if (asIsOptions.length !== 3) failures.push(`expected 3 Z3 as-is URLs, got ${asIsOptions.length}`);
+      if (refreshOptions.length !== 3) failures.push(`expected 3 Z4 refresh URLs, got ${refreshOptions.length}`);
+      for (const term of PIPELINE_TERMS) {
+        const asIs = pipelineOptionForTerm(asIsOptions, term);
+        const refresh = pipelineOptionForTerm(refreshOptions, term);
+        if (!asIs) failures.push(`${term}Y Z3 as-is URL is missing`);
+        else {
+          if (qtyInPipelineOption(asIs, new RegExp(`^LIC-Z3-ENT-${term}YR$`)) !== 3) {
+            failures.push(`${term}Y Z3 ENT-only total was not x3`);
+          }
+          if ((asIs.items || []).some((item) => /^Z3(?:-HW)?(?:-NA)?$/.test(item.sku))) {
+            failures.push(`${term}Y Z3 as-is alternative unexpectedly retained EOL hardware`);
+          }
+        }
+        if (!refresh) failures.push(`${term}Y Z4 refresh URL is missing`);
+        else {
+          if (qtyInPipelineOption(refresh, /^Z4-HW$/) !== 3) failures.push(`${term}Y Z4-HW total was not x3`);
+          if (qtyInPipelineOption(refresh, new RegExp(`^LIC-Z4-SEC-${term}Y$`)) !== 1) {
+            failures.push(`${term}Y Z3 blank/default occurrence did not map to Z4 SEC x1`);
+          }
+          if (qtyInPipelineOption(refresh, new RegExp(`^LIC-Z4-ENT-${term}Y$`)) !== 2) {
+            failures.push(`${term}Y explicit Z3 ENT occurrence did not map to Z4 ENT x2`);
+          }
+        }
+      }
+      if (outcome.ok || outcome.stage !== 'verify') failures.push('transformed Z3 alternatives did not fail the exact committed-row verifier');
+      if (!/committed quantity for Z3/i.test(outcome.error || '')) {
+        failures.push(`exact verifier returned an unexpected reason: ${outcome.error || 'none'}`);
+      }
+      if (outcome.publishedOptionCount !== 0) failures.push(`${outcome.publishedOptionCount} transformed Z3 URL(s) were published`);
+      return failures;
+    },
+  },
+  {
+    name: 'MS150 overlapping scanner patterns publish only the longest source interval',
+    rows: [{ sku: 'MS150-24P-4X', qty: 2 }],
+    sourceText: 'quote 2 MS150-24P-4X hardware only',
+    workerInputText: 'quote 2 MS150-24P-4X hardware only',
+    stageLabel: 'worker-occurrence-overlap',
+    check: (outcome) => {
+      const failures = [];
+      if (outcome.compositionBlocked) failures.push(`MS150 overlap cart was blocked: ${outcome.error}`);
+      const parsedRows = outcome.workerParsedRows || [];
+      if (JSON.stringify(parsedRows) !== JSON.stringify([
+        { sku: 'MS150-24P-4X', qty: 2, tier: '' },
+      ])) failures.push(`MS150 parser emitted overlapping rows: ${JSON.stringify(parsedRows)}`);
+      const rawOptions = outcome.workerOptions || [];
+      if (!rawOptions.length) failures.push('MS150 hardware-only URL was not published');
+      for (const option of rawOptions) {
+        if (qtyInPipelineOption(option, /^MS150-24P-4X$/) !== 2) failures.push('MS150-24P-4X quantity was not x2');
+        const phantom = (option.items || []).find((item) => /^MS150-24P(?:-HW)?$/.test(item.sku));
+        if (phantom) failures.push(`overlap scanner published phantom ${phantom.sku}`);
+      }
+      return failures;
+    },
+  },
+];
+
+function runActualPipelineMatrix() {
+  return REAL_PIPELINE_CASES.map((testCase) => {
+    const outcome = runActualQuotePipeline(testCase.rows, {
+      sourceText: testCase.sourceText,
+      workerInputText: testCase.workerInputText,
+      workerParsedInput: testCase.workerParsedInput,
+    });
+    const failures = testCase.check(outcome);
+    return {
+      name: testCase.name,
+      pass: failures.length === 0,
+      detail: failures.join(' | '),
+      stage: testCase.stageLabel || outcome.stage,
+      text: outcome.text,
+      haRequested: outcome.haRequested,
+      options: outcome.options,
+    };
+  });
+}
+
+// ── Real Gmail intake -> extension review -> Worker -> verifier pipeline ───
+//
+// This crosses the same boundary as EmailQuoteIntakeCard. Literal cases must
+// never invoke the LLM extractor and no request here performs a network or CRM
+// action. The result is asynchronous because buildOneshotIntake is the actual
+// Worker intake implementation.
+
+function gmailIntakeInput(body) {
+  return {
+    source: 'ext-email-ecomm-intake',
+    subject: 'Synthetic quote request',
+    body_text: body,
+    participants: [{ email: 'customer@example.com', name: 'Synthetic Customer', role: 'customer' }],
+    messages: [{ index: 0, from_email: 'customer@example.com', body }],
+  };
+}
+
+function intakeModifiers(intent) {
+  if (intent?.hardware_only === true) return ['hardware only'];
+  return ({ ENT: ['enterprise'], SEC: ['security'], SDW: ['SD-WAN'], A: ['advanced license'] })[
+    String(intent?.license_tier || '').toUpperCase()
+  ] || [];
+}
+
+async function runActualGmailIntakePipeline(body) {
+  let extractorCalls = 0;
+  let intake;
+  try {
+    intake = await workerBuildOneshotIntake(
+      gmailIntakeInput(body),
+      {},
+      'sales@example.com',
+      async () => {
+        extractorCalls += 1;
+        throw new Error('literal intake must not invoke the extractor');
+      },
+    );
+  } catch (error) {
+    return { ok: false, stage: 'intake', error: `Worker intake threw: ${error.message}`, extractorCalls, options: [], rawOptions: [] };
+  }
+  if (intake?.success !== true) {
+    return {
+      ok: false,
+      stage: 'intake',
+      error: String(intake?.detail || intake?.error || 'Worker intake failed.'),
+      extractorCalls,
+      intake,
+      options: [],
+      rawOptions: [],
+    };
+  }
+
+  const lines = Array.isArray(intake.lines) ? intake.lines : [];
+  const allResolved = lines.length > 0 && lines.every((line) => line.status === 'resolved');
+  const normalized = normalizeQuoteIntakeLines(lines);
+  if (!allResolved || !normalized.length) {
+    return {
+      ok: false,
+      stage: 'intake',
+      error: lines.map((line) => line.reason).filter(Boolean).join(' | ') || 'Intake rows need review.',
+      extractorCalls,
+      intake,
+      allResolved,
+      normalized,
+      skuText: '',
+      options: [],
+      rawOptions: [],
+      publishedOptionCount: 0,
+    };
+  }
+
+  const intent = intake.intent || {};
+  const skuText = [quoteSkuTextFromLines(lines), ...intakeModifiers(intent)].filter(Boolean).join('\n');
+  let parsed;
+  let built;
+  try {
+    parsed = workerParseMessage(skuText);
+    built = workerBuildQuoteResponse(parsed);
+  } catch (error) {
+    return {
+      ok: false,
+      stage: 'worker',
+      error: `Worker quote core threw after intake: ${error.message}`,
+      extractorCalls,
+      intake,
+      allResolved,
+      normalized,
+      skuText,
+      options: [],
+      rawOptions: [],
+      publishedOptionCount: 0,
+    };
+  }
+
+  let candidates = workerOptionsFromMessage(built?.message);
+  candidates = applyExplicitMxWarmSpareToQuoteOptions(candidates, intent.ha_requested === true);
+  const verified = verifyStratusOrderUrlOptions(candidates, normalized, {
+    licenseTier: intent.hardware_only === true ? null : intent.license_tier,
+    allowHaLicenseRatio: intent.ha_requested === true,
+    requireLicensedOption: intent.hardware_only !== true,
+  });
+  const decode = (option) => ({ ...option, items: decodePipelineOption(option) });
+  return {
+    ok: verified.ok,
+    stage: verified.ok ? 'done' : (built?.compositionBlocked ? 'composition' : 'verify'),
+    error: verified.error || String(built?.message || built?.errors?.join('; ') || ''),
+    extractorCalls,
+    intake,
+    allResolved,
+    normalized,
+    skuText,
+    parsed,
+    built,
+    rawOptions: candidates.map(decode),
+    options: (verified.ok ? verified.urls : []).map(decode),
+    publishedOptionCount: verified.urls.length,
+  };
+}
+
+function intakeOptionForTerm(outcome, term) {
+  return pipelineOptionForTerm(outcome?.options || [], term);
+}
+
+function intakeQty(outcome, term, matcher) {
+  return qtyInPipelineOption(intakeOptionForTerm(outcome, term), matcher);
+}
+
+function successfulIntakeChecks(outcome, lineChecks = []) {
+  const failures = [];
+  if (!outcome.ok) failures.push(`${outcome.stage}: ${outcome.error}`);
+  if (outcome.extractorCalls !== 0) failures.push(`literal intake invoked the extractor ${outcome.extractorCalls} time(s)`);
+  const terms = (outcome.options || [])
+    .map((option) => Number(option.termYears || optionTermFromUrl(option.url)))
+    .filter(Boolean)
+    .sort();
+  if (outcome.ok && JSON.stringify(terms) !== JSON.stringify(PIPELINE_TERMS)) {
+    failures.push(`expected verified 1/3/5-year intake options, got ${terms.join('/') || 'none'}`);
+  }
+  for (const check of lineChecks) {
+    for (const term of PIPELINE_TERMS) {
+      const qty = intakeQty(outcome, term, check.matcher(term));
+      if (qty !== check.qty) failures.push(`${term}Y ${check.label} qty ${qty}, expected ${check.qty}`);
+    }
+  }
+  return failures;
+}
+
+function proseTierIntakeCase(word, tier) {
+  return {
+    name: `Gmail prose ${word} remains a real MX tier`,
+    body: `Please quote 2 LIC-ENT-3YR and 1 MX67 ${word}.`,
+    check: (outcome) => {
+      const failures = successfulIntakeChecks(outcome, [
+        { label: 'standalone LIC-ENT', qty: 2, matcher: (term) => new RegExp(`^LIC-ENT-${term}YR$`) },
+        { label: `MX67 ${tier} companion`, qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-${tier}-${term}YR$`) },
+      ]);
+      if (outcome.intake?.intent?.license_tier !== tier) failures.push(`intake global tier was ${outcome.intake?.intent?.license_tier || 'unset'}`);
+      for (const line of outcome.intake?.lines || []) {
+        if (/^LIC-/.test(line.sku || '') && line.tier) failures.push(`${line.sku} received redundant tier ${line.tier}`);
+      }
+      return failures;
+    },
+  };
+}
+
+function mixedOccurrenceIntakeCase(firstTier, secondTier) {
+  const first = firstTier === 'SEC' ? { word: 'security', qty: 1 } : { word: 'enterprise', qty: 2 };
+  const second = secondTier === 'SEC' ? { word: 'security', qty: 1 } : { word: 'enterprise', qty: 2 };
+  return {
+    name: `Gmail same-SKU occurrences preserve ${firstTier} then ${secondTier}`,
+    body: `Please quote ${first.qty} MX67 ${first.word} and ${second.qty} MX67 ${second.word}.`,
+    preview: true,
+    check: (outcome) => {
+      const failures = successfulIntakeChecks(outcome, [
+        { label: 'MX67 hardware', qty: 3, matcher: () => /^MX67$/ },
+        { label: 'MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR$`) },
+        { label: 'MX67 ENT companion', qty: 2, matcher: (term) => new RegExp(`^LIC-MX67-ENT-${term}YR$`) },
+      ]);
+      const actual = (outcome.intake?.lines || []).map(({ sku, qty, tier, status }) => ({ sku, qty, tier, status }));
+      const expected = [firstTier, secondTier].map((tier) => ({
+        sku: 'MX67', qty: tier === 'SEC' ? 1 : 2, tier, status: 'resolved',
+      }));
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) failures.push(`intake occurrence rows changed: ${JSON.stringify(actual)}`);
+      const expectedText = `${first.qty} MX67 ${first.word}\n${second.qty} MX67 ${second.word}`;
+      if (outcome.skuText !== expectedText) failures.push(`review serializer changed: ${JSON.stringify(outcome.skuText || '')}`);
+      return failures;
+    },
+  };
+}
+
+function explicitCompanionIntakeCase(firstTier, secondTier) {
+  const skuFor = (tier) => `LIC-MX67-${tier}-3YR`;
+  const qtyFor = (tier) => (tier === 'SEC' ? 1 : 2);
+  return {
+    name: `Gmail bare MX67 with explicit companions preserves ${firstTier} then ${secondTier}`,
+    body: `Please quote 3 MX67, ${qtyFor(firstTier)} ${skuFor(firstTier)}, and ${qtyFor(secondTier)} ${skuFor(secondTier)}.`,
+    check: (outcome) => {
+      const failures = successfulIntakeChecks(outcome, [
+        { label: 'MX67 hardware', qty: 3, matcher: () => /^MX67$/ },
+        { label: 'explicit MX67 SEC total', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR$`) },
+        { label: 'explicit MX67 ENT total', qty: 2, matcher: (term) => new RegExp(`^LIC-MX67-ENT-${term}YR$`) },
+      ]);
+      const licenseLines = (outcome.intake?.lines || []).filter((line) => /^LIC-/.test(line.sku || ''));
+      if (licenseLines.length !== 2 || licenseLines.some((line) => line.status !== 'resolved' || line.tier)) {
+        failures.push(`explicit LIC rows were not resolved tier-free: ${JSON.stringify(licenseLines)}`);
+      }
+      if (/^\d+ LIC-[^\n]+\s(?:enterprise|security|SD-WAN|advanced)$/m.test(outcome.skuText || '')) {
+        failures.push(`review serializer added a redundant tier: ${JSON.stringify(outcome.skuText)}`);
+      }
+      return failures;
+    },
+  };
+}
+
+const REAL_INTAKE_CASES = [
+  {
+    name: 'literal LIC-ENT never reties blank MX67 away from default SEC',
+    body: 'Please quote 2 LIC-ENT-3YR and 1 MX67.',
+    check: (outcome) => {
+      const failures = successfulIntakeChecks(outcome, [
+        { label: 'standalone LIC-ENT', qty: 2, matcher: (term) => new RegExp(`^LIC-ENT-${term}YR$`) },
+        { label: 'MX67 hardware', qty: 1, matcher: () => /^MX67$/ },
+        { label: 'default MX67 SEC companion', qty: 1, matcher: (term) => new RegExp(`^LIC-MX67-SEC-${term}YR$`) },
+      ]);
+      if (outcome.intake?.intent?.license_tier != null) failures.push(`literal LIC-ENT became global tier ${outcome.intake.intent.license_tier}`);
+      if (outcome.skuText !== '2 LIC-ENT-3YR\n1 MX67') failures.push(`literal review text changed: ${JSON.stringify(outcome.skuText || '')}`);
+      const lic = (outcome.intake?.lines || []).find((line) => line.sku === 'LIC-ENT-3YR');
+      if (!lic || lic.status !== 'resolved' || lic.tier) failures.push(`explicit LIC-ENT row was not resolved tier-free: ${JSON.stringify(lic)}`);
+      for (const term of PIPELINE_TERMS) {
+        if (intakeQty(outcome, term, /^LIC-MX67-ENT-/)) failures.push(`${term}Y blank MX67 inherited literal ENT`);
+      }
+      return failures;
+    },
+  },
+  proseTierIntakeCase('enterprise', 'ENT'),
+  proseTierIntakeCase('security', 'SEC'),
+  mixedOccurrenceIntakeCase('SEC', 'ENT'),
+  mixedOccurrenceIntakeCase('ENT', 'SEC'),
+  explicitCompanionIntakeCase('SEC', 'ENT'),
+  explicitCompanionIntakeCase('ENT', 'SEC'),
+  {
+    name: 'Gmail multi-tier explicit companion under-total fails closed',
+    body: 'Please quote 3 MX67, 1 LIC-MX67-SEC-3YR, and 1 LIC-MX67-ENT-3YR.',
+    check: (outcome) => (!outcome.ok && outcome.publishedOptionCount === 0 && !(outcome.rawOptions || []).length
+      && /does not cover|quantity|review|matching hardware/i.test(`${outcome.error} ${outcome.built?.message || ''}`)
+      ? [] : [`under-total did not fail closed: ${outcome.error || 'URLs were published'}`]),
+  },
+  {
+    name: 'Gmail multi-tier explicit companion over-total fails closed',
+    body: 'Please quote 3 MX67, 2 LIC-MX67-SEC-3YR, and 2 LIC-MX67-ENT-3YR.',
+    check: (outcome) => (!outcome.ok && outcome.publishedOptionCount === 0 && !(outcome.rawOptions || []).length
+      && /does not cover|quantity|review|matching hardware/i.test(`${outcome.error} ${outcome.built?.message || ''}`)
+      ? [] : [`over-total did not fail closed: ${outcome.error || 'URLs were published'}`]),
+  },
+  {
+    name: 'Gmail mixed-term explicit companions stay review-blocked',
+    body: 'Please quote 3 MX67, 1 LIC-MX67-SEC-1YR, and 2 LIC-MX67-ENT-3YR.',
+    check: (outcome) => (!outcome.ok && outcome.stage === 'intake' && outcome.allResolved === false
+      && outcome.publishedOptionCount === 0 && !(outcome.rawOptions || []).length
+      && /different terms.*review/i.test(outcome.error || '')
+      ? [] : [`mixed terms did not fail closed at intake: ${outcome.error || 'URLs were published'}`]),
+  },
+];
+
+async function runActualIntakeMatrix() {
+  const results = [];
+  for (const testCase of REAL_INTAKE_CASES) {
+    const outcome = await runActualGmailIntakePipeline(testCase.body);
+    const failures = testCase.check(outcome);
+    results.push({
+      name: testCase.name,
+      pass: failures.length === 0,
+      detail: failures.join(' | '),
+      stage: outcome.stage,
+      lines: outcome.intake?.lines || [],
+      preview: testCase.preview === true,
+    });
+  }
+  return results;
 }
 
 const SCENARIOS = [
@@ -381,6 +1399,9 @@ function Harness() {
   const [status, setStatus] = useState('');
   const [log, setLog] = useState([]);
   const [matrix, setMatrix] = useState(null);
+  const [actualPipeline, setActualPipeline] = useState(null);
+  const [intakePipeline, setIntakePipeline] = useState(null);
+  const [intakeRunning, setIntakeRunning] = useState(false);
   const [replan, setReplan] = useState(null);
   const [planRows, setPlanRows] = useState(REPLAN_CASES[0].rows);
   const [planOut, setPlanOut] = useState(null);
@@ -427,6 +1448,34 @@ function Harness() {
     failed.forEach((f) => say(`  FAIL [${f.term}Y] ${f.name} — ${f.detail || '(no message)'}`, 'assert-fail'));
   }
 
+  function actualPipelineLoopTest() {
+    const all = runActualPipelineMatrix();
+    setActualPipeline(all);
+    const failed = all.filter((resultRow) => !resultRow.pass);
+    say(`actual quote pipeline: ${all.length - failed.length}/${all.length} passed`,
+      failed.length ? 'assert-fail' : 'assert-pass');
+    failed.forEach((failure) => say(`  FAIL ${failure.name} — ${failure.detail}`, 'assert-fail'));
+  }
+
+  async function actualIntakeLoopTest() {
+    setIntakeRunning(true);
+    try {
+      const all = await runActualIntakeMatrix();
+      setIntakePipeline(all);
+      const failed = all.filter((resultRow) => !resultRow.pass);
+      say(`actual Gmail intake pipeline: ${all.length - failed.length}/${all.length} passed`,
+        failed.length ? 'assert-fail' : 'assert-pass');
+      failed.forEach((failure) => say(`  FAIL ${failure.name} — ${failure.detail}`, 'assert-fail'));
+    } catch (error) {
+      setIntakePipeline([{
+        name: 'matrix runner', pass: false, detail: error.message, stage: 'harness', lines: [],
+      }]);
+      say(`actual Gmail intake pipeline threw — ${error.message}`, 'assert-fail');
+    } finally {
+      setIntakeRunning(false);
+    }
+  }
+
   function replanLoopTest() {
     const all = runReplanMatrix();
     setReplan(all);
@@ -457,9 +1506,72 @@ function Harness() {
     else say(`re-plan OK — ${outcome.skus.length} line(s), every invariant held`, 'assert-pass');
   }
 
+  const intakePreviewLines = intakePipeline?.find((resultRow) => resultRow.preview && resultRow.pass)?.lines || [];
+  const restoredIntakePreviewLines = normalizeQuoteIntakeLines(intakePreviewLines);
+
   return (
     <div className="wrap">
       <div className="rail">
+        <div className="card">
+          <h2>Actual quote pipeline</h2>
+          <p className="hint">
+            Real editor serializer → Worker parser/builder → extension verifier.
+            Split-quote cases use the Worker's aggregate endpoint guard.
+            No network or CRM calls. Worker source: {HARNESS_WORKER_SOURCE_SHA256.slice(0, 12)}…
+          </p>
+          <button id="actual-pipeline-loop" className="scenario" onClick={actualPipelineLoopTest}
+            style={{ borderColor: '#188038' }}>
+            <strong>▶ Run actual pipeline ({REAL_PIPELINE_CASES.length} cases)</strong>
+          </button>
+        </div>
+
+        {actualPipeline && (
+          <div className="card">
+            <h2>Actual pipeline results</h2>
+            <div className="log" id="actual-pipeline-out" data-worker-sha256={HARNESS_WORKER_SOURCE_SHA256}>
+              <div className={actualPipeline.every((resultRow) => resultRow.pass) ? 'assert-pass' : 'assert-fail'}>
+                {actualPipeline.filter((resultRow) => resultRow.pass).length}/{actualPipeline.length} actual-pipeline cases passed
+              </div>
+              {actualPipeline.map((resultRow, index) => (
+                <div key={index} className={resultRow.pass ? 'assert-pass' : 'assert-fail'}>
+                  {resultRow.pass ? 'PASS' : 'FAIL'} — {resultRow.name} [{resultRow.stage}]
+                  {!resultRow.pass && resultRow.detail ? ` — ${resultRow.detail}` : ''}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="card">
+          <h2>Actual Gmail intake pipeline</h2>
+          <p className="hint">
+            Real Worker Gmail intake → extension line normalizer/serializer →
+            Worker parser/builder → extension verifier. Literal inputs never use
+            the extractor; no network or CRM calls are made.
+          </p>
+          <button id="actual-intake-loop" className="scenario" onClick={actualIntakeLoopTest}
+            disabled={intakeRunning} style={{ borderColor: '#188038' }}>
+            <strong>{intakeRunning ? 'Running…' : `▶ Run Gmail intake pipeline (${REAL_INTAKE_CASES.length} cases)`}</strong>
+          </button>
+        </div>
+
+        {intakePipeline && (
+          <div className="card">
+            <h2>Gmail intake results</h2>
+            <div className="log" id="actual-intake-out" data-worker-sha256={HARNESS_WORKER_SOURCE_SHA256}>
+              <div className={intakePipeline.every((resultRow) => resultRow.pass) ? 'assert-pass' : 'assert-fail'}>
+                {intakePipeline.filter((resultRow) => resultRow.pass).length}/{intakePipeline.length} Gmail-intake cases passed
+              </div>
+              {intakePipeline.map((resultRow, index) => (
+                <div key={index} className={resultRow.pass ? 'assert-pass' : 'assert-fail'}>
+                  {resultRow.pass ? 'PASS' : 'FAIL'} — {resultRow.name} [{resultRow.stage}]
+                  {!resultRow.pass && resultRow.detail ? ` — ${resultRow.detail}` : ''}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="card">
           <h2>One-shot re-plan</h2>
           <p className="hint">
@@ -562,6 +1674,30 @@ function Harness() {
       </div>
 
       <div className="stage">
+        {intakePreviewLines.length > 0 && (
+          <div className="panel" style={{ marginBottom: 16 }} id="intake-card-tier-previews">
+            <div className="panelhead">Gmail intake tier-label previews</div>
+            <div id="fresh-intake-card-preview" style={{ padding: 10, borderRadius: 8, background: '#f8f9fa', marginBottom: 10, fontSize: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 5 }}>🛒 Fresh eCommerce quote intake</div>
+              {intakePreviewLines.map((line, index) => (
+                <div key={`${line.sku}-${line.tier || 'default'}-${index}`}>
+                  <b>{line.sku || line.family}</b> × {line.qty}
+                  {quoteIntakeTierLabel(line.tier) ? ` · ${quoteIntakeTierLabel(line.tier)}` : ''}
+                </div>
+              ))}
+            </div>
+            <div id="restored-intake-card-preview" style={{ padding: 10, borderRadius: 8, background: '#f8f9fa', fontSize: 12 }}>
+              <div style={{ fontWeight: 700, marginBottom: 5 }}>Restored Gmail quote intake — review only</div>
+              {restoredIntakePreviewLines.map((line, index) => (
+                <div key={`${line.sku}-${line.tier || 'default'}-${index}`}>
+                  {line.sku} × {line.qty}
+                  {quoteIntakeTierLabel(line.tier) ? ` · ${quoteIntakeTierLabel(line.tier)}` : ''}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="panel" style={{ marginBottom: 16 }}>
           <div className="panelhead">One-shot plan products</div>
           <SkuQuantityEditor
@@ -856,6 +1992,15 @@ function replanLegacy(rows, term = 1) {
 }
 
 window.__stratus = {
+  // Actual extension serializer -> actual Worker parser/builder -> actual
+  // extension verifier. Safe and deterministic: no fetch and no CRM writes.
+  actualQuotePipeline: runActualQuotePipeline,
+  actualPipelineLoop: runActualPipelineMatrix,
+  ACTUAL_PIPELINE_CASES: REAL_PIPELINE_CASES,
+  actualGmailIntakePipeline: runActualGmailIntakePipeline,
+  actualIntakeLoop: runActualIntakeMatrix,
+  ACTUAL_INTAKE_CASES: REAL_INTAKE_CASES,
+  workerSourceSha256: HARNESS_WORKER_SOURCE_SHA256,
   replan: oneshotReplan,
   replanLegacy,
   CASES: REPLAN_CASES,

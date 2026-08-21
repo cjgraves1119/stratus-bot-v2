@@ -211,7 +211,47 @@ function termAgnosticLicenseAliasKey(sku) {
  * or a shared licence such as LIC-ENT would be required to cover access points
  * the rep explicitly asked to quote bare (2026-08-19).
  */
-function automaticLicenseCompanionAssociation(sku, expectedMap, hardwareOnlySkus = null) {
+function committedLicenseSkuTier(sku) {
+  const value = String(sku || '').trim().toUpperCase();
+  const named = value.match(/(?:^LIC-|-)(ENT|SEC|SDW)-\d{1,2}Y(?:R)?$/);
+  if (named) return named[1];
+  if (/^LIC-(?:MS(?:130|150)-(?:CMPTA|\d+A)|MS390-\d+A|C9\d{3}[LX]?-\d+A)-\d{1,2}Y(?:R)?$/.test(value)) return 'A';
+  if (/^LIC-(?:MS(?:130|150)-(?:CMPT|\d+)|MS390-\d+E|C9\d{3}[LX]?-\d+E)-\d{1,2}Y(?:R)?$/.test(value)) return 'E';
+  return '';
+}
+
+function committedHardwareRowTier(line) {
+  const raw = String(line?.tier || '').trim();
+  if (raw.toLowerCase() === 'none') return 'NONE';
+  let tier = normalizedCommittedLicenseTier(raw);
+  const sku = canonicalOrderCompositionSku(line?.sku);
+  // "Advanced" on MR/CW is the worker's Enterprise/Advantage selection, not
+  // a switch Advanced (A) licence. Mirror clauseRequestedTier here.
+  if (tier === 'A' && /^(?:MR|CW)\d/.test(sku)) tier = 'ENT';
+  // A blank row is deliberately unscoped here. The standalone composition
+  // verifier historically accepts any otherwise valid family companion when
+  // no reviewed tier was supplied; verifyStratusOrderUrlOptions applies its
+  // request-global tier afterward. Only explicit row tiers partition quantity.
+  return tier;
+}
+
+function defaultCommittedHardwareTierForSku(sku) {
+  const value = canonicalOrderCompositionSku(sku);
+  // Legacy Z1/Z3 variants are ENT-only in _getLicenseSkusRaw; Z4-family is
+  // the first Z generation whose default is SEC.
+  if (/^Z(?:1|3)C?X?(?:-|$)/.test(value)) return 'ENT';
+  if (/^(?:MX|Z\d|C8\d)/.test(value)) return 'SEC';
+  if (/^(?:MR|CW|MG)\d/.test(value)) return 'ENT';
+  if (/^(?:MS|C9)\d/.test(value)) return 'E';
+  return '';
+}
+
+function automaticLicenseCompanionAssociation(
+  sku,
+  expectedMap,
+  hardwareOnlySkus = null,
+  expectedInputLines = null,
+) {
   const bare = hardwareOnlySkus instanceof Set
     ? hardwareOnlySkus
     : new Set((Array.isArray(hardwareOnlySkus) ? hardwareOnlySkus : [])
@@ -219,9 +259,54 @@ function automaticLicenseCompanionAssociation(sku, expectedMap, hardwareOnlySkus
   const hardware = [...expectedMap.entries()]
     .filter(([value]) => !value.startsWith('LIC-') && !bare.has(value));
   if (!hardware.length) return null;
+  const candidateTier = committedLicenseSkuTier(sku);
+  const rawHardware = Array.isArray(expectedInputLines)
+    ? expectedInputLines.map((line) => ({
+      sku: canonicalOrderCompositionSku(line?.sku),
+      qty: Number(line?.qty),
+      tier: committedHardwareRowTier(line),
+    })).filter((line) => line.sku && !line.sku.startsWith('LIC-')
+      && !bare.has(line.sku) && Number.isInteger(line.qty) && line.qty > 0)
+    : null;
   const match = (key, predicate, haEligible = false) => {
-    const expectedQty = hardware.reduce((sum, [item, qty]) => sum + (predicate(item) ? qty : 0), 0);
-    return expectedQty > 0 ? { key, expectedQty, haEligible } : null;
+    let expectedQty;
+    let expectedTier = '';
+    if (rawHardware) {
+      const matchingRows = rawHardware.filter((line) => predicate(line.sku) && line.tier !== 'NONE');
+      const explicitTiers = new Set(matchingRows.map((line) => line.tier).filter(Boolean));
+      // A blank row stays unscoped when the entire matching group is blank,
+      // preserving the historical standalone-verifier behavior. Once any row
+      // in that group carries an explicit tier, though, the Worker treats each
+      // remaining blank as that family's default—not as a wildcard that also
+      // belongs to every explicit tier (MX blank x1 + MX ENT x2 => SEC1/ENT2).
+      const scopedRows = explicitTiers.size > 0
+        ? matchingRows.map((line) => (line.tier
+          ? line
+          : { ...line, tier: defaultCommittedHardwareTierForSku(line.sku) }))
+        : matchingRows;
+      const reviewedTiers = new Set(scopedRows.map((line) => line.tier).filter(Boolean));
+      const tierRows = candidateTier
+        ? scopedRows.filter((line) => !line.tier || line.tier === candidateTier)
+        : scopedRows;
+      // With multiple reviewed tiers on one model, each generated companion is
+      // accountable only for its own rows. With one reviewed tier and a wrong
+      // generated tier, retain the quantity association so the later tier gate
+      // can report the precise "ENT when SEC requested" error instead of a
+      // generic unexpected-item failure.
+      const quantityRows = tierRows.length > 0
+        ? tierRows
+        : (explicitTiers.size === 1 ? matchingRows : []);
+      expectedQty = quantityRows.reduce((sum, line) => sum + line.qty, 0);
+      if (candidateTier && reviewedTiers.has(candidateTier)) expectedTier = candidateTier;
+      else if (reviewedTiers.size === 1) [expectedTier] = reviewedTiers;
+      else if (explicitTiers.size === 1) [expectedTier] = explicitTiers;
+    } else {
+      expectedQty = hardware.reduce((sum, [item, qty]) => sum + (predicate(item) ? qty : 0), 0);
+    }
+    const associationKey = candidateTier ? `${key}:${candidateTier}` : key;
+    return expectedQty > 0
+      ? { key: associationKey, expectedQty, expectedTier, haEligible }
+      : null;
   };
 
   const exactModel = sku.match(/^LIC-((?:MX|MG)\d+[A-Z]*)-/);
@@ -349,7 +434,12 @@ export function verifyStratusOrderUrlComposition(value, expectedInputLines, requ
     const [actualSku, actualQty] = aliasMatches[0];
     const automaticQty = shorthandAliasKeys.has(aliasKey)
       ? 0
-      : (automaticLicenseCompanionAssociation(actualSku, expectedMap, bareHardwareSkus)?.expectedQty || 0);
+      : (automaticLicenseCompanionAssociation(
+        actualSku,
+        expectedMap,
+        bareHardwareSkus,
+        expectedInputLines,
+      )?.expectedQty || 0);
     if (actualQty !== explicitQty + automaticQty) {
       return unusableOrderUrl('composition_mismatch', `The generated order URL did not contain the committed quantity for ${aliasKey}.`, expected.lines, actual.lines);
     }
@@ -359,7 +449,9 @@ export function verifyStratusOrderUrlComposition(value, expectedInputLines, requ
   for (const [sku, qty] of actualMap) {
     if (expectedMap.has(sku)) continue;
     if (allowedAliasActualSkus.has(sku)) continue;
-    const companion = sku.startsWith('LIC-') ? automaticLicenseCompanionAssociation(sku, expectedMap, bareHardwareSkus) : null;
+    const companion = sku.startsWith('LIC-')
+      ? automaticLicenseCompanionAssociation(sku, expectedMap, bareHardwareSkus, expectedInputLines)
+      : null;
     if (!companion) {
       return unusableOrderUrl('composition_mismatch', `The generated order URL contained an unexpected item (${sku}).`, expected.lines, actual.lines);
     }
@@ -417,13 +509,71 @@ function committedLinesAtTerm(lines, term) {
   });
 }
 
+function normalizedCommittedLicenseTier(value) {
+  const tier = String(value || '').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  if (tier === 'ENT' || tier === 'ENTERPRISE') return 'ENT';
+  if (tier === 'SEC' || tier === 'SECURITY' || tier === 'ADVANCEDSECURITY') return 'SEC';
+  if (tier === 'SDW' || tier === 'SDWAN' || tier === 'SDWANPLUS') return 'SDW';
+  if (tier === 'A' || tier === 'ADV' || tier === 'ADVANCED' || tier === 'ADVANTAGE') return 'A';
+  if (tier === 'E' || tier === 'ESSENTIALS' || tier === 'STANDARD') return 'E';
+  return '';
+}
+
+function reviewedOptionInputLines(lines, requirements = {}) {
+  const list = Array.isArray(lines) ? lines : [];
+  const hardwareRows = list.filter((line) => {
+    const sku = canonicalOrderCompositionSku(line?.sku);
+    return sku && !sku.startsWith('LIC-') && !termAgnosticLicenseAliasKey(sku);
+  });
+  const hasPerRowTier = hardwareRows.some((line) => String(line?.tier || '').trim() !== '');
+  const globalTier = hasPerRowTier
+    ? ''
+    : normalizedCommittedLicenseTier(requirements?.licenseTier);
+
+  // A blank editor row is a reviewed DEFAULT choice, not permission for any
+  // family-compatible tier. Stamp the Worker family default before composition
+  // verification. A request-global tier remains authoritative only when there
+  // are no row-local choices at all (the Gmail/global Enterprise path).
+  return list.map((line) => {
+    if (!line || typeof line !== 'object') return line;
+    const sku = canonicalOrderCompositionSku(line?.sku);
+    if (!sku || sku.startsWith('LIC-') || termAgnosticLicenseAliasKey(sku)) return { ...line };
+    if (String(line?.tier || '').trim() !== '') return { ...line };
+    const tier = globalTier || defaultCommittedHardwareTierForSku(sku);
+    return tier ? { ...line, tier } : { ...line };
+  });
+}
+
+// A mixed cart can legitimately contain a standalone licence in one tier and
+// hardware whose generated companion uses another. Resolve the requirement for
+// each generated companion from the tier stored on the hardware row instead of
+// applying the first/global tier to every LIC-* line in the URL.
+function committedHardwareTierForLicense(licenseSku, lines, hardwareOnlySkus) {
+  const expectedMap = new Map();
+  for (const line of (Array.isArray(lines) ? lines : [])) {
+    const sku = canonicalOrderCompositionSku(line?.sku);
+    if (!sku || sku.startsWith('LIC-')) continue;
+    const qty = Number(line?.qty);
+    if (!Number.isInteger(qty) || qty < 1) continue;
+    expectedMap.set(sku, (expectedMap.get(sku) || 0) + qty);
+  }
+  const association = automaticLicenseCompanionAssociation(
+    String(licenseSku || '').toUpperCase(),
+    expectedMap,
+    hardwareOnlySkus,
+    lines,
+  );
+  return association?.expectedTier || '';
+}
+
 export function verifyStratusOrderUrlOptions(values, expectedInputLines, requirements = {}) {
   const options = Array.isArray(values) ? values : [];
   if (!options.length) {
     return { ok: false, urls: [], error: 'No current quote link was generated for the committed SKU quantities.' };
   }
   const urls = [];
-  const expected = normalizeEditableQuoteLines(expectedInputLines);
+  const reviewedExpectedInputLines = reviewedOptionInputLines(expectedInputLines, requirements);
+  const expected = normalizeEditableQuoteLines(reviewedExpectedInputLines);
   const hasTermAgnosticLicenseAlias = expected.ok
     && expected.lines.some(({ sku }) => termAgnosticLicenseAliasPattern(sku));
   const requestedTier = String(requirements?.licenseTier || '').trim().toUpperCase();
@@ -463,8 +613,11 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
       ? null
       : quoteOptionTerm({ label: option?.label || '', url: rawUrl || '' });
     const expectedForOption = Number.isInteger(optionTerm)
-      ? committedLinesAtTerm(expected.ok ? expected.lines : expectedInputLines, optionTerm)
-      : expectedInputLines;
+      // Reterm the caller's rows, not normalizeEditableQuoteLines().lines:
+      // normalization deliberately strips UI metadata such as the per-hardware
+      // tier, which is required below to validate mixed-tier companions.
+      ? committedLinesAtTerm(reviewedExpectedInputLines, optionTerm)
+      : reviewedExpectedInputLines;
     const verification = verifyStratusOrderUrlComposition(rawUrl, expectedForOption, requirements);
     if (verification.usable !== true || !verification.usableUrl) {
       // Drop this representation, keep looking. See the note on `dropped`.
@@ -476,6 +629,16 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
       continue optionLoop;
     }
     const licenseLines = verification.urlLines.filter(({ sku }) => String(sku).startsWith('LIC-'));
+    // Exact committed LIC-* rows already bind family, tier, term and quantity
+    // through composition verification above. Do not reinterpret their encoded
+    // tier through a request-global hint: LIC-ENT and LIC-MX64-SEC are a valid
+    // mixed renewal, not a contradiction. The global/per-hardware tier check
+    // remains mandatory for generated companion licences.
+    const normalizedExpectedForOption = normalizeEditableQuoteLines(expectedForOption);
+    const exactCommittedLicenseSkus = new Set((normalizedExpectedForOption.ok
+      ? normalizedExpectedForOption.lines : [])
+      .filter(({ sku }) => String(sku).startsWith('LIC-'))
+      .map(({ sku }) => canonicalOrderCompositionSku(sku)));
     const hardwareOnly = option && typeof option === 'object' && option.hardwareOnly === true;
     const expectedTier = String(requirements?.licenseTier || '').trim().toUpperCase();
     if (hardwareOnly && licenseLines.length) {
@@ -500,21 +663,29 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
           }
         }
       }
-      if (['ENT', 'SEC', 'SDW'].includes(expectedTier)) {
-        for (const { sku } of licenseLines) {
+      for (const { sku } of licenseLines) {
+        if (exactCommittedLicenseSkus.has(canonicalOrderCompositionSku(sku))) continue;
+        const lineExpectedTier = committedHardwareTierForLicense(sku, expectedForOption, bareRows)
+          || expectedTier;
+        if (['ENT', 'SEC', 'SDW'].includes(lineExpectedTier)) {
           const tier = String(sku).match(/(?:^LIC-|-)\b(ENT|SEC|SDW)-/i)?.[1]?.toUpperCase() || '';
           const requiresNamedTier = /^LIC-(?:(?:MX|MG)\d|C8\d{3}|Z\d|ENT-|MR-)/i.test(String(sku));
-          if ((requiresNamedTier && tier !== expectedTier) || (tier && tier !== expectedTier)) {
-            { dropped.push({ option: index + 1, label: String(option?.label || `Option ${index + 1}`), reason: `The generated option contained a ${tier || 'missing/unknown'} license tier when ${expectedTier} was requested (${sku}).` }); continue optionLoop; }
+          if ((requiresNamedTier && tier !== lineExpectedTier) || (tier && tier !== lineExpectedTier)) {
+            { dropped.push({ option: index + 1, label: String(option?.label || `Option ${index + 1}`), reason: `The generated option contained a ${tier || 'missing/unknown'} license tier when ${lineExpectedTier} was requested (${sku}).` }); continue optionLoop; }
           }
-        }
-      } else if (expectedTier === 'A') {
-        for (const { sku } of licenseLines) {
+        } else if (lineExpectedTier === 'A') {
           const value = String(sku).toUpperCase();
           const tieredSwitchLicense = /^LIC-(?:C9\d{3}[LX]?-\d+[AE]|MS(?:130|150)-(?:CMPTA?|\d+A?)|MS390-\d+[AE])-\d{1,2}Y(?:R)?$/.test(value);
           const advancedSwitchLicense = /^LIC-(?:C9\d{3}[LX]?-\d+A|MS(?:130|150)-(?:CMPTA|\d+A)|MS390-\d+A)-\d{1,2}Y(?:R)?$/.test(value);
           if (tieredSwitchLicense && !advancedSwitchLicense) {
             { dropped.push({ option: index + 1, label: String(option?.label || `Option ${index + 1}`), reason: `The generated option contained an Essentials license when Advanced was requested (${sku}).` }); continue optionLoop; }
+          }
+        } else if (lineExpectedTier === 'E') {
+          const value = String(sku).toUpperCase();
+          const tieredSwitchLicense = /^LIC-(?:C9\d{3}[LX]?-\d+[AE]|MS(?:130|150)-(?:CMPTA?|\d+A?)|MS390-\d+[AE])-\d{1,2}Y(?:R)?$/.test(value);
+          const advancedSwitchLicense = /^LIC-(?:C9\d{3}[LX]?-\d+A|MS(?:130|150)-(?:CMPTA|\d+A)|MS390-\d+A)-\d{1,2}Y(?:R)?$/.test(value);
+          if (tieredSwitchLicense && advancedSwitchLicense) {
+            { dropped.push({ option: index + 1, label: String(option?.label || `Option ${index + 1}`), reason: `The generated option contained an Advanced license when Essentials was expected (${sku}).` }); continue optionLoop; }
           }
         }
       }
@@ -538,18 +709,56 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
   return { ok: true, urls, dropped, error: '' };
 }
 
+function normalizeQuoteIntakeTier(value) {
+  const tier = String(value || '').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  if (!tier) return '';
+  if (tier === 'ENT' || tier === 'ENTERPRISE') return 'ENT';
+  if (tier === 'SEC' || tier === 'SECURITY' || tier === 'ADVANCEDSECURITY') return 'SEC';
+  if (tier === 'SDW' || tier === 'SDWAN' || tier === 'SDWANPLUS') return 'SDW';
+  if (tier === 'A' || tier === 'ADV' || tier === 'ADVANCED' || tier === 'ADVANTAGE') return 'A';
+  return null;
+}
+
+export function quoteIntakeTierLabel(value) {
+  const tier = normalizeQuoteIntakeTier(value);
+  return ({
+    ENT: 'Enterprise (ENT)',
+    SEC: 'Advanced Security (SEC)',
+    SDW: 'SD-WAN Plus (SDW)',
+    A: 'Advanced / Advantage (A)',
+  })[tier] || '';
+}
+
 export function normalizeQuoteIntakeLines(lines) {
   const quantities = new Map();
+  const skuTotals = new Map();
   for (const line of Array.isArray(lines) ? lines : []) {
     if (!line || line.status !== 'resolved') continue;
     const sku = String(line.sku || '').trim().toUpperCase();
     const qty = Number(line.qty);
     if (!SAFE_SKU.test(sku) || !Number.isInteger(qty) || qty < 1 || qty > 99999) continue;
-    const nextQty = (quantities.get(sku) || 0) + qty;
-    if (nextQty > 99999) return [];
-    quantities.set(sku, nextQty);
+    // Explicit licence products already encode their tier in the SKU and must
+    // never receive a second row modifier. Hardware rows accept only the four
+    // tier values the Worker can deterministically parse; an unknown non-empty
+    // value fails the whole intake closed instead of silently defaulting it.
+    const rawTier = sku.startsWith('LIC-') ? '' : String(line.tier || '').trim();
+    const tier = normalizeQuoteIntakeTier(rawTier);
+    if (rawTier && tier === null) return [];
+
+    const nextSkuTotal = (skuTotals.get(sku) || 0) + qty;
+    if (nextSkuTotal > 99999) return [];
+    skuTotals.set(sku, nextSkuTotal);
+
+    const key = `${sku}\u0000${tier || ''}`;
+    const existing = quantities.get(key);
+    const nextQty = (existing?.qty || 0) + qty;
+    quantities.set(key, { sku, qty: nextQty, tier: tier || '' });
   }
-  return [...quantities.entries()].map(([sku, qty]) => ({ sku, qty }));
+  return [...quantities.values()].map(({ sku, qty, tier }) => ({
+    sku,
+    qty,
+    ...(tier ? { tier } : {}),
+  }));
 }
 
 export function sanitizeStratusOrderUrls(values) {
@@ -849,7 +1058,10 @@ export function hasExplicitMxHaIntent(value) {
 }
 
 export function quoteSkuTextFromLines(lines) {
-  return normalizeQuoteIntakeLines(lines).map(({ sku, qty }) => `${qty} ${sku}`).join('\n');
+  const modifier = { ENT: 'enterprise', SEC: 'security', SDW: 'SD-WAN', A: 'advanced' };
+  return normalizeQuoteIntakeLines(lines).map(({ sku, qty, tier }) => (
+    `${qty} ${sku}${tier && !sku.startsWith('LIC-') ? ` ${modifier[tier]}` : ''}`
+  )).join('\n');
 }
 
 export function normalizeHaMode(value) {

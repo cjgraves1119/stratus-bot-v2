@@ -336,6 +336,12 @@ function hasExplicitNoLicenseQualifier(rawText) {
 // Aug-13 incident showed exactly that mismatch), so inspect the generated URLs
 // before they leave /api/quote. EOL replacement flows are excluded because their
 // option URLs intentionally contain a successor model rather than the parsed one.
+function effectiveQuoteItemTier(item, items, globalTier) {
+  if (item?.requestedTier) return item.requestedTier;
+  const hasRowTier = (Array.isArray(items) ? items : []).some((entry) => entry?.requestedTier);
+  return hasRowTier ? null : (globalTier || null);
+}
+
 function validateExplicitMxMsQuoteComposition(rawText, parsed, quoteUrls, validatedItems = []) {
   const explicitMode = explicitQuoteComposition(rawText);
 
@@ -429,7 +435,8 @@ function validateExplicitMxMsQuoteComposition(rawText, parsed, quoteUrls, valida
       expectedHardwareQty.set(expectedHardware, (expectedHardwareQty.get(expectedHardware) || 0) + qty);
     }
 
-    const licenseOptions = getLicenseSkus(base, parsed?.requestedTier) || [];
+    const itemTier = effectiveQuoteItemTier(item, parsedItems, parsed?.requestedTier);
+    const licenseOptions = getLicenseSkus(base, itemTier) || [];
     for (const lic of licenseOptions) expectedLicenseUniverse.add(String(lic.sku).toUpperCase());
     if (!wantsLicense) continue;
     const requestedTerm = Number(parsed?.requestedTerm) || null;
@@ -439,6 +446,26 @@ function validateExplicitMxMsQuoteComposition(rawText, parsed, quoteUrls, valida
     for (const lic of matchingOptions) {
       const sku = String(lic.sku).toUpperCase();
       expectedLicenseQty.set(sku, (expectedLicenseQty.get(sku) || 0) + qty);
+    }
+  }
+
+  // A concrete license row is an explicitly committed total. Mirror the quote
+  // builder's term expansion and override the automatic companion expectation
+  // for the identical SKU. This keeps the endpoint guard consistent for both a
+  // single requested term and the normal 1/3/5 option set.
+  const explicitTerms = Number(parsed?.requestedTerm)
+    ? [Number(parsed.requestedTerm)]
+    : [1, 3, 5];
+  for (const item of parsedItems) {
+    const base = String(item?.baseSku || item?.sku || '').trim().toUpperCase();
+    if (!item?.isExplicitLicenseSku
+        && (!base.startsWith('LIC-') || /^(?:LIC[-_](?:ENT|MV|MT))$/.test(base))) continue;
+    const qty = Number(item?.qty) || 1;
+    for (const term of explicitTerms) {
+      const termSku = directLicenseSkuForTerm(base, term) || base;
+      const sku = String(termSku).toUpperCase();
+      expectedLicenseUniverse.add(sku);
+      expectedLicenseQty.set(sku, qty);
     }
   }
 
@@ -6030,14 +6057,19 @@ function extractEmbeddedDirectLicenseList(rawText) {
     // : 12, - 12, or a parenthesized (12)). A bare trailing number is rejected
     // so a stray token / year like "...LIC-MV-3YR 2024" is never read as qty.
     const afterQty = after.match(/^\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*|[:=]\s*|[-–—]\s*)(\d{1,5})(?:\s*\)|\s*\]|\b)/i)
-      || after.match(/^\s*[\(\[]\s*(\d{1,5})\s*[\)\]]/);
+      || after.match(/^\s*[\(\[]\s*(\d{1,5})\s*[\)\]]/)
+      || after.match(/^\s*[\(\[]\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*)(\d{1,5})\s*[\)\]]/i);
+    const bracketedMarkerQty = after.match(/^\s*[\(\[]\s*(?:[xX×]\s*|(?:QTY|QUANTITY)\s*[:=]?\s*)\d{1,5}\s*[\)\]]/i);
     // A quantity BEFORE the SKU is accepted only as a clean standalone token
     // (list/prose rhythm like "1 LIC-ENT-3YR" or ", 12 LIC-MV-3YR"). A number
     // glued to a currency symbol ("$500 LIC-...") is a price, not a quantity.
     const beforeRaw = before.match(/(^|[^A-Z0-9-])(\d{1,5})\s*(?:[xX×]\s*)?$/i);
     const beforeQty = beforeRaw && !/[$€£¥]/.test(beforeRaw[1]) ? beforeRaw : null;
     let qty = 1;
-    if (afterQty) qty = parseInt(afterQty[1], 10);
+    // A clean leading count is the stronger signal when the trailing marker is
+    // bracketed. This keeps "250 LIC-ENT-3YR (x1)" at 250 while still teaching
+    // the common "LIC-ENT-3YR (x2)" form to resolve as quantity 2.
+    if (afterQty && !(beforeQty && bracketedMarkerQty)) qty = parseInt(afterQty[1], 10);
     else if (beforeQty) qty = parseInt(beforeQty[2], 10);
     items.push({ sku, qty: Number.isFinite(qty) && qty > 0 ? qty : 1 });
   }
@@ -7156,7 +7188,6 @@ function parseMessage(text) {
   }
 
   const rawMatches = [];
-  const matched = new Set();
 
   for (const pattern of skuPatterns) {
     let match;
@@ -7180,8 +7211,6 @@ function parseMessage(text) {
         const fullValid = VALID_SKUS.has(sku);
         if (strippedValid && !fullValid) sku = stripped;
       }
-      if (matched.has(sku)) continue;
-      matched.add(sku);
       const before = hwScanText.slice(Math.max(0, pos - 20), pos);
       const after = hwScanText.slice(pos + match[0].length, pos + match[0].length + 15);
       let qty = 1;
@@ -7196,7 +7225,12 @@ function parseMessage(text) {
       // number is really the next model's leading quantity. See
       // afterQuantityBelongsToNextModel.
       qty = inlineModelQuantity(before, after, beforeQty, afterQty);
-      rawMatches.push({ baseSku: sku, qty, position: pos });
+      // Keep every separately typed occurrence. The old Set(sku) gate kept
+      // only the first row for a model, so "1 MX67 SEC and 2 MX67 ENT" lost
+      // the second quantity/tier before clause assignment. `scanEnd` lets the
+      // post-pass suppress only duplicate regex hits on the SAME source span;
+      // it must never compare SKU strings across different positions.
+      rawMatches.push({ baseSku: sku, qty, position: pos, scanEnd: pos + match[0].length });
     }
   }
 
@@ -7233,16 +7267,33 @@ function parseMessage(text) {
       const afterQty = after.match(/^[ \t]*[X×]?[ \t]*(\d+)(?![A-Z0-9]|[ \t]*-?Y(?:R|EAR|EARS)?\b)/i);
       qty = inlineModelQuantity(before, after, beforeQty, afterQty);
 
-      rawMatches.push({ baseSku: family, qty, position: pos });
+      rawMatches.push({ baseSku: family, qty, position: pos, scanEnd: pos + m[0].length });
     }
   }
 
-  const foundItems = rawMatches.filter((item, idx) => {
-    return !rawMatches.some((other, otherIdx) => {
-      if (idx === otherIdx) return false;
-      return other.baseSku.length > item.baseSku.length && other.baseSku.includes(item.baseSku);
-    });
-  });
+  // De-duplicate scanner overlap by SOURCE INTERVAL, never by SKU substring.
+  // Global string containment made distinct tokens suppress each other:
+  // MX64 + MX64W, MR36 + MR36H, Z4 + Z4C, and MG51 + MG51E all lost the
+  // shorter row even though the mentions were at different positions. Real
+  // scanner overlap still exists: MS150-24P-4X is matched both by the specific
+  // MS150 pattern and the shorter generic MS pattern. Rank by interval length,
+  // keep the first pattern on ties, and reject only candidates whose SOURCE
+  // interval overlaps a winner. Separate non-overlapping spans are separate
+  // customer-requested rows and must survive through per-clause tier/intent
+  // assignment. buildStratusUrl performs the final safe quantity aggregation
+  // for rows that resolve to the same catalog SKU.
+  const rankedHardwareMatches = rawMatches
+    .map((item, order) => ({ item, order, spanLength: item.scanEnd - item.position }))
+    .sort((a, b) => b.spanLength - a.spanLength || a.order - b.order);
+  const acceptedHardwareMatches = [];
+  for (const candidate of rankedHardwareMatches) {
+    const overlapsAccepted = acceptedHardwareMatches.some(({ item }) => (
+      candidate.item.position < item.scanEnd && item.position < candidate.item.scanEnd
+    ));
+    if (!overlapsAccepted) acceptedHardwareMatches.push(candidate);
+  }
+  const acceptedHardwareRows = new Set(acceptedHardwareMatches.map(({ item }) => item));
+  const foundItems = rawMatches.filter((item) => acceptedHardwareRows.has(item));
 
   // Merge bare agnostic items (MR-AGN, MV-AGN, MT-AGN) into foundItems
   // Only include if no specific model from that family was already matched (e.g., MR44 would suppress MR-AGN)
@@ -7278,10 +7329,12 @@ function parseMessage(text) {
   }
 
   // Concrete license SKUs the user typed alongside hardware. Added after the
-  // substring-dedup filter above (which only compares hardware model stems) and
-  // before the sort, so they keep their typed position in the cart order.
+  // span-dedup filter above (which only compares hardware scanner hits) and
+  // before the sort, so EVERY typed occurrence keeps its position and quantity
+  // in the cart order. Keeping repeats is required for reviewed totals such as
+  // two separately listed LIC-MX64-ENT-3YR x1 companion rows.
   for (const licItem of explicitLicenseItems) {
-    if (!foundItems.some(f => f.baseSku === licItem.baseSku)) foundItems.push(licItem);
+    foundItems.push(licItem);
   }
 
   foundItems.sort((a, b) => a.position - b.position);
@@ -7315,7 +7368,19 @@ function parseMessage(text) {
     }
     return null;
   }
-  return { items, requestedTerm, modifiers, requestedTier, isAdvisory, isRevision, showPricing };
+  return {
+    items,
+    requestedTerm,
+    modifiers,
+    requestedTier,
+    isAdvisory,
+    isRevision,
+    showPricing,
+    // Preserve only the hardened affirmative HA detector's verdict. This lets
+    // explicit 2:1 MX companion quantities pass reconciliation without treating
+    // generic redundancy, historical HA, or negated HA wording as permission.
+    haRequested: hasExplicitMxHaIntent(upper),
+  };
 }
 
 // ─── Price Formatting ────────────────────────────────────────────────────────
@@ -7487,7 +7552,8 @@ function buildQuoteResponse(parsed) {
     const requestedTier = parsed.requestedTier || null;
 
     // Extract base hardware model from each license SKU and check EOL
-    const eolFound = []; // { baseModel, replacement, sku, qty }
+    const eolFound = []; // { baseModel, replacement, sku, qty, requestedTier }
+    const eolTierErrors = [];
     for (const { sku, qty } of parsed.directLicenseList) {
       const modelMatch = sku.match(/^LIC-(MS\d{3}-[A-Z0-9]+)-\d+Y/i) ||
                          sku.match(/^LIC-(MX\d+[A-Z]*)-[A-Z]+-\d+Y/i) ||
@@ -7498,10 +7564,28 @@ function buildQuoteResponse(parsed) {
         if (isEol(baseModel)) {
           const replacement = checkEol(baseModel);
           if (replacement) {
-            eolFound.push({ baseModel, replacement, sku, qty });
+            const rowTier = directLicenseRequestedTier(sku);
+            // MX/Z/MG direct-license rows are fully specified catalog SKUs.
+            // Never let a malformed/unknown tier fall through to the replacement
+            // family's default (SEC for MX/Z), which would silently retier a
+            // renewal during the hardware-refresh option.
+            if (/^LIC-(?:MX|Z|MG)\d/i.test(sku) && !rowTier) {
+              eolTierErrors.push(`${sku} does not contain a supported replacement license tier`);
+            }
+            eolFound.push({ baseModel, replacement, sku, qty, requestedTier: rowTier });
           }
         }
       }
+    }
+
+    if (eolTierErrors.length > 0) {
+      const detail = [...new Set(eolTierErrors)].join('; ');
+      return {
+        message: `Quote composition needs review: ${detail}. No quote link was generated.`,
+        needsLlm: false,
+        compositionBlocked: true,
+        errors: [...new Set(eolTierErrors)],
+      };
     }
 
     // Show EOL warnings (compact format, no EOS dates)
@@ -7548,7 +7632,7 @@ function buildQuoteResponse(parsed) {
             const replHwSku = applySuffix(repl);
             const replLicenses = getLicenseSkus(
               repl,
-              eolEntry.requestedTier || parsed.requestedTier || requestedTier,
+              eolEntry.requestedTier,
             );
             urlItems.push({ sku: replHwSku, qty });
             if (replLicenses) {
@@ -7676,9 +7760,8 @@ function buildQuoteResponse(parsed) {
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
 
-  const anyItemTier = (parsed.items || []).some((it) => it && it.requestedTier);
   for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeReplaced: itemSmeReplaced, requestedTier: itemRequestedTier } of parsed.items) {
-    const itemTier = itemRequestedTier || (anyItemTier ? null : requestedTier);
+    const itemTier = effectiveQuoteItemTier({ requestedTier: itemRequestedTier }, parsed.items, requestedTier);
     // ── V3 collapsed named/multi-term license (Phase 4 — identical to worker/) ──
     // buildQuoteFromV3 collapses a named license (Duo/Umbrella/SME/AnyConnect/…) into ONE item
     // carrying its already-resolved per-term SKUs in _v3PreLicense. Emit it as a single agnostic
@@ -7768,6 +7851,9 @@ function buildQuoteResponse(parsed) {
         licenseSkus,
         eol: false,
         isAgnosticLicense: true,
+        // Exact catalog rows are committed totals. They can satisfy the same
+        // companion a hardware row would otherwise add automatically.
+        isExplicitCatalogLicense: true,
         hardwareOnly: false,
         licenseOnly: true
       };
@@ -7850,6 +7936,114 @@ function buildQuoteResponse(parsed) {
   // If some items are invalid but others are valid/EOL, proceed with valid items
   // and append errors as warnings at the top
 
+  // Resolve an EOL row's renewal SKU from that row's tier, never the request's
+  // global tier. This helper must also be available to companion reconciliation
+  // before the EOL rendering branch below.
+  const eolRenewalLicensesFor = (item) => {
+    const lics = getLicenseSkus(item.baseSku, item.requestedTier);
+    if (lics) return lics;
+    // Fallback: generate the legacy switch license pattern (for example
+    // LIC-MS390-48UX-1YR). Legacy MS rows have no separate tier token.
+    const legacyMatch = String(item.baseSku || '').toUpperCase().match(/^(MS\d{3})-(.+)/);
+    if (legacyMatch) {
+      return [
+        { term: '1Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-1YR` },
+        { term: '3Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-3YR` },
+        { term: '5Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-5YR` },
+      ];
+    }
+    return null;
+  };
+
+  // Reconcile exact typed license rows against automatic companions before any
+  // URL is emitted. An exact match is the committed TOTAL, but it may suppress
+  // automatic rows only when it covers the aggregate hardware quantity. The
+  // sole exception is an explicitly detected MX HA request at the reviewed 2:1
+  // ratio. Under/over coverage otherwise fails closed instead of publishing a
+  // plausible-looking but incorrect cart.
+  const approvedExplicitCompanionsByTerm = new Map();
+  const approvedExplicitEolCompanionsByTerm = new Map();
+  const approvedExplicitEolQtyByTerm = new Map();
+  const companionQuantityErrors = [];
+  for (const term of terms) {
+    const automatic = new Map();
+    const eolAutomatic = new Map();
+    const explicit = new Map();
+    for (const item of resolvedItems) {
+      const sku = item.licenseSkus?.find((entry) => entry.term === `${term}Y`)?.sku;
+      if (!sku) continue;
+      const key = String(sku).toUpperCase();
+      const qty = Number(item.qty) || 0;
+      if (item.isExplicitCatalogLicense === true) {
+        explicit.set(key, (explicit.get(key) || 0) + qty);
+      } else if (item.isAgnosticLicense !== true
+          && !(item.hardwareOnly ?? modifiers.hardwareOnly)) {
+        automatic.set(key, (automatic.get(key) || 0) + qty);
+      }
+    }
+    for (const item of eolItems) {
+      if (item.hardwareOnly ?? modifiers.hardwareOnly) continue;
+      const sku = eolRenewalLicensesFor(item)?.find((entry) => entry.term === `${term}Y`)?.sku;
+      if (!sku) continue;
+      const key = String(sku).toUpperCase();
+      const qty = Number(item.qty) || 0;
+      automatic.set(key, (automatic.get(key) || 0) + qty);
+      eolAutomatic.set(key, (eolAutomatic.get(key) || 0) + qty);
+    }
+    const approved = new Set();
+    const approvedEol = new Set();
+    const approvedEolQty = new Map();
+    for (const [sku, explicitQty] of explicit) {
+      const hardwareQty = automatic.get(sku) || 0;
+      if (!hardwareQty) continue; // unrelated standalone license remains additive
+      const isMxHa = parsed.haRequested === true
+        && /^LIC-MX[A-Z0-9]+-(?:ENT|SEC|SDW)-/.test(sku)
+        && hardwareQty % 2 === 0
+        && explicitQty === hardwareQty / 2;
+      if (explicitQty === hardwareQty || isMxHa) {
+        approved.add(sku);
+        if (eolAutomatic.has(sku)) {
+          approvedEol.add(sku);
+          approvedEolQty.set(sku, explicitQty);
+        }
+      } else {
+        companionQuantityErrors.push(
+          `${sku} quantity ${explicitQty} does not cover the matching hardware quantity ${hardwareQty}`
+        );
+      }
+    }
+    approvedExplicitCompanionsByTerm.set(term, approved);
+    approvedExplicitEolCompanionsByTerm.set(term, approvedEol);
+    approvedExplicitEolQtyByTerm.set(term, approvedEolQty);
+  }
+  if (companionQuantityErrors.length) {
+    const detail = [...new Set(companionQuantityErrors)].join('; ');
+    return {
+      message: `Quote composition needs review: ${detail}. No quote link was generated.`,
+      needsLlm: false,
+      compositionBlocked: true,
+      errors: [...new Set(companionQuantityErrors)],
+    };
+  }
+  const approvedExplicitCompanionsForTerm = (term) => (
+    approvedExplicitCompanionsByTerm.get(term) || new Set()
+  );
+  const approvedExplicitEolCompanionsForTerm = (term) => (
+    approvedExplicitEolCompanionsByTerm.get(term) || new Set()
+  );
+  const approvedExplicitEolQtyForTerm = (term) => (
+    approvedExplicitEolQtyByTerm.get(term) || new Map()
+  );
+  const resolvedLicenseSkuForTerm = (item, term, { refresh = false } = {}) => {
+    const sku = item?.licenseSkus?.find((entry) => entry.term === `${term}Y`)?.sku || null;
+    if (!sku) return null;
+    if (refresh && item.isExplicitCatalogLicense === true
+        && approvedExplicitEolCompanionsForTerm(term).has(String(sku).toUpperCase())) return null;
+    if (item.isAgnosticLicense !== true
+        && approvedExplicitCompanionsForTerm(term).has(String(sku).toUpperCase())) return null;
+    return sku;
+  };
+
   let lines = [];
   // Surface a carried business-rule note (e.g. the SME 5yr→3yr cap flag) at the top — identical to
   // worker/. A V3 collapsed named license routed through the default branch would otherwise drop it.
@@ -7879,22 +8073,7 @@ function buildQuoteResponse(parsed) {
     lines.push('');
 
     // Option 1 — Consolidated renewal (license-only for existing EOL hardware)
-    // For products where getLicenseSkus returns null (MS390, MS450), generate legacy license SKU
-    const _getEolRenewalLicenses = (baseSku) => {
-      const lics = getLicenseSkus(baseSku, requestedTier);
-      if (lics) return lics;
-      // Fallback: generate legacy switch license pattern (e.g. LIC-MS390-48UX-1YR)
-      const legacyMatch = baseSku.toUpperCase().match(/^(MS\d{3})-(.+)/);
-      if (legacyMatch) {
-        return [
-          { term: '1Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-1YR` },
-          { term: '3Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-3YR` },
-          { term: '5Y', sku: `LIC-${legacyMatch[1]}-${legacyMatch[2]}-5YR` }
-        ];
-      }
-      return null;
-    };
-    const hasRenewLicenses = eolItems.some(({ baseSku }) => _getEolRenewalLicenses(baseSku));
+    const hasRenewLicenses = eolItems.some((item) => eolRenewalLicensesFor(item));
     if (hasRenewLicenses) {
       // licenseOnly → pure renewal ("Renew As-Is", matching the vision builder).
       // Otherwise the user asked for a regular quote that keeps the EOL gear's
@@ -7916,17 +8095,19 @@ function buildQuoteResponse(parsed) {
           const itLic = entry.ref.licenseOnly ?? modifiers.licenseOnly;
           const explicitHw = entry.ref.hardwareOnly === true;
           if (entry.kind === 'eol') {
-            const { baseSku, qty } = entry.ref;
-            const renewLicenses = _getEolRenewalLicenses(baseSku);
+            const { qty } = entry.ref;
+            const renewLicenses = eolRenewalLicensesFor(entry.ref);
             if (renewLicenses && !itHw) {
               const licSku = renewLicenses.find(l => l.term === `${term}Y`)?.sku;
-              if (licSku) urlItems.push({ sku: licSku, qty });
+              if (licSku && !approvedExplicitCompanionsForTerm(term).has(String(licSku).toUpperCase())) {
+                urlItems.push({ sku: licSku, qty });
+              }
             }
           } else {
             const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = entry.ref;
             if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
             if (licenseSkus && !itHw) {
-              const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+              const licSku = resolvedLicenseSkuForTerm(entry.ref, term);
               if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
             }
           }
@@ -7953,6 +8134,7 @@ function buildQuoteResponse(parsed) {
       // Emit in REQUEST order: each EOL row becomes replacement HW + replacement
       // license at its original position; non-EOL rows carry their license forward.
       const urlItems = [];
+      const emittedApprovedEolCompanions = new Set();
       for (const entry of ordered) {
         // Per-item intent with global fallback (Bug #2). See Option-1 loop for the
         // explicitHw rationale.
@@ -7960,20 +8142,27 @@ function buildQuoteResponse(parsed) {
         const itLic = entry.ref.licenseOnly ?? modifiers.licenseOnly;
         const explicitHw = entry.ref.hardwareOnly === true;
         if (entry.kind === 'eol') {
-          const { qty, replacement } = entry.ref;
+          const { qty, replacement, requestedTier: rowTier } = entry.ref;
           const repl = _hasAlt(replacement) ? replacement[uplinkIdx] : _primary(replacement);
           const replHwSku = applySuffix(repl);
-          const replLicenses = getLicenseSkus(repl, requestedTier);
+          const replLicenses = getLicenseSkus(repl, rowTier);
           urlItems.push({ sku: replHwSku, qty });
           if (replLicenses && !itHw) {
             const licSku = replLicenses.find(l => l.term === `${term}Y`)?.sku;
-            if (licSku) urlItems.push({ sku: licSku, qty });
+            const oldLicSku = eolRenewalLicensesFor(entry.ref)
+              ?.find((license) => license.term === `${term}Y`)?.sku;
+            const oldKey = String(oldLicSku || '').toUpperCase();
+            const approvedQty = approvedExplicitEolQtyForTerm(term).get(oldKey) || null;
+            if (licSku && (!approvedQty || !emittedApprovedEolCompanions.has(oldKey))) {
+              urlItems.push({ sku: licSku, qty: approvedQty || qty });
+              if (approvedQty) emittedApprovedEolCompanions.add(oldKey);
+            }
           }
         } else {
           const { hwSku, qty, licenseSkus, isAgnosticLicense, smeReplaced } = entry.ref;
           if (!itLic && (!itHw || explicitHw) && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itHw) {
-            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+            const licSku = resolvedLicenseSkuForTerm(entry.ref, term, { refresh: true });
             if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
         }
@@ -8133,7 +8322,7 @@ function buildQuoteResponse(parsed) {
           const itLic = it.licenseOnly ?? modifiers.licenseOnly;
           if (!itLic && !isAgnosticLicense) allItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itHw) {
-            const licSku = licenseSkus.find(l => l.term === '3Y')?.sku;
+            const licSku = resolvedLicenseSkuForTerm(it, 3);
             if (licSku) allItems.push({ sku: licSku, qty });
           }
         }
@@ -8195,7 +8384,7 @@ function buildQuoteResponse(parsed) {
           const urlItems = [];
           if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itemHardwareOnly) {
-            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+            const licSku = resolvedLicenseSkuForTerm(item, term);
             if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
           if (urlItems.length > 0) {
@@ -8219,7 +8408,7 @@ function buildQuoteResponse(parsed) {
           const itemLicenseOnly = it.licenseOnly ?? modifiers.licenseOnly;
           if (!itemLicenseOnly && !isAgnosticLicense) urlItems.push({ sku: hwSku, qty });
           if (licenseSkus && !itemHardwareOnly) {
-            const licSku = licenseSkus.find(l => l.term === `${term}Y`)?.sku;
+            const licSku = resolvedLicenseSkuForTerm(it, term);
             if (licSku) urlItems.push({ sku: licSku, qty, smeReplaced });
           }
         }
@@ -11203,10 +11392,14 @@ async function buildOneshotPlan(input, env, caller, ctx, enrich) {
     const wf = await resolveAccountWaterfall({
       domain: selectedDomain || undefined,
       email: selectedEmail || undefined,
-      // Domain and exact contact email remain authoritative. A supplied
-      // company/customer name is only a low-confidence fallback and must be
-      // confirmed in the reviewed card before any write.
-      nameHint: p.account_name || selectedName || undefined,
+      // Domain and exact contact email remain authoritative. Only an explicit
+      // Account/company name may enter the low-confidence fuzzy tier. The
+      // selected participant name is a PERSON name: feeding "Sean Carpenter"
+      // into Account_Name:starts_with:carpenter falsely proposed Carpenter
+      // Lipps & Leland after palonix.com had correctly missed. With no explicit
+      // company hint, fall through to the same domain-enriched, human-reviewed
+      // create-Account path used by the Zoho tab.
+      nameHint: p.account_name || undefined,
     }, env).catch(() => null);
     accountResolution = wf;
     if (wf?.account) {
@@ -12359,7 +12552,21 @@ function hasExplicitMxHaIntent(value) {
 
 function oneshotIntakeIntent(parsed, requestText) {
   const upper = String(requestText || '').toUpperCase();
-  const tier = ['ENT', 'SEC', 'SDW', 'A'].includes(parsed?.requestedTier) ? parsed.requestedTier : null;
+  // parseMessage's broad requestedTier is useful to the quote builder, but a
+  // literal LIC-ENT/LIC-*-SEC product token can set it even when the customer
+  // never chose that tier for other hardware. Intake publishes one GLOBAL tier,
+  // so derive it only from prose after masking concrete license SKUs. Per-item
+  // phrases such as "MX67 enterprise" / "MX67 security" remain visible.
+  const prose = upper.replace(/\bLIC-[A-Z0-9-]+\b/g, ' ');
+  const proseTiers = new Set();
+  if (/\b(?:SD[ -]?WAN|SDW)(?:\s+PLUS)?\b/.test(prose)) proseTiers.add('SDW');
+  if (/\b(?:ADVANCED\s+SECURITY|SECURITY|SEC)(?:\s+LICEN[SC](?:E|ING)S?)?\b/.test(prose)) proseTiers.add('SEC');
+  if (/\b(?:ENTERPRISE|ENT)(?:\s+LICEN[SC](?:E|ING)S?)?\b/.test(prose)) proseTiers.add('ENT');
+  if (!/\bADVANCED\s+SECURITY\b/.test(prose)
+      && /\b(?:ADVANCED|ADV|ADVANTAGE)(?:\s+LICEN[SC](?:E|ING)S?|\s+TIER)?\b/.test(prose)) {
+    proseTiers.add('A');
+  }
+  const tier = proseTiers.size === 1 ? [...proseTiers][0] : null;
   const hardwareOnly = parsed?.modifiers?.hardwareOnly === true;
   const licenseOnly = parsed?.modifiers?.licenseOnly === true;
   const haRequested = hasExplicitMxHaIntent(upper);
@@ -12383,6 +12590,75 @@ function isExplicitlyExcludedOneshotSku(requestText, sku) {
     'i',
   );
   return exclusion.test(String(requestText || ''));
+}
+
+function normalizeOneshotLineTier(value) {
+  const tier = String(value || '').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  if (!tier) return '';
+  if (tier === 'ENT' || tier === 'ENTERPRISE') return 'ENT';
+  if (tier === 'SEC' || tier === 'SECURITY' || tier === 'ADVANCEDSECURITY') return 'SEC';
+  if (tier === 'SDW' || tier === 'SDWAN' || tier === 'SDWANPLUS') return 'SDW';
+  if (tier === 'A' || tier === 'ADV' || tier === 'ADVANCED' || tier === 'ADVANTAGE') return 'A';
+  return null;
+}
+
+// A bare MX hardware total plus exact same-model SEC/ENT/SDW licence rows is
+// already a fully reviewed tier split. Preserve that split on the intake card
+// so the extension serializes one hardware occurrence per tier instead of
+// flattening the hardware to its default SEC companion. This is deliberately
+// narrow: at least two distinct supported tiers, one shared term, no existing
+// hardware row tier, exact quantity coverage. Anything under/over-sized stays
+// visible but non-resolved so Build quote remains fail-closed.
+function reconcileOneshotLiteralMxTierRows(lines) {
+  const rows = (Array.isArray(lines) ? lines : []).map((line) => ({ ...line }));
+  const groups = new Map();
+  rows.forEach((line, index) => {
+    if (line?.status !== 'resolved') return;
+    const match = String(line.sku || '').toUpperCase()
+      .match(/^LIC-(MX\d+[A-Z]*)-(ENT|SEC|SDW)-(\d+)(?:YR|Y)$/);
+    if (!match) return;
+    const model = match[1];
+    if (!groups.has(model)) groups.set(model, []);
+    groups.get(model).push({ index, tier: match[2], term: match[3], qty: Number(line.qty) || 0 });
+  });
+
+  const replacements = new Map();
+  const droppedHardware = new Set();
+  for (const [model, licences] of groups) {
+    const tierOrder = [...new Set(licences.map((entry) => entry.tier))];
+    if (tierOrder.length < 2) continue;
+    const hardware = rows
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => line?.status === 'resolved'
+        && String(line.sku || '').toUpperCase() === model);
+    if (!hardware.length || hardware.some(({ line }) => String(line.tier || '').trim())) continue;
+
+    const terms = new Set(licences.map((entry) => entry.term));
+    const hardwareQty = hardware.reduce((sum, { line }) => sum + (Number(line.qty) || 0), 0);
+    const licenceQty = licences.reduce((sum, entry) => sum + entry.qty, 0);
+    if (terms.size !== 1 || licenceQty !== hardwareQty) {
+      const reason = terms.size !== 1
+        ? `${model} explicit tier licences use different terms and must be reviewed`
+        : `${model} explicit tier licence quantity ${licenceQty} must equal hardware quantity ${hardwareQty}`;
+      for (const { index } of licences) rows[index] = { ...rows[index], status: 'unsupported', reason };
+      continue;
+    }
+
+    const tierTotals = new Map();
+    for (const entry of licences) tierTotals.set(entry.tier, (tierTotals.get(entry.tier) || 0) + entry.qty);
+    const first = hardware[0];
+    replacements.set(first.index, tierOrder.map((tier) => ({
+      ...first.line,
+      qty: tierTotals.get(tier),
+      tier,
+    })));
+    for (const { index } of hardware.slice(1)) droppedHardware.add(index);
+  }
+
+  return rows.flatMap((line, index) => {
+    if (droppedHardware.has(index)) return [];
+    return replacements.get(index) || [line];
+  });
 }
 
 // `extractFacts` is INJECTED by the route (same pattern as buildOneshotPlan's
@@ -12479,9 +12755,33 @@ async function buildOneshotIntake(input, env, caller, extractFacts) {
       excludedLiteralCount += 1;
       continue;
     }
-    const v = validateSku(baseSku);
+    const isLicenseSku = baseSku.startsWith('LIC-');
+    const rawLineTier = isLicenseSku ? '' : String(item.requestedTier || '').trim();
+    const lineTier = normalizeOneshotLineTier(rawLineTier);
+    if (rawLineTier && lineTier === null) {
+      literal.push({
+        sku: baseSku,
+        qty: clampOneshotQty(item.qty),
+        status: 'unsupported',
+        reason: `${baseSku} carried an unsupported license tier and must be reviewed`,
+        suggestions: [],
+      });
+      continue;
+    }
+
+    // Mixed hardware + explicit-license requests keep LIC-* rows in
+    // parsed.items. VALID_SKUS/validateSku is hardware-oriented, so sending
+    // those rows through it marks real catalog licences unsupported. Resolve
+    // exact licence products against prices.json just like directLicenseList.
+    const cached = isLicenseSku ? resolveCachedProduct(baseSku) : null;
+    const v = cached?.entry ? { valid: true } : validateSku(baseSku);
     if (v && v.valid) {
-      literal.push({ sku: baseSku, qty: clampOneshotQty(item.qty), status: 'resolved' });
+      literal.push({
+        sku: cached?.entry ? cached.key : baseSku,
+        qty: clampOneshotQty(item.qty),
+        status: 'resolved',
+        ...(lineTier ? { tier: lineTier } : {}),
+      });
     } else {
       literal.push({
         sku: baseSku,
@@ -12492,7 +12792,36 @@ async function buildOneshotIntake(input, env, caller, extractFacts) {
       });
     }
   }
+  // A license-only request ("LIC-ENT-3YR (x2)") is parsed into
+  // parsed.directLicenseList, NOT parsed.items, so the loop above sees nothing
+  // and the intake used to fall through to family extraction — whose matrix
+  // only covers ONESHOT_INTAKE_FAMILIES (DUO). Resolve these literals here, on
+  // the same deterministic path as other exact catalog SKUs.
+  for (const licItem of (parsed && parsed.directLicenseList) || []) {
+    const licSku = String(licItem.sku || '').toUpperCase();
+    if (!licSku) continue;
+    if (isExplicitlyExcludedOneshotSku(requestedText, licSku)) {
+      excludedLiteralCount += 1;
+      continue;
+    }
+    // prices.json is the authority for LIC-* SKUs; VALID_SKUS is built from the
+    // hardware catalog and does not carry them.
+    const { key: licKey, entry: licPriced } = resolveCachedProduct(licSku);
+    if (licPriced) {
+      literal.push({ sku: licKey, qty: clampOneshotQty(licItem.qty), status: 'resolved' });
+      continue;
+    }
+    const lv = validateSku(licSku);
+    literal.push({
+      sku: licSku,
+      qty: clampOneshotQty(licItem.qty),
+      status: Array.isArray(lv?.suggest) && lv.suggest.length ? 'needs_sku' : 'unsupported',
+      reason: lv?.reason || `${licSku} is not a recognized SKU`,
+      suggestions: Array.isArray(lv?.suggest) ? lv.suggest.slice(0, 8) : [],
+    });
+  }
   if (literal.length > 0 || excludedLiteralCount > 0) {
+    const reviewedLiteral = reconcileOneshotLiteralMxTierRows(literal);
     return {
       success: true,
       used_llm: false,
@@ -12501,7 +12830,7 @@ async function buildOneshotIntake(input, env, caller, extractFacts) {
       used_structured_message: requestedMessage.used_structured_message,
       intent: oneshotIntakeIntent(parsed, requestedMessage.text),
       facts: { requested_products: [], isr_mentions: [], customer_hint: null },
-      lines: literal.map((l) => ({ family: null, ...l, options: null })),
+      lines: reviewedLiteral.map((l) => ({ family: null, ...l, options: null })),
       isr_prefill: null,
       participants_echo: participants,
     };
@@ -12973,6 +13302,65 @@ function deriveQuoteTermLabel(resolvedProducts, licenseTermArg) {
 // "1 year option", "36 mo") — stamping another suffix would double-label it.
 function subjectHasTermToken(subject) {
   return /\b\d{1,2}\s*-?\s*(y(?:ea)?rs?|mo(?:nth)?s?)\b/i.test(String(subject || ''));
+}
+
+function isGeneratedTitleLicenseSku(value) {
+  const sku = String(value || '').trim().toUpperCase();
+  return sku.startsWith('LIC-') || /^(?:DUO-|SFC-|SA-)/.test(sku);
+}
+
+// Build a useful shared fallback for Deal_Name and Quote Subject from fields the
+// rep already reviewed. Never read the wall clock: `closingDate` is the exact
+// Closing_Date / Valid_Till value that will be written to Zoho.
+function buildGeneratedDealQuoteTitle({
+  accountName = '',
+  resolvedProducts = [],
+  closingDate = '',
+  licenseTerm = null,
+} = {}) {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const products = (Array.isArray(resolvedProducts) ? resolvedProducts : [])
+    .map((product) => ({
+      sku: clean(product?.sku).toUpperCase(),
+      qty: Number(product?.qty),
+    }))
+    .filter((product) => product.sku);
+  const hardware = products.filter((product) => !isGeneratedTitleLicenseSku(product.sku));
+
+  let descriptor;
+  if (products.length > 0 && hardware.length === 0) {
+    descriptor = 'License Renewal';
+  } else if (hardware.length > 0) {
+    descriptor = hardware.slice(0, 2)
+      .map((product) => `${Number.isInteger(product.qty) && product.qty > 1 ? `${product.qty}x ` : ''}${product.sku}`)
+      .join(' + ');
+    if (hardware.length > 2) descriptor += ` + ${hardware.length - 2} more`;
+  } else {
+    descriptor = 'Quote';
+  }
+
+  // Bound the descriptor separately so a malformed/oversized catalog token can
+  // never crowd out the term and reviewed date suffix.
+  if (descriptor.length > 60) descriptor = `${descriptor.slice(0, 57).trimEnd()}...`;
+  const term = deriveQuoteTermLabel(products, licenseTerm);
+  const normalizedDate = clean(closingDate);
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) ? normalizedDate : '';
+  const suffix = [descriptor, term, date].filter(Boolean);
+  const suffixText = suffix.join(' - ');
+  let account = clean(accountName);
+
+  // Zoho subjects are kept at 120 characters. Truncate the account first so
+  // product/renewal, term, and date retain their meaning.
+  if (account) {
+    const allowed = 120 - suffixText.length - 3;
+    if (allowed < 1) account = '';
+    else if (account.length > allowed) {
+      account = allowed > 3
+        ? `${account.slice(0, allowed - 3).trimEnd()}...`
+        : account.slice(0, allowed);
+    }
+  }
+  return [account, ...suffix].filter(Boolean).join(' - ');
 }
 
 // Common misspellings/wrong values → correct values for helpful error messages
@@ -21434,12 +21822,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             );
           }
 
-          // STEP 4: Build SKU description for deal name (hardware only for cleaner name)
-          const skuSummary = resolvedProducts
-            .filter((product) => !String(product.sku || '').startsWith('LIC-'))
-            .map((product) => `${product.qty > 1 ? product.qty + 'x ' : ''}${product.sku}`)
-            .join(', ');
-
+          // STEP 4: Resolve the reviewed close date used by both Zoho records.
           // ── R4v2 date policy (Chris, 2026-07-21): Deal Closing_Date and Quote
           // Valid_Till default to the END OF THE CURRENT MONTH and ALWAYS MATCH
           // each other. Precedence: explicit closing_date param (user-confirmed)
@@ -21526,6 +21909,13 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             };
           }
 
+          const generatedRecordTitle = buildGeneratedDealQuoteTitle({
+            accountName: accountData?.Account_Name || account_name,
+            resolvedProducts,
+            closingDate,
+            licenseTerm: license_term,
+          });
+
           let quotedItems;
           if (reviewedProductSnapshot) {
             quotedItems = quotedItemsFromOneshotProductRows(resolvedProducts);
@@ -21583,7 +21973,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
 
           // STEP 5: Create Deal, or reuse the current Deal for create_quote_on_deal
           const dealData = {
-            Deal_Name: deal_name || existingDealData?.Deal_Name || `${accountData?.Account_Name || account_name} - ${skuSummary}`,
+            Deal_Name: deal_name || existingDealData?.Deal_Name || generatedRecordTitle,
             Account_Name: { id: accountId },
             Stage: 'Qualification',
             Lead_Source: lead_source || 'Stratus Referal',
@@ -21760,7 +22150,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
           // the Subject when it is unambiguous and the Subject doesn't already
           // say it — multi-term flows (1yr + 3yr on one deal) otherwise produce
           // identically-titled or mislabeled quotes.
-          let quoteSubject = deal_name || existingDealData?.Deal_Name || `${accountData?.Account_Name || account_name} - ${skuSummary}`;
+          let quoteSubject = deal_name || existingDealData?.Deal_Name || generatedRecordTitle;
           {
             const _termLabel = deriveQuoteTermLabel(resolvedProducts, license_term);
             if (_termLabel && !subjectHasTermToken(quoteSubject)) {
@@ -26252,6 +26642,16 @@ function directLicenseSkuForTerm(sku, term) {
   if (siblings) return siblings[key] || null;
   const rewritten = rewriteSkuTerm(sku, term);
   return rewritten && prices[rewritten] ? rewritten : null;
+}
+
+// A concrete device-license SKU is the authority for its own tier. This is
+// intentionally narrower than free-text tier parsing: a neighboring LIC-ENT
+// row or prose word must not retier an EOL hardware-refresh replacement.
+function directLicenseRequestedTier(sku) {
+  const match = String(sku || '').trim().toUpperCase().match(
+    /^LIC-(?:(?:MX|Z|MG)\d+[A-Z]*|C(?:8111|8121|8455))-(ENT|SEC|SDW)-\d+Y(?:R)?$/,
+  );
+  return match?.[1] || null;
 }
 
 function canRewriteDirectLicenseListForTerm(list, term) {
@@ -33960,6 +34360,25 @@ CRITICAL URL RULES:
 
             // Route through buildQuoteResponse for consistent output
             const quoteResult = buildQuoteResponse(parsed);
+
+            if (quoteResult.compositionBlocked === true) {
+              const detail = String(quoteResult.message || 'Quote composition needs review. No quote link was generated.');
+              apiResult = await finalizeQuoteResponse({
+                quoteUrls: [],
+                eolWarnings,
+                parsedItems: parsedWithValidation.map(p => ({ sku: p.sku, qty: p.qty })),
+                claudeResponse: detail,
+                recovery: {
+                  kind: 'quote_composition_mismatch',
+                  code: 'quote_companion_quantity_mismatch',
+                  title: 'Quote scope needs review',
+                  detail,
+                  write_state: 'none',
+                },
+                handlerType: 'quote-composition-blocked',
+              }, detail);
+              break;
+            }
 
             // If buildQuoteResponse says it needs LLM (advisory, revision, etc.),
             // fall through to Claude — identical to Webex bot behavior

@@ -240,6 +240,61 @@ test('term-agnostic license aliases require exact quantities and a labeled match
   }], [{ sku: 'LIC-ENT', qty: 5 }, { sku: 'MR-ENT', qty: 5 }]).ok, false,
   'one published line must not satisfy two committed aliases');
 
+  const mixedExplicitLicenseTiers = verifyStratusOrderUrlOptions([{
+    label: '1-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,LIC-MX64-SEC-1YR&qty=2,1',
+  }, {
+    label: '3-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,LIC-MX64-SEC-3YR&qty=2,1',
+  }, {
+    label: '5-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-5YR,LIC-MX64-SEC-5YR&qty=2,1',
+  }], [
+    { sku: 'LIC-ENT-3YR', qty: 2 },
+    { sku: 'LIC-MX64-SEC-3YR', qty: 1 },
+  ], { licenseTier: 'ENT', requireLicensedOption: true });
+  assert.equal(mixedExplicitLicenseTiers.ok, true,
+    mixedExplicitLicenseTiers.error || 'literal ENT and MX SEC renewals must retain their independently committed tiers');
+  assert.equal(mixedExplicitLicenseTiers.urls.length, 3);
+
+  const refreshBundleWithExplicitCompanion = verifyStratusOrderUrlOptions([{
+    label: '1-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,MX67,LIC-MX67-SEC-1YR&qty=2,1,1',
+  }, {
+    label: '3-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,MX67,LIC-MX67-SEC-3YR&qty=2,1,1',
+  }, {
+    label: '5-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-5YR,MX67,LIC-MX67-SEC-5YR&qty=2,1,1',
+  }], [
+    { sku: 'LIC-ENT-3YR', qty: 2 },
+    { sku: 'MX67', qty: 1 },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
+  ], { licenseTier: 'ENT', requireLicensedOption: true });
+  assert.equal(refreshBundleWithExplicitCompanion.ok, true,
+    refreshBundleWithExplicitCompanion.error || 'the sent MX67 refresh bundle must retain all three verified lines');
+  assert.equal(refreshBundleWithExplicitCompanion.urls.length, 3);
+
+  const mixedStandaloneAndHardware = verifyStratusOrderUrlOptions([{
+    label: '1-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,MX67,LIC-MX67-SEC-1YR&qty=2,1,1',
+  }], [
+    { sku: 'LIC-ENT-3YR', qty: 2 },
+    { sku: 'MX67', qty: 1, tier: 'security' },
+  ], { licenseTier: 'ENT', requireLicensedOption: true });
+  assert.equal(mixedStandaloneAndHardware.ok, true,
+    mixedStandaloneAndHardware.error || 'the MX row tier must override the unrelated standalone ENT license');
+
+  const wrongMxCompanionTier = verifyStratusOrderUrlOptions([{
+    label: '1-Year',
+    url: 'https://stratusinfosystems.com/order/?item=LIC-ENT-1YR,MX67,LIC-MX67-ENT-1YR&qty=2,1,1',
+  }], [
+    { sku: 'LIC-ENT-3YR', qty: 2 },
+    { sku: 'MX67', qty: 1, tier: 'security' },
+  ], { licenseTier: 'ENT', requireLicensedOption: true });
+  assert.equal(wrongMxCompanionTier.ok, false, 'MX67 Security must still reject an ENT companion');
+  assert.match(wrongMxCompanionTier.error, /ENT license tier when SEC was requested/i);
+
   const mixedMr = verifyStratusOrderUrlOptions([{
     label: '3-Year',
     url: 'https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=2,4',

@@ -42,7 +42,6 @@ import {
   applyExplicitMxWarmSpareToQuoteOptions,
   bindOneshotQuoteOptions,
   buildOneshotReplanPayload,
-  enrichmentComparisonRows,
   hasExplicitMxHaIntent,
   isProductChangingOneshotOverride,
   nextOneshotQuoteOptionState,
@@ -52,6 +51,7 @@ import {
   oneshotContextRefreshSummary,
   normalizeEditableQuoteLines,
   normalizeQuoteIntakeLines,
+  quoteIntakeTierLabel,
   oneshotHaStateForQuoteOption,
   oneshotProductSnapshotHash,
   quoteOptionTerm,
@@ -509,8 +509,7 @@ function SuggestionChips({ suggestions, onPick, disabled }) {
 // stand-in so they ride along in history without breaking the request.
 function messageHistoryText(m) {
   if (m && m.kind === 'email-quote-intake') {
-    const lines = normalizeQuoteIntakeLines(m.intake?.lines || []);
-    return `[Read-only Gmail eCommerce quote intake; no CRM action]\n${lines.map((l) => `${l.sku} × ${l.qty}`).join('\n')}`.trim();
+    return `[Read-only Gmail eCommerce quote intake; no CRM action]\n${quoteSkuTextFromLines(m.intake?.lines || [])}`.trim();
   }
   if (m && m.kind === 'quote-clarification') {
     return `[Dashboard quote blocked pending MX edition]\nDetected rows:\n${m.skuText || ''}\n${m.content || m.note || ''}`.trim();
@@ -704,10 +703,13 @@ function typedHardwareOnlyResult(result, text) {
 function explicitQuoteLicenseTier(text) {
   const value = String(text || '').toUpperCase();
   if (/\b(?:HARDWARE[ -]?ONLY|NO\s+LICEN[SC]ES?|WITHOUT\s+LICEN[SC]ES?|JUST\s+THE\s+HARDWARE)\b/.test(value)) return null;
-  if (/\b(?:ENTERPRISE|ENT)(?:\s+LICEN[SC](?:E|ING)S?)?\b/.test(value)) return 'ENT';
-  if (/\b(?:SD[ -]?WAN|SDW)(?:\s+PLUS)?\b/.test(value)) return 'SDW';
-  if (/\b(?:ADVANCED\s+SECURITY|SECURITY|SEC)(?:\s+LICEN[SC](?:E|ING)S?)?\b/.test(value)) return 'SEC';
-  if (/\b(?:ADVANCED|ADV)(?:\s+LICEN[SC](?:E|ING)S?|\s+TIER)?\b/.test(value)) return 'A';
+  // A literal product token such as LIC-ENT-3YR binds only that line. It is
+  // not prose authorizing Enterprise for unrelated blank hardware rows.
+  const prose = value.replace(/\bLIC-[A-Z0-9-]+\b/g, ' ');
+  if (/\b(?:ENTERPRISE|ENT)(?:\s+LICEN[SC](?:E|ING)S?)?\b/.test(prose)) return 'ENT';
+  if (/\b(?:SD[ -]?WAN|SDW)(?:\s+PLUS)?\b/.test(prose)) return 'SDW';
+  if (/\b(?:ADVANCED\s+SECURITY|SECURITY|SEC)(?:\s+LICEN[SC](?:E|ING)S?)?\b/.test(prose)) return 'SEC';
+  if (/\b(?:ADVANCED|ADV)(?:\s+LICEN[SC](?:E|ING)S?|\s+TIER)?\b/.test(prose)) return 'A';
   return null;
 }
 
@@ -889,7 +891,7 @@ function EmailQuoteIntakeCard({ msg, busy, onUpdate, onRemove, onBuildQuote, onM
         <div key={i} style={{ marginTop: 6 }}>
           {l.status === 'unsupported' && (
             <div style={{ color: '#c5221f' }}>
-              ⛔ “{l.sku || l.family}” is not in the quoting catalog — remove the line or quote SKUs directly.{' '}
+              ⛔ {l.reason || `“${l.sku || l.family}” is not in the quoting catalog`} — remove the line or correct it before building.{' '}
               <button style={chip(false)} disabled={busy} onClick={() => onRemove(msg, i)}>Remove line</button>
             </div>
           )}
@@ -913,6 +915,9 @@ function EmailQuoteIntakeCard({ msg, busy, onUpdate, onRemove, onBuildQuote, onM
               <input type="number" min="1" max="99999" value={l.qty} disabled={busy}
                 style={{ width: 56, fontSize: 12, padding: '2px 4px' }}
                 onChange={(e) => onUpdate(msg, i, { qty: Math.max(1, Math.min(99999, parseInt(e.target.value, 10) || 1)) })} />
+              {quoteIntakeTierLabel(l.tier) && (
+                <span style={{ color: COLORS.TEXT_SECONDARY }}> · {quoteIntakeTierLabel(l.tier)}</span>
+              )}
               {l.evidence && <span style={{ color: COLORS.TEXT_SECONDARY }} title={l.evidence}> · “{String(l.evidence).slice(0, 60)}”</span>}
               {l.options && l.status === 'resolved' && (
                 <button style={chip(false)} disabled={busy} title="Change edition/term"
@@ -1107,9 +1112,6 @@ function OneshotZohoLookup({
           Add new account
         </button>
       </div>
-      <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginTop: 3 }}>
-        Picking a record re-plans the card against it. Add-new uses the same enrichment fields as the Zoho tab. Nothing is written to Zoho until Execute.
-      </div>
     </div>
   );
 }
@@ -1188,6 +1190,53 @@ function OneshotIsrLookup({ styles, disabled, onPick }) {
   );
 }
 
+const ONESHOT_ENRICH_SOURCE_OPTIONS = [
+  { value: 'zia', label: 'Zia enrichment' },
+  { value: 'haiku', label: 'Web search' },
+  { value: 'sonnet', label: 'Deep web search' },
+];
+
+const ONESHOT_ENRICH_TIER_LABELS = {
+  zia: 'Zia enrichment',
+  'haiku-web': 'Web search',
+  'sonnet-web': 'Deep web search',
+  cache: 'Cached result',
+  'zoho-existing': 'Zoho CRM',
+};
+
+function oneshotEnrichTierLabel(tier) {
+  return ONESHOT_ENRICH_TIER_LABELS[String(tier || '').toLowerCase()]
+    || String(tier || 'Unknown source');
+}
+
+function oneshotEnrichStartTier(tier) {
+  const normalized = String(tier || '').toLowerCase();
+  if (normalized === 'zia') return 'zia';
+  if (normalized === 'haiku' || normalized === 'haiku-web') return 'haiku';
+  if (normalized === 'sonnet' || normalized === 'sonnet-web') return 'sonnet';
+  return 'zia';
+}
+
+function oneshotEnrichmentDomain(value) {
+  return String(value || '').trim().toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/.*$/, '');
+}
+
+function oneshotEnrichmentFields(result) {
+  const source = result || {};
+  return {
+    name: String(source.name || '').trim(),
+    street: String(source.address || source.street || '').trim(),
+    city: String(source.city || '').trim(),
+    state: String(source.state || '').trim(),
+    zip: String(source.zip || source.postalCode || '').trim(),
+    country: String(source.country || '').trim(),
+    website: String(source.website || source.domain || '').trim(),
+  };
+}
+
 function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext, onQuoteOptionChange: requestQuoteOptionChange, onExecute, onEditProducts, onProductSearch }) {
   const p = msg.plan || {};
   const blockers = msg.blockers || [];
@@ -1248,6 +1297,15 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
   const [forceCreateContact, setForceCreateContact] = useState(false);
   const [forceCreateAccount, setForceCreateAccount] = useState(false);
   const [isrVerified, setIsrVerified] = useState([]);
+  const initialEnrichment = acctPlan.prefill?.enrich_tier ? {
+    tier: acctPlan.prefill.enrich_tier,
+    confidence: acctPlan.prefill.enrich_confidence,
+    source_url: acctPlan.prefill.enrich_source_url || '',
+  } : null;
+  const [activeEnrichment, setActiveEnrichment] = useState(initialEnrichment);
+  const [enrichmentAlternate, setEnrichmentAlternate] = useState(null);
+  const [enrichmentLoading, setEnrichmentLoading] = useState(false);
+  const [enrichmentError, setEnrichmentError] = useState('');
   const [productRows, setProductRows] = useState(() => {
     const baseSkus = Array.isArray(msg.base?.skus) ? msg.base.skus : [];
     const planLines = Array.isArray(p.lines) ? p.lines : [];
@@ -1266,7 +1324,6 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
     && msg.selectedQuoteOptionIndex >= 0
     && msg.selectedQuoteOptionIndex < quoteOptions.length
     ? msg.selectedQuoteOptionIndex : null;
-  const enrichmentRows = enrichmentComparisonRows(p.enrichment_comparison || acctPlan.enrichment_comparison);
   const productValidation = p.product_validation || {};
   const productSnapshotLabel = productValidation.snapshot_hash
     || productValidation.plan_id
@@ -1470,6 +1527,68 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
     );
   }
 
+  async function fetchAccountEnrichment(startTier) {
+    const domain = oneshotEnrichmentDomain(
+      acct.website || acctPlan.domain || p.domain || cust.contact?.email?.split('@')[1],
+    );
+    if (!domain) {
+      setEnrichmentError('Add a customer domain or website first.');
+      return;
+    }
+    setEnrichmentLoading(true);
+    setEnrichmentError('');
+    try {
+      const result = await sendToBackground(MSG.ENRICH_COMPANY, {
+        domain,
+        cache_bust: true,
+        start_tier: startTier,
+      });
+      if (!result || result.error) {
+        setEnrichmentAlternate(null);
+        setEnrichmentError(result?.error || 'No enrichment result was returned.');
+        return;
+      }
+      setEnrichmentAlternate(result);
+    } catch (error) {
+      setEnrichmentAlternate(null);
+      setEnrichmentError(error?.message || 'Enrichment lookup failed.');
+    } finally {
+      setEnrichmentLoading(false);
+    }
+  }
+
+  function useEnrichmentResult(result) {
+    const candidate = oneshotEnrichmentFields(result);
+    setAcct((current) => Object.entries(candidate).reduce(
+      (next, [field, value]) => value ? { ...next, [field]: value } : next,
+      current,
+    ));
+    if (candidate.name && ct && ct.mode === 'create' && !ct.name && !contactNameEdited) {
+      setContactFirst(candidate.name);
+      setContactLast('IT');
+    }
+    setActiveEnrichment(result);
+    setEnrichmentAlternate(null);
+    setEnrichmentError('');
+  }
+
+  function renderEnrichmentBadge(result, prefix = 'via') {
+    if (!result) return null;
+    const confidence = Number(result.confidence);
+    const hasConfidence = Number.isFinite(confidence);
+    const sourceUrl = String(result.source_url || result.zohoUrl || '').trim();
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 }}>
+        <span style={{ color: hasConfidence && confidence >= 0.5 ? '#188038' : COLORS.TEXT_SECONDARY, fontWeight: 700 }}>
+          {hasConfidence && confidence >= 0.5 ? '✓' : '•'}
+        </span>
+        <span style={{ color: COLORS.TEXT_SECONDARY }}>{prefix} {oneshotEnrichTierLabel(result.tier)}</span>
+        {hasConfidence && <span style={{ color: COLORS.TEXT_SECONDARY }}>({Math.round(confidence * 100)}%)</span>}
+        {sourceUrl && <a href={sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: COLORS.STRATUS_BLUE }}>source</a>}
+      </div>
+    );
+  }
+
   return (
     <div style={{ alignSelf: 'stretch', maxWidth: '100%', padding: 12, borderRadius: 10, background: COLORS.BG_SECONDARY, fontSize: 12, border: `1px solid ${COLORS.BORDER}` }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -1536,7 +1655,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
           )}
           {quoteOptions.length > 1 && (
             <div style={S.sec}>
-              <div style={S.lab}>eCommerce quote option used for this Zoho plan</div>
+              <div style={S.lab}>Quote option</div>
               <select
                 style={S.in}
                 value={selectedQuoteOptionIndex}
@@ -1549,9 +1668,6 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
                   </option>
                 ))}
               </select>
-              <div style={{ color: COLORS.TEXT_SECONDARY }}>
-                Changing this option re-plans the same card and refreshes its reviewed SKU payload.
-              </div>
               {msg.executeAttempted === true && (
                 <div style={{ color: '#8a6100', fontSize: 11 }}>
                   Review fields and term are locked after an Execute attempt. Retry/resume reuses the exact original payload.
@@ -1607,12 +1723,6 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
               >
                 Refresh from current page / pin
               </button>
-              <div style={{ color: COLORS.TEXT_SECONDARY }}>
-                Re-plans this card using the Gmail thread the panel is showing now and the
-                pinned Zoho record. Use it when the card was started away from the thread and
-                the customer or account came back empty. Read-only: nothing is written to Zoho
-                until Execute.
-              </div>
             </div>
           )}
           <OneshotZohoLookup
@@ -1637,7 +1747,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
           />
           {cust.status === 'ambiguous' && (
             <div style={S.sec}>
-              <div style={S.lab}>Customer — multiple people on the thread, explicit pick required</div>
+              <div style={S.lab}>Customer</div>
               <select style={S.in} defaultValue="" onChange={(e) => e.target.value && onReplan({ contact_email: e.target.value })} disabled={reviewLocked}>
                 <option value="">— pick the customer —</option>
                 {(cust.candidates || []).map((c) => (
@@ -1669,89 +1779,86 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
             </div>
           )}
           {(forceCreateAccount || acctPlan.mode === 'create') && !linkedElse && (
-            <div style={S.sec}><div style={S.lab}>Account — will be created (review every field)</div>
-              {['name', 'street', 'city', 'state', 'zip', 'country'].map((f) => {
-                const provenance = acctPlan.field_provenance?.[f]
-                  || acctPlan.prefill?.field_provenance?.[f]
-                  || acctPlan.prefill_provenance?.[f]
-                  || acctPlan.prefill?.provenance?.[f]
-                  || acctPlan.prefill?.enrich_tier
-                  || 'email/context';
-                const provenanceLabel = typeof provenance === 'object'
-                  ? [provenance.source, provenance.tier, provenance.confidence].filter(Boolean).join(' · ')
-                  : String(provenance);
-                return (
-                  <label key={f} style={{ display: 'inline-flex', flexDirection: 'column', marginRight: 4 }}>
-                    <span style={{ fontSize: 9, color: COLORS.TEXT_SECONDARY }}>{f} · source: {provenanceLabel}</span>
-                    <input style={S.in} placeholder={f} value={acct[f]} disabled={reviewLocked}
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        setAcct((a) => ({ ...a, [f]: value }));
-                        if (f === 'name' && ct && ct.mode === 'create' && !ct.name && !contactNameEdited) {
-                          setContactFirst(value);
-                          setContactLast(value.trim() ? 'IT' : '');
-                        }
-                      }} />
-                  </label>
-                );
-              })}
-              <div style={{ color: COLORS.TEXT_SECONDARY, marginBottom: 4 }}>
-                Website (reference only; this workflow does not write it): {acct.website || 'blank'}
-                {' · source: '}
-                {(() => {
-                  const provenance = acctPlan.field_provenance?.website
-                    || acctPlan.prefill?.field_provenance?.website
-                    || acctPlan.prefill_provenance?.website
-                    || acctPlan.prefill?.provenance?.website
-                    || 'email/context';
-                  return typeof provenance === 'object'
-                    ? [provenance.source, provenance.tier, provenance.confidence].filter(Boolean).join(' · ')
-                    : String(provenance);
-                })()}
-              </div>
-              <div>
-                <button style={S.btn} disabled={reviewLocked}
-                  onClick={() => onReplan({
-                    refresh_enrichment: true,
-                    enrichment_mode: 'compare',
-                    account_prefill: { ...acct },
-                  }, { accountDraft: { ...acct } })}>
-                  Refresh & compare Zia/Web enrichment
-                </button>
-                <span style={{ color: COLORS.TEXT_SECONDARY }}>
-                  Results are shown for review; they never create the Account or silently authorize Execute.
-                </span>
-              </div>
-              {enrichmentRows.length > 0 && (
-                <div style={{ marginTop: 6, padding: 7, border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, background: COLORS.BG_PRIMARY }}>
-                  <div style={{ fontWeight: 700, marginBottom: 4 }}>Enrichment comparison — review before applying locally</div>
-                  {enrichmentRows.map((row) => (
-                    <div key={row.field} style={{ display: 'grid', gridTemplateColumns: '70px 1fr auto', gap: 5, alignItems: 'center', marginBottom: 4 }}>
-                      <b>{row.field}</b>
-                      <span>
-                        Current: {row.current || 'blank'}<br />
-                        Candidate: {row.candidate} <span style={{ color: COLORS.TEXT_SECONDARY }}>({row.source})</span>
-                      </span>
-                      {row.field === 'website' ? (
-                        <span style={{ color: COLORS.TEXT_SECONDARY }}>Reference only</span>
-                      ) : (
-                        <button style={S.btn} disabled={reviewLocked}
-                          onClick={() => setAcct((current) => ({ ...current, [row.field]: row.candidate }))}>
-                          Use candidate
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                  <button style={S.btn} disabled={reviewLocked}
-                    onClick={() => setAcct((current) => enrichmentRows.filter((row) => row.field !== 'website').reduce(
-                      (next, row) => ({ ...next, [row.field]: row.candidate }),
-                      current,
-                    ))}>
-                    Use all candidate values
+            <div style={S.sec}><div style={S.lab}>New account</div>
+              <div style={{ padding: 8, border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, background: '#f5f7fa', marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {activeEnrichment ? renderEnrichmentBadge(activeEnrichment) : (
+                    <span style={{ color: COLORS.TEXT_SECONDARY, fontSize: 11 }}>No enrichment source selected</span>
+                  )}
+                  <button
+                    type="button"
+                    style={{ ...S.btn, marginLeft: 'auto', marginBottom: 0 }}
+                    disabled={reviewLocked || enrichmentLoading}
+                    onClick={() => fetchAccountEnrichment(oneshotEnrichStartTier(activeEnrichment?.tier))}
+                  >
+                    {enrichmentLoading ? 'checking…' : 'refresh'}
                   </button>
-                  <div style={{ color: COLORS.TEXT_SECONDARY }}>Applied values only change this review card. Zoho is untouched until Execute.</div>
+                  <select
+                    aria-label="Choose account enrichment source"
+                    value=""
+                    disabled={reviewLocked || enrichmentLoading}
+                    onChange={(e) => e.target.value && fetchAccountEnrichment(e.target.value)}
+                    style={{ ...S.in, margin: 0, color: COLORS.STRATUS_BLUE }}
+                  >
+                    <option value="">choose source…</option>
+                    {ONESHOT_ENRICH_SOURCE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+                {enrichmentError && <div style={{ color: COLORS.ERROR, fontSize: 10, marginTop: 5 }}>{enrichmentError}</div>}
+              </div>
+              {enrichmentAlternate && !enrichmentLoading && (
+                <div style={{ marginBottom: 8, padding: 8, background: '#fffdf5', border: '1px solid #e6c86e', borderRadius: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    {renderEnrichmentBadge(enrichmentAlternate, 'from')}
+                    <button type="button" style={{ ...S.btn, marginLeft: 'auto', marginBottom: 0 }} disabled={reviewLocked}
+                      onClick={() => useEnrichmentResult(enrichmentAlternate)}>use</button>
+                  </div>
+                  {(() => {
+                    const candidate = oneshotEnrichmentFields(enrichmentAlternate);
+                    const locality = [candidate.city, [candidate.state, candidate.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+                    const rows = [
+                      ['Name', candidate.name],
+                      ['Street', candidate.street],
+                      ['City', locality],
+                      ['Website', candidate.website],
+                    ].filter(([, value]) => value);
+                    return rows.length > 0 && (
+                      <div style={{ marginTop: 6, padding: '6px 8px', background: '#fff8d8', borderRadius: 4 }}>
+                        {rows.map(([label, value]) => (
+                          <div key={label} style={{ display: 'grid', gridTemplateColumns: '52px minmax(0, 1fr)', gap: 6, marginBottom: 2 }}>
+                            <b style={{ color: COLORS.TEXT_SECONDARY }}>{label}</b><span>{value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
+              <input style={{ ...S.in, width: '100%', boxSizing: 'border-box' }} placeholder="Account name" value={acct.name} disabled={reviewLocked}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setAcct((current) => ({ ...current, name: value }));
+                  if (ct && ct.mode === 'create' && !ct.name && !contactNameEdited) {
+                    setContactFirst(value);
+                    setContactLast(value.trim() ? 'IT' : '');
+                  }
+                }} />
+              <input style={{ ...S.in, width: '100%', boxSizing: 'border-box' }} placeholder="Street address" value={acct.street} disabled={reviewLocked}
+                onChange={(e) => setAcct((current) => ({ ...current, street: e.target.value }))} />
+              <div style={{ display: 'flex', gap: 4 }}>
+                <input style={{ ...S.in, flex: 2, minWidth: 0 }} placeholder="City" value={acct.city} disabled={reviewLocked}
+                  onChange={(e) => setAcct((current) => ({ ...current, city: e.target.value }))} />
+                <input style={{ ...S.in, flex: 1, minWidth: 0 }} placeholder="State" value={acct.state} disabled={reviewLocked}
+                  onChange={(e) => setAcct((current) => ({ ...current, state: e.target.value }))} />
+                <input style={{ ...S.in, flex: 1, minWidth: 0 }} placeholder="Zip" value={acct.zip} disabled={reviewLocked}
+                  onChange={(e) => setAcct((current) => ({ ...current, zip: e.target.value }))} />
+              </div>
+              <input style={{ ...S.in, width: '100%', boxSizing: 'border-box' }} placeholder="Country" value={acct.country} disabled={reviewLocked}
+                onChange={(e) => setAcct((current) => ({ ...current, country: e.target.value }))} />
+              <input style={{ ...S.in, width: '100%', boxSizing: 'border-box' }} placeholder="Website" value={acct.website} disabled={reviewLocked}
+                onChange={(e) => setAcct((current) => ({ ...current, website: e.target.value }))} />
             </div>
           )}
           {linkedElse && ct && ct.linked_account && (
@@ -1766,13 +1873,10 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
             <div style={S.sec}><div style={S.lab}>Contact (existing)</div><b>{ct.name}</b> &lt;{ct.email}&gt;</div>
           )}
           {(forceCreateContact || (ct && ct.mode === 'create')) && (
-            <div style={S.sec}><div style={S.lab}>Contact — will be created</div>
+            <div style={S.sec}><div style={S.lab}>New contact</div>
               <input style={S.in} value={contactFirst} placeholder="First name" disabled={reviewLocked} onChange={(e) => { setContactNameEdited(true); setContactFirst(e.target.value); }} />
               <input style={S.in} value={contactLast} placeholder="Last name" disabled={reviewLocked} onChange={(e) => { setContactNameEdited(true); setContactLast(e.target.value); }} />
               <input style={S.in} type="email" value={contactEmail} placeholder="Email" disabled={reviewLocked} onChange={(e) => setContactEmail(e.target.value)} />
-              {(contactDefaults.account_it_fallback || (!(ct && ct.name) && contactLast === 'IT')) && (
-                <div style={{ color: COLORS.TEXT_SECONDARY }}>Name was unavailable: Account name + “IT” is the editable fallback.</div>
-              )}
               {String(contactEmail || '').trim().toLowerCase() !== String(ct.email || '').trim().toLowerCase() && (
                 <button style={S.btn} disabled={reviewLocked || !String(contactEmail || '').includes('@')}
                   onClick={() => onReplan({
@@ -1783,7 +1887,6 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
                   Re-plan edited email
                 </button>
               )}
-              {ct.last_name_placeholder && <div style={{ color: COLORS.TEXT_SECONDARY }}>Single name — surname defaults to “-” unless you edit it.</div>}
             </div>
           )}
           <div style={S.sec}><div style={S.lab}>Deal</div>
@@ -1869,9 +1972,6 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
               <option value="standard">Standard — no shared warm-spare license (default)</option>
               <option value="warm_spare">Warm spare / HA pair — recalculate to 2 hardware : 1 shared license</option>
             </select>
-            <div style={{ color: COLORS.TEXT_SECONDARY }}>
-              This control appears only when the request mentions HA/failover/spare equipment. It recalculates each matching MX license to one per two appliances, then revalidates and shows the reviewed 2:1 plan. Odd, unsupported, or conflicting quantities block Execute.
-            </div>
           </div>}
           {(p.lines || []).length > 0 && (
             <div style={S.sec}><div style={S.lab}>Quote lines (ecomm)</div>
@@ -2768,7 +2868,10 @@ export default function ChatPanel({
     // An explicit dropdown pick wins over the tier inferred from the prior
     // request text; undefined means "leave the inferred tier alone".
     const tierOverride = tier === undefined ? msg?.draftTier : tier;
-    const prepared = quoteTextFromEditorRows(rows, sourceText, { tier: tierOverride || '' });
+    const prepared = quoteTextFromEditorRows(rows, sourceText, {
+      tier: tierOverride || '',
+      haRequested: explicitQuoteHaRequested(msg),
+    });
     if (!prepared.ok) {
       invalidateQuoteUpdate(msg.id);
       updateMessage(msg.id, {
@@ -3595,10 +3698,10 @@ export default function ChatPanel({
       ...m,
       kind: 'quote',
       result: quoteResult
-        ? { ...quoteResult, parsed: normalized.map(({ sku, qty }) => ({ baseSku: sku, qty })) }
+        ? { ...quoteResult, parsed: normalized.map(({ sku, qty, tier }) => ({ baseSku: sku, qty, ...(tier ? { tier } : {}) })) }
         : {
           urls: [],
-          parsed: normalized.map(({ sku, qty }) => ({ baseSku: sku, qty })),
+          parsed: normalized.map(({ sku, qty, tier }) => ({ baseSku: sku, qty, ...(tier ? { tier } : {}) })),
           eolWarnings: [],
           suggestions: null,
           source: 'email-intake-sku-only',
@@ -3831,8 +3934,11 @@ export default function ChatPanel({
               return (
                 <div key={msg.id} style={{ alignSelf: 'stretch', padding: '9px 10px', borderRadius: 8, background: COLORS.BG_SECONDARY, fontSize: 12 }}>
                   <div style={{ fontWeight: 700, marginBottom: 5 }}>Restored Gmail quote intake — review only</div>
-                  {restoredLines.map((line) => (
-                    <div key={line.sku}>{line.sku} × {line.qty}</div>
+                  {restoredLines.map((line, index) => (
+                    <div key={`${line.sku}-${line.tier || 'default'}-${index}`}>
+                      {line.sku} × {line.qty}
+                      {quoteIntakeTierLabel(line.tier) ? ` · ${quoteIntakeTierLabel(line.tier)}` : ''}
+                    </div>
                   ))}
                   <div style={{ color: '#e37400', marginTop: 6 }}>
                     Gmail intent, participants, and message provenance are not retained with this restored card. Reopen the intended Gmail conversation and use Create Quote again before rebuilding or starting Zoho review.

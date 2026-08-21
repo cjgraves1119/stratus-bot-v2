@@ -11,6 +11,7 @@ import {
   isProductChangingOneshotOverride,
   nextOneshotQuoteOptionState,
   normalizeQuoteIntakeLines,
+  quoteIntakeTierLabel,
   oneshotHaStateForQuoteOption,
   oneshotProductSnapshotHash,
   quoteSkuTextFromLines,
@@ -96,6 +97,30 @@ test('normalized email intake retains SKU output even when pricing is absent', (
   assert.equal(quoteSkuTextFromLines(lines), '5 MR44\n5 LIC-MR-ADV-3YR');
   assert.match(quoteSource, /Parsed SKU quantities \(retained even though pricing\/links were unavailable\)/);
   assert.match(quoteSource, /Zoho quote option/);
+});
+
+test('email intake preserves same-SKU row tiers and serializes each occurrence explicitly', () => {
+  const lines = [
+    { status: 'resolved', sku: 'MX67', qty: 1, tier: 'SEC' },
+    { status: 'resolved', sku: 'mx67', qty: 2, tier: 'enterprise' },
+    { status: 'resolved', sku: 'LIC-ENT-3YR', qty: 2, tier: 'ENT' },
+  ];
+  assert.deepEqual(normalizeQuoteIntakeLines(lines), [
+    { sku: 'MX67', qty: 1, tier: 'SEC' },
+    { sku: 'MX67', qty: 2, tier: 'ENT' },
+    { sku: 'LIC-ENT-3YR', qty: 2 },
+  ]);
+  assert.equal(quoteSkuTextFromLines(lines),
+    '1 MX67 security\n2 MX67 enterprise\n2 LIC-ENT-3YR');
+  assert.equal(quoteIntakeTierLabel('SEC'), 'Advanced Security (SEC)');
+  assert.equal(quoteIntakeTierLabel('ENT'), 'Enterprise (ENT)');
+  assert.match(chatSource, /quoteIntakeTierLabel\(l\.tier\)/,
+    'the fresh intake card must visibly label each preserved row tier');
+  assert.match(chatSource, /quoteIntakeTierLabel\(line\.tier\)/,
+    'the inert restored card must visibly label each preserved row tier');
+  assert.deepEqual(normalizeQuoteIntakeLines([
+    { status: 'resolved', sku: 'MX67', qty: 1, tier: 'untrusted-tier' },
+  ]), [], 'unknown non-empty row tier must fail the intake closed');
 });
 
 test('returned 1-5-year options are explicit and only the separate button enters Zoho review', () => {
@@ -721,20 +746,20 @@ test('non-product replans reuse signed validation; product/term/HA changes do no
   assert.equal(buildOneshotReplanPayload(base, { skus: [{ sku: 'MR44', qty: 3 }] }, token).prior_review_token, undefined);
   assert.equal(buildOneshotReplanPayload(base, { ha_mode: 'warm_spare' }, token).prior_review_token, undefined);
   assert.equal(buildOneshotReplanPayload(base, { ha_recalculate_license_qty: true }, token).prior_review_token, undefined);
-  assert.match(chatSource, /refresh_enrichment: true,[\s\S]{0,100}enrichment_mode: 'compare'/);
-  assert.match(chatSource, /account_prefill: \{ \.\.\.acct \}/);
-  assert.match(chatSource, /\}, \{ accountDraft: \{ \.\.\.acct \} \}\)/);
+  assert.match(chatSource, /MSG\.ENRICH_COMPANY/);
+  assert.match(chatSource, /cache_bust: true,[\s\S]{0,100}start_tier: startTier/);
+  assert.match(chatSource, /useEnrichmentResult\(enrichmentAlternate\)/);
   assert.match(chatSource, /haAvailable && <div/);
   assert.match(chatSource, /value="warm_spare"/);
   assert.match(chatSource, /ha_recalculate_license_qty: nextHaMode === 'warm_spare'/);
-  assert.match(chatSource, /recalculates each matching MX license/);
+  assert.match(chatSource, /Warm spare \/ HA pair — recalculate to 2 hardware : 1 shared license/);
 
   assert.deepEqual(enrichmentComparisonRows({
     differences: [{ field: 'street', current: '1 Old Way', candidate: '2 New Way' }],
     provenance: { source: 'web', tier: 'company-site' },
   }), [{ field: 'street', current: '1 Old Way', candidate: '2 New Way', source: 'web' }]);
-  assert.match(chatSource, /Use candidate/);
-  assert.match(chatSource, /Use all candidate values/);
+  assert.match(chatSource, /Choose account enrichment source/);
+  assert.match(chatSource, /setEnrichmentAlternate\(result\)/);
   assert.doesNotMatch(chatSource, /JSON\.stringify\(p\.enrichment_comparison/);
   assert.match(chatSource, /'invalid_sku_quantity', 'unresolved_sku', 'inactive_sku', 'eol_sku', 'product_lookup_failed'/);
   assert.match(chatSource, /p\.product_validation \|\| \{\}/);

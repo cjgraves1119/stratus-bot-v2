@@ -11,8 +11,9 @@ function test(name, fn) {
   console.log(`  ✓ ${name}`);
 }
 
-test('one-shot account resolution uses domain/email first and a bounded name fallback', () => {
-  assert.match(source, /resolveAccountWaterfall\(\{[\s\S]*domain: selectedDomain[\s\S]*email: selectedEmail[\s\S]*nameHint: p\.account_name \|\| selectedName/);
+test('one-shot account resolution uses domain/email first and only an explicit Account-name fallback', () => {
+  assert.match(source, /resolveAccountWaterfall\(\{[\s\S]*domain: selectedDomain[\s\S]*email: selectedEmail[\s\S]*nameHint: p\.account_name \|\| undefined/);
+  assert.doesNotMatch(source, /nameHint: p\.account_name \|\| selectedName/);
   assert.match(source, /code: 'account_confirm'[\s\S]*fuzzyCandidates/);
 });
 

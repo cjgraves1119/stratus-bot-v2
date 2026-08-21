@@ -184,6 +184,7 @@ t('ChatPanel routes Gmail Create Quote through eCommerce before explicit Zoho re
   assert.ok(/startEmailEcommQuote/.test(chatPanelSource));
   assert.ok(/buildEcommQuoteFromIntake/.test(chatPanelSource));
   assert.ok(/Create Zoho CRM quote from selected/.test(quoteResultSource));
+  assert.ok(/disabled=\{busy \|\| !hasExplicitTermSelection\}/.test(quoteResultSource));
   assert.ok(/consentSource: 'quote-card-button'/.test(chatPanelSource));
   assert.ok(/Execute — create in Zoho CRM/.test(chatPanelSource));
 });

@@ -96,8 +96,8 @@ function runQuote(text) {
 }
 
 /** rebuildQuoteMessage, minus React and the network. */
-export function updateQuote(rows, { skuText = '', tier } = {}) {
-  const prepared = core.quoteTextFromEditorRows(rows, skuText, { tier: tier || '' });
+export function updateQuote(rows, { skuText = '', tier, haRequested = false } = {}) {
+  const prepared = core.quoteTextFromEditorRows(rows, skuText, { tier: tier || '', haRequested });
   if (!prepared.ok) return { stage: 'serialize', ok: false, error: prepared.error };
 
   const response = runQuote(prepared.text);
@@ -106,12 +106,16 @@ export function updateQuote(rows, { skuText = '', tier } = {}) {
   let candidate = typedHardwareOnlyResult(response.result, prepared.text);
   const overrideFired = candidate !== response.result;
   candidate = flow.withHardwareOnlyQuoteOption(candidate, prepared.rows);
+  candidate = {
+    ...candidate,
+    urls: flow.applyExplicitMxWarmSpareToQuoteOptions(candidate?.urls, haRequested),
+  };
 
   const msg = { skuText, quoteHardwareOnly: undefined };
   const hardwareOnly = isExplicitHardwareOnlyQuoteText(msg.skuText);
   const requirements = {
     licenseTier: hardwareOnly ? null : explicitQuoteLicenseTier(msg.skuText),
-    allowHaLicenseRatio: false,
+    allowHaLicenseRatio: haRequested,
     requireLicensedOption: !hardwareOnly,
     ...(Array.isArray(prepared.hardwareOnlySkus) && prepared.hardwareOnlySkus.length
       ? { hardwareOnlySkus: prepared.hardwareOnlySkus } : {}),
@@ -243,6 +247,154 @@ test('a per-row tier alone still verifies', () => {
   ], { skuText: 'quote 2 MX67C and 4 MR44' });
   assert.ok(r.ok, r.error);
   assert.match(findItem(r, /^LIC-MX67C-/).sku, /SEC/);
+});
+
+// ── Explicit companion reconciliation: reported 2026-08-21 failure ─────────
+
+test('standalone LIC-ENT text does not become a global tier for blank MX hardware', () => {
+  const sourceText = 'quote 2 LIC-ENT-3YR and 1 MX67';
+  assert.equal(explicitQuoteLicenseTier(sourceText), null);
+  const r = updateQuote([
+    { sku: 'LIC-ENT-3YR', qty: 2, tier: '' },
+    { sku: 'MX67', qty: 1, tier: '' },
+  ], { skuText: sourceText });
+
+  assert.ok(r.ok, r.error);
+  for (const option of r.options.filter((entry) => entry.label !== 'Hardware Only')) {
+    assert.match(option.items, /LIC-ENT-/, 'the standalone ENT renewal must remain present');
+    assert.match(option.items, /LIC-MX67-SEC-/, 'blank MX67 must retain default Security');
+    assert.doesNotMatch(option.items, /LIC-MX67-ENT-/, 'literal LIC-ENT must not leak onto MX67');
+  }
+});
+
+test('real prose still selects Enterprise or Security for blank MX hardware', () => {
+  for (const [word, tier] of [['enterprise', 'ENT'], ['security', 'SEC']]) {
+    const sourceText = `quote 2 LIC-ENT-3YR and 1 MX67 ${word}`;
+    assert.equal(explicitQuoteLicenseTier(sourceText), tier);
+    const r = updateQuote([
+      { sku: 'LIC-ENT-3YR', qty: 2, tier: '' },
+      { sku: 'MX67', qty: 1, tier: '' },
+    ], { skuText: sourceText });
+    assert.ok(r.ok, `${word}: ${r.error}`);
+    for (const option of r.options.filter((entry) => entry.label !== 'Hardware Only')) {
+      assert.match(option.items, new RegExp(`LIC-MX67-${tier}-`), `${word} must remain a real MX tier choice`);
+    }
+  }
+});
+
+test('an exact explicit MX SEC license is the committed total, not added to the automatic companion', () => {
+  const r = updateQuote([
+    { sku: 'LIC-ENT-3YR', qty: 2, tier: '' },
+    { sku: 'MX67', qty: 1, tier: 'security' },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1, tier: '' },
+  ], { skuText: 'quote 2 LIC-ENT-3YR, 1 MX67 security, and 1 LIC-MX67-SEC-3YR' });
+
+  assert.ok(r.ok, `the exact reported cart must verify: ${r.error}\n${JSON.stringify(r.options)}`);
+  for (const option of r.options) {
+    const skus = option.items.split(',');
+    const qtys = option.qty.split(',').map(Number);
+    const index = skus.findIndex((sku) => /^LIC-MX67-SEC-/.test(sku));
+    assert.notEqual(index, -1, `${option.label} must retain the SEC companion`);
+    assert.equal(qtys[index], 1, `${option.label} must contain the committed MX license exactly once`);
+  }
+});
+
+test('removing the explicit MX license still derives one SEC companion and never substitutes ENT', () => {
+  const r = updateQuote([
+    { sku: 'LIC-ENT-3YR', qty: 2, tier: '' },
+    { sku: 'MX67', qty: 1, tier: 'security' },
+  ], { skuText: 'quote 2 LIC-ENT-3YR and 1 MX67 security' });
+
+  assert.ok(r.ok, r.error);
+  for (const option of r.options) {
+    assert.match(option.items, /LIC-MX67-SEC-/, `${option.label} must honor the row-local SEC pick`);
+    assert.doesNotMatch(option.items, /LIC-MX67-ENT-/, `${option.label} must not flatten SEC to ENT`);
+  }
+});
+
+test('reported editor path: removing explicit MX SEC leaves blank MX at default SEC beside LIC-ENT', () => {
+  const originalText = 'quote 2 LIC-ENT-3YR, 1 MX67, and 1 LIC-MX67-SEC-3YR';
+  assert.equal(explicitQuoteLicenseTier(originalText), null,
+    'neither literal license token may impersonate a request-global tier');
+
+  // This is the editor state after the rep removes the explicit MX companion.
+  // MX67 itself was never assigned a row tier, so it must fall back to its
+  // family default (SEC) rather than inheriting ENT from LIC-ENT-3YR.
+  const r = updateQuote([
+    { sku: 'LIC-ENT-3YR', qty: 2, tier: '' },
+    { sku: 'MX67', qty: 1, tier: '' },
+  ], { skuText: originalText });
+
+  assert.ok(r.ok, `the regenerated default-SEC URL must verify: ${r.error}\n${JSON.stringify(r.options)}`);
+  assert.ok(r.published.length > 0, 'at least one verified URL must remain publishable');
+  for (const option of r.options.filter((entry) => entry.label !== 'Hardware Only')) {
+    assert.match(option.items, /LIC-MX67-SEC-/, `${option.label} must derive the default SEC companion`);
+    assert.doesNotMatch(option.items, /LIC-MX67-ENT-/, `${option.label} must not inherit ENT from LIC-ENT`);
+  }
+});
+
+test('the inverse mixed-tier cart keeps MX Enterprise beside a standalone SEC license', () => {
+  const r = updateQuote([
+    { sku: 'LIC-MX64-SEC-3YR', qty: 1, tier: '' },
+    { sku: 'MX67', qty: 1, tier: 'enterprise' },
+  ], { skuText: 'quote 1 LIC-MX64-SEC-3YR and 1 MX67 enterprise' });
+
+  assert.ok(r.ok, r.error);
+  for (const option of r.options) {
+    assert.match(option.items, /LIC-MX64-SEC-/, 'the standalone SEC renewal must remain SEC');
+    assert.match(option.items, /LIC-MX67-ENT-/, 'the MX67 companion must remain ENT');
+  }
+});
+
+test('a shared exact LIC-ENT row must equal aggregate MR and CW hardware coverage', () => {
+  const exact = updateQuote([
+    { sku: 'MR44', qty: 2, tier: '' },
+    { sku: 'CW9164', qty: 3, tier: '' },
+    { sku: 'LIC-ENT-3YR', qty: 5, tier: '' },
+  ], { skuText: 'quote 2 MR44, 3 CW9164, and 5 LIC-ENT-3YR' });
+  assert.ok(exact.ok, exact.error);
+  assert.equal(findItem(exact, /^LIC-ENT-/)?.qty, 5);
+
+  for (const qty of [2, 7]) {
+    const mismatch = updateQuote([
+      { sku: 'MR44', qty: 2, tier: '' },
+      { sku: 'CW9164', qty: 3, tier: '' },
+      { sku: 'LIC-ENT-3YR', qty, tier: '' },
+    ], { skuText: `quote 2 MR44, 3 CW9164, and ${qty} LIC-ENT-3YR` });
+    assert.equal(mismatch.ok, false, `LIC-ENT quantity ${qty} must fail closed`);
+    assert.equal(mismatch.stage, 'verify');
+  }
+});
+
+test('an explicit half-quantity MX companion is accepted only with affirmative HA authorization', () => {
+  const rows = [
+    { sku: 'MX67', qty: 2, tier: 'security' },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1, tier: '' },
+  ];
+  const standard = updateQuote(rows, { skuText: 'quote 2 MX67 security; standard deployment' });
+  assert.equal(standard.ok, false, '2:1 licensing must not pass as a standard deployment');
+
+  const ha = updateQuote(rows, {
+    skuText: 'quote 2 MX67 security as a warm spare HA pair',
+    haRequested: true,
+  });
+  assert.ok(ha.ok, ha.error);
+  assert.match(ha.text, /use warm spare HA/);
+  assert.equal(findItem(ha, /^LIC-MX67-SEC-/)?.qty, 1);
+});
+
+test('negated or historical HA wording never authorizes a half-quantity companion', () => {
+  const rows = [
+    { sku: 'MX67', qty: 2, tier: 'security' },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 1, tier: '' },
+  ];
+  for (const skuText of [
+    'quote 2 MX67 security; do not use HA',
+    'quote 2 MX67 security; the old site used HA but this one is standard',
+  ]) {
+    const result = updateQuote(rows, { skuText, haRequested: false });
+    assert.equal(result.ok, false, skuText);
+  }
 });
 
 // ── EOL models: the gap that was closed by dropping options, not the set ────

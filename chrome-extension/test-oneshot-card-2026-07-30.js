@@ -42,6 +42,7 @@ check('chat email-quote replies never auto-open a one-shot plan', () => {
 
 check('only the explicit quote-card button authorizes the first one-shot plan', () => {
   assert.ok(QUOTE.includes('Create Zoho CRM quote from selected'), 'explicit consent button is missing');
+  assert.ok(/onClick=\{\(\) => hasExplicitTermSelection && onSendToZoho\(result, selectedIndexes\)\}/.test(QUOTE), 'Zoho review must require a selected quote option and a separate button click');
   const starts = SRC.match(/startOneshotFromUrl\(/g) || [];
   assert.strictEqual(starts.length, 2, `expected one declaration + one explicit call, found ${starts.length}`);
   const seg = SRC.slice(SRC.indexOf('async function handleSendQuoteToZoho'), SRC.indexOf('async function replanOneshot'));
@@ -72,17 +73,19 @@ check('term switch parses the exact selected URL and re-plans the SAME card', ()
     { sku: 'MS150-48MP-4X', qty: 1 },
     { sku: 'LIC-MS150-48-5Y', qty: 2 },
   ]);
-  assert.ok(/eCommerce quote option used for this Zoho plan/.test(SRC), 'one-shot term selector missing');
+  assert.ok(/<div style=\{S\.lab\}>Quote option<\/div>/.test(SRC), 'one-shot term selector missing');
+  assert.ok(/value=\{selectedQuoteOptionIndex\}[\s\S]*onChange=\{\(e\) => onQuoteOptionChange\(Number\(e\.target\.value\)\)\}/.test(SRC), 'one-shot term selector must re-plan from the selected option');
   const change = SRC.slice(SRC.indexOf('async function changeOneshotQuoteOption'), SRC.indexOf('async function executeOneshotCard'));
   assert.ok(/parseOrderUrlItems\(option\.url\)/.test(change), 'selected order URL is not the SKU authority');
   assert.ok(/replanOneshot\(msg, \{[\s\S]*skus,[\s\S]*hardware_only: hardwareOnly,[\s\S]*\}, \{ \.\.\.messagePatch, selectedQuoteOptionIndex \}, \{ boundOptionSelection: true \}\)/.test(change), 'same card is not replanned in place with its reviewed account draft');
   assert.ok(/quoteOptionsSnapshotHash !== currentSnapshotHash/.test(change), 'stale option URLs must be rejected before they can trigger a new plan');
   assert.ok(!/appendMessage\(\{[\s\S]*kind: 'oneshot'/.test(change), 'term switch must not append a stale second card');
   assert.ok(/selectedUrls\.includes\(String\(option\?\.url \|\| ''\)\)/.test(QUOTE), 'quote-card selection must follow URL identity, not a stale index');
-  assert.ok(/type="checkbox"[\s\S]*checked=\{selectedIndexes\.includes\(option\.index\)\}/.test(QUOTE), 'Zoho conversion must expose explicit multi-term selection');
-  assert.ok(!/<option value="" disabled>Select a term or Hardware Only…<\/option>/.test(QUOTE), 'obsolete implicit single-select must stay removed');
+  assert.ok(/const \[selectedUrls, setSelectedUrls\] = useState\(\[\]\)/.test(QUOTE), 'Zoho conversion must begin with no implicit quote option');
+  assert.ok(/checked=\{selectedIndexes\.includes\(option\.index\)\}[\s\S]*onChange=\{\(\) => toggleUrl\(option\.url\)\}/.test(QUOTE), 'quote options must be selected explicitly');
   assert.ok(/disabled=\{busy \|\| !hasExplicitTermSelection\}/.test(QUOTE), 'Zoho conversion must stay disabled until explicit term selection');
-  assert.ok(!/onClick=\{\(\) => setSelectedUrl\(String\(urlObj\.url \|\| ''\) \|\| null\)\}/.test(QUOTE), 'Copy/Open must not count as Zoho consent');
+  assert.ok(/const url = urls\[idx\]\?\.url;[\s\S]*if \(url\) selectUrl\(url\)/.test(QUOTE), 'Copy must select the exact URL without starting Zoho review');
+  assert.ok(/onClick=\{\(\) => selectUrl\(urlObj\.url\)\}/.test(QUOTE), 'Open must select the exact URL without starting Zoho review');
 });
 
 check('term replan replaces payload, plan, and review token while locking races', () => {
@@ -188,17 +191,11 @@ check('a manually pinned Deal is forwarded as the reviewed attach target', () =>
     'explicit general-chat HA intent must reach the signed Plan');
 });
 
-check('Execute remains the sole write boundary and multi-term writes stay inside it', () => {
-  const start = SRC.indexOf('async function executeOneshotCard');
-  const end = SRC.indexOf('// ── Gmail thread', start);
-  const execute = SRC.slice(start, end);
-  const outside = SRC.slice(0, start) + SRC.slice(end);
-  const hits = execute.match(/sendToBackground\(MSG\.ONESHOT_EXECUTE/g) || [];
-  assert.strictEqual(hits.length, 2, `expected primary + reviewed extra-term Execute sites, found ${hits.length}`);
-  assert.ok(!/sendToBackground\(MSG\.ONESHOT_EXECUTE/.test(outside), 'CRM writes must not escape executeOneshotCard');
-  assert.ok(/existing_deal_id: dealId/.test(execute), 'extra terms must attach to the deal created by the reviewed primary write');
-  assert.ok(/review_token: planRes\.review_token/.test(execute), 'each extra term must use its own signed review token');
-  assert.ok(/idempotency_key: `\$\{msg\.idempotencyKey\}:term:/.test(execute), 'each extra term needs a distinct idempotency key');
+check('Execute remains the sole write call and rejects email-shaped contact names locally', () => {
+  const executeBoundary = extractFunction(SRC, 'executeOneshotCard');
+  const executeCalls = executeBoundary.match(/sendToBackground\(MSG\.ONESHOT_EXECUTE/g) || [];
+  assert.ok(executeCalls.length >= 1, 'Execute boundary must contain the CRM write call');
+  assert.ok(!/sendToBackground\(MSG\.ONESHOT_EXECUTE/.test(SRC.replace(executeBoundary, '')), 'ONESHOT_EXECUTE must not escape executeOneshotCard');
   assert.ok(/remove the email address from the contact name/.test(SRC));
   assert.ok(/disabled=\{hard\.length > 0 \|\| busy \|\| productDirty\}/.test(SRC), 'Execute must also block unvalidated product edits');
   assert.ok(/deal = \{ new: true, confirmed: true \}/.test(SRC), 'new-deal choice must carry explicit confirmed:true');

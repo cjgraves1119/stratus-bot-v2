@@ -139,10 +139,10 @@ export default function SkuQuantityEditor({
               aria-label={`License tier row ${index + 1}`}
               value={row?.tier || ''}
               disabled={disabled}
-              onChange={(event) => {
-                patchRow(index, { tier: event.target.value });
-                onTierChange?.(event.target.value);
-              }}
+              // This is a row-local choice. Publishing it as the old global
+              // draft tier also changed every blank-tier hardware row during
+              // serialization (for example MX67 ENT silently made MX75 ENT).
+              onChange={(event) => patchRow(index, { tier: event.target.value })}
               style={{ width: 132, boxSizing: 'border-box', fontSize: 10, padding: '4px 3px', borderRadius: 5, border: `1px solid ${COLORS.BORDER}`, background: '#fff' }}
             >
               {licenseTierOptionsForSku(row?.sku).map((option) => (

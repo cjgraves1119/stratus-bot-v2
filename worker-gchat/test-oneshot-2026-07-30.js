@@ -730,9 +730,10 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
     isrRowsByEmail = {},
     pinnedDeal = null,
     pinnedDealContact = null,
+    enrichmentResult = null,
   } = {}) {
     const m = { exports: {} };
-    const cfg = { waterfallAccount, contactByEmail, openDeals, isrRowsByEmail, pinnedDeal, pinnedDealContact };
+    const cfg = { waterfallAccount, contactByEmail, openDeals, isrRowsByEmail, pinnedDeal, pinnedDealContact, enrichmentResult };
     const stubs = [
       grabConstSet('CONSUMER_DOMAINS'),
       grabConstSet('ONESHOT_VENDOR_DOMAINS'),
@@ -749,6 +750,9 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
       grab('oneshotReviewKey'),
       grab('buildOneshotReviewSnapshot'),
       grab('signOneshotReviewToken'),
+      grab('normalizeOneshotAccountPrefill'),
+      grab('oneshotEnrichmentCandidate'),
+      grab('compareOneshotEnrichment'),
       `const fetchAccountById = async () => __cfg.waterfallAccount;`,
       `const resolveAccountWaterfall = async (args) => { __cfg.wfArgs = args; return (__cfg.waterfallAccount ? { account: __cfg.waterfallAccount, confidence: 'high', source: 'test' } : null); };`,
       `const enrichCompanyV2 = async () => null;`,
@@ -778,7 +782,9 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
     const run = (input) => m.exports(
       input,
       { ONESHOT_REVIEW_SECRET: 'test-review-secret' },
-      'test@stratusinfosystems.com'
+      'test@stratusinfosystems.com',
+      {},
+      async () => cfg.enrichmentResult,
     );
     run.cfg = cfg;
     return run;
@@ -896,6 +902,78 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
     assert.strictEqual(run.cfg.wfArgs.domain, 'marlettefunding.com', 'recipient domain is the lookup authority');
     assert.strictEqual(plan.plan.account.mode, 'create', 'no trustworthy domain match → CREATE review, never a similar-name attach');
     assert.strictEqual(plan.plan.account.prefill.name, '', 'engine leaves the name empty for the dashboard display-only backfill');
+  });
+
+  await checkAsync('business-email contact surname is never reused as an Account fuzzy-search hint', async () => {
+    const run = loadBuildPlan();
+    const plan = await run({
+      skus: [{ sku: 'LIC-ENT-3YR', qty: 2 }],
+      participants: [{ email: 'sean@palonix.example', name: 'Sean Carpenter' }],
+      enrich: false,
+    });
+    assert.strictEqual(run.cfg.wfArgs.domain, 'palonix.example');
+    assert.strictEqual(run.cfg.wfArgs.email, 'sean@palonix.example');
+    assert.strictEqual(
+      run.cfg.wfArgs.nameHint,
+      undefined,
+      'a person name must not trigger Account_Name:starts_with:carpenter after exact email/domain lookup misses',
+    );
+    assert.strictEqual(plan.plan.account.mode, 'create');
+    assert.ok(plan.blockers.some((b) => b.code === 'account_create_review'));
+  });
+
+  await checkAsync('domain miss follows the Zoho-tab pattern: enriched Account draft plus separate Contact draft', async () => {
+    const run = loadBuildPlan({
+      enrichmentResult: {
+        name: 'Palonix Example',
+        address: '3971 Example Rd PMB 183',
+        city: 'Grove City',
+        state: 'OH',
+        zip: '43123',
+        country: 'United States',
+        website: 'palonix.example',
+        source: 'synthetic-web-enrichment',
+        confidence: 0.9,
+      },
+    });
+    const result = await run({
+      skus: [{ sku: 'LIC-ENT-3YR', qty: 2 }],
+      participants: [{ email: 'sean@palonix.example', name: 'Sean Carpenter' }],
+    });
+    assert.strictEqual(result.plan.account.mode, 'create');
+    assert.strictEqual(
+      result.plan.account.prefill.enrich_error,
+      undefined,
+      `enrichment failed in the plan harness: ${result.plan.account.prefill.enrich_error || 'unknown'}`,
+    );
+    assert.deepStrictEqual(
+      {
+        name: result.plan.account.prefill.name,
+        street: result.plan.account.prefill.street,
+        city: result.plan.account.prefill.city,
+        state: result.plan.account.prefill.state,
+        zip: result.plan.account.prefill.zip,
+        website: result.plan.account.prefill.website,
+      },
+      {
+        name: 'Palonix Example',
+        street: '3971 Example Rd PMB 183',
+        city: 'Grove City',
+        state: 'OH',
+        zip: '43123',
+        website: 'www.palonix.example',
+      },
+      'domain enrichment should fill only the reviewed create-Account draft',
+    );
+    assert.strictEqual(result.plan.contact.mode, 'create');
+    assert.strictEqual(result.plan.contact.email, 'sean@palonix.example');
+    assert.deepStrictEqual(result.plan.contact.defaults, {
+      first_name: 'Sean',
+      last_name: 'Carpenter',
+      from_real_name: true,
+    });
+    assert.ok(result.blockers.some((b) => b.code === 'account_create_review'));
+    assert.ok(!result.blockers.some((b) => b.code === 'account_confirm'));
   });
 
   await checkAsync('open deals present → deal_choice blocker with the list', async () => {

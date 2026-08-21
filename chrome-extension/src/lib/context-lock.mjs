@@ -218,6 +218,11 @@ function sanitizeEmailQuoteIntakeLine(line) {
   const out = { status, qty };
   if (/^[A-Z0-9][A-Z0-9._/-]{1,79}$/.test(sku)) out.sku = sku;
   if (/^[A-Z0-9][A-Z0-9_-]{0,39}$/.test(family)) out.family = family;
+  // Per-row quote tier is needed only for an accurate inert restored-card
+  // display. Keep a tiny canonical allowlist; explicit LIC-* rows already
+  // encode their tier and must not carry redundant modifier metadata.
+  const tier = safeString(line.tier, 40).trim().toUpperCase();
+  if (!sku.startsWith('LIC-') && ['ENT', 'SEC', 'SDW', 'A'].includes(tier)) out.tier = tier;
   if (line.edition != null) out.edition = safeString(line.edition, 40).toUpperCase();
   if (Number.isInteger(Number(line.term_years)) && Number(line.term_years) > 0 && Number(line.term_years) <= 20) {
     out.term_years = Number(line.term_years);

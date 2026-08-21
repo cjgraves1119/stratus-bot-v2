@@ -124,8 +124,11 @@ function loadIntake({ prices } = {}) {
     grab('hasExplicitMxHaIntent'),
     grab('oneshotIntakeIntent'),
     grab('isExplicitlyExcludedOneshotSku'),
+    grab('normalizeOneshotLineTier'),
+    grab('reconcileOneshotLiteralMxTierRows'),
     `const parseMessage = () => { __ctl.parseCalls++; return __ctl.parseResult; };`,
     `const validateSku = (s) => { __ctl.validateCalls++; return __ctl.validateResults?.[s] || { valid: __ctl.validSkus.has(s) }; };`,
+    `const resolveCachedProduct = (s) => { const key = String(s || '').toUpperCase(); const entry = __prices?.prices?.[key] || null; return { key, entry }; };`,
     grab('buildOneshotIntake'),
     'module.exports = { buildOneshotIntake, oneshotIntakeFamilyMatrix, clampOneshotQty, sanitizeOneshotFacts, parseOneshotIntakeOrderUrls, normalizeOneshotRequestText, selectOneshotRequestedMessage, hasExplicitMxHaIntent, oneshotIntakeIntent };',
   ].join('\n');
@@ -280,6 +283,42 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
     assert.strictEqual(called, 0, 'extractor must not run on the literal path');
     assert.deepStrictEqual(r.lines.map((l) => [l.sku, l.qty, l.status]),
       [['MR44', 2, 'resolved'], ['LIC-MR-ADV-3YR', 2, 'resolved']]);
+  });
+  await checkAsync('literal LIC-ENT does not publish a global ENT intake tier for blank MX hardware', async () => {
+    const L = loadIntake();
+    // Mirror the real parser's broad requestedTier result: the intake helper
+    // must independently mask the literal license SKU before publishing intent.
+    L.ctl.parseResult = {
+      items: [{ sku: 'LIC-ENT-3YR', qty: 2 }, { sku: 'MX67', qty: 1 }],
+      requestedTier: 'ENT', modifiers: { hardwareOnly: false, licenseOnly: false },
+    };
+    L.ctl.validSkus = new Set(['LIC-ENT-3YR', 'MX67']);
+    const r = await L.buildOneshotIntake({
+      subject: 'Quote request',
+      body_text: 'Please quote 2 LIC-ENT-3YR and 1 MX67.',
+      messages: [{ index: 0, from_email: 'it@example.com', body: 'Please quote 2 LIC-ENT-3YR and 1 MX67.' }],
+    }, ENV_ON, OWNER, async () => ({}));
+    assert.strictEqual(r.success, true);
+    assert.deepStrictEqual(r.lines.map((l) => [l.sku, l.qty]), [['LIC-ENT-3YR', 2], ['MX67', 1]]);
+    assert.strictEqual(r.intent.license_tier, null);
+  });
+  await checkAsync('real Enterprise and Security prose still publish the intended intake tier', async () => {
+    for (const [word, tier] of [['enterprise', 'ENT'], ['security', 'SEC']]) {
+      const L = loadIntake();
+      L.ctl.parseResult = {
+        items: [{ sku: 'LIC-ENT-3YR', qty: 2 }, { sku: 'MX67', qty: 1, requestedTier: tier }],
+        requestedTier: tier, modifiers: { hardwareOnly: false, licenseOnly: false },
+      };
+      L.ctl.validSkus = new Set(['LIC-ENT-3YR', 'MX67']);
+      const text = `Please quote 2 LIC-ENT-3YR and 1 MX67 ${word}.`;
+      const r = await L.buildOneshotIntake({
+        subject: 'Quote request',
+        body_text: text,
+        messages: [{ index: 0, from_email: 'it@example.com', body: text }],
+      }, ENV_ON, OWNER, async () => ({}));
+      assert.strictEqual(r.success, true, word);
+      assert.strictEqual(r.intent.license_tier, tier, word);
+    }
   });
   await checkAsync('invalid literal candidates remain visible and block until corrected', async () => {
     const L = loadIntake();

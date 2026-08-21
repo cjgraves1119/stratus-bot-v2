@@ -382,7 +382,11 @@ test('Restored Gmail intake is explicitly inert because intent and participants 
       role: 'assistant',
       kind: 'email-quote-intake',
       intake: {
-        lines: [{ sku: 'MX75', qty: 2, status: 'resolved' }],
+        lines: [
+          { sku: 'MX67', qty: 1, status: 'resolved', tier: 'SEC' },
+          { sku: 'MX67', qty: 2, status: 'resolved', tier: 'ENT' },
+          { sku: 'LIC-ENT-3YR', qty: 2, status: 'resolved', tier: 'ENT' },
+        ],
         intent: { hardware_only: true },
         facts: { customer: 'must-not-persist' },
       },
@@ -392,7 +396,11 @@ test('Restored Gmail intake is explicitly inert because intent and participants 
   const message = stored.messages[0];
   assert.equal(message.kind, 'email-quote-intake');
   assert.equal(message.restored, true);
-  assert.deepEqual(message.intake.lines, [{ sku: 'MX75', qty: 2, status: 'resolved' }]);
+  assert.deepEqual(message.intake.lines, [
+    { sku: 'MX67', qty: 1, status: 'resolved', tier: 'SEC' },
+    { sku: 'MX67', qty: 2, status: 'resolved', tier: 'ENT' },
+    { sku: 'LIC-ENT-3YR', qty: 2, status: 'resolved' },
+  ]);
   assert.equal('intent' in message.intake, false);
   assert.equal('facts' in message.intake, false);
   assert.equal('emailQuoteContext' in message, false);

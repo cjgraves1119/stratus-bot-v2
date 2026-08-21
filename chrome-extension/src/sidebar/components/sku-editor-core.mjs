@@ -1,5 +1,4 @@
 import {
-  editableQuoteSkuText,
   normalizeEditableQuoteLines,
 } from '../../lib/email-quote-flow.mjs';
 
@@ -46,11 +45,19 @@ export function editableRowsFromResult(result) {
     // the row so callers can still show what the user originally asked for.
     const resolvedSku = String(item?.resolvedSku || '').trim().toUpperCase();
     const sku = resolvedSku || typedSku;
+    const rawTier = String(item?.tier || item?.requestedTier || '').trim().toUpperCase().replace(/[\s_-]+/g, '');
+    const tier = sku.startsWith('LIC-') ? '' : ({
+      ENT: 'enterprise', ENTERPRISE: 'enterprise',
+      SEC: 'security', SECURITY: 'security', ADVANCEDSECURITY: 'security',
+      SDW: 'sdwan', SDWAN: 'sdwan', SDWANPLUS: 'sdwan',
+      A: 'advanced', ADV: 'advanced', ADVANCED: 'advanced', ADVANTAGE: 'advanced',
+    })[rawTier] || '';
     return {
       sku,
       qty: Number(item?.qty ?? item?.quantity) || 1,
       unresolved: unresolved.has(sku) || unresolved.has(typedSku),
       synthetic: isSyntheticAgnosticSku(sku),
+      ...(tier ? { tier } : {}),
       ...(resolvedSku && resolvedSku !== typedSku ? { typedSku } : {}),
     };
   }).filter((row) => row.sku);
@@ -65,15 +72,61 @@ export function editableRowsFromResult(result) {
 
 /** Adapt the canonical strict line validator to the editor's `{ rows }` shape. */
 export function normalizeSkuEditorRows(rows) {
-  const normalized = normalizeEditableQuoteLines(rows);
-  return normalized.ok
-    ? {
-      ok: true,
-      rows: normalized.lines.map((line) => ({ ...line, unresolved: false })),
-      error: '',
-      errors: [],
+  // Run the shared validator over the complete list first. Besides validating
+  // each row, it enforces the 99,999 aggregate cap for an exact SKU even when
+  // that SKU is intentionally split across multiple tier groups below.
+  const validated = normalizeEditableQuoteLines(rows);
+  if (!validated.ok) {
+    return { ok: false, rows: [], error: validated.error, errors: validated.errors };
+  }
+
+  // A row's tier is quote intent, not display-only metadata. Merge duplicates
+  // only when BOTH the canonical SKU and supported row-local intent match.
+  // Merging by SKU alone turned MX67 SEC x1 + MX67 ENT x2 into MX67 SEC x3.
+  // A stale tier on a literal LIC-* row is deliberately ignored because the
+  // concrete licence SKU already binds its tier and the editor hides that
+  // dropdown; this preserves the existing stale-state cleanup behavior.
+  const grouped = new Map();
+  const intentsBySku = new Map();
+  for (const row of (Array.isArray(rows) ? rows : [])) {
+    const sku = String(row?.sku || '').trim().toUpperCase();
+    const qty = Number(row?.qty);
+    const tier = sku.startsWith('LIC-')
+      ? ''
+      : String(row?.tier || '').trim().toLowerCase();
+    const key = `${sku}\u0000${tier}`;
+    const existing = grouped.get(key);
+    if (existing) existing.qty += qty;
+    else grouped.set(key, { sku, qty, ...(tier ? { tier } : {}) });
+
+    if (!sku.startsWith('LIC-')) {
+      if (!intentsBySku.has(sku)) intentsBySku.set(sku, new Set());
+      intentsBySku.get(sku).add(tier);
     }
-    : { ok: false, rows: [], error: normalized.error, errors: normalized.errors };
+  }
+
+  // `hardwareOnlySkus` is intentionally a SKU list, so it cannot represent a
+  // partial quantity such as MX67 x1 bare + MX67 x2 licensed. Publishing that
+  // shape would make verification exclude all MX67 units from companion
+  // coverage. Refuse it explicitly until the review contract carries per-row
+  // quantities; separate tiered licensed rows remain fully supported.
+  for (const [sku, intents] of intentsBySku) {
+    if (!intents.has('none') || intents.size === 1) continue;
+    const message = `${sku} cannot be split between hardware-only and licensed rows in one quote. Use separate quotes for those quantities.`;
+    return {
+      ok: false,
+      rows: [],
+      error: message,
+      errors: [{ index: -1, code: 'mixed_same_sku_license_intent', message }],
+    };
+  }
+
+  return {
+    ok: true,
+    rows: [...grouped.values()].map((line) => ({ ...line, unresolved: false })),
+    error: '',
+    errors: [],
+  };
 }
 
 /**
@@ -394,10 +447,18 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
 
   let normalized = { ok: true, lines: [], text: '' };
   if (normalRows.length > 0) {
-    normalized = editableQuoteSkuText(normalRows);
-    if (!normalized.ok) {
-      return { ok: false, rows: [], text: '', error: normalized.error, errors: normalized.errors };
+    const editorNormalized = normalizeSkuEditorRows(normalRows);
+    if (!editorNormalized.ok) {
+      return { ok: false, rows: [], text: '', error: editorNormalized.error, errors: editorNormalized.errors };
     }
+    const lines = editorNormalized.rows.map(({ unresolved: _unresolved, ...line }) => line);
+    normalized = {
+      ok: true,
+      lines,
+      text: lines.map(({ sku, qty }) => `${qty} ${sku}`).join('\n'),
+      error: '',
+      errors: [],
+    };
   } else if (!syntheticRows.length) {
     return {
       ok: false,
@@ -443,25 +504,16 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
   // that ask for two different tiers at once (2026-08-19). The dropdown is
   // hidden for licence rows, but row state survives editing a SKU from hardware
   // to a licence, so the tier is dropped here rather than trusting the UI.
-  // Resolved by SKU, never by position. normalizeEditableQuoteLines MERGES
-  // duplicate SKUs, so normalized.lines is shorter than normalRows and the
-  // indexes drift apart: two "MR44" rows made index 1 read the SECOND MR44 row
-  // and mark the NEXT product hardware-only, silently stripping a licence from
-  // a product the rep never touched (2026-08-19).
-  const rowStateBySku = new Map();
-  for (const row of normalRows) {
-    const key = String(row?.sku || '').trim().toUpperCase();
-    if (!key || rowStateBySku.has(key)) continue;
-    rowStateBySku.set(key, row);
-  }
-  const rowFor = (line) => rowStateBySku.get(String(line?.sku || '').trim().toUpperCase()) || {};
+  // normalizeSkuEditorRows has already merged only (SKU + intent)-equivalent
+  // rows, so each normalized line carries its own tier/None state. Looking the
+  // state up by SKU would again collapse SEC and ENT occurrences of one model.
   const rowMods = normalized.lines.map((line) => (
     /^LIC-/i.test(String(line.sku || ''))
       ? null
-      : licenseTierModifier(rowFor(line).tier)
+      : licenseTierModifier(line.tier)
   ));
   const rowHardwareOnly = normalized.lines.map((line) => (
-    !/^LIC-/i.test(String(line.sku || '')) && rowIsHardwareOnly(rowFor(line))
+    !/^LIC-/i.test(String(line.sku || '')) && rowIsHardwareOnly(line)
   ));
   // A "None" row carries no tier modifier, so rowMods alone would not trigger
   // per-line emission for a cart whose only choice is None.
@@ -493,11 +545,33 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
     skuBlock = ordered.map((line) => line.text).join('\n');
   }
 
+  // A concrete LIC-ENT-* row contains the word ENT inside its SKU. If a real
+  // request-global tier is emitted only as a trailing line, the Worker sees a
+  // row tier on that literal license first and correctly stops global fallback
+  // from reaching blank hardware. Attach the reviewed prose tier directly to
+  // each hardware clause in this mixed literal-license shape; the concrete LIC
+  // row remains untouched and no token can impersonate a global choice.
+  const globalTierRenderedPerHardware = !anyRowTier && !mode.hardwareOnly && Boolean(mode.tier)
+    && normalized.lines.some((line) => /^LIC-/i.test(String(line.sku || '')))
+    && normalized.lines.some((line) => !/^LIC-/i.test(String(line.sku || '')));
+  if (globalTierRenderedPerHardware) {
+    skuBlock = normalized.lines.map((line) => (
+      /^LIC-/i.test(String(line.sku || ''))
+        ? `${line.qty} ${line.sku}`
+        : `${line.qty} ${line.sku} ${mode.tier}`
+    )).join('\n');
+  }
+
   const modifiers = [];
   if (mode.hardwareOnly) modifiers.push('hardware only');
   else if (mode.licenseOnly) modifiers.push('license only');
-  if (!mode.hardwareOnly && mode.tier && !anyRowTier) modifiers.push(mode.tier);
+  if (!mode.hardwareOnly && mode.tier && !anyRowTier && !globalTierRenderedPerHardware) modifiers.push(mode.tier);
   if (!mode.hardwareOnly && mode.term) modifiers.push(`${mode.term} year`);
+  // The UI has already reduced the original thread to the hardened explicit-HA
+  // boolean. Carry that reviewed authorization into the fresh Worker session;
+  // otherwise an editor rebuild loses the wording and a valid 2:1 companion is
+  // indistinguishable from an underlicensed cart.
+  if (!mode.hardwareOnly && overrides?.haRequested === true) modifiers.push('use warm spare HA');
 
   const combinedLines = [skuBlock, ...synthetic.lines.map((line) => line.text)].filter(Boolean);
   // Published so verification can be told which committed rows deliberately
@@ -507,17 +581,21 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
   const hardwareOnlySkus = normalized.lines
     .filter((line, index) => rowHardwareOnly[index])
     .map((line) => line.sku);
-  // The committed rows keep their per-row tier. normalizeEditableQuoteLines
-  // returns only { sku, qty }, so writing those straight back to draftRows
-  // erased the choice: a row set to "None (hardware only)" redrew as
-  // "Enterprise (ENT) - default" even though the links correctly carried no
-  // ENT licence for it, so the editor contradicted the quote (Chris,
-  // 2026-08-19). Resolved by SKU rather than by position, because
-  // normalizeEditableQuoteLines merges duplicate SKUs and the indexes diverge.
-  const committedRows = normalized.lines.map((line) => {
-    const tier = String(rowFor(line).tier || '');
-    return tier ? { ...line, tier } : { ...line };
-  });
+  // The normalized lines already retain the row-local intent used to render
+  // them. When every row is blank, however, the tier can still come from the
+  // prior/global request ("1 MX67 enterprise"). Stamp that effective choice
+  // onto committed hardware rows so verification reviews the same intent the
+  // worker received instead of treating the rows as family defaults. Do not
+  // stamp a global tier into a cart that already has row-local choices.
+  const effectiveGlobalTier = !anyRowTier && !mode.hardwareOnly
+    ? licenseTierValueFromMode(mode.tier)
+    : '';
+  const committedRows = normalized.lines.map((line) => ({
+    ...line,
+    ...(!/^LIC-/i.test(String(line.sku || '')) && effectiveGlobalTier
+      ? { tier: effectiveGlobalTier }
+      : {}),
+  }));
   return {
     ok: true,
     hardwareOnlySkus,

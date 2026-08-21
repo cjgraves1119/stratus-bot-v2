@@ -36,3 +36,8 @@ backups/
 graphify-out/
 *.crx
 *.zip
+
+# Local deployment provenance. The sanctioned DEV deploy appends this audit
+# trail after a clean-tree gate; keeping it local prevents the next deploy from
+# refusing its own prior log as an untracked repository change.
+/deploys.log
