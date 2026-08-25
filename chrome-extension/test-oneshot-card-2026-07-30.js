@@ -174,13 +174,14 @@ check('typed hardware-only requests never expose forced license URLs', () => {
 // ambiguous_contact. The safety property this test really guards is unchanged and
 // still asserted below: BOTH paths are gated on the captured participant list, so
 // a contact from another conversation can never leak into the plan.
-check('only an eligible participant is forwarded as contact_email', () => {
+check('only Gmail-intake cards forward eligible participants as contact_email', () => {
   assert.ok(/const forwardedContactEmail = participants\.some\(\(c\) => c\.email === explicitlySelectedEmail\)/.test(SRC),
     'an explicit pick must still be preferred');
   assert.ok(/participants\.some\(\(c\) => c\.email === shownContextEmail\) \? shownContextEmail : undefined/.test(SRC),
     'the shown contact is the fallback, and only when it is a captured participant');
   assert.ok(/contact_email: forwardedContactEmail,/.test(SRC));
-  assert.ok(/capturedParticipants: sourceMessage\?\.emailQuoteContext\?\.participants/.test(SRC));
+  assert.ok(/capturedParticipants: Array\.isArray\(sourceMessage\?\.emailQuoteContext\?\.participants\)[\s\S]*\? sourceMessage\.emailQuoteContext\.participants : \[\]/.test(SRC),
+    'manual/chat cards must explicitly pass no Gmail participants into One Shot');
   const planPayload = SRC.slice(SRC.indexOf('const base = {', SRC.indexOf('async function startOneshotFromUrl')), SRC.indexOf("source: 'ext-oneshot'", SRC.indexOf('async function startOneshotFromUrl')));
   assert.ok(!/customerEmail/.test(planPayload), 'the raw auto customerEmail must still not ride into the payload directly');
 });

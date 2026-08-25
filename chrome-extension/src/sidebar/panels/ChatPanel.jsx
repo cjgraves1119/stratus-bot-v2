@@ -26,6 +26,7 @@ import QuoteResult from '../components/QuoteResult';
 import EmailAnalysisResult from '../components/EmailAnalysisResult';
 import SkuQuantityEditor from '../components/SkuQuantityEditor';
 import { rebaseQuoteOptionIndexes } from '../components/quote-option-selection.mjs';
+import { resolveQuoteVariantCorrection } from '../components/quote-variant-correction.mjs';
 import { CrmDeleteControl } from '../components/CrmDeleteControl.jsx';
 import {
   applySkuSuggestion,
@@ -42,6 +43,7 @@ import {
 // deterministic engine the Webex/GChat bots use), consolidated into Chat
 // 2026-06-17 when the standalone Quote and Email tabs were removed.
 import { runQuote, analyzeImage } from '../../lib/quote-client';
+import catalog from '../../lib/auto-catalog.json';
 import {
   applyExplicitMxWarmSpareToQuoteOptions,
   bindOneshotQuoteOptions,
@@ -72,6 +74,15 @@ import {
 // tab's Zoho record from the storage fallback.
 const ZOHO_CTX_KEY_PREFIX = 'zohoCtx_';
 const zohoCtxKey = (tabId) => `${ZOHO_CTX_KEY_PREFIX}${tabId}`;
+// The deterministic card-local correction path verifies a proposed full SKU
+// before it changes a reviewed row. Only catalog arrays contain sellable SKU
+// values; metadata objects such as EOL mappings are deliberately excluded.
+const ACTIVE_QUOTE_CATALOG_SKUS = new Set(
+  Object.values(catalog)
+    .flatMap((value) => Array.isArray(value) ? value : [])
+    .map((sku) => String(sku || '').trim().toUpperCase())
+    .filter(Boolean),
+);
 
 /**
  * Read the per-tab Zoho context for a specific tab id directly from
@@ -657,7 +668,9 @@ function isQuoteEditorCorrectionRequest(text) {
 function isZohoQuoteReviewRequest(text) {
   const value = String(text || '').trim();
   return /\b(?:create|make|start|prepare|build)\s+(?:an?\s+)?(?:zoho|crm)(?:\s+crm)?\s+quote\b/i.test(value)
-    || /\b(?:create|make|start|prepare|build)\s+(?:an?\s+)?quote\s+(?:in|on|through)\s+(?:zoho|crm)\b/i.test(value);
+    || /\b(?:create|make|start|prepare|build)\s+(?:an?\s+)?quote\s+(?:in|on|through)\s+(?:zoho|crm)\b/i.test(value)
+    || /\b(?:make|turn|convert)\s+(?:(?:this|it|that)\s+)?into\s+(?:an?\s+)?(?:zoho|crm)(?:\s+crm)?\s+quote\b/i.test(value)
+    || /\b(?:create|make|start|prepare|build|turn|convert)\s+(?:this|it|that)\s+(?:an?\s+)?(?:zoho|crm)(?:\s+crm)?\s+quote\b/i.test(value);
 }
 
 function requestedQuoteTermYears(text) {
@@ -2865,6 +2878,44 @@ export default function ChatPanel({
     return Array.isArray(msg?.draftRows) ? msg.draftRows : editableRowsFromResult(msg?.result);
   }
 
+  // A hardware-variant correction is resolved against the quote card itself,
+  // not conversational history. That gives "change the 4G to the 4X" a
+  // deterministic, reviewable meaning while preserving ordinary "4x SKU"
+  // quantity syntax for the normal quote parser.
+  async function applyDeterministicQuoteVariantCorrection(msg, decision, correctionText, { requestZoho = false } = {}) {
+    if (!msg || loading) return;
+    appendMessage({ id: nextId(), role: 'user', content: correctionText, timestamp: new Date().toISOString() });
+    if (decision?.kind !== 'apply') {
+      updateMessage(msg.id, {
+        busy: false,
+        draftStatus: decision?.message || 'I could not safely determine the requested hardware-variant change. The quote is unchanged.',
+      });
+      appendMessage(infoMsg(`⚠️ ${decision?.message || 'Choose or enter the exact SKU to change. The quote is unchanged.'}`));
+      return;
+    }
+
+    updateMessage(msg.id, {
+      busy: true,
+      draftStatus: `Replacing ${decision.sourceSku} with ${decision.targetSku} in this quote…`,
+    });
+    const rebuilt = await rebuildQuoteMessage(msg, decision.rows, { sourceText: msg?.skuText || '' });
+    if (!requestZoho || !rebuilt?.success) return;
+
+    const requestedTerm = requestedQuoteTermYears(correctionText);
+    const options = Array.isArray(rebuilt?.result?.urls) ? rebuilt.result.urls : [];
+    const selectedIndex = requestedTerm == null
+      ? -1
+      : options.findIndex((option) => quoteOptionTerm(option) === requestedTerm);
+    if (selectedIndex >= 0) {
+      await handleSendQuoteToZoho(msg, rebuilt.result, selectedIndex);
+      return;
+    }
+    updateMessage(msg.id, {
+      draftStatus: 'Quote updated. Select the term option to review, then choose “Create Zoho CRM quote from selected”.',
+    });
+    appendMessage(infoMsg('Select a term on the updated quote card to open its One Shot review. No Zoho record has been created.'));
+  }
+
   // A natural-language correction first uses the same deterministic follow-up
   // session that already understands phrases such as "change MX67 to
   // Enterprise".  Its corrected SKU snapshot is then rebuilt through the
@@ -3068,7 +3119,7 @@ export default function ChatPanel({
       busy: false,
     }));
     setLoading(false);
-    return { success: true };
+    return { success: true, result: { ...candidate, urls: verified.urls }, rows: prepared.rows };
   }
 
   // Suggestion correction and manual editing share the same canonical rebuild
@@ -3296,7 +3347,12 @@ export default function ChatPanel({
       quoteOptions,
       selectedQuoteOptionIndex: normalizedSelectedIndex,
       extraQuoteOptionIndexes,
-      capturedParticipants: sourceMessage?.emailQuoteContext?.participants,
+      // A manually typed/chat quote must not inherit whichever Gmail thread
+      // happens to be open. Gmail-intake cards carry explicit reviewed
+      // participants; every other card deliberately starts One Shot with
+      // blank, editable account/contact fields.
+      capturedParticipants: Array.isArray(sourceMessage?.emailQuoteContext?.participants)
+        ? sourceMessage.emailQuoteContext.participants : [],
       hardwareOnlySkus: sourceMessage?.quoteHardwareOnlySkus,
       intakeIntent: sourceMessage?.emailQuoteContext?.intent
         || (sourceMessage?.quoteHaRequested === true ? { ha_requested: true } : null),
@@ -3930,13 +3986,20 @@ export default function ChatPanel({
       manualPinnedRecord: manualRecord,
       autoPinnedRecord,
     });
+    const priorQuote = hasPriorQuote ? msgs[lastQuoteIdx] : null;
+    const quoteVariantDecision = hasPriorQuote && !zohoTookOver
+      ? resolveQuoteVariantCorrection(quoteDraftRows(priorQuote), text, { activeSkus: ACTIVE_QUOTE_CATALOG_SKUS })
+      : null;
+    const quoteVariantCorrection = quoteVariantDecision?.kind === 'apply' || quoteVariantDecision?.kind === 'clarify';
     const mxEditionCorrection = hasPriorQuote && !zohoTookOver && isMxEditionQuoteFollowUp(text);
-    const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && isQuoteEditorCorrectionRequest(text);
+    const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && !quoteVariantCorrection && isQuoteEditorCorrectionRequest(text);
     const zohoReviewRequest = hasPriorQuote && !zohoTookOver && isZohoQuoteReviewRequest(text);
     const ecommAllowed = mxEditionCorrection || !onZohoRecord || isExplicitEcommUrlAsk(text);
-    if (zohoReviewRequest) {
+    if (quoteVariantCorrection) {
       if (!overrideText) setInput('');
-      const priorQuote = msgs[lastQuoteIdx];
+      applyDeterministicQuoteVariantCorrection(priorQuote, quoteVariantDecision, text, { requestZoho: zohoReviewRequest });
+    } else if (zohoReviewRequest) {
+      if (!overrideText) setInput('');
       const requestedTerm = requestedQuoteTermYears(text);
       const options = Array.isArray(priorQuote?.result?.urls) ? priorQuote.result.urls : [];
       const selectedIndex = requestedTerm == null ? -1 : options.findIndex((option) => quoteOptionTerm(option) === requestedTerm);
@@ -3951,7 +4014,7 @@ export default function ChatPanel({
       }
     } else if (quoteEditorCorrection) {
       if (!overrideText) setInput('');
-      applyNaturalLanguageQuoteCorrection(msgs[lastQuoteIdx], text);
+      applyNaturalLanguageQuoteCorrection(priorQuote, text);
     } else if (ecommAllowed && (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text)))) {
       if (!overrideText) setInput('');
       runAndPushQuote(text, {

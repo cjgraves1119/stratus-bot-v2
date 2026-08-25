@@ -26,7 +26,7 @@ test('natural-language quote corrections rebuild the current quote card through 
   assert.match(correction, /rebuildQuoteMessage\(msg, correctedRows/);
   assert.doesNotMatch(correction, /MSG\.CHAT_HANDOFF|MSG\.ONESHOT_EXECUTE/);
   assert.match(source, /const quoteEditorCorrection = hasPriorQuote/);
-  assert.match(source, /applyNaturalLanguageQuoteCorrection\(msgs\[lastQuoteIdx\], text\)/);
+  assert.match(source, /applyNaturalLanguageQuoteCorrection\(priorQuote, text\)/);
 });
 
 test('dialogue requests for Zoho use the current reviewed quote and require a term before One Shot planning', () => {

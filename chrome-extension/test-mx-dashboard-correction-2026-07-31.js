@@ -102,7 +102,10 @@ test('eligible correction bypasses CRM even on Zoho before takeover, but never a
   assert.ok(/mxEditionCorrection/.test(segment), 'MX correction gate missing');
   assert.ok(/const mxEditionCorrection = hasPriorQuote && !zohoTookOver && isMxEditionQuoteFollowUp\(text\)/.test(segment), 'correction is not bounded by prior quote + takeover');
   assert.ok(/const ecommAllowed = mxEditionCorrection \|\| !onZohoRecord \|\| isExplicitEcommUrlAsk\(text\)/.test(segment), 'Zoho-page exception is not limited to the correction gate');
-  assert.ok(/const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && isQuoteEditorCorrectionRequest\(text\)/.test(segment), 'template correction gate missing');
+  assert.ok(/const quoteVariantDecision = hasPriorQuote && !zohoTookOver/.test(segment), 'card-local variant gate missing');
+  assert.ok(/resolveQuoteVariantCorrection\(quoteDraftRows\(priorQuote\), text/.test(segment), 'variant gate is not bounded to the reviewed quote rows');
+  assert.ok(/const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && !quoteVariantCorrection && isQuoteEditorCorrectionRequest\(text\)/.test(segment), 'template correction gate missing');
+  assert.ok(/if \(quoteVariantCorrection\)[\s\S]*applyDeterministicQuoteVariantCorrection\(priorQuote, quoteVariantDecision, text/.test(segment), 'safe variant correction does not rebuild the current editable quote');
   assert.ok(/else if \(quoteEditorCorrection\).*?applyNaturalLanguageQuoteCorrection/s.test(segment), 'correction does not rebuild the current editable quote');
 });
 
