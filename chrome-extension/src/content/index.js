@@ -11,6 +11,7 @@
 import { MSG, DEAL_ID_PATTERN, CONSUMER_DOMAINS, COLORS } from '../lib/constants.js';
 import { sendToBackground, onMessage } from '../lib/messaging.js';
 import { nextFollowUpSubject } from '../lib/task-subjects.mjs';
+import { extractExactStratusOrderUrl } from '../lib/stratus-order-url.mjs';
 import './gmail-observer.js';
 // Source-level preservation of the reviewed post-send Task/Snooze workflow:
 // default Snooze + Task, task-date synchronization, exact Gmail confirmation,
@@ -298,20 +299,15 @@ function extractThreadOrderUrls() {
   const containers = Array.from(document.querySelectorAll('.a3s.aiL, .gs .a3s, [data-message-id] .a3s'));
   const urls = [];
   const seen = new Set();
-  const ORDER_URL_RE = /https?:\/\/[^\s)\]>"']*stratusinfosystems\.com\/order\/\?[^\s)\]>"']+/i;
   for (const el of containers) {
     const rect = el.getBoundingClientRect();
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0) continue;
     const hrefs = Array.from(el.querySelectorAll('a[href]')).map((a) => a.getAttribute('href') || '');
-    const textMatches = (el.innerText || '').match(new RegExp(ORDER_URL_RE.source, 'gi')) || [];
+    const textMatches = (el.innerText || '').match(/https?:\/\/[^\s)\]>"']*(?:stratusinfosystems\.com|google\.com)[^\s)\]>"']*/gi) || [];
     for (let raw of [...hrefs, ...textMatches]) {
-      if (!raw || !/stratusinfosystems\.com/i.test(raw)) continue;
-      const gm = raw.match(/^https?:\/\/www\.google\.com\/url\?(?:[^&]*&)*q=([^&]+)/i);
-      if (gm) { try { raw = decodeURIComponent(gm[1]); } catch { /* keep raw */ } }
-      const m = raw.match(ORDER_URL_RE);
-      if (!m) continue;
-      const url = m[0];
+      const url = extractExactStratusOrderUrl(raw);
+      if (!url) continue;
       if (seen.has(url)) continue;
       seen.add(url);
       urls.push(url);
