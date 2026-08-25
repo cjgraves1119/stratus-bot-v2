@@ -12719,6 +12719,45 @@ function parseOneshotIntakeOrderUrls(orderUrls) {
   };
 }
 
+// Gmail's text extraction can see the SKU tokens inside an /order/ URL while
+// losing its adjacent qty values (wrapped links are the common case). A cart
+// that belongs to the selected request and agrees with every safely parsed SKU
+// is the more precise source for quantities. Do not use a merely recent URL: a
+// different renewal/refresh cart elsewhere in the thread must never replace
+// the selected request.
+function matchingOneshotIntakeOrderUrl(orderUrls, literalLines, selectedRequestText = '') {
+  if (!Array.isArray(orderUrls) || orderUrls.length === 0 || orderUrls.length > 5) return null;
+  const expected = new Set((Array.isArray(literalLines) ? literalLines : [])
+    .filter((line) => line?.status === 'resolved')
+    .map((line) => String(line?.sku || '').trim().toUpperCase())
+    .filter(Boolean));
+  if (!expected.size) return null;
+
+  const selectedText = String(selectedRequestText || '').toLowerCase().replace(/\s+/g, '');
+  // Preserve the existing newest-first choice only among carts that contain
+  // every SKU safely parsed from the selected request. A cart that was
+  // actually present in that selected request may contain additional SKU
+  // tokens the text parser lost while reading its wrapped URL; use its exact
+  // quantities in that narrow case. A cart from another message must still be
+  // an exact inventory match, so later renewal/refresh alternatives cannot
+  // override the request being reviewed.
+  for (let index = orderUrls.length - 1; index >= 0; index--) {
+    const parsed = parseOneshotIntakeOrderUrls([orderUrls[index]]);
+    if (!parsed?.success) continue;
+    const actual = new Set(parsed.lines.map((line) => String(line?.sku || '').trim().toUpperCase()).filter(Boolean));
+    if ([...expected].some((sku) => !actual.has(sku))) continue;
+    const exactInventory = actual.size === expected.size;
+    const appearsInSelectedRequest = selectedText.includes(String(orderUrls[index] || '').trim().toLowerCase().replace(/\s+/g, ''));
+    if (!exactInventory && !appearsInSelectedRequest) continue;
+    return {
+      ...parsed,
+      selected_index: index,
+      selected_order_url: String(orderUrls[index]),
+    };
+  }
+  return null;
+}
+
 function normalizeOneshotRequestText(value) {
   return String(value || '')
     // Common email-list syntax: "2 - MX105". The general parser deliberately
@@ -13237,6 +13276,38 @@ async function buildOneshotIntake(input, env, caller, extractFacts) {
       && String(line?.sku || '').trim()
       && Number.isInteger(Number(line?.qty))
       && Number(line.qty) >= 1);
+
+  // If a visible Stratus cart belongs to the selected request and agrees with
+  // every safely parsed SKU, it supplies authoritative quantities. This
+  // specifically prevents Gmail-context population from turning
+  // `qty=...,3,...` into a default quantity of one while still refusing to
+  // merge or substitute a different cart from elsewhere in the thread.
+  const matchingOrder = extensionEcommIntake && hasSafeRequestedLines
+    ? matchingOneshotIntakeOrderUrl(p.order_urls, reviewedLiteral, requestedMessage.text)
+    : null;
+  if (matchingOrder) {
+    return {
+      success: true,
+      used_llm: false,
+      used_order_url: true,
+      selected_order_url: matchingOrder.selected_order_url,
+      selected_order_url_index: matchingOrder.selected_index,
+      selected_message_index: requestedMessage.selected_message_index,
+      selected_message_from: requestedMessage.selected_message_from,
+      used_structured_message: requestedMessage.used_structured_message,
+      intent: oneshotIntakeIntent(parsed, requestedMessage.text),
+      facts: { requested_products: [], isr_mentions: [], customer_hint: null },
+      lines: matchingOrder.lines.map((line) => ({
+        family: null,
+        sku: line.sku,
+        qty: line.qty,
+        status: 'resolved',
+        options: null,
+      })),
+      isr_prefill: null,
+      participants_echo: participants,
+    };
+  }
 
   // A structured external quote request is the authoritative scope. Gmail's
   // flat `order_urls` collection can also contain carts from Chris's later

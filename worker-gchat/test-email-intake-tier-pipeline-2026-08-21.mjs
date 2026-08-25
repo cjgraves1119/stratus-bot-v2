@@ -432,6 +432,34 @@ test('link-only Gmail handoff still falls back to the most recent exact cart wit
   assert.equal(extractorCalls, 0);
 });
 
+test('Gmail context preserves exact order-link quantities when the cart belongs to the parsed request', async () => {
+  const cart = 'https://stratusinfosystems.com/order/?item=LIC-ENT-3YR,LIC-MX60-ENT-3YR,LIC-MX64-ENT-3YR,LIC-Z1-ENT-3YR&qty=1,3,1,1';
+  // This is intentionally shaped like Gmail-visible copy: literal SKUs are
+  // present, but no textual x3 quantity accompanies MX60. The exact cart is
+  // therefore the authority for quantity, as it is in the right-click path.
+  const body = [
+    'Renew Existing Equipment As-Is:',
+    cart,
+  ].join('\n');
+  const intake = await worker.buildOneshotIntake({
+    source: 'ext-email-ecomm-intake',
+    subject: 'Meraki License Renewal',
+    body_text: body,
+    messages: [{ index: 4, from_email: 'chrisg@stratusinfosystems.com', body }],
+    order_urls: [cart],
+  }, {}, 'sales@example.com', async () => { throw new Error('must not extract'); });
+
+  assert.equal(intake.success, true, intake.detail || intake.error);
+  assert.equal(intake.used_order_url, true);
+  assert.equal(intake.selected_order_url, cart);
+  assert.deepEqual(intake.lines.map(({ sku, qty }) => [sku, qty]), [
+    ['LIC-ENT-3YR', 1],
+    ['LIC-MX60-ENT-3YR', 3],
+    ['LIC-MX64-ENT-3YR', 1],
+    ['LIC-Z1-ENT-3YR', 1],
+  ]);
+});
+
 test('a safe selected request ignores malformed historical thread URLs instead of consuming them', async () => {
   const request = 'Please quote 2 LIC-ENT-3YR and 1 LIC-MX64-SEC-3YR.';
   const intake = await worker.buildOneshotIntake({
