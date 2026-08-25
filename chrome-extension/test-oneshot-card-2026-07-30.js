@@ -168,18 +168,21 @@ check('typed hardware-only requests never expose forced license URLs', () => {
   assert.ok(/let candidate = typedHardwareOnlyResult\(response\.result, prepared\.text\)/.test(SRC), 'suggestion and manual re-quotes must preserve hardware-only filtering');
 });
 
-check('Gmail intake and exact-thread context-menu cards carry participants without leaking manual context', () => {
+check('Gmail intake, context-menu, and card-bound chat quotes carry safe participants', () => {
   const quote = SRC.slice(SRC.indexOf('async function runAndPushQuote'), SRC.indexOf('function quoteDraftRows'));
   const verificationFailure = quote.slice(quote.indexOf('if (!verified.ok)'), quote.indexOf('candidate = { ...candidate, urls: verified.urls }'));
   assert.ok(/const forwardedContactEmail = participants\.some\(\(c\) => c\.email === explicitlySelectedEmail\)/.test(SRC),
     'an explicit pick must still be preferred');
-  assert.ok(/participantContextMode !== 'context-menu'[\s\S]*participants\.some\(\(c\) => c\.email === shownContextEmail\) \? shownContextEmail : undefined/.test(SRC),
-    'a heuristic shown contact must not bypass ambiguity for a right-click participant snapshot');
+  assert.ok(/participantContextMode === 'gmail-intake'[\s\S]*participants\.some\(\(c\) => c\.email === shownContextEmail\) \? shownContextEmail : undefined/.test(SRC),
+    'only reviewed Gmail intake may use a live shown-contact fallback');
   assert.ok(/contact_email: forwardedContactEmail,/.test(SRC));
-  assert.ok(/const emailIntakeParticipants = Array\.isArray\(sourceMessage\?\.emailQuoteContext\?\.participants\)/.test(SRC));
-  assert.ok(/sourceMessage\?\.quoteSource === 'context-menu'[\s\S]*sourceMessage\?\.gmailParticipantSnapshot\?\.threadPermId/.test(SRC));
-  assert.ok(/capturedParticipants: emailIntakeParticipants \|\| contextMenuParticipants \|\| \[\]/.test(SRC),
-    'manual/chat cards must explicitly pass no Gmail participants into One Shot');
+  assert.ok(/const customerContext = quoteCustomerContextForHandoff\(sourceMessage\)/.test(SRC));
+  assert.ok(/capturedParticipants: customerContext\.participants,[\s\S]*capturedContactEmail: customerContext\.contactEmail/.test(SRC),
+    'One Shot must use the identity bound to the quote card');
+  assert.ok(/source: 'chat-quote',[\s\S]*quoteContext: currentQuoteCustomerContext\(\)/.test(SRC),
+    'natural-language chat quotes must retain their associated customer identity');
+  assert.ok(/source: 'manual-ecomm-quote',[\s\S]*context: currentQuoteCustomerContext\(\)/.test(SRC),
+    'manual quote cards must retain the customer shown when the card opens');
   assert.ok(/gmailParticipantSnapshot[\s\S]*threadPermId[\s\S]*participants/.test(SRC),
     'the live right-click quote must retain its bounded thread provenance');
   assert.ok(quote.indexOf('const quoteMessageProvenance = {') < quote.indexOf('if (verifyInitialComposition)'),

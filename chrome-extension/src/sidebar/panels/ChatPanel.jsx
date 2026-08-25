@@ -29,6 +29,11 @@ import { rebaseQuoteOptionIndexes } from '../components/quote-option-selection.m
 import { resolveQuoteVariantCorrection } from '../components/quote-variant-correction.mjs';
 import { CrmDeleteControl } from '../components/CrmDeleteControl.jsx';
 import {
+  quoteCustomerContextForHandoff,
+  quoteCustomerContextEnabled,
+  quoteCustomerContextSnapshot,
+} from '../../lib/quote-customer-context.mjs';
+import {
   applySkuSuggestion,
   blankQuoteEditorRows,
   editableRowsFromResult,
@@ -2093,6 +2098,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
 // ─────────────────────────────────────────────
 export default function ChatPanel({
   emailContext: liveEmailContext,
+  activePageType,
   navData,
   messages,
   onMessagesChange,
@@ -2375,6 +2381,25 @@ export default function ChatPanel({
   const activeContextEmail = selectedContextEmail === '__none__' ? null
     : (selectedContextEmail || emailContext?.customerEmail || null);
   const activeContact = participantOptions.find(p => p.email === activeContextEmail);
+
+  // Capture identity at card creation time. Quote parsing never receives the
+  // Gmail body from this helper; only the bounded participant set and the
+  // Contact visibly shown in the Context bar are retained. An explicit "No
+  // context" choice stays unscoped. A Zoho pin is sent alongside this snapshot
+  // and remains authoritative in startOneshotFromUrl; keeping both lets One
+  // Shot resolve an Account pin's Contact and surface a genuine mismatch.
+  function currentQuoteCustomerContext() {
+    const gmailIdentityAvailable = quoteCustomerContextEnabled({
+      activePageType,
+      contextLockKind: contextLock?.kind || '',
+    });
+    if (!gmailIdentityAvailable || selectedContextEmail === '__none__') return null;
+    return {
+      threadPermId: emailContext?.threadPermId || '',
+      participants: participantOptions,
+      contactEmail: activeContextEmail || '',
+    };
+  }
 
   const handleSendMessage = useCallback(async (overrideText, opts = {}) => {
     const messageText = overrideText || input.trim();
@@ -2835,6 +2860,11 @@ export default function ChatPanel({
   } = {}) {
     const text = (skuText || '').trim();
     if (!text || loading) return;
+    // Resolve before the quote request awaits network work, so navigation to a
+    // different Gmail thread cannot replace this card's customer identity.
+    const capturedQuoteContext = quoteContext || (source !== 'context-menu'
+      ? currentQuoteCustomerContext()
+      : null);
     lastSendRef.current = Date.now();
     if (pushUser) appendMessage({ id: nextId(), role: 'user', content: text, timestamp: new Date().toISOString() });
     setLoading(true);
@@ -2847,24 +2877,16 @@ export default function ChatPanel({
     const quoteHardwareOnly = isExplicitHardwareOnlyQuoteText(text);
     let candidate = typedHardwareOnlyResult(result, text);
     const committedRows = editableRowsFromResult(candidate);
-    const gmailParticipantSnapshot = (() => {
-      if (source !== 'context-menu' || !quoteContext || typeof quoteContext !== 'object') return null;
-      const threadPermId = String(quoteContext.threadPermId || '').trim();
-      const participants = (Array.isArray(quoteContext.participants) ? quoteContext.participants : [])
-        .map((participant) => ({
-          email: String(participant?.email || '').trim().toLowerCase(),
-          name: String(participant?.name || '').slice(0, 300),
-          role: String(participant?.role || '').slice(0, 80),
-        }))
-        .filter((participant) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email))
-        .slice(0, 50);
-      return threadPermId && participants.length ? { threadPermId, participants } : null;
-    })();
+    const gmailParticipantSnapshot = quoteCustomerContextSnapshot({
+      source,
+      context: capturedQuoteContext,
+      shownContactEmail: capturedQuoteContext?.contactEmail || '',
+    });
     const quoteMessageProvenance = {
       quoteSource: source || 'editable-quote',
-      // Transient provenance from the exact Gmail tab that received the
-      // context-menu gesture. The stored-session sanitizer intentionally drops
-      // it, so a restored card cannot borrow stale customer identity.
+      // Transient customer identity captured with the quote gesture. The
+      // stored-session sanitizer intentionally drops it, so a restored card
+      // cannot borrow stale customer identity.
       ...(gmailParticipantSnapshot ? { gmailParticipantSnapshot } : {}),
     };
     // A fresh chat quote must offer Hardware Only too. Only the "Update quote"
@@ -3395,24 +3417,16 @@ export default function ChatPanel({
     const extraQuoteOptionIndexes = rebasedSelectedIndexes.slice(1);
     const quoteOptions = indexedQuoteOptions.map(({ sourceIndex: _sourceIndex, ...option }) => option);
     const orderUrl = quoteOptions[normalizedSelectedIndex]?.url || '';
-    const emailIntakeParticipants = Array.isArray(sourceMessage?.emailQuoteContext?.participants)
-      ? sourceMessage.emailQuoteContext.participants : null;
-    const contextMenuParticipants = sourceMessage?.quoteSource === 'context-menu'
-      && sourceMessage?.gmailParticipantSnapshot?.threadPermId
-      && Array.isArray(sourceMessage?.gmailParticipantSnapshot?.participants)
-      ? sourceMessage.gmailParticipantSnapshot.participants : null;
+    const customerContext = quoteCustomerContextForHandoff(sourceMessage);
     return startOneshotFromUrl(orderUrl, {
       quoteOptions,
       selectedQuoteOptionIndex: normalizedSelectedIndex,
       extraQuoteOptionIndexes,
-      // Manual/chat quotes never inherit whichever Gmail thread happens to be
-      // open. Gmail-intake cards carry their reviewed participants; a Gmail
-      // context-menu card carries only the short-lived, exact-thread snapshot
-      // captured with that right-click gesture.
-      capturedParticipants: emailIntakeParticipants || contextMenuParticipants || [],
-      participantContextMode: emailIntakeParticipants
-        ? 'gmail-intake'
-        : (contextMenuParticipants ? 'context-menu' : 'unscoped'),
+      // A quote uses only the customer identity captured with its card. It
+      // never falls through to whichever Gmail thread is open later.
+      capturedParticipants: customerContext.participants,
+      capturedContactEmail: customerContext.contactEmail,
+      participantContextMode: customerContext.mode,
       hardwareOnlySkus: sourceMessage?.quoteHardwareOnlySkus,
       intakeIntent: sourceMessage?.emailQuoteContext?.intent
         || (sourceMessage?.quoteHaRequested === true ? { ha_requested: true } : null),
@@ -3424,6 +3438,7 @@ export default function ChatPanel({
     selectedQuoteOptionIndex = 0,
     extraQuoteOptionIndexes = [],
     capturedParticipants = null,
+    capturedContactEmail = '',
     participantContextMode = 'unscoped',
     hardwareOnlySkus = null,
     intakeIntent = null,
@@ -3454,10 +3469,13 @@ export default function ChatPanel({
       // from another conversation still cannot leak, and the card keeps the
       // customer picker so the rep can override before anything is written.
       const shownContextEmail = String(activeContextEmail || '').trim().toLowerCase();
+      const snapshottedContactEmail = String(capturedContactEmail || '').trim().toLowerCase();
       const forwardedContactEmail = participants.some((c) => c.email === explicitlySelectedEmail)
         ? explicitlySelectedEmail
-        : (participantContextMode !== 'context-menu'
-          && participants.some((c) => c.email === shownContextEmail) ? shownContextEmail : undefined);
+        : (participants.some((c) => c.email === snapshottedContactEmail)
+          ? snapshottedContactEmail
+          : (participantContextMode === 'gmail-intake'
+            && participants.some((c) => c.email === shownContextEmail) ? shownContextEmail : undefined));
       const base = {
         skus,
         participants,
@@ -3759,11 +3777,18 @@ export default function ChatPanel({
   // links remains an explicit second step; CRM review remains a third step.
   function startManualEcommQuote() {
     if (loading) return;
+    const gmailParticipantSnapshot = quoteCustomerContextSnapshot({
+      source: 'manual-ecomm-quote',
+      context: currentQuoteCustomerContext(),
+      shownContactEmail: activeContextEmail || '',
+    });
     appendMessage({
       id: nextId(),
       role: 'assistant',
       kind: 'quote',
       manualQuoteBuilder: true,
+      quoteSource: 'manual-ecomm-quote',
+      ...(gmailParticipantSnapshot ? { gmailParticipantSnapshot } : {}),
       result: { urls: [], parsed: [], eolWarnings: [], suggestions: null, source: 'manual-quote-builder' },
       draftRows: blankQuoteEditorRows(),
       draftDirty: true,
@@ -4086,6 +4111,7 @@ export default function ChatPanel({
           ? messageHistoryText(msgs[lastQuoteIdx]) : null,
         editable: true,
         source: 'chat-quote',
+        quoteContext: currentQuoteCustomerContext(),
       });
     } else {
       handleSendMessage(overrideText);

@@ -1050,6 +1050,7 @@ export default function App() {
             {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
             {activeTab === 'chat' && <ChatPanel
               emailContext={emailContext}
+              activePageType={pageType}
               navData={navData}
               messages={chatMessages}
               onMessagesChange={setChatMessages}
