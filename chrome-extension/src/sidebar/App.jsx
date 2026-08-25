@@ -246,8 +246,11 @@ export default function App() {
 
   // A context-menu click may open a brand-new side-panel document. Claim once
   // on mount, again when durable storage changes, and on the optional runtime
-  // wake-up. No path depends on a fixed mount delay.
+  // wake-up. Hydrate the saved session first: otherwise a fast right-click
+  // quote can append its fresh, actionable card and then be overwritten by an
+  // inert restored card when storage.session resolves.
   useEffect(() => {
+    if (!chatSessionHydrated) return undefined;
     let cancelled = false;
     const requestClaim = () => { if (!cancelled) claimPendingSidebarAction(); };
     requestClaim();
@@ -261,7 +264,7 @@ export default function App() {
       stopWakeListener();
       chrome.storage.onChanged.removeListener(onStorageChanged);
     };
-  }, [claimPendingSidebarAction]);
+  }, [claimPendingSidebarAction, chatSessionHydrated]);
 
   // An empty thread is a new conversation, so its record snapshot must not
   // leak into the next first message.

@@ -97,6 +97,8 @@ test('Concrete context-menu and panel wiring has no fixed-delay dependency', asy
   assert.match(app, /PENDING_SIDEBAR_ACTIONS_KEY/);
   assert.match(app, /SIDEBAR_ACTION_CLAIM/);
   assert.match(app, /SIDEBAR_ACTION_ACK/);
+  assert.match(app, /if \(!chatSessionHydrated\) return undefined;/,
+    'a fresh context-menu quote must be claimed only after restored session hydration');
   assert.match(chat, /navData\?\.quoteActionId \|\| navData\?\.quoteSkuText/);
   assert.match(backgroundActions, /isTrustedSidebarSender/);
 });
