@@ -104,9 +104,19 @@ test('eligible correction bypasses CRM even on Zoho before takeover, but never a
   assert.ok(/const ecommAllowed = mxEditionCorrection \|\| !onZohoRecord \|\| isExplicitEcommUrlAsk\(text\)/.test(segment), 'Zoho-page exception is not limited to the correction gate');
   assert.ok(/const quoteVariantDecision = hasPriorQuote && !zohoTookOver/.test(segment), 'card-local variant gate missing');
   assert.ok(/resolveQuoteVariantCorrection\(quoteDraftRows\(priorQuote\), text/.test(segment), 'variant gate is not bounded to the reviewed quote rows');
-  assert.ok(/const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && !quoteVariantCorrection && isQuoteEditorCorrectionRequest\(text\)/.test(segment), 'template correction gate missing');
+  assert.ok(/const explicitNewEcommQuote = isExplicitNewEcommQuoteRequest\(text\)/.test(segment), 'fresh-quote guard missing');
+  assert.ok(/const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && !quoteVariantCorrection[\s\S]*&& !explicitNewEcommQuote && isQuoteEditorCorrectionRequest\(text\)/.test(segment), 'template correction gate missing');
   assert.ok(/if \(quoteVariantCorrection\)[\s\S]*applyDeterministicQuoteVariantCorrection\(priorQuote, quoteVariantDecision, text/.test(segment), 'safe variant correction does not rebuild the current editable quote');
   assert.ok(/else if \(quoteEditorCorrection\).*?applyNaturalLanguageQuoteCorrection/s.test(segment), 'correction does not rebuild the current editable quote');
+});
+
+test('an explicit new SKU quote is not treated as an edit of the prior card', () => {
+  const isNew = Function('return (' + extractFunction(chat, 'isExplicitNewEcommQuoteRequest') + ')')();
+  assert.strictEqual(isNew('make a quote for 4x C9200L-24P-4G-M'), true);
+  assert.strictEqual(isNew('make quote for 4x C9200L-24P-4G-M'), true);
+  assert.strictEqual(isNew('create a new e-commerce quote with 4 MX67'), true);
+  assert.strictEqual(isNew('change the 4G to the 4X'), false);
+  assert.strictEqual(isNew('make into zoho quote'), false);
 });
 
 test('no deterministic quote result can auto-open the one-shot plan route', () => {

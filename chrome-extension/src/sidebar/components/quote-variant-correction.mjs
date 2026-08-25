@@ -54,6 +54,49 @@ function clarification(message, rows, candidates = []) {
   };
 }
 
+function applyCandidate(rowList, match, targetSku, request) {
+  const quantity = quotedQuantity(request);
+  const nextRows = rowList.map((row, index) => {
+    if (index !== match.index) return row;
+    const next = {
+      ...row,
+      sku: targetSku,
+      unresolved: false,
+      ...(quantity ? { qty: quantity } : {}),
+    };
+    if (row?.typedSku) next.typedSku = targetSku;
+    if (row?.resolvedSku) next.resolvedSku = targetSku;
+    return next;
+  });
+  return {
+    kind: 'apply',
+    rows: nextRows,
+    sourceSku: match.sourceSku,
+    targetSku,
+    quantity: quantity || Number(match.row?.qty) || 1,
+    message: `${match.sourceSku} was replaced with ${targetSku}.`,
+  };
+}
+
+function explicitFullSkuCandidates(rowList, request, catalog) {
+  const candidates = [];
+  for (const [index, row] of rowList.entries()) {
+    const sourceSku = rowSku(row);
+    for (const segment of sourceSku.matchAll(/-(\d{1,2})([GX])(?=-|$)/gi)) {
+      const sourceToken = `${segment[1]}${segment[2].toUpperCase()}`;
+      const targetToken = `${segment[1]}${segment[2].toUpperCase() === 'G' ? 'X' : 'G'}`;
+      const targetSku = replaceVariantToken(sourceSku, sourceToken, targetToken);
+      if (!catalog.has(targetSku)) continue;
+      const directionalFullSku = new RegExp(
+        `${escapeRegex(sourceSku)}\\s*(?:to|into|→|->)\\s*${escapeRegex(targetSku)}`,
+        'i',
+      );
+      if (directionalFullSku.test(request)) candidates.push({ row, index, sourceSku, targetSku });
+    }
+  }
+  return candidates;
+}
+
 /**
  * Resolve a directional 4G/4X-style variant correction against reviewed rows.
  *
@@ -68,6 +111,18 @@ export function resolveQuoteVariantCorrection(rows, text, { activeSkus = [] } = 
   if (!request || !EDIT_VERB.test(request)) return { kind: 'no-match', rows: rowList };
 
   const catalog = activeSkuSet(activeSkus);
+  const fullSkuCandidates = explicitFullSkuCandidates(rowList, request, catalog);
+  if (fullSkuCandidates.length > 0) {
+    if (fullSkuCandidates.length !== 1) {
+      return clarification(
+        'I found multiple full-SKU variant changes in this request. Enter one source and replacement SKU at a time so I do not change more than one row.',
+        rowList,
+        fullSkuCandidates,
+      );
+    }
+    const candidate = fullSkuCandidates[0];
+    return applyCandidate(rowList, candidate, candidate.targetSku, request);
+  }
   const directional = request.match(DIRECTIONAL_VARIANT);
   if (!directional) {
     // "change to 4X" has two plausible readings: a port/uplink variant or a
@@ -136,25 +191,5 @@ export function resolveQuoteVariantCorrection(rows, text, { activeSkus = [] } = 
     );
   }
 
-  const quantity = quotedQuantity(request);
-  const nextRows = rowList.map((row, index) => {
-    if (index !== match.index) return row;
-    const next = {
-      ...row,
-      sku: targetSku,
-      unresolved: false,
-      ...(quantity ? { qty: quantity } : {}),
-    };
-    if (row?.typedSku) next.typedSku = targetSku;
-    if (row?.resolvedSku) next.resolvedSku = targetSku;
-    return next;
-  });
-  return {
-    kind: 'apply',
-    rows: nextRows,
-    sourceSku: match.sourceSku,
-    targetSku,
-    quantity: quantity || Number(match.row?.qty) || 1,
-    message: `${match.sourceSku} was replaced with ${targetSku}.`,
-  };
+  return applyCandidate(rowList, match, targetSku, request);
 }

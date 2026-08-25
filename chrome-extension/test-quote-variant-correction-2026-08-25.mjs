@@ -39,6 +39,17 @@ test('an explicit 4G to 4X card correction swaps only the matching active SKU', 
   assert.doesNotMatch(prepared.text, /4G-M/i);
 });
 
+test('an explicit full-SKU 4G to 4X correction also stays in the deterministic card path', () => {
+  const result = resolveQuoteVariantCorrection(
+    baseRows,
+    'change C9200L-24P-4G-M to C9200L-24P-4X-M',
+    { activeSkus: catalog },
+  );
+  assert.equal(result.kind, 'apply');
+  assert.equal(result.rows[0].sku, 'C9200L-24P-4X-M');
+  assert.equal(result.rows[0].qty, 1);
+});
+
 test('an explicit quantity can accompany an unambiguous variant correction', () => {
   const result = resolveQuoteVariantCorrection(baseRows, 'change the 4G to the 4X and set quantity 4', { activeSkus: catalog });
   assert.equal(result.kind, 'apply');
@@ -89,6 +100,8 @@ test('ChatPanel routes variant decisions before general chat, rebuilds the same 
   assert.match(source, /applyDeterministicQuoteVariantCorrection\(priorQuote, quoteVariantDecision, text, \{ requestZoho: zohoReviewRequest \}\)/);
   assert.match(source, /await rebuildQuoteMessage\(msg, decision\.rows, \{ sourceText: msg\?\.skuText \|\| '' \}\)/);
   assert.match(source, /(?:make\|turn\|convert).*into/);
+  assert.match(source, /function isExplicitNewEcommQuoteRequest/);
+  assert.match(source, /!explicitNewEcommQuote && isQuoteEditorCorrectionRequest\(text\)/);
   assert.match(source, /capturedParticipants: Array\.isArray\(sourceMessage\?\.emailQuoteContext\?\.participants\)[\s\S]{0,180}\? sourceMessage\.emailQuoteContext\.participants : \[\]/);
 
   const dispatchStart = source.indexOf('function handleSend(overrideText)');

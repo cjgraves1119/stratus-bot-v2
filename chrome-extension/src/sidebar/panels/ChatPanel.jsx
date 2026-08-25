@@ -609,6 +609,16 @@ function isExplicitEcommUrlAsk(text) {
   return /\b(url\s+quote|e-?comm(?:erce)?\s+(?:quote|link|url)|quote\s+(?:link|url)|order\s+(?:link|url)|shopping\s+cart\s+link|stratus\s+url|send\s+me\s+a\s+link)\b/.test(v);
 }
 
+// A direct request to make a new quote must never be mistaken for an edit of
+// the last card simply because it contains an SKU. This keeps "make a quote
+// for 4x MX67" on the normal fresh-quote path, where 4x is a quantity.
+function isExplicitNewEcommQuoteRequest(text) {
+  const value = String(text || '').trim();
+  if (!value || /\b(?:zoho|crm)\b/i.test(value)) return false;
+  return /\b(?:create|make|start|prepare|build)\s+(?:(?:a|an|new)\s+)?(?:e-?comm(?:erce)?\s+)?quote\s+(?:for|with)\b/i.test(value)
+    || /\bnew\s+(?:e-?comm(?:erce)?\s+)?quote\s+(?:for|with)\b/i.test(value);
+}
+
 function isEcommQuoteRequest(text) {
   const v = (text || '').toLowerCase().trim();
   if (!v) return false;
@@ -3992,7 +4002,9 @@ export default function ChatPanel({
       : null;
     const quoteVariantCorrection = quoteVariantDecision?.kind === 'apply' || quoteVariantDecision?.kind === 'clarify';
     const mxEditionCorrection = hasPriorQuote && !zohoTookOver && isMxEditionQuoteFollowUp(text);
-    const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && !quoteVariantCorrection && isQuoteEditorCorrectionRequest(text);
+    const explicitNewEcommQuote = isExplicitNewEcommQuoteRequest(text);
+    const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && !quoteVariantCorrection
+      && !explicitNewEcommQuote && isQuoteEditorCorrectionRequest(text);
     const zohoReviewRequest = hasPriorQuote && !zohoTookOver && isZohoQuoteReviewRequest(text);
     const ecommAllowed = mxEditionCorrection || !onZohoRecord || isExplicitEcommUrlAsk(text);
     if (quoteVariantCorrection) {
