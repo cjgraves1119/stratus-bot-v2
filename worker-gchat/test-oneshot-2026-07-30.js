@@ -745,6 +745,8 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
       grab('selectCustomerFromParticipants'),
       grab('isZohoTrue'),
       grab('normalizeOneshotEmail'),
+      grab('_titleCaseNameToken'),
+      grab('deriveContactNameFields'),
       grab('canonicalOneshotRecipients'),
       grab('canonicalOneshotSkus'),
       grab('oneshotReviewKey'),
@@ -860,17 +862,35 @@ function loadIsrResolver(rows, { throwErr = false } = {}) {
     }
   });
 
-  await checkAsync('email-only display name uses the safe Account-name/IT fallback', async () => {
+  await checkAsync('email-only display name uses the obvious local-part first/last pattern', async () => {
     const plan = await loadBuildPlan({ waterfallAccount: FULL_ACCOUNT })({
       skus: [{ sku: 'LIC-ENT-3YR', qty: 1 }],
       participants: [{ email: 'ron.jarman@americanimplement.com', name: '<ron.jarman@americanimplement.com>' }],
     });
     assert.deepStrictEqual(plan.plan.contact.defaults, {
-      first_name: 'American Implement',
-      last_name: 'IT',
-      account_it_fallback: true,
+      first_name: 'Ron',
+      last_name: 'Jarman',
     });
     assert.ok(!JSON.stringify(plan.plan.contact.defaults).includes('@'));
+  });
+
+  await checkAsync('explicitly selected jason.rice participant becomes Jason Rice without guessing among recipients', async () => {
+    const plan = await loadBuildPlan({ waterfallAccount: FULL_ACCOUNT })({
+      skus: [{ sku: 'LIC-ENT-3YR', qty: 1 }],
+      participants: [
+        { email: 'jason.rice@omahazoo.com', name: 'jason.rice' },
+        { email: 'scott.carrier@omahazoo.com', name: 'scott.carrier' },
+        { email: 'mitch.anderson@omahazoo.com', name: 'mitch.anderson' },
+      ],
+      contact_email: 'jason.rice@omahazoo.com',
+    });
+    assert.strictEqual(plan.plan.customer.status, 'explicit');
+    assert.strictEqual(plan.plan.contact.email, 'jason.rice@omahazoo.com');
+    assert.deepStrictEqual(plan.plan.contact.defaults, {
+      first_name: 'Jason',
+      last_name: 'Rice',
+    });
+    assert.strictEqual(plan.plan.contact.last_name_placeholder, undefined);
   });
 
   await checkAsync('create-account + contact linked to ANOTHER account → contact_linked_elsewhere blocker', async () => {

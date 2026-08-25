@@ -1623,6 +1623,50 @@ export function withOneshotAccountDraft(messagePatch, accountDraft) {
   return { ...(messagePatch || {}), accountDraft: snapshot };
 }
 
+/**
+ * Build the one permitted automatic enrichment retry for a create-Account
+ * review card.
+ *
+ * The initial Worker plan already fills blank fields when enrichment returns
+ * immediately. A provider may instead return `in_progress` on that first read;
+ * the card therefore gets one cache-busting retry. Unlike the reviewer's
+ * Refresh button, this retry is NOT compare-only: it may fill blank fields, but
+ * the Worker still preserves every non-blank user/thread value. Clearing the
+ * transient local draft makes the remounted card display the newly reviewed
+ * Worker prefill instead of masking it with the old blank strings.
+ */
+export function oneshotAutoEnrichmentReplan({
+  done = false,
+  reviewLocked = false,
+  busy = false,
+  accountPlan = null,
+  accountDraft = null,
+} = {}) {
+  if (done || reviewLocked || busy || accountPlan?.mode !== 'create') return null;
+  const draft = {};
+  for (const field of ONESHOT_ACCOUNT_DRAFT_FIELDS) {
+    const value = accountDraft?.[field] ?? accountPlan?.prefill?.[field];
+    draft[field] = value == null ? '' : String(value);
+  }
+  const domain = String(
+    draft.website || accountPlan?.domain || '',
+  ).trim();
+  if (!domain) return null;
+  const missingReviewField = ['name', 'street', 'city', 'state', 'zip']
+    .some((field) => !draft[field].trim());
+  if (!missingReviewField) return null;
+  return {
+    overrides: {
+      enrich_cache_bust: true,
+      account_prefill: draft,
+    },
+    messagePatch: {
+      accountDraft: null,
+      oneshotAutoEnrichDone: true,
+    },
+  };
+}
+
 export function quoteOptionTerm(option) {
   const explicit = Number(option?.termYears);
   if (Number.isInteger(explicit) && explicit >= 1 && explicit <= 5) return explicit;

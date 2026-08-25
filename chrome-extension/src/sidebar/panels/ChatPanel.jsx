@@ -62,6 +62,7 @@ import {
   oneshotContextRefreshSummary,
   normalizeEditableQuoteLines,
   normalizeQuoteIntakeLines,
+  oneshotAutoEnrichmentReplan,
   quoteIntakeTierLabel,
   oneshotHaStateForQuoteOption,
   oneshotProductSnapshotHash,
@@ -1382,6 +1383,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
   const [enrichmentAlternate, setEnrichmentAlternate] = useState(null);
   const [enrichmentLoading, setEnrichmentLoading] = useState(false);
   const [enrichmentError, setEnrichmentError] = useState('');
+  const autoEnrichmentAttemptedRef = useRef(false);
   const [productRows, setProductRows] = useState(() => {
     const baseSkus = Array.isArray(msg.base?.skus) ? msg.base.skus : [];
     const planLines = Array.isArray(p.lines) ? p.lines : [];
@@ -1518,29 +1520,32 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
   // ── Auto-enrich a brand-new account (2026-08-18) ──
   // The Zoho tab already auto-enriches when a domain has no matching CRM
   // account (CrmPanel: domain lookup miss -> ENRICH_COMPANY). The one-shot card
-  // had the SAME capability but only behind the "Refresh & compare" button, so a
-  // new customer landed with every account field blank and "source: empty", and
-  // Execute stayed blocked with nothing to act on. Fire the identical compare
-  // re-plan once, automatically, under strict conditions.
+  // had the SAME capability but could leave an initial in-progress result behind
+  // the Refresh button, so a new customer landed with every account field blank
+  // even after the provider finished. Retry once and let the Worker fill blanks
+  // only; manual Refresh remains compare-only.
   //
   // Guarded so it can never loop: the flag rides the re-plan's messagePatch, so
   // it survives the card remount that every re-plan causes. It also never runs
-  // once the review is locked, while a request is in flight, or when any account
-  // field already carries a value (nothing the user or the parser supplied is
-  // ever overwritten).
+  // once the review is locked or while a request is in flight. Non-blank values
+  // supplied by the user or parser are carried into the retry and never
+  // overwritten.
   useEffect(() => {
-    if (msg.oneshotAutoEnrichDone) return;
-    if (reviewLocked || busy) return;
-    if (acctPlan.mode !== 'create') return;
-    const domain = String(acctPlan.prefill?.website || acctPlan.domain || p.domain || '').trim();
-    if (!domain) return;
-    const alreadyHasData = ['name', 'street', 'city', 'state', 'zip']
-      .some((field) => String(acct[field] || '').trim());
-    if (alreadyHasData) return;
-    onReplan(
-      { refresh_enrichment: true, enrichment_mode: 'compare', account_prefill: { ...acct } },
-      { accountDraft: { ...acct }, oneshotAutoEnrichDone: true },
-    );
+    if (autoEnrichmentAttemptedRef.current) return;
+    const retry = oneshotAutoEnrichmentReplan({
+      done: msg.oneshotAutoEnrichDone,
+      reviewLocked,
+      busy,
+      accountPlan: acctPlan,
+      accountDraft: acct,
+    });
+    if (!retry) return;
+    autoEnrichmentAttemptedRef.current = true;
+    // Bypass onReplan() here on purpose. That wrapper snapshots the old local
+    // draft, including its blank strings, which would mask the enriched prefill
+    // when the plan card remounts. This read-only retry explicitly replaces the
+    // blank draft with the Worker's new reviewed plan values.
+    requestReplan(retry.overrides, retry.messagePatch);
     // Intentionally keyed on the plan revision only: this must fire at most once
     // per card, not on every keystroke in the account fields.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3598,6 +3603,7 @@ export default function ChatPanel({
       delete base.prior_review_token;
       delete base.refresh_enrichment;
       delete base.enrichment_mode;
+      delete base.enrich_cache_bust;
       delete base.account_prefill;
       const quoteOptionState = nextOneshotQuoteOptionState({
         quoteOptions: msg.quoteOptions,

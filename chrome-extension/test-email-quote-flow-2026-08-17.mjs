@@ -11,6 +11,7 @@ import {
   isProductChangingOneshotOverride,
   nextOneshotQuoteOptionState,
   normalizeQuoteIntakeLines,
+  oneshotAutoEnrichmentReplan,
   quoteIntakeTierLabel,
   oneshotHaStateForQuoteOption,
   oneshotProductSnapshotHash,
@@ -777,6 +778,55 @@ test('non-product replans reuse signed validation; product/term/HA changes do no
   assert.match(chatSource, /productValidation\.snapshot_hash/);
   assert.match(chatSource, /productValidation\.product_validation_count/);
   assert.match(chatSource, /productValidation\.reused === true/);
+});
+
+test('new-account auto enrichment retries once, fills blanks, and never masks the result with the old draft', () => {
+  const partial = {
+    name: 'Omaha Zoo',
+    street: '',
+    city: '',
+    state: '',
+    zip: '',
+    country: 'United States',
+    website: 'www.omahazoo.com',
+  };
+  const retry = oneshotAutoEnrichmentReplan({
+    accountPlan: { mode: 'create', prefill: partial },
+    accountDraft: partial,
+  });
+  assert.deepEqual(retry, {
+    overrides: {
+      enrich_cache_bust: true,
+      account_prefill: partial,
+    },
+    messagePatch: {
+      accountDraft: null,
+      oneshotAutoEnrichDone: true,
+    },
+  });
+  assert.equal(retry.overrides.refresh_enrichment, undefined, 'automatic retry must fill blanks, not request compare-only');
+  assert.equal(retry.overrides.enrichment_mode, undefined, 'manual Refresh remains the compare-only path');
+
+  const complete = { ...partial, street: '3701 S 10th St', city: 'Omaha', state: 'NE', zip: '68107' };
+  assert.equal(oneshotAutoEnrichmentReplan({
+    accountPlan: { mode: 'create', prefill: complete },
+    accountDraft: complete,
+  }), null, 'a complete review must not trigger another lookup');
+  assert.equal(oneshotAutoEnrichmentReplan({
+    done: true,
+    accountPlan: { mode: 'create', prefill: partial },
+    accountDraft: partial,
+  }), null, 'the automatic lookup runs at most once');
+  assert.equal(oneshotAutoEnrichmentReplan({
+    accountPlan: { mode: 'existing', prefill: partial },
+    accountDraft: partial,
+  }), null, 'existing Accounts are never enriched by this create-only retry');
+
+  assert.match(chatSource, /requestReplan\(retry\.overrides, retry\.messagePatch\)/);
+  assert.match(chatSource, /if \(autoEnrichmentAttemptedRef\.current\) return/);
+  assert.match(chatSource, /autoEnrichmentAttemptedRef\.current = true/);
+  assert.doesNotMatch(chatSource, /refresh_enrichment: true, enrichment_mode: 'compare', account_prefill: \{ \.\.\.acct \}/);
+  assert.match(chatSource, /delete base\.enrich_cache_bust/);
 });
 
 test('explicit HA availability survives Hardware Only and licensed-term round trips', () => {

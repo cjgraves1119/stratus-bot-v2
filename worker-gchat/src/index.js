@@ -11980,20 +11980,26 @@ async function buildOneshotPlan(input, env, caller, ctx, enrich) {
       }
     } else {
       const nameTokens = String(selectedName || '').trim().split(/\s+/).filter(Boolean);
+      const derivedName = deriveContactNameFields(selectedEmail, selectedName);
+      const hasStructuredEmailName = !!(derivedName.firstName && derivedName.lastName);
       const fallbackAccountName = String(
         plan.account?.name || plan.account?.prefill?.name || ''
       ).trim();
-      const contactDefaults = nameTokens.length
-        ? { first_name: nameTokens[0], last_name: nameTokens.slice(1).join(' ') || '-', from_real_name: true }
-        : (fallbackAccountName
-          ? { first_name: fallbackAccountName, last_name: 'IT', account_it_fallback: true }
-          : null);
+      const contactDefaults = nameTokens.length >= 2
+        ? { first_name: nameTokens[0], last_name: nameTokens.slice(1).join(' '), from_real_name: true }
+        : (hasStructuredEmailName
+          ? { first_name: derivedName.firstName, last_name: derivedName.lastName }
+          : (nameTokens.length
+            ? { first_name: nameTokens[0], last_name: '-', from_real_name: true }
+            : (fallbackAccountName
+              ? { first_name: fallbackAccountName, last_name: 'IT', account_it_fallback: true }
+              : null)));
       plan.contact = {
         mode: 'create', name: selectedName || '', email: selectedEmail,
         defaults: contactDefaults,
         // Single-token names will be created with the neutral "-" surname
         // placeholder — surfaced here so the card shows it before any write.
-        last_name_placeholder: nameTokens.length === 1 || undefined,
+        last_name_placeholder: contactDefaults?.last_name === '-' || undefined,
       };
       if (!selectedName && !contactDefaults) blockers.push({ code: 'contact_name_required', email: selectedEmail });
     }
