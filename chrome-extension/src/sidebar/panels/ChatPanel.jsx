@@ -1031,7 +1031,7 @@ function EmailQuoteIntakeCard({ msg, busy, onUpdate, onRemove, onBuildQuote, onM
 // Zoho record without abandoning the card and restarting the flow from a Zoho
 // page. This is a READ-ONLY search: it never creates or edits a record, it only
 // feeds the SAME re-plan inputs the existing thread pickers already use
-// (contact_email / account_id), so the server re-resolves the whole plan and
+// (contact_id / account_id), so the server re-resolves the whole plan and
 // every downstream guard still applies.
 function OneshotZohoLookup({
   styles, disabled, onPickContact, onPickAccount, onAddContact, onAddAccount,
@@ -1142,7 +1142,7 @@ function OneshotZohoLookup({
               key={record.id}
               type="button"
               disabled={disabled}
-              onClick={() => (mode === 'Accounts' ? onPickAccount(record.id) : onPickContact(record.email))}
+              onClick={() => (mode === 'Accounts' ? onPickAccount(record.id) : onPickContact(record))}
               style={{ display: 'block', width: '100%', textAlign: 'left', padding: '5px 7px', border: 'none', borderBottom: `1px solid ${COLORS.BORDER}`, background: '#fff', cursor: disabled ? 'default' : 'pointer', fontSize: 11 }}
             >
               <b>{record.primary}</b>
@@ -1158,7 +1158,7 @@ function OneshotZohoLookup({
           onClick={() => onAddContact?.()}
           style={{ padding: '4px 8px', borderRadius: 6, border: `1px solid ${COLORS.BORDER}`, background: '#fff', fontSize: 11, cursor: disabled ? 'default' : 'pointer' }}
         >
-          Add new contact
+          Enter new contact details
         </button>
         <button
           type="button"
@@ -1166,7 +1166,7 @@ function OneshotZohoLookup({
           onClick={() => onAddAccount?.()}
           style={{ padding: '4px 8px', borderRadius: 6, border: `1px solid ${COLORS.BORDER}`, background: '#fff', fontSize: 11, cursor: disabled ? 'default' : 'pointer' }}
         >
-          Add new account
+          Enter new account details
         </button>
       </div>
     </div>
@@ -1292,6 +1292,20 @@ function oneshotEnrichmentFields(result) {
     country: String(source.country || '').trim(),
     website: String(source.website || source.domain || '').trim(),
   };
+}
+
+function oneshotHardBlockerMessage(blocker) {
+  const code = String(blocker?.code || 'review_required');
+  if (code === 'missing_contact') {
+    return 'No customer Contact is bound. Open the matching Gmail thread and Refresh, or search/select an existing Zoho Contact below.';
+  }
+  if (code === 'ambiguous_contact') {
+    return 'More than one customer matches. Choose a Contact below.';
+  }
+  if (code === 'contact_not_eligible') {
+    return 'That email was not eligible from the captured thread. Search/select the Zoho Contact record below.';
+  }
+  return `${code}${blocker?.sku ? ` (${blocker.sku})` : ''}`;
 }
 
 function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext, onQuoteOptionChange: requestQuoteOptionChange, onExecute, onEditProducts, onProductSearch }) {
@@ -1735,7 +1749,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
           )}
           {hard.length > 0 && (
             <div style={{ padding: 8, borderRadius: 8, background: '#fce8e6', border: `1px solid ${COLORS.ERROR}55`, color: COLORS.ERROR, marginBottom: 8, fontSize: 11 }}>
-              <b>Blocked:</b> {hard.map((b) => b.code + (b.sku ? ` (${b.sku})` : '')).join(' · ')} — fix in Zoho/catalog first.
+              <b>Blocked:</b> {hard.map(oneshotHardBlockerMessage).join(' · ')}
             </div>
           )}
           {advisory.length > 0 && (
@@ -1790,10 +1804,15 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
             filterAccountId={acctPlan.mode === 'existing' ? acctPlan.id : ''}
             filterAccountName={acctPlan.name || ''}
             filterContactAccountId={(ct && (ct.linked_account?.id || ct.account_id)) || ''}
-            onPickContact={(email) => {
-              if (!email) return;
+            onPickContact={(record) => {
+              const contactId = String(record?.id || '').trim();
+              const contactEmail = String(record?.email || '').trim().toLowerCase();
+              if (!contactId) return;
               setForceCreateContact(false);
-              onReplan({ contact_email: email });
+              onReplan({
+                contact_id: contactId,
+                ...(contactEmail ? { contact_email: contactEmail } : {}),
+              });
             }}
             onPickAccount={(id) => {
               if (!id) return;
@@ -2331,6 +2350,7 @@ export default function ChatPanel({
     if (navData?.quoteSkuText) runAndPushQuote(navData.quoteSkuText, {
       editable: true,
       source: 'context-menu',
+      quoteContext: navData.quoteContext || null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navData?.quoteActionId || navData?.quoteSkuText]);
@@ -2811,6 +2831,7 @@ export default function ChatPanel({
     priorQuoteText = null,
     editable = true,
     source = '',
+    quoteContext = null,
   } = {}) {
     const text = (skuText || '').trim();
     if (!text || loading) return;
@@ -2826,6 +2847,26 @@ export default function ChatPanel({
     const quoteHardwareOnly = isExplicitHardwareOnlyQuoteText(text);
     let candidate = typedHardwareOnlyResult(result, text);
     const committedRows = editableRowsFromResult(candidate);
+    const gmailParticipantSnapshot = (() => {
+      if (source !== 'context-menu' || !quoteContext || typeof quoteContext !== 'object') return null;
+      const threadPermId = String(quoteContext.threadPermId || '').trim();
+      const participants = (Array.isArray(quoteContext.participants) ? quoteContext.participants : [])
+        .map((participant) => ({
+          email: String(participant?.email || '').trim().toLowerCase(),
+          name: String(participant?.name || '').slice(0, 300),
+          role: String(participant?.role || '').slice(0, 80),
+        }))
+        .filter((participant) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(participant.email))
+        .slice(0, 50);
+      return threadPermId && participants.length ? { threadPermId, participants } : null;
+    })();
+    const quoteMessageProvenance = {
+      quoteSource: source || 'editable-quote',
+      // Transient provenance from the exact Gmail tab that received the
+      // context-menu gesture. The stored-session sanitizer intentionally drops
+      // it, so a restored card cannot borrow stale customer identity.
+      ...(gmailParticipantSnapshot ? { gmailParticipantSnapshot } : {}),
+    };
     // A fresh chat quote must offer Hardware Only too. Only the "Update quote"
     // path used to call this, so the option appeared only after an edit
     // (2026-08-19).
@@ -2860,6 +2901,7 @@ export default function ChatPanel({
           quoteHaRequested,
           quoteLicenseTier,
           quoteHardwareOnly,
+          ...quoteMessageProvenance,
           note: `${quoteHaRequested ? 'Explicit HA intent was detected, but ' : ''}Every action link was suppressed because the generated composition could not be verified (${verified.error}).`,
           timestamp: new Date().toISOString(),
         });
@@ -2874,11 +2916,11 @@ export default function ChatPanel({
       quoteHaRequested,
       quoteLicenseTier,
       quoteHardwareOnly,
+      ...quoteMessageProvenance,
       ...(draftRows?.length ? {
         draftRows,
         draftDirty: false,
         draftStatus: 'Parsed from the selected text. Edit or add SKU rows, then update the quote before using links or starting Zoho review.',
-        quoteSource: source || 'editable-quote',
       } : {}),
       timestamp: new Date().toISOString(),
     });
@@ -3353,16 +3395,24 @@ export default function ChatPanel({
     const extraQuoteOptionIndexes = rebasedSelectedIndexes.slice(1);
     const quoteOptions = indexedQuoteOptions.map(({ sourceIndex: _sourceIndex, ...option }) => option);
     const orderUrl = quoteOptions[normalizedSelectedIndex]?.url || '';
+    const emailIntakeParticipants = Array.isArray(sourceMessage?.emailQuoteContext?.participants)
+      ? sourceMessage.emailQuoteContext.participants : null;
+    const contextMenuParticipants = sourceMessage?.quoteSource === 'context-menu'
+      && sourceMessage?.gmailParticipantSnapshot?.threadPermId
+      && Array.isArray(sourceMessage?.gmailParticipantSnapshot?.participants)
+      ? sourceMessage.gmailParticipantSnapshot.participants : null;
     return startOneshotFromUrl(orderUrl, {
       quoteOptions,
       selectedQuoteOptionIndex: normalizedSelectedIndex,
       extraQuoteOptionIndexes,
-      // A manually typed/chat quote must not inherit whichever Gmail thread
-      // happens to be open. Gmail-intake cards carry explicit reviewed
-      // participants; every other card deliberately starts One Shot with
-      // blank, editable account/contact fields.
-      capturedParticipants: Array.isArray(sourceMessage?.emailQuoteContext?.participants)
-        ? sourceMessage.emailQuoteContext.participants : [],
+      // Manual/chat quotes never inherit whichever Gmail thread happens to be
+      // open. Gmail-intake cards carry their reviewed participants; a Gmail
+      // context-menu card carries only the short-lived, exact-thread snapshot
+      // captured with that right-click gesture.
+      capturedParticipants: emailIntakeParticipants || contextMenuParticipants || [],
+      participantContextMode: emailIntakeParticipants
+        ? 'gmail-intake'
+        : (contextMenuParticipants ? 'context-menu' : 'unscoped'),
       hardwareOnlySkus: sourceMessage?.quoteHardwareOnlySkus,
       intakeIntent: sourceMessage?.emailQuoteContext?.intent
         || (sourceMessage?.quoteHaRequested === true ? { ha_requested: true } : null),
@@ -3374,6 +3424,7 @@ export default function ChatPanel({
     selectedQuoteOptionIndex = 0,
     extraQuoteOptionIndexes = [],
     capturedParticipants = null,
+    participantContextMode = 'unscoped',
     hardwareOnlySkus = null,
     intakeIntent = null,
   } = {}) {
@@ -3405,7 +3456,8 @@ export default function ChatPanel({
       const shownContextEmail = String(activeContextEmail || '').trim().toLowerCase();
       const forwardedContactEmail = participants.some((c) => c.email === explicitlySelectedEmail)
         ? explicitlySelectedEmail
-        : (participants.some((c) => c.email === shownContextEmail) ? shownContextEmail : undefined);
+        : (participantContextMode !== 'context-menu'
+          && participants.some((c) => c.email === shownContextEmail) ? shownContextEmail : undefined);
       const base = {
         skus,
         participants,

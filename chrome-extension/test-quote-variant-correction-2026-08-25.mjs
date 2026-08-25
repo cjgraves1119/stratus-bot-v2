@@ -102,7 +102,8 @@ test('ChatPanel routes variant decisions before general chat, rebuilds the same 
   assert.match(source, /(?:make\|turn\|convert).*into/);
   assert.match(source, /function isExplicitNewEcommQuoteRequest/);
   assert.match(source, /!explicitNewEcommQuote && isQuoteEditorCorrectionRequest\(text\)/);
-  assert.match(source, /capturedParticipants: Array\.isArray\(sourceMessage\?\.emailQuoteContext\?\.participants\)[\s\S]{0,180}\? sourceMessage\.emailQuoteContext\.participants : \[\]/);
+  assert.match(source, /capturedParticipants: emailIntakeParticipants \|\| contextMenuParticipants \|\| \[\]/);
+  assert.match(source, /sourceMessage\?\.quoteSource === 'context-menu'[\s\S]*gmailParticipantSnapshot\?\.threadPermId/);
 
   const dispatchStart = source.indexOf('function handleSend(overrideText)');
   const dispatchEnd = source.indexOf('// ── Manual CRM search', dispatchStart);

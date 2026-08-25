@@ -6,6 +6,8 @@
 
 import { generateQuote, crmSearch } from './api-client.js';
 import { queueQuoteSidebarAction } from './sidebar-actions.js';
+import { MSG } from '../lib/constants.js';
+import { verifiedPendingQuoteGmailContext } from '../lib/pending-sidebar-action.mjs';
 
 /**
  * Post one message to a Zoho tab's content script. Kept local and tiny rather
@@ -160,10 +162,26 @@ export async function handleContextMenuClick(info, tab) {
         // browser action. The quote request itself is then queued durably so a
         // slower panel mount cannot lose it behind a fixed timeout.
         await chrome.sidePanel.open({ tabId: tab.id });
+        // Capture only the identity fields from the exact Gmail tab that
+        // received the right-click. The queue boundary sanitizes this down to
+        // the thread id + participants and drops every subject/body field.
+        // This must happen after sidePanel.open so the browser user gesture is
+        // not lost.
+        let gmailContext = null;
+        try {
+          const live = await chrome.tabs.sendMessage(tab.id, { type: MSG.GET_EMAIL_CONTEXT });
+          if (live && !live.empty) {
+            gmailContext = verifiedPendingQuoteGmailContext(live, {
+              pageUrl: info.pageUrl,
+              tabUrl: tab.url,
+            });
+          }
+        } catch (_) { /* an unhydrated Gmail tab safely yields an unscoped quote */ }
         const action = await queueQuoteSidebarAction({
           quoteSkuText: selectedText.trim(),
           tabId: tab.id,
           windowId: tab.windowId,
+          gmailContext,
         });
         if (!action) throw new Error('Could not create a bounded quote action');
         // Fast wake-up only. The sidebar still claims the stored action on

@@ -230,7 +230,11 @@ export default function App() {
         if (!acceptedPendingActionIdsRef.current.has(action.actionId)) {
           acceptedPendingActionIdsRef.current.add(action.actionId);
           setActiveTab('chat');
-          setNavData({ quoteSkuText: action.quoteSkuText, quoteActionId: action.actionId });
+          setNavData({
+            quoteSkuText: action.quoteSkuText,
+            quoteActionId: action.actionId,
+            quoteContext: action.gmailContext || null,
+          });
         }
         try {
           await sendToBackground(MSG.SIDEBAR_ACTION_ACK, {

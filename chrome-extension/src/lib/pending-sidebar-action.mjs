@@ -3,6 +3,7 @@ export const PENDING_SIDEBAR_ACTION_TTL_MS = 60_000;
 export const PENDING_SIDEBAR_ACTION_LEASE_MS = 10_000;
 export const MAX_PENDING_SIDEBAR_ACTIONS = 8;
 export const MAX_PENDING_QUOTE_CHARS = 8_000;
+export const MAX_PENDING_QUOTE_PARTICIPANTS = 50;
 
 const ACTION_ID_RE = /^[A-Za-z0-9_-]{8,160}$/;
 
@@ -14,6 +15,73 @@ function safeInteger(value) {
   return Number.isInteger(value) && value >= 0 ? value : null;
 }
 
+function safeEmail(value) {
+  const email = safeString(value, 320).trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+function safeGmailUrl(value) {
+  const raw = safeString(value, 4000).trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:' && url.hostname === 'mail.google.com' ? url.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Minimal Gmail identity snapshot for a context-menu quote.
+ *
+ * The pending action is tied to the exact tab that received the right-click,
+ * lives for only 60 seconds in storage.session, and intentionally excludes the
+ * subject/body/message text. This gives One Shot enough identity to perform its
+ * read-only Zoho lookup without letting a later, unrelated Gmail tab leak into
+ * the quote.
+ */
+export function normalizePendingQuoteGmailContext(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const threadPermId = safeString(source.threadPermId, 300).trim();
+  if (!threadPermId) return null;
+  const rawParticipants = Array.isArray(source.participants)
+    ? source.participants
+    : (Array.isArray(source.threadContacts) ? source.threadContacts : []);
+  const participants = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    const email = safeEmail(candidate?.email || candidate);
+    if (!email || seen.has(email) || participants.length >= MAX_PENDING_QUOTE_PARTICIPANTS) return;
+    seen.add(email);
+    participants.push({
+      email,
+      name: safeString(candidate?.name, 300).trim(),
+      role: safeString(candidate?.role, 80).trim(),
+    });
+  };
+  rawParticipants.forEach(add);
+  if (!participants.length) return null;
+  return {
+    threadPermId,
+    participants,
+  };
+}
+
+/**
+ * Accept a live Gmail snapshot only when it came from the exact page/tab that
+ * received the context-menu gesture. Gmail navigation is fast enough that the
+ * user can move threads while the side panel opens; a mismatch must therefore
+ * fail closed instead of borrowing the newly-active thread.
+ */
+export function verifiedPendingQuoteGmailContext(value, { pageUrl, tabUrl } = {}) {
+  const liveUrl = safeGmailUrl(value?.url);
+  const clickedUrl = safeGmailUrl(pageUrl || tabUrl);
+  const originalTabUrl = safeGmailUrl(tabUrl);
+  if (!liveUrl || !clickedUrl || liveUrl !== clickedUrl) return null;
+  if (pageUrl && originalTabUrl && clickedUrl !== originalTabUrl) return null;
+  return normalizePendingQuoteGmailContext(value);
+}
+
 function makeId(prefix, now, random) {
   const suffix = Number(random).toString(36).replace(/[^a-z0-9]/gi, '').slice(0, 12) || '0';
   return `${prefix}_${Number(now).toString(36)}_${suffix}`;
@@ -23,6 +91,7 @@ export function createQuoteSidebarAction({
   quoteSkuText,
   tabId,
   windowId,
+  gmailContext = null,
   now = Date.now(),
   random = Math.random(),
 } = {}) {
@@ -31,6 +100,7 @@ export function createQuoteSidebarAction({
   const targetWindowId = safeInteger(windowId);
   const createdAt = Number(now);
   if (!text || targetTabId == null || targetWindowId == null || !Number.isFinite(createdAt)) return null;
+  const normalizedGmailContext = normalizePendingQuoteGmailContext(gmailContext);
   return {
     version: 1,
     actionId: makeId('quote', createdAt, random),
@@ -43,6 +113,7 @@ export function createQuoteSidebarAction({
     expiresAt: createdAt + PENDING_SIDEBAR_ACTION_TTL_MS,
     claimId: null,
     claimExpiresAt: 0,
+    ...(normalizedGmailContext ? { gmailContext: normalizedGmailContext } : {}),
   };
 }
 
@@ -65,6 +136,7 @@ export function normalizePendingSidebarAction(value, { now = Date.now() } = {}) 
     && Number.isFinite(rawClaimExpiresAt)
     && rawClaimExpiresAt > currentTime
     && rawClaimExpiresAt <= expiresAt;
+  const gmailContext = normalizePendingQuoteGmailContext(value.gmailContext);
 
   return {
     version: 1,
@@ -78,6 +150,7 @@ export function normalizePendingSidebarAction(value, { now = Date.now() } = {}) 
     expiresAt,
     claimId: hasActiveClaim ? rawClaimId : null,
     claimExpiresAt: hasActiveClaim ? rawClaimExpiresAt : 0,
+    ...(gmailContext ? { gmailContext } : {}),
   };
 }
 

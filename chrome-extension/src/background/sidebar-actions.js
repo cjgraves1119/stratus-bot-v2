@@ -44,8 +44,8 @@ export function isTrustedSidebarSender(sender) {
   }
 }
 
-export async function queueQuoteSidebarAction({ quoteSkuText, tabId, windowId }) {
-  const action = createQuoteSidebarAction({ quoteSkuText, tabId, windowId });
+export async function queueQuoteSidebarAction({ quoteSkuText, tabId, windowId, gmailContext = null }) {
+  const action = createQuoteSidebarAction({ quoteSkuText, tabId, windowId, gmailContext });
   if (!action) return null;
   await withPendingActionStorageLock(async () => {
     const queue = await readQueue();

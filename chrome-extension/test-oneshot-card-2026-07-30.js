@@ -168,22 +168,42 @@ check('typed hardware-only requests never expose forced license URLs', () => {
   assert.ok(/let candidate = typedHardwareOnlyResult\(response\.result, prepared\.text\)/.test(SRC), 'suggestion and manual re-quotes must preserve hardware-only filtering');
 });
 
-// 2026-08-19, policy changed at Chris's request: the contact the panel is ALREADY
-// showing rides along too, not only an explicit dropdown pick. The card used to
-// display "Contact: Trevor Goode" while the plan was told nothing and blocked on
-// ambiguous_contact. The safety property this test really guards is unchanged and
-// still asserted below: BOTH paths are gated on the captured participant list, so
-// a contact from another conversation can never leak into the plan.
-check('only Gmail-intake cards forward eligible participants as contact_email', () => {
+check('Gmail intake and exact-thread context-menu cards carry participants without leaking manual context', () => {
+  const quote = SRC.slice(SRC.indexOf('async function runAndPushQuote'), SRC.indexOf('function quoteDraftRows'));
+  const verificationFailure = quote.slice(quote.indexOf('if (!verified.ok)'), quote.indexOf('candidate = { ...candidate, urls: verified.urls }'));
   assert.ok(/const forwardedContactEmail = participants\.some\(\(c\) => c\.email === explicitlySelectedEmail\)/.test(SRC),
     'an explicit pick must still be preferred');
-  assert.ok(/participants\.some\(\(c\) => c\.email === shownContextEmail\) \? shownContextEmail : undefined/.test(SRC),
-    'the shown contact is the fallback, and only when it is a captured participant');
+  assert.ok(/participantContextMode !== 'context-menu'[\s\S]*participants\.some\(\(c\) => c\.email === shownContextEmail\) \? shownContextEmail : undefined/.test(SRC),
+    'a heuristic shown contact must not bypass ambiguity for a right-click participant snapshot');
   assert.ok(/contact_email: forwardedContactEmail,/.test(SRC));
-  assert.ok(/capturedParticipants: Array\.isArray\(sourceMessage\?\.emailQuoteContext\?\.participants\)[\s\S]*\? sourceMessage\.emailQuoteContext\.participants : \[\]/.test(SRC),
+  assert.ok(/const emailIntakeParticipants = Array\.isArray\(sourceMessage\?\.emailQuoteContext\?\.participants\)/.test(SRC));
+  assert.ok(/sourceMessage\?\.quoteSource === 'context-menu'[\s\S]*sourceMessage\?\.gmailParticipantSnapshot\?\.threadPermId/.test(SRC));
+  assert.ok(/capturedParticipants: emailIntakeParticipants \|\| contextMenuParticipants \|\| \[\]/.test(SRC),
     'manual/chat cards must explicitly pass no Gmail participants into One Shot');
+  assert.ok(/gmailParticipantSnapshot[\s\S]*threadPermId[\s\S]*participants/.test(SRC),
+    'the live right-click quote must retain its bounded thread provenance');
+  assert.ok(quote.indexOf('const quoteMessageProvenance = {') < quote.indexOf('if (verifyInitialComposition)'),
+    'provenance must be prepared before any reviewable initial verification failure');
+  assert.ok(/\.\.\.quoteMessageProvenance/.test(verificationFailure),
+    'a failed initial verification card must keep its exact-thread provenance for correction/rebuild');
+  assert.ok((quote.match(/\.\.\.quoteMessageProvenance/g) || []).length >= 2,
+    'both failed and successful quote cards must carry the same provenance shape');
   const planPayload = SRC.slice(SRC.indexOf('const base = {', SRC.indexOf('async function startOneshotFromUrl')), SRC.indexOf("source: 'ext-oneshot'", SRC.indexOf('async function startOneshotFromUrl')));
   assert.ok(!/customerEmail/.test(planPayload), 'the raw auto customerEmail must still not ride into the payload directly');
+});
+
+check('explicit Zoho Contact search selection replans by authoritative contact id without writing', () => {
+  const lookup = SRC.slice(SRC.indexOf('function OneshotZohoLookup'), SRC.indexOf('function OneshotIsrLookup'));
+  assert.ok(/onPickContact\(record\)/.test(lookup), 'the lookup must retain the selected Zoho Contact id');
+  assert.ok(!/ONESHOT_EXECUTE/.test(lookup), 'read-only lookup must not cross the Execute boundary');
+  const pick = SRC.slice(SRC.indexOf('onPickContact={(record)'), SRC.indexOf('onPickAccount={(id)'));
+  assert.ok(/contact_id: contactId,[\s\S]*contact_email: contactEmail/.test(pick),
+    'the re-plan must bind the selected Contact record, not merely an untrusted email');
+  assert.ok(!/account_id:/.test(pick),
+    'a Contact pick must let the Worker derive its linked Account and preserve mismatch guards');
+  assert.ok(/Enter new contact details/.test(lookup));
+  assert.ok(/Enter new account details/.test(lookup));
+  assert.ok(/No customer Contact is bound\. Open the matching Gmail thread and Refresh/.test(SRC));
 });
 
 check('a manually pinned Deal is forwarded as the reviewed attach target', () => {
