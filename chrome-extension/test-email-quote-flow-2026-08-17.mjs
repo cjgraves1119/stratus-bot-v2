@@ -12,6 +12,7 @@ import {
   nextOneshotQuoteOptionState,
   normalizeQuoteIntakeLines,
   oneshotAutoEnrichmentReplan,
+  mergeOneshotAccountDraftWithPlan,
   quoteIntakeTierLabel,
   oneshotHaStateForQuoteOption,
   oneshotProductSnapshotHash,
@@ -801,7 +802,7 @@ test('new-account auto enrichment retries once, fills blanks, and never masks th
     },
     messagePatch: {
       accountDraft: null,
-      oneshotAutoEnrichDone: true,
+      oneshotAutoEnrichDomain: 'www.omahazoo.com',
     },
   });
   assert.equal(retry.overrides.refresh_enrichment, undefined, 'automatic retry must fill blanks, not request compare-only');
@@ -813,10 +814,10 @@ test('new-account auto enrichment retries once, fills blanks, and never masks th
     accountDraft: complete,
   }), null, 'a complete review must not trigger another lookup');
   assert.equal(oneshotAutoEnrichmentReplan({
-    done: true,
+    attemptedDomain: 'WWW.OMAHAZOO.COM',
     accountPlan: { mode: 'create', prefill: partial },
     accountDraft: partial,
-  }), null, 'the automatic lookup runs at most once');
+  }), null, 'the automatic lookup runs at most once per selected domain');
   assert.equal(oneshotAutoEnrichmentReplan({
     accountPlan: { mode: 'existing', prefill: partial },
     accountDraft: partial,
@@ -827,6 +828,44 @@ test('new-account auto enrichment retries once, fills blanks, and never masks th
   assert.match(chatSource, /autoEnrichmentAttemptedRef\.current = true/);
   assert.doesNotMatch(chatSource, /refresh_enrichment: true, enrichment_mode: 'compare', account_prefill: \{ \.\.\.acct \}/);
   assert.match(chatSource, /delete base\.enrich_cache_bust/);
+});
+
+test('cached enrichment fills blank draft fields after a contact/account re-plan', () => {
+  const localDraft = {
+    name: 'Omaha Zoo',
+    street: '',
+    city: '',
+    state: '',
+    zip: '',
+    country: 'United States',
+    website: 'www.omahazoo.com',
+  };
+  const nextPlan = {
+    account: {
+      mode: 'create',
+      prefill: {
+        name: 'Omaha Zoo and Aquarium',
+        street: '3701 S 10th St',
+        city: 'Omaha',
+        state: 'NE',
+        zip: '68107',
+        country: 'United States',
+        website: 'omahazoo.com',
+        enrich_tier: 'cache',
+      },
+    },
+  };
+  assert.deepEqual(mergeOneshotAccountDraftWithPlan(localDraft, nextPlan), {
+    name: 'Omaha Zoo',
+    street: '3701 S 10th St',
+    city: 'Omaha',
+    state: 'NE',
+    zip: '68107',
+    country: 'United States',
+    website: 'www.omahazoo.com',
+  }, 'nonblank reviewed values win while cached enrichment fills every blank');
+  assert.equal(mergeOneshotAccountDraftWithPlan(null, nextPlan), null);
+  assert.match(chatSource, /mergeOneshotAccountDraftWithPlan\([\s\S]{0,160}messagePatch\.accountDraft,[\s\S]{0,80}res\.plan/);
 });
 
 test('explicit HA availability survives Hardware Only and licensed-term round trips', () => {

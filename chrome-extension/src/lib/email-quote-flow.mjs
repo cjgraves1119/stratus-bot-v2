@@ -1624,6 +1624,25 @@ export function withOneshotAccountDraft(messagePatch, accountDraft) {
 }
 
 /**
+ * Keep reviewed non-blank values while allowing a fresh read-only plan to fill
+ * blank fields. Reapplying a stale blank draft previously hid valid cached
+ * enrichment until the reviewer clicked Refresh and Use.
+ */
+export function mergeOneshotAccountDraftWithPlan(accountDraft, nextPlan) {
+  if (!accountDraft || typeof accountDraft !== 'object') return accountDraft ?? null;
+  const prefill = nextPlan?.account?.prefill || {};
+  const merged = {};
+  for (const field of ONESHOT_ACCOUNT_DRAFT_FIELDS) {
+    const local = accountDraft[field];
+    const planned = prefill[field];
+    if (local != null && String(local).trim()) merged[field] = String(local);
+    else if (planned != null && String(planned).trim()) merged[field] = String(planned);
+    else if (local != null) merged[field] = String(local);
+  }
+  return merged;
+}
+
+/**
  * Build the one permitted automatic enrichment retry for a create-Account
  * review card.
  *
@@ -1636,13 +1655,13 @@ export function withOneshotAccountDraft(messagePatch, accountDraft) {
  * Worker prefill instead of masking it with the old blank strings.
  */
 export function oneshotAutoEnrichmentReplan({
-  done = false,
+  attemptedDomain = '',
   reviewLocked = false,
   busy = false,
   accountPlan = null,
   accountDraft = null,
 } = {}) {
-  if (done || reviewLocked || busy || accountPlan?.mode !== 'create') return null;
+  if (reviewLocked || busy || accountPlan?.mode !== 'create') return null;
   const draft = {};
   for (const field of ONESHOT_ACCOUNT_DRAFT_FIELDS) {
     const value = accountDraft?.[field] ?? accountPlan?.prefill?.[field];
@@ -1652,6 +1671,7 @@ export function oneshotAutoEnrichmentReplan({
     draft.website || accountPlan?.domain || '',
   ).trim();
   if (!domain) return null;
+  if (String(attemptedDomain || '').trim().toLowerCase() === domain.toLowerCase()) return null;
   const missingReviewField = ['name', 'street', 'city', 'state', 'zip']
     .some((field) => !draft[field].trim());
   if (!missingReviewField) return null;
@@ -1662,7 +1682,7 @@ export function oneshotAutoEnrichmentReplan({
     },
     messagePatch: {
       accountDraft: null,
-      oneshotAutoEnrichDone: true,
+      oneshotAutoEnrichDomain: domain,
     },
   };
 }

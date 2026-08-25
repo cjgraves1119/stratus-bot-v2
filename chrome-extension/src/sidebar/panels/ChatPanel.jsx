@@ -63,6 +63,7 @@ import {
   normalizeEditableQuoteLines,
   normalizeQuoteIntakeLines,
   oneshotAutoEnrichmentReplan,
+  mergeOneshotAccountDraftWithPlan,
   quoteIntakeTierLabel,
   oneshotHaStateForQuoteOption,
   oneshotProductSnapshotHash,
@@ -1533,7 +1534,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
   useEffect(() => {
     if (autoEnrichmentAttemptedRef.current) return;
     const retry = oneshotAutoEnrichmentReplan({
-      done: msg.oneshotAutoEnrichDone,
+      attemptedDomain: msg.oneshotAutoEnrichDomain,
       reviewLocked,
       busy,
       accountPlan: acctPlan,
@@ -1549,7 +1550,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
     // Intentionally keyed on the plan revision only: this must fire at most once
     // per card, not on every keystroke in the account fields.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [msg.planRevision, msg.oneshotAutoEnrichDone, reviewLocked, busy, acctPlan.mode]);
+  }, [msg.planRevision, msg.oneshotAutoEnrichDomain, reviewLocked, busy, acctPlan.mode]);
 
   async function revalidateEditedProducts(rows) {
     const hardwareOnly = msg.base?.hardware_only === true;
@@ -3615,9 +3616,16 @@ export default function ChatPanel({
         boundOptionSelection,
         nextSelectedQuoteOptionIndex: messagePatch.selectedQuoteOptionIndex,
       });
+      const resolvedMessagePatch = { ...messagePatch };
+      if (messagePatch.accountDraft && typeof messagePatch.accountDraft === 'object') {
+        resolvedMessagePatch.accountDraft = mergeOneshotAccountDraftWithPlan(
+          messagePatch.accountDraft,
+          res.plan,
+        );
+      }
       onMessagesChange((msgs) => msgs.map((m) => m.id === msg.id ? {
         ...m,
-        ...messagePatch,
+        ...resolvedMessagePatch,
         ...quoteOptionState,
         plan: res.plan,
         blockers: res.blockers,
