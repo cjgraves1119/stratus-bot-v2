@@ -635,6 +635,36 @@ function isQuoteFollowUp(text) {
     || /\b(no\s+licenses?|without\s+licenses?|just\s+(the\s+)?hardware|(remove|drop)\s+(the\s+|all\s+)?licen[sc]es?|take\s+(the\s+)?licen[sc]es?\s+(out|off))\b/.test(v);
 }
 
+// A correction belongs to the most recent eCommerce quote, not to the general
+// CRM chat agent.  Keep this deliberately bounded: it needs an edit verb plus
+// either an exact SKU, a quantity, or a licensing/tier instruction.  Ordinary
+// conversational questions remain chat turns.
+function isQuoteEditorCorrectionRequest(text) {
+  const value = String(text || '').trim();
+  if (!value || value.length > 240 || /\b(?:zoho|crm)\b/i.test(value)) return false;
+  // Existing MX-edition follow-ups include terse replies such as "ENT instead"
+  // that deliberately omit an edit verb.  They still belong to the current
+  // reviewable quote card rather than creating a second quote reply.
+  if (isMxEditionQuoteFollowUp(value)) return true;
+  if (!/\b(?:add|remove|drop|delete|change|update|replace|swap|switch|convert|correct|make|set)\b/i.test(value)) return false;
+  SKU_PATTERN.lastIndex = 0;
+  const hasSku = SKU_PATTERN.test(value) || /\b(?:MR[-_]ENT|MR\s+Enterprise)\b/i.test(value);
+  SKU_PATTERN.lastIndex = 0;
+  return hasSku
+    || /\b(?:\d+\s*(?:x|×)?\s*(?:license|licen[sc]e|hardware)|enterprise|security|sd[-\s]?wan|advanced|hardware[ -]?only|no\s+licenses?)\b/i.test(value);
+}
+
+function isZohoQuoteReviewRequest(text) {
+  const value = String(text || '').trim();
+  return /\b(?:create|make|start|prepare|build)\s+(?:an?\s+)?(?:zoho|crm)(?:\s+crm)?\s+quote\b/i.test(value)
+    || /\b(?:create|make|start|prepare|build)\s+(?:an?\s+)?quote\s+(?:in|on|through)\s+(?:zoho|crm)\b/i.test(value);
+}
+
+function requestedQuoteTermYears(text) {
+  const match = String(text || '').match(/\b([135])\s*[- ]?year\b/i);
+  return match ? Number(match[1]) : null;
+}
+
 function isExplicitHardwareOnlyQuoteText(text) {
   return /\b(?:hardware[ -]?only|no\s+licenses?|without\s+licenses?|just\s+(?:the\s+)?hardware)\b/i.test(String(text || ''));
 }
@@ -2756,7 +2786,7 @@ export default function ChatPanel({
   async function runAndPushQuote(skuText, {
     pushUser = true,
     priorQuoteText = null,
-    editable = false,
+    editable = true,
     source = '',
   } = {}) {
     const text = (skuText || '').trim();
@@ -2833,6 +2863,45 @@ export default function ChatPanel({
 
   function quoteDraftRows(msg) {
     return Array.isArray(msg?.draftRows) ? msg.draftRows : editableRowsFromResult(msg?.result);
+  }
+
+  // A natural-language correction first uses the same deterministic follow-up
+  // session that already understands phrases such as "change MX67 to
+  // Enterprise".  Its corrected SKU snapshot is then rebuilt through the
+  // editor's canonical, quantity-verified path.  The existing card changes in
+  // place; it never becomes an unreviewable prose answer or a second stale
+  // quote card.
+  async function applyNaturalLanguageQuoteCorrection(msg, correctionText) {
+    if (!msg || loading) return;
+    appendMessage({ id: nextId(), role: 'user', content: correctionText, timestamp: new Date().toISOString() });
+    updateMessage(msg.id, {
+      busy: true,
+      draftStatus: 'Applying your chat correction to these editable SKU rows…',
+    });
+    setLoading(true);
+    setError(null);
+    const response = await runQuote(correctionText, newQuotePersonId(), messageHistoryText(msg));
+    if (response?.error || !response?.result) {
+      updateMessage(msg.id, {
+        busy: false,
+        draftStatus: `Chat correction could not be applied: ${response?.error || 'the quote service returned no SKU result'}. Review or edit the rows directly.`,
+      });
+      setLoading(false);
+      return;
+    }
+    const correctedRows = editableRowsFromResult(typedHardwareOnlyResult(response.result, correctionText));
+    if (!correctedRows.length) {
+      updateMessage(msg.id, {
+        busy: false,
+        draftStatus: 'Chat correction did not produce reviewable SKU rows. The existing quote was left unchanged.',
+      });
+      setLoading(false);
+      return;
+    }
+    // rebuildQuoteMessage owns the new request sequence, verification, and
+    // spinner cleanup.  The previous quote stays inert until it succeeds.
+    setLoading(false);
+    await rebuildQuoteMessage(msg, correctedRows, { sourceText: correctionText });
   }
 
   function invalidateQuoteUpdate(messageId) {
@@ -3862,10 +3931,35 @@ export default function ChatPanel({
       autoPinnedRecord,
     });
     const mxEditionCorrection = hasPriorQuote && !zohoTookOver && isMxEditionQuoteFollowUp(text);
+    const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && isQuoteEditorCorrectionRequest(text);
+    const zohoReviewRequest = hasPriorQuote && !zohoTookOver && isZohoQuoteReviewRequest(text);
     const ecommAllowed = mxEditionCorrection || !onZohoRecord || isExplicitEcommUrlAsk(text);
-    if (ecommAllowed && (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text)))) {
+    if (zohoReviewRequest) {
       if (!overrideText) setInput('');
-      runAndPushQuote(text, { priorQuoteText: mxEditionCorrection ? messageHistoryText(msgs[lastQuoteIdx]) : null });
+      const priorQuote = msgs[lastQuoteIdx];
+      const requestedTerm = requestedQuoteTermYears(text);
+      const options = Array.isArray(priorQuote?.result?.urls) ? priorQuote.result.urls : [];
+      const selectedIndex = requestedTerm == null ? -1 : options.findIndex((option) => quoteOptionTerm(option) === requestedTerm);
+      appendMessage({ id: nextId(), role: 'user', content: text, timestamp: new Date().toISOString() });
+      if (selectedIndex >= 0) {
+        handleSendQuoteToZoho(priorQuote, priorQuote.result, selectedIndex);
+      } else {
+        updateMessage(priorQuote.id, {
+          draftStatus: 'Zoho review requested. Select the term option to review, then choose “Create Zoho CRM quote from selected”.',
+        });
+        appendMessage(infoMsg('Select a term on the current quote card to open its One Shot review. No Zoho record has been created.'));
+      }
+    } else if (quoteEditorCorrection) {
+      if (!overrideText) setInput('');
+      applyNaturalLanguageQuoteCorrection(msgs[lastQuoteIdx], text);
+    } else if (ecommAllowed && (isEcommQuoteRequest(text) || (hasPriorQuote && !zohoTookOver && isQuoteFollowUp(text)))) {
+      if (!overrideText) setInput('');
+      runAndPushQuote(text, {
+        priorQuoteText: (mxEditionCorrection || hasPriorQuote && isQuoteFollowUp(text))
+          ? messageHistoryText(msgs[lastQuoteIdx]) : null,
+        editable: true,
+        source: 'chat-quote',
+      });
     } else {
       handleSendMessage(overrideText);
     }

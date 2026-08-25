@@ -102,7 +102,8 @@ test('eligible correction bypasses CRM even on Zoho before takeover, but never a
   assert.ok(/mxEditionCorrection/.test(segment), 'MX correction gate missing');
   assert.ok(/const mxEditionCorrection = hasPriorQuote && !zohoTookOver && isMxEditionQuoteFollowUp\(text\)/.test(segment), 'correction is not bounded by prior quote + takeover');
   assert.ok(/const ecommAllowed = mxEditionCorrection \|\| !onZohoRecord \|\| isExplicitEcommUrlAsk\(text\)/.test(segment), 'Zoho-page exception is not limited to the correction gate');
-  assert.ok(/runAndPushQuote\(text, \{ priorQuoteText: mxEditionCorrection/.test(segment), 'correction does not call deterministic quote helper');
+  assert.ok(/const quoteEditorCorrection = hasPriorQuote && !zohoTookOver && isQuoteEditorCorrectionRequest\(text\)/.test(segment), 'template correction gate missing');
+  assert.ok(/else if \(quoteEditorCorrection\).*?applyNaturalLanguageQuoteCorrection/s.test(segment), 'correction does not rebuild the current editable quote');
 });
 
 test('no deterministic quote result can auto-open the one-shot plan route', () => {
