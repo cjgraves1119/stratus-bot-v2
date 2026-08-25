@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { verifyStratusOrderUrlOptions } from '../chrome-extension/src/lib/email-quote-flow.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -312,4 +313,31 @@ test('/api/quote preserves reviewed row tiers and editor resolution markers', as
   assert.equal(row.requestedTier, 'ENT');
   assert.equal(row.licenseOnly, true);
   assert.equal(row.resolvedSku, 'LIC-MX67-ENT-3YR');
+});
+
+test('Omaha Zoo multi-EOL renewal publishes every trusted refresh alternative', async () => {
+  const committed = [
+    { sku: 'LIC-MS120-24P-3YR', qty: 1 },
+    { sku: 'LIC-MX67-SEC-3YR', qty: 2 },
+    { sku: 'LIC-MX67C-SEC-3YR', qty: 1 },
+    { sku: 'LIC-ENT-3YR', qty: 193 },
+    { sku: 'LIC-MS220-8P-3YR', qty: 1 },
+    { sku: 'LIC-MS120-8-3YR', qty: 3 },
+    { sku: 'LIC-MS210-24P-3YR', qty: 1 },
+  ];
+  const result = await quote(committed.map(({ sku, qty }) => `${sku} x${qty}`).join(', '));
+  const refresh = result.quoteUrls.filter((option) => option.optionKind === 'eol_refresh');
+  assert.equal(refresh.length, 6, JSON.stringify(result.quoteUrls));
+  assert.deepEqual(
+    [...new Set(refresh.map((option) => option.optionGroupId))].sort(),
+    ['eol-refresh-10g', 'eol-refresh-1g'],
+  );
+
+  const checked = verifyStratusOrderUrlOptions(result.quoteUrls, committed);
+  assert.equal(checked.ok, true, checked.error);
+  const publishedRefresh = checked.urls.filter((option) => option.optionKind === 'eol_refresh');
+  assert.equal(publishedRefresh.length, 6, JSON.stringify({
+    published: checked.urls.map((option) => option.label),
+    dropped: checked.dropped,
+  }));
 });

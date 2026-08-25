@@ -675,6 +675,42 @@ const REAL_PIPELINE_CASES = [
   eolDirectLicenseCase('SEC', 'YR'),
   eolDirectLicenseCase('SDW', 'Y'),
   {
+    name: 'Omaha Zoo multi-EOL renewal keeps both 1G and 10G refresh choices',
+    rows: [
+      { sku: 'LIC-MS120-24P-3YR', qty: 1 },
+      { sku: 'LIC-MX67-SEC-3YR', qty: 2 },
+      { sku: 'LIC-MX67C-SEC-3YR', qty: 1 },
+      { sku: 'LIC-ENT-3YR', qty: 193 },
+      { sku: 'LIC-MS220-8P-3YR', qty: 1 },
+      { sku: 'LIC-MS120-8-3YR', qty: 3 },
+      { sku: 'LIC-MS210-24P-3YR', qty: 1 },
+    ],
+    sourceText: 'renew the listed Omaha Zoo estate as-is and show EOL refresh alternatives',
+    stageLabel: 'worker-multi-eol-extension-contract',
+    check: (outcome) => {
+      const failures = [];
+      if (!outcome.ok) failures.push(`multi-EOL options did not verify: ${outcome.error || 'unknown failure'}`);
+      const renewals = (outcome.options || []).filter((option) => option.optionKind !== 'eol_refresh');
+      const refresh = (outcome.options || []).filter((option) => option.optionKind === 'eol_refresh');
+      if (renewals.length !== 3) failures.push(`expected 3 renewals, got ${renewals.length}`);
+      if (refresh.length !== 6) failures.push(`expected 6 refresh choices, got ${refresh.length}`);
+      const groups = [...new Set(refresh.map((option) => option.optionGroupId))].sort();
+      if (JSON.stringify(groups) !== JSON.stringify(['eol-refresh-10g', 'eol-refresh-1g'])) {
+        failures.push(`refresh groups changed: ${JSON.stringify(groups)}`);
+      }
+      for (const term of PIPELINE_TERMS) {
+        const termRefresh = refresh.filter((option) => Number(option.termYears) === term);
+        if (termRefresh.length !== 2) failures.push(`${term}Y did not retain both uplink alternatives`);
+        for (const option of termRefresh) {
+          if (qtyInPipelineOption(option, new RegExp(`^LIC-ENT-${term}YR$`)) !== 193) {
+            failures.push(`${term}Y ${option.optionGroupId} lost LIC-ENT x193`);
+          }
+        }
+      }
+      return failures;
+    },
+  },
+  {
     name: 'tampered structured EOL transforms are dropped while Renew As-Is stays usable',
     rows: [
       { sku: 'LIC-ENT-3YR', qty: 2 },

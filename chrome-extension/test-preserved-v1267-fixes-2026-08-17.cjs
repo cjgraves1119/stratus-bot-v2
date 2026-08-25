@@ -19,7 +19,7 @@ const { manifestForTarget, resolveBuildTarget } = require("./release-targets.cjs
 
 assert.equal(manifest.name, "Stratus AI");
 assert.equal(manifest.action.default_title, "Stratus AI");
-assert.equal(manifest.version, "1.29.11");
+assert.equal(manifest.version, "1.29.12");
 assert.equal(manifest.update_url, "https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml");
 assert.ok(manifest.optional_host_permissions.includes("https://stratusinfosystems.com/*"));
 assert.ok(manifest.optional_host_permissions.includes("https://www.stratusinfosystems.com/*"));
@@ -27,7 +27,7 @@ assert.ok(manifest.optional_host_permissions.includes("https://www.stratusinfosy
 const snapshotManifest = manifestForTarget(manifest, resolveBuildTarget("snapshot-dev", { environment: {} }));
 assert.equal(snapshotManifest.name, "Stratus AI (DEV)");
 assert.equal(snapshotManifest.action.default_title, "Stratus AI (DEV)");
-assert.equal(snapshotManifest.version, "1.29.11");
+assert.equal(snapshotManifest.version, "1.29.12");
 assert.match(app, /DEV v\$\{chrome\.runtime\.getManifest\(\)\.version\}/);
 assert.equal(Object.hasOwn(snapshotManifest, "update_url"), false);
 assert.ok(snapshotManifest.optional_host_permissions.includes("https://stratusinfosystems.com/*"));

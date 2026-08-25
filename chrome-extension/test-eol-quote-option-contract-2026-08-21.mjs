@@ -153,6 +153,44 @@ test('explicit committed terms are safely restated for each structured option te
   assert.equal(result.ok, true, result.error);
 });
 
+test('legacy untiered switch renewals may migrate only to the replacement Essentials tier', () => {
+  const legacyCommitted = [{ sku: 'LIC-MS120-24P-3YR', qty: 1 }];
+  const option = {
+    label: 'Hardware Refresh — 3-Year',
+    optionKind: 'eol_refresh',
+    optionGroupId: 'eol-refresh',
+    termYears: 3,
+    url: 'https://stratusinfosystems.com/order/?item=MS130-24P,LIC-MS130-24-3Y&qty=1,1',
+    verification: {
+      schema: 'quote-option-v1',
+      mode: 'eol_transform',
+      sourceLines: legacyCommitted,
+      targetLines: [
+        { sku: 'MS130-24P', qty: 1 },
+        { sku: 'LIC-MS130-24-3Y', qty: 1 },
+      ],
+      replacements: [{
+        kind: 'eol_replace',
+        from: legacyCommitted,
+        to: [
+          { sku: 'MS130-24P', qty: 1, role: 'hardware' },
+          { sku: 'LIC-MS130-24-3Y', qty: 1, role: 'license' },
+        ],
+      }],
+    },
+  };
+  const essentials = verifyStratusOrderUrlOptions([option], legacyCommitted);
+  assert.equal(essentials.ok, true, essentials.error);
+
+  const advanced = clone(option);
+  advanced.url = 'https://stratusinfosystems.com/order/?item=MS130-24P,LIC-MS130-24A-3Y&qty=1,1';
+  advanced.verification.targetLines[1].sku = 'LIC-MS130-24A-3Y';
+  advanced.verification.replacements[0].to[1].sku = 'LIC-MS130-24A-3Y';
+  const rejected = verifyStratusOrderUrlOptions([advanced], legacyCommitted);
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /changed the committed license tier/i);
+});
+
 test('hardware-origin EOL transform consumes hardware without double-counting a paired old license', () => {
   const hardwareOnlySource = hardwareOriginRefresh();
   const hardwareOnlyCommitted = [

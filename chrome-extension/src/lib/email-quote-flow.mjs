@@ -695,6 +695,19 @@ function contractLineTier(line) {
   return declared || encoded || '';
 }
 
+// Legacy Meraki switch licences did not encode an Essentials/Advanced tier in
+// their SKU. Their current MS130/MS150/Catalyst replacements do, and the
+// deterministic EOL mapper uses Essentials when the old row carried no tier.
+// Keep this whitelist narrow: an unscoped MX/Z/MG source must never be allowed
+// to acquire a tier merely because a transform contract says so.
+function legacySwitchSourceMayDefaultToEssentials(lines) {
+  const values = (Array.isArray(lines) ? lines : [])
+    .map((line) => canonicalOrderCompositionSku(line?.sku));
+  return values.length > 0 && values.every((sku) => (
+    /^(?:LIC-)?MS(?:120|125|210|220|225|250|320|350|355|390|410|420|425)-/.test(sku)
+  ));
+}
+
 function invalidEolTransform(error, expectedLines = [], urlLines = []) {
   return unusableOrderUrl(
     'invalid_eol_transform_verification',
@@ -865,6 +878,8 @@ function verifyStructuredEolTransformOption(option, rawUrl, committedLines, requ
     }
 
     const sourceTier = [...sourceTiers][0] || '';
+    const sourceMayDefaultToEssentials = !sourceTier
+      && legacySwitchSourceMayDefaultToEssentials(from.lines);
     const hardwareOnlyReplacement = !rawTo.some((line) => line?.role === 'license');
     if (hardwareOnlyReplacement
       ? replacement.hardwareOnly !== true
@@ -930,7 +945,9 @@ function verifyStructuredEolTransformOption(option, rawUrl, committedLines, requ
       ? targetTiers.size !== 0
       : (sourceTier
         ? targetTiers.size !== 1 || !targetTiers.has(sourceTier)
-        : targetTiers.size !== 0))) {
+        : sourceMayDefaultToEssentials
+          ? targetTiers.size !== 1 || !targetTiers.has('E')
+          : targetTiers.size !== 0))) {
       return invalidEolTransform(`replacement ${displayIndex} changed the committed license tier.`, source.lines, target.lines);
     }
   }
