@@ -7,6 +7,11 @@
 
 import { ZOHO } from '../lib/constants.js';
 import { getSettings, getZohoTokens, saveZohoTokens, clearZohoTokens, getLocalStorage, setLocalStorage } from '../lib/storage.js';
+import {
+  extractZohoAuthorizationCode,
+  formatZohoOAuthError,
+  normalizeZohoCredential,
+} from './zoho-oauth-utils.mjs';
 
 /**
  * Start Zoho OAuth flow.
@@ -14,8 +19,8 @@ import { getSettings, getZohoTokens, saveZohoTokens, clearZohoTokens, getLocalSt
  * @returns {Promise<{success: boolean, error?: string}>}
  */
 export async function startZohoAuth() {
-  const settings = await getSettings();
-  const { zohoClientId } = await getLocalStorage('zohoClientId');
+  const stored = await getLocalStorage('zohoClientId');
+  const zohoClientId = normalizeZohoCredential(stored.zohoClientId);
 
   if (!zohoClientId) {
     throw new Error('Zoho Client ID not configured. Set it in extension settings.');
@@ -45,12 +50,7 @@ export async function startZohoAuth() {
       );
     });
 
-    // Extract authorization code from callback URL
-    const url = new URL(responseUrl);
-    const code = url.searchParams.get('code');
-    if (!code) {
-      throw new Error('No authorization code received from Zoho.');
-    }
+    const code = extractZohoAuthorizationCode(responseUrl, redirectUrl);
 
     // Exchange code for tokens
     await exchangeCodeForTokens(code, zohoClientId, redirectUrl);
@@ -58,15 +58,24 @@ export async function startZohoAuth() {
     return { success: true };
   } catch (err) {
     console.error('[Stratus Auth] OAuth flow failed:', err);
-    return { success: false, error: err.message };
+    const rawMessage = normalizeZohoCredential(err?.message);
+    const message = rawMessage.startsWith('Zoho ')
+      ? rawMessage
+      : formatZohoOAuthError({
+        data: { error: rawMessage },
+        redirectUri: redirectUrl,
+        phase: 'authorization',
+      });
+    return { success: false, error: message };
   }
 }
 
 /**
  * Exchange authorization code for access + refresh tokens.
  */
-async function exchangeCodeForTokens(code, clientId, redirectUri) {
-  const { zohoClientSecret } = await getLocalStorage('zohoClientSecret');
+export async function exchangeCodeForTokens(code, clientId, redirectUri) {
+  const stored = await getLocalStorage('zohoClientSecret');
+  const zohoClientSecret = normalizeZohoCredential(stored.zohoClientSecret);
   if (!zohoClientSecret) {
     throw new Error('Zoho Client Secret not configured.');
   }
@@ -85,10 +94,22 @@ async function exchangeCodeForTokens(code, clientId, redirectUri) {
     body: params.toString(),
   });
 
-  const data = await response.json();
+  const responseText = await response.text();
+  let data = {};
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    data = {};
+  }
 
-  if (data.error) {
-    throw new Error(`Zoho token exchange failed: ${data.error}`);
+  if (!response.ok || data.error || !data.access_token) {
+    throw new Error(formatZohoOAuthError({
+      data,
+      status: response.status,
+      statusText: response.statusText,
+      redirectUri,
+      phase: 'token',
+    }));
   }
 
   const tokens = {
@@ -128,8 +149,9 @@ export async function getValidZohoToken() {
  * Refresh an expired Zoho access token.
  */
 async function refreshZohoToken(refreshToken) {
-  const { zohoClientId } = await getLocalStorage('zohoClientId');
-  const { zohoClientSecret } = await getLocalStorage('zohoClientSecret');
+  const stored = await getLocalStorage(['zohoClientId', 'zohoClientSecret']);
+  const zohoClientId = normalizeZohoCredential(stored.zohoClientId);
+  const zohoClientSecret = normalizeZohoCredential(stored.zohoClientSecret);
 
   if (!zohoClientId || !zohoClientSecret) {
     throw new Error('Zoho credentials not configured.');
@@ -178,6 +200,7 @@ export async function getAuthStatus() {
     hasApiKey: !!settings.apiKey,
     zohoAuthenticated: !!tokens,
     zohoTokenExpired: tokens ? tokens.expiresAt < Date.now() : false,
+    zohoRedirectUrl: chrome.identity.getRedirectURL(),
     userEmail: settings.userEmail || '',
     userName: settings.userName || '',
   };

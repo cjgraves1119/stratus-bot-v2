@@ -38,21 +38,33 @@ export default function OptionsPage() {
   }
 
   async function handleSave() {
+    const normalizedClientId = zohoClientId.trim();
+    const normalizedClientSecret = zohoClientSecret.trim();
     setSaving(true);
     await saveSettings(settings);
-    await setLocalStorage({ zohoClientId, zohoClientSecret });
+    await setLocalStorage({ zohoClientId: normalizedClientId, zohoClientSecret: normalizedClientSecret });
+    setZohoClientId(normalizedClientId);
+    setZohoClientSecret(normalizedClientSecret);
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   }
 
   async function handleZohoConnect() {
-    if (!zohoClientId || !zohoClientSecret) {
+    const normalizedClientId = zohoClientId.trim();
+    const normalizedClientSecret = zohoClientSecret.trim();
+    if (!normalizedClientId || !normalizedClientSecret) {
       alert('Please enter Zoho Client ID and Client Secret first.');
       return;
     }
+    if (!normalizedClientId.startsWith('1000.') || /\s/.test(normalizedClientId)) {
+      alert('The Zoho Client ID should start with "1000." and must not contain spaces.');
+      return;
+    }
     // Save credentials first
-    await setLocalStorage({ zohoClientId, zohoClientSecret });
+    await setLocalStorage({ zohoClientId: normalizedClientId, zohoClientSecret: normalizedClientSecret });
+    setZohoClientId(normalizedClientId);
+    setZohoClientSecret(normalizedClientSecret);
 
     setZohoConnecting(true);
     const result = await sendToBackground(MSG.ZOHO_AUTH_START).catch((err) => ({ success: false, error: err.message }));
@@ -152,6 +164,28 @@ export default function OptionsPage() {
         </p>
         <Field label="Client ID" value={zohoClientId} onChange={setZohoClientId} placeholder="1000.XXXX..." />
         <Field label="Client Secret" value={zohoClientSecret} onChange={setZohoClientSecret} placeholder="abcd1234..." type="password" />
+
+        {authStatus?.zohoRedirectUrl && (
+          <div style={{ marginTop: 12, padding: 12, background: COLORS.BG_SECONDARY, border: `1px solid ${COLORS.BORDER}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.TEXT_PRIMARY, marginBottom: 6 }}>
+              Authorized Redirect URI
+            </div>
+            <code style={{ display: 'block', fontSize: 11, color: COLORS.TEXT_SECONDARY, overflowWrap: 'anywhere', marginBottom: 8 }}>
+              {authStatus.zohoRedirectUrl}
+            </code>
+            <p style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, margin: '0 0 8px' }}>
+              Register this exact value in the same Server-based client that supplied the Client ID and Client Secret above.
+            </p>
+            <button onClick={async () => {
+              await navigator.clipboard.writeText(authStatus.zohoRedirectUrl);
+            }} style={{
+              padding: '4px 10px', background: 'transparent', border: `1px solid ${COLORS.STRATUS_BLUE}`,
+              borderRadius: 4, fontSize: 11, color: COLORS.STRATUS_BLUE, cursor: 'pointer',
+            }}>
+              Copy Redirect URI
+            </button>
+          </div>
+        )}
 
         <div style={{ marginTop: 12 }}>
           {authStatus?.zohoAuthenticated ? (
