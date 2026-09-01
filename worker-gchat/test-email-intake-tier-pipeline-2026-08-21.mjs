@@ -478,6 +478,43 @@ test('a safe selected request ignores malformed historical thread URLs instead o
   ]);
 });
 
+test('descriptive Catalyst email becomes five exact quantity-two rows and routes the AO optic away from eCommerce', async () => {
+  const body = [
+    'Could I get another quote for the following:',
+    '2-Cisco Meraki Catalyst 9300L switch (C9300L-48P-4X-M)',
+    '2-(PWR-C1-715WAC-P-M) power supplies',
+    '2-(LIC-C9300-48E-3Y) licenses for the switches',
+    '2-Cisco Meraki stacking cable kit (C9300L-STAK-KIT2-M)',
+    '2-SFP + XCVR CISCO MA-SFP-10GB-SR COMP TAA (MA-SFP-10GB-SR-AO)',
+  ].join('\n');
+  const result = await runIntakePipeline(body);
+
+  assert.deepEqual(result.intake.lines.map(({ sku, qty, status }) => ({ sku, qty, status })), [
+    { sku: 'C9300L-48P-4X-M', qty: 2, status: 'resolved' },
+    { sku: 'PWR-C1-715WAC-P-M', qty: 2, status: 'resolved' },
+    { sku: 'LIC-C9300-48E-3Y', qty: 2, status: 'resolved' },
+    { sku: 'C9300L-STAK-KIT2-M', qty: 2, status: 'resolved' },
+    { sku: 'MA-SFP-10GB-SR-AO', qty: 2, status: 'resolved' },
+  ]);
+  assert.doesNotMatch(result.skuText, /\n2 MA-SFP-10GB-SR\n/);
+  assert.equal(result.built?.compositionBlocked, true);
+  assert.match(result.built?.message || '', /available through Zoho only/i);
+  assert.equal(result.options.length, 0, 'the Zoho-only AO optic must never publish an eCommerce URL');
+
+  const ecommResult = await runIntakePipeline(body.replaceAll('MA-SFP-10GB-SR-AO', 'MA-SFP-10GB-SR'));
+  assert.equal(ecommResult.ok, true, ecommResult.verified?.error || ecommResult.built?.message);
+  for (const option of licensedOptions(ecommResult)) {
+    const term = optionTerm(option.url);
+    const cart = cartOf(option.url);
+    assert.equal(cart.get('C9300L-48P-4X-M'), 2);
+    assert.equal(cart.get(`LIC-C9300-48E-${term}Y`), 2, 'explicit Catalyst licence is counted once');
+    assert.equal(cart.get('PWR-C1-715WAC-P-M'), 2);
+    assert.equal(cart.get('C9300L-STAK-KIT2-M'), 2);
+    assert.equal(cart.get('MA-SFP-10GB-SR'), 2);
+    assert.equal([...cart.keys()].some((sku) => sku.startsWith('LIC-C9300L-STAK')), false);
+  }
+});
+
 test('intake card visibly labels row tiers and gates unresolved rows', () => {
   const cardStart = CHAT_SOURCE.indexOf('function EmailQuoteIntakeCard(');
   const cardEnd = CHAT_SOURCE.indexOf('function OneshotZohoLookup(', cardStart);

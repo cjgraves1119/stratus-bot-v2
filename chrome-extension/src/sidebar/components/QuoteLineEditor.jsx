@@ -286,6 +286,12 @@ export default function QuoteLineEditor({
     cloneEolRefresh,
     cloneReplacementPath,
   ));
+  // A refresh clone can be started immediately. If the rep has not previewed
+  // it, runClones performs the identical read-only safety preview internally
+  // and writes only after that exact plan is complete. A visible incomplete
+  // preview remains a hard stop until the options change or it is re-run.
+  const cloneActionReady = cloneRequestReady
+    && (!cloneEolRefresh || clonePreviews === null || cloneWriteReady);
 
   // Same idea as QuoteResult.jsx:81's quoteActionsBlocked: uncommitted edits
   // invalidate every downstream artifact, so the customer-facing affordances
@@ -431,12 +437,42 @@ export default function QuoteLineEditor({
    * would leave duplicate quotes behind.
    */
   async function runClones() {
-    if (!onCloneTerms || !cloneWriteReady) return;
+    if (!onCloneTerms || !cloneRequestReady) return;
     setCloneBusy(true);
     setCloneNote('');
     setCloneResults(null);
-    setClonePreviews(null);
     try {
+      if (cloneEolRefresh && !refreshClonePreviewReady(
+        clonePreviews,
+        cloneTerms,
+        cloneEolRefresh,
+        cloneReplacementPath,
+      )) {
+        if (!handlers.current.onPreviewCloneTerms) {
+          setCloneNote('The required refresh safety preview is unavailable. Nothing was cloned.');
+          return;
+        }
+        const previewResponse = await handlers.current.onPreviewCloneTerms(
+          recordId,
+          cloneTerms,
+          cloneEolRefreshRequest(cloneEolRefresh, cloneReplacementPath),
+        );
+        if (previewResponse?.error) {
+          setCloneNote(`${previewResponse.error} Nothing was cloned.`);
+          return;
+        }
+        const previews = Array.isArray(previewResponse?.previews) ? previewResponse.previews : [];
+        setClonePreviews(previews);
+        if (!refreshClonePreviewReady(
+          previews,
+          cloneTerms,
+          cloneEolRefresh,
+          cloneReplacementPath,
+        )) {
+          setCloneNote('The automatic refresh safety preview was incomplete or unsupported. Nothing was cloned.');
+          return;
+        }
+      }
       const response = await handlers.current.onCloneTerms({
         recordId,
         terms: cloneTerms,
@@ -902,7 +938,7 @@ export default function QuoteLineEditor({
                   ? 'Refresh preview is complete. Review it below before cloning.'
                   : clonePreviews
                     ? 'Refresh preview is incomplete or unsupported. No quote can be created.'
-                    : 'Preview this exact refresh first. Clone unlocks only after every refresh plan is available and complete.'}
+                    : 'Clone runs this exact safety preview automatically. Use Preview if you want to review it first.'}
               </div>
             )}
           </div>
@@ -915,13 +951,13 @@ export default function QuoteLineEditor({
             )}
             <button
               type="button"
-              title="Create the previewed Zoho clone or clones"
+              title="Create the Zoho clone or clones after the refresh safety check"
               style={{
                 padding: '6px 12px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 700,
-                background: (busy || cloneBusy || !cloneWriteReady) ? '#9aa0a6' : ZOHO_PURPLE,
-                color: '#fff', cursor: (busy || cloneBusy || !cloneWriteReady) ? 'default' : 'pointer',
+                background: (busy || cloneBusy || !cloneActionReady) ? '#9aa0a6' : ZOHO_PURPLE,
+                color: '#fff', cursor: (busy || cloneBusy || !cloneActionReady) ? 'default' : 'pointer',
               }}
-              disabled={busy || cloneBusy || !cloneWriteReady}
+              disabled={busy || cloneBusy || !cloneActionReady}
               onClick={runClones}
             >
               {cloneBusy ? 'Cloning…' : `Clone ${cloneCount} quote${cloneCount === 1 ? '' : 's'}`}

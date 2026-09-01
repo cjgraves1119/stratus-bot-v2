@@ -214,6 +214,40 @@ global.fetch = async (url, options = {}) => {
     assert.deepStrictEqual(unexpectedNetwork, [], 'bundle regression attempted an external call');
   });
 
+  await test('/api/quote blocks the known Zoho-only AO optic while the standard optic remains eCommerce-capable', async () => {
+    const text = [
+      '2 C9300L-48P-4X-M',
+      '2 PWR-C1-715WAC-P-M',
+      '2 LIC-C9300-48E-3Y',
+      '2 C9300L-STAK-KIT2-M',
+      '2 MA-SFP-10GB-SR-AO',
+    ].join('\n');
+    const licenseIntents = [{ sku: 'LIC-C9300-48E-3Y', qty: 2, intent: 'paired' }];
+    const blocked = await callApi('/api/quote', {
+      text, licenseIntents, personId: 'catalyst-zoho-only-regression',
+    });
+    assert.strictEqual(blocked.status, 200, JSON.stringify(blocked.body));
+    assert.deepStrictEqual(blocked.body.quoteUrls, []);
+    assert.match(blocked.body.claudeResponse, /available through Zoho only/i);
+
+    const standard = await callApi('/api/quote', {
+      text: text.replace('MA-SFP-10GB-SR-AO', 'MA-SFP-10GB-SR'),
+      licenseIntents,
+      personId: 'catalyst-standard-optic-regression',
+    });
+    assert.strictEqual(standard.status, 200, JSON.stringify(standard.body));
+    assert.strictEqual(standard.body.quoteUrls.length, 3, JSON.stringify(standard.body));
+    for (const option of standard.body.quoteUrls) {
+      const rows = itemsFromUrl(option.url);
+      const quantities = new Map(rows.skus.map((sku, index) => [sku, rows.qtys[index]]));
+      assert.strictEqual(quantities.get('C9300L-48P-4X-M'), 2);
+      assert.strictEqual(quantities.get('PWR-C1-715WAC-P-M'), 2);
+      assert.strictEqual(quantities.get('C9300L-STAK-KIT2-M'), 2);
+      assert.strictEqual(quantities.get('MA-SFP-10GB-SR'), 2);
+      assert.strictEqual([...quantities].filter(([sku]) => /^LIC-C9300-48[AE]-/.test(sku)).length, 1);
+    }
+  });
+
   await test('generalized bundle invariant blocks a partial Catalyst + MT cart without requiring explicit scope words', () => {
     const raw = 'quote 1 C9300-24P-M and 1 MT12 3yr';
     const parsed = testApi.parseMessage(raw);

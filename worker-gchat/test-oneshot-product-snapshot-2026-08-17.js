@@ -102,6 +102,7 @@ function loadProductHelpers() {
     grab('oneshotLineIsHardwareOnly'),
     grab('oneshotProductPricingBlocker'),
     grab('quotedItemsFromOneshotProductRows'),
+    grab('isLicenseExemptAccessorySku'),
     grab('expandOneshotRequestedProducts'),
     grab('publicOneshotProductLines'),
     grab('oneshotProductBlockersFromSnapshot'),
@@ -201,6 +202,24 @@ function lookupSpy() {
       { sku: 'MX75', qty: 2 },
       { sku: 'LIC-MX75-SEC-3Y', qty: 2 },
     ]);
+  });
+
+  await check('Catalyst stack kits, power supplies, and SFPs never auto-add licences', () => {
+    const result = H.expandOneshotRequestedProducts({
+      ...baseInput,
+      skus: [
+        { sku: 'C9300L-STAK-KIT2-M', qty: 2 },
+        { sku: 'PWR-C1-715WAC-P-M', qty: 2 },
+        { sku: 'MA-SFP-10GB-SR-AO', qty: 2 },
+      ],
+    });
+    assert.strictEqual(result.success, true, JSON.stringify(result.blockers));
+    assert.deepStrictEqual(result.lines, [
+      { sku: 'C9300L-STAK-KIT2-M', qty: 2 },
+      { sku: 'MA-SFP-10GB-SR-AO', qty: 2 },
+      { sku: 'PWR-C1-715WAC-P-M', qty: 2 },
+    ]);
+    assert.ok(!result.lines.some((line) => line.sku.startsWith('LIC-')));
   });
 
   await check('explicit compatible MX ENT tier suppresses default SEC in either input order', () => {

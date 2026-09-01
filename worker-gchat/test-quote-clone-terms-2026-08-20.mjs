@@ -463,6 +463,46 @@ test('an EOL refresh preview is read-only and exposes the exact replacement plan
   );
 });
 
+test('Z3 Enterprise refreshes to the Z4 Security default instead of carrying the legacy tier', async () => {
+  const calls = stubZoho({
+    items: [
+      {
+        id: 'z3-hw',
+        Product_Name: { id: 'legacy-z3-product', Product_Code: 'Z3-HW' },
+        Quantity: 18,
+        List_Price: 500,
+        Discount: 0,
+        Description: 'End of Life Warning',
+        Sequence_Number: 1,
+      },
+      {
+        id: 'z3-ent',
+        Product_Name: {
+          id: String(CATALOG['LIC-Z3-ENT-3YR'].zoho_product_id),
+          Product_Code: 'LIC-Z3-ENT-3YR',
+        },
+        Quantity: 18,
+        List_Price: CATALOG['LIC-Z3-ENT-3YR'].list,
+        Discount: 0,
+        Description: 'End of Life Warning',
+        Sequence_Number: 2,
+      },
+    ],
+  });
+  const preview = await w.previewCloneQuoteWithTerm(SRC_ID, 3, ENV, {
+    eolRefresh: { enabled: true },
+  });
+
+  assert.equal(preview.available, true, preview.message);
+  assert.equal(preview.eol_refresh?.complete, true);
+  assert.deepEqual(
+    preview.eol_refresh.replacements[0].target_lines.map((line) => [line.sku, line.quantity]),
+    [['Z4-HW', 18], ['LIC-Z4-SEC-3Y', 18]],
+  );
+  assert.equal(calls.clones, 0);
+  assert.equal(calls.put, 0);
+});
+
 test('an ambiguous EOL switch path blocks before a clone exists', async () => {
   const calls = stubZoho({
     items: [

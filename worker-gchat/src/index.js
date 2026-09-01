@@ -365,6 +365,28 @@ function effectiveQuoteItemTier(item, items, globalTier) {
   return hasRowTier ? null : (globalTier || null);
 }
 
+// Physical accessories and field-replaceable components never derive a device
+// licence. Keep this narrow and SKU-shaped: it covers the accessory families
+// we sell plus Catalyst stack kits/network modules without turning ordinary
+// Catalyst hardware into hardware-only quotes.
+function isLicenseExemptAccessorySku(rawSku) {
+  const sku = String(rawSku || '').trim().toUpperCase();
+  if (!sku || sku.startsWith('LIC-')) return false;
+  return /^(?:MA|PWR|GLC|SFP|QSFP|CAB)-/.test(sku)
+    || /(?:^|-)(?:STA|STAK|STACK)-?KIT\d*(?:-|$)/.test(sku)
+    || /(?:^|-)NM-[A-Z0-9-]+$/.test(sku);
+}
+
+// Explicit exceptions confirmed to exist only as active Zoho Products, not as
+// eCommerce order-form rows. The live product-search route remains the general
+// authority; this narrow denylist prevents a raw /api/quote call from ever
+// publishing a storefront URL for a known Zoho-only part.
+const KNOWN_ZOHO_ONLY_SKUS = new Set(['MA-SFP-10GB-SR-AO']);
+
+function isKnownZohoOnlySku(rawSku) {
+  return KNOWN_ZOHO_ONLY_SKUS.has(String(rawSku || '').trim().toUpperCase());
+}
+
 function validateExplicitMxMsQuoteComposition(rawText, parsed, quoteUrls, validatedItems = []) {
   const explicitMode = explicitQuoteComposition(rawText);
 
@@ -443,6 +465,7 @@ function validateExplicitMxMsQuoteComposition(rawText, parsed, quoteUrls, valida
   for (const item of hardwareItems) {
     const base = String(item.baseSku || item.sku || '').toUpperCase();
     const qty = Number(item.qty) || 1;
+    const licenseExemptAccessory = isLicenseExemptAccessorySku(base);
     const wantsHardware = explicitMode === 'license-only'
       ? false
       : explicitMode === 'hardware-only'
@@ -459,9 +482,9 @@ function validateExplicitMxMsQuoteComposition(rawText, parsed, quoteUrls, valida
     }
 
     const itemTier = effectiveQuoteItemTier(item, parsedItems, parsed?.requestedTier);
-    const licenseOptions = getLicenseSkus(base, itemTier) || [];
+    const licenseOptions = licenseExemptAccessory ? [] : (getLicenseSkus(base, itemTier) || []);
     for (const lic of licenseOptions) expectedLicenseUniverse.add(String(lic.sku).toUpperCase());
-    if (!wantsLicense) continue;
+    if (!wantsLicense || licenseExemptAccessory) continue;
     const requestedTerm = Number(parsed?.requestedTerm) || null;
     const matchingOptions = requestedTerm
       ? licenseOptions.filter(lic => lic.term === `${requestedTerm}Y`)
@@ -2921,6 +2944,17 @@ function eolReplacementLicensePlan(baseSku, requestedTier) {
   };
 }
 
+// Z3/Z3C could only renew as Enterprise, but Z4/Z4C follow the current MX-like
+// default (Security). Carrying the legacy source tier onto a refresh silently
+// produces the wrong modern appliance bundle, so this one family transition
+// intentionally asks the replacement catalog for its default tier.
+function eolReplacementRequestedTier(sourceModel, replacementModel, requestedTier) {
+  const source = String(sourceModel || '').trim().toUpperCase();
+  const replacement = String(replacementModel || '').trim().toUpperCase();
+  if (/^Z3C?$/.test(source) && /^Z4C?$/.test(replacement)) return null;
+  return requestedTier || null;
+}
+
 function isHardwareOnlyQuoteIntent(text) {
   return /\b(hardware\s*only|hw\s*only|no\s+licen[cs]e|without\s+licen[cs]e|remove\s+(?:the\s+)?licen[cs]e|just\s+(?:the\s+)?hardware)\b/i.test(String(text || ''));
 }
@@ -4267,6 +4301,10 @@ function validateSku(baseSku) {
     return isEol(noHw) ? { valid: true, eol: true } : { valid: true };
   }
   if (/^MA-/.test(upper)) return { valid: true };
+  // Catalyst power supplies are catalog-backed accessories but live outside
+  // the hardware-family matrix. Accept only an exact embedded price-book key;
+  // arbitrary PWR-looking strings still fail closed.
+  if (/^(?:PWR|GLC|SFP|QSFP|CAB)-/.test(upper) && prices[upper]) return { valid: true };
   const family = detectFamily(upper);
   if (family && catalog[family]) {
     // Try partial string matching first
@@ -7500,6 +7538,7 @@ function parseMessage(text) {
     /C9[23]\d{2}[LX]?-[\dA-Z]+(?:-[\dA-Z]+)?-M(?:-O)?/gi,
     /C8[14]\d{2}-G2-MX/gi,
     /MA-[A-Z0-9-]+/gi,
+    /(?:PWR|GLC|SFP|QSFP|CAB)-[A-Z0-9-]+/gi,
     /CW9\d{3}[A-Z0-9]*/gi,
     /MS150-[\dA-Z]+-[\dA-Z]+/gi,
     /MS450-\d+/gi,
@@ -7797,6 +7836,22 @@ function buildQuoteResponse(parsed) {
   // Defensive: parseMessage returns null for non-quote inputs. Callers guard,
   // but null-safe here too so no caller can ever throw — route null → LLM.
   if (!parsed) return { message: null, needsLlm: true };
+  const zohoOnlyRequested = (Array.isArray(parsed?.items) ? parsed.items : [])
+    .map((item) => String(item?.baseSku || item?.sku || '').trim().toUpperCase())
+    .filter(isKnownZohoOnlySku);
+  if (zohoOnlyRequested.length > 0) {
+    const unique = [...new Set(zohoOnlyRequested)];
+    return {
+      message: `${unique.join(', ')} is available through Zoho only. No eCommerce quote link was generated; continue through the Zoho review-before-create flow.`,
+      needsLlm: false,
+      compositionBlocked: true,
+      recovery: {
+        kind: 'zoho_only_product',
+        code: 'zoho_review_required',
+        skus: unique,
+      },
+    };
+  }
   // Internal provenance records. Only the /api/quote boundary exposes these,
   // and only after attachTrustedQuoteOptionContracts revalidates them against
   // the current checkEol map and the exact generated order URL.
@@ -8326,7 +8381,9 @@ function buildQuoteResponse(parsed) {
       }
     }
     const hwSku = applySuffix(baseSku);
-    const licenseSkus = getLicenseSkus(baseSku, itemTier);
+    const licenseSkus = isLicenseExemptAccessorySku(baseSku)
+      ? null
+      : getLicenseSkus(baseSku, itemTier);
     const resItem = { baseSku, hwSku, qty, licenseSkus, eol: false, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, requestedTier: itemTier };
     resolvedItems.push(resItem);
     ordered.push({ kind: 'resolved', ref: resItem });
@@ -8899,8 +8956,8 @@ function buildQuoteResponse(parsed) {
     // These don't have term-based licensing, so showing 3 identical URLs (1Y/3Y/5Y) is noise.
     // (Ported from worker/ to fix the gchat-only accessory term-split bug; keeps engines in parity.)
     const allAccessories = resolvedItems.every(item =>
-      (!item.licenseSkus || item.licenseSkus.length === 0) &&
-      (item.baseSku?.toUpperCase().startsWith('MA-') || item.hwSku?.toUpperCase().startsWith('MA-'))
+      (!item.licenseSkus || item.licenseSkus.length === 0)
+      && isLicenseExemptAccessorySku(item.baseSku || item.hwSku)
     );
 
     if (allAccessories) {
@@ -11076,6 +11133,7 @@ function expandOneshotRequestedProducts(input) {
     }
     expanded.push(line);
     if (!includeLicenses) continue;
+    if (isLicenseExemptAccessorySku(rawSku)) continue;
     if (oneshotLineIsHardwareOnly(rawSku, hardwareOnlyKeys)) continue;
     const candidate = selectOneshotLicenseSku(rawSku, term, line.tier || null);
     if (candidate
@@ -12947,11 +13005,22 @@ function matchingOneshotIntakeOrderUrl(orderUrls, literalLines, selectedRequestT
 }
 
 function normalizeOneshotRequestText(value) {
-  return String(value || '')
+  const parentheticalSku = /\(\s*((?:(?:LIC|MA|PWR|GLC|SFP|QSFP|CAB)-[A-Z0-9-]+)|(?:(?:MX|MR|MS|MV|MT|MG|CW|C9|C8|Z)\d[A-Z0-9-]*))\s*\)/gi;
+  return String(value || '').split(/\r?\n/).map((line) => {
+    const quantity = line.match(/^\s*(\d{1,5})\s*[-\u2013\u2014]\s*/);
+    if (quantity) {
+      // Product descriptions often mention a shorter related SKU before the
+      // exact order code in parentheses. The last exact parenthetical token is
+      // the customer's committed line, so reduce the entire prose row to it.
+      const candidates = [...line.matchAll(parentheticalSku)];
+      const exact = candidates.at(-1)?.[1];
+      if (exact) return `${quantity[1]} ${exact.toUpperCase()}`;
+    }
     // Common email-list syntax: "2 - MX105". The general parser deliberately
     // avoids treating arbitrary dash-delimited numbers as quantities, so make
     // this narrow SKU-adjacent form explicit for the intake surface.
-    .replace(/\b(\d{1,5})\s*[-\u2013\u2014]\s*((?:MX|MR|MS|MV|MT|MG|CW|C9|C8|Z)\d[A-Z0-9-]*)\b/gi, '$1 $2');
+    return line.replace(/\b(\d{1,5})\s*[-\u2013\u2014]\s*((?:MX|MR|MS|MV|MT|MG|CW|C9|C8|Z)\d[A-Z0-9-]*)\b/gi, '$1 $2');
+  }).join('\n');
 }
 
 function selectOneshotRequestedMessage(messages, fallbackBody) {
@@ -12973,7 +13042,7 @@ function selectOneshotRequestedMessage(messages, fallbackBody) {
       const purchaseIntent = /\b(?:order|purchase|buy|need\s+to\s+order)\b/i.test(body);
       const explicitQuote = directQuoteRequest || purchaseIntent;
       const hardwareOnly = /\b(?:hardware\s+only|no\s+licen[sc]e|without\s+licen[sc]e|just\s+the\s+hardware)\b/i.test(body);
-      const skuCount = (body.match(/\b(?:MX|MR|MS|MV|MT|MG|CW|C9|C8|Z)\d[A-Z0-9-]*\b/gi) || []).length;
+      const skuCount = (body.match(/\b(?:(?:LIC|MA|PWR|GLC|SFP|QSFP|CAB)-[A-Z0-9-]+|(?:MX|MR|MS|MV|MT|MG|CW|C9|C8|Z)\d[A-Z0-9-]*)\b/gi) || []).length;
       return {
         body,
         from_email: fromEmail,
@@ -16943,22 +17012,27 @@ async function classifyEolRefreshLines(quotedItems, targetTerm, env, { codeOf, r
         });
       }
       const requestedSourceTier = sourceTiers[0] || null;
-      const replacementLicensePlan = eolReplacementLicensePlan(replacementModel, requestedSourceTier);
+      const requestedReplacementTier = eolReplacementRequestedTier(
+        group.sourceModel,
+        replacementModel,
+        requestedSourceTier,
+      );
+      const replacementLicensePlan = eolReplacementLicensePlan(replacementModel, requestedReplacementTier);
       // The shared URL-option builder may retain a trusted hardware refresh with
       // an explicit review warning, but a CRM clone is a write-ready plan. Never
       // let its catalog fallback silently change an explicit source tier and
       // still report complete:true. Stop before cloneQuoteRecord() and expose
       // the exact fallback family only as review evidence.
-      if (requestedSourceTier && replacementLicensePlan.licenseReviewRequired === true) {
+      if (requestedReplacementTier && replacementLicensePlan.licenseReviewRequired === true) {
         const fallbackSkus = (replacementLicensePlan.licenseSkus || []).map((license) => license.sku);
-        const warning = `${group.sourceModel} -> ${replacementModel}: the explicit ${requestedSourceTier} tier is unavailable on the replacement family; the catalog default (${fallbackSkus.join(', ') || 'no replacement licence'}) requires review.`;
+        const warning = `${group.sourceModel} -> ${replacementModel}: the explicit ${requestedReplacementTier} tier is unavailable on the replacement family; the catalog default (${fallbackSkus.join(', ') || 'no replacement licence'}) requires review.`;
         return bad('eol_license_tier_review_required',
           `${warning} NOTHING was cloned and no fallback tier was selected.`, {
             replacements,
             unresolved: [{
               source_model: group.sourceModel,
               replacement_model: replacementModel,
-              requested_tier: requestedSourceTier,
+              requested_tier: requestedReplacementTier,
               fallback_license_skus: fallbackSkus,
             }],
             reviewWarnings: [...reviewWarnings, warning],

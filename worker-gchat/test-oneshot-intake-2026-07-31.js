@@ -386,6 +386,24 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
     assert.strictEqual(r.intent.hardware_only, false);
     assert.ok(L.normalizeOneshotRequestText('2 - MX105 and 2 - MX85').includes('2 MX105'));
   });
+  check('descriptive email rows keep their leading quantities and last exact parenthetical SKU', () => {
+    const L = loadIntake();
+    const normalized = L.normalizeOneshotRequestText([
+      '2-Cisco Meraki Catalyst switch (C9300L-48P-4X-M)',
+      '2-(PWR-C1-715WAC-P-M) power supplies',
+      '2-(LIC-C9300-48E-3Y) licenses',
+      '2-Cisco stacking cable kit (C9300L-STAK-KIT2-M)',
+      '2-SFP + XCVR CISCO MA-SFP-10GB-SR COMP TAA (MA-SFP-10GB-SR-AO)',
+    ].join('\n'));
+    assert.strictEqual(normalized, [
+      '2 C9300L-48P-4X-M',
+      '2 PWR-C1-715WAC-P-M',
+      '2 LIC-C9300-48E-3Y',
+      '2 C9300L-STAK-KIT2-M',
+      '2 MA-SFP-10GB-SR-AO',
+    ].join('\n'));
+    assert.ok(!normalized.includes('\n2 MA-SFP-10GB-SR\n'), 'the descriptive standard SFP must not become a duplicate row');
+  });
   check('an approval plus a genuine new quote ask remains eligible as the current request', () => {
     const L = loadIntake();
     const selected = L.selectOneshotRequestedMessage([

@@ -949,7 +949,7 @@ test('clone refresh request logic is narrow and never increases selected-term cl
   assert.equal(eolReplacementDescription({ description: 'Replaces EOL MX100' }, {}), 'Replaces EOL MX100');
 });
 
-test('the clone term and EOL refresh card is gated and never auto-retried', () => {
+test('the clone term and EOL refresh card auto-previews safely and never auto-retries a write', () => {
   const source = fs.readFileSync(EDITOR_PATH, 'utf8');
   // Terms offered, matching the worker's CLONE_TERM_ALLOWED.
   assert.match(source, /const CLONE_TERMS = \[1, 3, 5, 7, 10\]/);
@@ -957,9 +957,10 @@ test('the clone term and EOL refresh card is gated and never auto-retried', () =
   assert.match(source, /const \[cloneEolRefresh, setCloneEolRefresh\] = useState\(false\)/);
   assert.match(source, /const cloneRequestReady = cloneCount > 0/);
   assert.match(source, /const cloneWriteReady = cloneRequestReady && \(!cloneEolRefresh \|\| refreshClonePreviewReady\(/);
-  assert.match(source, /if \(!onCloneTerms \|\| !cloneWriteReady\) return/);
+  assert.match(source, /const cloneActionReady = cloneRequestReady/);
+  assert.match(source, /if \(!onCloneTerms \|\| !cloneRequestReady\) return/);
   assert.match(source, /disabled=\{busy \|\| cloneBusy \|\| !cloneRequestReady\}/);
-  assert.match(source, /disabled=\{busy \|\| cloneBusy \|\| !cloneWriteReady\}/);
+  assert.match(source, /disabled=\{busy \|\| cloneBusy \|\| !cloneActionReady\}/);
   assert.match(source, /aria-label="Include end-of-life equipment refresh"/);
   assert.match(source, /aria-label="EOL replacement path preference"/);
   assert.match(source, /<option value="1g">Prefer 1G replacement<\/option>/);
@@ -967,7 +968,9 @@ test('the clone term and EOL refresh card is gated and never auto-retried', () =
   assert.match(source, /cloneEolRefreshRequest\(cloneEolRefresh, cloneReplacementPath\)/);
   assert.match(source, /Replacement line descriptions always name the retired model as "Replaces EOL \[model\]"/);
   assert.match(source, /Refresh preview is incomplete or unsupported\. No quote can be created\./);
-  assert.match(source, /Preview this exact refresh first\. Clone unlocks only after every refresh plan is available and complete\./);
+  assert.match(source, /Clone runs this exact safety preview automatically\. Use Preview if you want to review it first\./);
+  assert.match(source, /const previewResponse = await handlers\.current\.onPreviewCloneTerms/);
+  assert.match(source, /automatic refresh safety preview was incomplete or unsupported\. Nothing was cloned\./);
   // A clone creates records, so it must never be retried automatically: a
   // retry after a partial failure would leave duplicate quotes behind.
   const runClones = source.slice(source.indexOf('async function runClones()'));

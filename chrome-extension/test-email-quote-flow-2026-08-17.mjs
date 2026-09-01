@@ -59,7 +59,8 @@ test('visible Create Quote opens a manual builder; Gmail population is separate 
   assert.match(intake, /order_urls: validation\.orderUrls/);
   assert.match(intake, /messages: \(Array\.isArray\(quoteContext\.messageContexts\)/);
   assert.match(intake, /intent: res\.intent \|\| null/);
-  assert.match(intake, /quoteEditorRowsFromIntake\(res\.lines \|\| \[\], res\.intent \|\| \{\}\)/);
+  assert.match(intake, /quoteEditorRowsFromIntake\(intakeLines, res\.intent \|\| \{\}\)/);
+  assert.match(intake, /availabilityBySku/);
   assert.match(chatSource, />\s*\{msg\.gmailPopulated \? 'Gmail context populated' : 'Populate from Gmail context'\}/);
   assert.match(chatSource, /quoteUpdateLabel=[\s\S]{0,500}'Generate quote'/);
   assert.doesNotMatch(intake, /handleSend\(/);

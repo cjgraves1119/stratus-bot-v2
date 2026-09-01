@@ -55,12 +55,17 @@ export function editableRowsFromResult(result) {
         SDW: 'sdwan', SDWAN: 'sdwan', SDWANPLUS: 'sdwan',
         A: 'advanced', ADV: 'advanced', ADVANCED: 'advanced', ADVANTAGE: 'advanced',
       })[rawTier] || '');
+    const rawAvailability = String(item?.availability || '').trim().toLowerCase();
+    const availability = ['ecomm', 'zoho_only'].includes(rawAvailability) ? rawAvailability : '';
+    const productSource = String(item?.productSource || item?.product_source || '').trim();
     return {
       sku,
       qty: Number(item?.qty ?? item?.quantity) || 1,
       unresolved: unresolved.has(sku) || unresolved.has(typedSku),
       synthetic: isSyntheticAgnosticSku(sku),
       ...(tier ? { tier } : {}),
+      ...(availability ? { availability } : {}),
+      ...(productSource ? { productSource } : {}),
       ...(resolvedSku && resolvedSku !== typedSku ? { typedSku } : {}),
     };
   }).filter((row) => row.sku);
@@ -98,10 +103,20 @@ export function quoteEditorRowsFromIntake(lines, intent = {}) {
       String(candidate?.sku || '').trim().toUpperCase() === line.sku
       && (!line.tier || String(candidate?.tier || '').trim().toUpperCase() === line.tier)
     ));
+    const availability = matchingSource.some((candidate) => candidate?.availability === 'zoho_only')
+      ? 'zoho_only'
+      : (matchingSource.length > 0 && matchingSource.every((candidate) => candidate?.availability === 'ecomm')
+        ? 'ecomm'
+        : '');
+    const productSource = matchingSource
+      .map((candidate) => String(candidate?.productSource || candidate?.product_source || '').trim())
+      .find(Boolean) || '';
     return {
       baseSku: line.sku,
       qty: line.qty,
       ...(line.tier ? { tier: line.tier } : {}),
+      ...(availability ? { availability } : {}),
+      ...(productSource ? { productSource } : {}),
       ...((intent?.hardware_only === true || matchingSource.some((candidate) => candidate?.hardwareOnly === true))
         ? { hardwareOnly: true }
         : {}),
@@ -261,10 +276,20 @@ export function licenseTierModifier(value) {
   return found ? found.modifier : null;
 }
 
+/** Physical accessory rows do not own device licences or tier selectors. */
+export function isLicenseExemptAccessorySku(rawSku) {
+  const sku = String(rawSku || '').trim().toUpperCase();
+  if (!sku || sku.startsWith('LIC-')) return false;
+  return /^(?:MA|PWR|GLC|SFP|QSFP|CAB)-/.test(sku)
+    || /(?:^|-)(?:STA|STAK|STACK)-?KIT\d*(?:-|$)/.test(sku)
+    || /(?:^|-)NM-[A-Z0-9-]+$/.test(sku);
+}
+
 /** Family used to decide which license-tier picks are valid on a row. */
 export function licenseFamilyForSku(sku) {
   const s = String(sku || '').trim().toUpperCase();
   if (!s || s.startsWith('LIC-') || isSyntheticAgnosticSku(s)) return 'license';
+  if (isLicenseExemptAccessorySku(s)) return 'unknown';
   if (/^MX/.test(s) || /^C(8111|8121|8455)/.test(s)) return 'mx';
   if (/^Z\d/.test(s)) return 'z';
   if (/^MR/.test(s)) return 'mr';
@@ -335,13 +360,14 @@ export function licenseTierValueFromMode(tier) {
  * This is intentionally stricter than the Worker's general SKU parsing. A
  * shared family licence such as LIC-ENT-3YR does not name the device it covers,
  * so the review UI must not claim that it is paired with one particular MR or
- * CW row. This first review contract is MX-only: legacy Z models have a
- * different blank-tier default from Z4, which cannot be inferred safely from
- * licenseFamilyForSku() alone.
+ * CW row. Device-specific MX and Catalyst 9K licences are reviewable; legacy Z
+ * models remain outside this contract because their blank-tier defaults differ.
  */
 export function deviceLicenseTierFromSku(sku) {
   const value = String(sku || '').trim().toUpperCase();
   if (!value.startsWith('LIC-')) return '';
+  const catalyst = value.match(/^LIC-C9\d{3}-\d+(A|E)-\d+Y$/);
+  if (catalyst) return catalyst[1] === 'A' ? 'advanced' : 'standard';
   const segments = value.slice(4).split('-').filter(Boolean);
   if (segments.includes('ENT') || segments.includes('ENTERPRISE')) return 'enterprise';
   if (segments.includes('SEC') || segments.includes('SECURITY')) return 'security';
@@ -352,8 +378,13 @@ export function deviceLicenseTierFromSku(sku) {
 /** Effective reviewed tier for hardware whose concrete licence can be paired. */
 export function effectivePairableHardwareTier(row) {
   const family = licenseFamilyForSku(row?.sku);
-  if (family !== 'mx') return '';
   const selected = String(row?.tier || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (family === 'c9') {
+    if (!selected || selected === 'standard' || selected === 'essentials' || selected === 'e') return 'standard';
+    if (selected === 'advanced' || selected === 'advantage' || selected === 'adv' || selected === 'a') return 'advanced';
+    return '';
+  }
+  if (family !== 'mx') return '';
   if (!selected) return 'security';
   if (selected === 'enterprise' || selected === 'ent') return 'enterprise';
   if (selected === 'security' || selected === 'sec' || selected === 'advancedsecurity') return 'security';
@@ -380,7 +411,7 @@ function uniqueReviewSkus(rows, indexes) {
  * recomputes the review and stale "paired" state cannot survive an edit.
  *
  * Pairing is conservative:
- * - only MX device-specific licences participate;
+ * - only MX and Catalyst 9K device-specific licences participate;
  * - device identity and effective tier must match;
  * - duplicate rows aggregate, but multiple distinct licence products (for
  *   example mixed 1YR and 3YR terms) are a mismatch rather than one pair;
@@ -412,9 +443,9 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
     const tier = deviceLicenseTierFromSku(sku);
     if (!tier) return;
     // licenseFamilyForSku() quite correctly calls every LIC-* row "license";
-    // inspect its device token to keep this visual contract MX-only.
+    // inspect its device token to keep this visual contract device-specific.
     const deviceFamily = licenseFamilyForSku(skuModelToken(sku));
-    if (deviceFamily !== 'mx') return;
+    if (deviceFamily !== 'mx' && deviceFamily !== 'c9') return;
     const matches = hardwareGroups.filter((candidate) => (
       candidate.tier === tier && sameDeviceIdentity(candidate.anchorSku, sku)
     ));
@@ -473,7 +504,10 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
 export function skuModelToken(sku) {
   const value = String(sku || '').toUpperCase().trim();
   if (!value) return '';
-  return (value.startsWith('LIC-') ? value.slice(4) : value).split('-')[0];
+  const token = (value.startsWith('LIC-') ? value.slice(4) : value).split('-')[0];
+  // C9300L hardware uses the C9300 licence family. Keep other suffix-bearing
+  // Catalyst families exact until their own catalogue relationship is proven.
+  return token === 'C9300L' ? 'C9300' : token;
 }
 
 /**

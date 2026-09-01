@@ -55,6 +55,28 @@ test('Gmail intake preserves per-row hardware-only intent and fails closed on ma
   ]), []);
 });
 
+test('Gmail intake preserves exact product availability so Zoho-only rows cannot publish eCommerce links', () => {
+  assert.deepEqual(quoteEditorRowsFromIntake([
+    {
+      status: 'resolved', sku: 'MA-SFP-10GB-SR-AO', qty: 2,
+      availability: 'zoho_only', productSource: 'zoho',
+    },
+    {
+      status: 'resolved', sku: 'MA-SFP-10GB-SR', qty: 2,
+      availability: 'ecomm', productSource: 'catalog',
+    },
+  ]), [
+    {
+      sku: 'MA-SFP-10GB-SR-AO', qty: 2, unresolved: false, synthetic: false,
+      availability: 'zoho_only', productSource: 'zoho',
+    },
+    {
+      sku: 'MA-SFP-10GB-SR', qty: 2, unresolved: false, synthetic: false,
+      availability: 'ecomm', productSource: 'catalog',
+    },
+  ]);
+});
+
 test('manual row order is preserved in the canonical quote request', () => {
   const ordered = quoteTextFromEditorRows([
     { sku: 'MR44', qty: 2 },
@@ -83,6 +105,8 @@ test('manual opening and Gmail population contain no quote, chat, or CRM executi
   assert.match(populate, /MSG\.GET_FULL_EMAIL_CONTEXT/);
   assert.match(populate, /MSG\.ONESHOT_INTAKE/);
   assert.match(populate, /quoteEditorHasSkuInput\(quoteDraftRows\(msg\)\)/);
+  assert.match(populate, /availabilityBySku/);
+  assert.match(populate, /searchQuoteProducts\(sku\)/);
   assert.match(populate, /quoteEditorRowsFromIntake/);
   assert.doesNotMatch(populate, /runQuote|buildEcommQuoteFromIntake|CHAT_HANDOFF|ONESHOT_PLAN|ONESHOT_EXECUTE/);
 });

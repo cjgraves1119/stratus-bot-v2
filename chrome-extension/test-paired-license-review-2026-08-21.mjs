@@ -106,6 +106,29 @@ test('matching device license requires an explicit use choice and supports addit
   assert.equal(quoteTextFromEditorRows(mixedQuantity, '').ok, true);
 });
 
+test('Catalyst 9300L hardware and its explicit Standard licence require one counted-once choice', () => {
+  const rows = [
+    { sku: 'C9300L-48P-4X-M', qty: 2 },
+    { sku: 'LIC-C9300-48E-3Y', qty: 2 },
+    { sku: 'C9300L-STAK-KIT2-M', qty: 2 },
+  ];
+  const review = licensePairReviewForRows(rows);
+  assert.deepEqual(review.map(({ kind }) => kind), ['needs_review', 'needs_review', 'none']);
+  assert.equal(review[0].tier, 'standard');
+  assert.equal(quoteTextFromEditorRows(rows, '').ok, false, 'generation waits for the pairing choice');
+
+  const paired = rows.map((row, index) => (index === 1 ? { ...row, licenseIntent: 'paired' } : row));
+  assert.deepEqual(licensePairReviewForRows(paired).map(({ kind }) => kind), ['paired', 'paired', 'none']);
+  const prepared = quoteTextFromEditorRows(paired, '');
+  assert.equal(prepared.ok, true, prepared.error);
+  assert.deepEqual(prepared.licenseIntents, [
+    { sku: 'LIC-C9300-48E-3Y', qty: 2, intent: 'paired' },
+  ]);
+
+  const wrongQuantity = rows.map((row, index) => (index === 1 ? { ...row, qty: 1 } : row));
+  assert.deepEqual(licensePairReviewForRows(wrongQuantity).map(({ kind }) => kind), ['mismatch', 'mismatch', 'none']);
+});
+
 test('reviewed warm-spare HA recognizes exact 2:1 coverage without weakening standard mode', () => {
   const rows = [
     { sku: 'MX67', qty: 2 },

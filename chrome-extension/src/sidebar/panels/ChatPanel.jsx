@@ -3960,15 +3960,39 @@ export default function ChatPanel({
         return;
       }
 
-      const rows = quoteEditorRowsFromIntake(res.lines || [], res.intent || {});
-      const unresolvedCount = (Array.isArray(res.lines) ? res.lines : [])
+      // Intake proves the SKU/quantity, while product search proves whether the
+      // exact active Product_Code is also on eCommerce. Preserve that proof on
+      // the editor row so a mixed cart containing a Zoho-only product can only
+      // continue through the Zoho review flow—never through an order URL.
+      const rawIntakeLines = Array.isArray(res.lines) ? res.lines : [];
+      const resolvedSkus = [...new Set(rawIntakeLines
+        .filter((line) => line?.status === 'resolved')
+        .map((line) => String(line?.sku || '').trim().toUpperCase())
+        .filter(Boolean))];
+      const availabilityBySku = new Map(await Promise.all(resolvedSkus.map(async (sku) => {
+        const search = await searchQuoteProducts(sku);
+        const exact = search?.ok === true
+          ? search.results.find((product) => product.active === true && product.sku === sku)
+          : null;
+        return [sku, exact ? { availability: exact.availability, productSource: exact.source } : null];
+      })));
+      const intakeLines = rawIntakeLines.map((line) => {
+        const sku = String(line?.sku || '').trim().toUpperCase();
+        const proof = line?.status === 'resolved' ? availabilityBySku.get(sku) : null;
+        return proof && ['ecomm', 'zoho_only'].includes(proof.availability)
+          ? { ...line, availability: proof.availability, productSource: proof.productSource || '' }
+          : line;
+      });
+
+      const rows = quoteEditorRowsFromIntake(intakeLines, res.intent || {});
+      const unresolvedCount = intakeLines
         .filter((line) => line?.status !== 'resolved').length;
       if (!rows.length) {
         updateMessage(msg.id, {
           busy: false,
           draftStatus: 'Gmail did not contain any safely resolved SKU rows. Enter or select the products manually.',
           intake: {
-            lines: res.lines || [], facts: res.facts || null, intent: res.intent || null,
+            lines: intakeLines, facts: res.facts || null, intent: res.intent || null,
             selected_message_index: res.selected_message_index ?? null,
             selected_message_from: res.selected_message_from || null,
             extract_error: res.extract_error || null,
@@ -3986,7 +4010,7 @@ export default function ChatPanel({
           ? `Populated ${rows.length} SKU line${rows.length === 1 ? '' : 's'} from Gmail. Review them, then generate the quote.`
           : `Populated ${rows.length} safely resolved Gmail SKU line${rows.length === 1 ? '' : 's'}; ${unresolvedCount} unresolved line${unresolvedCount === 1 ? '' : 's'} still need manual review.`,
         intake: {
-          lines: res.lines || [], facts: res.facts || null, intent: res.intent || null,
+          lines: intakeLines, facts: res.facts || null, intent: res.intent || null,
           selected_message_index: res.selected_message_index ?? null,
           selected_message_from: res.selected_message_from || null,
           extract_error: res.extract_error || null,
@@ -3996,7 +4020,7 @@ export default function ChatPanel({
           isrPrefill: res.isr_prefill || null,
           intent: res.intent || null,
         },
-        skuText: quoteSkuTextFromLines(res.lines || []),
+        skuText: quoteSkuTextFromLines(intakeLines),
         gmailPopulated: true,
         resultRevision: (current.resultRevision || 0) + 1,
         busy: false,
