@@ -96,10 +96,13 @@ test('default MR44 without advanced still emits LIC-ENT-*YR', () => {
   }
 });
 
-test('CW remains ENT and its editor does not offer unsupported Advanced', () => {
-  assert.deepEqual(skusOf(gchatLicenses('CW9164I', 'A')), ['LIC-ENT-1YR', 'LIC-ENT-3YR', 'LIC-ENT-5YR']);
+test('Meraki-managed CW916x supports MR Advanced while keeping ENT as default', () => {
+  assert.deepEqual(skusOf(gchatLicenses('CW9164I', null)), ['LIC-ENT-1YR', 'LIC-ENT-3YR', 'LIC-ENT-5YR']);
+  assert.deepEqual(skusOf(gchatLicenses('CW9164I', 'A')), ['LIC-MR-ADV-1Y', 'LIC-MR-ADV-3Y', 'LIC-MR-ADV-5Y']);
+  assert.deepEqual(skusOf(workerLicenses('CW9164I', 'A')), ['LIC-MR-ADV-1Y', 'LIC-MR-ADV-3Y', 'LIC-MR-ADV-5Y']);
   const values = licenseTierOptionsForSku('CW9164I').map(({ value }) => value);
-  assert.deepEqual(values, ['', 'enterprise', 'none']);
+  assert.deepEqual(values, ['', 'enterprise', 'advanced', 'none']);
+  assert.deepEqual(licenseTierOptionsForSku('CW9172I').map(({ value }) => value), ['', 'enterprise', 'none']);
 });
 
 test('MR Advanced verifier rejects ENT and accepts LIC-MR-ADV', () => {

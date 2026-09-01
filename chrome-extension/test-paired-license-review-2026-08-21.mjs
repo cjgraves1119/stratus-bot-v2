@@ -36,21 +36,35 @@ test('reported MX67 default-security shape marks one exact pair and leaves share
   assert.equal(review[2].role, 'license');
 });
 
-test('different ENT and SEC tiers remain unpaired instead of claiming coverage', () => {
+test('different ENT and SEC tiers remain unpaired and force review on the license', () => {
   assert.deepEqual(licensePairReviewForRows([
     { sku: 'MX67', qty: 1, tier: 'enterprise' },
     { sku: 'LIC-MX67-SEC-3YR', qty: 1 },
-  ]), [{ kind: 'none' }, { kind: 'none' }]);
+  ]).map(({ kind }) => kind), ['none', 'mismatch']);
 
   assert.deepEqual(licensePairReviewForRows([
     { sku: 'MX67', qty: 1, tier: 'security' },
     { sku: 'LIC-MX67-ENT-3YR', qty: 1 },
-  ]), [{ kind: 'none' }, { kind: 'none' }]);
+  ]).map(({ kind }) => kind), ['none', 'mismatch']);
 });
 
-test('ambiguous shared and legacy-family licenses stay outside the conservative MX pairing contract', () => {
+test('shared AP licenses review aggregate MR/CW916x coverage while legacy Z stays out', () => {
+  const enterprise = licensePairReviewForRows([
+    { sku: 'MR44', qty: 2 },
+    { sku: 'CW9164I', qty: 1 },
+    { sku: 'LIC-ENT-3YR', qty: 3 },
+  ]);
+  assert.deepEqual(enterprise.map(({ kind }) => kind), ['needs_review', 'needs_review', 'needs_review']);
+  assert.equal(enterprise[2].hardwareQty, 3);
+
+  const advanced = licensePairReviewForRows([
+    { sku: 'CW9164I', qty: 1, tier: 'advanced' },
+    { sku: 'LIC-MR-ADV-3Y', qty: 1, licenseIntent: 'paired' },
+  ]);
+  assert.deepEqual(advanced.map(({ kind }) => kind), ['paired', 'paired']);
+
   assert.deepEqual(licensePairReviewForRows([
-    { sku: 'MR44', qty: 1 },
+    { sku: 'CW9172I', qty: 1 },
     { sku: 'LIC-ENT-3YR', qty: 1 },
     { sku: 'Z3', qty: 1 },
     { sku: 'LIC-Z3-ENT-3YR', qty: 1 },
@@ -59,6 +73,46 @@ test('ambiguous shared and legacy-family licenses stay outside the conservative 
     { kind: 'none' },
     { kind: 'none' },
     { kind: 'none' },
+  ]);
+});
+
+test('pasted AP cart requires license-use review and rejects stale paired intent after a tier change', () => {
+  const rows = [
+    { sku: 'CW9164I', qty: 1 },
+    { sku: 'LIC-ENT-5YR', qty: 1 },
+  ];
+  const undecided = quoteTextFromEditorRows(rows, '');
+  assert.equal(undecided.ok, false);
+  assert.match(undecided.error, /device-associated or a standalone renewal/i);
+
+  const paired = quoteTextFromEditorRows([
+    rows[0],
+    { ...rows[1], licenseIntent: 'paired' },
+  ], '');
+  assert.equal(paired.ok, true, paired.error);
+  assert.deepEqual(paired.licenseIntents, [{ sku: 'LIC-ENT-5YR', qty: 1, intent: 'paired' }]);
+
+  const stale = quoteTextFromEditorRows([
+    { ...rows[0], tier: 'advanced' },
+    { ...rows[1], licenseIntent: 'paired' },
+  ], '');
+  assert.equal(stale.ok, false);
+  assert.match(stale.error, /does not match/i);
+
+  const tierMismatch = quoteTextFromEditorRows([
+    { ...rows[0], tier: 'advanced' },
+    rows[1],
+  ], '');
+  assert.equal(tierMismatch.ok, false, 'tier mismatch without a use choice must fail closed');
+  assert.match(tierMismatch.error, /does not match/i);
+
+  const intentionalStandalone = quoteTextFromEditorRows([
+    { ...rows[0], tier: 'advanced' },
+    { ...rows[1], licenseIntent: 'standalone' },
+  ], '');
+  assert.equal(intentionalStandalone.ok, true, intentionalStandalone.error);
+  assert.deepEqual(intentionalStandalone.licenseIntents, [
+    { sku: 'LIC-ENT-5YR', qty: 1, intent: 'standalone' },
   ]);
 });
 
@@ -127,6 +181,7 @@ test('Catalyst 9300L hardware and its explicit Standard licence require one coun
 
   const wrongQuantity = rows.map((row, index) => (index === 1 ? { ...row, qty: 1 } : row));
   assert.deepEqual(licensePairReviewForRows(wrongQuantity).map(({ kind }) => kind), ['mismatch', 'mismatch', 'none']);
+  assert.equal(quoteTextFromEditorRows(wrongQuantity, '').ok, false, 'quantity mismatch requires correction or standalone intent');
 });
 
 test('reviewed warm-spare HA recognizes exact 2:1 coverage without weakening standard mode', () => {
@@ -175,10 +230,21 @@ test('pairing is recomputed from edits and never changes quote serialization', (
 
   const quantityEdit = rows.map((row, index) => (index === 1 ? { ...row, qty: 2 } : row));
   assert.equal(licensePairReviewForRows(quantityEdit)[1].kind, 'mismatch');
-  assert.equal(quoteTextFromEditorRows(quantityEdit, '').text, '2 LIC-ENT-3YR\n2 MX67\n1 LIC-MX67-SEC-3YR');
+  assert.equal(quoteTextFromEditorRows(quantityEdit, '').ok, false, 'a changed hardware quantity must reopen license-use review');
+  const intentionalExtra = quantityEdit.map((row, index) => (
+    index === 2 ? { ...row, licenseIntent: 'standalone' } : row
+  ));
+  assert.equal(
+    quoteTextFromEditorRows(intentionalExtra, '').text,
+    '2 LIC-ENT-3YR\n2 MX67\n1 LIC-MX67-SEC-3YR',
+  );
 
   const tierEdit = rows.map((row, index) => (index === 1 ? { ...row, tier: 'enterprise' } : row));
-  assert.deepEqual(licensePairReviewForRows(tierEdit), [{ kind: 'none' }, { kind: 'none' }, { kind: 'none' }]);
+  assert.deepEqual(
+    licensePairReviewForRows(tierEdit).map(({ kind }) => kind),
+    ['none', 'none', 'mismatch'],
+  );
+  assert.equal(quoteTextFromEditorRows(tierEdit, '').ok, false, 'tier edits must reopen license-use review');
 });
 
 test('editor renders explicit pairing and mismatch explanations and still parses as JSX', () => {

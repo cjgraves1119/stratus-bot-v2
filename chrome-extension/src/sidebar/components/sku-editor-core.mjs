@@ -332,7 +332,12 @@ export function licenseTierOptionsForSku(sku) {
     case 'mr':
       return pick('enterprise', 'advanced', 'none');
     case 'cw':
-      return pick('enterprise', 'none');
+      // CW916x-MR runs in the Meraki wireless family and supports the same
+      // Enterprise / MR Advanced co-term choices as MR hardware. Keep other
+      // CW families on their existing licensing surface.
+      return /^CW916\d/i.test(String(sku || '').trim())
+        ? pick('enterprise', 'advanced', 'none')
+        : pick('enterprise', 'none');
     case 'ms':
     case 'c9':
       return pick('advanced', 'none');
@@ -357,15 +362,18 @@ export function licenseTierValueFromMode(tier) {
 /**
  * Concrete tier encoded by a device-specific licence SKU.
  *
- * This is intentionally stricter than the Worker's general SKU parsing. A
- * shared family licence such as LIC-ENT-3YR does not name the device it covers,
- * so the review UI must not claim that it is paired with one particular MR or
- * CW row. Device-specific MX and Catalyst 9K licences are reviewable; legacy Z
- * models remain outside this contract because their blank-tier defaults differ.
+ * This is intentionally stricter than the Worker's general SKU parsing.
+ * Shared AP licenses are identified by their exact catalog family and are
+ * reviewed against the aggregate eligible AP quantity, never one arbitrarily
+ * chosen model row. Device-specific MX and Catalyst 9K licences remain
+ * reviewable; legacy Z models stay outside this contract because their
+ * blank-tier defaults differ.
  */
 export function deviceLicenseTierFromSku(sku) {
   const value = String(sku || '').trim().toUpperCase();
   if (!value.startsWith('LIC-')) return '';
+  if (/^LIC-ENT-(?:10|[1357])YR$/.test(value)) return 'enterprise';
+  if (/^LIC-MR-ADV-(?:10|[1357])Y$/.test(value)) return 'advanced';
   const catalyst = value.match(/^LIC-C9\d{3}-\d+(A|E)-\d+Y$/);
   if (catalyst) return catalyst[1] === 'A' ? 'advanced' : 'standard';
   const segments = value.slice(4).split('-').filter(Boolean);
@@ -379,6 +387,13 @@ export function deviceLicenseTierFromSku(sku) {
 export function effectivePairableHardwareTier(row) {
   const family = licenseFamilyForSku(row?.sku);
   const selected = String(row?.tier || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  const sharedAp = family === 'mr'
+    || (family === 'cw' && /^CW916\d/i.test(String(row?.sku || '').trim()));
+  if (sharedAp) {
+    if (!selected || selected === 'enterprise' || selected === 'ent') return 'enterprise';
+    if (selected === 'advanced' || selected === 'advantage' || selected === 'adv' || selected === 'a') return 'advanced';
+    return '';
+  }
   if (family === 'c9') {
     if (!selected || selected === 'standard' || selected === 'essentials' || selected === 'e') return 'standard';
     if (selected === 'advanced' || selected === 'advantage' || selected === 'adv' || selected === 'a') return 'advanced';
@@ -411,7 +426,9 @@ function uniqueReviewSkus(rows, indexes) {
  * recomputes the review and stale "paired" state cannot survive an edit.
  *
  * Pairing is conservative:
- * - only MX and Catalyst 9K device-specific licences participate;
+ * - MX and Catalyst 9K device-specific licences participate;
+ * - shared LIC-ENT / LIC-MR-ADV rows pair only with the aggregate quantity of
+ *   MR and Meraki-managed CW916x hardware at the matching tier;
  * - device identity and effective tier must match;
  * - duplicate rows aggregate, but multiple distinct licence products (for
  *   example mixed 1YR and 3YR terms) are a mismatch rather than one pair;
@@ -422,17 +439,24 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
   const list = Array.isArray(rows) ? rows : [];
   const review = list.map(() => ({ kind: 'none' }));
   const hardwareGroups = [];
+  const unmatchedLicenseIndexes = new Set();
 
   list.forEach((row, index) => {
     const sku = String(row?.sku || '').trim().toUpperCase();
     if (!sku || sku.startsWith('LIC-')) return;
     const tier = effectivePairableHardwareTier(row);
     if (!tier) return;
+    const family = licenseFamilyForSku(sku);
+    const scope = family === 'mr' || (family === 'cw' && /^CW916\d/.test(sku))
+      ? 'shared-ap'
+      : 'device';
     let group = hardwareGroups.find((candidate) => (
-      candidate.tier === tier && sameDeviceIdentity(candidate.anchorSku, sku)
+      candidate.tier === tier
+      && candidate.scope === scope
+      && (scope === 'shared-ap' || sameDeviceIdentity(candidate.anchorSku, sku))
     ));
     if (!group) {
-      group = { anchorSku: sku, tier, hardwareIndexes: [], licenseIndexes: [] };
+      group = { anchorSku: sku, tier, scope, hardwareIndexes: [], licenseIndexes: [] };
       hardwareGroups.push(group);
     }
     group.hardwareIndexes.push(index);
@@ -442,15 +466,25 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
     const sku = String(row?.sku || '').trim().toUpperCase();
     const tier = deviceLicenseTierFromSku(sku);
     if (!tier) return;
+    const sharedApLicense = /^LIC-(?:ENT-(?:10|[1357])YR|MR-ADV-(?:10|[1357])Y)$/.test(sku);
+    if (sharedApLicense) {
+      const sharedGroups = hardwareGroups.filter((candidate) => candidate.scope === 'shared-ap');
+      const matches = sharedGroups.filter((candidate) => candidate.tier === tier);
+      if (matches.length === 1) matches[0].licenseIndexes.push(index);
+      else if (sharedGroups.length > 0) unmatchedLicenseIndexes.add(index);
+      return;
+    }
     // licenseFamilyForSku() quite correctly calls every LIC-* row "license";
     // inspect its device token to keep this visual contract device-specific.
     const deviceFamily = licenseFamilyForSku(skuModelToken(sku));
     if (deviceFamily !== 'mx' && deviceFamily !== 'c9') return;
-    const matches = hardwareGroups.filter((candidate) => (
-      candidate.tier === tier && sameDeviceIdentity(candidate.anchorSku, sku)
+    const identityMatches = hardwareGroups.filter((candidate) => (
+      candidate.scope === 'device' && sameDeviceIdentity(candidate.anchorSku, sku)
     ));
+    const matches = identityMatches.filter((candidate) => candidate.tier === tier);
     // Ambiguous identity must never be dressed up as a confirmed pairing.
     if (matches.length === 1) matches[0].licenseIndexes.push(index);
+    else if (identityMatches.length > 0) unmatchedLicenseIndexes.add(index);
   });
 
   for (const group of hardwareGroups) {
@@ -491,6 +525,21 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
     group.hardwareIndexes.forEach((index) => { review[index] = { ...common, role: 'hardware' }; });
     group.licenseIndexes.forEach((index) => { review[index] = { ...common, role: 'license' }; });
   }
+
+  // A license that targets hardware in this cart but disagrees on tier must
+  // never disappear into `{ kind: 'none' }`. That would hide the license-use
+  // control and let the Worker derive the selected hardware tier while also
+  // retaining the pasted license as an unintended extra. Keep the hardware's
+  // existing review intact and fail closed on the mismatched license row.
+  unmatchedLicenseIndexes.forEach((index) => {
+    review[index] = {
+      kind: 'mismatch',
+      role: 'license',
+      licenseQty: reviewQuantity(list[index]),
+      licenseSkus: uniqueReviewSkus(list, [index]),
+      tier: deviceLicenseTierFromSku(list[index]?.sku),
+    };
+  });
 
   return review;
 }
@@ -693,8 +742,8 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
       return { ok: false, rows: [], text: '', error: editorNormalized.error, errors: editorNormalized.errors };
     }
     const lines = editorNormalized.rows.map(({ unresolved: _unresolved, ...line }) => line);
-    const unresolvedPair = licensePairReviewForRows(lines, { allowHaLicenseRatio: overrides?.haRequested === true })
-      .some((entry) => entry.kind === 'needs_review');
+    const pairReview = licensePairReviewForRows(lines, { allowHaLicenseRatio: overrides?.haRequested === true });
+    const unresolvedPair = pairReview.some((entry) => entry.kind === 'needs_review');
     if (unresolvedPair) {
       return {
         ok: false,
@@ -702,6 +751,34 @@ export function quoteTextFromEditorRows(rows, priorText = '', overrides = {}) {
         text: '',
         error: 'Choose whether each matching hardware/license row is device-associated or a standalone renewal before updating the quote.',
         errors: [{ index: -1, code: 'license_intent_required', message: 'Matching hardware/license rows require a license-use choice.' }],
+      };
+    }
+    const unresolvedMismatch = lines.some((line, index) => (
+      /^LIC-/i.test(String(line?.sku || ''))
+      && pairReview[index]?.kind === 'mismatch'
+      && line?.licenseIntent !== 'standalone'
+    ));
+    if (unresolvedMismatch) {
+      return {
+        ok: false,
+        rows: lines,
+        text: '',
+        error: 'A license does not match the current hardware tier or quantity. Choose Standalone renewal / additional license, or correct the hardware, tier, or quantity.',
+        errors: [{ index: -1, code: 'license_pair_mismatch', message: 'A mismatched hardware/license row requires correction or an explicit standalone choice.' }],
+      };
+    }
+    const stalePairedIntent = lines.some((line, index) => (
+      /^LIC-/i.test(String(line?.sku || ''))
+      && line?.licenseIntent === 'paired'
+      && pairReview[index]?.kind === 'none'
+    ));
+    if (stalePairedIntent) {
+      return {
+        ok: false,
+        rows: lines,
+        text: '',
+        error: 'A device-associated license no longer matches the current hardware tier. Choose its license use again or update the hardware tier.',
+        errors: [{ index: -1, code: 'stale_paired_license_intent', message: 'The reviewed device-associated license no longer matches the hardware.' }],
       };
     }
     normalized = {

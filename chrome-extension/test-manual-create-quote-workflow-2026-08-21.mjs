@@ -81,13 +81,13 @@ test('manual row order is preserved in the canonical quote request', () => {
   const ordered = quoteTextFromEditorRows([
     { sku: 'MR44', qty: 2 },
     { sku: 'MX67', qty: 1 },
-    { sku: 'LIC-ENT-3YR', qty: 4 },
+    { sku: 'LIC-ENT-3YR', qty: 4, licenseIntent: 'standalone' },
   ]);
   assert.equal(ordered.ok, true, ordered.error);
   assert.equal(ordered.text, '2 MR44\n1 MX67\n4 LIC-ENT-3YR');
 
   const moved = quoteTextFromEditorRows([
-    { sku: 'LIC-ENT-3YR', qty: 4 },
+    { sku: 'LIC-ENT-3YR', qty: 4, licenseIntent: 'standalone' },
     { sku: 'MR44', qty: 2 },
     { sku: 'MX67', qty: 1 },
   ]);

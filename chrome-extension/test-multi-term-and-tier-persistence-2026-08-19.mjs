@@ -67,7 +67,7 @@ test('the tier is resolved by SKU, not by position', () => {
 
 test('a licence row never keeps a tier', () => {
   const prepared = core.quoteTextFromEditorRows(
-    [{ sku: 'LIC-ENT-3YR', qty: 6, tier: 'none' }, { sku: 'MR44', qty: 6, tier: '' }], '', {});
+    [{ sku: 'LIC-ENT-3YR', qty: 6, tier: 'none', licenseIntent: 'paired' }, { sku: 'MR44', qty: 6, tier: '' }], '', {});
   assert.equal(prepared.ok, true, prepared.error);
   assert.deepEqual(prepared.hardwareOnlySkus, [], 'a LIC- row is not hardware');
   assert.ok(!/LIC-ENT-3YR hardware only/i.test(prepared.text));

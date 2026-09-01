@@ -114,7 +114,10 @@ export function updateQuote(rows, { skuText = '', tier, haRequested = false } = 
   const msg = { skuText, quoteHardwareOnly: undefined };
   const hardwareOnly = isExplicitHardwareOnlyQuoteText(msg.skuText);
   const requirements = {
-    licenseTier: hardwareOnly ? null : explicitQuoteLicenseTier(msg.skuText),
+    licenseTier: hardwareOnly || prepared.rows.some((row) => (
+      !/^LIC-/i.test(String(row?.sku || ''))
+      && !['', 'none'].includes(String(row?.tier || '').trim().toLowerCase())
+    )) ? null : explicitQuoteLicenseTier(msg.skuText),
     allowHaLicenseRatio: haRequested,
     requireLicensedOption: !hardwareOnly,
     ...(Array.isArray(prepared.hardwareOnlySkus) && prepared.hardwareOnlySkus.length
@@ -369,7 +372,7 @@ test('a shared exact LIC-ENT row must equal aggregate MR and CW hardware coverag
   const exact = updateQuote([
     { sku: 'MR44', qty: 2, tier: '' },
     { sku: 'CW9164', qty: 3, tier: '' },
-    { sku: 'LIC-ENT-3YR', qty: 5, tier: '' },
+    { sku: 'LIC-ENT-3YR', qty: 5, tier: '', licenseIntent: 'paired' },
   ], { skuText: 'quote 2 MR44, 3 CW9164, and 5 LIC-ENT-3YR' });
   assert.ok(exact.ok, exact.error);
   assert.equal(findItem(exact, /^LIC-ENT-/)?.qty, 5);
@@ -378,10 +381,10 @@ test('a shared exact LIC-ENT row must equal aggregate MR and CW hardware coverag
     const mismatch = updateQuote([
       { sku: 'MR44', qty: 2, tier: '' },
       { sku: 'CW9164', qty: 3, tier: '' },
-      { sku: 'LIC-ENT-3YR', qty, tier: '' },
+      { sku: 'LIC-ENT-3YR', qty, tier: '', licenseIntent: 'paired' },
     ], { skuText: `quote 2 MR44, 3 CW9164, and ${qty} LIC-ENT-3YR` });
     assert.equal(mismatch.ok, false, `LIC-ENT quantity ${qty} must fail closed`);
-    assert.equal(mismatch.stage, 'verify');
+    assert.equal(mismatch.stage, 'serialize', 'the editor must stop the mismatch before publishing an option');
   }
 });
 

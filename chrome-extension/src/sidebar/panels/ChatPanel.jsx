@@ -3112,8 +3112,18 @@ export default function ChatPanel({
   }
 
   function verifiedQuoteUrls(result, committedRows, msg = null, hardwareOnlySkus = null) {
+    const requirements = quoteVerificationRequirements(msg);
+    // A reviewed row-local tier wins over the stale/global tier recorded on
+    // the original message. The verifier already evaluates every committed
+    // row's tier; keeping the old global ENT requirement after changing one
+    // CW916x row to Advanced rejects the correct LIC-MR-ADV cart.
+    const hasRowLocalTier = (Array.isArray(committedRows) ? committedRows : []).some((row) => (
+      !/^LIC-/i.test(String(row?.sku || ''))
+      && !['', 'none'].includes(String(row?.tier || '').trim().toLowerCase())
+    ));
     return verifyStratusOrderUrlOptions(result?.urls, committedRows, {
-      ...quoteVerificationRequirements(msg),
+      ...requirements,
+      ...(hasRowLocalTier ? { licenseTier: null } : {}),
       // Rows the rep set to "None (hardware only)". Without these the shared
       // licence companion check requires a quantity covering every access point
       // in the cart, so one bare row failed the whole quote (2026-08-19).

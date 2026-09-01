@@ -44,8 +44,8 @@ const skv = {
 const db = { prepare: () => ({ bind: () => ({ run: async () => ({ success: true }), first: async () => null, all: async () => ({ results: [] }) }), run: async () => ({ success: true }), first: async () => null, all: async () => ({ results: [] }) }) };
 const env = { GMAIL_ADDON_API_KEY: 'k', CONVERSATION_KV: skv, PRICES_KV: { get: async () => null, put: async () => {} }, ANALYTICS_DB: db, BOT_METRICS: { writeDataPoint: () => {} }, BOT_STORAGE: skv };
 const ctx = { waitUntil: p => { try { p && p.catch && p.catch(() => {}); } catch (_) {} } };
-const call = async (text, pid) => {
-  const req = new Request('https://x.workers.dev/api/quote', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': 'k' }, body: JSON.stringify({ text, personId: pid }) });
+const call = async (text, pid, licenseIntents = undefined) => {
+  const req = new Request('https://x.workers.dev/api/quote', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': 'k' }, body: JSON.stringify({ text, personId: pid, licenseIntents }) });
   return await (await worker.fetch(req, env, ctx)).json();
 };
 
@@ -101,6 +101,33 @@ const call = async (text, pid) => {
   const j6 = await call('https://stratusinfosystems.com/order/?item=MR44-HW&qty=1 and https://stratusinfosystems.com/order/?item=MX85-HW&qty=1', 'echo-t6');
   ok(!(j6.handlerType === 'deterministic' && (j6.quoteUrls || []).length > 0 && !/MX85/.test(JSON.stringify(j6.quoteUrls))),
     'F1c: two pasted URLs are never half-rendered (first-only)');
+
+  // ── 6. Public CW916x-MR order SKU canonicalizes once for the editor ──
+  console.log('CW916x-MR URL editor canonicalization');
+  const j7 = await call('https://stratusinfosystems.com/order/?item=CW9164I-MR,LIC-ENT-5YR&qty=1,1', 'echo-t7');
+  ok(j7.handlerType === 'deterministic' && !(j7.suggestions || []).length,
+    `CW9164I-MR is accepted without suggestions (got ${j7.handlerType})`);
+  ok(JSON.stringify(j7.parsedItems) === JSON.stringify([
+    { sku: 'CW9164I', qty: 1 },
+    { sku: 'LIC-ENT-5YR', qty: 1 },
+  ]), `editor receives one canonical AP row plus the explicit license: ${JSON.stringify(j7.parsedItems)}`);
+  ok((j7.quoteUrls || []).length === 3 && (j7.quoteUrls || []).every(({ url }) => /CW9164I-MR/.test(url)),
+    'public order links retain CW9164I-MR while 1/3/5 terms expand');
+
+  // ── 7. Reviewed association controls whether an identical license totals 1 or 2 ──
+  console.log('reviewed shared AP license intent');
+  const reviewedText = '1 CW9164I\n1 LIC-ENT-5YR';
+  const paired = await call(reviewedText, 'echo-t8', [{ sku: 'LIC-ENT-5YR', qty: 1, intent: 'paired' }]);
+  const standalone = await call(reviewedText, 'echo-t9', [{ sku: 'LIC-ENT-5YR', qty: 1, intent: 'standalone' }]);
+  const qtyFor = (result, term) => {
+    const url = (result.quoteUrls || []).find((entry) => entry.label === `${term}-Year`)?.url || '';
+    const parsed = new URL(url);
+    const skus = (parsed.searchParams.get('item') || '').split(',');
+    const qtys = (parsed.searchParams.get('qty') || '').split(',').map(Number);
+    return qtys[skus.findIndex((sku) => sku === `LIC-ENT-${term}YR`)];
+  };
+  ok(qtyFor(paired, 5) === 1, 'device-associated explicit license is counted once');
+  ok(qtyFor(standalone, 5) === 2, 'standalone/additional copy consolidates to quantity 2');
 
   console.log('');
   console.log(fail === 0 ? `✅ ${pass}/${pass + fail} assertions passed` : `❌ ${fail} FAILED, ${pass} passed`);

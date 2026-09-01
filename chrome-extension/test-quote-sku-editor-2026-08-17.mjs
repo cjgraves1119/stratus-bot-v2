@@ -85,12 +85,13 @@ test('quote card hides every stale link and CRM action while rows are dirty or u
   assert.match(source, /Existing links, term selection, and Zoho conversion are hidden/);
 });
 
-// 2026-08-19: the requirements object now also carries hardwareOnlySkus, so the
-// per-row "None" rows are known to the verifier. The gate itself is unchanged.
+// The requirements object carries hardwareOnlySkus and clears a stale global
+// tier when the rep made a row-local tier choice.
 test('chat rebuild uses newest-response and canonical URL-composition gates', () => {
   const source = readFileSync(chatPanelPath, 'utf8');
   assert.match(source, /quoteUpdateSequenceRef/);
-  assert.match(source, /verifyStratusOrderUrlOptions\(result\?\.urls, committedRows, \{\s*\.\.\.quoteVerificationRequirements\(msg\)/);
+  assert.match(source, /const requirements = quoteVerificationRequirements\(msg\)[\s\S]{0,900}verifyStratusOrderUrlOptions\(result\?\.urls, committedRows, \{\s*\.\.\.requirements/);
+  assert.match(source, /hasRowLocalTier[\s\S]{0,900}licenseTier: null/);
   assert.match(source, /applyExplicitMxWarmSpareToQuoteOptions\(candidate\?\.urls, explicitQuoteHaRequested\(msg\)\)/);
   assert.match(source, /response\?\.result/);
   assert.match(source, /runQuote\(prepared\.text, newQuotePersonId\(\), null, \{\s*licenseIntents: prepared\.licenseIntents,/,
