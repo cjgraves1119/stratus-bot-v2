@@ -1,54 +1,50 @@
-# Dev → Corp workflow (anti-drift, 2026-07-15)
+# Stratus source, release, and deployment workflow
 
-The personal fork (`origin`, PUBLIC) is the **staging environment**; corp
-(`corp`, StratusInfoSystems/stratus-bot-v2, private) is **production, deployed
-only by Amir**. Everything flows dev-first, then corp, in this exact pipeline.
-Each rule below exists because its violation caused a real incident (cited).
+Updated: 2026-09-01
 
-## The pipeline
+This public repository is a source and staging control plane. A source PR, extension release, personal/staging Worker deployment, corporate deployment, and installed-browser update are separate actions with separate evidence and authority.
 
-```
-worktree branch → implement → test sweep → scripts/deploy-dev.sh → live-verify
-      → corp PR (worktree-split off corp base, parity-checked) → Amir merges
-      → sync personal main same day → scripts/drift-check.sh converges to zero
-```
+## Source changes
 
-## Rules
+1. Work in an isolated Git worktree from an explicitly verified base.
+2. Keep baseline reconciliation separate from focused feature changes.
+3. Run the maintained suites, secret scans, sync checks, reproducible extension build, and locked Wrangler dry-runs before review.
+4. Open a draft PR when provenance, governance, review, release, installation, or deployment evidence is incomplete.
+5. Source-only PRs do not require a Worker deployment or browser reload. They must state `NOT-DEPLOYED` and `NOT-INSTALLED` rather than treating those checks as failed or implied.
+6. Never commit customer data, credentials, browser state, raw handoffs, or internal email/plan artifacts.
 
-1. **Sessions work in git worktrees, never the entangled main tree.**
-   (07-15: main tree carried an unrelated uncommitted feature all day.)
-2. **Nothing deploys uncommitted. Deploy ONLY via `scripts/deploy-dev.sh`.**
-   It refuses a dirty tree and logs `sha → wrangler version` to `deploys.log`.
-   (07-15: an uncommitted deployed fix was silently reverted by the next deploy.)
-3. **Dev is a real staging gate:** full `node --check` + suite sweep (bar: no
-   NEW failures vs baseline) + live verification on chrisg-ec1 BEFORE any corp PR.
-4. **Corp PRs use the worktree-split recipe:** fresh worktree off the corp base
-   branch, cherry-pick/apply only your hunks, byte-parity check (`+/-` lines of
-   the personal commit vs the corp commit must be identical), corp tree must
-   parse as ESM (`cp src/index.js /tmp/x.mjs && node --check /tmp/x.mjs`), run
-   corp's suites. Check base drift before opening (PR #21's base drifted 4
-   commits mid-flight).
-5. **Pushes to the public fork go through the pre-push hook** (secret scan of
-   every pushed commit + HANDOFF-/PLAN-/EMAIL- doc blocklist). Install once per
-   clone: `git config core.hooksPath scripts/githooks`.
-   (06-10: leaked live credential; 07-15: customer-named doc needed a
-   filter-branch to keep out.)
-6. **Internal docs (HANDOFF-*, PLAN-*, EMAIL-*) stay untracked. Never commit.**
-7. **After Amir merges a corp PR, sync personal main the same day** (merge the
-   port branch). Personal main should always be: corp main minus not-yet-merged
-   corp PRs, plus nothing.
-8. **`scripts/drift-check.sh` at session start and before every corp PR.**
-   Section 1 must list only files covered by open corp PRs; anything else is
-   unexplained drift — stop and reconcile before adding more work.
-9. **Extension bundle is part of "deployed":** after ext changes, run
-   `chrome-extension/build-dev.sh` and reload 'Stratus AI (DEV)'.
-   (07-15: pin fixes sat unshipped in a stale bundle for 2 hours.)
-10. **Corp Cloudflare is read-only forever** (D1 SELECTs via the scoped key).
-    Deploys, KV writes, secrets on corp = Amir.
+## GitHub governance gate
 
-## One-time setup per clone
+Before `main` can be a release source, independently verify:
 
-```sh
-git config core.hooksPath scripts/githooks
-chmod +x scripts/githooks/pre-push scripts/deploy-dev.sh scripts/drift-check.sh
-```
+- branch protection or a repository ruleset applies to `main`;
+- required checks include the Worker build/test matrix, extension reproducible build, sync check, and gitleaks;
+- force-push and branch deletion are disabled;
+- `ext-v*` tags cannot be moved or deleted through ordinary contributor permissions;
+- production environments require designated human reviewers;
+- the baseline PR has independent owner review appropriate to its full changed-file scope.
+
+Repository connection or write permission is not evidence that these controls exist.
+
+## Extension release
+
+After the approved source baseline is merged:
+
+1. create the immutable version tag at the exact protected `main` tip;
+2. invoke the reviewed manual release workflow with the matching tag/version;
+3. retain the CRX or package, embedded provenance, checksum manifest, build/tree hashes, and workflow run IDs;
+4. verify published update metadata separately;
+5. install or reload only when the current task authorizes the exact browser/profile target;
+6. record installed extension ID, version, artifact hash, source commit, and focused runtime results.
+
+DEV snapshot builds are evidence/runtime-test artifacts and are not release eligible.
+
+## Worker deployment
+
+Worker deployment is never implied by a source PR or Wrangler dry-run. It requires explicit approval for the exact account, Worker, environment, bindings, and commit. Use the reviewed workflow or repository deploy script; never reconstruct authorization from local config files or use raw token upload commands.
+
+Retain deployment/version IDs, binding verification, rollback target, and sanitized live checks. Corporate Cloudflare remains outside this repository's standing mutation authority unless the current task names the authorized operator and exact target.
+
+## Historical personal/corporate flow
+
+Older instructions described a personal staging fork followed by a separately controlled corporate repository. Preserve that ownership separation where it still exists, but do not assume names, remotes, operators, or deployment authority from historical documentation. Reverify them for every release or deployment task.
