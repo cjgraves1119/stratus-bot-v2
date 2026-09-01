@@ -3792,6 +3792,12 @@ export default function ChatPanel({
         ...(Array.isArray(msg.base.hardware_only_skus) && msg.base.hardware_only_skus.length
           ? { hardware_only_skus: msg.base.hardware_only_skus }
           : {}),
+        // Zoho-only pricing is part of the Worker's signed product request.
+        // Execute must repeat the exact reviewed set or an otherwise unchanged
+        // cart fails closed with product_snapshot_mismatch.
+        ...(Array.isArray(msg.base.zoho_list_price_skus) && msg.base.zoho_list_price_skus.length
+          ? { zoho_list_price_skus: msg.base.zoho_list_price_skus }
+          : {}),
         ...decisions,
       };
     if (!payload) {
@@ -3859,6 +3865,9 @@ export default function ChatPanel({
               // (Chris, 2026-08-19).
               ...(Array.isArray(msg.base.hardware_only_skus) && msg.base.hardware_only_skus.length
                 ? { hardware_only_skus: msg.base.hardware_only_skus }
+                : {}),
+              ...(Array.isArray(msg.base.zoho_list_price_skus) && msg.base.zoho_list_price_skus.length
+                ? { zoho_list_price_skus: msg.base.zoho_list_price_skus }
                 : {}),
               ...(msg.base.ha_recalculate_license_qty === true
                 ? { ha_recalculate_license_qty: true }

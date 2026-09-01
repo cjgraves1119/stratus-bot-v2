@@ -89,6 +89,11 @@ test('the extra-term execute forwards hardware_only_skus', () => {
     'without this the 5-year quote fails product_snapshot_mismatch');
 });
 
+test('the extra-term execute forwards zoho_list_price_skus', () => {
+  assert.match(extraTermExecuteBlock(), /zoho_list_price_skus/,
+    'Zoho-only pricing is bound into the product snapshot fingerprint');
+});
+
 test('the extra-term execute forwards ha_recalculate_license_qty', () => {
   assert.match(extraTermExecuteBlock(), /ha_recalculate_license_qty/);
 });
@@ -105,4 +110,10 @@ test('the first-quote execute also forwards hardware_only_skus', () => {
   const start = CHAT.indexOf('idempotency_key: msg.idempotencyKey,');
   assert.ok(start > 0);
   assert.match(CHAT.slice(start, CHAT.indexOf('...decisions', start)), /hardware_only_skus/);
+});
+
+test('the first-quote execute also forwards zoho_list_price_skus', () => {
+  const start = CHAT.indexOf('idempotency_key: msg.idempotencyKey,');
+  assert.ok(start > 0);
+  assert.match(CHAT.slice(start, CHAT.indexOf('...decisions', start)), /zoho_list_price_skus/);
 });

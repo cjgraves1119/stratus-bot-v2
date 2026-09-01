@@ -1,6 +1,6 @@
 {
   "name": "stratus-ai-chrome-extension",
-  "version": "1.29.20",
+  "version": "1.29.21",
   "description": "Stratus AI Chrome Extension \u2014 Cisco/Meraki sales assistant for Gmail",
   "private": true,
   "scripts": {
