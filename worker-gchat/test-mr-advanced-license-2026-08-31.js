@@ -24,8 +24,11 @@ function extractRealFunctions(baseDir, label) {
   const workerOnly = label === 'worker'
     ? ', buildQuoteFromV2, normalizeRequestedTier, hasMsAdvancedTierIntent'
     : '';
+  const gchatOnly = label === 'gchat'
+    ? ', isExplicitMrAdvancedDraftOnlyRequest, requestedTierForHardware'
+    : '';
   src += `
-module.exports = { parseMessage, buildQuoteResponse, _getLicenseSkusRaw${workerOnly} };
+module.exports = { parseMessage, buildQuoteResponse, _getLicenseSkusRaw${workerOnly}${gchatOnly} };
 `;
   const tmpPath = path.join('/tmp', `.tmp-extract-mr-adv-${label}-${process.pid}.cjs`);
   fs.writeFileSync(tmpPath, src);
@@ -176,4 +179,41 @@ test('active V3 prompts teach MR Advanced while keeping CW Enterprise-only', () 
     assert.match(source, /CW access points remain Enterprise and must never set A/);
     assert.match(source, /content: CF_CLASSIFIER_PROMPT_V3_ACTIVE/);
   }
+});
+
+test('chat-tab draft-only guard accepts exact no-write MR Advanced prompts for every standard term', () => {
+  for (const term of [1, 3, 5]) {
+    const text = `Quote 1 MR44 with Advanced licensing for ${term} year${term === 1 ? '' : 's'}. Draft only. Do not create any CRM record.`;
+    assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest(text), true, `${term}Y guard`);
+    const parsed = gchat.parseMessage(text);
+    assert.ok(parsed, `${term}Y parsed`);
+    const quote = gchat.buildQuoteResponse(parsed);
+    const joined = decodeUrls(quote.message).flatMap((url) => url.items).join(',');
+    assert.match(joined, new RegExp(`LIC-MR-ADV-${term}Y`), `${term}Y advanced`);
+    assert.equal(/LIC-ENT/.test(joined), false, `${term}Y no enterprise fallback`);
+  }
+});
+
+test('chat-tab guard stays closed without both draft-only and explicit no-write language', () => {
+  assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 MR44 Advanced for 3 years.'), false);
+  assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 MR44 Advanced for 3 years. Draft only.'), false);
+  assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 MR44 Advanced Security for 3 years. Draft only. Do not create any CRM record.'), false);
+  assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 CW9164 Advanced for 3 years. Draft only. Do not create any CRM record.'), false);
+});
+
+test('CRM auto-pair tier is explicit and scoped to MR hardware', () => {
+  assert.equal(gchat.requestedTierForHardware('MR44', { license_tier: 'A' }), 'A');
+  assert.equal(gchat.requestedTierForHardware('MR44-HW', {}, 'Quote MR44 with Advanced licensing'), 'A');
+  assert.equal(gchat.requestedTierForHardware('MR44', {}, 'Quote MR44 with Advanced Security'), null);
+  assert.equal(gchat.requestedTierForHardware('CW9164I', { license_tier: 'A' }), null);
+  assert.equal(gchat.requestedTierForHardware('MS130-24P', { license_tier: 'A' }), null);
+});
+
+test('active CRM prompt, schema, and chat waterfall enforce MR Advanced mapping', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'src/index.js'), 'utf8');
+  assert.match(source, /Explicit MR Advanced\/ADV uses LIC-MR-ADV-\{term\}Y/);
+  assert.match(source, /license_tier:\"A\"/);
+  assert.doesNotMatch(source, /MR Enterprise License — UNIVERSAL across all MR APs/);
+  assert.match(source, /deterministic-mr-advanced-draft/);
+  assert.match(source, /getLicenseSkus\(rawSku, requestedLicenseTier\)/);
 });

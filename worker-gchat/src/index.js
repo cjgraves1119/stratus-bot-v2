@@ -247,6 +247,27 @@ function preserveMsAdvancedTier(parsed, rawText) {
   return parsed;
 }
 
+function isExplicitMrAdvancedDraftOnlyRequest(text) {
+  const raw = String(text || '');
+  if (!/\bMR\d+[A-Z0-9-]*\b/i.test(raw)) return false;
+  if (/\bADVANCED\s+SECURITY\b/i.test(raw)) return false;
+  if (!/\b(?:ADVANCED|ADV)\s*(?:LICENSE|LICENSING|LICENCE|LIC)?\b/i.test(raw)) return false;
+  if (!/\bDRAFT\s+ONLY\b/i.test(raw)) return false;
+  return /\b(?:DO\s+NOT|DON'T|NO)\s+(?:CREATE|WRITE|SAVE|SUBMIT)\b[\s\S]{0,80}\b(?:CRM|ZOHO|RECORD)\b/i.test(raw);
+}
+
+function requestedTierForHardware(rawSku, toolInput, rawPrompt = '') {
+  if (!/^MR\d/i.test(String(rawSku || ''))) return null;
+  const explicitTier = String(toolInput?.license_tier || '').toUpperCase();
+  if (['A', 'ADV', 'ADVANCED'].includes(explicitTier)) return 'A';
+  const prompt = String(rawPrompt || '');
+  if (/\bADVANCED\s+SECURITY\b/i.test(prompt)) return null;
+  const sku = String(rawSku || '').toUpperCase().replace(/-HW$/, '');
+  const escaped = sku.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const mrAdvanced = new RegExp(`(?:\\b${escaped}\\b[\\s\\S]{0,48}\\b(?:ADVANCED|ADV)\\b|\\b(?:ADVANCED|ADV)\\b[\\s\\S]{0,48}\\b${escaped}\\b)`, 'i');
+  return mrAdvanced.test(prompt) ? 'A' : null;
+}
+
 // Kept IDENTICAL to worker/ (webex) so both engines produce the same quote for the same input.
 function normalizeRequestedTier(rawTier, rawText = '') {
   const raw = String(rawTier || '').toUpperCase().replace(/\s+/g, '').replace(/^SD-WAN$/, 'SDW');
@@ -22168,7 +22189,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // phantom 1Y license that was being added on top of an explicit
             // 3Y license (LIC-MS130-48-1Y appearing alongside the requested
             // LIC-MS130-48-3Y).
-            const licenseOptions = includeLicenses ? getLicenseSkus(rawSku) : null;
+            const requestedLicenseTier = requestedTierForHardware(rawSku, toolInput, env?.__USER_PROMPT_RAW || sourceText || '');
+            const licenseOptions = includeLicenses ? getLicenseSkus(rawSku, requestedLicenseTier) : null;
             console.log(`[COMPOUND] getLicenseSkus(${rawSku}): ${licenseOptions ? JSON.stringify(licenseOptions[0]) : 'null'}`);
             let resolvedLicSku = null;
             if (licenseOptions && licenseOptions.length > 0) {
@@ -25135,7 +25157,7 @@ const CRM_EMAIL_TOOLS = [
           items: {
             type: 'object',
             properties: {
-              sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes. For "MR licenses" use MR-ENT or LIC-ENT-{term}YR; never substitute MR46/MR44 hardware unless the user asked for AP hardware.' },
+              sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes. Generic "MR licenses" use MR-ENT or LIC-ENT-{term}YR; explicit MR Advanced hardware uses the MR hardware SKU plus license_tier:"A". Never substitute MR46/MR44 hardware unless the user asked for AP hardware.' },
               qty: { type: 'number', description: 'Quantity (default 1)' },
               source_text: { type: 'string', description: 'REQUIRED whenever this line came from customer free text / an email rather than an explicit SKU the user typed: pass the customer\'s original wording for THIS line. Omit when the user typed the exact SKU.' }
             },
@@ -25147,6 +25169,7 @@ const CRM_EMAIL_TOOLS = [
         closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (end of the current month, capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation" — pass the date the user confirmed.' },
         date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a close date that falls after the current Cisco fiscal quarter end. Never set it on your own.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        license_tier: { type: 'string', enum: ['A', 'ADV', 'ADVANCED'], description: 'Set only when the user explicitly requests Advanced licensing for MR hardware. The server maps it to LIC-MR-ADV-{term}Y. Do not use for generic MR or CW licensing.' },
         account_id: { type: 'string', description: 'Zoho Account record id. Pass ONLY when a specific already-reviewed Account is known (e.g. pinned CRM context or a one-shot plan). Pins resolution to that exact record — the tool fails closed rather than falling back to a name/domain search if the id cannot be read.' },
         contact_id: { type: 'string', description: 'Zoho Contact record id. Pass ONLY when a specific already-reviewed Contact is known. Pins the Quote/Deal contact to that exact record; fails closed if unreadable.' },
         strict_contact: { type: 'boolean', description: 'Set true when the contact MUST be exactly the one specified (one-shot/reviewed flows): disables the "any recent contact on the Account" fallback so a missing contact blocks instead of guessing.' },
@@ -25202,6 +25225,7 @@ const CRM_EMAIL_TOOLS = [
         closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default end of the current month (capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
         date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a date after the current Cisco fiscal quarter end. Never set it on your own.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        license_tier: { type: 'string', enum: ['A', 'ADV', 'ADVANCED'], description: 'Set only when the user explicitly requests Advanced licensing for MR hardware. The server maps it to LIC-MR-ADV-{term}Y. Do not use for generic MR or CW licensing.' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses.' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
@@ -26303,7 +26327,7 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 
 **PRODUCT NOT FOUND — EXHAUST THE CATALOG FIRST.** Ladder: (1) batch_product_lookup (auto-normalizes dashes, -Y/-YR, and the '=' spare suffix); (2) on found:false check live_alternatives — a near-miss (trailing '=', length/size suffix) is usually the right part: confirm, then re-run with that exact spelling; (3) find_product_candidates with the user's wording; (4) web_search_sku ONLY after 1–3 miss — a web SKU is a LEAD, re-validate via batch_product_lookup. NEVER claim a part "isn't in our catalog" before steps 1–3 miss; finish resolving the product before any account/contact work.
 
-**MR Enterprise License — UNIVERSAL across all MR APs.** The SKU form is **LIC-ENT-{term}YR**. 1YR / 3YR / 5YR are the standard ecomm-quotable terms; **7YR and 10YR are ALSO real, active Zoho products — but they are co-term licenses valid for ZOHO QUOTES ONLY (never ecomm/URL quotes).** So a term being absent from the local price cache does NOT mean it is invalid — before telling anyone a term "doesn't exist" or is "not real," verify with batch_product_lookup, which live-checks Zoho. NEVER invent MALFORMED forms (these specific patterns are not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
+**MR licensing has two distinct tiers.** Generic/default MR and explicit Enterprise use **LIC-ENT-{term}YR**. Explicit MR Advanced/ADV uses **LIC-MR-ADV-{term}Y** for standard 1Y / 3Y / 5Y terms; pass license_tier:"A" when auto-pairing MR hardware. CW access points remain Enterprise-only and must never use LIC-MR-ADV. "Advanced Security" is an MX tier, not MR Advanced. 7YR and 10YR LIC-ENT products are co-term licenses valid for ZOHO QUOTES ONLY and must be live-validated. NEVER invent LIC-ENT-MR-{n}YR, LIC-MR-ENT-{n}YR, or LIC-MR-{n}YR / LIC-MR-{n}Y.
 "5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1, 3, or 5 year?" (7- and 10-year co-term licenses are also available on a Zoho quote if the customer wants them) — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
 
 **Family licenses:** MV → LIC-MV-{term}YR; MT → LIC-MT-{term}YR; MG → LIC-MG-{term}YR; MS and MX → MODEL-SPECIFIC (e.g. LIC-MX{model}-SEC-{term}YR), use batch_product_lookup.
@@ -26471,7 +26495,7 @@ Lead_Source values use the org spelling: Stratus Referal, Meraki ISR Referal, Me
 
 ## PRODUCT, LICENSE, AND EOL CONTRACT
 Use batch_product_lookup for exact SKUs and parse_quote_url for order URLs. If spelling is unknown, find_product_candidates; use web_search_sku only after local/live candidate lookup misses, then revalidate. found:false is not proof a product is inactive. Trust a current live lookup over a stale guard and surface the mismatch.
-MR Enterprise uses LIC-ENT-{term}YR. Standard ecomm terms are 1/3/5; 7/10YR are Zoho-quote-only co-term products and must be live-validated. Never invent LIC-ENT-MR-{n}YR, LIC-MR-ENT-{n}YR, or LIC-MR-{n}YR. MV uses LIC-MV; MT LIC-MT; MG LIC-MG; MX/MS licenses are model-specific. MX/C81xx tier defaults to SEC when unspecified; state the assumption and offer ENT/SDW chips.
+MR default/Enterprise uses LIC-ENT-{term}YR. Explicit MR Advanced/ADV uses LIC-MR-ADV-{term}Y for 1/3/5 years; pass license_tier:"A" when auto-pairing MR hardware. CW remains Enterprise-only. "Advanced Security" is MX, not MR Advanced. LIC-ENT 7/10YR are Zoho-quote-only co-term products and must be live-validated. Never invent LIC-ENT-MR-{n}YR, LIC-MR-ENT-{n}YR, or LIC-MR-{n}YR. MV uses LIC-MV; MT LIC-MT; MG LIC-MG; MX/MS licenses are model-specific. MX/C81xx tier defaults to SEC when unspecified; state the assumption and offer ENT/SDW chips.
 Systems Manager LIC-SME is retired: never output LIC-SME. Use LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM), minimum quantity 50, and disclose the substitution. Editionless vMX is retired; resolve size plus ENT/SEC, but never auto-size LIC-VMX100. Meraki Insight LIC-MI-S/M/L is retired; remove it and upgrade the related MX SEC license to SDW with an explicit warning.
 For renewals, MV, MR/CW, and MT are model-agnostic aliases with SUMMED quantity; MX/MS remain PER-MODEL. EOL/upgrade mapping is default behavior: quote the reviewed returned replacement by default, echo old→new, and confirm once.
 
@@ -36723,7 +36747,22 @@ CRITICAL URL RULES:
                 console.log(`[WATERFALL] Tier 0 skipped: explicit Zoho-write intent detected in user text`);
               }
               let deterministicTelemetryModel = 'deterministic';
-              if (!forcedModel && !skipDeterministic && !_zohoIntent) {
+              if (!forcedModel && isExplicitMrAdvancedDraftOnlyRequest(wText)) {
+                try {
+                  const parsed = preserveMsAdvancedTier(parseMessage(wText), wText);
+                  if (parsed && !parsed.isClarification && !parsed.isRevision) {
+                    const qResult = buildQuoteResponse(parsed);
+                    if (qResult && qResult.message && !qResult.needsLlm) {
+                      deterministicResult = qResult.message;
+                      deterministicTelemetryModel = 'deterministic-mr-advanced-draft';
+                      console.log('[WATERFALL] Tier 0 guarded draft hit: explicit MR Advanced with no CRM write');
+                    }
+                  }
+                } catch (detErr) {
+                  console.log(`[WATERFALL] MR Advanced draft guard skipped: ${detErr.message}`);
+                }
+              }
+              if (!deterministicResult && !forcedModel && !skipDeterministic && !_zohoIntent) {
                 try {
                   let classification = await classifyWithCF(wText, env);
                   classification = normalizeClassifierForRouting(classification, wText, false);
