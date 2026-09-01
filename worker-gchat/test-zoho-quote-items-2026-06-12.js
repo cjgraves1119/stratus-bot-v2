@@ -67,8 +67,8 @@ const hasNoPriceKey = (items) => items.every(it => PRICE_KEYS.every(k => !(k in 
   items = mapSubformToItems([{ Product_Name: { name: 'MX85 Security Appliance' }, Quantity: 3 }]);
   ok(items.length === 1 && items[0].sku === 'MX85' && items[0].qty === 3, 'name-only "MX85 ..." → MX85');
 
-  items = mapSubformToItems([{ Product_Name: { name: 'Meraki LIC-MR-ADV-3YR enterprise license' }, Quantity: 10 }]);
-  ok(items.length === 1 && items[0].sku === 'LIC-MR-ADV-3YR', 'name-only LIC- token → extracted');
+  items = mapSubformToItems([{ Product_Name: { name: 'Meraki LIC-MR-ADV-3Y advanced license' }, Quantity: 10 }]);
+  ok(items.length === 1 && items[0].sku === 'LIC-MR-ADV-3Y', 'name-only LIC- token → extracted');
 
   console.log('Skip + rounding + uppercase');
 

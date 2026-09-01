@@ -283,8 +283,9 @@ export function licenseTierOptionsForSku(sku) {
     case 'z':
       return pick('enterprise', 'security', 'sdwan', 'none');
     case 'mr':
-    case 'cw':
       return pick('enterprise', 'advanced', 'none');
+    case 'cw':
+      return pick('enterprise', 'none');
     case 'ms':
     case 'c9':
       return pick('advanced', 'none');

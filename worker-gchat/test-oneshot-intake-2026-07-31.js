@@ -294,15 +294,15 @@ const EMAIL_INPUT = { subject: 'Duo quote', body_text: 'We would like 25 seats o
 
   await checkAsync('valid literal SKUs → resolved lines, used_llm=false, extractor untouched', async () => {
     const L = loadIntake();
-    L.ctl.parseResult = { items: [{ sku: 'MR44', qty: 2 }, { baseSku: 'LIC-MR-ADV-3YR', qty: 2 }] };
-    L.ctl.validSkus = new Set(['MR44', 'LIC-MR-ADV-3YR']);
+    L.ctl.parseResult = { items: [{ sku: 'MR44', qty: 2 }, { baseSku: 'LIC-MR-ADV-3Y', qty: 2 }] };
+    L.ctl.validSkus = new Set(['MR44', 'LIC-MR-ADV-3Y']);
     let called = 0;
     const r = await L.buildOneshotIntake(EMAIL_INPUT, ENV_ON, OWNER, async () => { called++; return {}; });
     assert.strictEqual(r.success, true);
     assert.strictEqual(r.used_llm, false);
     assert.strictEqual(called, 0, 'extractor must not run on the literal path');
     assert.deepStrictEqual(r.lines.map((l) => [l.sku, l.qty, l.status]),
-      [['MR44', 2, 'resolved'], ['LIC-MR-ADV-3YR', 2, 'resolved']]);
+      [['MR44', 2, 'resolved'], ['LIC-MR-ADV-3Y', 2, 'resolved']]);
   });
   await checkAsync('literal LIC-ENT does not publish a global ENT intake tier for blank MX hardware', async () => {
     const L = loadIntake();

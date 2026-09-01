@@ -98,14 +98,14 @@ test('normalized email intake retains SKU output even when pricing is absent', (
   const lines = [
     { status: 'resolved', sku: 'mr44', qty: 2 },
     { status: 'resolved', sku: 'MR44', qty: 3 },
-    { status: 'resolved', sku: 'LIC-MR-ADV-3YR', qty: 5 },
+    { status: 'resolved', sku: 'LIC-MR-ADV-3Y', qty: 5 },
     { status: 'needs_term', sku: null, qty: 8 },
   ];
   assert.deepEqual(normalizeQuoteIntakeLines(lines), [
     { sku: 'MR44', qty: 5 },
-    { sku: 'LIC-MR-ADV-3YR', qty: 5 },
+    { sku: 'LIC-MR-ADV-3Y', qty: 5 },
   ]);
-  assert.equal(quoteSkuTextFromLines(lines), '5 MR44\n5 LIC-MR-ADV-3YR');
+  assert.equal(quoteSkuTextFromLines(lines), '5 MR44\n5 LIC-MR-ADV-3Y');
   assert.match(quoteSource, /Parsed SKU quantities \(retained even though pricing\/links were unavailable\)/);
   assert.match(quoteSource, /Zoho quote option/);
 });
@@ -645,7 +645,7 @@ test('Gmail option verification suppresses every URL on an MX84 or quantity mism
   assert.deepEqual(leakedHistory.urls, []);
   assert.match(leakedHistory.error, /unexpected item \(MX84\)/i);
 
-  for (const leakedLicense of ['LIC-MX84-ENT-3Y', 'LIC-MX75-ENT-3Y', 'LIC-MR-ADV-3YR']) {
+  for (const leakedLicense of ['LIC-MX84-ENT-3Y', 'LIC-MX75-ENT-3Y', 'LIC-MR-ADV-3Y']) {
     const licensedHistory = verifyStratusOrderUrlOptions([{
       label: '3-Year',
       url: `https://stratusinfosystems.com/order/?item=MX105-HW,LIC-MX105-ENT-3Y,MX85-HW,LIC-MX85-ENT-3Y,${leakedLicense}&qty=2,1,2,1,1`,

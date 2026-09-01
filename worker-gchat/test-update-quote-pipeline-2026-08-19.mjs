@@ -249,6 +249,25 @@ test('a per-row tier alone still verifies', () => {
   assert.match(findItem(r, /^LIC-MX67C-/).sku, /SEC/);
 });
 
+test('MR Advanced survives editor serialization, both workers, and final URL verification', () => {
+  const r = updateQuote(
+    [{ sku: 'MR44', qty: 3, tier: 'advanced' }],
+    { skuText: 'quote 3 MR44' },
+  );
+  assert.ok(r.ok, `MR Advanced full chain failed: ${r.error}\n${JSON.stringify(r.options)}`);
+  assert.match(r.text, /^3 MR44 advanced$/m);
+  assert.deepEqual(
+    r.published.filter((label) => label !== 'Hardware Only'),
+    ['1-Year', '3-Year', '5-Year'],
+  );
+  for (const option of r.options.filter((entry) => entry.label !== 'Hardware Only')) {
+    assert.match(option.items, /MR44-HW/);
+    assert.match(option.items, /LIC-MR-ADV-[135]Y/);
+    assert.doesNotMatch(option.items, /LIC-ENT-/);
+    assert.doesNotMatch(option.items, /LIC-MR-ADV-[135]YR/);
+  }
+});
+
 // ── Explicit companion reconciliation: reported 2026-08-21 failure ─────────
 
 test('standalone LIC-ENT text does not become a global tier for blank MX hardware', () => {

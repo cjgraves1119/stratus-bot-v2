@@ -1011,7 +1011,7 @@ function EmailQuoteIntakeCard({ msg, busy, onUpdate, onRemove, onBuildQuote, onM
       ))}
       {lines.length === 0 && (
         <div style={{ marginTop: 4 }}>
-          <div style={lab}>No products detected — enter SKUs (e.g. “MR44,2 LIC-MR-ADV-3YR,2”)</div>
+          <div style={lab}>No products detected — enter SKUs (e.g. “MR44,2 LIC-MR-ADV-3Y,2”)</div>
           <input style={{ fontSize: 12, padding: '3px 6px', width: '70%' }} value={manual} disabled={busy}
             onChange={(e) => setManual(e.target.value)} />
           <button style={chip(false)} disabled={busy || !manual.trim()} onClick={() => onManualSkus(manual)}>Quote these SKUs</button>
