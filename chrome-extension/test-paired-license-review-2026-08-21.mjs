@@ -254,6 +254,7 @@ test('editor renders explicit pairing and mismatch explanations and still parses
   assert.match(source, /counted once, not an extra license/);
   assert.match(source, /Warm-spare license supplied/);
   assert.match(source, /counted once for this HA pair/);
+  assert.match(source, /License tier mismatch/);
   assert.match(source, /License quantity mismatch/);
   assert.match(source, /Move SKU row .* up/);
   assert.match(source, /Standalone renewal \/ additional license/);

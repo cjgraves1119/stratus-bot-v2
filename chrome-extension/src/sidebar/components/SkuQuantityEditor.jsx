@@ -121,6 +121,8 @@ export default function SkuQuantityEditor({
           annotation = `Device license plus standalone renewal — total ${licenseLabel} coverage is x${(pairing.hardwareQty || 0) + (pairing.licenseQty || 0)}.`;
         } else if (needsReview && pairing.role === 'license') {
           annotation = `Review required: is ${licenseLabel} the license for ${hardwareLabel}, or an additional standalone renewal?`;
+        } else if (mismatch && pairing.hardwareQty == null) {
+          annotation = `License tier mismatch: ${licenseLabel} does not match the selected hardware license tier.`;
         } else if (mismatch) {
           annotation = `License quantity mismatch for ${hardwareLabel}: hardware x${pairing.hardwareQty ?? '?'}, explicit ${licenseLabel} x${pairing.licenseQty ?? '?'}`;
         }
