@@ -8,6 +8,7 @@ const fs = require('fs'), path = require('path'), assert = require('assert');
 const SRC = fs.readFileSync(path.join(__dirname, 'src/sidebar/panels/ChatPanel.jsx'), 'utf8');
 const QUOTE = fs.readFileSync(path.join(__dirname, 'src/sidebar/components/QuoteResult.jsx'), 'utf8');
 const CONTENT = fs.readFileSync(path.join(__dirname, 'src/content/index.js'), 'utf8');
+const CORE = fs.readFileSync(path.join(__dirname, 'src/sidebar/components/sku-editor-core.mjs'), 'utf8');
 let pass = 0, fail = 0;
 function check(name, fn) {
   try { fn(); pass++; console.log(`  ✓ ${name}`); }
@@ -52,9 +53,15 @@ check('only explicit quote-card or Zoho-only review buttons authorize the first 
   assert.ok(/msg\?\.manualQuoteBuilder/.test(zohoOnly), 'Zoho-only entry must belong to an explicit manual card');
   assert.ok(/zohoListPriceSkus/.test(zohoOnly), 'Zoho-only entry must carry its explicit list-price SKU allowlist');
   assert.ok(/startOneshotFromUrl\('', \{[\s\S]*directSkus: prepared\.rows/.test(zohoOnly), 'Zoho-only review must use the same guarded planner');
-  assert.ok(/directSkus\.map\(\(line\) => \(\{[\s\S]*line\?\.tier/.test(SRC), 'direct Zoho review must preserve each selected row tier');
-  assert.ok(/directSkus\.map\(\(line\) => \(\{[\s\S]*licenseIntent: String\(line\.licenseIntent\)/.test(SRC), 'direct Zoho review must preserve the reviewed paired/standalone license choice');
-  assert.ok(/directSkus\.map\(\(line\) => \(\{[\s\S]*availability: String\(line\.availability\)/.test(SRC), 'direct Zoho review must preserve the exact Zoho-only availability proof across re-plans');
+  // Direct rows are mapped by the shared core helper (2026-09-01) so the
+  // editor-only "None" tier travels as hardware_only_lines instead of an
+  // invalid Worker tier. The helper must still preserve tier, the reviewed
+  // paired/standalone choice, and the exact Zoho-only availability proof.
+  assert.ok(/\? oneshotSkusFromCommittedRows\(directSkus\)/.test(SRC), 'direct Zoho review must map rows through the shared core helper');
+  const directRows = extractFunction(CORE, 'oneshotSkusFromCommittedRows');
+  assert.ok(/if \(tier && tier !== 'NONE'\) line\.tier = tier;/.test(directRows), 'direct Zoho review must preserve each selected row tier and drop only the editor-only None tier');
+  assert.ok(/\['paired', 'standalone'\]\.includes\(licenseIntent\)\) line\.licenseIntent = licenseIntent;/.test(directRows), 'direct Zoho review must preserve the reviewed paired/standalone license choice');
+  assert.ok(/\['ecomm', 'zoho_only'\]\.includes\(availability\)\) line\.availability = availability;/.test(directRows), 'direct Zoho review must preserve the exact Zoho-only availability proof across re-plans');
   assert.ok(/const hasReviewedLicenseIntent = baseSkus\.some[\s\S]*const source = hasReviewedLicenseIntent[\s\S]*\? baseSkus/.test(SRC), 'one-shot re-plans must keep the reviewed request rows as the license-intent authority');
   assert.ok(/licenseIntent: String\(line\?\.licenseIntent \|\| line\?\.license_intent\)/.test(SRC), 'the re-mounted plan editor must restore the reviewed license choice');
   assert.ok(/startZohoOnlyManualQuote\(msg, rows\)/.test(SRC), 'the manual card button must be the only Zoho-only trigger');

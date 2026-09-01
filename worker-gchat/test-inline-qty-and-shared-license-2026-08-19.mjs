@@ -154,6 +154,32 @@ test('a model-specific licence is still matched one to one', () => {
   assert.equal(r.success, true, `expected success, got ${JSON.stringify(codesOf(r))}`);
 });
 
+test('MS130 24-port hardware variants reuse the existing exact-SKU aggregation path', () => {
+  const r = expand([
+    { sku: 'MS130-24P', qty: 2 },
+    { sku: 'MS130-24', qty: 4 },
+  ]);
+  assert.equal(r.success, true, `expected success, got ${JSON.stringify(codesOf(r))}`);
+  assert.deepEqual(
+    r.lines.filter((line) => line.sku === 'LIC-MS130-24-3Y'),
+    [{ sku: 'LIC-MS130-24-3Y', qty: 6 }],
+    'the canonical worker aggregator must emit one standard license line totaling both hardware variants',
+  );
+});
+
+test('MS130 24-port Advanced variants reuse the same exact-SKU aggregation path', () => {
+  const r = expand([
+    { sku: 'MS130-24P', qty: 2, tier: 'A' },
+    { sku: 'MS130-24', qty: 4, tier: 'A' },
+  ]);
+  assert.equal(r.success, true, `expected success, got ${JSON.stringify(codesOf(r))}`);
+  assert.deepEqual(
+    r.lines.filter((line) => line.sku === 'LIC-MS130-24A-3Y'),
+    [{ sku: 'LIC-MS130-24A-3Y', qty: 6 }],
+    'the canonical worker aggregator must emit one Advanced license line totaling both hardware variants',
+  );
+});
+
 test('a genuine quantity shortfall on a shared licence still blocks', () => {
   const r = expand([
     { sku: 'CW9176I-RTG', qty: 4 }, { sku: 'MR44-HW', qty: 4 },

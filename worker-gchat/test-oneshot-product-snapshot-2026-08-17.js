@@ -100,6 +100,10 @@ function loadProductHelpers() {
     grab('canonicalOneshotCompositionSku'),
     grab('oneshotHardwareOnlyKeys'),
     grab('oneshotLineIsHardwareOnly'),
+    // Quantity-scoped hardware_only_lines (2026-09-01).
+    grab('oneshotHardwareOnlyBudget'),
+    grab('oneshotHardwareOnlyBudgetKey'),
+    grab('oneshotLicensedHardwareQuantities'),
     grab('oneshotProductPricingBlocker'),
     grab('quotedItemsFromOneshotProductRows'),
     grab('isLicenseExemptAccessorySku'),

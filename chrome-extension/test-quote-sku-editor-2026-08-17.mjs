@@ -104,8 +104,13 @@ test('chat rebuild uses newest-response and canonical URL-composition gates', ()
 
 test('one-shot product edits force re-plan and cannot execute stale products', () => {
   const source = readFileSync(chatPanelPath, 'utf8');
-  assert.match(source, /onReplan\(\{\s*skus,\s*include_licenses: !hardwareOnly,\s*hardware_only: hardwareOnly,\s*zoho_list_price_skus:/,
+  assert.match(source, /onReplan\(\{\s*skus,\s*include_licenses: !hardwareOnly,\s*hardware_only: hardwareOnly,[\s\S]{0,600}?zoho_list_price_skus:/,
     'edited-product re-plan must recompute skus and pass explicit license intent (not reuse a stale normalized.lines snapshot)');
+  // Both bare-hardware forms are restated on every product re-plan (2026-09-01)
+  // so a row switched away from "None" stops being bare and the Worker's
+  // product fingerprint rebinds; an omitted key would silently inherit base.
+  assert.match(source, /hardware_only: hardwareOnly,[\s\S]{0,400}?hardware_only_skus: Array\.isArray\(prepared\.hardwareOnlySkus\) \? prepared\.hardwareOnlySkus : \[\],\s*hardware_only_lines: Array\.isArray\(prepared\.hardwareOnlyLines\) \? prepared\.hardwareOnlyLines : \[\],/,
+    'edited-product re-plan must restate whole-SKU and quantity-scoped hardware-only lines from the committed rows');
   assert.match(source, /disabled=\{hard\.length > 0 \|\| busy \|\| productDirty\}/);
   assert.match(source, /Product editing is unavailable after an Execute attempt/);
   assert.match(source, /Execute remains disabled/);

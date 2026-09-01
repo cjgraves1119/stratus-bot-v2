@@ -23,15 +23,14 @@ const screenshotRows = () => [
 test('reported MX67 default-security shape marks one exact pair and leaves shared LIC-ENT standalone', () => {
   const review = licensePairReviewForRows(screenshotRows());
   assert.deepEqual(review[0], { kind: 'none' });
-  assert.deepEqual(review[1], {
-    kind: 'paired',
-    role: 'hardware',
-    hardwareQty: 1,
-    licenseQty: 1,
-    hardwareSkus: ['MX67'],
-    licenseSkus: ['LIC-MX67-SEC-3YR'],
-    tier: 'security',
-  });
+  assert.equal(review[1].kind, 'paired');
+  assert.equal(review[1].role, 'hardware');
+  assert.equal(review[1].hardwareQty, 1);
+  assert.equal(review[1].licenseQty, 1);
+  assert.deepEqual(review[1].hardwareSkus, ['MX67']);
+  assert.deepEqual(review[1].licenseSkus, ['LIC-MX67-SEC-3YR']);
+  assert.deepEqual(review[1].hardwareContributions, [{ sku: 'MX67', qty: 1 }]);
+  assert.equal(review[1].tier, 'security');
   assert.equal(review[2].kind, 'paired');
   assert.equal(review[2].role, 'license');
 });
@@ -101,13 +100,22 @@ test('pasted AP cart requires license-use review and rejects stale paired intent
   assert.equal(stale.ok, false);
   assert.match(stale.error, /does not match/i);
 
+  // An undecided ENT licence next to Advanced hardware is reported by the pair
+  // review, not the hardware family-tier gate: explicit licence rows stay
+  // outside that gate so the rep is told the licence does not match and can
+  // choose a standalone renewal.
   const tierMismatch = quoteTextFromEditorRows([
     { ...rows[0], tier: 'advanced' },
     rows[1],
   ], '');
   assert.equal(tierMismatch.ok, false, 'tier mismatch without a use choice must fail closed');
   assert.match(tierMismatch.error, /does not match/i);
+  assert.notEqual(tierMismatch.errors[0]?.code, 'mixed_family_license_tier');
 
+  // A standalone renewal is an additive line for devices already in the field.
+  // Renewing ENT while buying Advanced APs is published with its intent intact
+  // (the same contract the Worker pipeline keeps for MX Enterprise beside a
+  // standalone SEC renewal); only the hardware dropdowns are tier-gated.
   const intentionalStandalone = quoteTextFromEditorRows([
     { ...rows[0], tier: 'advanced' },
     { ...rows[1], licenseIntent: 'standalone' },
@@ -116,6 +124,16 @@ test('pasted AP cart requires license-use review and rejects stale paired intent
   assert.deepEqual(intentionalStandalone.licenseIntents, [
     { sku: 'LIC-ENT-5YR', qty: 1, intent: 'standalone' },
   ]);
+  assert.equal(intentionalStandalone.text, '1 CW9164I advanced\n1 LIC-ENT-5YR');
+
+  const mixedHardware = quoteTextFromEditorRows([
+    { ...rows[0], tier: 'advanced' },
+    { sku: 'MR44', qty: 1, tier: 'enterprise' },
+    { ...rows[1], licenseIntent: 'standalone' },
+  ], '');
+  assert.equal(mixedHardware.ok, false, 'two AP models on different editions must still fail closed');
+  assert.equal(mixedHardware.errors[0].code, 'mixed_family_license_tier');
+  assert.match(mixedHardware.error, /Access points.*cannot mix advanced and enterprise/i);
 });
 
 test('same-scope quantity mismatch is amber-review data on both rows', () => {
@@ -252,14 +270,16 @@ test('pairing is recomputed from edits and never changes quote serialization', (
 test('editor renders explicit pairing and mismatch explanations and still parses as JSX', () => {
   const source = readFileSync(editorPath, 'utf8');
   assert.match(source, /licensePairReviewForRows\(values, \{ allowHaLicenseRatio \}\)/);
-  assert.match(source, /License supplied by paired/);
-  assert.match(source, /counted once, not an extra license/);
-  assert.match(source, /Warm-spare license supplied/);
-  assert.match(source, /counted once for this HA pair/);
+  assert.match(source, /applyLinkedQuoteRowPatch\(values, index, patch/);
+  assert.match(source, /groupQuoteEditorRows\(values, pairReview\)/);
+  assert.match(source, /Paired license totals update automatically/);
+  assert.match(source, /Synced total/);
+  assert.match(source, /Warm spare/);
   assert.match(source, /License tier mismatch/);
   assert.match(source, /License quantity mismatch/);
   assert.match(source, /Move SKU row .* up/);
-  assert.match(source, /Standalone renewal \/ additional license/);
+  assert.match(source, /Standalone renewal/);
+  assert.match(source, /linkedLicenseQuantity/);
   assert.match(source, /needsReview \|\| paired \|\| standalone \|\| mismatch/);
   assert.doesNotThrow(() => babel.transformSync(source, {
     filename: 'SkuQuantityEditor.jsx',

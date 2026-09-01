@@ -10822,6 +10822,9 @@ function oneshotCatalogVersion() {
 function oneshotProductRequestDescriptor(input) {
   const p = input || {};
   const hardwareOnly = [...oneshotHardwareOnlyKeys(p.hardware_only_skus)].sort();
+  const hardwareOnlyLines = [...oneshotHardwareOnlyBudget(p.hardware_only_lines).entries()]
+    .map(([sku, qty]) => ({ sku, qty }))
+    .sort((a, b) => a.sku.localeCompare(b.sku));
   const zohoListPriceSkus = [...new Set((Array.isArray(p.zoho_list_price_skus) ? p.zoho_list_price_skus : [])
     .map((sku) => String(sku || '').trim().toUpperCase())
     .filter(Boolean))].sort();
@@ -10845,6 +10848,10 @@ function oneshotProductRequestDescriptor(input) {
     // identical carts hash differently, and OMITTED when unused so every cart
     // that does not use the feature keeps the fingerprint it had before.
     ...(hardwareOnly.length ? { hardware_only_skus: hardwareOnly } : {}),
+    // Quantity-scoped form of the same review: "MX67 x1 of 3 is bare". It also
+    // changes the licence the expansion produces, so it is bound the same way
+    // and OMITTED when unused so existing fingerprints are unchanged.
+    ...(hardwareOnlyLines.length ? { hardware_only_lines: hardwareOnlyLines } : {}),
     // Explicitly selected live-Zoho rows that are absent from the embedded
     // eCommerce catalog. Only these rows may fall back to Zoho Unit_Price with
     // zero discount; binding the list into the product fingerprint prevents a
@@ -11011,6 +11018,60 @@ function oneshotLineIsHardwareOnly(hardwareSku, keys) {
   return false;
 }
 
+/**
+ * Quantity-scoped "None (hardware only)": `hardware_only_lines` is
+ * [{ sku, qty }] and names how MANY units of a SKU the rep quoted bare, so one
+ * cart line (MX67 x3) can be one bare spare plus two licensed appliances. The
+ * whole-SKU `hardware_only_skus` list keeps its exact meaning; this budget is
+ * consumed per hardware line, in cart order, and only reduces the companion
+ * quantity. Malformed entries are dropped, which can only ADD licences, never
+ * remove one the rep asked for.
+ */
+function oneshotHardwareOnlyBudget(list) {
+  const budget = new Map();
+  for (const line of (Array.isArray(list) ? list : [])) {
+    const sku = canonicalOneshotCompositionSku(line?.sku);
+    const qty = Number(line?.qty);
+    if (!sku || sku.startsWith('LIC-') || !Number.isInteger(qty) || qty < 1 || qty > 99999) continue;
+    budget.set(sku, Math.min(99999, (budget.get(sku) || 0) + qty));
+  }
+  return budget;
+}
+
+function oneshotHardwareOnlyBudgetKey(hardwareSku, budget) {
+  const canonical = canonicalOneshotCompositionSku(hardwareSku);
+  if (budget.has(canonical)) return canonical;
+  for (const key of budget.keys()) {
+    if (/^CW\d{4}$/.test(key) && canonical.startsWith(key) && /^[A-Z]*$/.test(canonical.slice(key.length))) {
+      return key;
+    }
+  }
+  return '';
+}
+
+/**
+ * Licensed unit count for every requested hardware line after the whole-SKU
+ * list and the quantity-scoped budget are applied. Returns a Map keyed by the
+ * request line object so both the explicit-licence coverage check and the
+ * expansion read the same partition.
+ */
+function oneshotLicensedHardwareQuantities(requested, hardwareOnlyKeys, hardwareOnlyLines) {
+  const budget = oneshotHardwareOnlyBudget(hardwareOnlyLines);
+  const licensed = new Map();
+  for (const line of (Array.isArray(requested) ? requested : [])) {
+    if (!line || line.sku.startsWith('LIC-')) continue;
+    if (oneshotLineIsHardwareOnly(line.sku, hardwareOnlyKeys)) {
+      licensed.set(line, 0);
+      continue;
+    }
+    const key = oneshotHardwareOnlyBudgetKey(line.sku, budget);
+    const bare = key ? Math.min(budget.get(key) || 0, line.qty) : 0;
+    if (key && bare) budget.set(key, budget.get(key) - bare);
+    licensed.set(line, line.qty - bare);
+  }
+  return licensed;
+}
+
 // Expand exactly once before lookup. HA is never inferred: only an explicit
 // warm_spare selection changes the normal one-license-per-device behavior.
 function expandOneshotRequestedProducts(input) {
@@ -11039,6 +11100,10 @@ function expandOneshotRequestedProducts(input) {
   // Rows the rep marked "None (hardware only)" in the editor. Absent field =>
   // empty set => behaviour is exactly as before, still fail-closed.
   const hardwareOnlyKeys = oneshotHardwareOnlyKeys(p.hardware_only_skus);
+  // Licensed units per hardware line once whole-SKU and quantity-scoped bare
+  // reviews are applied. 0 means the line is entirely bare.
+  const licensedHardwareQty = oneshotLicensedHardwareQuantities(requested, hardwareOnlyKeys, p.hardware_only_lines);
+  const licensedQtyOf = (line) => (licensedHardwareQty.has(line) ? licensedHardwareQty.get(line) : line.qty);
   const term = String(p.license_term || '1');
   const explicitLicenses = requested.filter((line) => line.sku.startsWith('LIC-'));
   // Blank is the backwards-compatible meaning: older reviewed carts already
@@ -11144,8 +11209,10 @@ function expandOneshotRequestedProducts(input) {
     const coveredHardware = new Map();
     for (const hw of hardware) {
       // Deliberately unlicensed: it must not pull a shared licence's expected
-      // quantity up, and must not bind to one.
-      if (oneshotLineIsHardwareOnly(hw.sku, hardwareOnlyKeys)) continue;
+      // quantity up, and must not bind to one. A partially bare line binds
+      // with only its licensed units.
+      const licensedQty = licensedQtyOf(hw);
+      if (licensedQty === 0) continue;
       const compatible = pairedExplicitLicenses.filter((line) => oneshotExplicitLicenseMatchesHardware(hw.sku, line.sku));
       for (const line of compatible) matchedExplicit.add(line.sku);
       if (compatible.length > 1) {
@@ -11155,7 +11222,7 @@ function expandOneshotRequestedProducts(input) {
       const explicit = compatible[0] || null;
       if (!explicit) continue;
       if (!coveredHardware.has(explicit.sku)) coveredHardware.set(explicit.sku, []);
-      coveredHardware.get(explicit.sku).push(hw);
+      coveredHardware.get(explicit.sku).push({ ...hw, qty: licensedQty });
       explicitByHardware.set(hw.sku, explicit);
     }
     for (const [licenseSku, coveredLines] of coveredHardware) {
@@ -11186,7 +11253,7 @@ function expandOneshotRequestedProducts(input) {
     // renewal line then blocked the cart (Chris, 2026-08-19). A licence for
     // equipment the customer already owns has no hardware here by definition.
     const unlicensedMxHardware = hardware.some((line) => /^MX\d/i.test(line.sku)
-      && !oneshotLineIsHardwareOnly(line.sku, hardwareOnlyKeys)
+      && licensedQtyOf(line) > 0
       && !explicitByHardware.has(line.sku));
     for (const explicit of pairedExplicitLicenses) {
       if (unlicensedMxHardware && /^LIC-MX\d/i.test(explicit.sku) && !matchedExplicit.has(explicit.sku)) {
@@ -11217,12 +11284,13 @@ function expandOneshotRequestedProducts(input) {
     expanded.push(line);
     if (!includeLicenses) continue;
     if (isLicenseExemptAccessorySku(rawSku)) continue;
-    if (oneshotLineIsHardwareOnly(rawSku, hardwareOnlyKeys)) continue;
+    const licensedQty = licensedQtyOf(line);
+    if (licensedQty === 0) continue;
     const candidate = selectOneshotLicenseSku(rawSku, term, line.tier || null);
     if (candidate
         && !explicitByHardware.has(rawSku)
         && !explicitStems.has(oneshotLicenseStem(canonicalOneshotCatalogSku(candidate)))) {
-      expanded.push({ sku: candidate, qty: line.qty });
+      expanded.push({ sku: candidate, qty: licensedQty });
     }
   }
   return {

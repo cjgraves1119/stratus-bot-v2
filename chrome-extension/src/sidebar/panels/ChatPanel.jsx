@@ -37,12 +37,17 @@ import {
   applySkuSuggestion,
   blankQuoteEditorRows,
   editableRowsFromResult,
+  oneshotSkusFromCommittedRows,
+  oneshotSkusWithReviewedLicenseIntents,
   quoteEditorHasSkuInput,
   quoteEditorRowsFromIntake,
   quoteTextFromEditorRows,
+  retainPairedLicenseProjections,
+  rowsForLinkedQuoteRebuild,
   sameDeviceIdentity,
   splitRowsForTierRequote,
   termFromLicenseRows,
+  withPairedLicenseProjections,
 } from '../components/sku-editor-core.mjs';
 // Quoting + screenshot parsing routed through the worker API (the same
 // deterministic engine the Webex/GChat bots use), consolidated into Chat
@@ -1573,13 +1578,16 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
 
   async function revalidateEditedProducts(rows) {
     const hardwareOnly = msg.base?.hardware_only === true;
-    const prepared = quoteTextFromEditorRows(rows, '', {});
+    const rebuildRows = rowsForLinkedQuoteRebuild(rows, {
+      allowHaLicenseRatio: msg.base?.ha_mode === 'warm_spare',
+    });
+    const prepared = quoteTextFromEditorRows(rebuildRows, '', {});
     if (!prepared.ok) {
       setProductStatus(prepared.error || 'The edited SKU quantities are invalid.');
       return;
     }
     setProductStatus('Revalidating products and rebuilding the read-only plan…');
-    let skus = prepared.rows;
+    let skus = oneshotSkusFromCommittedRows(prepared.rows);
     const hasRowTier = (rows || []).some((row) => String(row?.tier || '').trim());
     if (hasRowTier && !hardwareOnly) {
       // Only the hardware is requoted. The licences already in this plan were
@@ -1601,11 +1609,15 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
         const parsed = match?.url ? parseOrderUrlItems(match.url) : [];
         if (parsed.length) {
           // Belt and braces: if the requote already produced a licence for the
-          // same device, that licence is derived after all and must not be
-          // added a second time. Matched on device identity, not just the model
-          // token, so a LIC-MS130-48 is not swallowed by a LIC-MS130-24.
+          // same device, an UNDECIDED licence is derived after all and must not
+          // be added a second time. Matched on device identity, not just the
+          // model token, so a LIC-MS130-48 is not swallowed by a LIC-MS130-24.
+          // A reviewed standalone renewal is additive by definition, so it is
+          // always carried: the same catalogue licence legitimately appears
+          // both as the requote's device companion and as the renewal copy.
           const carried = standaloneLicenseRows
-            .filter((row) => !parsed.some((item) => sameDeviceIdentity(item.sku, row.sku)))
+            .filter((row) => row?.licenseIntent === 'standalone'
+              || !parsed.some((item) => sameDeviceIdentity(item.sku, row.sku)))
             .map(({ sku, qty, licenseIntent }) => ({
               sku,
               qty,
@@ -1619,6 +1631,11 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
       skus,
       include_licenses: !hardwareOnly,
       hardware_only: hardwareOnly,
+      // Always restated, never inherited from base: a row the rep just switched
+      // away from "None" must stop being bare, and both forms are bound into
+      // the Worker's product fingerprint.
+      hardware_only_skus: Array.isArray(prepared.hardwareOnlySkus) ? prepared.hardwareOnlySkus : [],
+      hardware_only_lines: Array.isArray(prepared.hardwareOnlyLines) ? prepared.hardwareOnlyLines : [],
       zoho_list_price_skus: prepared.rows
         .filter((row) => row.availability === 'zoho_only')
         .map((row) => row.sku),
@@ -3111,7 +3128,7 @@ export default function ChatPanel({
     };
   }
 
-  function verifiedQuoteUrls(result, committedRows, msg = null, hardwareOnlySkus = null) {
+  function verifiedQuoteUrls(result, committedRows, msg = null, hardwareOnlySkus = null, hardwareOnlyLines = null) {
     const requirements = quoteVerificationRequirements(msg);
     // A reviewed row-local tier wins over the stale/global tier recorded on
     // the original message. The verifier already evaluates every committed
@@ -3128,7 +3145,28 @@ export default function ChatPanel({
       // licence companion check requires a quantity covering every access point
       // in the cart, so one bare row failed the whole quote (2026-08-19).
       ...(Array.isArray(hardwareOnlySkus) && hardwareOnlySkus.length ? { hardwareOnlySkus } : {}),
+      // Quantity-scoped form: one SKU may be a bare spare plus licensed units.
+      ...(Array.isArray(hardwareOnlyLines) && hardwareOnlyLines.length ? { hardwareOnlyLines } : {}),
     });
+  }
+
+  // Lines of the verified option whose term the editor is already showing, so a
+  // rebuilt quote re-projects its device-associated licences at that term.
+  // Hardware Only and EOL refresh options describe a different cart shape and
+  // are never used as a projection source.
+  function pairedProjectionSourceLines(verifiedUrls, preferredTerm) {
+    const candidates = (Array.isArray(verifiedUrls) ? verifiedUrls : [])
+      .filter((option) => option && typeof option === 'object'
+        && option.hardwareOnly !== true
+        && String(option.optionKind || '') !== 'eol_refresh'
+        && option.url)
+      .map((option) => ({ option, lines: parseOrderUrlItems(option.url) }))
+      .filter(({ lines }) => lines.some((line) => /^LIC-/i.test(String(line?.sku || ''))));
+    if (!candidates.length) return [];
+    const preferred = preferredTerm
+      ? candidates.find(({ option }) => String(option.termYears || quoteOptionTerm(option) || '') === String(preferredTerm))
+      : null;
+    return (preferred || candidates[0]).lines;
   }
 
   function explicitQuoteHaRequested(msg) {
@@ -3142,7 +3180,10 @@ export default function ChatPanel({
     // An explicit dropdown pick wins over the tier inferred from the prior
     // request text; undefined means "leave the inferred tier alone".
     const tierOverride = tier === undefined ? msg?.draftTier : tier;
-    const prepared = quoteTextFromEditorRows(rows, sourceText, {
+    const rebuildRows = rowsForLinkedQuoteRebuild(rows, {
+      allowHaLicenseRatio: explicitQuoteHaRequested(msg),
+    });
+    const prepared = quoteTextFromEditorRows(rebuildRows, sourceText, {
       tier: tierOverride || '',
       haRequested: explicitQuoteHaRequested(msg),
     });
@@ -3205,7 +3246,9 @@ export default function ChatPanel({
       updateMessage(msg.id, {
         result: { ...candidate, urls: [] },
         skuText: prepared.text,
-        draftRows: prepared.rows.map((row) => ({ ...row, unresolved: unresolved.has(row.sku) })),
+        // The quote was not replaced, so the editor keeps its paired review rows.
+        draftRows: retainPairedLicenseProjections(prepared.rows, rows)
+          .map((row) => ({ ...row, unresolved: unresolved.has(row.sku) })),
         draftDirty: true,
         draftStatus: 'The quote service did not recognize every SKU. Apply a suggestion or edit the unresolved row, then update again.',
         resultRevision: (msg.resultRevision || 0) + 1,
@@ -3215,12 +3258,18 @@ export default function ChatPanel({
       return { success: false, error: 'unresolved_sku' };
     }
 
-    const verified = verifiedQuoteUrls(candidate, prepared.rows, msg, prepared.hardwareOnlySkus);
+    const verified = verifiedQuoteUrls(
+      candidate,
+      prepared.rows,
+      msg,
+      prepared.hardwareOnlySkus,
+      prepared.hardwareOnlyLines,
+    );
     if (!verified.ok) {
       updateMessage(msg.id, {
         result: { ...candidate, urls: [] },
         skuText: prepared.text,
-        draftRows: prepared.rows,
+        draftRows: retainPairedLicenseProjections(prepared.rows, rows),
         draftDirty: true,
         draftStatus: `Quote could not be verified: ${verified.error} No link or Zoho action is available.`,
         resultRevision: (msg.resultRevision || 0) + 1,
@@ -3230,15 +3279,27 @@ export default function ChatPanel({
       return { success: false, error: verified.error };
     }
 
+    // The committed rows deliberately exclude paired projections (the Worker
+    // derives those companions). Re-project them from the verified option at
+    // the term the editor was showing so the rep keeps seeing, and can keep
+    // unpairing, the licence total behind each hardware row after Update.
+    const projectedRows = withPairedLicenseProjections(
+      prepared.rows,
+      pairedProjectionSourceLines(verified.urls, termFromLicenseRows(rows) || termFromLicenseRows(prepared.rows)),
+      { allowHaLicenseRatio: explicitQuoteHaRequested(msg) },
+    );
     updateMessage(msg.id, (current) => ({
       result: { ...candidate, urls: verified.urls },
       skuText: prepared.text,
-      draftRows: prepared.rows,
+      draftRows: projectedRows,
       // Which committed rows the rep set to "None (hardware only)". The one-shot
       // plan needs this: LIC-ENT is model-agnostic, so without it the worker's
       // coverage check demands a licence for access points the rep deliberately
       // quoted bare and refuses the cart (Chris, 2026-08-19).
       quoteHardwareOnlySkus: Array.isArray(prepared.hardwareOnlySkus) ? prepared.hardwareOnlySkus : [],
+      // Quantity-scoped form of the same review (one bare spare among licensed
+      // units of the same SKU). Both travel to the one-shot plan.
+      quoteHardwareOnlyLines: Array.isArray(prepared.hardwareOnlyLines) ? prepared.hardwareOnlyLines : [],
       draftDirty: false,
       draftStatus: 'Quote updated and every displayed link matches the committed SKU quantities.',
       resultRevision: (current.resultRevision || 0) + 1,
@@ -3480,6 +3541,12 @@ export default function ChatPanel({
       capturedContactEmail: customerContext.contactEmail,
       participantContextMode: customerContext.mode,
       hardwareOnlySkus: sourceMessage?.quoteHardwareOnlySkus,
+      hardwareOnlyLines: sourceMessage?.quoteHardwareOnlyLines,
+      // The verified URL aggregates a derived companion with an additive
+      // standalone copy of the same licence. The committed rows say which
+      // quantity was the reviewed renewal so the Worker does not read all of
+      // it as device coverage.
+      reviewedRows: quoteDraftRows(sourceMessage),
       intakeIntent: sourceMessage?.emailQuoteContext?.intent
         || (sourceMessage?.quoteHaRequested === true ? { ha_requested: true } : null),
     });
@@ -3493,6 +3560,8 @@ export default function ChatPanel({
     capturedContactEmail = '',
     participantContextMode = 'unscoped',
     hardwareOnlySkus = null,
+    hardwareOnlyLines = null,
+    reviewedRows = null,
     intakeIntent = null,
     directSkus = null,
     zohoListPriceSkus = null,
@@ -3500,19 +3569,12 @@ export default function ChatPanel({
     if (oneshotPlanStartRef.current) return;
     oneshotPlanStartRef.current = true;
     try {
+      // Direct rows drop the editor-only "None" tier (carried as
+      // hardware_only_lines instead); URL carts get the reviewed standalone
+      // quantities split back out of their aggregated licence lines.
       const skus = Array.isArray(directSkus)
-        ? directSkus.map((line) => ({
-          sku: String(line?.sku || '').trim().toUpperCase(),
-          qty: Number(line?.qty) || 1,
-          ...(String(line?.tier || '').trim() ? { tier: String(line.tier).trim().toUpperCase() } : {}),
-          ...(/^LIC-/i.test(String(line?.sku || '')) && ['paired', 'standalone'].includes(String(line?.licenseIntent || '').trim().toLowerCase())
-            ? { licenseIntent: String(line.licenseIntent).trim().toLowerCase() }
-            : {}),
-          ...(['ecomm', 'zoho_only'].includes(String(line?.availability || '').trim().toLowerCase())
-            ? { availability: String(line.availability).trim().toLowerCase() }
-            : {}),
-        })).filter((line) => line.sku)
-        : parseOrderUrlItems(orderUrl);
+        ? oneshotSkusFromCommittedRows(directSkus)
+        : oneshotSkusWithReviewedLicenseIntents(parseOrderUrlItems(orderUrl), reviewedRows);
       if (!skus.length) {
         appendMessage(infoMsg('⚠️ No SKUs found on the selected quote URL.'));
         return { success: false, error: 'no_skus' };
@@ -3562,6 +3624,11 @@ export default function ChatPanel({
         // deliberately quoted bare and refuses the cart.
         ...(Array.isArray(hardwareOnlySkus) && hardwareOnlySkus.length
           ? { hardware_only_skus: hardwareOnlySkus }
+          : {}),
+        // Quantity-scoped bare units (MX67 x1 of 3). Bound into the Worker's
+        // product fingerprint alongside hardware_only_skus.
+        ...(Array.isArray(hardwareOnlyLines) && hardwareOnlyLines.length
+          ? { hardware_only_lines: hardwareOnlyLines.map(({ sku, qty }) => ({ sku, qty })) }
           : {}),
         ...(Array.isArray(zohoListPriceSkus) && zohoListPriceSkus.length
           ? { zoho_list_price_skus: [...new Set(zohoListPriceSkus.map((sku) => String(sku || '').trim().toUpperCase()).filter(Boolean))] }
@@ -3613,7 +3680,10 @@ export default function ChatPanel({
 
   async function startZohoOnlyManualQuote(msg, rows) {
     if (!msg?.manualQuoteBuilder || loading) return { success: false, error: 'manual_quote_unavailable' };
-    const prepared = quoteTextFromEditorRows(rows, '', {
+    const rebuildRows = rowsForLinkedQuoteRebuild(rows, {
+      allowHaLicenseRatio: explicitQuoteHaRequested(msg),
+    });
+    const prepared = quoteTextFromEditorRows(rebuildRows, '', {
       tier: msg?.draftTier || '',
       haRequested: explicitQuoteHaRequested(msg),
     });
@@ -3625,8 +3695,11 @@ export default function ChatPanel({
       .filter((row) => row.availability === 'zoho_only')
       .map((row) => row.sku);
     if (!zohoListPriceSkus.length) return rebuildQuoteMessage(msg, rows);
+    // No eCommerce quote replaces this card, so the editor keeps its paired
+    // review rows; the Worker derives the companions for the Zoho plan itself.
+    const draftRows = retainPairedLicenseProjections(prepared.rows, rows);
     updateMessage(msg.id, {
-      draftRows: prepared.rows,
+      draftRows,
       draftDirty: true,
       draftStatus: 'Opening a read-only Zoho plan. No eCommerce link or CRM record is being created.',
       busy: true,
@@ -3639,10 +3712,11 @@ export default function ChatPanel({
       capturedContactEmail: customerContext.contactEmail,
       participantContextMode: customerContext.mode,
       hardwareOnlySkus: prepared.hardwareOnlySkus,
+      hardwareOnlyLines: prepared.hardwareOnlyLines,
       intakeIntent: msg?.emailQuoteContext?.intent || null,
     });
     updateMessage(msg.id, {
-      draftRows: prepared.rows,
+      draftRows,
       draftDirty: true,
       draftStatus: result?.success === false
         ? `Zoho review could not be opened: ${result.error || 'unknown error'}. No CRM record was created.`
@@ -3802,6 +3876,9 @@ export default function ChatPanel({
         ...(Array.isArray(msg.base.hardware_only_skus) && msg.base.hardware_only_skus.length
           ? { hardware_only_skus: msg.base.hardware_only_skus }
           : {}),
+        ...(Array.isArray(msg.base.hardware_only_lines) && msg.base.hardware_only_lines.length
+          ? { hardware_only_lines: msg.base.hardware_only_lines }
+          : {}),
         // Zoho-only pricing is part of the Worker's signed product request.
         // Execute must repeat the exact reviewed set or an otherwise unchanged
         // cart fails closed with product_snapshot_mismatch.
@@ -3830,7 +3907,9 @@ export default function ChatPanel({
           for (const extraIdx of extraIndexes) {
             const option = (msg.quoteOptions || [])[extraIdx];
             if (!option?.url) continue;
-            const extraSkus = parseOrderUrlItems(option.url);
+            // Same reviewed standalone split as the first plan, so the other
+            // term's aggregated licence line is not read as all device coverage.
+            const extraSkus = oneshotSkusWithReviewedLicenseIntents(parseOrderUrlItems(option.url), msg.base.skus);
             if (!extraSkus.length) {
               appendMessage(infoMsg(`Extra term ${option.label || extraIdx} had no SKUs and was skipped.`));
               continue;
@@ -3875,6 +3954,9 @@ export default function ChatPanel({
               // (Chris, 2026-08-19).
               ...(Array.isArray(msg.base.hardware_only_skus) && msg.base.hardware_only_skus.length
                 ? { hardware_only_skus: msg.base.hardware_only_skus }
+                : {}),
+              ...(Array.isArray(msg.base.hardware_only_lines) && msg.base.hardware_only_lines.length
+                ? { hardware_only_lines: msg.base.hardware_only_lines }
                 : {}),
               ...(Array.isArray(msg.base.zoho_list_price_skus) && msg.base.zoho_list_price_skus.length
                 ? { zoho_list_price_skus: msg.base.zoho_list_price_skus }

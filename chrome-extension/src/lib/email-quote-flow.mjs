@@ -12,6 +12,10 @@ const PRODUCT_OVERRIDE_KEYS = new Set([
   'include_licenses',
   'ha_mode',
   'ha_recalculate_license_qty',
+  // Both are bound into the Worker's product fingerprint, so changing either
+  // is a product change that must not reuse the prior review token.
+  'hardware_only_skus',
+  'hardware_only_lines',
 ]);
 
 function editableQuoteLineError(index, code, message) {
@@ -210,7 +214,44 @@ function termAgnosticLicenseAliasKey(sku) {
  * (the editor's per-line "None"). They are excluded from the companion quantity,
  * or a shared licence such as LIC-ENT would be required to cover access points
  * the rep explicitly asked to quote bare (2026-08-19).
+ *
+ * `hardwareOnlyLines` ([{ sku, qty }]) is the quantity-scoped form of the same
+ * contract. One SKU may be split into a bare spare and licensed production
+ * units; only the bare quantity is excluded. A SKU is treated as WHOLLY bare
+ * when the legacy list names it or when its bare quantity covers its entire
+ * committed quantity. A partially bare SKU is partitioned per row through the
+ * committed rows' own `tier: 'none'`, never by removing the whole SKU.
  */
+function bareHardwareRequirements(requirements, committedLines) {
+  const wholeBare = new Set(
+    (Array.isArray(requirements?.hardwareOnlySkus) ? requirements.hardwareOnlySkus : [])
+      .map((value) => canonicalOrderCompositionSku(value))
+      .filter((sku) => sku && !sku.startsWith('LIC-')),
+  );
+  const bareQtyBySku = new Map();
+  for (const line of (Array.isArray(requirements?.hardwareOnlyLines) ? requirements.hardwareOnlyLines : [])) {
+    const sku = canonicalOrderCompositionSku(line?.sku);
+    const qty = Number(line?.qty);
+    if (!sku || sku.startsWith('LIC-') || !Number.isInteger(qty) || qty < 1) continue;
+    bareQtyBySku.set(sku, (bareQtyBySku.get(sku) || 0) + qty);
+  }
+  const committedQtyBySku = new Map();
+  for (const line of (Array.isArray(committedLines) ? committedLines : [])) {
+    const sku = canonicalOrderCompositionSku(line?.sku);
+    const qty = Number(line?.qty);
+    if (!sku || sku.startsWith('LIC-') || !Number.isInteger(qty) || qty < 1) continue;
+    committedQtyBySku.set(sku, (committedQtyBySku.get(sku) || 0) + qty);
+  }
+  for (const [sku, bareQty] of bareQtyBySku) {
+    const committedQty = committedQtyBySku.get(sku);
+    if (Number.isInteger(committedQty) && bareQty >= committedQty) wholeBare.add(sku);
+  }
+  for (const sku of wholeBare) {
+    if (!bareQtyBySku.has(sku) && committedQtyBySku.has(sku)) bareQtyBySku.set(sku, committedQtyBySku.get(sku));
+  }
+  return { wholeBare, bareQtyBySku, committedQtyBySku };
+}
+
 function committedLicenseSkuTier(sku) {
   const value = String(sku || '').trim().toUpperCase();
   const named = value.match(/(?:^LIC-|-)(ENT|SEC|SDW)-\d{1,2}Y(?:R)?$/);
@@ -390,10 +431,7 @@ export function verifyStratusOrderUrlComposition(value, expectedInputLines, requ
   if (!expectedMap || !actualMap) {
     return unusableOrderUrl('invalid_url_composition', 'The generated order URL exceeded safe quantity limits.', expected.lines, actual.lines);
   }
-  const bareHardwareSkus = new Set(
-    (Array.isArray(requirements?.hardwareOnlySkus) ? requirements.hardwareOnlySkus : [])
-      .map((value) => canonicalOrderCompositionSku(value)),
-  );
+  const bareHardwareSkus = bareHardwareRequirements(requirements, expectedInputLines).wholeBare;
   // A reviewed standalone device license is intentionally additive: leave the
   // hardware's generated companion in place and require the URL to contain
   // both quantities. Only remove the literal expected row when it actually
@@ -771,11 +809,18 @@ function verifyStructuredEolTransformOption(option, rawUrl, committedLines, requ
   }
 
   const derived = new Map(source.map);
-  const bareSourceSkus = new Set(
-    (Array.isArray(requirements?.hardwareOnlySkus) ? requirements.hardwareOnlySkus : [])
-      .map((value) => canonicalOrderCompositionSku(value)),
-  );
-  const transformedBareSkus = new Set(bareSourceSkus);
+  const bareSource = bareHardwareRequirements(requirements, committedLines);
+  const bareSourceSkus = bareSource.wholeBare;
+  // Quantity-scoped bare budget per source SKU. A hardware-only replacement
+  // may consume only reviewed bare units; a licensed replacement may consume
+  // only the licensed remainder. Wholly bare SKUs keep the legacy behavior.
+  const bareSourceQtyRemaining = new Map(bareSource.bareQtyBySku);
+  const licensedSourceQtyRemaining = new Map();
+  for (const [sku, qty] of source.map) {
+    if (sku.startsWith('LIC-')) continue;
+    licensedSourceQtyRemaining.set(sku, Math.max(0, qty - (bareSource.bareQtyBySku.get(sku) || 0)));
+  }
+  const transformedBareLines = [];
   // Preserve row-level tier intent while applying the transform. The quantity
   // map below enforces global bounds; these rows let the ordinary composition
   // verifier validate deterministic companions for retained non-EOL hardware.
@@ -915,24 +960,44 @@ function verifyStructuredEolTransformOption(option, rawUrl, committedLines, requ
           ? { ...(hardwareOnlyReplacement ? { tier: 'none' } : (sourceTier ? { tier: sourceTier } : {})) }
           : {}),
       });
-      if (role === 'hardware' && hardwareOnlyReplacement) transformedBareSkus.add(sku);
+      // Target rows are recorded as quantity-scoped bare lines, not whole-SKU
+      // exclusions: one replacement model may be both the bare target of a
+      // hardware-only source and the licensed target of a licensed source.
+      if (role === 'hardware' && hardwareOnlyReplacement) transformedBareLines.push({ sku, qty });
     }
     const expectedTargetHardwareQty = sourceHardwareQty || coverageQty;
     // A reviewed per-row "None (hardware only)" choice may legitimately be
     // transformed to replacement hardware without a licence. Authorize that
-    // exception only from the current committed hardwareOnlySkus snapshot;
-    // the Worker flag or a user-visible label is never sufficient on its own.
-    const sourceHardwareSkus = from.lines
+    // exception only from the current committed hardware-only snapshot (the
+    // whole-SKU list or the quantity-scoped lines); the Worker flag or a
+    // user-visible label is never sufficient on its own. Each source unit is
+    // consumed from exactly one budget so a split SKU cannot be quoted bare
+    // twice or licensed twice.
+    const sourceHardwareLines = from.lines
       .filter(({ sku }) => !String(sku).startsWith('LIC-'))
-      .map(({ sku }) => canonicalOrderCompositionSku(sku));
+      .map(({ sku, qty }) => ({ sku: canonicalOrderCompositionSku(sku), qty: Number(qty) }));
     if (hardwareOnlyReplacement) {
-      if (!sourceHardwareQty || sourceLicenseQty
-          || sourceHardwareSkus.length === 0
-          || sourceHardwareSkus.some((sku) => !bareSourceSkus.has(sku))) {
+      if (!sourceHardwareQty || sourceLicenseQty || sourceHardwareLines.length === 0) {
         return invalidEolTransform(`replacement ${displayIndex} was license-free without a matching reviewed Hardware Only source.`, source.lines, target.lines);
       }
-    } else if (sourceHardwareSkus.some((sku) => bareSourceSkus.has(sku))) {
-      return invalidEolTransform(`replacement ${displayIndex} added a license to a reviewed Hardware Only source.`, source.lines, target.lines);
+      for (const { sku, qty } of sourceHardwareLines) {
+        const available = bareSourceSkus.has(sku) ? Infinity : (bareSourceQtyRemaining.get(sku) || 0);
+        if (qty > available) {
+          return invalidEolTransform(`replacement ${displayIndex} was license-free without a matching reviewed Hardware Only source.`, source.lines, target.lines);
+        }
+        if (available !== Infinity) bareSourceQtyRemaining.set(sku, available - qty);
+      }
+    } else {
+      for (const { sku, qty } of sourceHardwareLines) {
+        if (bareSourceSkus.has(sku)) {
+          return invalidEolTransform(`replacement ${displayIndex} added a license to a reviewed Hardware Only source.`, source.lines, target.lines);
+        }
+        const available = licensedSourceQtyRemaining.has(sku) ? licensedSourceQtyRemaining.get(sku) : Infinity;
+        if (qty > available) {
+          return invalidEolTransform(`replacement ${displayIndex} added a license to a reviewed Hardware Only source.`, source.lines, target.lines);
+        }
+        if (available !== Infinity) licensedSourceQtyRemaining.set(sku, available - qty);
+      }
     }
     const expectedTargetLicenseQty = hardwareOnlyReplacement ? 0 : (sourceLicenseQty || coverageQty);
     if (hardwareQty !== expectedTargetHardwareQty || licenseQty !== expectedTargetLicenseQty) {
@@ -952,7 +1017,13 @@ function verifyStructuredEolTransformOption(option, rawUrl, committedLines, requ
   const transformedExpectedLines = derivedRows.filter((line) => Number(line.qty) > 0);
   const transformedRequirements = {
     ...requirements,
-    hardwareOnlySkus: [...transformedBareSkus],
+    hardwareOnlySkus: [...bareSourceSkus],
+    hardwareOnlyLines: [
+      ...[...bareSourceQtyRemaining.entries()]
+        .filter(([, qty]) => Number.isInteger(qty) && qty > 0)
+        .map(([sku, qty]) => ({ sku, qty })),
+      ...transformedBareLines,
+    ],
   };
   const targetVerification = verifyStratusOrderUrlComposition(
     rawUrl,
@@ -987,15 +1058,19 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
   // hardware-only, whatever the original request said, so demanding a licensed
   // term option rejects a correct quote with "No licensed term option was
   // generated" (2026-08-19).
-  const bareRows = new Set(
-    (Array.isArray(requirements?.hardwareOnlySkus) ? requirements.hardwareOnlySkus : [])
-      .map((value) => canonicalOrderCompositionSku(value)),
-  );
+  const bareRequirements = bareHardwareRequirements(requirements, reviewedExpectedInputLines);
+  const bareRows = bareRequirements.wholeBare;
   const committedHardware = expected.ok
     ? expected.lines.filter(({ sku }) => !String(sku).toUpperCase().startsWith('LIC-'))
     : [];
+  // Quantity-scoped: a split SKU (one bare spare plus licensed units) is NOT a
+  // hardware-only cart, so a licensed option is still required for it.
   const everyHardwareRowIsBare = bareRows.size > 0 && committedHardware.length > 0
-    && committedHardware.every(({ sku }) => bareRows.has(canonicalOrderCompositionSku(sku)));
+    && committedHardware.every(({ sku, qty }) => {
+      const canonical = canonicalOrderCompositionSku(sku);
+      return bareRows.has(canonical)
+        || (bareRequirements.bareQtyBySku.get(canonical) || 0) >= Number(qty);
+    });
   const requireLicensedOption = !everyHardwareRowIsBare
     && (requirements?.requireLicensedOption === true
       || (['ENT', 'SEC', 'SDW', 'A'].includes(requestedTier) && requirements?.requireLicensedOption !== false));

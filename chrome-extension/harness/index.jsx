@@ -236,6 +236,7 @@ export function runActualQuotePipeline(rows, {
     allowHaLicenseRatio: haRequested,
     requireLicensedOption: prepared.mode?.hardwareOnly !== true,
     ...(prepared.hardwareOnlySkus?.length ? { hardwareOnlySkus: prepared.hardwareOnlySkus } : {}),
+    ...(prepared.hardwareOnlyLines?.length ? { hardwareOnlyLines: prepared.hardwareOnlyLines } : {}),
   });
   return {
     ok: verified.ok,

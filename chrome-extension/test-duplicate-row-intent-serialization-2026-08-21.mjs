@@ -92,7 +92,7 @@ test('actual Worker intake ignores tier words inside literal LIC-* SKUs', () => 
   }
 });
 
-test('editor normalization merges only exact same-SKU, same-intent rows', () => {
+test('editor normalization merges matching rows and blocks mixed tiers inside one family', () => {
   assert.deepEqual(normalizeSkuEditorRows([
     { sku: 'mx67', qty: 1, tier: 'security' },
     { sku: 'MX67', qty: 2, tier: 'security' },
@@ -100,21 +100,20 @@ test('editor normalization merges only exact same-SKU, same-intent rows', () => 
     { sku: 'MX67', qty: 3, tier: 'security', unresolved: false },
   ]);
 
-  assert.deepEqual(normalizeSkuEditorRows(MIXED_TIER_ROWS).rows, [
-    { sku: 'MX67', qty: 1, tier: 'security', unresolved: false },
-    { sku: 'MX67', qty: 2, tier: 'enterprise', unresolved: false },
-  ]);
+  const mixed = normalizeSkuEditorRows(MIXED_TIER_ROWS);
+  assert.equal(mixed.ok, false);
+  assert.equal(mixed.errors[0].code, 'mixed_family_license_tier');
 });
 
-test('serializer preserves repeated same-model row tiers and exact quantities', () => {
+test('serializer fails closed on repeated same-model mixed tiers', () => {
   const prepared = quoteTextFromEditorRows(
     MIXED_TIER_ROWS,
     'quote 1 MX67 security and 2 MX67 enterprise',
     { haRequested: false },
   );
-  assert.equal(prepared.ok, true, prepared.error);
-  assert.equal(prepared.text, '1 MX67 security\n2 MX67 enterprise');
-  assert.deepEqual(prepared.rows, MIXED_TIER_ROWS);
+  assert.equal(prepared.ok, false);
+  assert.equal(prepared.errors[0].code, 'mixed_family_license_tier');
+  assert.equal(prepared.text, '');
 });
 
 test('serializer still safely aggregates same-model rows when every intent field matches', () => {
@@ -272,7 +271,7 @@ test('request-global Enterprise scopes an otherwise blank MX row before verifica
   assert.equal(verified.urls.length, 1);
 });
 
-test('blank and Enterprise rows for one MX model remain default SEC x1 plus ENT x2', () => {
+test('blank default Security and explicit Enterprise rows for one MX family fail closed', () => {
   const rows = [
     { sku: 'MX67', qty: 1 },
     { sku: 'MX67', qty: 2, tier: 'enterprise' },
@@ -282,35 +281,9 @@ test('blank and Enterprise rows for one MX model remain default SEC x1 plus ENT 
     'quote 1 MX67 and 2 MX67 enterprise',
     { haRequested: false },
   );
-  assert.equal(prepared.ok, true, prepared.error);
-  assert.equal(prepared.text, '1 MX67\n2 MX67 enterprise');
-  assert.deepEqual(prepared.rows, rows);
-
-  const parsed = worker.parseMessage(prepared.text);
-  assert.deepEqual(parsed.items.map((row) => ({
-    sku: row.baseSku,
-    qty: row.qty,
-    tier: row.requestedTier || null,
-  })), [
-    { sku: 'MX67', qty: 1, tier: null },
-    { sku: 'MX67', qty: 2, tier: 'ENT' },
-  ]);
-
-  const built = worker.buildQuoteResponse(parsed);
-  assert.notEqual(built.compositionBlocked, true, built.message);
-  const options = optionsFromWorkerMessage(built.message);
-  assert.equal(options.length, 3);
-  const verified = verifyStratusOrderUrlOptions(options, prepared.rows, {
-    requireLicensedOption: true,
-  });
-  assert.equal(verified.ok, true, verified.error);
-  assert.equal(verified.urls.length, 3);
-  for (const [index, term] of [1, 3, 5].entries()) {
-    const cart = cartOf(verified.urls[index].url);
-    assert.equal(cart.get('MX67'), 3);
-    assert.equal(cart.get(`LIC-MX67-SEC-${term}YR`), 1);
-    assert.equal(cart.get(`LIC-MX67-ENT-${term}YR`), 2);
-  }
+  assert.equal(prepared.ok, false);
+  assert.equal(prepared.errors[0].code, 'mixed_family_license_tier');
+  assert.equal(prepared.text, '');
 });
 
 test('legacy Z1/Z3 blank quantities stay on their ENT-only family default', () => {
@@ -370,50 +343,69 @@ test('actual Z3 Worker alternatives retain raw tiers but exact editor verificati
   assert.match(verified.error, /committed quantity for Z3|unexpected item/i);
 });
 
-test('same SKU cannot mix hardware-only and licensed quantities in one editor snapshot', () => {
+test('same SKU splits into bare and licensed quantities through quantity-scoped hardwareOnlyLines', () => {
   const prepared = quoteTextFromEditorRows([
     { sku: 'MX67', qty: 1, tier: 'none' },
     { sku: 'MX67', qty: 2, tier: 'security' },
+    { sku: 'MR44', qty: 3, tier: 'none' },
   ], '', {});
-  assert.equal(prepared.ok, false);
-  assert.match(prepared.error, /MX67.*hardware-only.*licensed.*separate quotes/i);
-  assert.equal(prepared.text, '');
+  assert.equal(prepared.ok, true);
+  assert.deepEqual(prepared.rows, [
+    { sku: 'MX67', qty: 1, tier: 'none' },
+    { sku: 'MX67', qty: 2, tier: 'security' },
+    { sku: 'MR44', qty: 3, tier: 'none' },
+  ]);
+  assert.equal(prepared.text, '1 MX67 hardware only\n3 MR44 hardware only\n2 MX67 security');
+  // Quantity-scoped contract: the bare spare is one unit, not the whole SKU.
+  assert.deepEqual(prepared.hardwareOnlyLines, [{ sku: 'MX67', qty: 1 }, { sku: 'MR44', qty: 3 }]);
+  // Legacy whole-SKU list must not claim MX67 is bare: a consumer that only
+  // understands it would otherwise exclude the two licensed appliances from
+  // companion coverage and accept a URL that under-licenses them.
+  assert.deepEqual(prepared.hardwareOnlySkus, ['MR44']);
+
+  const verified = verifyStratusOrderUrlOptions([{
+    label: '3-Year',
+    url: 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-3YR,MR44&qty=3,2,3',
+  }], prepared.rows, {
+    requireLicensedOption: true,
+    hardwareOnlyLines: prepared.hardwareOnlyLines,
+    hardwareOnlySkus: prepared.hardwareOnlySkus,
+  });
+  assert.equal(verified.ok, true, verified.error);
+  assert.equal(verified.urls.length, 1);
+
+  const underLicensed = verifyStratusOrderUrlOptions([{
+    label: '3-Year',
+    url: 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-3YR,MR44&qty=3,1,3',
+  }], prepared.rows, {
+    requireLicensedOption: true,
+    hardwareOnlyLines: prepared.hardwareOnlyLines,
+    hardwareOnlySkus: prepared.hardwareOnlySkus,
+  });
+  assert.equal(underLicensed.ok, false);
+  assert.match(underLicensed.error, /wrong license quantity/i);
+
+  const overLicensed = verifyStratusOrderUrlOptions([{
+    label: '3-Year',
+    url: 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-3YR,MR44&qty=3,3,3',
+  }], prepared.rows, {
+    requireLicensedOption: true,
+    hardwareOnlyLines: prepared.hardwareOnlyLines,
+    hardwareOnlySkus: prepared.hardwareOnlySkus,
+  });
+  assert.equal(overLicensed.ok, false);
+  assert.match(overLicensed.error, /wrong license quantity/i);
 });
 
-test('actual serializer -> Worker -> verifier keeps SEC x1 and ENT x2', () => {
+test('actual serializer blocks SEC and ENT in the same appliance family before Worker routing', () => {
   const prepared = quoteTextFromEditorRows(
     MIXED_TIER_ROWS,
     'quote 1 MX67 security and 2 MX67 enterprise',
     { haRequested: false },
   );
-  assert.equal(prepared.ok, true, prepared.error);
-
-  const parsed = worker.parseMessage(prepared.text);
-  assert.deepEqual(parsed.items.map((row) => ({
-    sku: row.baseSku,
-    qty: row.qty,
-    tier: row.requestedTier,
-  })), [
-    { sku: 'MX67', qty: 1, tier: 'SEC' },
-    { sku: 'MX67', qty: 2, tier: 'ENT' },
-  ]);
-
-  const built = worker.buildQuoteResponse(parsed);
-  assert.notEqual(built.compositionBlocked, true, built.message);
-  const options = optionsFromWorkerMessage(built.message);
-  assert.equal(options.length, 3);
-
-  const verified = verifyStratusOrderUrlOptions(options, prepared.rows, {
-    requireLicensedOption: true,
-  });
-  assert.equal(verified.ok, true, verified.error);
-  assert.equal(verified.urls.length, 3);
-  for (const [index, term] of [1, 3, 5].entries()) {
-    const cart = cartOf(verified.urls[index].url);
-    assert.equal(cart.get('MX67'), 3);
-    assert.equal(cart.get(`LIC-MX67-SEC-${term}YR`), 1);
-    assert.equal(cart.get(`LIC-MX67-ENT-${term}YR`), 2);
-  }
+  assert.equal(prepared.ok, false);
+  assert.equal(prepared.errors[0].code, 'mixed_family_license_tier');
+  assert.equal(prepared.text, '');
 });
 
 test('tier-aware verifier rejects a same-model companion with the wrong row quantity', () => {
