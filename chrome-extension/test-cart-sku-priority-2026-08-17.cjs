@@ -44,12 +44,12 @@ const explicit = core.resolveCartRows({ rows: [{
   quantity: 4,
   activeUnitCents: null,
   subtotalCents: 999,
-  explicitSkus: ["MR44", "LIC-MR-ADV-3YR"],
+  explicitSkus: ["MR44", "LIC-MR-ADV-3Y"],
 }] });
 assert.equal(explicit.complete, true);
 assert.deepEqual(explicit.items, [
   { sku: "MR44", qty: 4 },
-  { sku: "LIC-MR-ADV-3YR", qty: 4 },
+  { sku: "LIC-MR-ADV-3Y", qty: 4 },
 ]);
 
 const explicitWins = core.resolveCartRows({ rows: [{

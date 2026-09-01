@@ -215,6 +215,7 @@ function committedLicenseSkuTier(sku) {
   const value = String(sku || '').trim().toUpperCase();
   const named = value.match(/(?:^LIC-|-)(ENT|SEC|SDW)-\d{1,2}Y(?:R)?$/);
   if (named) return named[1];
+  if (/^LIC-MR-ADV-\d{1,2}Y$/.test(value)) return 'A';
   if (/^LIC-(?:MS(?:130|150)-(?:CMPTA|\d+A)|MS390-\d+A|C9\d{3}[LX]?-\d+A)-\d{1,2}Y(?:R)?$/.test(value)) return 'A';
   if (/^LIC-(?:MS(?:130|150)-(?:CMPT|\d+)|MS390-\d+E|C9\d{3}[LX]?-\d+E)-\d{1,2}Y(?:R)?$/.test(value)) return 'E';
   return '';
@@ -225,9 +226,9 @@ function committedHardwareRowTier(line) {
   if (raw.toLowerCase() === 'none') return 'NONE';
   let tier = normalizedCommittedLicenseTier(raw);
   const sku = canonicalOrderCompositionSku(line?.sku);
-  // "Advanced" on MR/CW is the worker's Enterprise/Advantage selection, not
-  // a switch Advanced (A) licence. Mirror clauseRequestedTier here.
-  if (tier === 'A' && /^(?:MR|CW)\d/.test(sku)) tier = 'ENT';
+  // CW has no Advanced companion SKU; its supported default remains ENT.
+  // MR Advanced is a real LIC-MR-ADV-*Y family and must retain A here.
+  if (tier === 'A' && /^CW\d/.test(sku)) tier = 'ENT';
   // A blank row is deliberately unscoped here. The standalone composition
   // verifier historically accepts any otherwise valid family companion when
   // no reviewed tier was supplied; verifyStratusOrderUrlOptions applies its
@@ -1092,6 +1093,11 @@ export function verifyStratusOrderUrlOptions(values, expectedInputLines, require
           }
         } else if (lineExpectedTier === 'A') {
           const value = String(sku).toUpperCase();
+          const mrFamilyLicense = /^LIC-(?:ENT|MR)-/.test(value);
+          const advancedMrLicense = /^LIC-MR-ADV-\d{1,2}Y$/.test(value);
+          if (mrFamilyLicense && !advancedMrLicense) {
+            { dropped.push({ option: index + 1, label: String(option?.label || `Option ${index + 1}`), reason: `The generated option contained an Enterprise MR license when MR Advanced was requested (${sku}).` }); continue optionLoop; }
+          }
           const tieredSwitchLicense = /^LIC-(?:C9\d{3}[LX]?-\d+[AE]|MS(?:130|150)-(?:CMPTA?|\d+A?)|MS390-\d+[AE])-\d{1,2}Y(?:R)?$/.test(value);
           const advancedSwitchLicense = /^LIC-(?:C9\d{3}[LX]?-\d+A|MS(?:130|150)-(?:CMPTA|\d+A)|MS390-\d+A)-\d{1,2}Y(?:R)?$/.test(value);
           if (tieredSwitchLicense && !advancedSwitchLicense) {

@@ -456,7 +456,9 @@ function normalizeParsedDirectLicenses(parsed) {
 
 function hasMsAdvancedTierIntent(text) {
   const upper = String(text || '').toUpperCase();
-  if (!/\b(MS130|MS150|MS390|C9\d{3}|C9200L|C9300)\b/.test(upper)) return false;
+  // Advanced (A) is valid for supported switches and for MR APs. CW APs are
+  // intentionally excluded because they continue to use the shared ENT SKUs.
+  if (!/\b(MR\d+|MS130|MS150|MS390|C9\d{3}|C9200L|C9300)\b/.test(upper)) return false;
   if (/\bADVANCED\s+SECURITY\b/.test(upper)) return false;
   return /\b(ADVANCED|ADV)\s*(LICENSE|LICENSING|LICENCE|LIC|FEATURES?|TIER)?\b/.test(upper)
     || /\bADAPTIVE\s+POLICY\b/.test(upper);
@@ -977,6 +979,8 @@ async function downloadWebexFile(fileUrl, token) {
 const CF_CLASSIFIER_PROMPT_V3 = "You are an intent classifier for a Cisco/Meraki quoting bot. Output a single JSON object — no prose, no markdown.\n\nSCHEMA:\n{\"intent\":\"quote|revise|price_lookup|dashboard_parse|product_info|escalate|conversation\",\"confidence\":0.0-1.0,\"clarify\":{\"needed\":false,\"question\":\"\"},\"items\":[{\"product\":\"...\",\"qty\":1,\"intent\":\"hardware|license|normal\"}],\"modifiers\":{\"term_years\":null,\"tier\":null,\"show_pricing\":false,\"all_terms\":false,\"separate_quotes\":false},\"revision\":{\"action\":null,\"target_sku\":null,\"add_items\":[],\"new_term\":null,\"new_tier\":null,\"new_qty\":null,\"hw_lic_toggle\":null},\"reference\":{\"is_pronoun_ref\":false,\"option_ref\":null,\"resolve_from_history\":false},\"dashboard\":{\"is_meraki_license_page\":false}}\n\n★ CORE PRINCIPLE — COPY PRODUCT NAMES, DO NOT CREATE THEM.\n- items[].product is COPIED from the user's message with light cleanup only — a model as they wrote it (\"MR44\",\"CW9172I\",\"MX84\",\"MS220-8P\"), a shorthand family (\"6 mr\"→\"mr\",\"mv\",\"mt\"), or a license named in words (\"duo essentials\",\"umbrella DNS essentials\",\"Systems Manager\",\"AnyConnect Plus\").\n- NEVER create a product code that is not in the message. Forbidden unless the user LITERALLY typed it: strings starting \"LIC-\", hardware suffixes \"-HW\"/\"-RTG\", EOL replacements (\"MX84\" stays \"MX84\", never \"MX85\"), completed variants (\"MS130-24\" never becomes \"MS130-24P\"), or any license/term code. Do not pick a term or tier the user didn't state. Do not fold a tier word into the product.\n- The engine resolves exact SKUs, suffixes, EOL replacements, licenses, term caps, and pricing. Your job is WHICH product (as typed) + HOW MANY + the per-item INTENT. If you'd have to guess the product → clarify. Not knowing SKUs is correct — you are not supposed to.\n\nINTENT RULES:\n- \"quote\": fresh quote or license request naming ≥1 product. A bare product (\"MR46\") = quote qty 1. \"renewal for [products]\" or \"renew N [product]\" = quote (per-item intent=\"license\"; NOT revise — renewals with explicit products are fresh license quotes).\n- MULTILINE RENEWAL LISTS: a message beginning \"renewal for\" followed by line-separated products and quantities is intent=\"quote\" with each item intent=\"license\". Keep every exact model line with its quantity (including EOL models — leave them named, the engine replaces). If a line is a generic family-only line (\"MR x 18\") mixed with exact models, keep the exact models and emit the generic family as product=\"mr\" too (the engine resolves family→agnostic) rather than dropping it.\n- \"price_lookup\": standalone pricing question naming a SPECIFIC product with NO prior quote context — \"cost of MR44\", \"how much is MR44\", \"price for MR44 with 3 year license\". Set modifiers.show_pricing=true and populate items[]. \"with license\" phrasing keeps intent=price_lookup AND sets that item intent=\"normal\"; do not switch to quote just because \"with license\" is appended. If prior_context is present and the user asks to see pricing on the prior quote (\"what's the cost\",\"with pricing\"), use intent=\"revise\" action=\"show_pricing\".\n- \"revise\": modifies a prior quote via a REVISION VERB or PRONOUN REFERENCE — \"add X\",\"remove X\",\"swap X for Y\",\"replace X\",\"change X\",\"make it N\",\"license only\",\"hardware only\",\"3 year only\",\"convert to\",\"with pricing on that\",\"show me pricing\". HARD RULE #1: revise REQUIRES prior_context. If prior_context is empty/null, NEVER output revise — use quote (with the right per-item intent/modifiers) or clarify. \"refresh N X\",\"replace our X with Y\",\"upgrade to X\",\"just the hardware for N X\",\"hardware only for N X\",\"just the N year for N X\" with an explicit product and NO prior_context are intent=\"quote\". HARD RULE #2: even WITH prior_context, a message opening with a FRESH QUOTING VERB (\"quote\",\"price\",\"send me\",\"give me\",\"I need\",\"refresh\",\"just show me\") followed by an explicit product/quantity is quote, NOT revise. Revise needs a revision verb (add/remove/swap/replace/change/make it/convert) OR a pronoun/demonstrative referencing the prior quote.\n- \"dashboard_parse\": image of a Meraki license dashboard. NEVER for messages containing stratusinfosystems.com URLs (those are the bot's own quote output).\n- STRATUS URL ECHOBACK: if the user pasted a stratusinfosystems.com/order/ URL, it already contains product codes the customer gave us. For THIS URL-only case, copy each item= value exactly into product with its matching qty — one product per item= value; do NOT group, normalize, infer replacements, or create codes. intent: a product starting \"LIC-\" → \"license\"; a \"-HW\"/\"-RTG\" suffix or a bare hardware model code → \"hardware\". This carve-out does NOT permit SKU generation for ordinary text. Never classify URL messages as revise/dashboard_parse/conversation.\n- \"product_info\": spec / compare / sizing / EOL-status / recommendation question — NOT a quote. \"what do I need for X users\",\"which firewall for X employees\",\"what's the best AP for a warehouse\". Also bare product-line NAMES that identify a Cisco line without a quantity/quote ask (\"DNS Security Essentials\",\"Umbrella SIG\",\"Duo Advantage\" said as a lookup).\n- \"escalate\": complex proposal / multi-site deployment planning.\n- \"conversation\": greeting, thanks, identity, short reactions (\"lol\",\"ok\",\"?\").\n\nPER-ITEM INTENT — items[].intent is \"hardware\" | \"license\" | \"normal\". Decide scope IN THIS ORDER:\n1. List-level PREFIX before an item list: \"renewal/license(s) for A and B\" → every listed item intent=\"license\". \"hardware for A and B\" → every listed item intent=\"hardware\".\n2. Clause-level words override ONLY that clause: \"A hardware only and B\" → A hardware, B normal (B has no intent word — it does NOT inherit A's). \"A license renewal and B\" → A license, B normal. \"renew A then add B hardware\" → A license, B hardware.\n3. Trailing plural AFTER a multi-item list applies to the whole list: \"A, B, C licenses/renewals\" → every listed item intent=\"license\".\n4. \"with license\"/\"with licensing\"/\"and license\" → intent=\"normal\" (NOT license-only).\n5. A bare product with no intent word → \"normal\". Ignore \"hardware\" inside \"hardware support/model/issue/question/specs\" — those items stay \"normal\".\nWord triggers (subject to the precedence above): \"hardware only\"/\"hw only\"/\"no license\"/\"without (the/their) license\"/\"just the hardware for\" → hardware. \"license\"/\"licenses\"/\"renewal\"/\"renew X\"/\"license only\" → license.\n\nCLARIFY — top-level clarify:{needed,question}. Set needed=true (write a short customer-facing question) when a quote would be a GUESS:\n- refresh/upgrade/replace naming a CATEGORY but no target model: \"4 APs, hardware refresh\", \"upgrade my firewalls\" → ask which model. Do NOT escalate, do NOT pick a model.\n- incomplete model stem needing a variant/suffix: \"quote 5 MS130-24\", \"3 MX\", bare \"CW\" (no digits) → ask; do NOT pick a variant.\n- vague category: \"need some switches\", \"I need wireless\", \"some APs\", \"pricing\" alone.\n- MIXED terms/tiers: clarify ONLY when two or more DIFFERENT terms/tiers attach to DIFFERENT product clauses — \"MR44 3yr and MX67 5yr\", \"MX67 SEC and MX84 SDW\" → clarify (per-item term/tier isn't supported yet; a shared term would misprice).\n- do NOT clarify when ONE term/tier is shared by the whole request: \"MR44 and MX67 5 year\", \"10 mx67 SEC 5 year\", \"MX85 SD-WAN with licensing\".\n- multiple terms for the SAME product/license family (\"SME 1yr and 3yr\", \"all terms\") → modifiers.all_terms=true, clarify.needed=false.\n- contradictory / nonsensical input.\nWhen clarify.needed=true, keep intent as the underlying type (usually \"quote\"); items may be empty or partial — the engine returns the question instead of a quote.\n\nMODIFIER RULES (LIST-LEVEL — one value for the whole message; if they differ across items, see CLARIFY):\n- term_years: 1/3/5 for \"1 year\"/\"3 year\"/\"5 year\"/\"just the 5 year\". null otherwise.\n- all_terms: true for \"1yr 3yr and 5yr\"/\"all terms\"; also when multiple distinct terms are named for the SAME item set (\"SME 1yr and 3yr\"). (Differing terms across DIFFERENT items → clarify, not all_terms.)\n- tier: \"SEC\" for MX \"SEC\"/\"security\"/\"advanced security\"; \"ENT\" for \"ENT\"/\"enterprise\"; \"SDW\" for any of \"SD-WAN\"/\"SDW\"/\"SD WAN\"/\"sdwan\" (any case); \"A\" for MS130/MS150/MS390/Catalyst \"advanced license\"/\"adaptive policy\". null otherwise.\n- CRITICAL — SDW & tier suffixes: whenever \"SDW\"/\"SD-WAN\"/\"sdwan\" (any case) appears ANYWHERE, set tier=\"SDW\" — even in a suffix (\"MX85-SDW\"), space-separated (\"MX85 SDW\"), or appended (\"MX85 SD-WAN with licensing\"). If a product carries a tier suffix or space-separated tier word (\"MX85-SDW\",\"MX67 SEC\",\"MX75 enterprise\"), STRIP it: product is the base model (\"MX85\"), tier goes in modifiers. Never embed the tier in items[].product.\n- show_pricing: true for pricing intent (\"cost\",\"how much\",\"with pricing\",\"price\").\n- CRITICAL — separate_quotes: set true whenever the user asks for one URL/quote/link PER item, tier, or line. Triggers (any case, anywhere): \"separate quote[s]/url[s]/link[s]\",\"individual quote[s]/url[s]/link[s]\",\"each as its own ...\",\"each separately\",\"one per line\",\"one per tier\",\"break (these|them) out\",\"split into separate\",\"X url, Y url, Z url\". When true, items[] MUST contain EVERY distinct thing named so the renderer can produce one URL each — never collapse a multi-item/multi-tier request into one item.\n\nREVISION RULES (only when prior_context present):\n- action: \"add\"/\"remove\"/\"swap\"/\"change_term\"/\"change_tier\"/\"toggle_hw_lic\"/\"change_qty\"/\"show_pricing\".\n- \"license only\"/\"hardware only\" AFTER a prior quote → action=\"toggle_hw_lic\", hw_lic_toggle=\"license_only\"/\"hardware_only\". (With NO prior_context, the same phrasing on an explicit product is intent=\"quote\" with that item intent=\"license\"/\"hardware\".)\n- \"3 year only\"/\"make it 5 year\" → change_term. \"add 2 MX67\" → add, add_items=[{product:\"MX67\",\"qty\":2}]. \"remove MR44\" → remove, target_sku=\"MR44\". SWAP \"swap X for Y\"/\"replace X with Y\"/\"change X to Y\" → ONE atomic action=\"swap\", target_sku=\"X\", add_items=[{product:\"Y\"}]; never split into remove+add.\n- Pricing follow-up (\"what's the cost\",\"with pricing\",\"how much\") → action=\"show_pricing\", modifiers.show_pricing=true, reference.resolve_from_history=true (no item/term/tier change).\n- For revisions set reference.resolve_from_history=true. \"renewal for [products]\" is NOT a revision — it's a fresh quote with item intent=\"license\".\n\nREFERENCE RULES:\n- is_pronoun_ref: true for \"that\"/\"those\"/\"it\"/\"them\"/\"this\"/\"these\"/\"the switch\"/\"the AP\"/\"the quote\".\n- option_ref: 1/2/3 if \"Option 1/2/3\". resolve_from_history: true whenever the message only makes sense with prior context.\n\nPRODUCT KNOWLEDGE (to RECOGNIZE products — NOT to emit SKUs):\n- Meraki families: MR (APs), MX (firewalls), MS (switches), MV (cameras), MT (sensors), MG (cellular), Z (teleworker), CW (Wi-Fi 6E/7). Catalyst: C9300/C9300L/C9300X/C9200L/C8xxx. Accessories: MA-* (transceivers, cables, PSUs, mounts).\n- License lines named in words → product = the words, item intent=\"license\": \"duo essentials/advantage/premier\", \"umbrella DNS/SIG essentials/advantage\", \"AnyConnect Plus/Apex\" (a.k.a. Cisco Secure Client / Cisco VPN — IS in catalog, never say we don't sell it), \"Systems Manager\"/\"SME\", \"enterprise license\". Copy the words exactly as the customer wrote them; the engine maps them to the right license SKU. Do NOT write any \"LIC-...\" string yourself.\n- If the customer names BOTH a tier and a product (\"MX67 SEC\"), product=\"MX67\" + modifiers.tier=\"SEC\". If they name a license family with a tier (\"duo advantage\"), product=\"duo advantage\" (the tier is part of the named line, leave it in the product words).\n- If a model looks valid but you don't recognize it (new or EOL), still emit it as named — the engine validates and replaces.\n- Word numbers: one=1 … ten=10, \"a couple\"=2, \"a few\"=3.\n\nEXAMPLES:\n- \"1 CW9172I hardware only and 6 MR44\" → intent quote, clarify.needed false, items=[{product:\"CW9172I\",\"qty\":1,intent:\"hardware\"},{product:\"MR44\",\"qty\":6,intent:\"normal\"}]\n- \"6 mr and 1 mx84 enterprise license renewal and 1 CW9172I hardware only\" → items=[{product:\"mr\",\"qty\":6,intent:\"license\"},{product:\"mx84\",\"qty\":1,intent:\"license\"},{product:\"CW9172I\",\"qty\":1,intent:\"hardware\"}], modifiers.tier=\"ENT\"\n- \"renew MX67 then add MR44 hardware\" → items=[{product:\"MX67\",\"qty\":1,intent:\"license\"},{product:\"MR44\",\"qty\":1,intent:\"hardware\"}]\n- \"10 duo essentials and 6 mr44\" → items=[{product:\"duo essentials\",\"qty\":10,intent:\"license\"},{product:\"mr44\",\"qty\":6,intent:\"normal\"}]\n- \"quote 6 mr44 without the license\" → items=[{product:\"mr44\",\"qty\":6,intent:\"hardware\"}]\n- \"4 APs, hardware refresh\" → intent quote, clarify.needed true, question asks which model; items=[]\n- \"quote 5 MS130-24\" → clarify.needed true (needs the port/uplink variant); items=[]\n- \"MR44 3yr and MX67 5yr\" → clarify.needed true (mixed terms — ask which term applies); items=[{product:\"MR44\",\"qty\":1,intent:\"normal\"},{product:\"MX67\",\"qty\":1,intent:\"normal\"}]\n- \"SME license 1yr and 3yr\" → items=[{product:\"Systems Manager\",\"qty\":1,intent:\"license\"}], modifiers.all_terms=true\n- \"10 mx67 SEC 5 year\" → items=[{product:\"MX67\",\"qty\":10,intent:\"normal\"}], modifiers.tier=\"SEC\", modifiers.term_years=5\n\nReturn ONLY the JSON object. Emit STRICT JSON: EVERY key must be double-quoted, including numeric keys — write \"qty\":10 NEVER qty:10. No markdown fences. No explanation.";
 
 
+const CF_CLASSIFIER_PROMPT_V3_ACTIVE = `${CF_CLASSIFIER_PROMPT_V3}\n\nMR ADVANCED TIER RULE: For an MR access point such as MR44, \"advanced\", \"ADV\", or \"advanced license\" means modifiers.tier=\"A\". CW access points remain Enterprise and must never set A. Example: \"3 MR44 advanced\" -> items=[{product:\"MR44\",qty:3,intent:\"normal\"}], modifiers.tier=\"A\".`;
+
 // Deterministic continuation for a bare tier reply after a Duo/Umbrella clarify question.
 // The tier question says "Just reply with the tier name" — but a bare reply ("Essentials") has
 // no SKU for the engine and previously fell to the Claude fallback (V3 canary 2026-06-09: 19.7s
@@ -1037,7 +1041,7 @@ async function classifyV3(userMessage, priorContext, env) {
   try {
     const userText = priorContext ? `Prior assistant context:\n${priorContext}\n\nUser message:\n${userMessage}` : String(userMessage || "");
     const result = await Promise.race([
-      env.AI.run(CF_MODEL, { messages: [ { role: "system", content: CF_CLASSIFIER_PROMPT_V3 }, { role: "user", content: userText } ], max_tokens: 512 }),
+      env.AI.run(CF_MODEL, { messages: [ { role: "system", content: CF_CLASSIFIER_PROMPT_V3_ACTIVE }, { role: "user", content: userText } ], max_tokens: 512 }),
       new Promise((_, reject) => setTimeout(() => reject(new Error("V3_TIMEOUT")), 8000))
     ]);
     const rawResponse = result?.response ?? result?.choices?.[0]?.message?.content;
@@ -1280,7 +1284,7 @@ MODIFIER RULES:
 - license_only: "license only","just the license","licenses only","renewal only","renew X","renewal for X","lic only". When the user says "renewal for [devices]" they want license quotes — set license_only=true and intent="quote".
 - with_license: true when user says "with license","with licensing","and license". null otherwise.
 - term_years: 1/3/5 for "1 year"/"3 year"/"5 year"/"three year"/"just the 5 year". null otherwise.
-- tier: "SEC" for MX "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for any of "SD-WAN"/"SDW"/"SD WAN"/"sdwan"/"sd-wan"/"sd wan" (case-insensitive); "A" for MS130/MS150/MS390/Catalyst switch Advanced license requests such as "advanced license" or "adaptive policy". null otherwise.
+- tier: "SEC" for MX "SEC"/"security"/"advanced security"; "ENT" for "ENT"/"enterprise"; "SDW" for any of "SD-WAN"/"SDW"/"SD WAN"/"sdwan"/"sd-wan"/"sd wan" (case-insensitive); "A" for MR access points and MS130/MS150/MS390/Catalyst switches when the user requests "advanced", "advanced license", "ADV", or "adaptive policy". CW access points remain ENT and must not be labeled A. null otherwise.
 - CRITICAL — SDW TIER: Whenever the user says "SDW", "SD-WAN", "SD WAN", "sdwan", or any case variant ANYWHERE in the message, you MUST set modifiers.tier="SDW". Never drop it. Never leave tier as null when these phrasings are present. This applies even when the phrasing is in a suffix (MX85-SDW), separated by space (MX85 SDW), or appended after the model (MX85 SD-WAN with licensing).
 - TIER SUFFIX SPLITTING: If a SKU has a tier suffix or space-separated tier word appended — examples: "MX85-SDW", "MX85 SDW", "MX85 sdwan", "MX85-SD-WAN", "MX67-SEC", "MX67 SEC", "MX75-ENT", "MX75 enterprise" — SPLIT it: put the base model in items[].sku (e.g., "MX85") and the tier in modifiers.tier (e.g., "SDW"). Never include the tier suffix as part of the SKU string. Never leave the tier as null when you've stripped a tier suffix.
 - show_pricing: true for pricing intent ("cost","how much","with pricing","price").
@@ -1419,7 +1423,7 @@ async function classifyWithV3Shadow(userMessage, priorContext, env) {
     const result = await Promise.race([
       env.AI.run(CF_MODEL, {
         messages: [
-          { role: 'system', content: CF_CLASSIFIER_PROMPT_V3 },
+          { role: 'system', content: CF_CLASSIFIER_PROMPT_V3_ACTIVE },
           { role: 'user', content: userText }
         ],
         max_tokens: 512
@@ -2746,7 +2750,23 @@ function _getLicenseSkusRaw(baseSku, requestedTier) {
   // CW9800 Wireless Controller — no standard license association
   if (/^CW9800/.test(upper)) return null;
 
-  if (/^MR\d/.test(upper) || /^CW9\d/.test(upper)) {
+  if (/^MR\d/.test(upper)) {
+    const adv = ['A', 'ADV', 'ADVANCED'].includes(String(requestedTier || '').toUpperCase());
+    if (adv) {
+      return [
+        { term: '1Y', sku: 'LIC-MR-ADV-1Y' },
+        { term: '3Y', sku: 'LIC-MR-ADV-3Y' },
+        { term: '5Y', sku: 'LIC-MR-ADV-5Y' }
+      ];
+    }
+    return [
+      { term: '1Y', sku: 'LIC-ENT-1YR' },
+      { term: '3Y', sku: 'LIC-ENT-3YR' },
+      { term: '5Y', sku: 'LIC-ENT-5YR' }
+    ];
+  }
+
+  if (/^CW9\d/.test(upper)) {
     return [
       { term: '1Y', sku: 'LIC-ENT-1YR' },
       { term: '3Y', sku: 'LIC-ENT-3YR' },
@@ -6305,6 +6325,53 @@ function expandFamily(rawText) {
 // in an interior clause stays attached to its own item, and a hardware/license
 // conflict makes intent-less items NORMAL. If NO clause has explicit intent the
 // items are left untouched (undefined) so plain quotes behave exactly as before.
+function clauseRequestedTier(clauseText, itemSku) {
+  const t = String(clauseText || '').toUpperCase();
+  const sku = String(itemSku || '').toUpperCase();
+  const isSwitch = /^(MS130|MS150|MS390|C9\d{3}|C9200L|C9300)/.test(sku);
+  const isMxZ = /^(MX|C8111|C8121|C8455|Z\d)/.test(sku);
+  const isMr = /^MR/.test(sku);
+  const isCw = /^CW/.test(sku);
+  const isMrCw = isMr || isCw;
+  if (/\b(SD[-\s]?WAN|SDW)\b/.test(t) && (isMxZ || !sku)) return 'SDW';
+  if ((/\bADVANCED\s+SECURITY\b/.test(t) || (/\bSEC(URITY)?\b/.test(t) && !/\bENTERPRISE\b/.test(t))) && (isMxZ || !sku || (!isSwitch && !isMrCw))) return 'SEC';
+  if (/\bENT(ERPRISE)?\b/.test(t) && !/\bSEC(URITY)?\b/.test(t)) return 'ENT';
+  if (!/\bADVANCED\s+SECURITY\b/.test(t) && /\b(ADVANCED|ADV)\b/.test(t)) {
+    if (isSwitch || isMr) return 'A';
+    if (isCw) return 'ENT';
+  }
+  return null;
+}
+
+function assignClauseTier(items, upper) {
+  if (!items || items.length === 0) return;
+  const listTierMatch = String(upper || '').match(
+    /^\s*(?:QUOTE\s+)?(ENT(?:ERPRISE)?|SEC(?:URITY)?|SD[-\s]?WAN|SDW)\s+(?:(?:LICEN[SC]E|LISCEN[SC]E|LICESE|LICENSING)S?(?:\s+RENEWALS?)?|RENEWALS?)\s+(?:FOR|OF)\b/,
+  );
+  if (listTierMatch) {
+    for (const item of items) {
+      const tier = clauseRequestedTier(listTierMatch[1], item.baseSku || item.sku);
+      if (tier) item.requestedTier = tier;
+    }
+    return;
+  }
+  const clauses = [];
+  const sepRe = /(\s+AND\s+|\s+PLUS\s+|\s+THEN\s+|,|;|\n)/g;
+  let last = 0, mm;
+  while ((mm = sepRe.exec(upper)) !== null) {
+    clauses.push({ start: last, end: mm.index, text: upper.slice(last, mm.index) });
+    last = mm.index + mm[0].length;
+  }
+  clauses.push({ start: last, end: upper.length, text: upper.slice(last) });
+  for (const item of items) {
+    if (typeof item.position !== 'number') continue;
+    const clause = clauses.find((c) => item.position >= c.start && item.position < c.end);
+    if (!clause) continue;
+    const tier = clauseRequestedTier(clause.text, item.baseSku || item.sku);
+    if (tier) item.requestedTier = tier;
+  }
+}
+
 function assignClauseIntent(items, upper, modifiers) {
   if (!items || items.length === 0) return;
   // Build clause char-ranges by splitting on connectors: AND, PLUS, comma,
@@ -7274,6 +7341,7 @@ function parseMessage(text) {
   // Bug #2: attach per-clause license/hardware intent to each item (no-op for
   // plain quotes; only mutates items when the message has explicit intent words).
   assignClauseIntent(items, upper, modifiers);
+  assignClauseTier(items, upper);
 
   const revisionPatterns = [
     /\b(REMOVE|DROP|TAKE OUT|DELETE|STRIP|EXCLUDE)\b.*(LICENSE|HARDWARE|HW|AP|SWITCH|MX|MR)/,
@@ -7731,7 +7799,9 @@ function buildQuoteResponse(parsed) {
   // so Option 1 + Hardware Refresh URLs match the input order, like the vision builder.
   const ordered = [];
 
-  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeReplaced: itemSmeReplaced } of parsed.items) {
+  const anyItemTier = (parsed.items || []).some((it) => it && it.requestedTier);
+  for (let { baseSku, qty, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, _v3PreLicense, smeReplaced: itemSmeReplaced, requestedTier: itemRequestedTier } of parsed.items) {
+    const itemTier = itemRequestedTier || (anyItemTier ? null : requestedTier);
     // ── V3 collapsed named/multi-term license (Phase 3) ──
     // buildQuoteFromV3 collapses a named license (Duo/Umbrella/SME/AnyConnect/…) into ONE item
     // carrying its already-resolved per-term SKUs in _v3PreLicense. Emit it as a single agnostic
@@ -7833,7 +7903,7 @@ function buildQuoteResponse(parsed) {
     const eol = isEol(baseSku);
     const replacement = checkEol(baseSku);
     if (eol && replacement) {
-      const eolItem = { baseSku, qty, replacement, eol: true, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
+      const eolItem = { baseSku, qty, replacement, eol: true, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, requestedTier: itemTier };
       eolItems.push(eolItem);
       ordered.push({ kind: 'eol', ref: eolItem });
       continue;
@@ -7841,16 +7911,16 @@ function buildQuoteResponse(parsed) {
     const zTest = baseSku.toUpperCase().match(/^Z(\d+)/);
     if (zTest) {
       const zNum = zTest[1];
-      if ((zNum === '1' || zNum === '3') && requestedTier && requestedTier !== 'ENT') {
+      if ((zNum === '1' || zNum === '3') && itemTier && itemTier !== 'ENT') {
         tierWarnings.push(`⚠️ **${baseSku}** only supports Enterprise licensing. Using ENT.`);
       }
-      if (zNum === '4' && requestedTier === 'SDW') {
+      if (zNum === '4' && itemTier === 'SDW') {
         tierWarnings.push(`⚠️ **${baseSku}** does not support SD-WAN licensing. Using ENT.`);
       }
     }
     const hwSku = applySuffix(baseSku);
-    const licenseSkus = getLicenseSkus(baseSku, requestedTier);
-    const resItem = { baseSku, hwSku, qty, licenseSkus, eol: false, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly };
+    const licenseSkus = getLicenseSkus(baseSku, itemTier);
+    const resItem = { baseSku, hwSku, qty, licenseSkus, eol: false, hardwareOnly: itemHardwareOnly, licenseOnly: itemLicenseOnly, requestedTier: itemTier };
     resolvedItems.push(resItem);
     ordered.push({ kind: 'resolved', ref: resItem });
   }
@@ -8404,8 +8474,10 @@ Three license tiers exist for MX/Z:
 
 EXACT license SKU mappings by product family:
 
-### APs (MR + CW) — all use generic ENT license
-- All MR and CW APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
+### APs (MR + CW) — MR supports Advanced; default MR and CW use generic ENT
+- MR APs with no explicit Advanced request → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix)
+- MR APs explicitly requested as Advanced/ADV → LIC-MR-ADV-1Y, LIC-MR-ADV-3Y, LIC-MR-ADV-5Y (note: -Y suffix)
+- CW9 APs → LIC-ENT-1YR, LIC-ENT-3YR, LIC-ENT-5YR (note: -YR suffix), even when Advanced is requested
 - CW9800 wireless controllers → NO license association
 
 ### Systems Manager (SME) — generic, model-agnostic
