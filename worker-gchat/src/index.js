@@ -10693,13 +10693,29 @@ function canonicalOneshotSkus(skus) {
         : rawTier === 'SDW' || rawTier === 'SDWAN' || rawTier === 'SDWANPLUS' ? 'SDW'
           : rawTier === 'A' || rawTier === 'ADV' || rawTier === 'ADVANCED' || rawTier === 'ADVANTAGE' ? 'A'
             : rawTier ? 'INVALID' : '';
+    const rawLicenseIntent = sku.startsWith('LIC-')
+      ? String(line?.license_intent || line?.licenseIntent || line?.intent || '').trim().toLowerCase()
+      : '';
+    const licenseIntent = !rawLicenseIntent
+      ? ''
+      : ['paired', 'standalone'].includes(rawLicenseIntent) ? rawLicenseIntent : 'INVALID';
     if (!sku) continue;
-    const key = `${sku}\u0000${tier}`;
+    // A device-associated copy and an additive standalone copy of the same
+    // catalogue license have different commercial meaning. Keep that reviewed
+    // decision in the signed request instead of merging the two rows here.
+    const key = `${sku}\u0000${tier}\u0000${licenseIntent}`;
     const prior = totals.get(key);
-    totals.set(key, { sku, qty: (prior?.qty || 0) + qty, ...(tier ? { tier } : {}) });
+    totals.set(key, {
+      sku,
+      qty: (prior?.qty || 0) + qty,
+      ...(tier ? { tier } : {}),
+      ...(licenseIntent ? { license_intent: licenseIntent } : {}),
+    });
   }
   return [...totals.values()]
-    .sort((a, b) => a.sku.localeCompare(b.sku) || String(a.tier || '').localeCompare(String(b.tier || '')));
+    .sort((a, b) => a.sku.localeCompare(b.sku)
+      || String(a.tier || '').localeCompare(String(b.tier || ''))
+      || String(a.license_intent || '').localeCompare(String(b.license_intent || '')));
 }
 
 // ─── One-shot product snapshot (2026-08-17) ────────────────────────────────
@@ -10954,6 +10970,7 @@ function expandOneshotRequestedProducts(input) {
       blockers.push({ code: 'invalid_sku_quantity' });
     }
     if (line.tier === 'INVALID') blockers.push({ code: 'invalid_license_tier', sku: line.sku });
+    if (line.license_intent === 'INVALID') blockers.push({ code: 'invalid_license_intent', sku: line.sku });
   }
   if (blockers.length) return { success: false, lines: [], blockers, ha_mode: haMode };
 
@@ -10963,6 +10980,11 @@ function expandOneshotRequestedProducts(input) {
   const hardwareOnlyKeys = oneshotHardwareOnlyKeys(p.hardware_only_skus);
   const term = String(p.license_term || '1');
   const explicitLicenses = requested.filter((line) => line.sku.startsWith('LIC-'));
+  // Blank is the backwards-compatible meaning: older reviewed carts already
+  // treated a compatible explicit licence as the device companion. Only an
+  // affirmative standalone choice makes that row additive.
+  const pairedExplicitLicenses = explicitLicenses.filter((line) => line.license_intent !== 'standalone');
+  const standaloneExplicitLicenses = explicitLicenses.filter((line) => line.license_intent === 'standalone');
   const hardware = requested.filter((line) => !line.sku.startsWith('LIC-'));
 
   if (p.ha_recalculate_license_qty === true && haMode !== 'warm_spare') {
@@ -10988,7 +11010,7 @@ function expandOneshotRequestedProducts(input) {
     const usedExplicit = new Set();
     const pairs = [];
     for (const hw of hardware) {
-      const compatible = explicitLicenses.filter((line) => oneshotExplicitLicenseMatchesHardware(hw.sku, line.sku));
+      const compatible = pairedExplicitLicenses.filter((line) => oneshotExplicitLicenseMatchesHardware(hw.sku, line.sku));
       if (compatible.length > 1) {
         blockers.push({ code: 'ha_ambiguous_license_lines', sku: hw.sku, licenses: compatible.map((line) => line.sku) });
         continue;
@@ -11013,14 +11035,14 @@ function expandOneshotRequestedProducts(input) {
       }
       pairs.push({ hw, explicit, licenseSku, requiredLicenseQty, licenseQtyRecalculated });
     }
-    for (const explicit of explicitLicenses) {
+    for (const explicit of pairedExplicitLicenses) {
       if (!usedExplicit.has(explicit.sku)) blockers.push({ code: 'ha_license_family_conflict', sku: explicit.sku });
     }
     if (blockers.length) return { success: false, lines: [], blockers, ha_mode: haMode };
     const expandedPairs = pairs.flatMap(({ hw, explicit, licenseSku, requiredLicenseQty }) => ([
       { sku: hw.sku, qty: hw.qty },
       { sku: explicit?.sku || licenseSku, qty: requiredLicenseQty },
-    ]));
+    ])).concat(standaloneExplicitLicenses.map(({ sku, qty }) => ({ sku, qty })));
     return {
       success: true,
       ha_mode: haMode,
@@ -11048,7 +11070,7 @@ function expandOneshotRequestedProducts(input) {
   }
 
   const explicitByHardware = new Map();
-  if (includeLicenses && explicitLicenses.length > 0 && hardware.length > 0) {
+  if (includeLicenses && pairedExplicitLicenses.length > 0 && hardware.length > 0) {
     const matchedExplicit = new Set();
     // A model-agnostic licence covers EVERY access point in the cart as one
     // aggregated line: the quote engine itself emits "4x CW9176I-RTG, 4x
@@ -11063,7 +11085,7 @@ function expandOneshotRequestedProducts(input) {
       // Deliberately unlicensed: it must not pull a shared licence's expected
       // quantity up, and must not bind to one.
       if (oneshotLineIsHardwareOnly(hw.sku, hardwareOnlyKeys)) continue;
-      const compatible = explicitLicenses.filter((line) => oneshotExplicitLicenseMatchesHardware(hw.sku, line.sku));
+      const compatible = pairedExplicitLicenses.filter((line) => oneshotExplicitLicenseMatchesHardware(hw.sku, line.sku));
       for (const line of compatible) matchedExplicit.add(line.sku);
       if (compatible.length > 1) {
         blockers.push({ code: 'explicit_license_ambiguous', sku: hw.sku, licenses: compatible.map((line) => line.sku) });
@@ -11076,7 +11098,7 @@ function expandOneshotRequestedProducts(input) {
       explicitByHardware.set(hw.sku, explicit);
     }
     for (const [licenseSku, coveredLines] of coveredHardware) {
-      const explicit = explicitLicenses.find((line) => line.sku === licenseSku);
+      const explicit = pairedExplicitLicenses.find((line) => line.sku === licenseSku);
       if (!explicit) continue;
       const explicitTerm = oneshotLicenseTerm(explicit.sku);
       if (p.license_term != null && explicitTerm !== term) {
@@ -11105,7 +11127,7 @@ function expandOneshotRequestedProducts(input) {
     const unlicensedMxHardware = hardware.some((line) => /^MX\d/i.test(line.sku)
       && !oneshotLineIsHardwareOnly(line.sku, hardwareOnlyKeys)
       && !explicitByHardware.has(line.sku));
-    for (const explicit of explicitLicenses) {
+    for (const explicit of pairedExplicitLicenses) {
       if (unlicensedMxHardware && /^LIC-MX\d/i.test(explicit.sku) && !matchedExplicit.has(explicit.sku)) {
         blockers.push({ code: 'explicit_license_family_conflict', sku: explicit.sku });
       }
@@ -11113,7 +11135,7 @@ function expandOneshotRequestedProducts(input) {
     if (blockers.length) return { success: false, lines: [], blockers, ha_mode: haMode };
   }
 
-  const explicitStems = new Set(explicitLicenses.map((line) => oneshotLicenseStem(canonicalOneshotCatalogSku(line.sku))));
+  const explicitStems = new Set(pairedExplicitLicenses.map((line) => oneshotLicenseStem(canonicalOneshotCatalogSku(line.sku))));
   const expanded = [];
   for (const line of requested) {
     const rawSku = line.sku;
@@ -11689,7 +11711,7 @@ async function validateOneshotReviewBinding(input, env, caller) {
     'pinned_deal_account_mismatch', 'pinned_deal_contact_mismatch',
     'unresolved_sku', 'inactive_sku', 'eol_sku',
     'product_lookup_failed', 'isr_not_found',
-    'ha_mode_invalid', 'invalid_sku_quantity', 'invalid_license_tier', 'ha_requires_shared_license',
+    'ha_mode_invalid', 'invalid_sku_quantity', 'invalid_license_tier', 'invalid_license_intent', 'ha_requires_shared_license',
     'ha_hardware_required', 'ha_mixed_hardware', 'ha_hardware_unsupported',
     'ha_even_hardware_quantity_required', 'ha_ambiguous_license_lines',
     'ha_license_term_conflict', 'ha_shared_license_unresolved',

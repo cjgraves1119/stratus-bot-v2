@@ -238,6 +238,43 @@ function lookupSpy() {
     }
   });
 
+  await check('reviewed paired versus standalone license intent is signed and counted exactly once or additively', () => {
+    const pairedInput = {
+      ...baseInput,
+      skus: [
+        { sku: 'MX75', qty: 2 },
+        { sku: 'LIC-MX75-SEC-3Y', qty: 2, licenseIntent: 'paired' },
+      ],
+    };
+    assert.deepStrictEqual(H.canonicalOneshotSkus(pairedInput.skus), [
+      { sku: 'LIC-MX75-SEC-3Y', qty: 2, license_intent: 'paired' },
+      { sku: 'MX75', qty: 2 },
+    ]);
+    assert.deepStrictEqual(H.expandOneshotRequestedProducts(pairedInput).lines, [
+      { sku: 'MX75', qty: 2 },
+      { sku: 'LIC-MX75-SEC-3Y', qty: 2 },
+    ]);
+
+    const standaloneInput = {
+      ...baseInput,
+      skus: [
+        { sku: 'MX75', qty: 2 },
+        { sku: 'LIC-MX75-SEC-3Y', qty: 2, licenseIntent: 'standalone' },
+      ],
+    };
+    assert.deepStrictEqual(H.expandOneshotRequestedProducts(standaloneInput).lines, [
+      { sku: 'MX75', qty: 2 },
+      { sku: 'LIC-MX75-SEC-3Y', qty: 4 },
+    ]);
+
+    const invalid = H.expandOneshotRequestedProducts({
+      ...baseInput,
+      skus: [{ sku: 'LIC-MX75-SEC-3Y', qty: 2, licenseIntent: 'guessed' }],
+    });
+    assert.strictEqual(invalid.success, false);
+    assert.ok(invalid.blockers.some((blocker) => blocker.code === 'invalid_license_intent'));
+  });
+
   await check('ambiguous, wrong-model, wrong-term, and wrong-quantity explicit MX licenses block before lookup', async () => {
     const cases = [
       {

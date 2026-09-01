@@ -777,7 +777,7 @@ test('non-product replans reuse signed validation; product/term/HA changes do no
   assert.match(chatSource, /Choose account enrichment source/);
   assert.match(chatSource, /setEnrichmentAlternate\(result\)/);
   assert.doesNotMatch(chatSource, /JSON\.stringify\(p\.enrichment_comparison/);
-  assert.match(chatSource, /'invalid_sku_quantity', 'unresolved_sku', 'inactive_sku', 'eol_sku', 'product_lookup_failed'/);
+  assert.match(chatSource, /'invalid_sku_quantity', 'invalid_license_intent', 'unresolved_sku', 'inactive_sku', 'eol_sku', 'product_lookup_failed'/);
   assert.match(chatSource, /p\.product_validation \|\| \{\}/);
   assert.match(chatSource, /productValidation\.snapshot_hash/);
   assert.match(chatSource, /productValidation\.product_validation_count/);

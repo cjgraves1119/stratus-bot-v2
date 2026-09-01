@@ -1390,11 +1390,25 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
     const planLines = Array.isArray(p.lines) ? p.lines : [];
     const keepLicenses = msg.base?.hardware_only !== true && msg.base?.include_licenses !== false;
     const planHasLicenses = planLines.some((line) => String(line?.sku || '').toUpperCase().startsWith('LIC-'));
-    const source = (keepLicenses && planHasLicenses) ? planLines : (baseSkus.length ? baseSkus : planLines);
+    // When the rep reviewed an explicit device-associated/standalone licence,
+    // the original request rows are the editable authority. The expanded plan
+    // may aggregate an auto companion with an additive standalone copy, which
+    // cannot safely reconstruct that choice. Keeping baseSkus also prevents a
+    // harmless re-plan from asking the same licensing question again.
+    const hasReviewedLicenseIntent = baseSkus.some((line) => (
+      /^LIC-/i.test(String(line?.sku || ''))
+      && ['paired', 'standalone'].includes(String(line?.licenseIntent || line?.license_intent || '').trim().toLowerCase())
+    ));
+    const source = hasReviewedLicenseIntent
+      ? baseSkus
+      : (keepLicenses && planHasLicenses) ? planLines : (baseSkus.length ? baseSkus : planLines);
     return source.map((line) => ({
       sku: String(line?.sku || '').trim().toUpperCase(),
       qty: line?.qty ?? 1,
       tier: line?.tier || '',
+      ...(['paired', 'standalone'].includes(String(line?.licenseIntent || line?.license_intent || '').trim().toLowerCase())
+        ? { licenseIntent: String(line?.licenseIntent || line?.license_intent).trim().toLowerCase() }
+        : {}),
       ...(line?.availability === 'zoho_only' ? { availability: 'zoho_only' } : {}),
     }));
   });
@@ -1433,7 +1447,7 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
     'pinned_deal_contact_not_readable', 'pinned_deal_contact_email_missing',
     'pinned_deal_contact_account_missing',
     'pinned_deal_account_mismatch', 'pinned_deal_contact_mismatch',
-    'invalid_sku_quantity', 'unresolved_sku', 'inactive_sku', 'eol_sku', 'product_lookup_failed',
+    'invalid_sku_quantity', 'invalid_license_intent', 'unresolved_sku', 'inactive_sku', 'eol_sku', 'product_lookup_failed',
     'isr_not_found',
   ].includes(b.code));
   // Card-per-section design (2026-08-18 redesign): every reviewed field group
@@ -1592,7 +1606,11 @@ function OneshotPlanCard({ msg, busy, onReplan: requestReplan, onRefreshContext,
           // token, so a LIC-MS130-48 is not swallowed by a LIC-MS130-24.
           const carried = standaloneLicenseRows
             .filter((row) => !parsed.some((item) => sameDeviceIdentity(item.sku, row.sku)))
-            .map(({ sku, qty }) => ({ sku, qty }));
+            .map(({ sku, qty, licenseIntent }) => ({
+              sku,
+              qty,
+              ...(licenseIntent ? { licenseIntent } : {}),
+            }));
           skus = hardwareRows.length ? [...parsed, ...carried] : parsed;
         }
       }
@@ -3477,6 +3495,9 @@ export default function ChatPanel({
           sku: String(line?.sku || '').trim().toUpperCase(),
           qty: Number(line?.qty) || 1,
           ...(String(line?.tier || '').trim() ? { tier: String(line.tier).trim().toUpperCase() } : {}),
+          ...(/^LIC-/i.test(String(line?.sku || '')) && ['paired', 'standalone'].includes(String(line?.licenseIntent || '').trim().toLowerCase())
+            ? { licenseIntent: String(line.licenseIntent).trim().toLowerCase() }
+            : {}),
         })).filter((line) => line.sku)
         : parseOrderUrlItems(orderUrl);
       if (!skus.length) {
