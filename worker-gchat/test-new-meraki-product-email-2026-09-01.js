@@ -28,7 +28,6 @@ function load() {
   const module = { exports: {} };
   const code = [
     grabConst('MERAKI_PRODUCT_SEEN_KEY'),
-    grabConst('MERAKI_PRODUCT_BOOTSTRAP_DAYS'),
     grab('isMerakiProductRecord'),
     grab('selectNewMerakiProductNotifications'),
     grab('_escapeHtml'),
@@ -64,20 +63,19 @@ function kvMock() {
   assert.equal(h.isMerakiProductRecord({ Product_Code: 'C9300-24P', Product_Name: 'Cisco Catalyst', Product_Active: true }), false);
   assert.equal(h.isMerakiProductRecord({ Product_Code: 'CW9174E-RTG', Product_Name: 'Cisco Wireless', Product_Active: false }), false);
 
-  const now = Date.now();
-  const recent = new Date(now - 2 * 86400000).toISOString();
-  const old = new Date(now - 90 * 86400000).toISOString();
+  const recent = new Date(Date.now() - 2 * 86400000).toISOString();
+  const old = new Date(Date.now() - 90 * 86400000).toISOString();
   const rows = [
     { sku: 'CW9174E-RTG', name: 'New AP', created_at: recent, list_price: 2495 },
     { sku: 'MR44-HW', name: 'Old AP', created_at: old, list_price: 995 },
   ];
   assert.deepStrictEqual(
-    h.selectNewMerakiProductNotifications(rows, null, now).map((row) => row.sku),
-    ['CW9174E-RTG'],
-    'bootstrap must surface recent products without flooding historical gaps',
+    h.selectNewMerakiProductNotifications(rows, null).map((row) => row.sku),
+    [],
+    'bootstrap must establish a silent baseline regardless of product age',
   );
   assert.deepStrictEqual(
-    h.selectNewMerakiProductNotifications(rows, { initialized: true, skus: ['CW9174E-RTG'] }, now).map((row) => row.sku),
+    h.selectNewMerakiProductNotifications(rows, { initialized: true, skus: ['CW9174E-RTG'] }).map((row) => row.sku),
     ['MR44-HW'],
     'after baseline, every genuinely unseen active product is eligible',
   );
@@ -93,22 +91,31 @@ function kvMock() {
   const kv = kvMock();
   const env = { CONVERSATION_KV: kv, SYSTEM_OWNER_EMAIL: 'owner@example.com' };
   const first = await h.notifyNewMerakiProducts(env, [rows[0]], new Set());
-  assert.equal(first.sent, 1);
-  assert.equal(h.calls.length, 1);
-  assert.match(h.calls[0][2], /CW9174E-RTG/);
-  const second = await h.notifyNewMerakiProducts(env, [rows[0]], new Set());
-  assert.equal(second.sent, 0);
+  assert.equal(first.sent, 0, 'first successful scan must establish a silent baseline');
+  assert.equal(h.calls.length, 0);
+  const second = await h.notifyNewMerakiProducts(env, rows, new Set());
+  assert.equal(second.sent, 1);
   assert.equal(h.calls.length, 1, 'the same product must not email twice');
+  assert.match(h.calls[0][2], /MR44-HW/);
+  const third = await h.notifyNewMerakiProducts(env, rows, new Set());
+  assert.equal(third.sent, 0);
+  assert.equal(h.calls.length, 1, 'an already reported product must not email again');
 
   const retryKv = kvMock();
+  await h.notifyNewMerakiProducts(
+    { CONVERSATION_KV: retryKv, SYSTEM_OWNER_EMAIL: 'owner@example.com' },
+    [rows[0]],
+    new Set(),
+  );
   h.setSend(async () => { throw new Error('gmail down'); });
   await assert.rejects(
-    h.notifyNewMerakiProducts({ CONVERSATION_KV: retryKv, SYSTEM_OWNER_EMAIL: 'owner@example.com' }, [rows[0]], new Set()),
+    h.notifyNewMerakiProducts({ CONVERSATION_KV: retryKv, SYSTEM_OWNER_EMAIL: 'owner@example.com' }, rows, new Set()),
     /gmail down/,
   );
-  assert.equal(retryKv.values.size, 0, 'failed email must not advance the dedupe baseline');
+  const retryState = JSON.parse(retryKv.values.get('meraki_product_seen_v1'));
+  assert.deepStrictEqual(retryState.skus, ['CW9174E-RTG'], 'failed email must not advance the dedupe baseline');
 
-  console.log('PASS new Meraki product detection, bootstrap, email, and durable dedupe');
+  console.log('PASS new Meraki product silent baseline, email, and durable dedupe');
 })().catch((error) => {
   console.error(error.stack || error.message);
   process.exitCode = 1;

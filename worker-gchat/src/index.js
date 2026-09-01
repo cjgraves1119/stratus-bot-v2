@@ -33179,7 +33179,6 @@ async function sendDailyErrorDigest(env) {
 // NEW MERAKI PRODUCT NOTIFICATION — one email on first observation in Zoho.
 // ═══════════════════════════════════════════════════════════════════════════
 const MERAKI_PRODUCT_SEEN_KEY = 'meraki_product_seen_v1';
-const MERAKI_PRODUCT_BOOTSTRAP_DAYS = 30;
 
 function isMerakiProductRecord(record) {
   const sku = String(record?.Product_Code || record?.sku || '').trim().toUpperCase();
@@ -33227,21 +33226,19 @@ async function discoverActiveMerakiProducts(env, { maxPages = 20 } = {}) {
   return [...records.values()].sort((a, b) => a.sku.localeCompare(b.sku));
 }
 
-function selectNewMerakiProductNotifications(current, previousState, nowMs = Date.now()) {
+function selectNewMerakiProductNotifications(current, previousState) {
   const rows = Array.isArray(current) ? current : [];
   const previous = new Set((Array.isArray(previousState?.skus) ? previousState.skus : [])
     .map((sku) => String(sku || '').trim().toUpperCase()).filter(Boolean));
   const initialized = previousState?.initialized === true;
-  const bootstrapCutoff = nowMs - MERAKI_PRODUCT_BOOTSTRAP_DAYS * 86400000;
+  // The first successful scan is a silent baseline. Without it, deploying the
+  // feature could email about pre-existing catalog rows merely because they
+  // were created recently. Only rows first observed after initialization are
+  // genuinely new to this detector.
+  if (!initialized) return [];
   return rows.filter((row) => {
     const sku = String(row?.sku || '').trim().toUpperCase();
-    if (!sku || previous.has(sku)) return false;
-    if (initialized) return true;
-    // The first deployed run establishes a baseline instead of emailing every
-    // historical catalog gap. It still surfaces recent additions such as a
-    // newly introduced CW model that prompted this feature.
-    const createdMs = Date.parse(String(row?.created_at || ''));
-    return Number.isFinite(createdMs) && createdMs >= bootstrapCutoff;
+    return !!sku && !previous.has(sku);
   });
 }
 
