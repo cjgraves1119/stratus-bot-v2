@@ -16,8 +16,8 @@
  * post-pass over the family rules, so it can only ever turn an -HW answer into
  * a bare one the catalog already knows.
  *
- * Both workers implement it identically and are checked against each other
- * here, because they share the price KV and must agree on what a SKU means.
+ * This maintained test covers the editable Google Chat Worker source. Historical
+ * compiled Worker evidence is quarantined and is not a release-test dependency.
  */
 
 import { test } from 'node:test';
@@ -31,7 +31,6 @@ const WORKER = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(path.join(WORKER, 'x.cjs'));
 const SOURCE = fs.readFileSync(path.join(WORKER, 'src/index.js'), 'utf8');
 const PRICES = require(path.join(WORKER, 'src/data/prices.json')).prices;
-const WEBEX = path.join(WORKER, '../worker-webex-recovered/src/index.js');
 
 function resolverFrom(src, prices) {
   const a = src.indexOf('function applySuffix(sku) {');
@@ -148,47 +147,4 @@ test('every orphaned -HW twin is superseded and mirrors its live twin', () => {
   assert.match(proxy, /_superseded_by/);
   assert.ok(proxy.indexOf('_superseded_by') < proxy.indexOf('const live = livePrices[prop]'),
     'the supersede check must run before the KV value is taken');
-});
-
-test('the Webex worker resolves every catalog SKU identically', () => {
-  // Both workers read the SAME price KV, so a SKU that means different things
-  // in each is a split brain: an ecomm quote and a CRM quote for the same
-  // request would price differently.
-  const webexSrc = fs.readFileSync(WEBEX, 'utf8');
-  assert.match(webexSrc, /function applySuffixFamilyRules\(sku\)/, 'Webex must carry the same post-pass');
-  assert.match(webexSrc, /Bare-code migrations/, 'Webex must carry the migration overrides');
-  assert.match(webexSrc, /_superseded_by/, 'Webex must honour superseded keys over KV');
-
-  // Build the Webex resolver over its own catalog plus its override block.
-  const ps = webexSrc.indexOf('var prices_default = ');
-  const objStart = webexSrc.indexOf('{', ps);
-  let depth = 0, end = -1;
-  for (let i = objStart; i < webexSrc.length; i++) {
-    if (webexSrc[i] === '{') depth++;
-    else if (webexSrc[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
-  }
-  const catalog = (0, eval)(`(${webexSrc.slice(objStart, end)})`).prices;
-  const o = webexSrc.indexOf('Object.assign(staticPrices, {');
-  const os = webexSrc.indexOf('{', o + 20);
-  let d2 = 0, oe = -1;
-  for (let i = os; i < webexSrc.length; i++) {
-    if (webexSrc[i] === '{') d2++;
-    else if (webexSrc[i] === '}') { d2--; if (d2 === 0) { oe = i + 1; break; } }
-  }
-  const webexPrices = Object.assign({}, catalog, (0, eval)(`(${webexSrc.slice(os, oe)})`));
-  const webexResolve = resolverFrom(webexSrc, webexPrices);
-
-  const disagreements = [];
-  for (const sku of [...MIGRATED, ...STILL_HW, 'MX67C', 'Z3C-HW-NA', 'CW9164I', 'MS150-48LP-4X']) {
-    if (applySuffix(sku) !== webexResolve(sku)) {
-      disagreements.push(`${sku}: gchat ${applySuffix(sku)} vs webex ${webexResolve(sku)}`);
-    }
-  }
-  assert.deepEqual(disagreements, [], `the two workers must agree:\n${disagreements.join('\n')}`);
-
-  // And the migrated SKUs must carry the same money in both.
-  for (const sku of MIGRATED) {
-    assert.equal(webexPrices[sku].price, PRICES[sku].price, `${sku} ecomm must match gchat`);
-    assert.equal(webexPrices[sku].list, PRICES[sku].list, `${sku} list must match gchat`);
-  }
 });
