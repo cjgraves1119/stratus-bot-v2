@@ -3498,6 +3498,9 @@ export default function ChatPanel({
           ...(/^LIC-/i.test(String(line?.sku || '')) && ['paired', 'standalone'].includes(String(line?.licenseIntent || '').trim().toLowerCase())
             ? { licenseIntent: String(line.licenseIntent).trim().toLowerCase() }
             : {}),
+          ...(['ecomm', 'zoho_only'].includes(String(line?.availability || '').trim().toLowerCase())
+            ? { availability: String(line.availability).trim().toLowerCase() }
+            : {}),
         })).filter((line) => line.sku)
         : parseOrderUrlItems(orderUrl);
       if (!skus.length) {

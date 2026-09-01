@@ -54,6 +54,7 @@ check('only explicit quote-card or Zoho-only review buttons authorize the first 
   assert.ok(/startOneshotFromUrl\('', \{[\s\S]*directSkus: prepared\.rows/.test(zohoOnly), 'Zoho-only review must use the same guarded planner');
   assert.ok(/directSkus\.map\(\(line\) => \(\{[\s\S]*line\?\.tier/.test(SRC), 'direct Zoho review must preserve each selected row tier');
   assert.ok(/directSkus\.map\(\(line\) => \(\{[\s\S]*licenseIntent: String\(line\.licenseIntent\)/.test(SRC), 'direct Zoho review must preserve the reviewed paired/standalone license choice');
+  assert.ok(/directSkus\.map\(\(line\) => \(\{[\s\S]*availability: String\(line\.availability\)/.test(SRC), 'direct Zoho review must preserve the exact Zoho-only availability proof across re-plans');
   assert.ok(/const hasReviewedLicenseIntent = baseSkus\.some[\s\S]*const source = hasReviewedLicenseIntent[\s\S]*\? baseSkus/.test(SRC), 'one-shot re-plans must keep the reviewed request rows as the license-intent authority');
   assert.ok(/licenseIntent: String\(line\?\.licenseIntent \|\| line\?\.license_intent\)/.test(SRC), 'the re-mounted plan editor must restore the reviewed license choice');
   assert.ok(/startZohoOnlyManualQuote\(msg, rows\)/.test(SRC), 'the manual card button must be the only Zoho-only trigger');
