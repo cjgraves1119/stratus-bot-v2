@@ -36,6 +36,8 @@ const check = (desc, cond, diag) => {
   if (cond) { console.log(`✅ ${desc}`); pass++; }
   else { console.log(`❌ ${desc}${diag ? '\n   ' + diag : ''}`); fail++; }
 };
+const hasOrderSku = (text, sku) => [...String(text || '').matchAll(/[?&]item=([^&\s]+)/g)]
+  .some((match) => decodeURIComponent(match[1]).split(',').includes(sku));
 
 // ─── extractDashboardMetadata ───────────────────────────────────────────────
 {
@@ -164,11 +166,13 @@ MR_EDITION: Enterprise`;
   check('Option 1 INCLUDES the EOL device current license at qty=ACTIVE',
     !!msg && /Option 1 - Renew As-Is/.test(msg) && /LIC-MX64-SEC-3YR/.test(msg),
     `msg=${msg}`);
-  check('Option 1 does NOT include EOL hardware (no MX64-HW in renewal cart)',
-    !!msg && !/MX64-HW/.test(msg),
+  const option1 = msg && (msg.split('Option 1')[1] || '').split('Option 2')[0];
+  const option2 = msg && (msg.split('Option 2')[1] || '');
+  check('Option 1 does NOT include EOL hardware (no MX64 in renewal cart)',
+    !!option1 && !hasOrderSku(option1, 'MX64'),
     `msg=${msg}`);
-  check('Option 2 replaces MX64 hardware with MX67-HW + LIC-MX67-SEC-*',
-    !!msg && /Option 2 - Hardware Refresh/.test(msg) && /MX67-HW/.test(msg) && /LIC-MX67-SEC-3YR/.test(msg),
+  check('Option 2 replaces MX64 hardware with public MX67 + LIC-MX67-SEC-*',
+    !!option2 && /Option 2 - Hardware Refresh/.test(msg) && hasOrderSku(option2, 'MX67') && /LIC-MX67-SEC-3YR/.test(option2),
     `msg=${msg}`);
   check('Option 2 does NOT contain the EOL MX64 license',
     !!msg && !(msg.split('Option 2')[1] || '').includes('LIC-MX64-'),

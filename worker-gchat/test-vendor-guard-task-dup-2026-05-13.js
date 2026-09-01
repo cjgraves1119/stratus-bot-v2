@@ -117,16 +117,23 @@ t('Task Subject derivation falls through 4 sources', () => {
   );
 });
 
-t('Task Subject uses the resolved label (passed to helper)', () => {
+t('Task Subject uses the resolved label through the canonical ordinal normalizer', () => {
   // STEP 8 now passes _taskAccountLabel as subjectLabel to the shared helper.
-  // The helper builds `Follow up - ${subjectLabel || \`Deal ${dealId}\`}`.
   assert.ok(
     /createFollowUpTaskForDeal\(\{\s*dealId,\s*subjectLabel: _taskAccountLabel/.test(source),
     'STEP 8 must pass _taskAccountLabel as subjectLabel to createFollowUpTaskForDeal'
   );
   assert.ok(
-    /Subject: `Follow up - \$\{subjectLabel \|\| `Deal \$\{dealId\}`\}`/.test(source),
-    'helper Subject template must use subjectLabel with Deal-id fallback'
+    /subject: normalizeRequestedFollowUpSubject\(`Follow up: \$\{requiredBusinessText\(subjectLabel \|\| `Deal \$\{dealId\}`, 'Follow-up context'\)\}`\)/.test(source),
+    'helper must validate the resolved label and pass it through the ordinal subject normalizer'
+  );
+  assert.ok(
+    /return `\$\{taskOrdinalLabel\(Math\.max\(1, level\)\)\} Follow-Up: \$\{base\}`/.test(source),
+    'normalizer must emit the canonical ordinal Follow-Up subject'
+  );
+  assert.ok(
+    /TASK_LEGACY_FOLLOWUP_RE\.test\(subject\) \|\| TASK_NUMBERED_FOLLOWUP_RE\.test\(subject\)/.test(source),
+    'cross-turn dedupe must recognize both legacy and canonical ordinal subjects'
   );
 });
 

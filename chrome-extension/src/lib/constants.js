@@ -2,21 +2,15 @@
  * Stratus AI Chrome Extension — Constants & Configuration
  */
 
-// Pointed at the gateway worker (Gemma-first waterfall with Claude fallback).
-// Gateway transparently forwards non-chat /api/* paths to the main worker.
-// ROLLBACK: change to 'https://stratus-ai-bot-gchat.chrisg-ec1.workers.dev' to
-// revert to the original Claude-only path. No other code changes needed.
-// API_BASE is overridable at build time via webpack DefinePlugin (STRATUS_API_BASE) or a
-// global, so one bundle works for personal and corporate. Falls back to the personal-account
-// gateway for backward compat.
+// webpack injects both values from one named release target. A missing value is
+// a broken build, never a reason to fall back to a production/customer gateway.
 export const API_BASE = (typeof STRATUS_API_BASE !== 'undefined' && STRATUS_API_BASE)
-  || (typeof globalThis !== 'undefined' && globalThis.STRATUS_API_BASE)
-  || 'https://stratus-ai-bot-gateway.chrisg-ec1.workers.dev';
+  || (() => { throw new Error('STRATUS_API_BASE was not injected by a named build target'); })();
 
-// Build environment. 'dev' for a locally-loaded unpacked TEST build (set STRATUS_ENV=dev at
-// build time); 'prod' otherwise. Drives the DEV header color/label so you can visually tell a
-// test build apart from the published one. Production/Web-Store builds leave this unset -> 'prod'.
-export const STRATUS_ENV_NAME = (typeof STRATUS_ENV !== 'undefined' && STRATUS_ENV) || 'prod';
+// Build environment is injected with the API origin by the named target. It
+// drives the DEV header color/label so test builds are visually distinct.
+export const STRATUS_ENV_NAME = (typeof STRATUS_ENV !== 'undefined' && STRATUS_ENV)
+  || (() => { throw new Error('STRATUS_ENV was not injected by a named build target'); })();
 export const IS_DEV_BUILD = STRATUS_ENV_NAME === 'dev';
 
 export const ZOHO = {
@@ -85,6 +79,7 @@ export const MSG = {
   GENERATE_QUOTE: 'GENERATE_QUOTE',
   DRAFT_REPLY: 'DRAFT_REPLY',
   DETECT_SKUS: 'DETECT_SKUS',
+  PRODUCT_SEARCH: 'PRODUCT_SEARCH',
   FETCH_TASKS: 'FETCH_TASKS',
   TASK_ACTION: 'TASK_ACTION',
   GET_PRICE: 'GET_PRICE',
@@ -100,6 +95,9 @@ export const MSG = {
   GET_CRM_CONTEXT: 'GET_CRM_CONTEXT',
   OPEN_SIDEBAR: 'OPEN_SIDEBAR',
   SIDEBAR_NAVIGATE: 'SIDEBAR_NAVIGATE',
+  SIDEBAR_ACTION_AVAILABLE: 'SIDEBAR_ACTION_AVAILABLE',
+  SIDEBAR_ACTION_CLAIM: 'SIDEBAR_ACTION_CLAIM',
+  SIDEBAR_ACTION_ACK: 'SIDEBAR_ACTION_ACK',
 
   // Auth
   ZOHO_AUTH_START: 'ZOHO_AUTH_START',
@@ -135,6 +133,17 @@ export const MSG = {
   VELOCITY_HUB_SUBMIT: 'VELOCITY_HUB_SUBMIT',
   ASSIGN_REP: 'ASSIGN_REP',
   FIND_LICENSE_KEY: 'FIND_LICENSE_KEY',
+
+  // Deal Close Lost — confirm-gated Stage update with server-side read-back verify
+  DEAL_CLOSE_LOST: 'DEAL_CLOSE_LOST',
+
+  // One-shot customer-to-quote: deterministic reviewed plan + execute (no agent loop)
+  CRM_DELETE: 'CRM_DELETE',
+  CRM_UNDO: 'CRM_UNDO',
+  ONESHOT_PLAN: 'ONESHOT_PLAN',
+  ONESHOT_EXECUTE: 'ONESHOT_EXECUTE',
+  // Email intake: parse the open email once into catalog-resolved lines (read-only)
+  ONESHOT_INTAKE: 'ONESHOT_INTAKE',
 
   // Task suggestion
   SUGGEST_TASK_PREVIEW: 'SUGGEST_TASK_PREVIEW',
@@ -173,6 +182,29 @@ export const MSG = {
   // (preview page → ExportPDF.do) and returns the PDF as base64.
   EXPORT_ZOHO_PDF: 'EXPORT_ZOHO_PDF',
   EXPORT_ZOHO_PDF_DIRECT: 'EXPORT_ZOHO_PDF_DIRECT',
+
+  // Quote Line Editor (2026-08-20). Bulk discount / batch delete / reorder on a
+  // Zoho Quote, committed in ONE atomic worker PUT.
+  //   GET_QUOTE_LINES:        sidebar/overlay -> background -> POST /api/quote-lines
+  //                           (INTERNAL: returns list price and discount)
+  //   COMMIT_QUOTE_LINE_OPS:  the deterministic write, POST /api/quote-line-ops
+  //   OPEN_QUOTE_LINE_EDITOR: chip / context menu / side panel -> the Zoho tab's
+  //                           content script, which mounts the iframe overlay
+  GET_QUOTE_LINES: 'GET_QUOTE_LINES',
+  //   MATCH_QUOTE_LINES_TO_ECOMM: resolve each line's live storefront price,
+  //                           POST /api/quote-line-ecomm (read-only preview)
+  MATCH_QUOTE_LINES_TO_ECOMM: 'MATCH_QUOTE_LINES_TO_ECOMM',
+  //   GET_QUOTE_LINE_COSTS:   distributor cost per line (the Costs By Lines /
+  //                           Vendor_Lines related list), POST
+  //                           /api/quote-line-costs, for margin pricing
+  GET_QUOTE_LINE_COSTS: 'GET_QUOTE_LINE_COSTS',
+  //   PREVIEW_QUOTE_CLONE_TERMS / CLONE_QUOTE_TERMS: clone the quote onto other
+  //   licence terms. Preview writes nothing; the clone creates one new Zoho
+  //   quote per term, each verified with its own undo token.
+  PREVIEW_QUOTE_CLONE_TERMS: 'PREVIEW_QUOTE_CLONE_TERMS',
+  CLONE_QUOTE_TERMS: 'CLONE_QUOTE_TERMS',
+  COMMIT_QUOTE_LINE_OPS: 'COMMIT_QUOTE_LINE_OPS',
+  OPEN_QUOTE_LINE_EDITOR: 'OPEN_QUOTE_LINE_EDITOR',
 
   // Report Issue — sidebar → background → POST /api/report-issue with a snapshot
   REPORT_ISSUE: 'REPORT_ISSUE',

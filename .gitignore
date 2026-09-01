@@ -1,23 +1,44 @@
+# Dependencies and build output
 node_modules/
-.env
-*.log
-.DS_Store
+dist/
+harness-dist/
+coverage/
+release/
+.release-stage/
+.wrangler/
+.wrangler-dry-run*/
 
-# Wrangler local secret files — never commit
+# Local secrets — never commit. Wrangler secrets live in Cloudflare.
 .dev.vars
-*.dev.vars
+.dev.vars.*
+.env
+.env.*
+env/
+*.pem
+*.key
 
-# Wrangler local-state cache (created by `wrangler whoami` / dev / kv local) — never commit
-.wrangler/
-**/.wrangler/
+# Point-in-time snapshot directories and file-level backups. These are local
+# safety nets, not history; git is the history now.
+*-backup-*/
+*.backup-*
+*.bak
+*.keep
+*.pre-*-snapshot
+src/index.js.backup-*
+backup/
+backups/
+*.backup
+*.orig
 
-# Claude Code local scratch (agent worktrees, session files) — never commit
-.claude/
+# Scratch
+.tmp-*
+.DS_Store
+graphify-out/
+*.crx
+*.zip
 
-# Secrets file — lives in parent Bots/ directory, but add here as
-# belt-and-suspenders in case someone ever copies it into the repo tree.
-.stratus-secrets
-*.stratus-secrets
-
-.wrangler/
-**/.wrangler/
+# Local deployment provenance. The sanctioned DEV deploy appends this audit
+# trail after a clean-tree gate; keeping it local prevents the next deploy from
+# refusing its own prior log as an untracked repository change.
+/deploys.log
+/.pressure-loop/

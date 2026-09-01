@@ -11,6 +11,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { sendToBackground } from '../../lib/messaging';
 import { MSG, COLORS, CONSUMER_DOMAINS } from '../../lib/constants';
+import { nextFollowUpSubject } from '../../lib/task-subjects.mjs';
+import { CrmDeleteControl } from '../components/CrmDeleteControl.jsx';
 
 const ZOHO_ORG = 'org647122552';
 
@@ -240,6 +242,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   // Create Task form state
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [createTaskData, setCreateTaskData] = useState({ subject: '', dueDate: '', priority: 'Normal', description: '' });
+  // Seeded when the form opens (deals/contact are resolved by then). '' = Account only.
+  const [createTaskDealId, setCreateTaskDealId] = useState('');
+  const [createTaskContactEmail, setCreateTaskContactEmail] = useState('');
   const [createTaskLoading, setCreateTaskLoading] = useState(false);
   const [createTaskError, setCreateTaskError] = useState(null);
   const [createTaskSuccess, setCreateTaskSuccess] = useState(null);
@@ -309,6 +314,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     // Tier 1 (polluted-data safe) and adds Tier 4 consumer local-part fallback.
     if (!domain) {
       setData(null); setDeals(null); setTasks(null);
+      resetCreateTaskForm(); // no lookup on this path — reset the form here too
       return;
     }
     lookupCrm(email, domain);
@@ -354,6 +360,21 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     }
   }, [data?.contact?.email]);
 
+  // The Create Task form seeds dealId/contact from the CURRENT account, so any
+  // context change invalidates them. Close the form outright rather than leave a
+  // stale half-filled one that could file a task against the outgoing account's
+  // deal (DealSelect would silently fall back to "None (Account only)" while
+  // handleCreateTask still sent the stale id).
+  function resetCreateTaskForm() {
+    setShowCreateTask(false);
+    setCreateTaskDealId('');
+    setCreateTaskContactEmail('');
+    // Also clear the typed fields — a subject written for account A must not be
+    // reopened and filed against account B.
+    setCreateTaskData({ subject: '', dueDate: '', priority: 'Normal', description: '' });
+    setCreateTaskError(null);
+  }
+
   const lookupCrm = useCallback(async (email, domain) => {
     setLoading(true);
     setError(null);
@@ -361,6 +382,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setDeals(null);
     setTasks(null);
     setIsrDeals(null);
+    resetCreateTaskForm();
     try {
       const result = await sendToBackground(MSG.CRM_LOOKUP, { email, domain });
       setData(result);
@@ -427,7 +449,16 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   async function handleTaskAction(action, taskId, options = {}) {
     setTaskActionLoading(taskId);
     try {
-      const result = await sendToBackground(MSG.TASK_ACTION, { action, taskId, ...options });
+      // gmailThreadUrl rides every action, but the worker only writes it on
+      // complete_and_followup, where it seeds the NEW successor task's description.
+      // Existing tasks are deliberately left alone so an edit never appends a
+      // duplicate link. `...options` last so a caller can still override it.
+      const result = await sendToBackground(MSG.TASK_ACTION, {
+        action,
+        taskId,
+        gmailThreadUrl: emailContext?.url || '',
+        ...options,
+      });
       // Show success briefly
       if (result?.success) {
         const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
@@ -446,6 +477,32 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
   }
 
   // ── Create Task ──
+  // Resolve a picked participant email to a Zoho contact id, but ONLY when that
+  // contact's own email actually matches what was picked. Returns '' otherwise, so
+  // the task is created with no Who_Id rather than one pointing at the wrong person.
+  // Empty input ("None") deliberately yields '' — an explicit choice, not a fallback.
+  async function resolveWhoId(pickedEmail) {
+    const picked = (pickedEmail || '').trim().toLowerCase();
+    if (!picked) return '';
+    // Fast path: the panel's already-resolved contact, but ONLY if the worker
+    // flagged it a real match (contact.matched) for this same email. A Tier-5
+    // account primary-fallback placeholder has matched:false — and its email is
+    // fabricated from the request email, so an equality check would wrongly pass.
+    if (data?.contact?.matched && (data.contact.email || '').toLowerCase() === picked) {
+      return data.contact.id || '';
+    }
+    // verifyOnly: don't let this verification lookup clobber the warm CRM context.
+    const looked = await sendToBackground(MSG.CRM_LOOKUP, {
+      email: picked,
+      domain: picked.split('@')[1] || '',
+      verifyOnly: true,
+    }).catch(() => null);
+    const found = looked?.contact;
+    // Trust the worker's own match verdict, not the echoed email. This also keeps
+    // Secondary_Email matches (whose primary email differs from `picked`) working.
+    return found?.matched && found.id ? found.id : '';
+  }
+
   async function handleCreateTask(e) {
     e.preventDefault();
     if (!createTaskData.subject.trim()) return;
@@ -453,13 +510,27 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
     setCreateTaskError(null);
     setCreateTaskSuccess(null);
     try {
+      // Who_Id must be EMAIL-VERIFIED — see resolveWhoId. Never data.contact.id
+      // by default: when no contact matched the sender, the worker substitutes the
+      // account's most-recently-modified contact purely so the sidebar has someone
+      // to display (fetchPrimaryContactForAccount). Filing a task against that
+      // placeholder is exactly the misattribution this picker exists to prevent.
+      const contactId = await resolveWhoId(createTaskContactEmail);
+      // Belt and braces behind the context reset: never send a deal id that is not
+      // in the CURRENTLY displayed deal list, so a stale seed can't misattribute
+      // the task to another account's deal.
+      const currentDealIds = [...(deals?.deals || []), ...(isrDeals?.deals || [])]
+        .map(d => d?.id).filter(Boolean);
+      const safeDealId = (createTaskDealId && currentDealIds.includes(createTaskDealId))
+        ? createTaskDealId : '';
       const result = await sendToBackground(MSG.CRM_CREATE_TASK, {
         subject: createTaskData.subject,
         dueDate: createTaskData.dueDate,
-        dealId: data?.deals?.[0]?.id || deals?.deals?.[0]?.id || '',
-        contactId: data?.contact?.id || '',
+        dealId: safeDealId,
+        contactId,
         priority: createTaskData.priority,
         description: createTaskData.description,
+        gmailThreadUrl: emailContext?.url || '',
       });
       if (result?.success) {
         setCreateTaskSuccess('Task created' + (result.zohoUrl ? '' : ''));
@@ -514,12 +585,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       setSuggestPreview(preview);
       setSuggestEditSubject(preview.subject || `Follow up with ${preview.contactName || preview.senderName || preview.senderEmail || 'contact'}`);
       // Auto-select first open deal (non-Closed) if available
-      const allDeals = [...(deals?.deals || []), ...(isrDeals?.deals || [])];
-      const openDeals = allDeals.filter(d => {
-        const st = (typeof (d.stage || d.Stage) === 'object' ? (d.stage || d.Stage)?.name : (d.stage || d.Stage)) || '';
-        return !st.toLowerCase().includes('closed');
-      });
-      setSuggestDealId(openDeals.length > 0 ? (openDeals[0].id || '') : '');
+      setSuggestDealId(firstOpenDealId([...(deals?.deals || []), ...(isrDeals?.deals || [])]));
     } catch (err) {
       setSuggestResult({ error: err.message });
     } finally {
@@ -536,19 +602,25 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       const confirmSenderLower = confirmSender.toLowerCase();
       const confirmSenderDomain = (confirmSender.split('@')[1] || '').toLowerCase();
       const confirmSenderIsInternal = confirmSenderLower.includes('@stratusinfosystems.com') || confirmSenderDomain === 'cisco.com';
+      const confirmTaskEmail = suggestPreview.senderEmail
+        || emailContext?.customerEmail
+        || (confirmSenderIsInternal ? '' : confirmSender)
+        || '';
+      // Same email-verified rule as handleCreateTask. Sending an unverified id here
+      // would suppress the worker's own by-sender-email Contact search, so when we
+      // can't verify we send '' and let the worker resolve it authoritatively.
+      const confirmWhoId = await resolveWhoId(confirmTaskEmail);
       const result = await sendToBackground(MSG.SUGGEST_TASK, {
-        senderEmail: suggestPreview.senderEmail
-          || emailContext?.customerEmail
-          || (confirmSenderIsInternal ? '' : confirmSender)
-          || '',
+        senderEmail: confirmTaskEmail,
         senderName: suggestPreview.senderName || suggestPreview.contactName || emailContext?.customerName || '',
         subject: suggestEditSubject || suggestPreview.subject,
         hasAccount: !!suggestPreview.accountId,
         accountId: suggestPreview.accountId || data?.account?.id || '',
-        contact_id: suggestPreview.contact_id || suggestPreview.contactId || data?.contact?.id || '',
+        contact_id: confirmWhoId,
         dealId: suggestDealId || '',
         priority: suggestPreview.priority || 'Normal',
         description: suggestPreview.description || '',
+        gmailThreadUrl: emailContext?.url || '',
       });
       setSuggestResult(result);
       setSuggestPreview(null);
@@ -586,6 +658,52 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
       setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], repLoading: false, repResult: result } }));
     } catch (err) {
       setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], repLoading: false, repResult: { error: err.message } } }));
+    }
+  }
+
+  // ── Close Lost (confirm-gated; worker verifies stage via read-back) ──
+  async function handleDealCloseLost(dealId, dealName) {
+    setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], clLoading: true, clResult: null } }));
+    try {
+      const result = await sendToBackground(MSG.DEAL_CLOSE_LOST, { dealId, expectedDealName: dealName });
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], clLoading: false, clResult: result } }));
+      if (result?.success && result?.verifiedStage === 'Closed (Lost)') {
+        // Reflect the VERIFIED stage in the visible deals list without a refetch.
+        const patch = (list) => (list || []).map(d => d.id === dealId ? { ...d, stage: result.verifiedStage } : d);
+        setDeals(prev => (prev ? { ...prev, deals: patch(prev.deals) } : prev));
+        setIsrDeals(prev => (prev ? { ...prev, deals: patch(prev.deals) } : prev));
+      }
+    } catch (err) {
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], clLoading: false, clResult: { success: false, error: err.message } } }));
+    }
+  }
+
+  // ── Complete the exact linked task — only offered AFTER a verified Closed (Lost) ──
+  async function handleCompleteLinkedTask(dealId, taskId) {
+    const clResult = dealActions[dealId]?.clResult;
+    const linked = (tasks?.tasks || []).find(t => t.id === taskId && t.dealId === dealId);
+    // Hard gate: verified Closed (Lost) + exact linked task proven via What_Id match.
+    if (!clResult?.success || clResult?.verifiedStage !== 'Closed (Lost)' || !linked) {
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctResult: { success: false, taskId, error: 'Not a verified linked task for this deal — nothing was changed.' } } }));
+      return;
+    }
+    setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctLoading: taskId, ctResult: null } }));
+    try {
+      const result = await sendToBackground(MSG.TASK_ACTION, { action: 'complete', taskId });
+      // verifiedStatus comes from the worker's post-update read-back of the task record.
+      const verified = !!(result?.success && result?.verifiedStatus === 'Completed');
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctLoading: null, ctResult: { ...result, verified, taskId, subject: linked.subject } } }));
+      if (result?.success) {
+        const taskResult = await sendToBackground(MSG.FETCH_TASKS, {
+          domains: emailContext?.allDomains || [],
+          emails: emailContext?.allEmails || [],
+          accountId: data?.account?.id || '',
+          contactId: data?.contact?.id || '',
+        }).catch(() => null);
+        if (taskResult) setTasks(taskResult);
+      }
+    } catch (err) {
+      setDealActions(prev => ({ ...prev, [dealId]: { ...prev[dealId], ctLoading: null, ctResult: { success: false, error: err.message, taskId } } }));
     }
   }
 
@@ -1187,6 +1305,8 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 <p style={{ fontSize: 13 }}>Select a participant or enter an email above.</p>
               </div>
             )}
+
+            <ManualCrmDelete />
           </>
         )}
 
@@ -1280,6 +1400,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                     actions={dealActions[deal.id] || {}}
                     onVelocityHub={() => handleDealVelocityHub(deal.id)}
                     onAssignRep={(repEmail) => handleDealAssignRep(deal.id, repEmail)}
+                    linkedTasks={taskList.filter(t => t.dealId === deal.id)}
+                    onCloseLost={(dealName) => handleDealCloseLost(deal.id, dealName)}
+                    onCompleteLinkedTask={(taskId) => handleCompleteLinkedTask(deal.id, taskId)}
                   />
                 ))}
               </Card>
@@ -1296,6 +1419,9 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                     actions={dealActions[deal.id] || {}}
                     onVelocityHub={() => handleDealVelocityHub(deal.id)}
                     onAssignRep={(repEmail) => handleDealAssignRep(deal.id, repEmail)}
+                    linkedTasks={taskList.filter(t => t.dealId === deal.id)}
+                    onCloseLost={(dealName) => handleDealCloseLost(deal.id, dealName)}
+                    onCompleteLinkedTask={(taskId) => handleCompleteLinkedTask(deal.id, taskId)}
                   />
                 ))}
               </Card>
@@ -1330,7 +1456,18 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 Open Tasks ({taskList.length})
               </div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => { setShowCreateTask(v => !v); setSuggestPreview(null); }}
+                <button onClick={() => {
+                    const opening = !showCreateTask;
+                    setShowCreateTask(opening);
+                    setSuggestPreview(null);
+                    if (opening) {
+                      // Default to the first OPEN deal and the selected participant.
+                      setCreateTaskDealId(firstOpenDealId([...(dealList || []), ...(isrDealList || [])]));
+                      // Seed the picker only from a real match, never a Tier-5 placeholder
+                      // (matched:false), whose email is a fabricated echo of the sender.
+                      setCreateTaskContactEmail(selectedContact || (data?.contact?.matched ? data.contact.email : '') || '');
+                    }
+                  }}
                   style={{
                     padding: '4px 10px', background: 'transparent',
                     border: `1px solid ${COLORS.STRATUS_BLUE}`, borderRadius: 6,
@@ -1388,6 +1525,32 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                       <option>Low</option>
                     </select>
                   </div>
+                  <DealSelect
+                    deals={[...(dealList || []), ...(isrDealList || [])]}
+                    value={createTaskDealId}
+                    onChange={e => setCreateTaskDealId(e.target.value)}
+                    labelColor={COLORS.TEXT_SECONDARY}
+                    selectStyle={{ ...inputStyle, width: '100%', boxSizing: 'border-box', cursor: 'pointer' }}
+                  />
+                  {externalContacts.length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.TEXT_SECONDARY, marginBottom: 3, textTransform: 'uppercase' }}>
+                        Contact
+                      </div>
+                      <select
+                        value={createTaskContactEmail}
+                        onChange={e => setCreateTaskContactEmail(e.target.value)}
+                        style={{ ...inputStyle, width: '100%', boxSizing: 'border-box', cursor: 'pointer' }}
+                      >
+                        <option value="">None</option>
+                        {externalContacts.map((c, idx) => (
+                          <option key={idx} value={c.email}>
+                            {c.name !== c.email.split('@')[0] ? `${c.name} (${c.email})` : c.email}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                   <input type="text" placeholder="Description (optional)" value={createTaskData.description}
                     onChange={e => setCreateTaskData(p => ({ ...p, description: e.target.value }))}
                     style={{ ...inputStyle, width: '100%', marginBottom: 8, boxSizing: 'border-box' }} />
@@ -1437,46 +1600,18 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                   onBlur={(e) => e.target.style.borderColor = '#a5d6a7'}
                 />
                 {/* Deal selector */}
-                {(() => {
-                  const allDeals = [...(dealList || []), ...(isrDealList || [])];
-                  // Deduplicate by id
-                  const seen = new Set();
-                  const uniqueDeals = allDeals.filter(d => {
-                    if (!d.id || seen.has(d.id)) return false;
-                    seen.add(d.id);
-                    return true;
-                  });
-                  return (
-                    <div style={{ marginBottom: 6 }}>
-                      <div style={{ fontSize: 10, fontWeight: 600, color: '#2e7d32', marginBottom: 3, textTransform: 'uppercase' }}>
-                        Link to Deal
-                      </div>
-                      <select
-                        value={suggestDealId}
-                        onChange={(e) => setSuggestDealId(e.target.value)}
-                        style={{
-                          width: '100%', padding: '5px 8px', fontSize: 12,
-                          borderRadius: 4, border: '1px solid #a5d6a7',
-                          background: 'white', color: COLORS.TEXT_PRIMARY,
-                          cursor: 'pointer', boxSizing: 'border-box',
-                        }}
-                      >
-                        <option value="">None (Account only)</option>
-                        {uniqueDeals.map(deal => {
-                          const name = typeof (deal.name || deal.Deal_Name) === 'object'
-                            ? (deal.name || deal.Deal_Name)?.name : (deal.name || deal.Deal_Name);
-                          const stage = typeof (deal.stage || deal.Stage) === 'object'
-                            ? (deal.stage || deal.Stage)?.name : (deal.stage || deal.Stage);
-                          return (
-                            <option key={deal.id} value={deal.id}>
-                              {name || 'Unnamed Deal'}{stage ? ` (${stage})` : ''}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </div>
-                  );
-                })()}
+                <DealSelect
+                  deals={[...(dealList || []), ...(isrDealList || [])]}
+                  value={suggestDealId}
+                  onChange={(e) => setSuggestDealId(e.target.value)}
+                  labelColor="#2e7d32"
+                  selectStyle={{
+                    width: '100%', padding: '5px 8px', fontSize: 12,
+                    borderRadius: 4, border: '1px solid #a5d6a7',
+                    background: 'white', color: COLORS.TEXT_PRIMARY,
+                    cursor: 'pointer', boxSizing: 'border-box',
+                  }}
+                />
 
                 {suggestPreview.description && (
                   <div style={{ fontSize: 12, color: COLORS.TEXT_SECONDARY, marginBottom: 4 }}>{suggestPreview.description}</div>
@@ -1531,7 +1666,7 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
                 onComplete={() => handleTaskAction('complete_and_followup', task.id, {
                   dealId: task.dealId,
                   contactId: task.contactId,
-                  newSubject: `Follow up: ${task.subject}`,
+                  newSubject: nextFollowUpSubject(task.subject),
                 })}
                 onClose={() => handleTaskAction('complete', task.id)}
                 onReschedule={() => handleTaskAction('reschedule', task.id, {
@@ -1552,9 +1687,11 @@ export default function CrmPanel({ emailContext, crmContext, onNavigate, navData
 
 // ── Sub-components ──
 
-function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRep }) {
+function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRep, linkedTasks = [], onCloseLost, onCompleteLinkedTask }) {
   const [expanded, setExpanded] = useState(false);
   const [selectedRep, setSelectedRep] = useState('');
+  const [confirmingClose, setConfirmingClose] = useState(false);
+  const [confirmingTaskId, setConfirmingTaskId] = useState(null);
   const [licenseKey, setLicenseKey] = useState(deal.licenseKey || null);
   const [keyLoading, setKeyLoading] = useState(false);
   const [keyError, setKeyError] = useState('');
@@ -1630,6 +1767,142 @@ function DealRow({ deal, isLast, ciscoEmails, actions, onVelocityHub, onAssignRe
             </button>
             {keyError && <div style={{ fontSize: 10, color: '#c62828', marginTop: 4 }}>{keyError}</div>}
           </div>
+
+          {/* ── Close Lost — explicit confirm naming the exact deal; Zoho write + read-back verify on the worker ── */}
+          {(() => {
+            const closable = !!stage && !['Closed (Lost)', 'Closed (Won)', 'Closed Won'].includes(stage);
+            const verifiedClosed = !!(actions.clResult?.success && actions.clResult?.verifiedStage === 'Closed (Lost)');
+            return (
+              <div style={{ marginBottom: 8 }}>
+                {closable && !verifiedClosed && !confirmingClose && (
+                  <button
+                    onClick={() => setConfirmingClose(true)}
+                    disabled={actions.clLoading}
+                    style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, border: '1px solid #c6282866', background: '#fff', cursor: actions.clLoading ? 'default' : 'pointer', color: '#c62828', fontWeight: 600 }}
+                  >
+                    Mark Closed (Lost)…
+                  </button>
+                )}
+
+                {closable && !verifiedClosed && confirmingClose && (
+                  <div style={{ padding: 8, background: '#fce8e6', border: '1px solid #c6282844', borderRadius: 6 }}>
+                    <div style={{ fontSize: 11, color: COLORS.TEXT_PRIMARY, fontWeight: 600 }}>
+                      Mark "{dealName}" as Closed (Lost)?
+                    </div>
+                    <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginTop: 3 }}>
+                      This will update this deal's Stage in Zoho CRM (current stage: {stage}). Nothing else on the deal is changed.
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                      <button
+                        onClick={() => { setConfirmingClose(false); onCloseLost && onCloseLost(dealName); }}
+                        disabled={actions.clLoading}
+                        style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: 'none', background: '#c62828', color: '#fff', fontWeight: 600, cursor: 'pointer' }}
+                      >
+                        Confirm — update Zoho CRM
+                      </button>
+                      <button
+                        onClick={() => setConfirmingClose(false)}
+                        style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: `1px solid ${COLORS.BORDER}`, background: '#fff', color: COLORS.TEXT_SECONDARY, cursor: 'pointer' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {actions.clLoading && (
+                  <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic', marginTop: 4 }}>
+                    Updating Zoho CRM and verifying…
+                  </div>
+                )}
+
+                {actions.clResult && !actions.clResult.success && (
+                  <div style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, marginTop: 4, background: '#fce8e6', color: COLORS.ERROR }}>
+                    {actions.clResult.error || 'Close-lost failed — deal unchanged.'}
+                  </div>
+                )}
+
+                {verifiedClosed && (
+                  <div style={{ fontSize: 11, padding: '4px 8px', borderRadius: 4, marginTop: 4, background: '#e6f4ea', color: '#137333' }}>
+                    ✓ {actions.clResult.message || `Verified: "${dealName}" is now Closed (Lost) in Zoho CRM.`}
+                  </div>
+                )}
+
+                {/* ── Linked task completion — separate explicit action, only after verified Closed (Lost),
+                       only for tasks proven linked to THIS deal (task.dealId === deal.id from Zoho What_Id) ── */}
+                {verifiedClosed && (
+                  <div style={{ marginTop: 6 }}>
+                    {linkedTasks.length === 0 ? (
+                      <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic' }}>
+                        No open task linked to this deal was found — nothing to complete.
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.TEXT_SECONDARY, textTransform: 'uppercase', marginBottom: 4 }}>
+                          Linked open task{linkedTasks.length > 1 ? 's' : ''} ({linkedTasks.length})
+                        </div>
+                        {linkedTasks.map((t) => (
+                          <div key={t.id} style={{ marginBottom: 6 }}>
+                            <div style={{ fontSize: 11, color: COLORS.TEXT_PRIMARY }}>
+                              {t.subject}{t.dueDate ? ` · due ${t.dueDate}` : ''}
+                            </div>
+                            {confirmingTaskId !== t.id && actions.ctResult?.taskId !== t.id && (
+                              <button
+                                onClick={() => setConfirmingTaskId(t.id)}
+                                disabled={!!actions.ctLoading}
+                                style={{ fontSize: 11, padding: '3px 8px', borderRadius: 4, border: `1px solid ${COLORS.STRATUS_BLUE}66`, background: '#fff', color: COLORS.STRATUS_BLUE, cursor: 'pointer', marginTop: 2 }}
+                              >
+                                Complete this task…
+                              </button>
+                            )}
+                            {confirmingTaskId === t.id && (
+                              <div style={{ padding: 6, background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`, borderRadius: 6, marginTop: 4 }}>
+                                <div style={{ fontSize: 10, color: COLORS.TEXT_PRIMARY }}>
+                                  Mark task "{t.subject}" as Completed in Zoho CRM? Only this task is changed.
+                                </div>
+                                <div style={{ display: 'flex', gap: 6, marginTop: 5 }}>
+                                  <button
+                                    onClick={() => { setConfirmingTaskId(null); onCompleteLinkedTask && onCompleteLinkedTask(t.id); }}
+                                    style={{ fontSize: 11, padding: '3px 8px', borderRadius: 4, border: 'none', background: COLORS.STRATUS_BLUE, color: '#fff', fontWeight: 600, cursor: 'pointer' }}
+                                  >
+                                    Confirm — complete task
+                                  </button>
+                                  <button
+                                    onClick={() => setConfirmingTaskId(null)}
+                                    style={{ fontSize: 11, padding: '3px 8px', borderRadius: 4, border: `1px solid ${COLORS.BORDER}`, background: '#fff', color: COLORS.TEXT_SECONDARY, cursor: 'pointer' }}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                            {actions.ctLoading === t.id && (
+                              <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, fontStyle: 'italic', marginTop: 2 }}>
+                                Completing task and verifying…
+                              </div>
+                            )}
+                            {actions.ctResult?.taskId === t.id && (
+                              <div style={{
+                                fontSize: 10, padding: '3px 6px', borderRadius: 4, marginTop: 3,
+                                background: actions.ctResult.verified ? '#e6f4ea' : (actions.ctResult.success ? '#fef7e0' : '#fce8e6'),
+                                color: actions.ctResult.verified ? '#137333' : (actions.ctResult.success ? '#b06000' : COLORS.ERROR),
+                              }}>
+                                {actions.ctResult.verified
+                                  ? '✓ Task completed — verified in Zoho.'
+                                  : actions.ctResult.success
+                                    ? 'Completion sent, but Zoho verification is pending/unavailable — double-check the task in Zoho.'
+                                    : (actions.ctResult.error || 'Task completion failed — task unchanged.')}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* 2026-05-12: Velocity Hub button removed per Chris. Server-side
               velocity_hub_submit tool stays intact for use by the
@@ -2172,6 +2445,133 @@ function SmallButton({ children, onClick, disabled, color }) {
     }}>
       {children}
     </button>
+  );
+}
+
+// Zoho returns deal name/stage as either a string or a lookup object {name, id}.
+function dealField(deal, key, apiKey) {
+  const v = deal?.[key] ?? deal?.[apiKey];
+  return (typeof v === 'object' ? v?.name : v) || '';
+}
+
+// First non-Closed deal id, '' when there is none. Used to default both task forms
+// so a task never silently attaches to a closed deal.
+function firstOpenDealId(deals) {
+  const open = (deals || []).find(d => d?.id && !dealField(d, 'stage', 'Stage').toLowerCase().includes('closed'));
+  return open?.id || '';
+}
+
+// "Link to Deal" picker, deduped by id — shared by the Create Task form and the
+// Suggest preview card. Colors stay per-caller so neither card is restyled.
+function DealSelect({ deals, value, onChange, labelColor, selectStyle }) {
+  const seen = new Set();
+  const uniqueDeals = (deals || []).filter(d => {
+    if (!d?.id || seen.has(d.id)) return false;
+    seen.add(d.id);
+    return true;
+  });
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ fontSize: 10, fontWeight: 600, color: labelColor, marginBottom: 3, textTransform: 'uppercase' }}>
+        Link to Deal
+      </div>
+      <select value={value} onChange={onChange} style={selectStyle}>
+        <option value="">None (Account only)</option>
+        {uniqueDeals.map(deal => {
+          const name = dealField(deal, 'name', 'Deal_Name');
+          const stage = dealField(deal, 'stage', 'Stage');
+          return (
+            <option key={deal.id} value={deal.id}>
+              {name || 'Unnamed Deal'}{stage ? ` (${stage})` : ''}
+            </option>
+          );
+        })}
+      </select>
+    </div>
+  );
+}
+
+/**
+ * Delete any Zoho record you can already name, without going through the chat
+ * agent. Deleting used to cost two LLM round trips (search, then confirm, then
+ * the tool call), and it failed when the model serialized confirm as a string
+ * (Chris, 2026-08-19). When the quote number or record id is already in hand,
+ * none of that is needed.
+ *
+ * The delete itself is the shared CrmDeleteControl, so this form and the
+ * one-shot card take the identical two-step, undoable, server-guarded path.
+ */
+function ManualCrmDelete() {
+  const [moduleName, setModuleName] = useState('Quotes');
+  const [value, setValue] = useState('');
+  const [open, setOpen] = useState(false);
+
+  const trimmed = String(value || '').trim();
+  // A Quote_Number and a record id are BOTH long numerics, and passing one as
+  // the other is the classic mistake here. Zoho record ids are 15+ digits, so
+  // anything shorter (or non-numeric) is sent as a quote number and the server
+  // resolves it to the real id. Getting this wrong is not dangerous: the server
+  // refuses a Quote_Number passed as a record_id and says so.
+  const looksLikeRecordId = /^\d{15,25}$/.test(trimmed);
+  const isQuote = moduleName === 'Quotes';
+  const recordId = looksLikeRecordId ? trimmed : '';
+  const quoteNumber = (!looksLikeRecordId && isQuote) ? trimmed : '';
+  const usable = isQuote ? !!(recordId || quoteNumber) : looksLikeRecordId;
+
+  return (
+    <Card>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ fontWeight: 600, fontSize: 12, color: COLORS.TEXT_PRIMARY }}>Delete a Zoho record</div>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{ background: 'none', border: 'none', color: COLORS.STRATUS_BLUE, fontSize: 11, cursor: 'pointer', padding: 0 }}
+        >
+          {open ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <select
+              value={moduleName}
+              onChange={(e) => setModuleName(e.target.value)}
+              style={{ ...inputStyle, flex: '0 0 130px' }}
+            >
+              <option value="Quotes">Quotes</option>
+              <option value="Deals">Deals</option>
+              <option value="Sales_Orders">Sales Orders</option>
+              <option value="Purchase_Orders">Purchase Orders</option>
+              <option value="Tasks">Tasks</option>
+            </select>
+            <input
+              style={inputStyle}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder={isQuote ? 'Quote number or record id' : 'Record id'}
+            />
+          </div>
+          {usable ? (
+            <CrmDeleteControl
+              styles={{ btn: { ...inputStyle, flex: 'none', cursor: 'pointer', padding: '4px 10px' } }}
+              sendToBackground={sendToBackground}
+              moduleName={moduleName}
+              recordId={recordId}
+              quoteNumber={quoteNumber}
+              label={quoteNumber ? `quote #${quoteNumber}` : `${moduleName} ${recordId}`}
+            />
+          ) : (
+            <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>
+              {isQuote
+                ? 'Enter the customer-facing quote number, or the record id.'
+                : 'Enter the record id (15 or more digits).'}
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: COLORS.TEXT_SECONDARY }}>
+            Asks you to confirm before anything is sent, and offers Undo afterwards.
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

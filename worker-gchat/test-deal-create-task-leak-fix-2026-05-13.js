@@ -30,7 +30,8 @@ console.log('\n=== Test 1: zoho_create_record(Deals) triggers Task POST ===\n');
 
 t('createFollowUpTaskForDeal helper is defined', () => {
   assert.ok(
-    /async function createFollowUpTaskForDeal\(\{ dealId, subjectLabel, env, personId, ownerId \}\)/.test(source),
+    // existingDeal param added 2026-07-21 (follow-up task dedupe)
+    /async function createFollowUpTaskForDeal\(\{ dealId, subjectLabel, env, personId, ownerId, existingDeal = false \}\)/.test(source),
     'createFollowUpTaskForDeal signature missing'
   );
 });
@@ -107,17 +108,22 @@ t('Helper returns success:false + classification on failure', () => {
   );
 });
 
-t('Both call sites read taskRes.success / taskRes.error', () => {
+t('Both call sites capture the helper contract, with an explicit reviewed-extension skip path', () => {
   // zoho_create_record path
   assert.ok(
     /const taskRes = await createFollowUpTaskForDeal\(/.test(source),
     'zoho_create_record path does not capture helper return'
   );
-  // STEP 8 path
+  assert.ok(/if \(taskRes\.success\)[\s\S]{0,800}parsed\.task_create_error = taskRes\.error;/.test(source),
+    'zoho_create_record path does not consume helper success/error');
+  // STEP 8 may deliberately skip Task creation for a reviewed extension
+  // quote-only snapshot; every other request must await the shared helper.
   assert.ok(
-    /const _taskRes = await createFollowUpTaskForDeal\(/.test(source),
-    'STEP 8 does not capture helper return'
+    /const _taskRes = _skipReviewedExtensionTask \? \{[\s\S]{0,200}skipped: true[\s\S]{0,200}\} : await createFollowUpTaskForDeal\(/.test(source),
+    'STEP 8 does not encode the explicit skip-or-helper contract'
   );
+  assert.ok(/if \(_taskRes\.skipped\)[\s\S]{0,300}else if \(_taskRes\.success\)/.test(source),
+    'STEP 8 does not distinguish deliberate skip from successful Task create');
 });
 
 console.log('\n=== Test 4: 5xx triggers ONE retry, 4xx does NOT ===\n');
@@ -174,7 +180,9 @@ t('Helper logs successful task creation to crm_operations (logCrmOpToD1)', () =>
 
 t('Failure telemetry includes classification + retried flag for triage', () => {
   assert.ok(
-    /details: \{ dealId, dueDate: dueDateStr, retried, classification: attempt\.classification, source: 'createFollowUpTaskForDeal' \}/.test(source),
+    // ownerSource added 2026-07-15 (R6 owner-resolution fix) — optional here so
+    // the marker keeps guarding classification/retried/source.
+    /details: \{ dealId, dueDate: dueDateStr, retried, classification: attempt\.classification, source: 'createFollowUpTaskForDeal'(, ownerSource: _taskOwnerSource)? \}/.test(source),
     'failure telemetry missing classification/retried/source markers'
   );
 });

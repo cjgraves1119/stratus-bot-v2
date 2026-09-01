@@ -23,7 +23,7 @@
 //      license SKU whose term the USER never stated expands to labeled 1/3/5 URLs instead
 //      of one bare unlabeled URL.
 //   F4 handleFollowUpModifier (BOTH workers): all-terms re-render across [1,3,5] via
-//      rewriteSkuTerm; SME capped — NEVER emits LIC-SME-5YR.
+//      rewriteSkuTerm; retired SME is replaced by active Ivanti 1/3/5 lines.
 //
 // Run: node worker-gchat/test-seam-fixes-2026-06-10.js
 
@@ -36,9 +36,11 @@ function loadEngine(workerDir, tag) {
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
   src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
+  src = src.replace(/^import legacyProductIdAliasesData from '\.\/data\/legacy-product-id-aliases\.json';?$/m, `const legacyProductIdAliasesData = require('${esc('src/data/legacy-product-id-aliases.json')}');`);
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${esc('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const ed = src.indexOf('export default');
@@ -237,11 +239,14 @@ const has135Labels = (m) => /\*\*1-Year Co-Term:\*\*/.test(m) && /\*\*3-Year Co-
       kvWith('**3-Year Co-Term:** https://stratusinfosystems.com/order/?item=MR44-HW,LIC-ENT-3YR&qty=5,5'));
     ok(r && has135Labels(r) && /MR44-HW,LIC-ENT-1YR&qty=5,5/.test(r) && /MR44-HW,LIC-ENT-5YR&qty=5,5/.test(r),
       `${name}: all-terms on hw+lic prior → license rewritten per bucket, hardware carried`);
-    // SME: 5-year deprecated — [1,3] only, flag note, NEVER LIC-SME-5YR
+    // SME is retired — replace it with active Ivanti 1/3/5 options and never
+    // let a legacy LIC-SME token survive into an order URL.
     r = await E.handleFollowUpModifier('provide 1-5 year options', 'p1', kvWith(SME_SINGLE));
-    ok(r && /LIC-SME-1YR&qty=100/.test(r) && /LIC-SME-3YR&qty=100/.test(r)
-      && !/LIC-SME-5YR/.test(r) && /1-year and 3-year terms/.test(r),
-      `${name}: all-terms on SME → 1YR+3YR only, flag note, NEVER LIC-SME-5YR`);
+    ok(r && /LIC-MI-EMSC-D-1YMC-A-1YR&qty=100/.test(r)
+      && /LIC-MI-EMSC-D-1YMC-A-3YR&qty=100/.test(r)
+      && /LIC-MI-EMSC-D-1YMC-A-5YR&qty=100/.test(r)
+      && !/item=LIC-SME/.test(r) && /Systems Manager.*discontinued/i.test(r),
+      `${name}: all-terms on SME → Ivanti 1\/3\/5 replacement, no LIC-SME (got ${String(r).slice(0, 500)})`);
     // Fail closed: no prior quote / nothing term-bearing
     r = await E.handleFollowUpModifier('provide 1-5 year options', 'p1', kvEmpty);
     ok(r === null, `${name}: all-terms with no prior quote → null (fail closed)`);
@@ -287,19 +292,22 @@ const has135Labels = (m) => /\*\*1-Year Co-Term:\*\*/.test(m) && /\*\*3-Year Co-
       'webex: V2 hallucinated-term single license + no user term → labeled 1/3/5 (was: one bare URL)');
     ok(r && !/^https:\/\//.test(String(r.message).trim()), 'webex: response does not START with a bare unlabeled URL');
 
-    // User DID state the term → single-term shape preserved (no behavior change)
+    // Initial typed-license quotes deliberately render every available term;
+    // narrowing to one term belongs to a revision/selection turn.
     const p2 = W.buildQuoteFromV2(
       { intent: 'quote', items: [{ sku: 'LIC-UMB-DNS-ADV-K9-3YR', qty: 200, sku_type: 'license' }], modifiers: { term_years: 3 } },
       '200 dns advantage 3 year');
-    ok(p2 && p2.directLicense && p2.directLicense.sku === 'LIC-UMB-DNS-ADV-K9-3YR' && p2.directLicense.qty === 200,
-      'webex: user stated "3 year" → directLicense single-term shape unchanged');
+    const p2r = p2 ? W.buildQuoteResponse(p2) : null;
+    ok(p2 && p2.isTermOptionQuote && p2r?.message && has135Labels(p2r.message),
+      'webex: initial stated-term license still renders the available 1\/3\/5 set');
 
-    // User literally typed the SKU (term is their own choice) → unchanged
+    // A literal term-bearing SKU follows the same initial-choice policy.
     const p3 = W.buildQuoteFromV2(
       { intent: 'quote', items: [{ sku: 'LIC-UMB-DNS-ADV-K9-3YR', qty: 200, sku_type: 'license' }], modifiers: {} },
       'quote 200 LIC-UMB-DNS-ADV-K9-3YR');
-    ok(p3 && p3.directLicense && p3.directLicense.sku === 'LIC-UMB-DNS-ADV-K9-3YR',
-      'webex: user typed the term-bearing SKU themselves → directLicense unchanged');
+    const p3r = p3 ? W.buildQuoteResponse(p3) : null;
+    ok(p3 && p3.isTermOptionQuote && p3r?.message && has135Labels(p3r.message),
+      'webex: literal term-bearing SKU renders the available 1\/3\/5 set');
 
     // gchat has no V2 adapter — guard the assumption so a future port re-evaluates F3
     ok(G.buildQuoteFromV2 === null, 'gchat: no buildQuoteFromV2 (F3 fix is webex-layer only)');

@@ -1,1 +1,0 @@
-This folder contains the built output assets for the worker "stratus-ai-bot-gchat" generated at 2026-03-26T19:28:59.950Z.

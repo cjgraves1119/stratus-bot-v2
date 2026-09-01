@@ -110,12 +110,15 @@ t('pre-resolution regex includes C8 family for symmetry with suffix/licensing su
   assert.match(src, /\(\?:MR\|MV\|MT\|MG\|MX\|CW9\|MS\|C8\|C9\|Z\)/);
 });
 
-t('/api/chat-waterfall injects pre-resolved products before askWithWaterfall', () => {
+t('/api/chat-waterfall carries pre-resolved products into the waterfall agent copy', () => {
   const preResolveAt = src.indexOf('preResolveProductsForQuoteText(wText)');
-  const waterfallAt = src.indexOf('askWithWaterfall(wEnrichedMessage');
+  const enrichAt = src.indexOf('wEnrichedMessage += `\\n\\n[Pre-resolved products:', preResolveAt);
+  const agentCopyAt = src.indexOf('let wAgentMessage = wEnrichedMessage', enrichAt);
+  const waterfallAt = src.indexOf('askWithWaterfall(wAgentMessage', agentCopyAt);
   assert.ok(preResolveAt > 0, 'chat-waterfall should call preResolveProductsForQuoteText(wText)');
-  assert.ok(waterfallAt > 0, 'chat-waterfall should call askWithWaterfall');
-  assert.ok(preResolveAt < waterfallAt, 'pre-resolution must happen before the LLM waterfall');
+  assert.ok(enrichAt > preResolveAt, 'pre-resolved data should be appended to wEnrichedMessage');
+  assert.ok(agentCopyAt > enrichAt, 'the agent copy should be initialized from the enriched message');
+  assert.ok(waterfallAt > agentCopyAt, 'askWithWaterfall should consume the agent copy');
 });
 
 t('/api/chat-waterfall pre-resolution fires for the original no-quote-keyword prompt', () => {
@@ -141,9 +144,10 @@ t('product pre-resolution failures are caught in both chat routes', () => {
 
 t('chat-tab write intent uses shared Claude-first cascade unless forceModel is explicit', () => {
   assert.doesNotMatch(src, /forceClaudeForChatWrite/);
+  assert.match(src, /const skipDeterministic = wSource === 'chat-tab' \|\| \(wEc && wEc\.source === 'chat-tab'\)/);
+  assert.match(src, /outcome = await askWithWaterfall\(wAgentMessage, env, wPersonId,/);
   assert.match(src, /forceClaude: forcedModel === 'claude'/);
-  assert.match(src, /const autoForceClaudeForWrite = shouldForceClaudeForWrite\(userMessage\);/);
-  assert.match(src, /cascading to normal waterfall/);
+  assert.match(src, /const autoForceClaudeForWrite = [^;]*shouldForceClaudeForWrite\(userMessage\)[^;]*options\.crmFollowUp === true/);
 });
 
 t('create_deal_and_quote sets Cisco_Billing_Term explicitly and verifies it', () => {

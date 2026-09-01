@@ -138,6 +138,102 @@ expectArchDirectLicenseQuote('parenthesized quantity direct list',
 expectArchDirectLicenseQuote('natural quantity-before direct list',
   'Please quote 1 LIC-ENT-3YR, 12 LIC-MV-3YR, and 2 LIC-MX67W-SEC-3YR.');
 
+// Dashboard-export pair format. The comma binds each quantity to the SKU that
+// precedes it; the legacy comma splitter used to shift every quantity forward.
+{
+  const input = 'LIC-C9300-24E-3Y,1  LIC-ENT-3YR,27  LIC-MS120-24-3YR,4  LIC-MS120-24P-3YR,1  LIC-MS120-48LP-3YR,6  LIC-MS120-8LP-3YR,2  LIC-MS125-48LP-3Y,5  LIC-MS130-CMPT-3Y,8  LIC-MS225-24P-3YR,3  LIC-MS425-16-3YR,1  LIC-MS450-12-3YR,2  LIC-MT-3Y,1  LIC-MX100-SEC-3YR,1  LIC-MX105-SEC-3Y,1  LIC-MX250-SEC-3YR,1  LIC-MX65-SEC-3YR,2  LIC-MX67W-SEC-3YR,5  LIC-MX75-SEC-3Y,4  LIC-MX85-SEC-3Y,1  LIC-MX95-SEC-3Y,1';
+  const expected = {
+    'LIC-C9300-24E-3Y': 1, 'LIC-ENT-3YR': 27, 'LIC-MS120-24-3YR': 4, 'LIC-MS120-24P-3YR': 1,
+    'LIC-MS120-48LP-3YR': 6, 'LIC-MS120-8LP-3YR': 2, 'LIC-MS125-48LP-3Y': 5, 'LIC-MS130-CMPT-3Y': 8,
+    'LIC-MS225-24P-3YR': 3, 'LIC-MS425-16-3YR': 1, 'LIC-MS450-12-3YR': 2, 'LIC-MT-3Y': 1,
+    'LIC-MX100-SEC-3YR': 1, 'LIC-MX105-SEC-3Y': 1, 'LIC-MX250-SEC-3YR': 1, 'LIC-MX65-SEC-3YR': 2,
+    'LIC-MX67W-SEC-3YR': 5, 'LIC-MX75-SEC-3Y': 4, 'LIC-MX85-SEC-3Y': 1, 'LIC-MX95-SEC-3Y': 1,
+  };
+  const parsed = parseMessage(input);
+  check('Ohio Valley Gas 20-pair paste preserves every exact quantity',
+    parsed && Array.isArray(parsed.directLicenseList) && parsed.directLicenseList.length === 20 &&
+      parsed.directLicenseList.every(({ sku, qty }) => expected[sku] === qty),
+    JSON.stringify(parsed));
+}
+
+{
+  const parsed = parseMessage('LIC-ENT-3YR,27  LIC-MS120-24-3YR,4\nLIC-MX65-SEC-3YR,2\nLIC-MT-3Y,1');
+  const map = Object.fromEntries((parsed?.directLicenseList || []).map(({ sku, qty }) => [sku, qty]));
+  check('multi-line input retains multiple SKU,qty pairs carried on one line',
+    parsed && Array.isArray(parsed.directLicenseList) &&
+      map['LIC-ENT-3YR'] === 27 && map['LIC-MS120-24-3YR'] === 4 &&
+      map['LIC-MX65-SEC-3YR'] === 2 && map['LIC-MT-3Y'] === 1,
+    JSON.stringify(parsed));
+}
+
+{
+  const parsed = parseMessage('LIC-MX68W-SEC-1YR, LIC-ENT-1YR, LIC-MS220-8P-1YR');
+  check('legacy SKU-only comma list remains quantity one per line',
+    parsed && JSON.stringify(parsed.directLicenseList) === JSON.stringify([
+      { sku: 'LIC-MX68W-SEC-1YR', qty: 1 },
+      { sku: 'LIC-ENT-1YR', qty: 1 },
+      { sku: 'LIC-MS220-8P-1YR', qty: 1 },
+    ]),
+    JSON.stringify(parsed));
+}
+
+{
+  const parsed = parseMessage('LIC-ENT-1YR, 5 LIC-MX68-SEC-1YR');
+  check('ambiguous mixed syntax preserves legacy quantity-first binding',
+    parsed && JSON.stringify(parsed.directLicenseList) === JSON.stringify([
+      { sku: 'LIC-ENT-1YR', qty: 1 },
+      { sku: 'LIC-MX68-SEC-1YR', qty: 5 },
+    ]),
+    JSON.stringify(parsed));
+}
+
+{
+  const parsed = parseMessage('PUBLIC-SECTOR,3 LIC-ENT-3YR,27 LIC-MX67-SEC-3YR,2');
+  const map = Object.fromEntries((parsed?.directLicenseList || []).map(({ sku, qty }) => [sku, qty]));
+  check('PUBLIC-SECTOR substring never mints a bogus LIC-SECTOR pair',
+    parsed && Array.isArray(parsed.directLicenseList) && !('LIC-SECTOR' in map) &&
+      map['LIC-ENT-3YR'] === 27 && map['LIC-MX67-SEC-3YR'] === 2,
+    JSON.stringify(parsed));
+}
+
+{
+  const parsed = parseMessage('LIC-ENT-3YR,0 LIC-MX67-SEC-3YR,2 LIC-MT-3Y,1');
+  const map = Object.fromEntries((parsed?.directLicenseList || []).map(({ sku, qty }) => [sku, qty]));
+  check('zero-quantity pairs are skipped without falling back or shifting',
+    parsed && Array.isArray(parsed.directLicenseList) && !('LIC-ENT-3YR' in map) &&
+      map['LIC-MX67-SEC-3YR'] === 2 && map['LIC-MT-3Y'] === 1,
+    JSON.stringify(parsed));
+}
+
+{
+  const input = 'LIC-ENT-3YR,100000 LIC-MX67-SEC-3YR,2 LIC-MT-3Y,1';
+  const parsed = parseMessage(input);
+  check('six-digit pair quantity fails closed before any shifted quote can form',
+    parsed?.isClarification === true && !Array.isArray(parsed.directLicenseList) &&
+      /between 1 and 99,999/i.test(parsed.clarificationMessage || ''),
+    JSON.stringify(parsed));
+  const bypassParsed = parseExplicitDirectLicenseListBeforeClassifier(input);
+  check('pre-classifier direct-list bypass preserves six-digit fail-closed clarification',
+    bypassParsed?.isClarification === true && !Array.isArray(bypassParsed.directLicenseList),
+    JSON.stringify(bypassParsed));
+}
+
+{
+  const parsed = parseMessage('LIC-ENT-3YR,27 LIC-MX67-SEC-3YR,2 2 MR44');
+  check('single-line mixed license pairs plus hardware do not take over as license-only',
+    parsed && !Array.isArray(parsed.directLicenseList) &&
+      Array.isArray(parsed.items) && parsed.items.some(i => i.baseSku === 'MR44' && i.qty === 2),
+    JSON.stringify(parsed));
+}
+
+{
+  const parsed = parseMessage('LIC-ENT-3YR,27\nLIC-MX67-SEC-3YR,2\n2 MR44');
+  check('multi-line mixed license pairs plus hardware preserve the hardware parse',
+    parsed && !Array.isArray(parsed.directLicenseList) &&
+      Array.isArray(parsed.items) && parsed.items.some(i => i.baseSku === 'MR44' && i.qty === 2),
+    JSON.stringify(parsed));
+}
+
 // R4: a stray trailing bare number / year after the last SKU must NOT be read
 // as a quantity. Only explicit markers (x12, qty 12, (12), : 12) count.
 {

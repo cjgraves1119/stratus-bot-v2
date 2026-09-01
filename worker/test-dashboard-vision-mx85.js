@@ -110,7 +110,7 @@ const check = (desc, cond, diag) => {
     merged2[0].qty === 5);
 }
 
-// ─── 5. End-to-end: MX85 from audit → renders MX85-HW + LIC-MX85-SEC-3Y ────
+// ─── 5. End-to-end: MX85 from audit → public MX85 + LIC-MX85-SEC-3Y ────────
 {
   // After the audit merge the deterministic engine should be able to quote
   // the recovered MX85. We exercise the same parseMessage + buildQuoteResponse
@@ -119,8 +119,10 @@ const check = (desc, cond, diag) => {
   const parsed = m.parseMessage(skuText);
   const out = parsed && m.buildQuoteResponse(parsed);
   const msg = out && out.message;
-  check('MX85 vision-recovered SKU renders MX85-HW',
-    !!msg && /MX85-HW\b/.test(msg), `msg=${msg}`);
+  const hasPublicMx85 = [...String(msg || '').matchAll(/[?&]item=([^&\s]+)/g)]
+    .some((match) => decodeURIComponent(match[1]).split(',').includes('MX85'));
+  check('MX85 vision-recovered SKU renders the public MX85 order SKU',
+    !!msg && hasPublicMx85, `msg=${msg}`);
   check('MX85 vision-recovered SKU includes LIC-MX85-SEC-3Y (default 3y)',
     !!msg && /LIC-MX85-SEC-3Y/.test(msg), `msg=${msg}`);
 }

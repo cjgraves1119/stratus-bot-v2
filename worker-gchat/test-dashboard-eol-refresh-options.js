@@ -93,10 +93,11 @@ const check = (desc, cond, diag) => {
   check('Option 1 has NO MX85-HW (license-only renewal)',
     !!opt1Section && !/MX85-HW/.test(opt1Section), opt1Section);
 
-  // Option 2 URLs: every term has MX67-HW qty 2 + LIC-MX67-SEC-{term} qty 2 + LIC-MX85-SEC-{term} qty 1 + LIC-ENT-{term} qty 4
+  // Option 2 URLs: every term has active order SKU MX67 qty 2 + its license,
+  // the carried MX85 license, and the MR enterprise license.
   const opt2Section = msg && (msg.split('Option 2')[1] || '');
-  check('Option 2 includes MX67-HW (replacement hardware)',
-    !!opt2Section && /MX67-HW/.test(opt2Section), opt2Section);
+  check('Option 2 includes active non-HW MX67 replacement order SKU',
+    !!opt2Section && /(?:item=|,)MX67(?:,|&qty=)/.test(opt2Section) && !/MX67-HW/.test(opt2Section), opt2Section);
   check('Option 2 includes LIC-MX67-SEC-{1,3,5}YR (replacement license)',
     !!opt2Section &&
       /LIC-MX67-SEC-1YR/.test(opt2Section) &&
@@ -191,11 +192,11 @@ const check = (desc, cond, diag) => {
     opt3);
 
   // Scalar replacements present in BOTH Option 2 and Option 3 (same SKU)
-  check('Option 2 includes scalar MX67-HW + MX68-HW + MX85-HW',
-    !!opt2 && /MX67-HW/.test(opt2) && /MX68-HW/.test(opt2) && /MX85-HW/.test(opt2),
+  check('Option 2 includes active scalar MX67 + MX68 + MX85 order SKUs',
+    !!opt2 && /(?:item=|,)MX67(?:,|&qty=)/.test(opt2) && /(?:item=|,)MX68(?:,|&qty=)/.test(opt2) && /(?:item=|,)MX85(?:,|&qty=)/.test(opt2) && !/MX(?:67|68|85)-HW/.test(opt2),
     opt2);
-  check('Option 3 also includes scalar MX67-HW + MX68-HW + MX85-HW (same as Option 2 for non-uplink replacements)',
-    !!opt3 && /MX67-HW/.test(opt3) && /MX68-HW/.test(opt3) && /MX85-HW/.test(opt3),
+  check('Option 3 also includes active scalar MX67 + MX68 + MX85 order SKUs',
+    !!opt3 && /(?:item=|,)MX67(?:,|&qty=)/.test(opt3) && /(?:item=|,)MX68(?:,|&qty=)/.test(opt3) && /(?:item=|,)MX85(?:,|&qty=)/.test(opt3) && !/MX(?:67|68|85)-HW/.test(opt3),
     opt3);
 
   // MR-ENT carry-forward in all three options

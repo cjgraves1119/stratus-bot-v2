@@ -21,7 +21,7 @@ if (edIdx > -1) {
   }
   src = src.slice(0, edIdx) + src.slice(end + 1);
 }
-src += '\nmodule.exports = { parseMessage, buildQuoteResponse, buildQuoteFromV3, parseExplicitDirectLicenseListBeforeClassifier, parseExplicitSkuRequestBeforeClassifier, canRewriteDirectLicenseListForAllTerms, canRewriteDirectLicenseListForTerm, rewriteDirectLicenseListForTerm };';
+src += '\nmodule.exports = { parseMessage, buildQuoteResponse, buildQuoteFromV3, parseExplicitDirectLicenseListBeforeClassifier, parseExplicitSkuRequestBeforeClassifier, validateExplicitMxMsQuoteComposition, canRewriteDirectLicenseListForAllTerms, canRewriteDirectLicenseListForTerm, rewriteDirectLicenseListForTerm };';
 const tmp = path.join(os.tmpdir(), `stratus-gchat-direct-license-${process.pid}.cjs`);
 fs.writeFileSync(tmp, src);
 const {
@@ -30,6 +30,7 @@ const {
   buildQuoteFromV3,
   parseExplicitDirectLicenseListBeforeClassifier,
   parseExplicitSkuRequestBeforeClassifier,
+  validateExplicitMxMsQuoteComposition,
   canRewriteDirectLicenseListForAllTerms,
   canRewriteDirectLicenseListForTerm,
   rewriteDirectLicenseListForTerm,
@@ -271,6 +272,123 @@ expectNoEmbeddedDirectLicenseList('existing order URL',
   check('SKU-list pre-classifier bypass ignores product-info questions',
     parseExplicitSkuRequestBeforeClassifier('what is MR44?') === null,
     JSON.stringify(parseExplicitSkuRequestBeforeClassifier('what is MR44?')));
+}
+
+{
+  const parsed = parseExplicitSkuRequestBeforeClassifier('quote 1 MX67 and 1 MS130-24P with 3yr licenses');
+  check('compact 3yr explicit SKU bundle bypasses V3 classifier',
+    parsed && Array.isArray(parsed.items) && parsed.items.length === 2,
+    JSON.stringify(parsed));
+  const urls = decodeAllUrls(messageOf(buildQuoteResponse(parsed)));
+  check('compact 3yr bypass preserves hardware plus licenses',
+    hasUrl(urls, ['MX67', 'LIC-MX67-SEC-3YR', 'MS130-24P', 'LIC-MS130-24-3Y'], [1, 1, 1, 1]),
+    JSON.stringify(urls));
+}
+
+{
+  const hostileBundle = buildQuoteFromV3({
+    intent: 'quote',
+    clarify: { needed: false, question: '' },
+    items: [
+      { product: 'MX67', qty: 1, intent: 'license' },
+      { product: 'MS130-24P', qty: 1, intent: 'license' },
+    ],
+    modifiers: { term_years: 3, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+  }, 'please put MX67 and MS130-24P together with 3yr licenses in a quote');
+  const bundleUrls = decodeAllUrls(messageOf(buildQuoteResponse(hostileBundle)));
+  check('raw WITH-license scope overrides hostile V3 license-only labels',
+    hasUrl(bundleUrls, ['MX67', 'LIC-MX67-SEC-3YR', 'MS130-24P', 'LIC-MS130-24-3Y'], [1, 1, 1, 1]),
+    JSON.stringify(bundleUrls));
+
+  const hostileRenewal = buildQuoteFromV3({
+    intent: 'quote',
+    clarify: { needed: false, question: '' },
+    items: [
+      { product: 'MX67', qty: 1, intent: 'normal' },
+      { product: 'MS130-24P', qty: 1, intent: 'normal' },
+    ],
+    modifiers: { term_years: 3, tier: null, show_pricing: false, all_terms: false, separate_quotes: false },
+  }, '3-year licenses for MX67 and MS130-24P');
+  const renewalUrls = decodeAllUrls(messageOf(buildQuoteResponse(hostileRenewal)));
+  check('raw LICENSES FOR scope overrides hostile V3 bundle labels',
+    hasUrl(renewalUrls, ['LIC-MX67-SEC-3YR', 'LIC-MS130-24-3Y'], [1, 1]),
+    JSON.stringify(renewalUrls));
+
+  const parsedBundle = parseMessage('quote MX67 and MS130-24P with 3yr licenses');
+  const correctBundle = [{
+    url: 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-3YR,MS130-24P,LIC-MS130-24-3Y&qty=1,1,1,1',
+  }];
+  const licenseOnlyBug = [{
+    url: 'https://stratusinfosystems.com/order/?item=LIC-MX67-SEC-3YR,LIC-MS130-24-3Y&qty=1,1',
+  }];
+  check('composition invariant accepts a complete explicit bundle',
+    validateExplicitMxMsQuoteComposition('quote MX67 and MS130-24P with 3yr licenses', parsedBundle, correctBundle).ok);
+  const blockedBundle = validateExplicitMxMsQuoteComposition(
+    'quote MX67 and MS130-24P with 3yr licenses', parsedBundle, licenseOnlyBug);
+  check('composition invariant blocks the exact parsed-items/license-only-card failure',
+    !blockedBundle.ok && blockedBundle.failures.some(f => /MX67 quantity is 0; expected 1/.test(f)),
+    JSON.stringify(blockedBundle));
+
+  const separateBundle = validateExplicitMxMsQuoteComposition(
+    'quote MX67 and MS130-24P with 3yr licenses in separate quotes',
+    parsedBundle,
+    [
+      { url: 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-3YR&qty=1,1' },
+      { url: 'https://stratusinfosystems.com/order/?item=MS130-24P,LIC-MS130-24-3Y&qty=1,1' },
+    ]);
+  check('composition invariant accepts valid per-item separate quote URLs',
+    separateBundle.ok,
+    JSON.stringify(separateBundle));
+
+  const wrongTermOrQty = validateExplicitMxMsQuoteComposition(
+    'quote MX67 and MS130-24P with 3yr licenses',
+    parsedBundle,
+    [{ url: 'https://stratusinfosystems.com/order/?item=MX67,LIC-MX67-SEC-1YR,MS130-24P,LIC-MS130-24-1Y&qty=2,2,1,1' }]);
+  check('composition invariant blocks wrong requested term and hardware quantity',
+    !wrongTermOrQty.ok && wrongTermOrQty.failures.some(f => /MX67 quantity is 2; expected 1/.test(f)),
+    JSON.stringify(wrongTermOrQty));
+
+  const mixedScope = validateExplicitMxMsQuoteComposition(
+    'MX67 with 3-year licenses and MS130-24P hardware only',
+    parseMessage('MX67 with 3-year licenses and MS130-24P hardware only'),
+    []);
+  check('mixed per-item scope is not collapsed into a global composition mode',
+    mixedScope.ok && mixedScope.mode === null,
+    JSON.stringify(mixedScope));
+
+  const mixedLicenseOnly = validateExplicitMxMsQuoteComposition(
+    'MX67 with 3yr licenses and MS130-24P license only',
+    parseMessage('MX67 with 3yr licenses and MS130-24P license only'),
+    []);
+  check('WITH bundle plus a per-item license-only clause stays mixed',
+    mixedLicenseOnly.ok && mixedLicenseOnly.mode === null,
+    JSON.stringify(mixedLicenseOnly));
+
+  const mixedRenewal = validateExplicitMxMsQuoteComposition(
+    'renew MX67 and quote MS130-24P with 3yr licenses',
+    parseMessage('renew MX67 and quote MS130-24P with 3yr licenses'),
+    []);
+  check('renewal clause plus a WITH bundle clause stays mixed',
+    mixedRenewal.ok && mixedRenewal.mode === null,
+    JSON.stringify(mixedRenewal));
+
+  const mixedLicenseFor = validateExplicitMxMsQuoteComposition(
+    'MX67 with 3yr licenses and licenses for MS130-24P',
+    parseMessage('MX67 with 3yr licenses and licenses for MS130-24P'),
+    []);
+  check('WITH bundle plus item-local LICENSES FOR stays mixed',
+    mixedLicenseFor.ok && mixedLicenseFor.mode === null,
+    JSON.stringify(mixedLicenseFor));
+
+  const unexpectedLicenseOnlyHardware = validateExplicitMxMsQuoteComposition(
+    '3-year licenses for MX67 and MS130-24P',
+    parseMessage('3-year licenses for MX67 and MS130-24P'),
+    [{ url: 'https://stratusinfosystems.com/order/?item=LIC-MX67-SEC-3YR,LIC-MS130-24-3Y,MX67-HW,MS125-24P&qty=1,1,1,1' }]);
+  check('license-only invariant blocks legacy and unrelated MX/MS hardware',
+    !unexpectedLicenseOnlyHardware.ok
+      && unexpectedLicenseOnlyHardware.failures.some(f => /MX67-HW hardware/.test(f))
+      && unexpectedLicenseOnlyHardware.failures.some(f => /MS125-24P hardware/.test(f)),
+    JSON.stringify(unexpectedLicenseOnlyHardware));
 }
 
 {

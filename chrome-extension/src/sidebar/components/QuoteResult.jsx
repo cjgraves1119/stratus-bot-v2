@@ -13,8 +13,15 @@
  * Per the no-margin rule, labels + URLs only — never pricing/cost/margin.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { COLORS } from '../../lib/constants';
+import { selectableQuoteTerms } from '../../lib/email-quote-flow.mjs';
+import {
+  normalizeQuoteOptionIndexes,
+  selectQuoteOptionIndex,
+  toggleQuoteOptionIndex,
+} from './quote-option-selection.mjs';
+import SkuQuantityEditor from './SkuQuantityEditor';
 
 function escapeHtml(value) {
   return String(value || '').replace(/[&<>"']/g, (ch) => ({
@@ -48,18 +55,63 @@ async function plainCopy(text) {
   }
 }
 
-export default function QuoteResult({ result, onApplySuggestion, onStackSuggestion, onSendToZoho, busy }) {
+export default function QuoteResult({
+  result,
+  onApplySuggestion,
+  onStackSuggestion,
+  onSendToZoho,
+  busy,
+  draftRows,
+  draftDirty = false,
+  draftStatus = '',
+  resultRevision = 0,
+  onDraftRowsChange,
+  onUpdateQuote,
+  quoteUpdateLabel = 'Update quote',
+  onProductSearch,
+  draftTier = '',
+  onDraftTierChange,
+  allowHaLicenseRatio = false,
+}) {
   const [copiedIdx, setCopiedIdx] = useState(null);
-  // Track which order URL (term) the user last copied/opened so the Zoho
-  // handoff sends THAT one, not always the first (1-year) option.
-  const [selectedIdx, setSelectedIdx] = useState(0);
+  // Copy/Open also select that option for Zoho. Multiple terms can be checked
+  // so 1/3/5-year quotes are created under the same deal. Selection identity
+  // is the reviewed option INDEX, not its URL: two semantically distinct
+  // alternatives are allowed to share one deterministic cart URL.
+  const [selectedIndexes, setSelectedIndexes] = useState([]);
+  const urls = Array.isArray(result?.urls) ? result.urls : [];
+  const suggestions = Array.isArray(result?.suggestions) ? result.suggestions : [];
+  const termOptions = selectableQuoteTerms(urls);
+  const isEditable = Array.isArray(draftRows)
+    && typeof onDraftRowsChange === 'function'
+    && typeof onUpdateQuote === 'function';
+  // Suggestions are unresolved input, and edits are uncommitted input. In
+  // either state every link/term/Zoho action from the prior response is stale.
+  const quoteActionsBlocked = busy || draftDirty || suggestions.length > 0;
+  const validSelectedIndexes = normalizeQuoteOptionIndexes(selectedIndexes, urls.length);
+  const hasExplicitTermSelection = validSelectedIndexes.length > 0;
+
+  function selectIndex(index, { exclusive = false } = {}) {
+    setSelectedIndexes((current) => selectQuoteOptionIndex(
+      current, index, urls.length, { exclusive },
+    ));
+  }
+
+  function toggleIndex(index) {
+    setSelectedIndexes((current) => toggleQuoteOptionIndex(current, index, urls.length));
+  }
+
+  useEffect(() => {
+    setSelectedIndexes([]);
+  }, [resultRevision]);
 
   if (!result) return null;
 
   async function handleCopy(text, idx) {
     await plainCopy(text);
+    const url = urls[idx]?.url;
+    if (url) selectIndex(idx);
     setCopiedIdx(idx);
-    if (typeof idx === 'number') setSelectedIdx(idx);
     setTimeout(() => setCopiedIdx(null), 2000);
   }
 
@@ -81,9 +133,6 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
     setCopiedIdx('all');
     setTimeout(() => setCopiedIdx(null), 2000);
   }
-
-  const urls = Array.isArray(result.urls) ? result.urls : [];
-  const suggestions = Array.isArray(result.suggestions) ? result.suggestions : [];
 
   return (
     <div style={{ opacity: busy ? 0.55 : 1 }}>
@@ -136,6 +185,29 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
         </div>
       )}
 
+      {isEditable && (
+        <SkuQuantityEditor
+          rows={draftRows}
+          onRowsChange={onDraftRowsChange}
+          onUpdate={onUpdateQuote}
+          onProductSearch={onProductSearch}
+          dirty={draftDirty || suggestions.length > 0}
+          disabled={busy}
+          title="Quote items (edit before using links)"
+          updateLabel={suggestions.length > 0 ? 'Apply correction and update quote' : quoteUpdateLabel}
+          status={draftStatus}
+          tier={draftTier}
+          onTierChange={onDraftTierChange}
+          allowHaLicenseRatio={allowHaLicenseRatio}
+        />
+      )}
+
+      {isEditable && quoteActionsBlocked && urls.length > 0 && (
+        <div style={{ padding: 8, marginTop: 8, marginBottom: 8, borderRadius: 6, background: '#fef7e0', color: '#e37400', fontSize: 11 }}>
+          Existing links, term selection, and Zoho conversion are hidden until the edited SKU quantities are successfully rebuilt and verified.
+        </div>
+      )}
+
       {/* Pricing calculator response */}
       {result.pricingResponse && (
         <TextBlock badge="💰 Pricing" badgeBg="#e8f5e9" badgeColor="#2e7d32" mono text={result.pricingResponse} />
@@ -146,13 +218,34 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
         <TextBlock badge="📅 EOL Date Lookup" badgeBg="#fef7e0" badgeColor="#e37400" text={result.eolDateResponse} />
       )}
 
+      {/* Typed terminal recovery is inert: guidance only, with no retry or
+          mutation button. This is important when a prior agent turn may have
+          touched CRM or when deterministic catalog validation blocked a link. */}
+      {result.recovery && (
+        <div style={{
+          padding: 10, marginBottom: 8, borderRadius: 8,
+          border: `1px solid ${result.recovery.write_state === 'possible' ? '#d9302566' : '#f9ab0066'}`,
+          background: result.recovery.write_state === 'possible' ? '#fce8e6' : '#fef7e0',
+          color: COLORS.TEXT_PRIMARY,
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 3 }}>
+            {result.recovery.title || 'Recovery required'}
+          </div>
+          {Array.isArray(result.recovery.actions) && result.recovery.actions.map((action, index) => (
+            <div key={index} style={{ fontSize: 11, marginTop: 2 }}>
+              {index + 1}. {action}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* AI advisory response (technical questions) */}
       {result.claudeResponse && urls.length === 0 && (
         <TextBlock badge="🤖 AI Response" badgeBg="#e3f2fd" badgeColor="#1565c0" text={result.claudeResponse} />
       )}
 
       {/* Quote URLs */}
-      {urls.length > 0 && (
+      {urls.length > 0 && !quoteActionsBlocked && (
         <div>
           <div style={{
             display: 'inline-block', padding: '3px 9px', borderRadius: 4,
@@ -192,14 +285,22 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
           {urls.map((urlObj, i) => (
             <div key={i} style={{
               background: COLORS.BG_PRIMARY,
-              border: `1px solid ${selectedIdx === i && urls.length > 1 ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
+              border: `1px solid ${validSelectedIndexes.includes(i) ? COLORS.STRATUS_BLUE : COLORS.BORDER}`,
               borderRadius: 8, padding: 10, marginBottom: 8,
             }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 6 }}>
-                {urlObj.label || `Option ${i + 1}`}
-                {selectedIdx === i && urls.length > 1 && (
-                  <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 600, color: COLORS.STRATUS_BLUE }}>
-                    • selected for Zoho
+              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.TEXT_PRIMARY, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontWeight: 600, cursor: busy ? 'default' : 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={validSelectedIndexes.includes(i)}
+                    disabled={busy}
+                    onChange={() => toggleIndex(i)}
+                  />
+                  {urlObj.label || `Option ${i + 1}`}
+                </label>
+                {validSelectedIndexes.includes(i) && (
+                  <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.STRATUS_BLUE }}>
+                    selected for Zoho
                   </span>
                 )}
               </div>
@@ -227,7 +328,7 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
                 </button>
                 <a
                   href={urlObj.url} target="_blank" rel="noopener"
-                  onClick={() => setSelectedIdx(i)}
+                  onClick={() => selectIndex(i)}
                   style={{
                     flex: 1, padding: '6px 10px', background: 'transparent',
                     color: COLORS.STRATUS_BLUE, border: `1px solid ${COLORS.STRATUS_BLUE}`,
@@ -242,20 +343,47 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
           ))}
 
           {onSendToZoho && (
-            <button
-              onClick={() => onSendToZoho(result, selectedIdx)}
-              style={{
-                width: '100%', padding: '7px 10px', background: '#7b1fa2',
-                color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
-                fontWeight: 600, cursor: 'pointer', marginTop: 2,
-              }}
-              title="Ask the CRM agent to create a Zoho quote from this order"
-            >
-              Create Zoho CRM quote from this
-            </button>
+            <div style={{ marginTop: 8, padding: 8, border: `1px solid ${COLORS.BORDER}`, borderRadius: 8, background: COLORS.BG_PRIMARY }}>
+              <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 4 }}>Zoho quote option</div>
+              <div style={{ fontSize: 10, color: COLORS.TEXT_SECONDARY, marginBottom: 6 }}>
+                Copy or Open also selects that option. Check 1, 3, and 5 year to create multiple quotes under the same deal.
+              </div>
+              {termOptions.map((option) => (
+                <label key={`${option.index}:${option.url}`} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginBottom: 3, cursor: busy ? 'default' : 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={validSelectedIndexes.includes(option.index)}
+                    disabled={busy}
+                    onChange={() => toggleIndex(option.index)}
+                  />
+                  {option.years && option.label !== `${option.years}-Year`
+                    ? `${option.years}-Year: ${option.label}`
+                    : option.label}
+                </label>
+              ))}
+              <button
+                onClick={() => hasExplicitTermSelection && onSendToZoho(result, validSelectedIndexes)}
+                disabled={busy || !hasExplicitTermSelection}
+                style={{
+                  width: '100%', padding: '7px 10px', background: '#7b1fa2',
+                  color: 'white', border: 'none', borderRadius: 6, fontSize: 12,
+                  fontWeight: 600, cursor: busy || !hasExplicitTermSelection ? 'default' : 'pointer', marginTop: 6,
+                  opacity: busy || !hasExplicitTermSelection ? 0.55 : 1,
+                }}
+                title={hasExplicitTermSelection
+                  ? 'Begin a separate deterministic Zoho review; nothing is written until Execute'
+                  : 'Select a quote option before starting Zoho review'}
+              >
+                {busy
+                  ? 'Preparing Zoho review…'
+                  : (validSelectedIndexes.length > 1
+                    ? `Create ${validSelectedIndexes.length} Zoho CRM quotes from selected`
+                    : (hasExplicitTermSelection ? 'Create Zoho CRM quote from selected' : 'Select an option to enable Zoho conversion'))}
+              </button>
+            </div>
           )}
 
-          {result.parsed && result.parsed.length > 0 && (
+          {!isEditable && result.parsed && result.parsed.length > 0 && (
             <div style={{
               background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
               borderRadius: 8, padding: 10, marginTop: 8,
@@ -265,12 +393,29 @@ export default function QuoteResult({ result, onApplySuggestion, onStackSuggesti
               </div>
               {result.parsed.map((item, i) => (
                 <div key={i} style={{ fontSize: 12, padding: '3px 0', display: 'flex', alignItems: 'center', gap: 6, color: COLORS.TEXT_PRIMARY }}>
-                  <span style={{ fontWeight: 600 }}>{item.qty || 1}x</span>
                   <span>{item.baseSku}</span>
+                  <span style={{ fontWeight: 600 }}>× {item.qty || 1}</span>
                 </div>
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {!isEditable && urls.length === 0 && result.parsed && result.parsed.length > 0 && (
+        <div style={{
+          background: COLORS.BG_PRIMARY, border: `1px solid ${COLORS.BORDER}`,
+          borderRadius: 8, padding: 10, marginTop: 8,
+        }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.TEXT_SECONDARY, marginBottom: 6 }}>
+            Parsed SKU quantities (retained even though pricing/links were unavailable)
+          </div>
+          {result.parsed.map((item, i) => (
+            <div key={i} style={{ fontSize: 12, padding: '3px 0', display: 'flex', alignItems: 'center', gap: 6, color: COLORS.TEXT_PRIMARY }}>
+              <span>{item.baseSku}</span>
+              <span style={{ fontWeight: 600 }}>× {item.qty || 1}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>

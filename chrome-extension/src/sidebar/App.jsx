@@ -6,7 +6,7 @@
  * (Email and Quote tabs were folded into Chat on 2026-06-17.)
  */
 
-import { useState, useEffect, useCallback, lazy, Suspense, Component } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense, Component } from 'react';
 import { sendToBackground, onMessage } from '../lib/messaging';
 import { MSG, COLORS, IS_DEV_BUILD, API_BASE } from '../lib/constants';
 import { installErrorCapture, getRecentErrors } from '../lib/errorBuffer';
@@ -15,11 +15,23 @@ import {
   contextMatchesUrl,
   minimalContextFromUrl,
 } from '../lib/zoho-url.js';
+import {
+  CHAT_SESSION_STORAGE_KEY,
+  contextLockLabel,
+  contextLockReportMetadata,
+  createContextLock,
+  createEmptyChatSession,
+  isLockSourceAvailable,
+  normalizeStoredChatSession,
+  serializeChatSession,
+} from '../lib/context-lock.mjs';
+import { PENDING_SIDEBAR_ACTIONS_KEY } from '../lib/pending-sidebar-action.mjs';
 
 // Lazy load panels for faster initial render
 const CrmPanel = lazy(() => import('./panels/CrmPanel'));
 const ChatPanel = lazy(() => import('./panels/ChatPanel'));
 const SearchPanel = lazy(() => import('./panels/SearchPanel'));
+const QuoteLineEditor = lazy(() => import('./components/QuoteLineEditor'));
 
 function PanelLoader() {
   return (
@@ -79,9 +91,70 @@ const TABS = [
   { id: 'search', label: 'Search', icon: '🔍' },
 ];
 
+// Only meaningful on a Zoho Quote record, so it is appended to TABS rather than
+// living in it: on Gmail or a Deal page there is nothing for it to edit.
+const QUOTE_LINES_TAB = { id: 'quote-lines', label: 'Lines', icon: '📊' };
+
 // Valid panel ids — guards deep-link navigations that may still target a
 // now-removed tab (Email/Quote were folded into Chat 2026-06-17).
-const VALID_PANELS = new Set(TABS.map((t) => t.id));
+const VALID_PANELS = new Set([...TABS.map((t) => t.id), QUOTE_LINES_TAB.id]);
+
+/**
+ * The Quote Line Editor, wired to the background service worker.
+ *
+ * Shared by BOTH surfaces: the side panel's "Lines" tab renders it inline, and
+ * sidebar.html?view=quote-lines renders it standalone inside the iframe overlay
+ * that zoho-content.js pins onto the Zoho page. One component, one code path,
+ * so the overlay can never drift from the panel.
+ */
+export function QuoteLinesView({ recordId, module = 'Quotes', onClose }) {
+  const load = useCallback(
+    (id, mod) => sendToBackground(MSG.GET_QUOTE_LINES, { recordId: id, module: mod }),
+    [],
+  );
+  const commit = useCallback(
+    (payload) => sendToBackground(MSG.COMMIT_QUOTE_LINE_OPS, payload),
+    [],
+  );
+  const loadCosts = useCallback(
+    (id, mod) => sendToBackground(MSG.GET_QUOTE_LINE_COSTS, { recordId: id, module: mod }),
+    [],
+  );
+  const previewCloneTerms = useCallback(
+    (id, terms) => sendToBackground(MSG.PREVIEW_QUOTE_CLONE_TERMS, { recordId: id, terms }),
+    [],
+  );
+  const cloneTerms = useCallback(
+    (payload) => sendToBackground(MSG.CLONE_QUOTE_TERMS, payload),
+    [],
+  );
+  const matchEcomm = useCallback(
+    (id, mod) => sendToBackground(MSG.MATCH_QUOTE_LINES_TO_ECOMM, { recordId: id, module: mod }),
+    [],
+  );
+  if (!recordId) {
+    return (
+      <div style={{ padding: 16, fontSize: 12, color: COLORS.TEXT_SECONDARY }}>
+        Open a Zoho Quote record to edit its line items.
+      </div>
+    );
+  }
+  return (
+    <Suspense fallback={<PanelLoader />}>
+      <QuoteLineEditor
+        recordId={recordId}
+        module={module}
+        onLoad={load}
+        onCommit={commit}
+        onMatchEcomm={matchEcomm}
+        onLoadCosts={loadCosts}
+        onPreviewCloneTerms={previewCloneTerms}
+        onCloneTerms={cloneTerms}
+        onClose={onClose}
+      />
+    </Suspense>
+  );
+}
 
 // Per-tab storage key prefix — must match the background service worker.
 // The Zoho content script's context is keyed by the tab it lives in so that
@@ -112,11 +185,179 @@ export default function App() {
   const [crmContext, setCrmContext] = useState(null);
   const [navData, setNavData] = useState(null);
   const [authStatus, setAuthStatus] = useState(null);
-  // Lift chat state here so it persists when switching tabs
+  // Lift conversation state here so it persists when switching tabs. The
+  // Zoho record pin must survive ChatPanel's conditional unmount when an SPA
+  // navigation auto-switches the sidebar to the CRM tab.
   const [chatMessages, setChatMessages] = useState([]);
+  const [chatAutoPinnedRecord, setChatAutoPinnedRecord] = useState(null);
+  const [chatManualPinnedRecord, setChatManualPinnedRecord] = useState(null);
+  const [chatContextLock, setChatContextLock] = useState(null);
+  const [chatSessionId, setChatSessionId] = useState(null);
+  const [chatSessionHydrated, setChatSessionHydrated] = useState(false);
+  const lastPersistedChatRef = useRef('');
+  const lastObservedActiveTabRef = useRef('');
+  const pendingActionClaimStateRef = useRef({ running: false, rerun: false });
+  const acceptedPendingActionIdsRef = useRef(new Set());
+
+  const claimPendingSidebarAction = useCallback(async () => {
+    const state = pendingActionClaimStateRef.current;
+    if (state.running) {
+      state.rerun = true;
+      return;
+    }
+    state.running = true;
+    try {
+      do {
+        state.rerun = false;
+        let active;
+        try {
+          [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+        } catch (_) {
+          active = null;
+        }
+        if (!active?.id || !Number.isInteger(active.windowId)) continue;
+        let claim = null;
+        try {
+          const response = await sendToBackground(MSG.SIDEBAR_ACTION_CLAIM, {
+            tabId: active.id,
+            windowId: active.windowId,
+          });
+          claim = response?.claim || null;
+        } catch (_) { /* the next storage/wake event retries */ }
+        const action = claim?.action;
+        if (!action?.actionId || action.type !== 'quote-selection' || !action.quoteSkuText) continue;
+
+        if (!acceptedPendingActionIdsRef.current.has(action.actionId)) {
+          acceptedPendingActionIdsRef.current.add(action.actionId);
+          setActiveTab('chat');
+          setNavData({
+            quoteSkuText: action.quoteSkuText,
+            quoteActionId: action.actionId,
+            quoteContext: action.gmailContext || null,
+          });
+        }
+        try {
+          await sendToBackground(MSG.SIDEBAR_ACTION_ACK, {
+            actionId: action.actionId,
+            claimId: claim.claimId,
+          });
+        } catch (_) { /* the lease expires; the in-document id guard prevents duplicates */ }
+      } while (state.rerun);
+    } finally {
+      state.running = false;
+    }
+  }, []);
+
+  // A context-menu click may open a brand-new side-panel document. Claim once
+  // on mount, again when durable storage changes, and on the optional runtime
+  // wake-up. Hydrate the saved session first: otherwise a fast right-click
+  // quote can append its fresh, actionable card and then be overwritten by an
+  // inert restored card when storage.session resolves.
+  useEffect(() => {
+    if (!chatSessionHydrated) return undefined;
+    let cancelled = false;
+    const requestClaim = () => { if (!cancelled) claimPendingSidebarAction(); };
+    requestClaim();
+    const stopWakeListener = onMessage(MSG.SIDEBAR_ACTION_AVAILABLE, requestClaim);
+    const onStorageChanged = (changes, areaName) => {
+      if (areaName === 'session' && changes[PENDING_SIDEBAR_ACTIONS_KEY]) requestClaim();
+    };
+    chrome.storage.onChanged.addListener(onStorageChanged);
+    return () => {
+      cancelled = true;
+      stopWakeListener();
+      chrome.storage.onChanged.removeListener(onStorageChanged);
+    };
+  }, [claimPendingSidebarAction, chatSessionHydrated]);
+
+  // An empty thread is a new conversation, so its record snapshot must not
+  // leak into the next first message.
+  useEffect(() => {
+    if (!chatMessages || chatMessages.length === 0) {
+      setChatAutoPinnedRecord(null);
+    }
+  }, [chatMessages && chatMessages.length]);
+
+  // Restore one browser-session-scoped chat across side-panel document
+  // recreation, tab switches, and extension reloads. chrome.storage.session is
+  // memory-backed and clears on browser shutdown; it is intentionally not
+  // storage.local because a Gmail lock can contain bounded thread text.
+  useEffect(() => {
+    let cancelled = false;
+    async function hydrate() {
+      let restored = null;
+      try {
+        const stored = await chrome.storage.session.get(CHAT_SESSION_STORAGE_KEY);
+        restored = normalizeStoredChatSession(stored?.[CHAT_SESSION_STORAGE_KEY]);
+      } catch (_) { /* use a fresh session */ }
+      if (cancelled) return;
+      const session = restored || createEmptyChatSession();
+      lastPersistedChatRef.current = JSON.stringify(session);
+      setChatSessionId(session.sessionId);
+      setChatMessages(session.messages || []);
+      setChatAutoPinnedRecord(session.autoPinnedRecord || null);
+      setChatManualPinnedRecord(session.manualPinnedRecord || null);
+      setChatContextLock(session.contextLock || null);
+      setChatSessionHydrated(true);
+    }
+
+    const onStorageChanged = (changes, areaName) => {
+      if (areaName !== 'session' || !changes[CHAT_SESSION_STORAGE_KEY]?.newValue) return;
+      const session = normalizeStoredChatSession(changes[CHAT_SESSION_STORAGE_KEY].newValue);
+      if (!session) return;
+      const serialized = JSON.stringify(session);
+      if (serialized === lastPersistedChatRef.current) return;
+      lastPersistedChatRef.current = serialized;
+      setChatSessionId(session.sessionId);
+      setChatMessages(session.messages || []);
+      setChatAutoPinnedRecord(session.autoPinnedRecord || null);
+      setChatManualPinnedRecord(session.manualPinnedRecord || null);
+      setChatContextLock(session.contextLock || null);
+      setChatSessionHydrated(true);
+    };
+
+    hydrate();
+    chrome.storage.onChanged.addListener(onStorageChanged);
+    return () => {
+      cancelled = true;
+      chrome.storage.onChanged.removeListener(onStorageChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatSessionHydrated || !chatSessionId) return;
+    const session = serializeChatSession({
+      sessionId: chatSessionId,
+      messages: chatMessages,
+      autoPinnedRecord: chatAutoPinnedRecord,
+      manualPinnedRecord: chatManualPinnedRecord,
+      contextLock: chatContextLock,
+    });
+    const serialized = JSON.stringify(session);
+    if (serialized === lastPersistedChatRef.current) return;
+    lastPersistedChatRef.current = serialized;
+    chrome.storage.session.set({ [CHAT_SESSION_STORAGE_KEY]: session }).catch(() => {});
+  }, [chatSessionHydrated, chatSessionId, chatMessages, chatAutoPinnedRecord, chatManualPinnedRecord, chatContextLock]);
 
   const [pageType, setPageType] = useState(null); // 'gmail' | 'zoho' | 'other'
   const [zohoPageContext, setZohoPageContext] = useState(null);
+
+  // If DOM enrichment arrives for the record already pinned to the
+  // conversation, fold those non-empty fields into the snapshot even when
+  // ChatPanel has been auto-unmounted. Never update a different-record pin.
+  useEffect(() => {
+    if (!zohoPageContext || !zohoPageContext.recordId) return;
+    setChatAutoPinnedRecord((snapshot) => {
+      if (!snapshot || snapshot.recordId !== zohoPageContext.recordId) return snapshot;
+      let enriched = snapshot;
+      for (const [key, value] of Object.entries(zohoPageContext)) {
+        if (value == null || value === '' || snapshot[key] === value) continue;
+        if (enriched === snapshot) enriched = { ...snapshot };
+        enriched[key] = value;
+      }
+      return enriched;
+    });
+  }, [zohoPageContext]);
 
   // ── Report Issue ── one-click bug/glitch reporting for the team.
   const [reportOpen, setReportOpen] = useState(false);
@@ -153,6 +394,7 @@ export default function App() {
             module: zohoPageContext.module, recordId: zohoPageContext.recordId,
             recordName: zohoPageContext.recordName,
           } : null,
+          lock: contextLockReportMetadata(chatContextLock),
         },
         lastChat: (chatMessages || []).slice(-6).map((m) => ({
           role: m.role, content: String(m.content || '').slice(0, 1500),
@@ -168,7 +410,7 @@ export default function App() {
       console.error('[Stratus AI] report failed:', e?.message);
       setReportStatus('error');
     }
-  }, [reportNote, activeTab, pageType, emailContext, zohoPageContext, chatMessages]);
+  }, [reportNote, activeTab, pageType, emailContext, zohoPageContext, chatMessages, chatContextLock]);
 
   // Detect page context first, then load appropriate data.
   //
@@ -322,10 +564,20 @@ export default function App() {
 
   // Listen for email changes from content script
   useEffect(() => {
-    return onMessage(MSG.EMAIL_CHANGED, (data) => {
-      setEmailContext(data);
-      setCrmContext(null);
-      setNavData(null);
+    return onMessage(MSG.EMAIL_CHANGED, async (data, sender) => {
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        // Every Gmail content script can emit this runtime message. Only the
+        // active Gmail tab is authoritative for the live (unlocked) context.
+        if (!activeTab?.url?.startsWith('https://mail.google.com/')) return;
+        if (sender?.tab?.id == null || sender.tab.id !== activeTab.id) return;
+        setEmailContext(data?.empty ? null : data);
+        setPageType('gmail');
+        setCrmContext(null);
+        setNavData(null);
+      } catch (_) {
+        // Fail closed: an unverified sender must not repoint live context.
+      }
     });
   }, []);
 
@@ -406,12 +658,27 @@ export default function App() {
         const activeUrl = activeTab?.url || '';
         const activeTabId = activeTab?.id ?? null;
         const urlInfo = parseZohoRecordUrl(activeUrl);
+        const activeKey = `${activeTabId ?? 'none'}:${activeUrl}`;
+        const activeChanged = activeKey !== lastObservedActiveTabRef.current;
+        lastObservedActiveTabRef.current = activeKey;
 
         if (!urlInfo?.isZoho) {
-          // User is off Zoho entirely — clear the header pill.
-          if (!cancelled) setZohoPageContext((prev) => (prev ? null : prev));
+          if (!cancelled) {
+            setZohoPageContext((prev) => (prev ? null : prev));
+            if (activeUrl.startsWith('https://mail.google.com/')) {
+              setPageType('gmail');
+              if (activeChanged) {
+                sendToBackground(MSG.GET_EMAIL_CONTEXT).then((ctx) => {
+                  if (!cancelled) setEmailContext(ctx && !ctx.empty ? ctx : null);
+                }).catch(() => {});
+              }
+            } else {
+              setPageType('other');
+            }
+          }
           return;
         }
+        if (!cancelled) setPageType('zoho');
         if (!urlInfo.isRecord) {
           // List view / dashboard: no active record.
           if (!cancelled) setZohoPageContext((prev) => (prev ? null : prev));
@@ -484,6 +751,113 @@ export default function App() {
     setNavData(data || null);
   }, []);
 
+  const captureCurrentContextLock = useCallback(async () => {
+    let activeTabInfo = null;
+    try {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      activeTabInfo = activeTab || null;
+    } catch (_) { /* create a no-context lock */ }
+
+    const activeUrl = activeTabInfo?.url || '';
+    let fullEmailContext = null;
+    let currentZohoContext = null;
+
+    if (activeUrl.startsWith('https://mail.google.com/')) {
+      try {
+        const ctx = await sendToBackground(MSG.GET_FULL_EMAIL_CONTEXT);
+        if (ctx && !ctx.empty) fullEmailContext = ctx;
+      } catch (_) { /* an explicit no-context lock is safer than stale email */ }
+    } else {
+      const urlInfo = parseZohoRecordUrl(activeUrl);
+      if (urlInfo?.isRecord) {
+        if (contextMatchesUrl(zohoPageContext, urlInfo)) {
+          currentZohoContext = zohoPageContext;
+        } else {
+          try {
+            const ctx = await sendToBackground(MSG.GET_PAGE_CONTEXT);
+            if (contextMatchesUrl(ctx?.zohoContext, urlInfo)) currentZohoContext = ctx.zohoContext;
+          } catch (_) { /* use the URL-derived record below */ }
+        }
+        if (!currentZohoContext) currentZohoContext = minimalContextFromUrl(urlInfo);
+      }
+    }
+
+    const lock = createContextLock({
+      pageUrl: activeUrl,
+      tabId: activeTabInfo?.id ?? null,
+      emailContext: fullEmailContext,
+      zohoContext: currentZohoContext,
+    });
+    setChatContextLock(lock);
+    // The old R7 auto-pin is an unlocked heuristic. A first-class lock owns
+    // context selection while active, so do not retain a competing snapshot.
+    setChatAutoPinnedRecord(null);
+    if (!chatSessionId) setChatSessionId(createEmptyChatSession().sessionId);
+    setActiveTab('chat');
+    return lock;
+  }, [zohoPageContext, chatSessionId]);
+
+  const unlockChatContext = useCallback(() => {
+    setChatContextLock(null);
+    setChatAutoPinnedRecord(null);
+  }, []);
+
+  const startNewChatSession = useCallback(() => {
+    const empty = createEmptyChatSession();
+    setChatSessionId(empty.sessionId);
+    setChatMessages([]);
+    setChatAutoPinnedRecord(null);
+    setChatManualPinnedRecord(null);
+    setChatContextLock(null);
+  }, []);
+
+  // A closed/navigated source tab makes the lock stale, but never swaps in a
+  // new page. The self-contained snapshot remains usable and the UI turns
+  // amber so the user can replace or unlock it deliberately.
+  useEffect(() => {
+    const sourceTabId = chatContextLock?.lockedFromTabId;
+    if (sourceTabId == null) return undefined;
+    let cancelled = false;
+
+    async function refreshAvailability() {
+      let available = false;
+      try {
+        const tab = await chrome.tabs.get(sourceTabId);
+        available = isLockSourceAvailable(chatContextLock, tab);
+      } catch (_) { /* tab closed */ }
+      if (cancelled || available === chatContextLock.sourceAvailable) return;
+      setChatContextLock((current) => current ? { ...current, sourceAvailable: available } : current);
+    }
+
+    const onRemoved = (tabId) => {
+      if (tabId === sourceTabId) {
+        setChatContextLock((current) => current ? { ...current, sourceAvailable: false } : current);
+      }
+    };
+    const onUpdated = (tabId) => { if (tabId === sourceTabId) refreshAvailability(); };
+
+    refreshAvailability();
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    return () => {
+      cancelled = true;
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+    };
+  }, [chatContextLock?.lockedFromTabId, chatContextLock?.sourceUrl, chatContextLock?.kind, chatContextLock?.snapshot?.recordId, chatContextLock?.sourceAvailable]);
+
+  // The Lines tab only exists while a Zoho Quote is the active record. If the
+  // rep navigates away while it is open, fall back to the CRM tab rather than
+  // leaving an editor pointed at a record that is no longer on screen.
+  const quoteLinesRecordId = (pageType === 'zoho' && zohoPageContext?.module === 'Quotes')
+    ? zohoPageContext.recordId
+    : null;
+  const visibleTabs = quoteLinesRecordId ? [...TABS, QUOTE_LINES_TAB] : TABS;
+
+  useEffect(() => {
+    if (activeTab === QUOTE_LINES_TAB.id && !quoteLinesRecordId) setActiveTab('crm');
+  }, [activeTab, quoteLinesRecordId]);
+
   // Auth check
   if (authStatus && !authStatus.hasApiKey) {
     return (
@@ -528,7 +902,7 @@ export default function App() {
           style={{ fontWeight: 700, fontSize: 15, flex: 1 }}
           title={IS_DEV_BUILD ? 'DEV build → ' + API_BASE : undefined}
         >
-          Stratus AI{IS_DEV_BUILD ? ' · DEV' : ''}
+          Stratus AI{IS_DEV_BUILD ? ` · DEV v${chrome.runtime.getManifest().version}` : ''}
         </div>
 
         {/* Blue pill — shows current Zoho record across ALL tabs, always visible */}
@@ -548,6 +922,29 @@ export default function App() {
               {zohoModuleLabel}{zohoPageContext.recordName ? ': ' + zohoPageContext.recordName : ' ' + zohoPageContext.recordId}
             </span>
           </div>
+        )}
+
+        {chatSessionHydrated && (
+          <button
+            onClick={chatContextLock ? unlockChatContext : captureCurrentContextLock}
+            title={chatContextLock
+              ? `Context locked for this chat. Click to unlock. ${contextLockLabel(chatContextLock)}`
+              : 'Lock the current Gmail, Zoho, or general page context to this chat'}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 4,
+              background: chatContextLock
+                ? (chatContextLock.sourceAvailable === false ? '#b06000' : '#0b8043')
+                : 'transparent',
+              border: `1px solid ${chatContextLock ? '#ffffff66' : '#ffffff55'}`,
+              borderRadius: 12, padding: '2px 8px', color: 'white',
+              fontSize: 10, fontWeight: 700, cursor: 'pointer', maxWidth: 190,
+            }}
+          >
+            <span>{chatContextLock ? '🔒' : '🔓'}</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {chatContextLock ? contextLockLabel(chatContextLock) : 'Lock context'}
+            </span>
+          </button>
         )}
 
         <button
@@ -625,7 +1022,7 @@ export default function App() {
         display: 'flex', borderBottom: `1px solid ${COLORS.BORDER}`,
         background: COLORS.BG_PRIMARY, overflowX: 'auto',
       }}>
-        {TABS.map((tab) => (
+        {visibleTabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => handleTabChange(tab.id)}
@@ -651,8 +1048,25 @@ export default function App() {
         <PanelErrorBoundary activeTab={activeTab}>
           <Suspense fallback={<PanelLoader />}>
             {activeTab === 'crm' && <CrmPanel emailContext={emailContext} crmContext={crmContext} onNavigate={handleNavigate} navData={navData} />}
-            {activeTab === 'chat' && <ChatPanel emailContext={emailContext} navData={navData} messages={chatMessages} onMessagesChange={setChatMessages} zohoPageContext={zohoPageContext} />}
+            {activeTab === 'chat' && <ChatPanel
+              emailContext={emailContext}
+              activePageType={pageType}
+              navData={navData}
+              messages={chatMessages}
+              onMessagesChange={setChatMessages}
+              zohoPageContext={zohoPageContext}
+              autoPinnedRecord={chatAutoPinnedRecord}
+              onAutoPinnedRecordChange={setChatAutoPinnedRecord}
+              manualPinnedRecord={chatManualPinnedRecord}
+              onManualPinnedRecordChange={setChatManualPinnedRecord}
+              contextLock={chatContextLock}
+              onLockCurrentContext={captureCurrentContextLock}
+              onUnlockContext={unlockChatContext}
+              onStartNewConversation={startNewChatSession}
+            />}
             {activeTab === 'search' && <SearchPanel navData={navData} />}
+            {activeTab === QUOTE_LINES_TAB.id && quoteLinesRecordId
+              && <QuoteLinesView recordId={quoteLinesRecordId} module="Quotes" />}
           </Suspense>
         </PanelErrorBoundary>
       </div>

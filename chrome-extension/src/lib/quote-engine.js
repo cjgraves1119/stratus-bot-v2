@@ -47,6 +47,16 @@ for (const [key, val] of Object.entries(catalog)) {
 // SKU SUFFIX RULES
 // ============================================================================
 
+/**
+ * DEAD CODE. Nothing imports this and it is in no built bundle (see the note in
+ * background/api-client.js). SKU resolution is the WORKER's applySuffix, which
+ * is the only implementation that sees the live catalog.
+ *
+ * The rules below are also STALE as of 2026-08-20: the worker now prefers the
+ * NON -HW code wherever both forms exist (MS130, MX, and several MV models have
+ * migrated), gated on the catalog rather than hardcoded families. Do not copy
+ * this function; if this file is ever revived, port the worker's version.
+ */
 export function applySuffix(sku) {
   const upper = sku.toUpperCase();
 

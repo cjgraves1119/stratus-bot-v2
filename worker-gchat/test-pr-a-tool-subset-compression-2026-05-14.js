@@ -133,10 +133,10 @@ const LOAD_BEARING_PHRASES = [
   '_undo_token',
   'confirm: true',
   'Restate the undo token',
-  // Anti-hallucination
-  'LIC-ENT-1YR',
-  'LIC-ENT-3YR',
-  'LIC-ENT-5YR',
+  // Anti-hallucination — 2026-07-14 coterm rewording: the prompt now teaches the
+  // SKU FORM (LIC-ENT-{term}YR, 7/10YR real but Zoho-quote-only) instead of
+  // enumerating the three ecomm terms; the malformed-pattern guard is unchanged.
+  'LIC-ENT-{term}YR',
   'LIC-ENT-MR',                  // explicit ❌ pattern
   'Cisco reps live in the Meraki_ISRs',
   'Meraki ISR Referal',
@@ -350,10 +350,15 @@ t('selectToolSubset — unknown class falls back to general', () => {
   assert.deepStrictEqual(names, expected);
 });
 
-t('selectToolSubset — quote_url path is minimal (1-2 tools)', () => {
+t('selectToolSubset — quote_url path contains the exact validated lookup waterfall', () => {
   const intent = { class: 'quote_url', confidence: 0.9 };
   const subset = selectToolSubset(intent, CRM_EMAIL_TOOLS);
-  assert.ok(subset.length <= 3, `quote_url subset has ${subset.length} tools, expected ≤ 3`);
+  assert.deepStrictEqual(subset.map(tool => tool.name).sort(), [
+    'batch_product_lookup',
+    'find_product_candidates',
+    'parse_quote_url',
+    'web_search_sku',
+  ].sort());
 });
 
 t('selectToolSubset — every subset is non-empty when input is non-empty', () => {

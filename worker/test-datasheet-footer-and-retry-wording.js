@@ -65,7 +65,7 @@ const check = (desc, cond, diag) => {
     /function stripEchoedSourceFooter\(reply\)/.test(fileSrc),
     'helper not found');
   check('Final-reply assembly calls stripEchoedSourceFooter',
-    /const sanitizedReply = sanitizeLiveFetchRetryWording\(reply\);/.test(fileSrc) &&
+    /const sanitizedReply = sanitizeLiveFetchRetryWording\([\s\S]{0,160}reply[\s\S]{0,40}\);/.test(fileSrc) &&
     /const dedupedReply = stripEchoedSourceFooter\(sanitizedReply\);/.test(fileSrc) &&
     /\$\{dedupedReply\}.*\$\{sourceFooter\}/s.test(fileSrc),
     'dedupedReply not threaded into finalReply');

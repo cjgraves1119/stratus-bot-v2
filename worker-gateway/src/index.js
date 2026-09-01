@@ -286,9 +286,21 @@ export default {
     // their entire API_BASE at the gateway. Only /api/chat gets the waterfall;
     // everything else is pass-through with zero modification.
     if (pathname.startsWith('/api/') && pathname !== '/api/chat') {
-      // Same API-key gate on passthrough routes.
+      // Same API-key gate on passthrough routes, with one carve-out for
+      // same-account Workers calling in over a SERVICE BINDING.
+      //
+      // Why this is safe: Cloudflare stamps CF-Connecting-IP on every request
+      // that enters from the public internet. A service-binding call never
+      // touches the edge, so it cannot have that header — and a public caller
+      // cannot strip it. Absence therefore proves the request did NOT come from
+      // outside, and only Workers on this account can hold a binding to us.
+      // (This mirrors the existing forwardHeaders logic below, which already
+      // drops cf-connecting-ip when relaying onward.) The X-Internal-Worker
+      // header is a readability marker for logs, NOT the security boundary.
       const apiKey = request.headers.get('X-API-Key');
-      if (!env.GATEWAY_API_KEY || apiKey !== env.GATEWAY_API_KEY) {
+      const fromServiceBinding = !request.headers.get('cf-connecting-ip')
+        && request.headers.get('X-Internal-Worker') === 'stratus';
+      if (!fromServiceBinding && (!env.GATEWAY_API_KEY || apiKey !== env.GATEWAY_API_KEY)) {
         return jsonResponse({ error: 'Unauthorized' }, 401);
       }
       try {

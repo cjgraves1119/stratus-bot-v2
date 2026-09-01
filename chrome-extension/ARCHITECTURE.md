@@ -1,279 +1,108 @@
-# Stratus AI Chrome Extension — Architecture
+# Stratus AI Chrome extension architecture
 
-## Overview
+## Source and runtime
 
-Replaces the Gmail Add-on (Apps Script Card Service) with a Manifest V3 Chrome extension. Compatible with Chrome, Comet, and all Chromium-based browsers. Multi-user via per-user Zoho OAuth + per-user API key storage.
+This Manifest V3 extension is an editable webpack/React application. The same
+source supports Chrome, Comet, and Chromium browsers. Its major runtime pieces
+are:
 
-## Key Advantages Over Gmail Add-on
+- `src/background/`: service worker, API routing, CRM/auth operations, and
+  cross-surface messaging;
+- `src/content/`: Gmail and Zoho content scripts;
+- `src/sidebar/`: React chat, CRM, quote, and task interfaces;
+- `src/popup/` and `src/options/`: browser action and settings interfaces;
+- `src/lib/`: shared configuration, storage, quote, catalog, and context logic;
+- `public/`: static HTML shells and cart/task helper scripts.
 
-| Capability | Gmail Add-on | Chrome Extension |
-|---|---|---|
-| API latency | 2-4s (Apps Script cold start + relay) | 200-500ms (direct fetch) |
-| Execution timeout | 60 seconds | None |
-| UI placement | Sidebar only (Card Service) | Sidebar + inline DOM injection |
-| Clipboard | Blocked | Full Clipboard API |
-| Background tasks | None | Service worker (persistent) |
-| Cache/storage | CacheService (5 min TTL) | IndexedDB (unlimited, persistent) |
-| SKU highlighting | Not possible | Content script inline injection |
-| Compose integration | Separate trigger | Button in compose toolbar |
-| Keyboard shortcuts | Not possible | Fully customizable |
-| Notifications | Not possible | Desktop Notifications API |
-| Real-time updates | Polling only | WebSocket-ready |
-| Browser support | Gmail only | Chrome, Comet, Chromium |
+Webpack emits the unpacked extension to `dist/`. Compiled output, dependencies,
+browser-installed copies, environment files, Wrangler state, and release
+packages are not source and are excluded from Git.
 
-## Architecture
+## API path
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   Chrome Extension                    │
-│                                                       │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────┐ │
-│  │  Background  │  │   Content    │  │   Sidebar   │ │
-│  │   Service    │  │   Script     │  │    Panel    │ │
-│  │   Worker     │  │  (Gmail DOM) │  │   (React)   │ │
-│  │              │  │              │  │             │ │
-│  │ - API client │  │ - SKU detect │  │ - Analysis  │ │
-│  │ - Auth/OAuth │  │ - CRM banner │  │ - CRM view  │ │
-│  │ - Cache mgr  │  │ - Compose    │  │ - Quotes    │ │
-│  │ - Shortcuts  │  │   toolbar    │  │ - Drafts    │ │
-│  │ - Notifs     │  │ - Highlights │  │ - Tasks     │ │
-│  │ - Price sync │  │ - Tooltips   │  │ - Settings  │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬──────┘ │
-│         │                  │                  │        │
-│         └──────────────────┼──────────────────┘        │
-│                    Message Passing                      │
-│                            │                            │
-└────────────────────────────┼────────────────────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │  GChat Worker   │
-                    │  /api/* routes  │
-                    │  (Cloudflare)   │
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   Zoho CRM      │
-                    │  (per-user      │
-                    │   OAuth token)  │
-                    └─────────────────┘
+All extension API calls use the single `API_BASE` compiled into the bundle. The
+value has no runtime or personal-gateway fallback. `release-targets.cjs` resolves
+it together with branding, environment label, manifest host permission, and
+update behavior.
+
+```text
+named target
+    ├── API origin
+    ├── prod/DEV runtime flag
+    ├── extension name and action title
+    ├── one Workers host permission
+    └── production update feed present/absent
 ```
 
-## File Structure
+This prevents independent flags from silently mixing branding, gateways, and
+update behavior. The explicitly named `snapshot-dev` target retains the
+reviewed personal DEV gateway for controlled local testing and artifact-lineage
+evidence; it is not a distributable team build. The `team-dev` target fails
+closed unless a distinct reviewed gateway is selected. Neither DEV target
+inherits the production auto-update feed.
 
-```
-chrome-extension/
-├── manifest.json              # Manifest V3 config
-├── package.json               # Build dependencies (webpack, React)
-├── webpack.config.js          # Build config
-├── scripts/
-│   ├── build-crx.sh           # Build .crx for distribution
-│   └── update-manifest.xml    # Auto-update XML for self-hosted
-├── public/
-│   ├── sidebar.html           # Sidebar panel HTML shell
-│   ├── popup.html             # Popup HTML shell
-│   └── options.html           # Settings/options page
-├── src/
-│   ├── background/
-│   │   ├── index.js           # Service worker entry
-│   │   ├── api-client.js      # All /api/* endpoint calls
-│   │   ├── auth.js            # Zoho OAuth + API key management
-│   │   ├── cache.js           # IndexedDB cache manager
-│   │   ├── notifications.js   # Desktop notifications
-│   │   ├── shortcuts.js       # Keyboard shortcut handlers
-│   │   ├── context-menus.js   # Right-click context menus
-│   │   └── price-sync.js      # Background price refresh
-│   ├── content/
-│   │   ├── index.js           # Content script entry (Gmail DOM)
-│   │   ├── gmail-observer.js  # MutationObserver for Gmail SPA
-│   │   ├── sku-highlighter.js # Inline SKU detection + tooltips
-│   │   ├── crm-banner.js      # CRM info banner on threads
-│   │   ├── compose-toolbar.js # Quote button in compose window
-│   │   └── email-extractor.js # Extract email data from DOM
-│   ├── sidebar/
-│   │   ├── index.jsx          # Sidebar React entry
-│   │   ├── App.jsx            # Main sidebar app
-│   │   ├── panels/
-│   │   │   ├── EmailPanel.jsx    # Email analysis view
-│   │   │   ├── CrmPanel.jsx      # CRM account/contact/deal view
-│   │   │   ├── QuotePanel.jsx    # Quote builder
-│   │   │   ├── TaskPanel.jsx     # Task management
-│   │   │   ├── DraftPanel.jsx    # Reply draft generator
-│   │   │   └── SearchPanel.jsx   # CRM search
-│   │   └── components/
-│   │       ├── Header.jsx
-│   │       ├── ContactCard.jsx
-│   │       ├── DealCard.jsx
-│   │       ├── TaskCard.jsx
-│   │       ├── QuoteResult.jsx
-│   │       └── SkuInput.jsx
-│   ├── popup/
-│   │   ├── index.jsx          # Popup React entry
-│   │   └── QuickActions.jsx   # Quick quote, CRM search, shortcuts
-│   ├── lib/
-│   │   ├── constants.js       # Config, API URLs, colors
-│   │   ├── messaging.js       # Chrome message passing helpers
-│   │   ├── storage.js         # chrome.storage wrapper (sync + local)
-│   │   └── zoho-oauth.js      # Zoho OAuth flow helpers
-│   ├── styles/
-│   │   ├── global.css         # Shared styles
-│   │   ├── sidebar.css        # Sidebar-specific
-│   │   ├── content.css        # Gmail injected styles
-│   │   └── popup.css          # Popup styles
-│   └── icons/
-│       ├── icon-16.png
-│       ├── icon-32.png
-│       ├── icon-48.png
-│       └── icon-128.png
-```
+## Target roles
 
-## Multi-User Design
+The root `manifest.json` is the canonical production manifest. Build-time
+manifest transformation is narrow and deterministic:
 
-### Authentication Flow
+- `prod` preserves production branding and update feed;
+- `snapshot-dev` reconstructs the historical DEV runtime for evidence work but
+  removes the update feed and is deliberately named at every build/watch call;
+- `team-dev` uses separate team branding and a separately approved gateway.
 
-```
-1. User installs extension
-2. Extension opens options page on first run
-3. User enters:
-   a. Stratus API key (provided by admin / auto-provisioned)
-   b. Clicks "Connect Zoho CRM" → OAuth flow
-4. Zoho OAuth tokens stored in chrome.storage.local (encrypted)
-5. API key stored in chrome.storage.sync (syncs across devices)
-6. Each API call includes user's API key in X-API-Key header
-7. CRM calls include user's Zoho access token (refreshed automatically)
-```
+The historical snapshot and future team package are products of the reviewed
+commit, never separate source directories. See `RELEASE.md` for the current
+team-gateway blocker and packaging gates.
 
-### Per-User Data Isolation
+## Build and release boundary
 
-- `chrome.storage.sync` — settings, preferences, API key (synced across devices)
-- `chrome.storage.local` — Zoho OAuth tokens, cached CRM data, price cache
-- IndexedDB — large data (full price catalog, conversation history, analysis cache)
+Node `24.19.0`, pnpm `11.19.0`, and `pnpm-lock.yaml` define the extension
+toolchain. Production/team packages exclude source maps. The sanitizer accepts
+only the expected manifest, bundles, styles, HTML, licenses, and four icon
+files; any unexpected path or symlink fails the package.
 
-### Worker Changes Needed
+Each distributable carries embedded provenance and published SHA-256 hashes.
+Production self-update additionally requires the signing key for extension ID
+`haangicfjfkenoilhdadbnljcacighih`. Team DEV has no production `update_url` and
+must not reuse the production gateway.
 
-The GChat worker needs minor updates to support per-user auth:
-1. Accept Zoho OAuth token in header (alongside or instead of using worker's own token)
-2. New endpoint: `/api/auth/zoho-refresh` to refresh expired tokens
-3. API key provisioning: admin creates keys per user in worker config
+Production preparation and signing use separate ephemeral CI runners. The
+no-secret runner rebuilds and hash-binds the sanitized payload; a fresh
+protected runner downloads and verifies it before key access, then runs only
+the built-in-Node signer. Build dependencies never execute in the key-bearing
+runner.
 
-## Content Script — Gmail DOM Integration
+Worker deployment is a separate manual-only workflow. Building or packaging an
+extension never deploys a Worker, reloads a browser, or changes CRM/browser data.
+The workflow compiles all three coupled Workers in dry-run mode before its first
+deployment command. Cloudflare does not provide a single atomic transaction
+across the three Worker services, so protected-environment approval and an
+operator rollback plan remain mandatory for the separately authorized deploy.
 
-### Email Detection (MutationObserver)
+## Security boundaries
 
-Gmail is a SPA. Content script uses MutationObserver to detect:
-- Email thread opened (DOM class: `.nH .if`, subject in `.hP`)
-- Compose window opened (DOM class: `.T-I.J-J5-Ji`)
-- Navigation changes (URL hash changes: `#inbox/`, `#sent/`, etc.)
+- OAuth tokens, API keys, Worker secrets, environment files, and signing keys
+  are never part of the extension source or package.
+- Zoho writes remain explicit user actions in the runtime; build scripts do not
+  access Zoho, Gmail, CRM, or browser state.
+- Customer-facing UI must not expose margin or margin percentage.
+- Local QA harness output is written to `harness-dist/`, outside `dist/`.
+- The QA harness has no implicit gateway. `build:harness:team` uses the
+  fail-closed reviewed team target; `build:harness:snapshot-evidence` is named
+  explicitly because it reproduces the historical production-gateway path and
+  is only for controlled lineage comparison.
+- Installed/minified copies are evidence or deployment outputs, never editable
+  inputs.
 
-### SKU Highlighting
+## Verification layers
 
-Content script scans email body text for known Cisco/Meraki SKU patterns:
-- Regex: `/\b(MR\d{2,3}|MS\d{3}|MX\d{2,3}|CW\d{4}|MV\d{2,3}|MT\d{2}|MG\d{2}|Z\d[A-Z]*)\b/gi`
-- Wraps matches in `<span class="stratus-sku" data-sku="...">` with CSS highlight
-- Hover tooltip shows: product name, list price, ecomm price, stock status
-- Click opens Quick Quote pre-filled with that SKU
+Release review distinguishes four claims:
 
-### CRM Banner
+1. source tests passed;
+2. webpack and Wrangler dry-runs built locally;
+3. a sanitized package was generated from an exact commit/tag;
+4. a browser or Worker was actually deployed and verified.
 
-When an email thread is opened:
-1. Content script extracts sender email + domain
-2. Sends message to background worker: `{type: 'CRM_LOOKUP', email, domain}`
-3. Background calls `/api/crm-contact` + `/api/crm-deals`
-4. If CRM data found, content script injects a banner above the email:
-   ```
-   ┌─────────────────────────────────────────────────┐
-   │ 🏢 Acme Corp  │  3 Open Deals ($45K)  │ Zoho ↗ │
-   └─────────────────────────────────────────────────┘
-   ```
-5. Banner is collapsible, shows last activity, primary contact, deal summary
-
-### Compose Toolbar Button
-
-When a compose window opens:
-1. Content script detects the compose toolbar (`.btC` container)
-2. Injects a "Stratus Quote" button with the Stratus icon
-3. Click opens a floating quote builder panel (React rendered in shadow DOM)
-4. Generated quote URL is inserted directly into the compose body
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|---|---|
-| Alt+Q | Open/focus Quick Quote (sidebar or popup) |
-| Alt+S | Open Stratus sidebar |
-| Alt+C | CRM lookup for current email sender |
-| Alt+A | Run AI analysis on current email |
-| Alt+T | View tasks for current account |
-| Alt+D | Generate draft reply |
-
-Configured via `chrome.commands` in manifest. User-customizable via chrome://extensions/shortcuts.
-
-## Context Menus
-
-Right-click context menus:
-- **On selected text**: "Quote these SKUs with Stratus" → opens quote builder pre-filled
-- **On selected text**: "Look up in Zoho CRM" → CRM search
-- **On email link**: "View in Zoho CRM" → opens CRM record if match found
-
-## Desktop Notifications
-
-Background service worker sends notifications for:
-- CRM task due today (checked on extension startup + hourly)
-- Quote request completed (if quote generation takes >2s)
-- Price refresh completed (daily background sync)
-
-## Caching Strategy
-
-| Data | Storage | TTL | Size |
-|---|---|---|---|
-| CRM contact/account | IndexedDB | 15 min | ~2KB per record |
-| Email analysis | IndexedDB | 30 min | ~5KB per analysis |
-| Price catalog | IndexedDB | 24 hours | ~200KB |
-| User settings | chrome.storage.sync | Persistent | <8KB |
-| Zoho tokens | chrome.storage.local | Persistent (auto-refresh) | <1KB |
-| SKU patterns (regex) | In-memory | Extension lifetime | <10KB |
-
-## Distribution
-
-Self-hosted CRX via GitHub Releases with auto-update:
-
-1. GitHub Actions workflow on push to `main`:
-   - Runs `npm run build` in chrome-extension/
-   - Packages as .crx signed with extension private key
-   - Creates GitHub Release with .crx attachment
-   - Updates `update-manifest.xml` on GitHub Pages
-
-2. Extension manifest includes:
-   ```json
-   "update_url": "https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml"
-   ```
-
-3. Chromium checks this URL periodically and auto-updates.
-
-4. For Google Workspace managed devices: force-install via Admin Console policy.
-
-## Comet Browser Compatibility
-
-Comet is Chromium-based and supports:
-- Manifest V3 extensions ✓
-- chrome.* APIs ✓
-- Content scripts ✓
-- Side panel API ✓ (Chromium 114+)
-- Self-hosted .crx install ✓ (no Web Store dependency)
-
-Key consideration: Comet may not support `chrome.sidePanel` API if on older Chromium. Fallback: use `chrome.action` popup as sidebar alternative, or inject sidebar via content script into a fixed-position panel.
-
-## Migration Path
-
-Phase 1 (this build):
-- Full extension with all features
-- Gmail Add-on remains available as fallback
-- Team tests extension for 1-2 weeks
-
-Phase 2:
-- Disable Gmail Add-on
-- Extension becomes primary tool
-- Add features not possible in add-on (WebSocket notifications, etc.)
-
-Phase 3 (future):
-- Extend to Google Calendar (meeting prep with CRM context)
-- Extend to other webmail (Outlook web) if needed
+Earlier layers do not prove later ones. Browser reloads and Cloudflare deploys
+always require separate authorization and post-state evidence.

@@ -81,7 +81,7 @@ id = "af24db17eaa644fe9456e2ae74379766"
 binding = "ANALYTICS_DB"
 database_name = "stratus-bot-analytics"
 database_id = "d4c3c112-e36b-4484-ac15-cbd848fa77fb"
-migrations_dir = "../migrations"
+migrations_dir = "migrations"
 
 # Service binding to self: Workers can't fetch their own URL directly
 # (same-zone restriction). This binding lets us self-invoke /_work and
@@ -125,7 +125,6 @@ crons = ["0 11 * * *"]
 # silently falls through to the Queue.
 [[workflows]]
 name = "stratus-gchat-crm-workflow"
-account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 binding = "CRM_WORKFLOW"
 class_name = "CrmWorkflow"
 
@@ -137,7 +136,6 @@ class_name = "CrmWorkflow"
 # Without this binding, the wrapper silently falls back to inline.
 [[workflows]]
 name = "stratus-gchat-quote-po-workflow"
-account_id = "ec1888c5a0b51dc3eebf6bae13a3922b"
 binding = "QUOTE_PO_WORKFLOW"
 class_name = "QuotePoWorkflow"
 
@@ -157,4 +155,3 @@ dataset = "stratus_bot_metrics"
 [[r2_buckets]]
 binding = "BOT_STORAGE"
 bucket_name = "stratus-bot-storage"
-

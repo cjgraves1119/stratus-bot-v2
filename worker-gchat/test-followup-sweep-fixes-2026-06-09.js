@@ -17,6 +17,7 @@ function loadEngine(workerDir, tag) {
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${esc('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const ed = src.indexOf('export default');
@@ -98,7 +99,7 @@ const qtys = (r, sku) => { const m = (r || '').match(new RegExp('item=([^&\\s]*)
   r = await W.handleFollowUpModifier('add 100 duo essentials', 'p', kvWith(DUO200));
   ok(r && !/LIC-DUO-ESSENTIALS-3YR[^&]*&[^#]*1-Year/.test(r) && qtys(r, 'LIC-DUO-ESSENTIALS-1YR').length === 1 && qtys(r, 'LIC-DUO-ESSENTIALS-3YR').length === 1, '"add 100 duo essentials" → each term bucket gets ONLY its own term SKU (no cross-term poison)');
   r = await W.handleFollowUpModifier('add 2 MX67', 'p', kvWith(MR44Q));
-  ok(r && qtys(r, 'MX67-HW')[0] === 2 && qtys(r, 'LIC-MX67-SEC-3YR')[0] === 2, '"add 2 MX67" → hardware + paired co-term license (was hardware only)');
+  ok(r && qtys(r, 'MX67')[0] === 2 && !/MX67-HW/.test(r) && qtys(r, 'LIC-MX67-SEC-3YR')[0] === 2, '"add 2 MX67" → active non-HW order SKU + paired co-term license');
 
   console.log('── SME discontinued → replacement substitution (was: 5-year cap) ──');
   r = await W.handleFollowUpModifier('5 year', 'p', kvWith(SMEQ));

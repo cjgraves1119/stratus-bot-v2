@@ -35,6 +35,8 @@ const optBlock = (msg, n) => {
   return m ? m[0] : '';
 };
 const firstUrl = (block) => (block.split('\n').find(l => l.includes('Co-Term: http')) || '');
+const hasOrderSku = (text, sku) => [...String(text || '').matchAll(/[?&]item=([^&\s]+)/g)]
+  .some((match) => decodeURIComponent(match[1]).split(',').includes(sku));
 
 // ─── Mixed non-EOL (first) + EOL (second): order must be preserved ───────────
 // MX85 is non-EOL; MX64 is EOL → MX67. Request order: MX85 then MX64.
@@ -65,12 +67,12 @@ const firstUrl = (block) => (block.split('\n').find(l => l.includes('Co-Term: ht
 
   // ORDER in refresh: MX85 (carried) before MX67 (MX64's replacement)
   const o2 = firstUrl(optBlock(msg, 2));
-  check('Option 2: replacement MX67-HW present', /MX67-HW/.test(o2), o2);
+  check('Option 2: public replacement MX67 present', hasOrderSku(o2, 'MX67'), o2);
   check('Option 2: MX85 before MX67 (request order)',
     o2.indexOf('MX85') > -1 && o2.indexOf('MX67') > -1 && o2.indexOf('MX85') < o2.indexOf('MX67'),
     o2);
-  check('Option 1 is license-only for the EOL device (no MX67-HW / MX64-HW in renewal cart)',
-    !/MX67-HW/.test(o1) && !/MX64-HW/.test(o1), o1);
+  check('Option 1 is license-only for the EOL device (no MX67 / MX64 hardware in renewal cart)',
+    !hasOrderSku(o1, 'MX67') && !hasOrderSku(o1, 'MX64'), o1);
 }
 
 // ─── licenseOnly renewal → "Renew As-Is" label (matches vision builder) ──────

@@ -21,9 +21,11 @@ function loadEngine() {
   const esc = p => path.join(here, p).replace(/\\/g, '\\\\');
   src = src.replace(/^import \{ WorkflowEntrypoint \} from 'cloudflare:workers';?$/m, 'class WorkflowEntrypoint {}');
   src = src.replace(/^import pricesData from '\.\/data\/prices\.json';?$/m, `const pricesData = require('${esc('src/data/prices.json')}');`);
+  src = src.replace(/^import legacyProductIdAliasesData from '\.\/data\/legacy-product-id-aliases\.json';?$/m, `const legacyProductIdAliasesData = require('${esc('src/data/legacy-product-id-aliases.json')}');`);
   src = src.replace(/^import catalogData from '\.\/data\/auto-catalog\.json';?$/m, `const catalogData = require('${esc('src/data/auto-catalog.json')}');`);
   src = src.replace(/^import specsData from '\.\/data\/specs\.json';?$/m, `const specsData = require('${esc('src/data/specs.json')}');`);
   src = src.replace(/^import accessoriesData from '\.\/data\/accessories\.json';?$/m, `const accessoriesData = require('${esc('src/data/accessories.json')}');`);
+  src = src.replace(/^import voiceSkillData from '\.\/email-reply-voice-skill\.json';?$/m, `const voiceSkillData = require('${esc('src/email-reply-voice-skill.json')}');`);
   src = src.replace(/^export class CrmWorkflow/m, 'class CrmWorkflow');
   src = src.replace(/^export class QuotePoWorkflow/m, 'class QuotePoWorkflow');
   const ed = src.indexOf('export default');
@@ -173,8 +175,14 @@ const hasNoPriceKey = (items) => items.every(it => PRICE_KEYS.every(k => !(k in 
   // SKUs+qtys joined, NO engine round-trip (which dropped EOL-flagged MS225 lines).
   {
     const src = fs.readFileSync(path.join(__dirname, 'src/index.js'), 'utf8');
-    ok(/const orderUrl = items\.length \? buildStratusUrl\(items\) : null;/.test(src),
+    ok(/orderUrl = items\.length \? buildStratusUrl\(items\) : null;/.test(epBlock)
+       && !/parseMessage\(|buildQuoteResponse\(/.test(epBlock),
       'endpoint builds a faithful orderUrl via buildStratusUrl (no resolving engine)');
+    ok(/err\?\.code === 'order_sku_unavailable'/.test(epBlock)
+       && /errorCode: 'order_sku_unavailable'/.test(epBlock)
+       && /kind: 'quote_link'/.test(epBlock)
+       && /write_state: 'none'/.test(epBlock),
+      'unavailable order SKUs return a typed, read-only recovery instead of dropping lines');
     ok(/JSON\.stringify\(\{ items, orderUrl, module, recordId, recordName/.test(src),
       'endpoint response includes orderUrl');
   }

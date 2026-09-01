@@ -47,17 +47,30 @@ function urlsFor(message) {
   return { urls, raw: text.slice(0, 400) };
 }
 
+const hasItem = (items, sku) => String(items || '').split(',').includes(sku);
+
 // (a) BUNDLE: hardware + that-term license, single URL
 {
   const { urls, raw } = urlsFor('quote 3 MS130-24P with 5-year licenses');
   check('(a) "with 5-year licenses" bundles hardware + 5Y license',
-    urls.length === 1 && /MS130-24P-HW/.test(urls[0].items) && /LIC-MS130-24-5Y/.test(urls[0].items),
+    urls.length === 1 && hasItem(urls[0].items, 'MS130-24P') && !hasItem(urls[0].items, 'MS130-24P-HW') && /LIC-MS130-24-5Y/.test(urls[0].items),
     JSON.stringify(urls) || raw);
 }
 {
   const { urls } = urlsFor('quote 1 MX67 with 3 year license');
   check('(a2) "MX67 with 3 year license" bundles hardware + 3YR license',
-    urls.length >= 1 && /MX67-HW/.test(urls[0].items) && /LIC-MX67-SEC-3YR/.test(urls[0].items),
+    urls.length >= 1 && hasItem(urls[0].items, 'MX67') && !hasItem(urls[0].items, 'MX67-HW') && /LIC-MX67-SEC-3YR/.test(urls[0].items),
+    JSON.stringify(urls));
+}
+{
+  const { urls } = urlsFor('quote 1 MX67 and 1 MS130-24P with 3yr licenses');
+  check('(a3) multi-product "with 3yr licenses" bundles both bare hardware SKUs',
+    urls.length === 1
+      && hasItem(urls[0].items, 'MX67')
+      && hasItem(urls[0].items, 'MS130-24P')
+      && !/-HW(?:,|$)/.test(urls[0].items)
+      && /LIC-MX67-SEC-3YR/.test(urls[0].items)
+      && /LIC-MS130-24-3Y/.test(urls[0].items),
     JSON.stringify(urls));
 }
 
@@ -65,21 +78,30 @@ function urlsFor(message) {
 {
   const { urls } = urlsFor('quote 3 MS130-24P 5 year license');
   check('(b) "MS130-24P 5 year license" (no with) is license-only 5Y',
-    urls.length >= 1 && urls.every(u => !/MS130-24P-HW/.test(u.items)) && /LIC-MS130-24-5Y/.test(urls[0].items),
+    urls.length >= 1 && urls.every(u => !hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW')) && /LIC-MS130-24-5Y/.test(urls[0].items),
+    JSON.stringify(urls));
+}
+{
+  const { urls } = urlsFor('3-year licenses for 1 MX67 and 1 MS130-24P');
+  check('(b2) term-prefixed "licenses for" applies license-only to the full list',
+    urls.length === 1
+      && urls.every(u => !hasItem(u.items, 'MX67') && !hasItem(u.items, 'MS130-24P'))
+      && /LIC-MX67-SEC-3YR/.test(urls[0].items)
+      && /LIC-MS130-24-3Y/.test(urls[0].items),
     JSON.stringify(urls));
 }
 
 // (c) bare hardware → hardware + all 3 term options
 {
   const { urls } = urlsFor('quote 3 MS130-24P');
-  const all3 = ['1Y', '3Y', '5Y'].every(t => urls.some(u => u.items.includes(`LIC-MS130-24-${t}`) && u.items.includes('MS130-24P-HW')));
+  const all3 = ['1Y', '3Y', '5Y'].every(t => urls.some(u => u.items.includes(`LIC-MS130-24-${t}`) && hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW')));
   check('(c) bare "MS130-24P" quotes hardware + 1/3/5-year options', urls.length === 3 && all3, JSON.stringify(urls));
 }
 
 // (c2) trailing "licenses" (no term) → license-only, all 3 terms
 {
   const { urls } = urlsFor('quote 3 MS130-24P licenses');
-  const licOnlyAll3 = urls.length === 3 && urls.every(u => !u.items.includes('MS130-24P-HW'));
+  const licOnlyAll3 = urls.length === 3 && urls.every(u => !hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW'));
   check('(c2) "MS130-24P licenses" stays license-only, all 3 terms', licOnlyAll3, JSON.stringify(urls));
 }
 
@@ -87,7 +109,7 @@ function urlsFor(message) {
 {
   const { urls } = urlsFor('renewal for 3 MS130-24P');
   check('(d) "renewal for MS130-24P" is license-only',
-    urls.length >= 1 && urls.every(u => !u.items.includes('MS130-24P-HW')),
+    urls.length >= 1 && urls.every(u => !hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW')),
     JSON.stringify(urls));
 }
 
@@ -111,7 +133,7 @@ function urlsFor(message) {
 {
   const { urls } = urlsFor('quote 3 MS130-24P without licenses');
   check('(guard) "without licenses" stays hardware-only',
-    urls.length >= 1 && urls.every(u => u.items.includes('MS130-24P-HW') && !u.items.includes('LIC-')),
+    urls.length >= 1 && urls.every(u => hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW') && !u.items.includes('LIC-')),
     JSON.stringify(urls));
 }
 
@@ -121,7 +143,7 @@ function urlsFor(message) {
 {
   const { urls } = urlsFor('quote 2 MX67 with advanced security licenses');
   check('(r2) "with advanced security licenses" bundles hardware',
-    urls.length >= 1 && urls.every(u => u.items.includes('MX67-HW')), JSON.stringify(urls));
+    urls.length >= 1 && urls.every(u => hasItem(u.items, 'MX67') && !hasItem(u.items, 'MX67-HW')), JSON.stringify(urls));
 }
 {
   const { urls } = urlsFor('quote 3 MR46 with enterprise 5 year licenses');
@@ -133,19 +155,19 @@ function urlsFor(message) {
 {
   const { urls } = urlsFor('quote 3 MS130-24P without the licenses');
   check('(r2) "without THE licenses" is hardware-only',
-    urls.length >= 1 && urls.every(u => u.items.includes('MS130-24P-HW') && !u.items.includes('LIC-')), JSON.stringify(urls));
+    urls.length >= 1 && urls.every(u => hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW') && !u.items.includes('LIC-')), JSON.stringify(urls));
 }
 {
   const { urls } = urlsFor('quote 3 MS130-24P without 5 year licenses');
   check('(r2) "without 5 year licenses" is hardware-only',
-    urls.length >= 1 && urls.every(u => u.items.includes('MS130-24P-HW') && !u.items.includes('LIC-')), JSON.stringify(urls));
+    urls.length >= 1 && urls.every(u => hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW') && !u.items.includes('LIC-')), JSON.stringify(urls));
 }
 
 // Descriptive "has no licenses" must NOT flip a renewal to hardware-only
 {
   const { urls } = urlsFor('customer has no licenses currently please quote renewals for 3 MS130-24P');
   check('(r2) descriptive "has no licenses" keeps renewal license-only',
-    urls.length >= 1 && urls.every(u => !u.items.includes('MS130-24P-HW')), JSON.stringify(urls));
+    urls.length >= 1 && urls.every(u => !hasItem(u.items, 'MS130-24P') && !hasItem(u.items, 'MS130-24P-HW')), JSON.stringify(urls));
 }
 
 // Comma-stranded trailing intent clause

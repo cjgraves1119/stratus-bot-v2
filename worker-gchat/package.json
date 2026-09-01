@@ -4,6 +4,6 @@
   "description": "Stratus AI Google Chat Bot - Cisco/Meraki quoting assistant",
   "private": true,
   "devDependencies": {
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.122.0"
   }
 }

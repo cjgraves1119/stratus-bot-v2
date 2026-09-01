@@ -98,9 +98,9 @@ export function registerMessageHandlers(handlers) {
  * @returns {Function} Unlisten function
  */
 export function onMessage(type, callback) {
-  const listener = (message) => {
+  const listener = (message, sender) => {
     if (message.type === type) {
-      callback(message);
+      callback(message, sender);
     }
   };
   chrome.runtime.onMessage.addListener(listener);

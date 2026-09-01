@@ -1,179 +1,161 @@
-# Releasing the Stratus AI Chrome Extension (self-hosted auto-update)
+# Stratus AI extension release process
 
-The extension is **not** on the Chrome Web Store. It is self-hosted: a signed
-CRX3 and a Chrome update manifest are published to **GitHub Pages**, and every
-installed copy auto-updates from there with zero local-machine involvement.
+The canonical repository contains one editable extension source tree. Production,
+personal snapshot DEV, and team DEV are build targets from that source; they
+are not forks and must never be maintained as copied/minified extension folders.
 
-```
-manifest.json  ─ update_url ─►  https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml
-update-manifest.xml ─ codebase ─►  https://cjgraves1119.github.io/stratus-bot-v2/stratus-ai-<version>.crx
-```
+## Required toolchain
 
-Chrome polls the `update_url` on its own schedule (roughly every few hours).
-When the manifest advertises a higher `version` than what is installed, Chrome
-downloads the new `.crx`, verifies its signature, and updates silently.
+- Node.js `24.19.0`
+- pnpm `11.19.0`
+- `chrome-extension/pnpm-lock.yaml` with `pnpm install --frozen-lockfile --ignore-scripts`
 
-The pipeline:
+`package-lock.json` is intentionally absent. Build commands run the exact
+toolchain check before webpack.
 
-- `scripts/pack-crx.mjs` — the single source of truth. Reads `dist/` + an RSA
-  private key, derives the extension ID, writes a signed **CRX3** and a matching
-  `update-manifest.xml` into `release/`.
-- `.github/workflows/release-extension.yml` — builds, signs, and deploys the two
-  files to GitHub Pages on demand or on an `ext-v*` tag.
-- `scripts/build-crx.sh` — thin local wrapper (build + pack) for manual
-  inspection only. You normally never run it.
+## Atomic targets
 
----
+| Target | Branding | API origin | `update_url` | Permitted use |
+|---|---|---|---|---|
+| `prod` | Stratus AI | reviewed production gateway in `release-targets.cjs` | production Pages feed | reviewed production release |
+| `snapshot-dev` | Stratus AI (DEV) | reviewed personal DEV gateway | absent | local DEV testing and artifact lineage evidence only |
+| `team-dev` | Stratus AI (TEAM DEV) | explicit reviewed team origin | absent | future sanitized team package |
 
-## The signing key controls the extension ID
+One named target selects API origin, runtime environment, branding, host
+permission, and update behavior together. Legacy `STRATUS_API_BASE` and
+`STRATUS_ENV` overrides fail closed because they could mix those decisions.
+There is intentionally no ambiguous `pnpm dev` shortcut. Use the explicitly
+named `pnpm run dev:snapshot` only for reviewed personal DEV work, or
+`pnpm run dev:team` after the separate team gateway has been approved.
 
-The extension ID is derived from the **public half of the signing key**:
-the first 16 bytes of `SHA-256(SubjectPublicKeyInfo DER)`, with each hex nibble
-mapped `0-f → a-p`.
+The team DEV gateway is not yet authoritative. `APPROVED_TEAM_DEV_API_BASES` is
+therefore empty, so `pnpm run build:team-dev` intentionally fails. A future PR
+must add the reviewed team gateway origin to that allowlist. The build still
+requires the same origin through `STRATUS_TEAM_DEV_API_BASE` and rejects the
+production origin. Do not infer that the historical `it-262` host is the team
+gateway.
 
-The stable ID for this extension is:
-
-```
-haangicfjfkenoilhdadbnljcacighih
-```
-
-That ID only comes from the **one original signing key**. As long as CI signs
-with that key:
-
-- the published ID stays `idkfe…`,
-- `update-manifest.xml` advertises updates for the already-installed extension,
-- everyone auto-updates.
-
-**If that key is ever lost, the ID changes.** A new key produces a different ID,
-which Chrome treats as a different extension — existing installs will *not*
-auto-update to it. Recovery then requires a **one-time manual reinstall** by each
-user (drag the new `.crx` into `chrome://extensions` once). So: **back up the key.**
-
-> The packer prints a non-fatal warning whenever the derived ID is not `idkfe…`
-> (e.g. when you sign with a throwaway test key locally). In CI that warning
-> means the wrong secret is configured — fix it before shipping.
-
----
-
-## (a) One-time setup
-
-### 1. Add the signing key as a repo secret
-
-From a checkout that has the **existing** signing key PEM (the one that yields
-`idkfe…`), base64-encode it:
-
-```sh
-base64 -i key.pem | pbcopy        # macOS, copies to clipboard
-# or: base64 -i key.pem            # then copy the output
-```
-
-Then in GitHub: **Settings → Secrets and variables → Actions → New repository
-secret**
-
-- **Name:** `EXT_SIGNING_KEY`
-- **Value:** the base64 string from above
-
-The workflow decodes this back to a PEM at runtime, signs with it, and deletes
-it. The job **fails fast** if the secret is missing or is not a valid private
-key PEM.
-
-> Don't have the original key? Then you've lost the stable ID. Generate a fresh
-> one with `openssl genrsa 2048 > key.pem`, store it as the secret, and accept
-> that the published ID will change to whatever that key derives (run the packer
-> once to see it) — every user must reinstall once. Update the `EXPECTED_ID`
-> constant in `scripts/pack-crx.mjs` and the ID in this doc to the new value.
-
-### 2. Enable GitHub Pages with the Actions source
-
-GitHub: **Settings → Pages → Build and deployment → Source = "GitHub Actions"**.
-
-Do **not** pick "Deploy from a branch" — this pipeline publishes via the Pages
-deployment action, which requires the "GitHub Actions" source. The repo must be
-public (or the org must have Pages enabled for private repos) for Chrome to
-reach the files unauthenticated.
-
-A `github-pages` environment is created automatically the first time the
-workflow deploys.
-
----
-
-## (b) Per release
-
-1. **Bump the version** in `chrome-extension/manifest.json` (e.g. `1.12.3` →
-   `1.12.4`). Chrome only updates to a strictly higher version, so this is
-   required every release.
-2. **Merge to `main`** (the version bump must be on the branch CI checks out).
-3. **Trigger the release**, either:
-   - **Actions → "Release Extension (CRX3 → Pages)" → Run workflow**, or
-   - push a tag: `git tag ext-v1.12.4 && git push origin ext-v1.12.4`.
-
-CI then builds, signs the CRX3, regenerates `update-manifest.xml` (with the real
-ID + the new version + the Pages codebase URL), and publishes **only** those two
-files to Pages. Installed extensions pick up the update on Chrome's next poll
-(force it sooner via `chrome://extensions` → **Update**).
-
-Verify after deploy:
-
-```sh
-curl -s https://cjgraves1119.github.io/stratus-bot-v2/update-manifest.xml
-# appid should be haangicfjfkenoilhdadbnljcacighih and version should match.
-```
-
----
-
-## (c) First-time install (once per machine)
-
-Auto-update only applies to an already-installed extension, so each user
-installs once by hand:
-
-1. Open `https://cjgraves1119.github.io/stratus-bot-v2/stratus-ai-<version>.crx`
-   in Chrome to download the `.crx` (use the current version from the manifest).
-2. Open `chrome://extensions`, enable **Developer mode** (top-right).
-3. **Drag the downloaded `.crx` file onto the `chrome://extensions` page** and
-   confirm. (Double-clicking the file is blocked by Chrome; drag-and-drop works.)
-
-After that, every future release auto-updates — no further manual steps.
-
----
-
-## Local inspection (optional, not a release path)
-
-To produce a `.crx` locally for inspection (it will have a *different* ID
-because you're not using the production key):
+## Build commands
 
 ```sh
 cd chrome-extension
-openssl genrsa 2048 > /tmp/test-key.pem
-npm run build
-EXT_SIGNING_KEY_PEM_PATH=/tmp/test-key.pem npm run pack:crx
-# or the all-in-one wrapper:
-npm run build:crx -- --key /tmp/test-key.pem
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm run build:prod
+pnpm run build:snapshot-dev
+pnpm run test:all
 ```
 
-Outputs land in `chrome-extension/release/` (gitignored). The CRX3 begins with
-the bytes `Cr24` followed by format version `3`.
+`build-dev.sh` is a repository-local wrapper for `build:snapshot-dev`. It does
+not copy into an installed extension, another project, or a browser profile.
 
----
+Production and team DEV builds omit source maps. The snapshot target retains
+source maps solely so reviewed personal DEV source can be compared with the
+installed evidence artifact. Snapshot DEV also removes the production
+`update_url`; that intentional manifest safety delta means a post-reconciliation
+snapshot is not expected to be byte-identical to the installed manifest.
 
-## Caveats / risks
+## Release gates
 
-- **Windows & managed Chrome block off-store extensions.** Self-hosted CRX
-  auto-update works fine on **macOS** (and Linux), but on **Windows** and any
-  enterprise-managed Chrome, off-store extensions are blocked unless allow-listed
-  via enterprise policy (`ExtensionInstallAllowlist` / `ExtensionInstallForcelist`
-  + a policy `update_url`). Stratus is macOS-first, so this is acceptable, but
-  Windows users need a policy or they cannot install/update.
-- **`CRX_REQUIRED_PROOF_MISSING`** can appear if a user tries to install the
-  `.crx` without Developer mode enabled (Chrome wants a Web Store signature for
-  normal installs). The drag-and-drop + Developer-mode flow above avoids it.
-- **Update latency is Chrome's call.** Chrome decides when to poll the
-  `update_url` (typically a few hours). Users can force it from
-  `chrome://extensions`.
-- **The key is the whole game.** Lose `EXT_SIGNING_KEY` and you lose the stable
-  ID (forces a one-time reinstall for everyone). Leak it and someone else can
-  publish a CRX that Chrome would accept as an update for this ID. Keep it only
-  in the GitHub Actions secret and a secure backup; never commit it
-  (`*.pem` is gitignored).
-- **Pages serves the whole site.** The workflow stages a directory containing
-  *only* `update-manifest.xml` + the `.crx`, so nothing else from the repo is
-  exposed via Pages by this deploy.
+Before any package is generated, all of these must be true:
+
+1. The exact source commit has been reviewed and all maintained tests, Worker
+   dry-runs, and the secret scan are green.
+2. The version in `package.json` and the canonical production `manifest.json`
+   matches the release version.
+3. The checkout is clean and exactly equals a full 40-character reviewed commit.
+4. An exact versioned tag points to that commit:
+   - production: `ext-v<version>`
+   - team DEV: `ext-team-dev-v<version>`
+5. For team DEV, a separate gateway is reviewed and committed to the allowlist.
+6. Production signing uses the key that derives the stable self-hosted ID
+   `haangicfjfkenoilhdadbnljcacighih`.
+
+Repository policy is part of the release gate, not an assumption: protect
+`main`, require the source-build, complete test, sync, and gitleaks checks,
+disable force-pushes, protect `ext-v*` tags from movement/deletion, and require
+reviewers on both `github-pages` and `cloudflare-production` environments. The
+manual workflows additionally require the exact current `main` tip; a branch or
+older repository commit cannot be released or deployed.
+
+Configure `CLOUDFLARE_API_TOKEN` only as a secret on the protected
+`cloudflare-production` environment, not as a repository-wide secret. It is
+referenced only by the three post-preflight deployment steps.
+
+The historical Chrome Web Store ID `idkfeabnpcnpklbgknibidbgjcpbcmkh`
+belongs to an older distribution channel. The unpacked local ID
+`fkopkkoaedjgkcdhgblkoaaicmkpnhhb` is path/key dependent and is not a release
+identity. Neither should replace the stable self-hosted ID.
+
+## Reproducible sanitized artifacts
+
+`scripts/release-artifact.mjs` is shared by production and team packaging. It:
+
+- accepts only the reviewed extension artifact allowlist;
+- rejects symlinks, source maps, environments, dependencies, Wrangler state,
+  backups, existing packages, and unexpected paths;
+- requires every runtime entry bundle, HTML shell, helper, style, and icon;
+- rematerializes `node_modules` from the frozen offline pnpm store before build;
+- writes the ZIP with reviewed Node code using sorted members, STORE mode,
+  normalized Unix file modes, and a fixed timestamp rather than a host `zip`;
+- embeds `STRATUS-PROVENANCE.json` with version, target, exact commit/tag,
+  API origin, toolchain, lockfile hash, file inventory, and sanitized tree hash;
+- emits a provenance sidecar and SHA-256 checksum manifest.
+
+Synthetic tests exercise exclusion, provenance, and two-run ZIP determinism.
+They do not generate or publish a real Stratus package.
+
+Both package entry points first verify an exact clean commit/tag and then invoke
+the named build themselves. They recheck Git after the build and never stamp a
+pre-existing or ignored `dist/` directory as belonging to the reviewed commit.
+
+`pnpm run test:all` prints the complete maintained extension-test inventory
+before running it. The production workflow uses that dynamic inventory so a new
+test cannot be silently omitted from the release gate.
+
+For a future approved team DEV package:
+
+```sh
+STRATUS_TEAM_DEV_API_BASE=https://reviewed-team-gateway.example.workers.dev \
+  pnpm run build:team-dev
+STRATUS_RELEASE_COMMIT=<full-reviewed-sha> \
+STRATUS_RELEASE_TAG=ext-team-dev-v<version> \
+STRATUS_TEAM_DEV_API_BASE=https://reviewed-team-gateway.example.workers.dev \
+  pnpm run package:team-dev
+```
+
+The placeholders are deliberate. Do not run this until the source and gateway
+gates are met. Never package the installed/minified extension folder.
+
+## Production workflow
+
+The `Release Extension` GitHub Actions workflow is manual-only. It requires the
+exact current protected-`main` SHA and matching immutable `ext-v<version>` tag.
+It runs in three boundaries:
+
+1. a no-secret verifier reruns the full extension and Worker suites, two-build
+   comparison, catalog sync, all three Wrangler dry-runs, and gitleaks;
+2. a second no-secret runner rebuilds and uploads only a sanitized, hash-bound
+   unsigned payload plus receipt;
+3. a fresh protected-environment runner verifies the transferred payload, then
+   exposes the signing key only to the built-in-Node CRX signer. No package
+   manager, webpack loader, or build dependency runs on that signing runner.
+
+The signer verifies the stable extension ID and checksums, then stages only:
+
+- `stratus-ai-<version>.crx`
+- `update-manifest.xml`
+- `stratus-ai-<version>.provenance.json`
+- `SHA256SUMS`
+
+The protected tag ruleset and environment reviewer settings are external
+controls and must be confirmed before a production GO. Never move an existing
+release tag or use the workflow to roll back the published version. A workflow
+run, build, or dry-run is not proof that a browser updated; installed browser
+state requires a separate authorized verification.
+
+Configure `EXT_SIGNING_KEY` specifically as a `github-pages` environment
+secret, never as a repository-wide Actions secret, and retain only a secure
+offline backup. Checkout credentials are not persisted on the signing runner.
+The packer hard-fails if the key derives any ID other than the stable production
+ID. Every third-party Action is pinned to a reviewed full commit SHA; deliberate
+upgrades must resolve and review a new SHA rather than restoring a floating tag.

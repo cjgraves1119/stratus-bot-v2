@@ -1,4 +1,4 @@
-name: Worker Build Check
+name: Source Build Checks
 
 # Pre-merge build validation. Catches syntax that `node -c` tolerates but
 # Cloudflare's wrangler/esbuild rejects (e.g. inline backticks inside a
@@ -7,7 +7,7 @@ name: Worker Build Check
 #
 # Triggers:
 #   - pull_request to main → block PR check until all three workers build
-#   - push to main → defense in depth before Deploy Stratus Bots runs
+#   - push to main → defense in depth before any later manual deployment
 #
 # No CLOUDFLARE_API_TOKEN required: `wrangler deploy --dry-run --outdir`
 # bundles to disk without uploading.
@@ -19,7 +19,82 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  local-secret-scan:
+    name: Built-in secret-pattern scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Scan every tracked and unignored candidate without printing values
+        run: node scripts/scan-secrets.mjs
+
+  worker-tests:
+    name: Complete maintained Worker suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Enumerate and run all non-live Worker tests with a scrubbed environment
+        run: node scripts/run-maintained-worker-tests.mjs
+
+  extension-check:
+    name: Extension tests + reproducible build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Set up exact pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+          test "$(pnpm --version)" = "11.19.0"
+
+      - name: Install from the sole extension lockfile
+        working-directory: chrome-extension
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Enumerate and run the complete extension suite
+        working-directory: chrome-extension
+        run: pnpm run test:all
+
+      - name: Build production twice and compare every byte
+        working-directory: chrome-extension
+        run: |
+          pnpm run build:prod
+          cp -a dist /tmp/stratus-extension-prod-first
+          pnpm run build:prod
+          diff -qr /tmp/stratus-extension-prod-first dist
+          node -e "const m=require('./dist/manifest.json'); if(m.name!=='Stratus AI'||!m.update_url) process.exit(1)"
+          test -z "$(find dist -type f -name '*.map' -print)"
+
+      - name: Build and validate the non-releasing snapshot target
+        working-directory: chrome-extension
+        run: |
+          pnpm run build:snapshot-dev
+          node -e "const m=require('./dist/manifest.json'); if(m.name!=='Stratus AI (DEV)'||Object.hasOwn(m,'update_url')) process.exit(1)"
+
   build-check:
     name: Wrangler dry-run (${{ matrix.worker }})
     runs-on: ubuntu-latest
@@ -28,19 +103,28 @@ jobs:
       matrix:
         worker: [worker, worker-gchat, worker-gateway]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: '20'
+          persist-credentials: false
 
-      - name: Install ${{ matrix.worker }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+
+      - name: Require a reproducible dependency lock for ${{ matrix.worker }}
         run: |
-          cd ${{ matrix.worker }} && (npm install --omit=dev || npm install --omit=dev --no-package-lock)
+          test -f ${{ matrix.worker }}/package-lock.json || {
+            echo "::error::${{ matrix.worker }}/package-lock.json is required"
+            exit 1
+          }
+
+      - name: Install ${{ matrix.worker }} from its lockfile
+        working-directory: ${{ matrix.worker }}
+        run: npm ci --include=dev --ignore-scripts
 
       - name: Wrangler deploy --dry-run (${{ matrix.worker }})
-        run: |
-          cd ${{ matrix.worker }} && npx wrangler deploy --dry-run --outdir /tmp/dry-run-${{ matrix.worker }}
+        working-directory: ${{ matrix.worker }}
+        run: npx --no-install wrangler deploy --dry-run --outdir /tmp/dry-run-${{ matrix.worker }}
 
       - name: Confirm bundle was produced
         run: |

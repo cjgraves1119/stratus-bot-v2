@@ -168,8 +168,8 @@ MR_EDITION: Enterprise`;
   check('Option 1 does NOT include EOL hardware (no MX64-HW in renewal cart)',
     !!msg && !/MX64-HW/.test(msg),
     `msg=${msg}`);
-  check('Option 2 replaces MX64 hardware with MX67-HW + LIC-MX67-SEC-*',
-    !!msg && /Option 2 - Hardware Refresh/.test(msg) && /MX67-HW/.test(msg) && /LIC-MX67-SEC-3YR/.test(msg),
+  check('Option 2 replaces MX64 hardware with active order SKU MX67 + LIC-MX67-SEC-*',
+    !!msg && /Option 2 - Hardware Refresh/.test(msg) && /[?&,]item=MX67,|[?,]item=[^\n]*\bMX67,/.test(msg) && /LIC-MX67-SEC-3YR/.test(msg) && !/MX67-HW/.test(msg),
     `msg=${msg}`);
   check('Option 2 does NOT contain the EOL MX64 license',
     !!msg && !(msg.split('Option 2')[1] || '').includes('LIC-MX64-'),
