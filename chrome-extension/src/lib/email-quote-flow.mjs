@@ -224,11 +224,7 @@ function committedLicenseSkuTier(sku) {
 function committedHardwareRowTier(line) {
   const raw = String(line?.tier || '').trim();
   if (raw.toLowerCase() === 'none') return 'NONE';
-  let tier = normalizedCommittedLicenseTier(raw);
-  const sku = canonicalOrderCompositionSku(line?.sku);
-  // Meraki-managed CW916x uses the same LIC-MR-ADV-*Y family as MR. Other CW
-  // families retain the existing Enterprise-only verifier contract.
-  if (tier === 'A' && /^CW(?!916\d)/.test(sku)) tier = 'ENT';
+  const tier = normalizedCommittedLicenseTier(raw);
   // A blank row is deliberately unscoped here. The standalone composition
   // verifier historically accepts any otherwise valid family companion when
   // no reviewed tier was supplied; verifyStratusOrderUrlOptions applies its

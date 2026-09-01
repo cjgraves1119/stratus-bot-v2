@@ -142,9 +142,11 @@ test('reviewer reproduction: multiline C9200L Advanced does not upgrade default 
   }
 });
 
-test('active Webex V2 adapter preserves Advanced for MR and Meraki-managed CW916x', () => {
+test('active Webex V2 adapter preserves Advanced for MR and every CW access point', () => {
   assert.equal(worker.hasMsAdvancedTierIntent('3 MR44 advanced'), true);
   assert.equal(worker.hasMsAdvancedTierIntent('3 CW9164I advanced'), true);
+  assert.equal(worker.hasMsAdvancedTierIntent('3 CW9172I advanced'), true);
+  assert.equal(worker.hasMsAdvancedTierIntent('1 CW9800 advanced'), false);
   assert.equal(worker.normalizeRequestedTier('A', '3 MR44 advanced'), 'A');
   assert.equal(worker.normalizeRequestedTier('A', '3 CW9164I advanced'), 'A');
 
@@ -171,13 +173,13 @@ test('active Webex V2 adapter preserves Advanced for MR and Meraki-managed CW916
   assert.equal(/LIC-ENT/.test(joined), false);
 });
 
-test('active V3 prompts teach Advanced for MR and Meraki-managed CW916x', () => {
+test('active V3 prompts teach Advanced for MR and every CW access point', () => {
   for (const rel of ['../worker/src/index.js', 'src/index.js']) {
     const source = fs.readFileSync(path.resolve(__dirname, rel), 'utf8');
     assert.match(source, /const CF_CLASSIFIER_PROMPT_V3_ACTIVE =/);
-    assert.match(source, /MR ADVANCED TIER RULE:/);
-    assert.match(source, /Meraki-managed CW916x access point/);
-    assert.match(source, /Other CW families retain their existing rules/);
+    assert.match(source, /MERAKI AP ADVANCED TIER RULE:/);
+    assert.match(source, /Every MR and CW access point/);
+    assert.match(source, /CW9800 is a controller, not an AP/);
     assert.match(source, /content: CF_CLASSIFIER_PROMPT_V3_ACTIVE/);
   }
 });
@@ -200,19 +202,23 @@ test('chat-tab guard stays closed without both draft-only and explicit no-write 
   assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 MR44 Advanced for 3 years. Draft only.'), false);
   assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 MR44 Advanced Security for 3 years. Draft only. Do not create any CRM record.'), false);
   assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 CW9164 Advanced for 3 years. Draft only. Do not create any CRM record.'), true);
+  assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 CW9172I Advanced for 3 years. Draft only. Do not create any CRM record.'), true);
+  assert.equal(gchat.isExplicitMrAdvancedDraftOnlyRequest('Quote 1 CW9800 Advanced for 3 years. Draft only. Do not create any CRM record.'), false);
 });
 
-test('CRM auto-pair tier is explicit and scoped to MR / Meraki-managed CW916x hardware', () => {
+test('CRM auto-pair tier is explicit and scoped to MR / CW access-point hardware', () => {
   assert.equal(gchat.requestedTierForHardware('MR44', { license_tier: 'A' }), 'A');
   assert.equal(gchat.requestedTierForHardware('MR44-HW', {}, 'Quote MR44 with Advanced licensing'), 'A');
   assert.equal(gchat.requestedTierForHardware('MR44', {}, 'Quote MR44 with Advanced Security'), null);
   assert.equal(gchat.requestedTierForHardware('CW9164I', { license_tier: 'A' }), 'A');
+  assert.equal(gchat.requestedTierForHardware('CW9172I-RTG', { license_tier: 'A' }), 'A');
+  assert.equal(gchat.requestedTierForHardware('CW9800', { license_tier: 'A' }), null);
   assert.equal(gchat.requestedTierForHardware('MS130-24P', { license_tier: 'A' }), null);
 });
 
 test('active CRM prompt, schema, and chat waterfall enforce MR Advanced mapping', () => {
   const source = fs.readFileSync(path.join(__dirname, 'src/index.js'), 'utf8');
-  assert.match(source, /Explicit Advanced\/ADV on MR or CW916x uses \*\*LIC-MR-ADV-\{term\}Y\*\*/);
+  assert.match(source, /Explicit Advanced\/ADV on MR or CW access points uses \*\*LIC-MR-ADV-\{term\}Y\*\*/);
   assert.match(source, /license_tier:\"A\"/);
   assert.doesNotMatch(source, /MR Enterprise License — UNIVERSAL across all MR APs/);
   assert.match(source, /deterministic-mr-advanced-draft/);

@@ -3116,7 +3116,7 @@ export default function ChatPanel({
     // A reviewed row-local tier wins over the stale/global tier recorded on
     // the original message. The verifier already evaluates every committed
     // row's tier; keeping the old global ENT requirement after changing one
-    // CW916x row to Advanced rejects the correct LIC-MR-ADV cart.
+    // CW access-point row to Advanced rejects the correct LIC-MR-ADV cart.
     const hasRowLocalTier = (Array.isArray(committedRows) ? committedRows : []).some((row) => (
       !/^LIC-/i.test(String(row?.sku || ''))
       && !['', 'none'].includes(String(row?.tier || '').trim().toLowerCase())

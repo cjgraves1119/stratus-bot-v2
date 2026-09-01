@@ -48,14 +48,15 @@ test('different ENT and SEC tiers remain unpaired and force review on the licens
   ]).map(({ kind }) => kind), ['none', 'mismatch']);
 });
 
-test('shared AP licenses review aggregate MR/CW916x coverage while legacy Z stays out', () => {
+test('shared AP licenses review aggregate MR/all-CW coverage while legacy Z stays out', () => {
   const enterprise = licensePairReviewForRows([
     { sku: 'MR44', qty: 2 },
     { sku: 'CW9164I', qty: 1 },
-    { sku: 'LIC-ENT-3YR', qty: 3 },
+    { sku: 'CW9172I', qty: 2 },
+    { sku: 'LIC-ENT-3YR', qty: 5 },
   ]);
-  assert.deepEqual(enterprise.map(({ kind }) => kind), ['needs_review', 'needs_review', 'needs_review']);
-  assert.equal(enterprise[2].hardwareQty, 3);
+  assert.deepEqual(enterprise.map(({ kind }) => kind), ['needs_review', 'needs_review', 'needs_review', 'needs_review']);
+  assert.equal(enterprise[3].hardwareQty, 5);
 
   const advanced = licensePairReviewForRows([
     { sku: 'CW9164I', qty: 1, tier: 'advanced' },
@@ -63,17 +64,18 @@ test('shared AP licenses review aggregate MR/CW916x coverage while legacy Z stay
   ]);
   assert.deepEqual(advanced.map(({ kind }) => kind), ['paired', 'paired']);
 
+  const wifi7Advanced = licensePairReviewForRows([
+    { sku: 'CW9172I', qty: 2, tier: 'advanced' },
+    { sku: 'LIC-MR-ADV-3Y', qty: 2, licenseIntent: 'paired' },
+  ]);
+  assert.deepEqual(wifi7Advanced.map(({ kind }) => kind), ['paired', 'paired']);
+
   assert.deepEqual(licensePairReviewForRows([
     { sku: 'CW9172I', qty: 1 },
     { sku: 'LIC-ENT-3YR', qty: 1 },
     { sku: 'Z3', qty: 1 },
     { sku: 'LIC-Z3-ENT-3YR', qty: 1 },
-  ]), [
-    { kind: 'none' },
-    { kind: 'none' },
-    { kind: 'none' },
-    { kind: 'none' },
-  ]);
+  ]).map(({ kind }) => kind), ['needs_review', 'needs_review', 'none', 'none']);
 });
 
 test('pasted AP cart requires license-use review and rejects stale paired intent after a tier change', () => {

@@ -96,13 +96,15 @@ test('default MR44 without advanced still emits LIC-ENT-*YR', () => {
   }
 });
 
-test('Meraki-managed CW916x supports MR Advanced while keeping ENT as default', () => {
-  assert.deepEqual(skusOf(gchatLicenses('CW9164I', null)), ['LIC-ENT-1YR', 'LIC-ENT-3YR', 'LIC-ENT-5YR']);
-  assert.deepEqual(skusOf(gchatLicenses('CW9164I', 'A')), ['LIC-MR-ADV-1Y', 'LIC-MR-ADV-3Y', 'LIC-MR-ADV-5Y']);
-  assert.deepEqual(skusOf(workerLicenses('CW9164I', 'A')), ['LIC-MR-ADV-1Y', 'LIC-MR-ADV-3Y', 'LIC-MR-ADV-5Y']);
-  const values = licenseTierOptionsForSku('CW9164I').map(({ value }) => value);
-  assert.deepEqual(values, ['', 'enterprise', 'advanced', 'none']);
-  assert.deepEqual(licenseTierOptionsForSku('CW9172I').map(({ value }) => value), ['', 'enterprise', 'none']);
+test('every CW access point supports MR Advanced while keeping ENT as default', () => {
+  for (const sku of ['CW9164I', 'CW9172I', 'CW9176D1', 'CW9179F']) {
+    assert.deepEqual(skusOf(gchatLicenses(sku, null)), ['LIC-ENT-1YR', 'LIC-ENT-3YR', 'LIC-ENT-5YR'], `${sku} default`);
+    assert.deepEqual(skusOf(gchatLicenses(sku, 'A')), ['LIC-MR-ADV-1Y', 'LIC-MR-ADV-3Y', 'LIC-MR-ADV-5Y'], `${sku} gchat advanced`);
+    assert.deepEqual(skusOf(workerLicenses(sku, 'A')), ['LIC-MR-ADV-1Y', 'LIC-MR-ADV-3Y', 'LIC-MR-ADV-5Y'], `${sku} worker advanced`);
+    assert.deepEqual(licenseTierOptionsForSku(sku).map(({ value }) => value), ['', 'enterprise', 'advanced', 'none'], `${sku} editor`);
+  }
+  assert.equal(gchatLicenses('CW9800', 'A'), null, 'controller remains license-exempt');
+  assert.deepEqual(licenseTierOptionsForSku('CW9800').map(({ value }) => value), ['']);
 });
 
 test('MR Advanced verifier rejects ENT and accepts LIC-MR-ADV', () => {

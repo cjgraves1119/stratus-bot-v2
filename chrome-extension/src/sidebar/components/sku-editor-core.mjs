@@ -332,12 +332,12 @@ export function licenseTierOptionsForSku(sku) {
     case 'mr':
       return pick('enterprise', 'advanced', 'none');
     case 'cw':
-      // CW916x-MR runs in the Meraki wireless family and supports the same
-      // Enterprise / MR Advanced co-term choices as MR hardware. Keep other
-      // CW families on their existing licensing surface.
-      return /^CW916\d/i.test(String(sku || '').trim())
+      // Every CW access point uses the shared Meraki co-term AP licensing
+      // family: Enterprise by default, with MR Advanced available explicitly.
+      // CW9800 is a controller rather than an access point and stays outside.
+      return /^CW(?!9800)\d/i.test(String(sku || '').trim())
         ? pick('enterprise', 'advanced', 'none')
-        : pick('enterprise', 'none');
+        : [byValue['']];
     case 'ms':
     case 'c9':
       return pick('advanced', 'none');
@@ -388,7 +388,7 @@ export function effectivePairableHardwareTier(row) {
   const family = licenseFamilyForSku(row?.sku);
   const selected = String(row?.tier || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   const sharedAp = family === 'mr'
-    || (family === 'cw' && /^CW916\d/i.test(String(row?.sku || '').trim()));
+    || (family === 'cw' && /^CW(?!9800)\d/i.test(String(row?.sku || '').trim()));
   if (sharedAp) {
     if (!selected || selected === 'enterprise' || selected === 'ent') return 'enterprise';
     if (selected === 'advanced' || selected === 'advantage' || selected === 'adv' || selected === 'a') return 'advanced';
@@ -428,7 +428,7 @@ function uniqueReviewSkus(rows, indexes) {
  * Pairing is conservative:
  * - MX and Catalyst 9K device-specific licences participate;
  * - shared LIC-ENT / LIC-MR-ADV rows pair only with the aggregate quantity of
- *   MR and Meraki-managed CW916x hardware at the matching tier;
+ *   MR and CW access-point hardware at the matching tier;
  * - device identity and effective tier must match;
  * - duplicate rows aggregate, but multiple distinct licence products (for
  *   example mixed 1YR and 3YR terms) are a mismatch rather than one pair;
@@ -447,7 +447,7 @@ export function licensePairReviewForRows(rows, { allowHaLicenseRatio = false } =
     const tier = effectivePairableHardwareTier(row);
     if (!tier) return;
     const family = licenseFamilyForSku(sku);
-    const scope = family === 'mr' || (family === 'cw' && /^CW916\d/.test(sku))
+    const scope = family === 'mr' || (family === 'cw' && /^CW(?!9800)\d/.test(sku))
       ? 'shared-ap'
       : 'device';
     let group = hardwareGroups.find((candidate) => (
