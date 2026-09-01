@@ -266,7 +266,7 @@ function createSyntheticPreparedCrxFixture({ provenanceOverrides = {} } = {}) {
 
 test('canonical config uses one lockfile, exact toolchain, and production branding', () => {
   assert.equal(packageJson.version, canonicalManifest.version);
-  assert.equal(packageJson.version, '1.29.12');
+  assert.equal(packageJson.version, '1.29.13');
   assert.equal(packageJson.packageManager, 'pnpm@11.19.0');
   assert.deepEqual(packageJson.engines, { node: '24.19.0', pnpm: '11.19.0' });
   assert.equal(canonicalManifest.name, 'Stratus AI');

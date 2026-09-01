@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   blankQuoteEditorRows,
+  quoteTextFromEditorRows,
   quoteEditorHasSkuInput,
   quoteEditorRowsFromIntake,
 } from './src/sidebar/components/sku-editor-core.mjs';
@@ -52,6 +53,24 @@ test('Gmail intake preserves per-row hardware-only intent and fails closed on ma
   assert.deepEqual(quoteEditorRowsFromIntake([
     { status: 'resolved', sku: 'MX67', qty: 1, tier: 'BOGUS' },
   ]), []);
+});
+
+test('manual row order is preserved in the canonical quote request', () => {
+  const ordered = quoteTextFromEditorRows([
+    { sku: 'MR44', qty: 2 },
+    { sku: 'MX67', qty: 1 },
+    { sku: 'LIC-ENT-3YR', qty: 4 },
+  ]);
+  assert.equal(ordered.ok, true, ordered.error);
+  assert.equal(ordered.text, '2 MR44\n1 MX67\n4 LIC-ENT-3YR');
+
+  const moved = quoteTextFromEditorRows([
+    { sku: 'LIC-ENT-3YR', qty: 4 },
+    { sku: 'MR44', qty: 2 },
+    { sku: 'MX67', qty: 1 },
+  ]);
+  assert.equal(moved.ok, true, moved.error);
+  assert.equal(moved.text, '4 LIC-ENT-3YR\n2 MR44\n1 MX67');
 });
 
 test('manual opening and Gmail population contain no quote, chat, or CRM execution', () => {
