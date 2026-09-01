@@ -247,6 +247,27 @@ function preserveMsAdvancedTier(parsed, rawText) {
   return parsed;
 }
 
+function isExplicitMrAdvancedDraftOnlyRequest(text) {
+  const raw = String(text || '');
+  if (!/\bMR\d+[A-Z0-9-]*\b/i.test(raw)) return false;
+  if (/\bADVANCED\s+SECURITY\b/i.test(raw)) return false;
+  if (!/\b(?:ADVANCED|ADV)\s*(?:LICENSE|LICENSING|LICENCE|LIC)?\b/i.test(raw)) return false;
+  if (!/\bDRAFT\s+ONLY\b/i.test(raw)) return false;
+  return /\b(?:DO\s+NOT|DON'T|NO)\s+(?:CREATE|WRITE|SAVE|SUBMIT)\b[\s\S]{0,80}\b(?:CRM|ZOHO|RECORD)\b/i.test(raw);
+}
+
+function requestedTierForHardware(rawSku, toolInput, rawPrompt = '') {
+  if (!/^MR\d/i.test(String(rawSku || ''))) return null;
+  const explicitTier = String(toolInput?.license_tier || '').toUpperCase();
+  if (['A', 'ADV', 'ADVANCED'].includes(explicitTier)) return 'A';
+  const prompt = String(rawPrompt || '');
+  if (/\bADVANCED\s+SECURITY\b/i.test(prompt)) return null;
+  const sku = String(rawSku || '').toUpperCase().replace(/-HW$/, '');
+  const escaped = sku.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const mrAdvanced = new RegExp(`(?:\\b${escaped}\\b[\\s\\S]{0,48}\\b(?:ADVANCED|ADV)\\b|\\b(?:ADVANCED|ADV)\\b[\\s\\S]{0,48}\\b${escaped}\\b)`, 'i');
+  return mrAdvanced.test(prompt) ? 'A' : null;
+}
+
 // Kept IDENTICAL to worker/ (webex) so both engines produce the same quote for the same input.
 function normalizeRequestedTier(rawTier, rawText = '') {
   const raw = String(rawTier || '').toUpperCase().replace(/\s+/g, '').replace(/^SD-WAN$/, 'SDW');
@@ -18934,6 +18955,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
               if (expandedParsed?.data?.[0]) {
                 // Extract only the fields Claude needs to keep payload manageable
                 const full = expandedParsed.data[0];
+                const allQuotedItems = Array.isArray(full.Quoted_Items) ? full.Quoted_Items : [];
+                const quotedItemsPage = allQuotedItems.slice(0, 25);
                 const slim = {
                   id: full.id,
                   Subject: full.Subject,
@@ -18973,7 +18996,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   // Quoted_Items: slim down each line item to essential fields
                   // NOTE: id + product_id are REQUIRED for updates — Zoho rejects without item IDs
                   // and product_id is needed to build the Product_Name object for unchanged items
-                  Quoted_Items: (full.Quoted_Items || []).map(item => ({
+                  Quoted_Items: quotedItemsPage.map(item => ({
                     id: item.id,
                     product_id: item.Product_Name?.id,
                     Sequence_Number: item.Sequence_Number,
@@ -18989,7 +19012,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                     Net_Total: item.Net_Total
                   })),
                   _auto_expanded: true,
-                  _line_item_count: (full.Quoted_Items || []).length
+                  _line_item_count: allQuotedItems.length,
+                  _line_items_returned: quotedItemsPage.length,
+                  _line_item_start: 1,
+                  _line_item_end: quotedItemsPage.length,
+                  _line_items_has_more: quotedItemsPage.length < allQuotedItems.length,
+                  _line_items_next_start: quotedItemsPage.length < allQuotedItems.length ? quotedItemsPage.length + 1 : null
                 };
                 parsed.data[0] = { ...parsed.data[0], ...slim };
                 // Inject _url for narration
@@ -19023,7 +19051,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
       }
 
       case 'zoho_get_record': {
-        const { module_name, record_id, fields } = toolInput;
+        const { module_name, record_id, fields, line_item_start, line_item_limit } = toolInput;
         // For Quotes: Do NOT use ?fields= parameter — Zoho CRM v2 API strips subform data
         // (Quoted_Items) when fields are specified. Fetch full record and slim it down.
         if (module_name === 'Quotes') {
@@ -19032,6 +19060,11 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             const parsed = typeof fullResult === 'string' ? JSON.parse(fullResult) : fullResult;
             if (parsed?.data?.[0]) {
               const full = parsed.data[0];
+              const allQuotedItems = Array.isArray(full.Quoted_Items) ? full.Quoted_Items : [];
+              const requestedStart = Math.max(1, Math.floor(Number(line_item_start) || 1));
+              const requestedLimit = Math.min(50, Math.max(1, Math.floor(Number(line_item_limit) || 25)));
+              const quotedItemsPage = allQuotedItems.slice(requestedStart - 1, requestedStart - 1 + requestedLimit);
+              const returnedEnd = requestedStart + quotedItemsPage.length - 1;
               parsed.data[0] = {
                 id: full.id,
                 Subject: full.Subject,
@@ -19064,7 +19097,7 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                 Admin_Action: full.Admin_Action,
                 Cisco_Estimate_Status: full.Cisco_Estimate_Status,
                 Cisco_Quote_Status: full.Cisco_Quote_Status,
-                Quoted_Items: (full.Quoted_Items || []).map(item => ({
+                Quoted_Items: quotedItemsPage.map(item => ({
                   id: item.id,
                   product_id: item.Product_Name?.id,
                   Sequence_Number: item.Sequence_Number,
@@ -19079,7 +19112,12 @@ async function executeToolCall(toolName, toolInput, env, personId) {
                   Tax: item.Tax,
                   Net_Total: item.Net_Total
                 })),
-                _line_item_count: (full.Quoted_Items || []).length,
+                _line_item_count: allQuotedItems.length,
+                _line_items_returned: quotedItemsPage.length,
+                _line_item_start: requestedStart,
+                _line_item_end: quotedItemsPage.length ? returnedEnd : requestedStart - 1,
+                _line_items_has_more: returnedEnd < allQuotedItems.length,
+                _line_items_next_start: returnedEnd < allQuotedItems.length ? returnedEnd + 1 : null,
                 _url: `https://crm.zoho.com/crm/org647122552/tab/${module_name}/${full.id}`
               };
               return JSON.stringify(parsed);
@@ -22168,7 +22206,8 @@ async function executeToolCall(toolName, toolInput, env, personId) {
             // phantom 1Y license that was being added on top of an explicit
             // 3Y license (LIC-MS130-48-1Y appearing alongside the requested
             // LIC-MS130-48-3Y).
-            const licenseOptions = includeLicenses ? getLicenseSkus(rawSku) : null;
+            const requestedLicenseTier = requestedTierForHardware(rawSku, toolInput, env?.__USER_PROMPT_RAW || sourceText || '');
+            const licenseOptions = includeLicenses ? getLicenseSkus(rawSku, requestedLicenseTier) : null;
             console.log(`[COMPOUND] getLicenseSkus(${rawSku}): ${licenseOptions ? JSON.stringify(licenseOptions[0]) : 'null'}`);
             let resolvedLicSku = null;
             if (licenseOptions && licenseOptions.length > 0) {
@@ -24935,13 +24974,15 @@ const CRM_EMAIL_TOOLS = [
   },
   {
     name: 'zoho_get_record',
-    description: 'Get a specific Zoho CRM record by its ID. Returns full record details.',
+    description: 'Get a specific Zoho CRM record by its ID. Returns full record details. For Quotes, line items are returned in complete, numbered pages; use line_item_start and line_item_limit to retrieve later rows when _line_items_has_more is true. Never treat the last returned row as the last Quote row unless _line_items_has_more is false.',
     input_schema: {
       type: 'object',
       properties: {
         module_name: { type: 'string', description: 'CRM module API name' },
         record_id: { type: 'string', description: 'Record ID (numeric string)' },
-        fields: { type: 'string', description: 'Optional comma-separated fields to return' }
+        fields: { type: 'string', description: 'Optional comma-separated fields to return' },
+        line_item_start: { type: 'integer', minimum: 1, description: 'Quotes only: 1-based first line item to return (default 1)' },
+        line_item_limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Quotes only: number of line items to return (default 25, maximum 50)' }
       },
       required: ['module_name', 'record_id']
     }
@@ -25135,7 +25176,7 @@ const CRM_EMAIL_TOOLS = [
           items: {
             type: 'object',
             properties: {
-              sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes. For "MR licenses" use MR-ENT or LIC-ENT-{term}YR; never substitute MR46/MR44 hardware unless the user asked for AP hardware.' },
+              sku: { type: 'string', description: 'Hardware SKU for hardware quotes, or explicit license SKU / model-agnostic license alias for license-only quotes. Generic "MR licenses" use MR-ENT or LIC-ENT-{term}YR; explicit MR Advanced hardware uses the MR hardware SKU plus license_tier:"A". Never substitute MR46/MR44 hardware unless the user asked for AP hardware.' },
               qty: { type: 'number', description: 'Quantity (default 1)' },
               source_text: { type: 'string', description: 'REQUIRED whenever this line came from customer free text / an email rather than an explicit SKU the user typed: pass the customer\'s original wording for THIS line. Omit when the user typed the exact SKU.' }
             },
@@ -25147,6 +25188,7 @@ const CRM_EMAIL_TOOLS = [
         closing_date: { type: 'string', description: 'Optional YYYY-MM-DD close date, applied to BOTH the Deal Closing_Date and the Quote Valid_Till (they always match). Omit for the default (end of the current month, capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation" — pass the date the user confirmed.' },
         date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a close date that falls after the current Cisco fiscal quarter end. Never set it on your own.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        license_tier: { type: 'string', enum: ['A', 'ADV', 'ADVANCED'], description: 'Set only when the user explicitly requests Advanced licensing for MR hardware. The server maps it to LIC-MR-ADV-{term}Y. Do not use for generic MR or CW licensing.' },
         account_id: { type: 'string', description: 'Zoho Account record id. Pass ONLY when a specific already-reviewed Account is known (e.g. pinned CRM context or a one-shot plan). Pins resolution to that exact record — the tool fails closed rather than falling back to a name/domain search if the id cannot be read.' },
         contact_id: { type: 'string', description: 'Zoho Contact record id. Pass ONLY when a specific already-reviewed Contact is known. Pins the Quote/Deal contact to that exact record; fails closed if unreadable.' },
         strict_contact: { type: 'boolean', description: 'Set true when the contact MUST be exactly the one specified (one-shot/reviewed flows): disables the "any recent contact on the Account" fallback so a missing contact blocks instead of guessing.' },
@@ -25202,6 +25244,7 @@ const CRM_EMAIL_TOOLS = [
         closing_date: { type: 'string', description: 'Optional YYYY-MM-DD date for the Quote Valid_Till (matches the Deal Closing_Date). Omit to inherit the Deal\'s future Closing_Date, else default end of the current month (capped at the Cisco fiscal quarter end). REQUIRED on the retry after error:"closing_date_needs_confirmation".' },
         date_confirmed: { type: 'boolean', description: 'Pass true ONLY when the user has explicitly approved a date after the current Cisco fiscal quarter end. Never set it on your own.' },
         license_term: { type: 'string', description: 'License term for auto-added licenses: "1" (default), "3", or "5".' },
+        license_tier: { type: 'string', enum: ['A', 'ADV', 'ADVANCED'], description: 'Set only when the user explicitly requests Advanced licensing for MR hardware. The server maps it to LIC-MR-ADV-{term}Y. Do not use for generic MR or CW licensing.' },
         include_licenses: { type: 'boolean', description: 'Set false when the user says hardware only, no license, remove license, or just the hardware. Default true.' },
         hardware_only: { type: 'boolean', description: 'Set true when the user explicitly requests hardware only/no licenses.' },
         cisco_billing_term: { type: 'string', description: 'Optional Cisco billing term override for the Quote. Omit unless the user explicitly supplies a billing term; default is "Prepaid Term".' },
@@ -26303,7 +26346,7 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 
 **PRODUCT NOT FOUND — EXHAUST THE CATALOG FIRST.** Ladder: (1) batch_product_lookup (auto-normalizes dashes, -Y/-YR, and the '=' spare suffix); (2) on found:false check live_alternatives — a near-miss (trailing '=', length/size suffix) is usually the right part: confirm, then re-run with that exact spelling; (3) find_product_candidates with the user's wording; (4) web_search_sku ONLY after 1–3 miss — a web SKU is a LEAD, re-validate via batch_product_lookup. NEVER claim a part "isn't in our catalog" before steps 1–3 miss; finish resolving the product before any account/contact work.
 
-**MR Enterprise License — UNIVERSAL across all MR APs.** The SKU form is **LIC-ENT-{term}YR**. 1YR / 3YR / 5YR are the standard ecomm-quotable terms; **7YR and 10YR are ALSO real, active Zoho products — but they are co-term licenses valid for ZOHO QUOTES ONLY (never ecomm/URL quotes).** So a term being absent from the local price cache does NOT mean it is invalid — before telling anyone a term "doesn't exist" or is "not real," verify with batch_product_lookup, which live-checks Zoho. NEVER invent MALFORMED forms (these specific patterns are not real Cisco SKUs): ❌ LIC-ENT-MR-{n}YR ❌ LIC-MR-ENT-{n}YR ❌ LIC-MR-{n}YR / LIC-MR-{n}Y.
+**MR licensing has two distinct tiers.** Generic/default MR and explicit Enterprise use **LIC-ENT-{term}YR**. Explicit MR Advanced/ADV uses **LIC-MR-ADV-{term}Y** for standard 1Y / 3Y / 5Y terms; pass license_tier:"A" when auto-pairing MR hardware. CW access points remain Enterprise-only and must never use LIC-MR-ADV. "Advanced Security" is an MX tier, not MR Advanced. 7YR and 10YR LIC-ENT products are co-term licenses valid for ZOHO QUOTES ONLY and must be live-validated. NEVER invent LIC-ENT-MR-{n}YR, LIC-MR-ENT-{n}YR, or LIC-MR-{n}YR / LIC-MR-{n}Y.
 "5 MR licenses" / "licenses for the MR APs" → LIC-ENT-{term}YR (or create_deal_and_quote sku=MR-ENT + license_term). No term given → ask "1, 3, or 5 year?" (7- and 10-year co-term licenses are also available on a Zoho quote if the customer wants them) — do NOT default silently. The MR model never changes the license SKU, and "MR licenses" NEVER becomes AP hardware — add hardware only when the user asks for APs / hardware / devices.
 
 **Family licenses:** MV → LIC-MV-{term}YR; MT → LIC-MT-{term}YR; MG → LIC-MG-{term}YR; MS and MX → MODEL-SPECIFIC (e.g. LIC-MX{model}-SEC-{term}YR), use batch_product_lookup.
@@ -26322,6 +26365,8 @@ Tools handle suffixes + hardware→license pairing automatically: batch_product_
 ## ZOHO SEARCH
 
 Accounts FIRST, then Contacts (can run parallel). Quote lookups → search Quotes directly (first result auto-expands with full Quoted_Items — no separate zoho_get_record). Use "contains" when unsure. Never pass record IDs into name search fields — use zoho_get_related_records. Call independent tools in the SAME response; never serialize independent calls (each API call ~2-3s).
+
+**QUOTE LINE PAGING:** A Quote read reports \`_line_item_count\`, \`_line_items_returned\`, and \`_line_items_has_more\`. Never say you checked every line unless returned equals count and has_more is false. If has_more is true, call \`zoho_get_record\` again with \`line_item_start: _line_items_next_start\` and \`line_item_limit: 25\`. To inspect a specific later line (for example line 18), call with \`line_item_start: 18, line_item_limit: 1\`. Never describe a transport page as a Zoho limitation.
 
 ## PRODUCT LOOKUP & PRICING
 
@@ -26471,7 +26516,7 @@ Lead_Source values use the org spelling: Stratus Referal, Meraki ISR Referal, Me
 
 ## PRODUCT, LICENSE, AND EOL CONTRACT
 Use batch_product_lookup for exact SKUs and parse_quote_url for order URLs. If spelling is unknown, find_product_candidates; use web_search_sku only after local/live candidate lookup misses, then revalidate. found:false is not proof a product is inactive. Trust a current live lookup over a stale guard and surface the mismatch.
-MR Enterprise uses LIC-ENT-{term}YR. Standard ecomm terms are 1/3/5; 7/10YR are Zoho-quote-only co-term products and must be live-validated. Never invent LIC-ENT-MR-{n}YR, LIC-MR-ENT-{n}YR, or LIC-MR-{n}YR. MV uses LIC-MV; MT LIC-MT; MG LIC-MG; MX/MS licenses are model-specific. MX/C81xx tier defaults to SEC when unspecified; state the assumption and offer ENT/SDW chips.
+MR default/Enterprise uses LIC-ENT-{term}YR. Explicit MR Advanced/ADV uses LIC-MR-ADV-{term}Y for 1/3/5 years; pass license_tier:"A" when auto-pairing MR hardware. CW remains Enterprise-only. "Advanced Security" is MX, not MR Advanced. LIC-ENT 7/10YR are Zoho-quote-only co-term products and must be live-validated. Never invent LIC-ENT-MR-{n}YR, LIC-MR-ENT-{n}YR, or LIC-MR-{n}YR. MV uses LIC-MV; MT LIC-MT; MG LIC-MG; MX/MS licenses are model-specific. MX/C81xx tier defaults to SEC when unspecified; state the assumption and offer ENT/SDW chips.
 Systems Manager LIC-SME is retired: never output LIC-SME. Use LIC-MI-EMSC-D-1YMC-A-{1YR|3YR|5YR} (Ivanti Neurons for MDM), minimum quantity 50, and disclose the substitution. Editionless vMX is retired; resolve size plus ENT/SEC, but never auto-size LIC-VMX100. Meraki Insight LIC-MI-S/M/L is retired; remove it and upgrade the related MX SEC license to SDW with an explicit warning.
 For renewals, MV, MR/CW, and MT are model-agnostic aliases with SUMMED quantity; MX/MS remain PER-MODEL. EOL/upgrade mapping is default behavior: quote the reviewed returned replacement by default, echo old→new, and confirm once.
 
@@ -26851,6 +26896,112 @@ function repairDanglingToolUse(messages) {
   return out;
 }
 
+// Quote subforms routinely exceed the generic tool-result budget. Never cut a
+// Quote result with substring(): that produces invalid JSON and can make the
+// model believe the last visible row is the last real row. Keep the payload
+// parseable and, if even the larger Quote budget is exceeded, return a complete
+// prefix plus an explicit cursor the model can use with zoho_get_record.
+function formatToolResultForModel(toolName, toolInput, result, options = {}) {
+  const defaultLimit = Number(options.defaultLimit) || 2000;
+  const quoteLimit = Number(options.quoteLimit) || 32000;
+  const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+  const isQuoteData = toolInput?.module_name === 'Quotes'
+    && ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(toolName);
+  const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal', 'clone_quote'].includes(toolName);
+  const limit = (isQuoteData || isCompoundCreate
+    || toolName === 'reterm_quote_licenses'
+    || toolName === 'convert_quote_licenses_fedramp') ? quoteLimit : defaultLimit;
+
+  if (resultStr.length <= limit) return resultStr;
+
+  // Only read results have a safe, deterministic pagination fallback. Update
+  // and create verification payloads retain the prior behavior for now.
+  if (isQuoteData && ['zoho_get_record', 'zoho_search_records'].includes(toolName)) {
+    try {
+      const parsed = JSON.parse(resultStr);
+      const records = Array.isArray(parsed?.data) ? parsed.data : [];
+      const recordIndex = records.findIndex((record) => Array.isArray(record?.Quoted_Items));
+      if (recordIndex >= 0) {
+        const record = records[recordIndex];
+        const items = record.Quoted_Items;
+        const total = Number(record._line_item_count) || items.length;
+        const start = Math.max(1, Number(record._line_item_start) || 1);
+        const baseRecord = { ...record, Quoted_Items: [] };
+        const base = {
+          ...parsed,
+          data: records.map((entry, index) => index === recordIndex ? baseRecord : entry),
+        };
+        const kept = [];
+        for (const item of items) {
+          const candidateRecord = {
+            ...baseRecord,
+            Quoted_Items: [...kept, item],
+            _line_items_returned: kept.length + 1,
+            _line_item_start: start,
+            _line_item_end: start + kept.length,
+            _line_items_has_more: start + kept.length < total,
+            _line_items_next_start: start + kept.length + 1,
+            _transport_note: 'Quote rows are paged without cutting JSON. Call zoho_get_record again with line_item_start=_line_items_next_start and line_item_limit=25.',
+          };
+          const candidate = {
+            ...base,
+            data: records.map((entry, index) => index === recordIndex ? candidateRecord : entry),
+          };
+          if (JSON.stringify(candidate).length > limit) break;
+          kept.push(item);
+        }
+        const end = kept.length ? start + kept.length - 1 : start - 1;
+        const pagedRecord = {
+          ...baseRecord,
+          Quoted_Items: kept,
+          _line_items_returned: kept.length,
+          _line_item_start: start,
+          _line_item_end: end,
+          _line_items_has_more: end < total,
+          _line_items_next_start: end + 1,
+          _transport_note: 'Quote rows are paged without cutting JSON. Call zoho_get_record again with line_item_start=_line_items_next_start and line_item_limit=25.',
+        };
+        return JSON.stringify({
+          ...base,
+          data: records.map((entry, index) => index === recordIndex ? pagedRecord : entry),
+        });
+      }
+
+      // Quote search can legitimately fall back to list-only records when
+      // auto-expand fails. Keep whole records and a valid JSON envelope; never
+      // cut the list in the middle of a record/string.
+      if (toolName === 'zoho_search_records' && records.length > 0) {
+        const keptRecords = [];
+        for (const record of records) {
+          const candidate = {
+            ...parsed,
+            data: [...keptRecords, record],
+            _transport_records_total_in_page: records.length,
+            _transport_records_returned: keptRecords.length + 1,
+            _transport_records_has_more: keptRecords.length + 1 < records.length || parsed?.info?.more_records === true,
+            _transport_note: 'Quote search results are bounded by whole records. Narrow the criteria or call the next Zoho search page; never treat this transport page as the full result set.',
+          };
+          if (JSON.stringify(candidate).length > limit) break;
+          keptRecords.push(record);
+        }
+        return JSON.stringify({
+          ...parsed,
+          data: keptRecords,
+          _transport_records_total_in_page: records.length,
+          _transport_records_returned: keptRecords.length,
+          _transport_records_has_more: keptRecords.length < records.length || parsed?.info?.more_records === true,
+          _transport_next_page: parsed?.info?.page ? Number(parsed.info.page) + 1 : null,
+          _transport_note: 'Quote search results are bounded by whole records. Narrow the criteria or call the next Zoho search page; never treat this transport page as the full result set.',
+        });
+      }
+    } catch (_) {
+      // Fall through to the legacy bounded text path for non-JSON errors.
+    }
+  }
+
+  return resultStr.substring(0, limit) + '...(truncated)';
+}
+
 async function askClaudeContinue(messages, tools, systemPrompt, startIteration, env, progressCallback, maxWallMs, personId = null) {
   const MAX_TOOL_ITERATIONS = 30;
   let iteration = startIteration;
@@ -27029,24 +27180,10 @@ async function askClaudeContinue(messages, tools, systemPrompt, startIteration, 
       const toolPromises = toolBlocks.map(async (block) => {
         console.log(`[GCHAT-CONTINUE] Tool: ${block.name}`);
         const result = await executeToolCall(block.name, block.input, env, personId);
-        const resultStr = JSON.stringify(result);
-        // Quote get/search/update return large payloads (Quoted_Items +
-        // verification object) — give them the higher limit so the verdict
-        // isn't truncated away. Mirrors the askClaude path.
-        const isQuoteData = block.input?.module_name === 'Quotes' &&
-                            ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(block.name);
-        // Compound create results carry nested records + verification line items the
-        // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
-        // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
-        const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
-        const truncLimit = (block.name === 'zoho_get_record'
-          || block.name === 'reterm_quote_licenses'
-          || block.name === 'convert_quote_licenses_fedramp'
-          || isQuoteData || isCompoundCreate) ? 8000 : 2000;
         return {
           type: 'tool_result',
           tool_use_id: block.id,
-          content: resultStr.length > truncLimit ? resultStr.substring(0, truncLimit) + '...(truncated)' : resultStr
+          content: formatToolResultForModel(block.name, block.input, result)
         };
       });
 
@@ -29080,7 +29217,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
           // The search auto-expands the first result with full Quoted_Items — no separate get needed.
           // Also check cross-iteration cache for get_record calls that come in later iterations.
           if (block.name === 'zoho_get_record' && block.input?.module_name === 'Quotes') {
-            if (_quotesSearchDone) {
+            // Explicit page/range reads must never be replaced by the search's
+            // first auto-expanded page, even when both tools share a batch.
+            const isRangedQuoteRead = block.input?.line_item_start != null || block.input?.line_item_limit != null;
+            if (!isRangedQuoteRead && _quotesSearchDone) {
               console.log(`[GCHAT-AGENT] Skipping Quote get_record (search in same batch auto-expands)`);
               return {
                 type: 'tool_result',
@@ -29088,13 +29228,15 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
                 content: '{"info":"Quote details already included in the search results above via auto-expand. Look for the _auto_expanded:true record which contains Quoted_Items, Grand_Total, Quote_Stage, etc."}'
               };
             }
-            if (_expandedQuoteCache[block.input?.record_id]) {
+            // A ranged read must bypass the first-page cache so later rows are
+            // fetched instead of silently replaying the beginning of the Quote.
+            if (!isRangedQuoteRead && _expandedQuoteCache[block.input?.record_id]) {
               console.log(`[GCHAT-AGENT] Cache hit for Quote ${block.input.record_id} — skipping API call`);
               const cached = _expandedQuoteCache[block.input.record_id];
               return {
                 type: 'tool_result',
                 tool_use_id: block.id,
-                content: cached.length > 8000 ? cached.substring(0, 8000) + '...(truncated)' : cached
+                content: formatToolResultForModel(block.name, block.input, cached)
               };
             }
           }
@@ -29133,21 +29275,10 @@ async function askClaude(userMessage, personId, env, imageData = null, useTools 
             } catch (_) {}
           }
 
-          // Higher truncation limit for Quote data (search results now include Quoted_Items via auto-expand)
-          // Also include zoho_update_record on Quotes so Admin Action responses (with CCW_Deal_Number etc.) aren't truncated
-          const isQuoteData = (block.input?.module_name === 'Quotes') &&
-                              ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(block.name);
-          // Compound create results carry nested records + verification line items the
-          // crm_context extractor must parse intact — a 2000-char cut breaks JSON.parse
-          // mid-string and the context save silently no-ops (SEDA postmortem 2026-06-09).
-          const isCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal'].includes(block.name);
-          const truncLimit = (isQuoteData || isCompoundCreate
-            || block.name === 'reterm_quote_licenses'
-            || block.name === 'convert_quote_licenses_fedramp') ? 8000 : 2000;
           return {
             type: 'tool_result',
             tool_use_id: block.id,
-            content: resultStr.length > truncLimit ? resultStr.substring(0, truncLimit) + '...(truncated)' : resultStr
+            content: formatToolResultForModel(block.name, block.input, result)
           };
         });
 
@@ -30744,21 +30875,12 @@ async function askCfModel(modelId, userMessage, systemPrompt, anthropicTools, en
               addVerifiedRef(args.module_name, parsedResultForGuard.record_id);
             }
           }
-          const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-          // Truncation parity with askClaude (2026-07-16): quote get/search/update
-          // and compound-create payloads carry Quoted_Items + verification objects
-          // the crm_context extractor must parse intact — a 4000-char cut breaks
-          // JSON.parse mid-string and the context save silently no-ops (SEDA
-          // postmortem 2026-06-09 failure class).
-          const _cfIsQuoteData = call.arguments?.module_name === 'Quotes'
-            && ['zoho_get_record', 'zoho_search_records', 'zoho_update_record'].includes(call.name);
-          const _cfIsCompoundCreate = ['create_deal_and_quote', 'create_quote_on_deal', 'clone_quote'].includes(call.name);
-          const _cfTruncLimit = (call.name === 'zoho_get_record' || _cfIsQuoteData || _cfIsCompoundCreate) ? 8000 : 4000;
+          const resultStr = formatToolResultForModel(call.name, call.arguments, result, { defaultLimit: 4000 });
           messages.push({
             role: 'tool',
             tool_call_id: callId,
             name: call.name,
-            content: resultStr.substring(0, _cfTruncLimit) + (mocked ? ' [DRY_RUN_MOCKED]' : '')
+            content: resultStr + (mocked ? ' [DRY_RUN_MOCKED]' : '')
           });
         } catch (toolErr) {
           errors.push({ iteration, tool: call.name, error: toolErr.message });
@@ -36723,7 +36845,22 @@ CRITICAL URL RULES:
                 console.log(`[WATERFALL] Tier 0 skipped: explicit Zoho-write intent detected in user text`);
               }
               let deterministicTelemetryModel = 'deterministic';
-              if (!forcedModel && !skipDeterministic && !_zohoIntent) {
+              if (!forcedModel && isExplicitMrAdvancedDraftOnlyRequest(wText)) {
+                try {
+                  const parsed = preserveMsAdvancedTier(parseMessage(wText), wText);
+                  if (parsed && !parsed.isClarification && !parsed.isRevision) {
+                    const qResult = buildQuoteResponse(parsed);
+                    if (qResult && qResult.message && !qResult.needsLlm) {
+                      deterministicResult = qResult.message;
+                      deterministicTelemetryModel = 'deterministic-mr-advanced-draft';
+                      console.log('[WATERFALL] Tier 0 guarded draft hit: explicit MR Advanced with no CRM write');
+                    }
+                  }
+                } catch (detErr) {
+                  console.log(`[WATERFALL] MR Advanced draft guard skipped: ${detErr.message}`);
+                }
+              }
+              if (!deterministicResult && !forcedModel && !skipDeterministic && !_zohoIntent) {
                 try {
                   let classification = await classifyWithCF(wText, env);
                   classification = normalizeClassifierForRouting(classification, wText, false);

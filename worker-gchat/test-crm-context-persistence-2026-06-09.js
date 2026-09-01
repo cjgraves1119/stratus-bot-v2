@@ -122,11 +122,9 @@ const SEDA_RESULT = {
   // (truncation sites + incremental wiring live inside askClaude's loop).
   console.log('Source revert-guards');
   const src = fs.readFileSync(path.join(__dirname, 'src/index.js'), 'utf8');
-  const truncSites = (src.match(/isCompoundCreate\) \? 8000 : 2000|isCompoundCreate\s*\)\s*\?\s*8000/g) || []).length
-    + (src.match(/isQuoteData \|\| isCompoundCreate\) \? 8000/g) || []).length;
-  ok(/const isCompoundCreate = \['create_deal_and_quote', 'create_quote_on_deal'\]\.includes\(block\.name\);/.test(src)
-     && (src.match(/isCompoundCreate/g) || []).length >= 4,
-    'both truncation sites exempt compound creates from the 2000-char cut');
+  ok(/const isCompoundCreate = \['create_deal_and_quote', 'create_quote_on_deal', 'clone_quote'\]\.includes\(toolName\);/.test(src)
+     && (src.match(/formatToolResultForModel\(block\.name, block\.input, result\)/g) || []).length >= 2,
+    'both Anthropic tool loops route compound creates through the shared higher-budget formatter');
   ok(/id: item\.id \|\| null,\s*\n\s*sku: item\.Product_Code \|\| item\.Product_Name\?\.Product_Code \|\| null,\s*\n\s*product_id: item\.Product_Name\?\.id \|\| item\.product\?\.id \|\| null/.test(src),
     'verification.items carries id/sku/product_id (extractor schema source)');
   const pushIdx = src.indexOf("messages.push({ role: 'user', content: toolResults });");
